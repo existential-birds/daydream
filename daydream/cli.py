@@ -91,11 +91,19 @@ def _parse_args() -> RunConfig:
         help="Save debug log",
     )
 
-    parser.add_argument(
+    cleanup_group = parser.add_mutually_exclusive_group()
+    cleanup_group.add_argument(
         "--cleanup",
         action="store_true",
         default=None,
+        dest="cleanup",
         help="Cleanup review output after completion",
+    )
+    cleanup_group.add_argument(
+        "--no-cleanup",
+        action="store_false",
+        dest="cleanup",
+        help="Keep review output after completion",
     )
 
     parser.add_argument(
@@ -111,7 +119,7 @@ def _parse_args() -> RunConfig:
         target=args.target,
         skill=args.skill,
         debug=args.debug,
-        cleanup=args.cleanup if args.cleanup else None,
+        cleanup=args.cleanup,
         quiet=True,
         review_only=args.review_only,
     )
