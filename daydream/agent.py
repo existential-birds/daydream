@@ -22,13 +22,17 @@ from daydream.ui import (
     LiveToolPanelRegistry,
     create_console,
     print_cost,
-    print_success,
     print_thinking,
 )
 
 
 class MissingSkillError(Exception):
-    """Raised when a required skill is not available."""
+    """Raised when a required skill is not available.
+
+    Args:
+        skill_name: The name of the skill that was not found.
+
+    """
 
     def __init__(self, skill_name: str):
         self.skill_name = skill_name
@@ -50,40 +54,84 @@ console = create_console()
 
 
 def set_debug_log(log_file: TextIO | None) -> None:
-    """Set the debug log file handle."""
+    """Set the debug log file handle.
+
+    Args:
+        log_file: File handle for debug logging, or None to disable.
+
+    Returns:
+        None
+
+    """
     global _debug_log
     _debug_log = log_file
 
 
 def get_debug_log() -> TextIO | None:
-    """Get the current debug log file handle."""
+    """Get the current debug log file handle.
+
+    Returns:
+        The current debug log file handle, or None if not set.
+
+    """
     return _debug_log
 
 
 def set_quiet_mode(quiet: bool) -> None:
-    """Set quiet mode for agent output."""
+    """Set quiet mode for agent output.
+
+    Args:
+        quiet: True to hide tool calls and results, False to show them.
+
+    Returns:
+        None
+
+    """
     global _quiet_mode
     _quiet_mode = quiet
 
 
 def get_quiet_mode() -> bool:
-    """Get current quiet mode setting."""
+    """Get current quiet mode setting.
+
+    Returns:
+        True if quiet mode is enabled, False otherwise.
+
+    """
     return _quiet_mode
 
 
 def set_shutdown_requested(requested: bool) -> None:
-    """Set shutdown requested flag."""
+    """Set shutdown requested flag.
+
+    Args:
+        requested: True to indicate shutdown has been requested, False otherwise.
+
+    Returns:
+        None
+
+    """
     global _shutdown_requested
     _shutdown_requested = requested
 
 
 def get_shutdown_requested() -> bool:
-    """Get shutdown requested flag."""
+    """Get shutdown requested flag.
+
+    Returns:
+        True if shutdown has been requested, False otherwise.
+
+    """
     return _shutdown_requested
 
 
 def get_current_client() -> ClaudeSDKClient | None:
-    """Get the currently running client."""
+    """Get the currently running client.
+
+    Returns:
+        The currently running ClaudeSDKClient instance, or None if no client is active.
+
+    """
     return _current_client
 
 
@@ -105,6 +153,7 @@ def _detect_test_success(output: str) -> bool:
 
     Returns:
         True if tests clearly passed, False otherwise
+
     """
     output_lower = output.lower()
 
@@ -163,6 +212,7 @@ async def run_agent(cwd: Path, prompt: str) -> str:
     Raises:
         MissingSkillError: If a required skill is not available
         SystemExit: If the agent is cancelled due to script termination
+
     """
     global _current_client
 
@@ -235,8 +285,6 @@ async def run_agent(cwd: Path, prompt: str) -> str:
             print()
         finally:
             _current_client = None
-            if _shutdown_requested:
-                print_success(console, "Agent terminated")
 
     return "".join(output_parts)
 
@@ -252,6 +300,7 @@ def extract_json_from_output(output: str) -> list[dict[str, Any]]:
 
     Raises:
         ValueError: If no valid JSON array found
+
     """
     import json
 

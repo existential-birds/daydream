@@ -1,5 +1,6 @@
 """Main orchestration logic for the review and fix loop."""
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,28 @@ from daydream.ui import (
 )
 
 
+@dataclass
+class RunConfig:
+    """Configuration for a daydream run.
+
+    Attributes:
+        target: Target directory path for the review. If None, prompts user.
+        skill: Review skill to use ("python" or "frontend"). If None, prompts user.
+        debug: Enable debug logging to a timestamped file in the target directory.
+        cleanup: Remove review output file after completion. If None, prompts user.
+        quiet: Suppress verbose output from the agent.
+        review_only: Run review phase only without applying fixes.
+
+    """
+
+    target: str | None = None
+    skill: str | None = None  # "python" or "frontend"
+    debug: bool = False
+    cleanup: bool | None = None
+    quiet: bool = True
+    review_only: bool = False
+
+
 def _print_missing_skill_error(skill_name: str) -> None:
     """Print error message for missing skill with installation instructions."""
     print_error(console, "Missing Skill", f"Skill '{skill_name}' is not available")
@@ -55,58 +78,81 @@ def _print_missing_skill_error(skill_name: str) -> None:
     console.print()
 
 
-async def run() -> int:
-    """Main entry point for the review and fix loop.
+async def run(config: RunConfig | None = None) -> int:
+    """Execute the review and fix loop.
+
+    Args:
+        config: Optional configuration. If provided, values skip prompts.
 
     Returns:
         Exit code (0 for success, 1 for failure)
+
     """
+    if config is None:
+        config = RunConfig()
+
     print_ascii_header(console, "DAYDREAM")
 
-    # Prompt for target directory
-    target_input = prompt_user(console, "Enter target directory", ".")
-    target_dir = Path(target_input).resolve()
+    # Get target directory (from config or prompt)
+    if config.target is not None:
+        target_dir = Path(config.target).resolve()
+    else:
+        target_input = prompt_user(console, "Enter target directory", ".")
+        target_dir = Path(target_input).resolve()
 
     if not target_dir.is_dir():
         print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
         return 1
 
-    # Prompt for review skill selection
-    console.print()
-    print_menu(console, "Select review skill", [
-        ("1", "Python/FastAPI backend (review-python)"),
-        ("2", "React/TypeScript frontend (review-frontend)"),
-    ])
+    # Get review skill (from config or prompt)
+    if config.skill is not None:
+        # Map skill name to full skill path
+        skill_map = {"python": "beagle:review-python", "frontend": "beagle:review-frontend"}
+        if config.skill in skill_map:
+            skill = skill_map[config.skill]
+        elif config.skill in REVIEW_SKILLS.values():
+            skill = config.skill
+        else:
+            print_error(console, "Invalid Skill", f"'{config.skill}' is not a valid skill")
+            return 1
+    else:
+        console.print()
+        print_menu(console, "Select review skill", [
+            ("1", "Python/FastAPI backend (review-python)"),
+            ("2", "React/TypeScript frontend (review-frontend)"),
+        ])
 
-    skill_choice = prompt_user(console, "Choice", "1")
+        skill_choice = prompt_user(console, "Choice", "1")
 
-    if skill_choice not in REVIEW_SKILLS:
-        print_error(console, "Invalid Choice", f"'{skill_choice}' is not a valid option")
-        return 1
+        if skill_choice not in REVIEW_SKILLS:
+            print_error(console, "Invalid Choice", f"'{skill_choice}' is not a valid option")
+            return 1
 
-    skill = REVIEW_SKILLS[skill_choice]
+        skill = REVIEW_SKILLS[skill_choice]
 
-    # Prompt for debug logging
-    console.print()
-    debug_response = prompt_user(console, "Save debug log? [y/N]", "n")
+    # Set up debug logging if enabled
     debug_log_path: Path | None = None
-    if debug_response.lower() in ("y", "yes"):
+    if config.debug:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         debug_log_path = target_dir / f".review-debug-{timestamp}.log"
         set_debug_log(open(debug_log_path, "w", encoding="utf-8"))  # noqa: SIM115
         print_info(console, f"Debug log: {debug_log_path}")
 
-    # Prompt for cleanup preference
-    cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
-    cleanup_enabled = cleanup_response.lower() in ("y", "yes")
+    # Get cleanup setting (from config or prompt)
+    if config.cleanup is not None:
+        cleanup_enabled = config.cleanup
+    else:
+        cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
+        cleanup_enabled = cleanup_response.lower() in ("y", "yes")
 
-    # Prompt for quiet mode
-    quiet_response = prompt_user(console, "Quiet mode (hide tool output)? [Y/n]", "y")
-    set_quiet_mode(quiet_response.lower() not in ("n", "no"))
+    # Set quiet mode
+    set_quiet_mode(config.quiet)
 
     console.print()
     print_info(console, f"Target directory: {target_dir}")
     print_info(console, f"Review skill: {skill}")
+    if config.review_only:
+        print_info(console, "Mode: review-only (skipping fixes)")
     console.print()
 
     try:
@@ -123,6 +169,22 @@ async def run() -> int:
         except ValueError:
             print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
             return 1
+
+        # If review-only mode, show summary and exit
+        if config.review_only:
+            print_summary(
+                console,
+                SummaryData(
+                    skill=skill,
+                    target=str(target_dir),
+                    feedback_count=len(feedback_items),
+                    fixes_applied=0,
+                    test_retries=0,
+                    tests_passed=True,
+                    review_only=True,
+                ),
+            )
+            return 0
 
         # Phase 3: Apply fixes
         fixes_applied = 0

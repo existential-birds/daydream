@@ -29,6 +29,13 @@ async def phase_review(cwd: Path, skill: str) -> None:
     Args:
         cwd: Working directory for the review
         skill: The review skill to invoke (e.g., beagle:review-python)
+
+    Returns:
+        None
+
+    Raises:
+        Exception: If the agent fails to execute the review skill.
+
     """
     print_phase(console, 1, f"Running review skill: {skill}")
 
@@ -54,6 +61,10 @@ async def phase_parse_feedback(cwd: Path) -> list[dict[str, Any]]:
 
     Returns:
         List of validated feedback items with id, description, file, line
+
+    Raises:
+        ValueError: If the agent output cannot be parsed as valid JSON.
+
     """
     print_phase(console, 2, "Parsing feedback")
 
@@ -98,6 +109,10 @@ async def phase_fix(cwd: Path, item: dict[str, Any], item_num: int, total: int) 
         item: Feedback item containing description, file, and line
         item_num: Current item number (1-indexed)
         total: Total number of items
+
+    Returns:
+        None
+
     """
     description = item.get("description", "No description")
     file_path = item.get("file", "Unknown file")
@@ -127,6 +142,7 @@ async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
 
     Returns:
         Tuple of (success: bool, retries_used: int)
+
     """
     from daydream.agent import _detect_test_success
 
@@ -195,6 +211,10 @@ async def phase_commit_push(cwd: Path) -> None:
 
     Args:
         cwd: Working directory for the commit
+
+    Returns:
+        None
+
     """
     response = prompt_user(console, "Commit and push changes? [y/N]", "n")
 

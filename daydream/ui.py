@@ -1,5 +1,4 @@
-"""
-Neon terminal UI components for review_fix_loop.py.
+"""Neon terminal UI components for review_fix_loop.py.
 
 Implements a 1980s neon terminal aesthetic using the Rich library,
 with a Dracula-based color theme and animated elements.
@@ -94,35 +93,58 @@ STATUS_CONFIG = {
 
 
 class NeonConsole:
-    """
-    Wrapper around Rich Console providing themed output methods.
+    """Wrapper around Rich Console providing themed output methods.
 
     This class encapsulates all the neon-styled output functionality,
     providing a consistent visual theme across all terminal output.
+
+    Args:
+        console: Optional Rich Console instance. If not provided,
+            a new Console with the neon theme will be created.
+
     """
 
     def __init__(self, console: Console | None = None) -> None:
-        """
-        Initialize the NeonConsole.
+        """Initialize the NeonConsole.
 
         Args:
             console: Optional Rich Console instance. If not provided,
                     a new Console with the neon theme will be created.
+
         """
         self.console = console or Console(theme=NEON_THEME)
         self._throbber = NeonThrobber()
 
     def print(self, *args: Any, **kwargs: Any) -> None:
-        """Pass-through to underlying console.print()."""
+        """Pass through to underlying console.print().
+
+        Args:
+            *args: Positional arguments to pass to console.print().
+            **kwargs: Keyword arguments to pass to console.print().
+
+        Returns:
+            None
+
+        """
         self.console.print(*args, **kwargs)
 
     def clear(self) -> None:
-        """Clear the terminal screen."""
+        """Clear the terminal screen.
+
+        Returns:
+            None
+
+        """
         self.console.clear()
 
 
 def create_console() -> Console:
-    """Create a Rich Console with neon theme applied."""
+    """Create a Rich Console with neon theme applied.
+
+    Returns:
+        Console: A new Rich Console instance configured with the neon theme.
+
+    """
     return Console(theme=NEON_THEME)
 
 
@@ -132,8 +154,7 @@ def create_console() -> Console:
 
 
 def print_header(console: Console, text: str) -> None:
-    """
-    Print a neon-bordered header panel.
+    """Print a neon-bordered header panel.
 
     Creates a prominent header with pink border and purple text,
     using double-edge box styling for a retro terminal look.
@@ -141,6 +162,7 @@ def print_header(console: Console, text: str) -> None:
     Args:
         console: Rich Console instance for output.
         text: The header text to display.
+
     """
     header_panel = Panel(
         Text(text, style=Style(color=NEON_COLORS["purple"], bold=True)),
@@ -187,8 +209,7 @@ ASCII_GRADIENT_COLORS = [
 
 
 def _interpolate_color(color1: str, color2: str, t: float) -> str:
-    """
-    Interpolate between two hex colors.
+    """Interpolate between two hex colors.
 
     Args:
         color1: Starting hex color (e.g., "#8BE9FD").
@@ -197,6 +218,7 @@ def _interpolate_color(color1: str, color2: str, t: float) -> str:
 
     Returns:
         Interpolated hex color string.
+
     """
     r1, g1, b1 = int(color1[1:3], 16), int(color1[3:5], 16), int(color1[5:7], 16)
     r2, g2, b2 = int(color2[1:3], 16), int(color2[3:5], 16), int(color2[5:7], 16)
@@ -207,8 +229,7 @@ def _interpolate_color(color1: str, color2: str, t: float) -> str:
 
 
 def _get_gradient_color(position: float) -> str:
-    """
-    Get a color from the gradient based on position (0.0 to 1.0).
+    """Get a color from the gradient based on position (0.0 to 1.0).
 
     The gradient smoothly transitions: cyan -> pink -> purple.
 
@@ -217,6 +238,7 @@ def _get_gradient_color(position: float) -> str:
 
     Returns:
         Hex color string at the given position.
+
     """
     # Clamp position
     position = max(0.0, min(1.0, position))
@@ -236,8 +258,7 @@ def _get_gradient_color(position: float) -> str:
 
 
 def print_ascii_header(console: Console, text: str) -> None:
-    """
-    Print a visually striking ASCII art header with neon gradient.
+    """Print a visually striking ASCII art header with neon gradient.
 
     Uses pyfiglet to generate ASCII art and applies a horizontal
     gradient from cyan (#8BE9FD) -> pink (#FF79C6) -> purple (#BD93F9)
@@ -246,6 +267,7 @@ def print_ascii_header(console: Console, text: str) -> None:
     Args:
         console: Rich Console instance for output.
         text: The text to render as ASCII art.
+
     """
     # Generate ASCII art using pyfiglet with 'ansi_shadow' font
     # This font creates a nice blocky 3D effect
@@ -324,8 +346,7 @@ def print_phase(
     description: str,
     status: str = "in_progress",
 ) -> None:
-    """
-    Print a phase indicator with status.
+    """Print a phase indicator with status.
 
     Displays a numbered phase with an appropriate status icon and
     color-coded border based on the current status.
@@ -335,6 +356,7 @@ def print_phase(
         phase_num: The phase number to display.
         description: Description of the phase.
         status: One of "pending", "in_progress", "completed", "failed".
+
     """
     config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
     icon = config["icon"]
@@ -360,8 +382,7 @@ def print_phase(
 
 
 def pill(text: str, bg_color: str, fg_color: str) -> Text:
-    """
-    Create a pill-shaped badge with the given colors.
+    """Create a pill-shaped badge with the given colors.
 
     Uses the pattern: [bg]foreground[/bg] to create a badge effect
     with half-block characters on the edges.
@@ -373,6 +394,7 @@ def pill(text: str, bg_color: str, fg_color: str) -> Text:
 
     Returns:
         Rich Text object containing the styled pill.
+
     """
     result = Text()
     # Left edge
@@ -393,8 +415,7 @@ _TOOL_ARG_PATTERN = re.compile(r"(\w+)=((?:'[^']*'|\"[^\"]*\"|[^,\s]+))")
 
 
 def _colorize_tool_args(args: dict[str, object]) -> Text:
-    """
-    Apply neon syntax highlighting to tool call arguments.
+    """Apply neon syntax highlighting to tool call arguments.
 
     Colorizes parameter names and values based on their types:
     - Keys in cyan
@@ -407,6 +428,7 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
 
     Returns:
         Rich Text with neon styling applied.
+
     """
     result = Text()
 
@@ -446,8 +468,7 @@ def print_tool_call(
     args: dict[str, object],
     quiet_mode: bool = False,
 ) -> None:
-    """
-    Print a tool call with its arguments.
+    """Print a tool call with its arguments.
 
     Displays the tool name with a wrench icon, followed by the arguments
     in a styled panel. All tool calls are wrapped in a Panel with dark
@@ -464,6 +485,7 @@ def print_tool_call(
         name: Name of the tool being called.
         args: Dictionary of arguments passed to the tool.
         quiet_mode: If True, hide command details for Bash tools.
+
     """
     # Newline before tool call for separation
     console.print()
@@ -650,8 +672,7 @@ _SHELL_DETECT_COMMAND_PATTERN = re.compile(
 
 
 def _detect_shell_syntax(content: str) -> bool:
-    """
-    Detect if content looks like shell script or command output.
+    """Detect if content looks like shell script or command output.
 
     Checks for common shell indicators such as:
     - Lines starting with $ or # (shell prompts)
@@ -663,6 +684,7 @@ def _detect_shell_syntax(content: str) -> bool:
 
     Returns:
         True if the content appears to be shell script or output.
+
     """
     # Check for shebang - strong indicator
     if _SHEBANG_PATTERN.search(content):
@@ -683,14 +705,14 @@ def _detect_shell_syntax(content: str) -> bool:
 
 
 def _colorize_git_line(line: str) -> Text | None:
-    """
-    Check if a line matches git output patterns and return styled Text.
+    """Check if a line matches git output patterns and return styled Text.
 
     Args:
         line: The line to check.
 
     Returns:
         Rich Text with git-specific styling, or None if not git output.
+
     """
     # File headers (+++/---) - cyan bold
     if _GIT_FILE_HEADER_PATTERN.match(line):
@@ -716,8 +738,7 @@ def _colorize_git_line(line: str) -> Text | None:
 
 
 def _colorize_line(line: str, is_error: bool = False) -> Text:
-    """
-    Apply neon syntax highlighting to a single line of output.
+    """Apply neon syntax highlighting to a single line of output.
 
     Args:
         line: The line to colorize.
@@ -725,6 +746,7 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
 
     Returns:
         Rich Text with neon styling applied.
+
     """
     # Check for git-specific patterns first
     git_result = _colorize_git_line(line)
@@ -849,8 +871,7 @@ def print_tool_result(
     is_error: bool = False,
     max_lines: int = 20,
 ) -> None:
-    """
-    Print a tool result with neon syntax highlighting.
+    """Print a tool result with neon syntax highlighting.
 
     Displays the result content with colorized file paths, line numbers,
     and keyword highlighting. Uses red styling for errors. For shell scripts
@@ -861,6 +882,7 @@ def print_tool_result(
         content: The result content to display.
         is_error: Whether this is an error result.
         max_lines: Maximum number of lines to display.
+
     """
     if not content or not content.strip():
         return
@@ -955,8 +977,7 @@ def print_code_result(
     filename: str = "",
     max_lines: int = 30,
 ) -> None:
-    """
-    Print code content with syntax highlighting.
+    """Print code content with syntax highlighting.
 
     Uses Rich's Syntax component for proper highlighting and
     automatic line wrapping that respects terminal width.
@@ -966,6 +987,7 @@ def print_code_result(
         content: The code content to display.
         filename: Optional filename to detect language (e.g., "test.py").
         max_lines: Maximum number of lines to display.
+
     """
     lines = content.split("\n")
     truncated = len(lines) > max_lines
@@ -1001,8 +1023,7 @@ def print_code_result(
 
 
 def print_thinking(console: Console, content: str, max_length: int = 300) -> None:
-    """
-    Print a thinking/reasoning panel.
+    """Print a thinking/reasoning panel.
 
     Displays the AI's thought process in a purple-styled panel
     with a thought bubble icon.
@@ -1011,6 +1032,7 @@ def print_thinking(console: Console, content: str, max_length: int = 300) -> Non
         console: Rich Console instance for output.
         content: The thinking content to display.
         max_length: Maximum content length before truncation.
+
     """
     # Truncate if needed
     display_content = content if len(content) <= max_length else content[:max_length] + "..."
@@ -1032,8 +1054,7 @@ def print_thinking(console: Console, content: str, max_length: int = 300) -> Non
 
 
 def print_feedback_table(console: Console, items: list[dict[str, object]]) -> None:
-    """
-    Print a table of feedback items/issues.
+    """Print a table of feedback items/issues.
 
     Creates a styled table with columns for issue number, status,
     description, file, and line number.
@@ -1041,6 +1062,7 @@ def print_feedback_table(console: Console, items: list[dict[str, object]]) -> No
     Args:
         console: Rich Console instance for output.
         items: List of dicts with keys: status, description, file, line.
+
     """
     table = Table(
         title="\U0001f4cb Issues to Fix",  # 📋
@@ -1084,8 +1106,7 @@ def print_feedback_table(console: Console, items: list[dict[str, object]]) -> No
 
 
 def print_error(console: Console, title: str, message: str) -> None:
-    """
-    Print an error panel with red styling.
+    """Print an error panel with red styling.
 
     Creates a prominent error display with a warning icon
     and double-edge border.
@@ -1094,6 +1115,7 @@ def print_error(console: Console, title: str, message: str) -> None:
         console: Rich Console instance for output.
         title: Error title text.
         message: Detailed error message.
+
     """
     panel = Panel(
         Text(message, style=Style(color=NEON_COLORS["red"])),
@@ -1112,12 +1134,12 @@ def print_error(console: Console, title: str, message: str) -> None:
 
 
 def print_warning(console: Console, message: str) -> None:
-    """
-    Print a warning panel with yellow styling.
+    """Print a warning panel with yellow styling.
 
     Args:
         console: Rich Console instance for output.
         message: Warning message to display.
+
     """
     panel = Panel(
         Text(message, style=Style(color=NEON_COLORS["yellow"])),
@@ -1134,12 +1156,12 @@ def print_warning(console: Console, message: str) -> None:
 
 
 def print_success(console: Console, message: str) -> None:
-    """
-    Print a success message with green styling.
+    """Print a success message with green styling.
 
     Args:
         console: Rich Console instance for output.
         message: Success message to display.
+
     """
     console.print(f"[neon.success]✔[/] [neon.green]{message}[/]")
 
@@ -1150,12 +1172,12 @@ def print_success(console: Console, message: str) -> None:
 
 
 def print_cost(console: Console, cost_usd: float) -> None:
-    """
-    Print a cost indicator with cyan styling.
+    """Print a cost indicator with cyan styling.
 
     Args:
         console: Rich Console instance for output.
         cost_usd: The cost in USD.
+
     """
     console.print(f"[neon.cyan]💰[/] [neon.dim]${cost_usd:.4f}[/]")
 
@@ -1166,23 +1188,23 @@ def print_cost(console: Console, cost_usd: float) -> None:
 
 
 def print_info(console: Console, message: str) -> None:
-    """
-    Print an info message with cyan styling.
+    """Print an info message with cyan styling.
 
     Args:
         console: Rich Console instance for output.
         message: Info message to display.
+
     """
     console.print(f"[neon.cyan]ℹ[/] [neon.fg]{message}[/]")
 
 
 def print_dim(console: Console, message: str) -> None:
-    """
-    Print a dimmed message for secondary information.
+    """Print a dimmed message for secondary information.
 
     Args:
         console: Rich Console instance for output.
         message: Message to display in dimmed style.
+
     """
     console.print(f"[neon.dim]{message}[/]")
 
@@ -1196,8 +1218,7 @@ _agent_text_line_started = False
 
 
 def _highlight_agent_text(text: str) -> Text:
-    """
-    Apply syntax highlighting to agent text.
+    """Apply syntax highlighting to agent text.
 
     Highlights:
     - Inline code (`code`)
@@ -1211,6 +1232,7 @@ def _highlight_agent_text(text: str) -> Text:
 
     Returns:
         Rich Text with neon styling applied.
+
     """
     result = Text()
 
@@ -1306,12 +1328,14 @@ AGENT_TEXT_FG = NEON_COLORS["green"]  # Neon green text
 
 
 class AgentTextRenderer:
-    """
-    Renderer for agent text using Rich Live Panel with buffering.
+    """Renderer for agent text using Rich Live Panel with buffering.
 
     This class buffers incoming text chunks and displays them in a
     Live-updating Panel that provides proper word wrapping. This solves
     the issue of broken line wrapping when streaming text character-by-character.
+
+    Args:
+        console: Rich Console instance for output.
 
     Usage:
         renderer = AgentTextRenderer(console)
@@ -1319,14 +1343,15 @@ class AgentTextRenderer:
         for chunk in stream:
             renderer.append(chunk)
         renderer.finish()
+
     """
 
     def __init__(self, console: Console) -> None:
-        """
-        Initialize the renderer.
+        """Initialize the renderer.
 
         Args:
             console: Rich Console instance for output.
+
         """
         self._console = console
         self._buffer: list[str] = []
@@ -1334,11 +1359,11 @@ class AgentTextRenderer:
         self._started = False
 
     def _render_panel(self) -> Panel:
-        """
-        Render the current buffer as a styled Panel.
+        """Render the current buffer as a styled Panel.
 
         Returns:
             Rich Panel with highlighted text and neon green styling.
+
         """
         full_text = "".join(self._buffer)
 
@@ -1360,10 +1385,13 @@ class AgentTextRenderer:
         )
 
     def start(self) -> None:
-        """
-        Start the Live context for real-time updates.
+        """Start the Live context for real-time updates.
 
         Call this before appending any text chunks.
+
+        Returns:
+            None
+
         """
         if self._started:
             return
@@ -1381,11 +1409,14 @@ class AgentTextRenderer:
         self._started = True
 
     def append(self, text: str) -> None:
-        """
-        Append text to the buffer and update the display.
+        """Append text to the buffer and update the display.
 
         Args:
             text: Text chunk to append.
+
+        Returns:
+            None
+
         """
         if not text:
             return
@@ -1400,10 +1431,13 @@ class AgentTextRenderer:
             self._live.update(self._render_panel())
 
     def finish(self) -> None:
-        """
-        Stop the Live context and print the final Panel.
+        """Stop the Live context and print the final Panel.
 
         Call this when all text has been received.
+
+        Returns:
+            None
+
         """
         if self._live is not None:
             self._live.stop()
@@ -1419,13 +1453,17 @@ class AgentTextRenderer:
 
     @property
     def has_content(self) -> bool:
-        """Check if the buffer has any content."""
+        """Check if the buffer has any content.
+
+        Returns:
+            bool: True if the buffer contains text, False otherwise.
+
+        """
         return bool(self._buffer)
 
 
 def print_agent_text(console: Console, text: str) -> None:
-    """
-    Print agent text output with streaming-friendly left gutter.
+    """Print agent text output with streaming-friendly left gutter.
 
     Displays agent text with a neon-styled left border and
     markdown-aware syntax highlighting. The gutter prefix is
@@ -1434,6 +1472,10 @@ def print_agent_text(console: Console, text: str) -> None:
     Args:
         console: Rich Console instance for output.
         text: The agent text to display.
+
+    Returns:
+        None
+
     """
     global _agent_text_line_started
 
@@ -1467,11 +1509,14 @@ def print_agent_text(console: Console, text: str) -> None:
 
 
 def reset_agent_text_state() -> None:
-    """
-    Reset the agent text line state.
+    """Reset the agent text line state.
 
     Call this at the end of an agent response to ensure
     the next agent response starts with a fresh gutter.
+
+    Returns:
+        None
+
     """
     global _agent_text_line_started
     _agent_text_line_started = False
@@ -1480,14 +1525,17 @@ def reset_agent_text_state() -> None:
 def print_fix_progress(
     console: Console, item_num: int, total: int, description: str
 ) -> None:
-    """
-    Print fix progress indicator.
+    """Print fix progress indicator.
 
     Args:
         console: Rich Console instance for output.
         item_num: Current item number (1-indexed).
         total: Total number of items.
         description: Description of the fix.
+
+    Returns:
+        None
+
     """
     text = Text()
     text.append("  ", style=Style())
@@ -1500,13 +1548,16 @@ def print_fix_progress(
 
 
 def print_fix_complete(console: Console, item_num: int, total: int) -> None:
-    """
-    Print fix completion indicator.
+    """Print fix completion indicator.
 
     Args:
         console: Rich Console instance for output.
         item_num: Current item number (1-indexed).
         total: Total number of items.
+
+    Returns:
+        None
+
     """
     text = Text()
     text.append("  ", style=Style())
@@ -1522,7 +1573,18 @@ def print_fix_complete(console: Console, item_num: int, total: int) -> None:
 
 @dataclass
 class SummaryData:
-    """Data class for summary information."""
+    """Data class for summary information.
+
+    Attributes:
+        skill: Name of the skill that was executed.
+        target: Target file or directory that was reviewed.
+        feedback_count: Number of issues found during review.
+        fixes_applied: Number of fixes that were applied.
+        test_retries: Number of times tests were retried.
+        tests_passed: Whether all tests passed after fixes.
+        review_only: If True, only review was performed (no fixes).
+
+    """
 
     skill: str
     target: str
@@ -1530,11 +1592,11 @@ class SummaryData:
     fixes_applied: int
     test_retries: int
     tests_passed: bool
+    review_only: bool = False
 
 
 def print_summary(console: Console, data: SummaryData) -> None:
-    """
-    Print a summary table with neon styling.
+    """Print a summary table with neon styling.
 
     Displays a comprehensive summary of the review/fix session
     with status badges for pass/fail.
@@ -1542,6 +1604,7 @@ def print_summary(console: Console, data: SummaryData) -> None:
     Args:
         console: Rich Console instance for output.
         data: SummaryData containing all summary fields.
+
     """
     table = Table(
         title="✨ Review Summary",
@@ -1555,18 +1618,25 @@ def print_summary(console: Console, data: SummaryData) -> None:
     table.add_column("Field", style=Style(color=NEON_COLORS["cyan"]))
     table.add_column("Value", style=Style(color=NEON_COLORS["foreground"]))
 
-    # Create pass/fail pill
-    if data.tests_passed:
-        status_badge = pill(" PASSED ", NEON_COLORS["green"], NEON_COLORS["background"])
-    else:
-        status_badge = pill(" FAILED ", NEON_COLORS["red"], NEON_COLORS["background"])
-
     table.add_row("Skill", data.skill)
     table.add_row("Target", data.target)
     table.add_row("Issues Found", str(data.feedback_count))
-    table.add_row("Fixes Applied", str(data.fixes_applied))
-    table.add_row("Test Retries", str(data.test_retries))
-    table.add_row("Tests", status_badge)
+
+    if data.review_only:
+        # Review-only mode: show mode badge instead of fix/test stats
+        mode_badge = pill(" REVIEW ONLY ", NEON_COLORS["cyan"], NEON_COLORS["background"])
+        table.add_row("Mode", mode_badge)
+    else:
+        # Full mode: show fix and test stats
+        table.add_row("Fixes Applied", str(data.fixes_applied))
+        table.add_row("Test Retries", str(data.test_retries))
+
+        # Create pass/fail pill
+        if data.tests_passed:
+            status_badge = pill(" PASSED ", NEON_COLORS["green"], NEON_COLORS["background"])
+        else:
+            status_badge = pill(" FAILED ", NEON_COLORS["red"], NEON_COLORS["background"])
+        table.add_row("Tests", status_badge)
 
     console.print(table)
 
@@ -1577,8 +1647,7 @@ def print_summary(console: Console, data: SummaryData) -> None:
 
 
 def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> None:
-    """
-    Print a styled menu for user selection.
+    """Print a styled menu for user selection.
 
     Displays numbered options with descriptions in a neon-styled panel.
 
@@ -1586,6 +1655,7 @@ def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> 
         console: Rich Console instance for output.
         title: Menu title.
         options: List of (key, description) tuples.
+
     """
     menu_text = Text()
     for key, description in options:
@@ -1609,8 +1679,7 @@ def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> 
 
 
 def prompt_user(console: Console, message: str, default: str = "") -> str:
-    """
-    Display a styled input prompt and get user input.
+    """Display a styled input prompt and get user input.
 
     Args:
         console: Rich Console instance for output.
@@ -1619,6 +1688,7 @@ def prompt_user(console: Console, message: str, default: str = "") -> str:
 
     Returns:
         User's input string, or default if empty.
+
     """
     prompt_text = Text()
     prompt_text.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
@@ -1638,11 +1708,15 @@ def prompt_user(console: Console, message: str, default: str = "") -> str:
 
 
 class NeonThrobber:
-    """
-    Animated gradient bar for progress indication.
+    """Animated gradient bar for progress indication.
 
     Creates a scrolling rainbow effect using horizontal line characters
     and the gradient color palette.
+
+    Attributes:
+        _offset: Current animation offset for color cycling.
+        _char: Character used to render the throbber bar.
+
     """
 
     def __init__(self) -> None:
@@ -1651,14 +1725,14 @@ class NeonThrobber:
         self._char = "\u2501"  # ━
 
     def render(self, width: int = 40) -> Text:
-        """
-        Render the throbber bar with current animation frame.
+        """Render the throbber bar with current animation frame.
 
         Args:
             width: Width of the throbber bar in characters.
 
         Returns:
             Rich Text object containing the styled throbber.
+
         """
         result = Text()
         num_colors = len(GRADIENT_COLORS)
@@ -1674,7 +1748,12 @@ class NeonThrobber:
         return result
 
     def reset(self) -> None:
-        """Reset the animation offset to the beginning."""
+        """Reset the animation offset to the beginning.
+
+        Returns:
+            None
+
+        """
         self._offset = 0
 
 
@@ -1684,8 +1763,7 @@ class NeonThrobber:
 
 
 class LiveToolPanel:
-    """
-    Manages a single tool call panel with Live updates.
+    """Manage a single tool call panel with Live updates.
 
     Consolidates tool call display and result into a single live-updating panel.
     Shows an animated throbber while waiting for the result, then replaces it
@@ -1693,12 +1771,20 @@ class LiveToolPanel:
 
     In quiet mode, delegates to print_tool_call and skips result display.
 
+    Args:
+        console: Rich Console instance for output.
+        tool_use_id: Unique identifier for the tool use.
+        name: Name of the tool being called.
+        args: Dictionary of arguments passed to the tool.
+        quiet_mode: If True, use static display instead of Live updates.
+
     Usage:
         panel = LiveToolPanel(console, "tool-123", "Bash", {"command": "ls"})
         panel.start()
         # ... tool executes ...
         panel.set_result("file1.txt\nfile2.txt", is_error=False)
         panel.finish()
+
     """
 
     def __init__(
@@ -1709,8 +1795,7 @@ class LiveToolPanel:
         args: dict[str, object],
         quiet_mode: bool = False,
     ) -> None:
-        """
-        Initialize the LiveToolPanel.
+        """Initialize the LiveToolPanel.
 
         Args:
             console: Rich Console instance for output.
@@ -1718,6 +1803,7 @@ class LiveToolPanel:
             name: Name of the tool being called.
             args: Dictionary of arguments passed to the tool.
             quiet_mode: If True, use static display instead of Live updates.
+
         """
         self._console = console
         self._tool_use_id = tool_use_id
@@ -1730,14 +1816,14 @@ class LiveToolPanel:
         self._quiet_mode = quiet_mode
 
     def _build_tool_header(self) -> Text:
-        """
-        Build the tool call header content.
+        """Build the tool call header content.
 
         Reuses logic from print_tool_call for consistent styling.
         Handles special cases for Bash, Skill, and Write tools.
 
         Returns:
             Rich Text containing the styled tool header.
+
         """
         content = Text()
 
@@ -1820,8 +1906,7 @@ class LiveToolPanel:
         return content
 
     def _build_result_content(self, max_lines: int = 20) -> Text | Syntax | Group:
-        """
-        Build the result content with syntax highlighting.
+        """Build the result content with syntax highlighting.
 
         Reuses logic from print_tool_result for consistent styling.
 
@@ -1830,6 +1915,7 @@ class LiveToolPanel:
 
         Returns:
             Rich renderable containing the styled result.
+
         """
         if self._result is None:
             return Text()
@@ -1883,13 +1969,13 @@ class LiveToolPanel:
         return result_text
 
     def _render_panel(self) -> Panel:
-        """
-        Render the current state as a Panel.
+        """Render the current state as a Panel.
 
         Shows tool call header + either throbber (if waiting) or result.
 
         Returns:
             Rich Panel containing the consolidated tool call display.
+
         """
         # Build header
         header = self._build_tool_header()
@@ -1945,10 +2031,13 @@ class LiveToolPanel:
         return self._render_panel()
 
     def start(self) -> None:
-        """
-        Start the Live context and show tool call with animated throbber.
+        """Start the Live context and show tool call with animated throbber.
 
         In quiet mode, calls print_tool_call and returns without Live.
+
+        Returns:
+            None
+
         """
         if self._quiet_mode:
             print_tool_call(self._console, self._name, self._args, quiet_mode=True)
@@ -1966,12 +2055,12 @@ class LiveToolPanel:
         self._live.start()
 
     def set_result(self, content: str, is_error: bool = False) -> None:
-        """
-        Store result and update the display.
+        """Store result and update the display.
 
         Args:
             content: The result content from the tool.
             is_error: Whether this is an error result.
+
         """
         self._result = content
         self._is_error = is_error
@@ -1980,10 +2069,13 @@ class LiveToolPanel:
             self._live.update(self._render_panel())
 
     def finish(self) -> None:
-        """
-        Stop Live context and print final static panel.
+        """Stop Live context and print final static panel.
 
         In quiet mode, this is a no-op.
+
+        Returns:
+            None
+
         """
         if self._quiet_mode:
             return
@@ -2002,12 +2094,15 @@ class LiveToolPanel:
 
 
 class LiveToolPanelRegistry:
-    """
-    Registry for tracking multiple concurrent tool panels.
+    """Registry for tracking multiple concurrent tool panels.
 
     Provides a central registry for LiveToolPanel instances, indexed by
     tool_use_id. This enables correlation between ToolUseBlock and
     ToolResultBlock events when processing streaming responses.
+
+    Args:
+        console: Rich Console instance for creating panels.
+        quiet_mode: If True, panels use static display instead of Live updates.
 
     Usage:
         registry = LiveToolPanelRegistry(console, quiet_mode=False)
@@ -2016,15 +2111,16 @@ class LiveToolPanelRegistry:
         panel.set_result("file1.txt", is_error=False)
         panel.finish()
         registry.remove("tool-123")
+
     """
 
     def __init__(self, console: Console, quiet_mode: bool = False) -> None:
-        """
-        Initialize the registry.
+        """Initialize the registry.
 
         Args:
             console: Rich Console instance for creating panels.
             quiet_mode: If True, panels use static display instead of Live updates.
+
         """
         self._console = console
         self._quiet_mode = quiet_mode
@@ -2036,8 +2132,7 @@ class LiveToolPanelRegistry:
         name: str,
         args: dict[str, object],
     ) -> LiveToolPanel:
-        """
-        Create and register a new panel, then start it.
+        """Create and register a new panel, then start it.
 
         Args:
             tool_use_id: Unique identifier for the tool use.
@@ -2046,6 +2141,7 @@ class LiveToolPanelRegistry:
 
         Returns:
             The created and started LiveToolPanel.
+
         """
         panel = LiveToolPanel(
             console=self._console,
@@ -2059,34 +2155,40 @@ class LiveToolPanelRegistry:
         return panel
 
     def get(self, tool_use_id: str) -> LiveToolPanel | None:
-        """
-        Get a panel by its tool_use_id.
+        """Get a panel by its tool_use_id.
 
         Args:
             tool_use_id: The unique identifier of the tool use.
 
         Returns:
             The LiveToolPanel if found, None otherwise.
+
         """
         return self._panels.get(tool_use_id)
 
     def remove(self, tool_use_id: str) -> None:
-        """
-        Remove a panel from the registry.
+        """Remove a panel from the registry.
 
         Call this after finishing a panel to clean up the registry.
 
         Args:
             tool_use_id: The unique identifier of the tool use to remove.
+
+        Returns:
+            None
+
         """
         self._panels.pop(tool_use_id, None)
 
     def finish_all(self) -> None:
-        """
-        Finalize all remaining panels.
+        """Finalize all remaining panels.
 
         Calls finish() on each panel and clears the registry.
         Use this for cleanup when a response ends unexpectedly.
+
+        Returns:
+            None
+
         """
         for panel in self._panels.values():
             panel.finish()
@@ -2105,8 +2207,7 @@ def neon_progress(
     width: int = 40,
     refresh_rate: float = 0.1,
 ) -> Generator[None, None, None]:
-    """
-    Context manager for displaying an animated progress indicator.
+    """Context manager for displaying an animated progress indicator.
 
     Shows an animated throbber while the wrapped operation executes,
     then clears it when done.
@@ -2123,6 +2224,7 @@ def neon_progress(
     Example:
         with neon_progress(console, "Loading..."):
             do_long_operation()
+
     """
     throbber = NeonThrobber()
     stop_event = threading.Event()
@@ -2149,29 +2251,212 @@ def neon_progress(
 
 
 # =============================================================================
+# ShutdownPanel Class
+# =============================================================================
+
+
+@dataclass
+class ShutdownStep:
+    """A step in the shutdown process.
+
+    Attributes:
+        message: Description of the shutdown step.
+        status: Current status of the step ("pending", "in_progress", or "completed").
+
+    """
+
+    message: str
+    status: str = "pending"  # pending, in_progress, completed
+
+
+class ShutdownPanel:
+    """Live-updating panel for showing shutdown progress.
+
+    Consolidates all shutdown messages into a single panel that
+    updates in place, showing the progression of shutdown steps.
+
+    Args:
+        console: Rich Console instance for output.
+
+    Usage:
+        panel = ShutdownPanel(console)
+        panel.start("Received SIGINT, shutting down")
+        panel.add_step("Terminating running agent...")
+        panel.complete_step(0)  # Mark first step as completed
+        panel.finish()
+
+    """
+
+    def __init__(self, console: Console) -> None:
+        """Initialize the ShutdownPanel.
+
+        Args:
+            console: Rich Console instance for output.
+
+        """
+        self._console = console
+        self._steps: list[ShutdownStep] = []
+        self._live: Live | None = None
+
+    def _render_panel(self) -> Panel:
+        """Render the current state as a Panel.
+
+        Returns:
+            Rich Panel containing all shutdown steps with status icons.
+
+        """
+        content = Text()
+
+        for i, step in enumerate(self._steps):
+            config = STATUS_CONFIG.get(step.status, STATUS_CONFIG["pending"])
+            icon = config["icon"]
+            color = config["color"]
+
+            content.append(f"{icon} ", style=Style(color=color))
+            content.append(step.message, style=Style(color=NEON_COLORS["foreground"]))
+
+            if i < len(self._steps) - 1:
+                content.append("\n")
+
+        return Panel(
+            content,
+            box=box.ROUNDED,
+            border_style=Style(color=NEON_COLORS["yellow"]),
+            padding=(0, 1),
+        )
+
+    def start(self, initial_message: str) -> None:
+        """Start the live panel with an initial message.
+
+        Args:
+            initial_message: The first message to display (e.g., "Received SIGINT").
+
+        Returns:
+            None
+
+        """
+        self._steps.append(ShutdownStep(message=initial_message, status="completed"))
+
+        self._console.print()  # Add spacing before panel
+        self._live = Live(
+            self._render_panel(),
+            console=self._console,
+            refresh_per_second=10,
+            transient=True,
+        )
+        self._live.start()
+
+    def add_step(self, message: str, status: str = "in_progress") -> int:
+        """Add a new step to the shutdown sequence.
+
+        Args:
+            message: The step message to display.
+            status: Initial status ("pending", "in_progress", "completed").
+
+        Returns:
+            Index of the added step for later updates.
+
+        """
+        self._steps.append(ShutdownStep(message=message, status=status))
+        if self._live is not None:
+            self._live.update(self._render_panel())
+        return len(self._steps) - 1
+
+    def complete_step(self, index: int) -> None:
+        """Mark a step as completed.
+
+        Args:
+            index: Index of the step to mark as completed.
+
+        Returns:
+            None
+
+        """
+        if 0 <= index < len(self._steps):
+            self._steps[index].status = "completed"
+            if self._live is not None:
+                self._live.update(self._render_panel())
+
+    def complete_last_step(self) -> None:
+        """Mark the last step as completed.
+
+        Returns:
+            None
+
+        """
+        if self._steps:
+            self.complete_step(len(self._steps) - 1)
+
+    def finish(self) -> None:
+        """Stop the live context and print the final panel.
+
+        Call this when all shutdown steps are complete.
+
+        Returns:
+            None
+
+        """
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+        # Print the final panel (non-transient)
+        if self._steps:
+            self._console.print(self._render_panel())
+
+
+# Global shutdown panel instance for cross-module access
+_shutdown_panel: ShutdownPanel | None = None
+
+
+def get_shutdown_panel() -> ShutdownPanel | None:
+    """Get the current shutdown panel instance.
+
+    Returns:
+        ShutdownPanel | None: The current shutdown panel, or None if not set.
+
+    """
+    return _shutdown_panel
+
+
+def set_shutdown_panel(panel: ShutdownPanel | None) -> None:
+    """Set the global shutdown panel instance.
+
+    Args:
+        panel: The ShutdownPanel instance to set, or None to clear.
+
+    Returns:
+        None
+
+    """
+    global _shutdown_panel
+    _shutdown_panel = panel
+
+
+# =============================================================================
 # Convenience Functions
 # =============================================================================
 
 
 def create_neon_console() -> NeonConsole:
-    """
-    Create and return a new NeonConsole instance.
+    """Create and return a new NeonConsole instance.
 
     Returns:
         Configured NeonConsole ready for use.
+
     """
     return NeonConsole()
 
 
 def get_status_style(status: str) -> Style:
-    """
-    Get the Rich Style for a given status.
+    """Get the Rich Style for a given status.
 
     Args:
         status: One of "pending", "in_progress", "completed", "failed".
 
     Returns:
         Rich Style object with appropriate color.
+
     """
     config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
     return Style(color=config["color"])

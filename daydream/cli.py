@@ -1,5 +1,6 @@
 """CLI entry point for daydream."""
 
+import argparse
 import signal
 import sys
 
@@ -10,23 +11,29 @@ from daydream.agent import (
     get_current_client,
     set_shutdown_requested,
 )
-from daydream.runner import run
+from daydream.runner import RunConfig, run
 from daydream.ui import (
-    print_dim,
+    ShutdownPanel,
+    get_shutdown_panel,
     print_error,
-    print_warning,
+    set_shutdown_panel,
 )
 
 
 def _signal_handler(signum: int, frame: object) -> None:
     """Handle termination signals by requesting shutdown."""
     signal_name = signal.Signals(signum).name
-    print_warning(console, f"Received {signal_name}, shutting down...")
     set_shutdown_requested(True)
 
+    # Create and start the shutdown panel
+    panel = ShutdownPanel(console)
+    set_shutdown_panel(panel)
+    panel.start(f"Received {signal_name}, shutting down")
+
     if get_current_client() is not None:
-        print_dim(console, "Terminating running agent...")
-        raise KeyboardInterrupt
+        panel.add_step("Terminating running agent...")
+
+    raise KeyboardInterrupt
 
 
 def _install_signal_handlers() -> None:
@@ -35,17 +42,113 @@ def _install_signal_handlers() -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
 
 
+def _parse_args() -> RunConfig:
+    """Parse command line arguments and return a RunConfig.
+
+    Returns:
+        RunConfig: Configuration object populated from command line arguments.
+
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream",
+        description="Automated code review and fix loop",
+    )
+
+    parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        metavar="TARGET",
+        help="Target directory (default: prompt interactively)",
+    )
+
+    skill_group = parser.add_mutually_exclusive_group()
+    skill_group.add_argument(
+        "-s", "--skill",
+        choices=["python", "frontend"],
+        default=None,
+        help="Review skill: python, frontend",
+    )
+    skill_group.add_argument(
+        "--python",
+        action="store_const",
+        const="python",
+        dest="skill",
+        help="Use Python/FastAPI review skill",
+    )
+    skill_group.add_argument(
+        "--typescript",
+        action="store_const",
+        const="frontend",
+        dest="skill",
+        help="Use React/TypeScript review skill",
+    )
+
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Save debug log",
+    )
+
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        default=None,
+        help="Cleanup review output after completion",
+    )
+
+    parser.add_argument(
+        "--review-only",
+        action="store_true",
+        default=False,
+        help="Skip fixes, only review and parse feedback",
+    )
+
+    args = parser.parse_args()
+
+    return RunConfig(
+        target=args.target,
+        skill=args.skill,
+        debug=args.debug,
+        cleanup=args.cleanup if args.cleanup else None,
+        quiet=True,
+        review_only=args.review_only,
+    )
+
+
 def main() -> None:
-    """Main entry point for the CLI."""
+    """Run the CLI entry point.
+
+    Returns:
+        None: This function does not return; it exits via sys.exit().
+
+    Raises:
+        SystemExit: Always raised with exit code 0 on success, 130 on keyboard
+            interrupt, or 1 on fatal error.
+
+    """
     _install_signal_handlers()
+    config = _parse_args()
     try:
-        exit_code = anyio.run(run)
+        exit_code = anyio.run(run, config)
         sys.exit(exit_code)
     except KeyboardInterrupt:
-        console.print()
-        print_warning(console, "Aborted by user")
+        panel = get_shutdown_panel()
+        if panel is not None:
+            # Complete agent termination step if it was added
+            panel.complete_last_step()
+            # Add final step
+            panel.add_step("Aborted by user", status="completed")
+            panel.finish()
+            set_shutdown_panel(None)
         sys.exit(130)
     except Exception as e:
+        # Clean up any active shutdown panel
+        panel = get_shutdown_panel()
+        if panel is not None:
+            panel.finish()
+            set_shutdown_panel(None)
         console.print()
         print_error(console, "Fatal Error", str(e))
         sys.exit(1)
