@@ -1,6 +1,5 @@
 """Agent interaction and SDK client management."""
 
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -255,7 +254,11 @@ def detect_test_success(output: str) -> bool:
     return "passed" in output_lower
 
 
-async def run_agent(cwd: Path, prompt: str) -> str:
+async def run_agent(
+    cwd: Path,
+    prompt: str,
+    output_schema: dict[str, Any] | None = None,
+) -> str | Any:
     """Run agent with the given prompt and return full text output.
 
     Streams verbose output to stdout as it's received.
@@ -263,9 +266,11 @@ async def run_agent(cwd: Path, prompt: str) -> str:
     Args:
         cwd: Working directory for the agent
         prompt: The prompt to send to the agent
+        output_schema: Optional JSON schema for structured output
 
     Returns:
-        The full text output from the agent session
+        The full text output from the agent session, or structured data if
+        output_schema is provided
 
     Raises:
         MissingSkillError: If a required skill is not available
@@ -278,14 +283,22 @@ async def run_agent(cwd: Path, prompt: str) -> str:
     _log_debug(f"[PROMPT] cwd={cwd}\n{prompt}\n")
     _log_debug(f"{'='*80}\n\n")
 
+    output_format = (
+        {"type": "json_schema", "schema": output_schema}
+        if output_schema
+        else None
+    )
+
     options = ClaudeAgentOptions(
         cwd=str(cwd),
         permission_mode="bypassPermissions",
         setting_sources=["user", "project", "local"],
         model=_state.model,
+        output_format=output_format,
     )
 
     output_parts: list[str] = []
+    structured_result: Any = None
 
     async with ClaudeSDKClient(options=options) as client:
         _current_client = client
@@ -312,6 +325,10 @@ async def run_agent(cwd: Path, prompt: str) -> str:
                             print_thinking(console, block.thinking)
                             _log_debug(f"[THINKING] {block.thinking}\n")
                         elif isinstance(block, ToolUseBlock):
+                            if block.name == "StructuredOutput":
+                                # Skip panel - handled in ResultMessage
+                                _log_debug(f"[TOOL_USE] {block.name}({block.input})\n")
+                                continue
                             if agent_renderer.has_content:
                                 agent_renderer.finish()
                             tool_registry.create(block.id, block.name, block.input or {})
@@ -331,12 +348,21 @@ async def run_agent(cwd: Path, prompt: str) -> str:
                             error_marker = " [ERROR]" if user_block.is_error else ""
                             _log_debug(f"[TOOL_RESULT{error_marker}] {content_str}\n")
 
-                elif isinstance(msg, ResultMessage) and msg.total_cost_usd:
-                    if agent_renderer.has_content:
-                        agent_renderer.finish()
-                    print()
-                    print_cost(console, msg.total_cost_usd)
-                    _log_debug(f"[COST] ${msg.total_cost_usd:.4f}\n")
+                elif isinstance(msg, ResultMessage):
+                    if msg.structured_output is not None:
+                        structured_result = msg.structured_output
+                        # Format issues as agent text
+                        issues = structured_result.get("issues", [])
+                        if issues:
+                            lines = [f"[{i['id']}] {i['file']}:{i['line']} - {i['description']}" for i in issues]
+                            agent_renderer.append("\n".join(lines))
+                        _log_debug(f"[STRUCTURED_OUTPUT] {structured_result}\n")
+                    if msg.total_cost_usd:
+                        if agent_renderer.has_content:
+                            agent_renderer.finish()
+                        print()
+                        print_cost(console, msg.total_cost_usd)
+                        _log_debug(f"[COST] ${msg.total_cost_usd:.4f}\n")
 
             if agent_renderer.has_content:
                 agent_renderer.finish()
@@ -345,49 +371,6 @@ async def run_agent(cwd: Path, prompt: str) -> str:
         finally:
             _current_client = None
 
+    if output_schema is not None and structured_result is not None:
+        return structured_result
     return "".join(output_parts)
-
-
-def extract_json_from_output(output: str) -> list[dict[str, Any]]:
-    """Extract JSON array from agent output, handling markdown code fences.
-
-    Args:
-        output: Raw agent output that may contain JSON
-
-    Returns:
-        Parsed list of feedback items
-
-    Raises:
-        ValueError: If no valid JSON array found
-
-    """
-    code_block_pattern = r"```(?:json)?\s*\n?([\s\S]*?)\n?```"
-    matches = re.findall(code_block_pattern, output)
-
-    for match in matches:
-        try:
-            data = json.loads(match.strip())
-            if isinstance(data, list):
-                return data
-        except json.JSONDecodeError:
-            continue
-
-    array_pattern = r"\[[\s\S]*?\]"
-    matches = re.findall(array_pattern, output)
-
-    for match in matches:
-        try:
-            data = json.loads(match)
-            if isinstance(data, list):
-                return data
-        except json.JSONDecodeError:
-            continue
-
-    try:
-        data = json.loads(output.strip())
-        if isinstance(data, list):
-            return data
-    except json.JSONDecodeError:
-        pass
-
-    raise ValueError("No valid JSON array found in output")

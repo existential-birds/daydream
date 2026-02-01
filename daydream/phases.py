@@ -5,7 +5,6 @@ from typing import Any
 
 from daydream.agent import (
     console,
-    extract_json_from_output,
     run_agent,
 )
 from daydream.config import REVIEW_OUTPUT_FILE
@@ -24,6 +23,26 @@ from daydream.ui import (
 )
 
 TEST_FIX_PROMPT = "The tests failed. Analyze the failures and fix them."
+
+FEEDBACK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "description": {"type": "string"},
+                    "file": {"type": "string"},
+                    "line": {"type": "integer"},
+                },
+                "required": ["id", "description", "file", "line"],
+            },
+        },
+    },
+    "required": ["issues"],
+}
 
 
 def check_review_file_exists(target_dir: Path) -> None:
@@ -89,7 +108,7 @@ async def phase_parse_feedback(cwd: Path) -> list[dict[str, Any]]:
         List of validated feedback items with id, description, file, line
 
     Raises:
-        ValueError: If the agent output cannot be parsed as valid JSON.
+        ValueError: If the agent output is not a valid list.
 
     """
     print_phase_hero(console, "REFLECT", phase_subtitle("REFLECT"))
@@ -103,30 +122,23 @@ Extract ONLY actionable issues that need fixing. Skip these sections entirely:
 - "Summary" sections
 - Any positive observations
 
-For each issue found, output a JSON array with this structure:
+For each issue found, return a JSON array with this structure:
 [
   {{"id": 1, "description": "Brief description of the issue", "file": "path/to/file.py", "line": 42}},
   ...
 ]
 
-If there are no actionable issues, output an empty array: []
-
-Output ONLY the JSON array, no other text.
+If there are no actionable issues, return an empty array: []
 """
 
-    output = await run_agent(cwd, prompt)
+    result = await run_agent(cwd, prompt, output_schema=FEEDBACK_SCHEMA)
 
-    try:
-        feedback_items = extract_json_from_output(output)
-        print_info(console, f"Found {len(feedback_items)} actionable issues")
-        return feedback_items
-    except ValueError as e:
-        print_error(console, "Parse Error", f"Error parsing feedback: {e}")
-        print_dim(console, "Raw output:")
-        print_dim(console, "-" * 40)
-        print_dim(console, output)
-        print_dim(console, "-" * 40)
-        raise
+    if not isinstance(result, dict) or "issues" not in result:
+        raise ValueError(f"Expected dict with 'issues' key, got {type(result)}")
+
+    feedback_items = result["issues"]
+    print_info(console, f"Found {len(feedback_items)} actionable issues")
+    return feedback_items
 
 
 async def phase_fix(cwd: Path, item: dict[str, Any], item_num: int, total: int) -> None:

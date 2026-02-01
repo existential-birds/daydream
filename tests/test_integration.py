@@ -76,6 +76,7 @@ class MockResultMessage:
     """Mock ResultMessage from claude_agent_sdk.types."""
 
     total_cost_usd: float | None = 0.001
+    structured_output: Any = None
 
 
 # =============================================================================
@@ -103,40 +104,43 @@ class MockClaudeSDKClient:
 
     async def receive_response(self):
         """Yield mock responses based on prompt content."""
-        response_text = self._get_response_for_prompt()
+        response_text, structured_output = self._get_response_for_prompt()
         # First yield AssistantMessage with text content
         yield MockAssistantMessage(content=[MockTextBlock(text=response_text)])
-        # Then yield ResultMessage with cost
-        yield MockResultMessage(total_cost_usd=0.001)
+        # Then yield ResultMessage with cost and optional structured output
+        yield MockResultMessage(total_cost_usd=0.001, structured_output=structured_output)
 
-    def _get_response_for_prompt(self) -> str:
+    def _get_response_for_prompt(self) -> tuple[str, Any]:
+        """Return (text_response, structured_output) for the current prompt."""
         prompt_lower = self._prompt.lower()
 
         # Phase 1: Review skill invocation
         if "beagle:review-" in prompt_lower or "/beagle:review" in self._prompt:
-            return "Review complete. Found 1 issue to fix."
+            return "Review complete. Found 1 issue to fix.", None
 
         # Phase 2: Parse feedback (looking for JSON extraction)
+        # Now returns structured output directly instead of text
         if "extract" in prompt_lower and "json" in prompt_lower:
-            return """```json
-[
-  {"id": 1, "description": "Add type hints to function", "file": "main.py", "line": 1}
-]
-```"""
+            structured = {
+                "issues": [
+                    {"id": 1, "description": "Add type hints to function", "file": "main.py", "line": 1}
+                ]
+            }
+            return "Extracted feedback.", structured
 
         # Phase 3: Fix (contains file path and line)
         if "fix this issue" in prompt_lower:
-            return "Fixed the issue by adding type hints."
+            return "Fixed the issue by adding type hints.", None
 
         # Phase 4: Test (run test suite)
         if "test suite" in prompt_lower or "run the project" in prompt_lower:
-            return "All 1 tests passed. 0 failed."
+            return "All 1 tests passed. 0 failed.", None
 
         # Commit push skill
         if "commit-push" in prompt_lower:
-            return "Changes committed and pushed."
+            return "Changes committed and pushed.", None
 
-        return "OK"
+        return "OK", None
 
 
 class MockClaudeSDKClientWithToolUse:
