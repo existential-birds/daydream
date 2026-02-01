@@ -37,7 +37,7 @@ async def phase_review(cwd: Path, skill: str) -> None:
         Exception: If the agent fails to execute the review skill.
 
     """
-    print_phase_hero(console, 1, "GAZE", f"Running review skill: {skill}")
+    print_phase_hero(console, 1, "BREATHE", "[italic]\"Be guided by beauty\" —Jim Simons[/italic]")
 
     prompt = f"""/{skill}
 

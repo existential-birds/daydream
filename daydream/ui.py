@@ -10,6 +10,7 @@ from typing import Any
 
 import pyfiglet
 from rich import box
+from rich.align import Align
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -333,10 +334,9 @@ def print_ascii_header(console: Console, text: str) -> None:
         if line_idx < len(lines) - 1:
             gradient_text.append("\n")
 
-    # Create a subtle tagline
-    tagline = Text()
+    # Create a subtle tagline (centered via Rich alignment)
+    tagline = Text(justify="center")
     tagline.append("\n")
-    tagline.append("    ", style=Style())
     tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
     tagline.append(" automated code review ", style=Style(color=NEON_COLORS["pink"], dim=True))
     tagline.append("&", style=Style(color=NEON_COLORS["cyan"], dim=True))
@@ -348,9 +348,9 @@ def print_ascii_header(console: Console, text: str) -> None:
     full_content.append_text(gradient_text)
     full_content.append_text(tagline)
 
-    # Create panel with dim purple border for subtle framing
+    # Create panel with dim purple border for subtle framing, centered content
     panel = Panel(
-        full_content,
+        Align.center(full_content),
         box=box.DOUBLE_EDGE,
         border_style=Style(color=NEON_COLORS["purple"], dim=True),
         padding=(0, 2),
@@ -365,7 +365,7 @@ def print_ascii_header(console: Console, text: str) -> None:
 # =============================================================================
 
 PHASE_TITLES = {
-    1: "GAZE",   # Mystical, peering into code
+    1: "BREATHE",   # Mystical, peering into code
     2: "MIND",   # Psychic understanding
     3: "HEAL",   # Restorative magic
     4: "PROVE",  # Mathematical certainty
@@ -396,9 +396,9 @@ def print_phase_hero(
         description: Subtitle text displayed below the ASCII art.
 
     """
-    # Generate ASCII art using pyfiglet with 'small' font for compact display
+    # Generate ASCII art using pyfiglet with 'ansi_shadow' font for readability
     try:
-        ascii_art = pyfiglet.figlet_format(title, font="small")
+        ascii_art = pyfiglet.figlet_format(title, font="ansi_shadow")
     except pyfiglet.FigletError:
         # Fallback to standard font
         ascii_art = pyfiglet.figlet_format(title, font="standard")
@@ -430,10 +430,9 @@ def print_phase_hero(
         if line_idx < len(lines) - 1:
             gradient_text.append("\n")
 
-    # Create decorative subtitle
-    tagline = Text()
+    # Create decorative subtitle (centered via Rich alignment)
+    tagline = Text(justify="center")
     tagline.append("\n")
-    tagline.append("       ", style=Style())
     tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
     tagline.append(f" {description} ", style=Style(color=NEON_COLORS["pink"], dim=True))
     tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
@@ -443,9 +442,9 @@ def print_phase_hero(
     full_content.append_text(gradient_text)
     full_content.append_text(tagline)
 
-    # Create panel with dim purple border for subtle framing
+    # Create panel with dim purple border for subtle framing, centered content
     panel = Panel(
-        full_content,
+        Align.center(full_content),
         box=box.DOUBLE_EDGE,
         border_style=Style(color=NEON_COLORS["purple"], dim=True),
         padding=(0, 2),
@@ -1230,7 +1229,7 @@ def print_tool_result(
         title = "[bold red]❌ Error[/bold red]"
     else:
         border_style = STYLE_PURPLE
-        title = f"[bold {NEON_COLORS['cyan']}]📤 Output[/bold {NEON_COLORS['cyan']}]"
+        title = f"[bold {NEON_COLORS['cyan']}]Output[/bold {NEON_COLORS['cyan']}]"
 
     panel = Panel(
         result_content,
@@ -2247,7 +2246,7 @@ class LiveToolPanel:
                 result_title.append("\u274c Error", style=STYLE_BOLD_RED)
             else:
                 result_title = Text()
-                result_title.append("\U0001f4e4 Output", style=STYLE_BOLD_CYAN)
+                result_title.append("Output", style=STYLE_BOLD_CYAN)
 
             if isinstance(result_content, Text) and not result_content.plain.strip():
                 # Empty result - just show header (wrap in Group for type consistency)
@@ -2322,19 +2321,27 @@ class LiveToolPanel:
         """
         if self._quiet_mode:
             # In quiet mode, header was already printed by start()
-            # Print just the result if we have one
-            if self._result is not None and self._result.strip():
+            # Always print result in a panel if we have one
+            if self._result is not None:
                 result_content = self._build_result_content_internal()
-                if not (isinstance(result_content, Text) and not result_content.plain.strip()):
-                    # Build result section with title
-                    if self._is_error:
-                        result_title = Text()
-                        result_title.append("\u274c Error", style=STYLE_BOLD_RED)
-                    else:
-                        result_title = Text()
-                        result_title.append("\U0001f4e4 Output", style=STYLE_BOLD_CYAN)
-                    result_group = Group(result_title, Text("\n"), result_content)
-                    self._console.print(result_group)
+                # Build result section with title
+                if self._is_error:
+                    result_title = Text()
+                    result_title.append("Error", style=STYLE_BOLD_RED)
+                    border_style = STYLE_RED
+                else:
+                    result_title = Text()
+                    result_title.append("Output", style=STYLE_BOLD_CYAN)
+                    border_style = STYLE_PURPLE
+                result_group = Group(result_title, Text("\n"), result_content)
+                result_panel = Panel(
+                    result_group,
+                    box=box.ROUNDED,
+                    border_style=border_style,
+                    style=STYLE_PANEL_BG,
+                    padding=(0, 1),
+                )
+                self._console.print(result_panel)
             return
 
         if self._live is not None:

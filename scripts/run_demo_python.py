@@ -319,7 +319,7 @@ def run_daydream(target: Path) -> int:
     print("-" * 60)
 
     result = subprocess.run(
-        ["python", "-m", "daydream", str(target), "--python"],
+        ["python", "-m", "daydream", str(target), "--python", "--debug", "--no-cleanup"],
         cwd=Path(__file__).parent.parent,
     )
 

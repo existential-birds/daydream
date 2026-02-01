@@ -410,3 +410,148 @@ async def test_glob_tool_panel_truncates_long_results(mock_sdk_with_tool_use, mo
 
     # Verify truncation indicator (25 total - 20 displayed = 5 more)
     assert "and 5 more" in output_text
+
+
+@pytest.mark.asyncio
+async def test_quiet_mode_output_in_panel_without_emoji(mock_sdk_with_tool_use, monkeypatch):
+    """Test that quiet mode shows output in a panel without emoji prefix."""
+    from daydream.agent import run_agent, set_quiet_mode
+
+    tool_use_id = "test-output-panel-001"
+    read_result = "def hello():\n    return 'world'"
+
+    messages = [
+        MockAssistantMessage(content=[
+            MockToolUseBlock(
+                id=tool_use_id,
+                name="Read",
+                input={"file_path": "/project/main.py"},
+            ),
+        ]),
+        MockUserMessage(content=[
+            MockToolResultBlock(
+                tool_use_id=tool_use_id,
+                content=read_result,
+                is_error=False,
+            ),
+        ]),
+        MockResultMessage(total_cost_usd=0.001),
+    ]
+
+    mock_client_class = mock_sdk_with_tool_use(messages)
+    monkeypatch.setattr("daydream.agent.ClaudeSDKClient", mock_client_class)
+
+    output = StringIO()
+    test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
+    monkeypatch.setattr("daydream.agent.console", test_console)
+
+    set_quiet_mode(True)
+
+    await run_agent(Path("/tmp"), "Test prompt")
+
+    output_text = output.getvalue()
+
+    # Verify "Output" label appears without emoji (no 📤 or \U0001f4e4)
+    assert "Output" in output_text
+    assert "\U0001f4e4" not in output_text  # No outbox tray emoji
+
+    # Verify content is displayed
+    assert "hello" in output_text
+    assert "world" in output_text
+
+    # Verify panel border characters are present (rounded box uses these)
+    # Rich's ROUNDED box uses Unicode box-drawing characters
+    assert "╭" in output_text or "│" in output_text  # Panel border indicators
+
+
+@pytest.mark.asyncio
+async def test_quiet_mode_empty_result_shows_panel(mock_sdk_with_tool_use, monkeypatch):
+    """Test that quiet mode shows a panel even for empty/whitespace-only results."""
+    from daydream.agent import run_agent, set_quiet_mode
+
+    tool_use_id = "test-empty-result-002"
+
+    messages = [
+        MockAssistantMessage(content=[
+            MockToolUseBlock(
+                id=tool_use_id,
+                name="Bash",
+                input={"command": "true"},  # Command that produces no output
+            ),
+        ]),
+        MockUserMessage(content=[
+            MockToolResultBlock(
+                tool_use_id=tool_use_id,
+                content="",  # Empty result
+                is_error=False,
+            ),
+        ]),
+        MockResultMessage(total_cost_usd=0.001),
+    ]
+
+    mock_client_class = mock_sdk_with_tool_use(messages)
+    monkeypatch.setattr("daydream.agent.ClaudeSDKClient", mock_client_class)
+
+    output = StringIO()
+    test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
+    monkeypatch.setattr("daydream.agent.console", test_console)
+
+    set_quiet_mode(True)
+
+    await run_agent(Path("/tmp"), "Test prompt")
+
+    output_text = output.getvalue()
+
+    # Verify "Output" label still appears for empty results
+    assert "Output" in output_text
+
+    # Verify panel border is present
+    assert "╭" in output_text or "│" in output_text
+
+
+@pytest.mark.asyncio
+async def test_quiet_mode_error_result_in_panel(mock_sdk_with_tool_use, monkeypatch):
+    """Test that quiet mode shows error results in a panel with Error label."""
+    from daydream.agent import run_agent, set_quiet_mode
+
+    tool_use_id = "test-error-result-003"
+
+    messages = [
+        MockAssistantMessage(content=[
+            MockToolUseBlock(
+                id=tool_use_id,
+                name="Bash",
+                input={"command": "false"},
+            ),
+        ]),
+        MockUserMessage(content=[
+            MockToolResultBlock(
+                tool_use_id=tool_use_id,
+                content="Command failed with exit code 1",
+                is_error=True,
+            ),
+        ]),
+        MockResultMessage(total_cost_usd=0.001),
+    ]
+
+    mock_client_class = mock_sdk_with_tool_use(messages)
+    monkeypatch.setattr("daydream.agent.ClaudeSDKClient", mock_client_class)
+
+    output = StringIO()
+    test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
+    monkeypatch.setattr("daydream.agent.console", test_console)
+
+    set_quiet_mode(True)
+
+    await run_agent(Path("/tmp"), "Test prompt")
+
+    output_text = output.getvalue()
+
+    # Verify "Error" label appears (not "Output") for error results
+    assert "Error" in output_text
+
+    # Verify error content is displayed
+    assert "Command failed" in output_text or "exit code" in output_text
+
+    # Verify panel border is present
+    assert "╭" in output_text or "│" in output_text
