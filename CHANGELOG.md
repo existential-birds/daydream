@@ -13,21 +13,52 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 
 ### Added
 
-- **cli:** Add command-line interface with `daydream` entry point and signal handling (SIGINT/SIGTERM)
-- **cli:** Add `--python` and `--typescript` flags to select review type
-- **cli:** Add `--review-only` flag to skip fix and test phases
-- **cli:** Add `--start-at` option to resume from a specific phase
-- **cli:** Add `--model` option to select Claude model
-- **cli:** Add `--no-cleanup` flag for non-interactive runs
-- **cli:** Add `--debug` and `--quiet` flags for output control
-- **runner:** Add main orchestration via `run()` async function with `RunConfig` dataclass
-- **phases:** Add four-phase workflow: review, parse feedback, fix, and test-and-heal
-- **agent:** Add Claude SDK client wrapper with streaming response support
-- **agent:** Add structured output support for feedback parsing
-- **ui:** Add Rich-based terminal UI with Dracula theme and live-updating panels
-- **ui:** Add formatted tool displays for Glob, Grep, Read, Edit, and TodoWrite tools
-- **ui:** Add ASCII art phase hero banners with neon gradient styling
-- **config:** Add skill mappings for Python/FastAPI and React/TypeScript reviews
+#### Core Package
+- Package structure with `pyproject.toml` and `daydream` entry point
+- Four-phase workflow: review → parse feedback → fix → test-and-heal
+- Claude Agent SDK integration with streaming response support
+- Structured output support for feedback parsing
+
+#### CLI
+- `daydream` command with target directory argument
+- `--python` flag for Python/FastAPI code reviews
+- `--typescript` flag for React/TypeScript code reviews
+- `--review-only` flag to skip fix and test phases
+- `--start-at` option to resume from a specific phase (review, parse, fix, test)
+- `--model` option to select Claude model (sonnet, opus, haiku)
+- `--no-cleanup` flag for non-interactive runs
+- `--debug` flag to enable debug logging
+- `--quiet` flag to suppress non-essential output
+- Signal handling for graceful shutdown (SIGINT/SIGTERM)
+
+#### UI
+- Rich-based terminal UI with Dracula theme
+- Live-updating panels with animated throbbers during tool execution
+- Formatted tool displays for Glob, Grep, Read, Edit, and TodoWrite
+- ASCII art phase hero banners with neon gradient styling
+- Quiet mode for minimal output
+
+#### Configuration
+- Skill mappings for `beagle:review-python` and `beagle:review-frontend`
+- Review output written to `.review-output.md`
+
+#### Development
+- GitHub Actions CI workflow with lint, typecheck, and test jobs
+- Pre-push hook matching CI checks
+- Makefile with `install`, `hooks`, `lint`, `typecheck`, `test`, and `check` targets
+- Integration test for full review-fix-test flow
+- Demo script for Python/FastAPI reviewer testing
+
+### Fixed
+
+- Force truecolor in Rich Console for consistent CI behavior
+
+### Dependencies
+
+- `claude-agent-sdk` - Claude Code SDK for agent interactions
+- `anyio` - Async I/O abstraction
+- `rich` - Terminal UI components
+- `pyfiglet` - ASCII art header generation
 
 [unreleased]: https://github.com/existential-birds/daydream/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/existential-birds/daydream/releases/tag/v0.1.0
