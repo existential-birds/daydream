@@ -113,15 +113,36 @@ def _parse_args() -> RunConfig:
         help="Skip fixes, only review and parse feedback",
     )
 
+    parser.add_argument(
+        "--start-at",
+        choices=["review", "parse", "fix", "test"],
+        default="review",
+        dest="start_at",
+        help="Start at a specific phase (default: review)",
+    )
+
+    parser.add_argument(
+        "--model",
+        choices=["opus", "sonnet", "haiku"],
+        default="opus",
+        help="Claude model to use (default: opus)",
+    )
+
     args = parser.parse_args()
+
+    # Validate mutual exclusion: --start-at and --review-only
+    if args.start_at != "review" and args.review_only:
+        parser.error("--start-at and --review-only are mutually exclusive")
 
     return RunConfig(
         target=args.target,
         skill=args.skill,
+        model=args.model,
         debug=args.debug,
         cleanup=args.cleanup,
         quiet=True,
         review_only=args.review_only,
+        start_at=args.start_at,
     )
 
 

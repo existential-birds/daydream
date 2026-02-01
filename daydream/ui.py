@@ -4,7 +4,9 @@ Implements a 1980s neon terminal aesthetic using the Rich library,
 with a Dracula-based color theme and animated elements.
 """
 
+import random
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -88,6 +90,66 @@ STYLE_AGENT_BG = Style(bgcolor="#051208")
 
 # Dim style
 STYLE_DIM = Style(dim=True)
+
+# Mystical action terms for tool displays
+MYSTICAL_TERMS = {
+    "Glob": ["scrying", "divining", "seeking", "wandering"],
+    "Grep": ["channeling", "attuning", "resonating", "listening"],
+    "Read": ["beholding", "absorbing", "dreaming into", "perceiving"],
+    "Edit": ["healing", "realigning", "restoring flow to", "mending"],
+    "Write": ["inscribing", "etching", "conjuring", "forging"],
+    "Skill": ["invoking", "channeling", "summoning", "awakening"],
+}
+
+# Dream Surgery symbols for Edit tool visualization
+SURGERY_CHAKRA_SYMBOLS = ["◉", "◎", "●", "○", "◐", "◑", "◒"]
+SURGERY_ENERGY_FLOW = ["~", "≈", "∿", "〜", "⌇", "⌁", "⚡"]
+SURGERY_PHASES = [
+    ("LOCATING MERIDIAN", "yellow"),
+    ("CLEARING BLOCKAGE", "red"),
+    ("CHANNELING FLOW", "purple"),
+    ("HARMONY RESTORED", "green"),
+]
+
+
+def mystical_term(tool: str) -> str:
+    """Return a random mystical action term for the given tool."""
+    return random.choice(MYSTICAL_TERMS.get(tool, ["processing"]))
+
+
+# Dreamlike phase subtitles
+PHASE_SUBTITLES = {
+    "DAYDREAM": [
+        "the mind wanders, the code improves",
+        "where code dreams itself awake",
+        "the quiet work of becoming",
+        "drift into clarity",
+    ],
+    "REFLECT": [
+        "gathering scattered thoughts",
+        "seeing what surfaces",
+        "listening to the echoes",
+        "patterns emerge from stillness",
+    ],
+    "HEAL": [
+        "mending what was found",
+        "gentle corrections",
+        "restoring harmony",
+        "the wounds close softly",
+    ],
+    "AWAKEN": [
+        "returning to waking life",
+        "does the dream hold?",
+        "testing the vision",
+        "reality reasserts itself",
+    ],
+}
+
+
+def phase_subtitle(phase: str) -> str:
+    """Return a random dreamlike subtitle for the given phase."""
+    return random.choice(PHASE_SUBTITLES.get(phase, ["..."]))
+
 
 GRADIENT_COLORS = [
     "#881177",
@@ -283,95 +345,6 @@ def _get_gradient_color(position: float) -> str:
     )
 
 
-def print_ascii_header(console: Console, text: str) -> None:
-    """Print a visually striking ASCII art header with neon gradient.
-
-    Uses pyfiglet to generate ASCII art and applies a horizontal
-    gradient from cyan (#8BE9FD) -> pink (#FF79C6) -> purple (#BD93F9)
-    character-by-character across each line.
-
-    Args:
-        console: Rich Console instance for output.
-        text: The text to render as ASCII art.
-
-    """
-    # Generate ASCII art using pyfiglet with 'ansi_shadow' font
-    # This font creates a nice blocky 3D effect
-    try:
-        ascii_art = pyfiglet.figlet_format(text, font="ansi_shadow")
-    except pyfiglet.FigletError:
-        # Fallback to 'slant' if ansi_shadow not available
-        try:
-            ascii_art = pyfiglet.figlet_format(text, font="slant")
-        except pyfiglet.FigletError:
-            # Final fallback to standard font
-            ascii_art = pyfiglet.figlet_format(text, font="standard")
-
-    lines = ascii_art.rstrip("\n").split("\n")
-
-    # Find the maximum line width for gradient calculation
-    max_width = max(len(line) for line in lines) if lines else 1
-
-    # Build the gradient text
-    gradient_text = Text()
-
-    for line_idx, line in enumerate(lines):
-        if not line.strip():
-            # Empty or whitespace-only line
-            gradient_text.append(line + "\n")
-            continue
-
-        # Apply gradient character by character
-        for char_idx, char in enumerate(line):
-            if char == " ":
-                gradient_text.append(char)
-            else:
-                # Calculate position in gradient based on character position
-                position = char_idx / max_width if max_width > 0 else 0
-                color = _get_gradient_color(position)
-                gradient_text.append(char, style=Style(color=color, bold=True))
-
-        if line_idx < len(lines) - 1:
-            gradient_text.append("\n")
-
-    # Create a subtle tagline (centered via Rich alignment)
-    tagline = Text(justify="center")
-    tagline.append("\n")
-    tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
-    tagline.append(" automated code review ", style=Style(color=NEON_COLORS["pink"], dim=True))
-    tagline.append("&", style=Style(color=NEON_COLORS["cyan"], dim=True))
-    tagline.append(" fix loop ", style=Style(color=NEON_COLORS["pink"], dim=True))
-    tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
-
-    # Combine ASCII art and tagline
-    full_content = Text()
-    full_content.append_text(gradient_text)
-    full_content.append_text(tagline)
-
-    # Create panel with dim purple border for subtle framing, centered content
-    panel = Panel(
-        Align.center(full_content),
-        box=box.DOUBLE_EDGE,
-        border_style=Style(color=NEON_COLORS["purple"], dim=True),
-        padding=(0, 2),
-    )
-
-    console.print()  # Add some spacing before
-    console.print(panel)
-
-
-# =============================================================================
-# Phase Titles (80s Neon Magical Theme)
-# =============================================================================
-
-PHASE_TITLES = {
-    1: "BREATHE",   # Mystical, peering into code
-    2: "MIND",   # Psychic understanding
-    3: "HEAL",   # Restorative magic
-    4: "PROVE",  # Mathematical certainty
-}
-
-
 # =============================================================================
 # Phase Hero Component (ASCII Art Banners)
 # =============================================================================
@@ -379,11 +352,10 @@ PHASE_TITLES = {
 
 def print_phase_hero(
     console: Console,
-    phase_num: int,
     title: str,
     description: str,
 ) -> None:
-    """Print a visually striking ASCII art phase banner with neon gradient.
+    """Print a visually striking ASCII art banner with neon gradient.
 
     Uses pyfiglet to generate ASCII art and applies a horizontal
     gradient from cyan -> pink -> purple character-by-character.
@@ -391,8 +363,7 @@ def print_phase_hero(
 
     Args:
         console: Rich Console instance for output.
-        phase_num: The phase number (1-4).
-        title: The ASCII art text (e.g., "GAZE", "MIND", "HEAL", "PROVE").
+        title: The ASCII art text (e.g., "DAYDREAM", "BREATHE", "HEAL").
         description: Subtitle text displayed below the ASCII art.
 
     """
@@ -430,21 +401,21 @@ def print_phase_hero(
         if line_idx < len(lines) - 1:
             gradient_text.append("\n")
 
-    # Create decorative subtitle (centered via Rich alignment)
-    tagline = Text(justify="center")
-    tagline.append("\n")
+    # Create decorative subtitle
+    tagline = Text()
     tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
-    tagline.append(f" {description} ", style=Style(color=NEON_COLORS["pink"], dim=True))
+    tagline.append(f" {description} ", style=Style(color=NEON_COLORS["pink"], dim=True, italic=True))
     tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
 
-    # Combine ASCII art and tagline
-    full_content = Text()
-    full_content.append_text(gradient_text)
-    full_content.append_text(tagline)
+    # Combine ASCII art and tagline as separate centered elements
+    full_content = Group(
+        Align.center(gradient_text),
+        Align.center(tagline),
+    )
 
-    # Create panel with dim purple border for subtle framing, centered content
+    # Create panel with dim purple border for subtle framing
     panel = Panel(
-        Align.center(full_content),
+        full_content,
         box=box.DOUBLE_EDGE,
         border_style=Style(color=NEON_COLORS["purple"], dim=True),
         padding=(0, 2),
@@ -607,24 +578,27 @@ def _build_tool_header(
     """
     content = Text()
 
-    # Special handling for Skill tool calls
+    # Special handling for Skill tool calls - Gradient Whisper style
     if name == "Skill":
         header_line = Text()
-        header_line.append("\u2728 ", style=STYLE_YELLOW)  # ✨
+        header_line.append("\u2728 ", style=STYLE_PURPLE)  # ✨
+        header_line.append(f"{mystical_term('Skill')} ", style=Style(color=NEON_COLORS["pink"], italic=True))
         header_line.append("Skill", style=STYLE_BOLD_CYAN)
         content.append_text(header_line)
-        content.append("\n")
+        content.append("\n  ")
 
-        # Extract and display skill name as cyan pill badge
+        # Apply character-by-character gradient to skill name
         skill_name = str(args.get("skill", ""))
-        skill_pill = pill(f" {skill_name} ", NEON_COLORS["cyan"], NEON_COLORS["background"])
-        content.append_text(skill_pill)
+        for i, char in enumerate(skill_name):
+            position = i / max(len(skill_name) - 1, 1)
+            color = _get_gradient_color(position)
+            content.append(char, style=Style(color=color, bold=True))
 
         # Show args in non-quiet mode (if present)
         if not quiet_mode:
             skill_args = args.get("args")
             if skill_args:
-                content.append("\n")
+                content.append("\n  ")
                 content.append("args=", style=STYLE_PURPLE)
                 content.append(str(skill_args), style=STYLE_ORANGE)
 
@@ -688,8 +662,7 @@ def _build_tool_header(
         header_line.append("\u26CF\uFE0F ", style=STYLE_ORANGE)  # ⛏️
         header_line.append("Write", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
-        content.append("\n")
-        content.append("file_path=", style=STYLE_CYAN)
+        content.append(f" {mystical_term('Write')}... ", style=f"{STYLE_PURPLE} italic")
         content.append(file_path, style=STYLE_CYAN)
 
         return content
@@ -703,10 +676,7 @@ def _build_tool_header(
         header_line.append("\U0001f52e ", style=STYLE_PURPLE)  # 🔮 crystal ball
         header_line.append("Glob", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
-        content.append("\n")
-
-        # Pattern with orange highlighting (the key info)
-        content.append("pattern=", style=STYLE_PURPLE)
+        content.append(f" {mystical_term('Glob')}... ", style=f"{STYLE_PURPLE} italic")
         content.append(pattern, style=STYLE_ORANGE)
 
         # Search path if provided
@@ -728,10 +698,7 @@ def _build_tool_header(
         header_line.append("\U0001f9d9 ", style=STYLE_PURPLE)  # 🧙 wizard
         header_line.append("Grep", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
-        content.append("\n")
-
-        # Pattern with orange highlighting (the key info)
-        content.append("pattern=", style=STYLE_PURPLE)
+        content.append(f" {mystical_term('Grep')}... ", style=f"{STYLE_PURPLE} italic")
         content.append(pattern, style=STYLE_ORANGE)
 
         # Search path if provided
@@ -764,10 +731,7 @@ def _build_tool_header(
         header_line.append("\U0001f4dc ", style=STYLE_ORANGE)  # 📜 scroll
         header_line.append("Read", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
-        content.append("\n")
-
-        # File path (the key info)
-        content.append("file_path=", style=STYLE_PURPLE)
+        content.append(f" {mystical_term('Read')}... ", style=f"{STYLE_PURPLE} italic")
         content.append(file_path, style=STYLE_CYAN)
 
         # Line range if specified
@@ -784,21 +748,19 @@ def _build_tool_header(
 
         return content
 
-    # Special handling for Edit tool calls
+    # Special handling for Edit tool calls - Dream Surgery visualization
     if name == "Edit":
         file_path = str(args.get("file_path", ""))
         old_string = str(args.get("old_string", ""))
         new_string = str(args.get("new_string", ""))
         replace_all = args.get("replace_all", False)
 
+        # Header with surgery/healing theme
         header_line = Text()
-        header_line.append("\U0001fa84 ", style=STYLE_PINK)  # 🪄 magic wand
+        header_line.append("⚕ ", style=STYLE_CYAN)  # Medical symbol
         header_line.append("Edit", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
-        content.append("\n")
-
-        # File path
-        content.append("file_path=", style=STYLE_PURPLE)
+        content.append(f" {mystical_term('Edit')}... ", style=Style(color=NEON_COLORS["purple"], italic=True))
         content.append(file_path, style=STYLE_CYAN)
 
         # Replace all flag if true
@@ -807,20 +769,47 @@ def _build_tool_header(
             content.append("replace_all=", style=STYLE_PURPLE)
             content.append("True", style=STYLE_PURPLE)
 
-        # Show truncated old/new strings
-        if old_string:
-            content.append("\n")
-            content.append("old_string=", style=STYLE_PURPLE)
-            preview = old_string[:50] + "..." if len(old_string) > 50 else old_string
-            preview = preview.replace("\n", "\\n")
-            content.append(f'"{preview}"', style=STYLE_RED)
+        content.append("\n")
 
+        # BLOCKED energy - old string with red→orange gradient
+        content.append("\n")
+        content.append("  ⊗ ", style=STYLE_RED)
+        content.append("BLOCKED", style=Style(color=NEON_COLORS["red"], bold=True))
+        content.append("\n")
+        if old_string:
+            lines = old_string.split("\n")[:30]  # Up to 30 lines
+            preview = "\n".join(lines)
+            if len(old_string.split("\n")) > 30:
+                preview += "\n..."
+            preview_len = max(len(preview) - 1, 1)
+            # Show with gradient from red to orange
+            for i, char in enumerate(preview):
+                if char == "\n":
+                    content.append("\n  ")  # Indent continuation lines
+                else:
+                    t = i / preview_len
+                    color = _interpolate_color(NEON_COLORS["red"], NEON_COLORS["orange"], t)
+                    content.append(char, style=Style(color=color))
+
+        # FLOWING energy - new string with cyan→green gradient
+        content.append("\n\n")
+        content.append("  ✓ ", style=STYLE_GREEN)
+        content.append("FLOWING", style=Style(color=NEON_COLORS["green"], bold=True))
+        content.append("\n")
         if new_string:
-            content.append("\n")
-            content.append("new_string=", style=STYLE_PURPLE)
-            preview = new_string[:50] + "..." if len(new_string) > 50 else new_string
-            preview = preview.replace("\n", "\\n")
-            content.append(f'"{preview}"', style=STYLE_GREEN)
+            lines = new_string.split("\n")[:30]  # Up to 30 lines
+            preview = "\n".join(lines)
+            if len(new_string.split("\n")) > 30:
+                preview += "\n..."
+            preview_len = max(len(preview) - 1, 1)
+            # Show with gradient from cyan to green
+            for i, char in enumerate(preview):
+                if char == "\n":
+                    content.append("\n  ")  # Indent continuation lines
+                else:
+                    t = i / preview_len
+                    color = _interpolate_color(NEON_COLORS["cyan"], NEON_COLORS["green"], t)
+                    content.append(char, style=Style(color=color, bold=True))
 
         return content
 
@@ -1300,11 +1289,11 @@ def print_code_result(
 # =============================================================================
 
 
-def print_thinking(console: Console, content: str, max_length: int = 300) -> None:
-    """Print a thinking/reasoning panel.
+class LiveThinkingPanel:
+    """Animated thinking panel with crazy spinners in title.
 
     Displays the AI's thought process in a purple-styled panel
-    with a thought bubble icon.
+    with animated spinners alongside the thought bubble icon.
 
     Args:
         console: Rich Console instance for output.
@@ -1312,18 +1301,78 @@ def print_thinking(console: Console, content: str, max_length: int = 300) -> Non
         max_length: Maximum content length before truncation.
 
     """
-    # Truncate if needed
-    display_content = content if len(content) <= max_length else content[:max_length] + "..."
 
-    panel = Panel(
-        Text(display_content, style=Style(color=NEON_COLORS["purple"], italic=True)),
-        title="\U0001f4ad Thinking",  # 💭
-        title_align="left",
-        box=box.ROUNDED,
-        border_style=STYLE_PURPLE,
-        padding=(0, 1),
-    )
-    console.print(panel)
+    def __init__(self, console: Console, content: str, max_length: int = 300) -> None:
+        """Initialize the panel.
+
+        Args:
+            console: Rich Console instance for output.
+            content: The thinking content to display.
+            max_length: Maximum content length before truncation.
+
+        """
+        self._console = console
+        self._content = content if len(content) <= max_length else content[:max_length] + "..."
+        self._spinner = CrazySpinner(num_spinners=3)
+
+    def __rich__(self) -> Panel:
+        """Render panel with animated title.
+
+        Returns:
+            Rich Panel with animated spinners in title.
+
+        """
+        # Build title with spinners
+        title = Text()
+        title.append("\U0001f4ad Thinking")  # 💭
+        title.append_text(self._spinner.render())
+
+        return Panel(
+            Text(self._content, style=Style(color=NEON_COLORS["purple"], italic=True)),
+            title=title,
+            title_align="left",
+            box=box.ROUNDED,
+            border_style=STYLE_PURPLE,
+            padding=(0, 1),
+        )
+
+    def show(self, duration: float = 1.0) -> None:
+        """Show animated panel for duration, then persist final state.
+
+        Args:
+            duration: How long to show animation before settling.
+
+        """
+        self._console.print()
+        with Live(self, console=self._console, refresh_per_second=10, transient=True):
+            time.sleep(duration)
+        # Print final static panel
+        self._console.print(
+            Panel(
+                Text(self._content, style=Style(color=NEON_COLORS["purple"], italic=True)),
+                title="\U0001f4ad Thinking",  # 💭
+                title_align="left",
+                box=box.ROUNDED,
+                border_style=STYLE_PURPLE,
+                padding=(0, 1),
+            )
+        )
+
+
+def print_thinking(console: Console, content: str, max_length: int = 300) -> None:
+    """Print a thinking panel with brief animation.
+
+    Displays the AI's thought process in a purple-styled panel
+    with animated spinners in the title that settle after a brief duration.
+
+    Args:
+        console: Rich Console instance for output.
+        content: The thinking content to display.
+        max_length: Maximum content length before truncation.
+
+    """
+    panel = LiveThinkingPanel(console, content, max_length)
+    panel.show(duration=0.5)  # Brief animation before settling
 
 
 # =============================================================================
@@ -1476,6 +1525,26 @@ def print_info(console: Console, message: str) -> None:
     console.print(f"[neon.cyan]ℹ[/] [neon.fg]{message}[/]")
 
 
+def print_skipped_phases(console: Console, start_at: str) -> None:
+    """Print message about skipped phases when starting at a non-default phase.
+
+    Args:
+        console: Rich Console instance for output.
+        start_at: The phase to start at ("parse", "fix", or "test").
+
+    """
+    phase_order = ["review", "parse", "fix", "test"]
+    skipped = []
+    for phase in phase_order:
+        if phase == start_at:
+            break
+        skipped.append(phase)
+
+    if skipped:
+        skipped_str = ", ".join(skipped)
+        console.print(f"[neon.yellow]⏭[/] [neon.fg]Starting at phase: {start_at} (skipping {skipped_str})[/]")
+
+
 def print_dim(console: Console, message: str) -> None:
     """Print a dimmed message for secondary information.
 
@@ -1491,11 +1560,12 @@ def print_dim(console: Console, message: str) -> None:
 # Agent Text Component
 # =============================================================================
 
-# Track state for agent text blocks (gutter display)
+# Track state for agent text blocks (gutter display and markdown detection)
 _agent_text_line_started = False
+_agent_text_has_markdown = False
 
 
-def _highlight_agent_text(text: str) -> Text:
+def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
     """Apply syntax highlighting to agent text.
 
     Highlights:
@@ -1507,11 +1577,15 @@ def _highlight_agent_text(text: str) -> Text:
 
     Args:
         text: Raw agent text to highlight.
+        base_style: Style for non-highlighted text. Defaults to STYLE_GREEN.
 
     Returns:
         Rich Text with neon styling applied.
 
     """
+    if base_style is None:
+        base_style = STYLE_GREEN
+
     result = Text()
 
     # Patterns for highlighting
@@ -1582,27 +1656,84 @@ def _highlight_agent_text(text: str) -> Text:
             continue
 
         if start > pos:
-            # Add default styled text - bright neon green
-            result.append(text[pos:start], style=STYLE_GREEN)
+            # Add default styled text with base style
+            result.append(text[pos:start], style=base_style)
 
         result.append(display_text, style=style)
         used_ranges.append((start, end))
         pos = end
 
-    # Add remaining text - bright neon green
+    # Add remaining text with base style
     if pos < len(text):
-        result.append(text[pos:], style=STYLE_GREEN)
+        result.append(text[pos:], style=base_style)
 
     return result
 
 
 # =============================================================================
-# AgentTextRenderer Class (Live Panel with buffering)
+# Agent Text Helpers
 # =============================================================================
 
 # Constants for agent text styling
 AGENT_TEXT_BG = "#051208"  # Very dark green background
 AGENT_TEXT_FG = NEON_COLORS["green"]  # Neon green text
+
+# Pattern to detect markdown headers anywhere in text (not just at line start)
+# Matches 1-6 consecutive hashes followed by whitespace and a non-whitespace char
+# This handles both proper line-start headers AND inline headers from streaming
+_MARKDOWN_HEADER_PATTERN = re.compile(r"#{1,6}\s+\S")
+
+
+def _has_markdown_headers(text: str) -> bool:
+    """Check if text contains markdown headers.
+
+    Args:
+        text: Text to check for markdown headers.
+
+    Returns:
+        True if text contains markdown headers (e.g., ## Summary).
+
+    """
+    return bool(_MARKDOWN_HEADER_PATTERN.search(text))
+
+
+def _render_agent_lines_with_gradient(
+    lines: list[str],
+    use_italic: bool = True,
+) -> Text:
+    """Render agent text lines with vertical cyan-to-green gradient.
+
+    Args:
+        lines: List of text lines to render.
+        use_italic: Whether to apply italic styling (False for markdown content).
+
+    Returns:
+        Rich Text with vertical gradient styling applied.
+
+    """
+    highlighted = Text()
+    num_lines = max(len(lines), 1)
+
+    for i, line in enumerate(lines):
+        if line:
+            # Calculate vertical gradient position (0.0 = top/cyan, 1.0 = bottom/green)
+            t = i / max(num_lines - 1, 1)
+            gradient_color = _interpolate_color(
+                NEON_COLORS["cyan"],
+                NEON_COLORS["green"],
+                t,
+            )
+            line_style = Style(color=gradient_color, italic=use_italic)
+            highlighted.append_text(_highlight_agent_text(line, base_style=line_style))
+        if i < len(lines) - 1:
+            highlighted.append("\n")
+
+    return highlighted
+
+
+# =============================================================================
+# AgentTextRenderer Class (Live Panel with buffering)
+# =============================================================================
 
 
 class AgentTextRenderer:
@@ -1635,32 +1766,45 @@ class AgentTextRenderer:
         self._buffer: list[str] = []
         self._live: Live | None = None
         self._started = False
+        self._spinner = CrazySpinner(num_spinners=3)
 
-    def _render_panel(self) -> Panel:
-        """Render the current buffer as a styled Panel.
+    def _render_panel(self, show_spinner: bool = True) -> Panel:
+        """Render the current buffer as a styled Panel with vertical gradient.
+
+        Applies a cyan-to-green vertical gradient. Uses italic styling for
+        regular text, but not for markdown content (detected by headers).
+
+        Args:
+            show_spinner: If True, append animated spinner at end (cursor effect).
 
         Returns:
-            Rich Panel with highlighted text and neon green styling.
+            Rich Panel with gradient styling applied.
 
         """
         full_text = "".join(self._buffer)
-
-        # Apply syntax highlighting to each line
-        highlighted = Text()
         lines = full_text.split("\n")
-        for i, line in enumerate(lines):
-            if line:
-                highlighted.append_text(_highlight_agent_text(line))
-            if i < len(lines) - 1:
-                highlighted.append("\n")
+
+        # Detect markdown - use gradient but no italic for markdown content
+        use_italic = not _has_markdown_headers(full_text)
+
+        # Render with vertical gradient
+        content = _render_agent_lines_with_gradient(lines, use_italic=use_italic)
+
+        # Append spinner at end (like a cursor) while streaming
+        if show_spinner:
+            content.append_text(self._spinner.render())
 
         return Panel(
-            highlighted,
+            content,
             box=box.ROUNDED,
             border_style=STYLE_GREEN,
             style=STYLE_AGENT_BG,
             padding=(0, 1),
         )
+
+    def __rich__(self) -> Panel:
+        """Render for Live refresh cycle - enables continuous spinner animation."""
+        return self._render_panel(show_spinner=True)
 
     def start(self) -> None:
         """Start the Live context for real-time updates.
@@ -1678,7 +1822,7 @@ class AgentTextRenderer:
         self._console.print()
 
         self._live = Live(
-            self._render_panel(),
+            self,  # Pass self so Live calls __rich__() on each refresh
             console=self._console,
             refresh_per_second=10,
             transient=True,  # Remove the live display when done
@@ -1704,9 +1848,7 @@ class AgentTextRenderer:
             self.start()
 
         self._buffer.append(text)
-
-        if self._live is not None:
-            self._live.update(self._render_panel())
+        # Live will pick up buffer changes via __rich__() on next refresh
 
     def finish(self) -> None:
         """Stop the Live context and print the final Panel.
@@ -1721,9 +1863,9 @@ class AgentTextRenderer:
             self._live.stop()
             self._live = None
 
-        # Print the final panel (non-transient)
+        # Print the final panel (non-transient, without spinner)
         if self._buffer:
-            self._console.print(self._render_panel())
+            self._console.print(self._render_panel(show_spinner=False))
 
         # Reset state
         self._buffer = []
@@ -1747,6 +1889,8 @@ def print_agent_text(console: Console, text: str) -> None:
     markdown-aware syntax highlighting. The gutter prefix is
     shown on the first line, and the text flows with word wrapping.
 
+    Uses italic for regular narration, but not for markdown content.
+
     Args:
         console: Rich Console instance for output.
         text: The agent text to display.
@@ -1755,10 +1899,14 @@ def print_agent_text(console: Console, text: str) -> None:
         None
 
     """
-    global _agent_text_line_started
+    global _agent_text_line_started, _agent_text_has_markdown
 
     if not text:
         return
+
+    # Check for markdown headers in this chunk
+    if _has_markdown_headers(text):
+        _agent_text_has_markdown = True
 
     # Split into lines to handle multiline text
     lines = text.split("\n")
@@ -1775,8 +1923,11 @@ def print_agent_text(console: Console, text: str) -> None:
             _agent_text_line_started = True
 
         # Highlight and print the line content with dark green background
+        # Use italic only for non-markdown content
         if line:
-            highlighted = _highlight_agent_text(line)
+            use_italic = not _agent_text_has_markdown
+            base_style = Style(color=NEON_COLORS["green"], italic=use_italic)
+            highlighted = _highlight_agent_text(line, base_style=base_style)
             highlighted.stylize(STYLE_AGENT_BG)
             console.print(highlighted, end="")
 
@@ -1796,8 +1947,9 @@ def reset_agent_text_state() -> None:
         None
 
     """
-    global _agent_text_line_started
+    global _agent_text_line_started, _agent_text_has_markdown
     _agent_text_line_started = False
+    _agent_text_has_markdown = False
 
 
 def print_fix_progress(
@@ -2035,6 +2187,85 @@ class NeonThrobber:
         self._offset = 0
 
 
+class CrazySpinner:
+    """Wild multi-pattern spinner with gradient colors.
+
+    Displays multiple spinner characters simultaneously, each with its own
+    animation pattern and gradient color cycling. Creates a chaotic but
+    visually striking loading indicator.
+
+    """
+
+    # Multiple spinner pattern sets - each runs independently
+    SPINNERS = [
+        # Braille dots - vertical bounce
+        ["⠁", "⠂", "⠄", "⡀", "⡀", "⠄", "⠂", "⠁"],
+        # Braille dots - horizontal sweep
+        ["⠈", "⠐", "⠠", "⢀", "⢀", "⠠", "⠐", "⠈"],
+        # Quarter blocks - rotation
+        ["◴", "◷", "◶", "◵"],
+        # Arrows - spinning
+        ["←", "↖", "↑", "↗", "→", "↘", "↓", "↙"],
+        # Box drawing - morphing
+        ["┤", "┘", "┴", "└", "├", "┌", "┬", "┐"],
+        # Stars - twinkling
+        ["✶", "✷", "✸", "✹", "✺", "✹", "✸", "✷"],
+        # Geometric - pulsing
+        ["◯", "◎", "◉", "●", "◉", "◎"],
+        # Dice - rolling
+        ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"],
+    ]
+
+    def __init__(self, num_spinners: int = 3) -> None:
+        """Initialize with multiple independent spinner states.
+
+        Args:
+            num_spinners: Number of spinner characters to display.
+
+        """
+        self._num_spinners = num_spinners
+        self._frame = 0
+        # Each spinner gets a random-ish starting pattern and offset
+        self._spinner_indices = [i % len(self.SPINNERS) for i in range(num_spinners)]
+        self._offsets = [i * 2 for i in range(num_spinners)]
+
+    def render(self) -> Text:
+        """Render the current frame of all spinners with gradient colors.
+
+        Returns:
+            Rich Text with multiple animated spinner characters.
+
+        """
+        result = Text()
+        result.append(" ")  # Leading space
+
+        num_colors = len(GRADIENT_COLORS)
+
+        for i in range(self._num_spinners):
+            # Get this spinner's pattern
+            pattern_idx = (self._spinner_indices[i] + self._frame // 8) % len(self.SPINNERS)
+            pattern = self.SPINNERS[pattern_idx]
+
+            # Get current character from pattern
+            char_idx = (self._frame + self._offsets[i]) % len(pattern)
+            char = pattern[char_idx]
+
+            # Color cycles through gradient, offset per spinner
+            color_idx = (self._frame + i * 3) % num_colors
+            color = GRADIENT_COLORS[color_idx]
+
+            result.append(char, style=Style(color=color, bold=True))
+
+        # Advance frame
+        self._frame += 1
+
+        return result
+
+    def reset(self) -> None:
+        """Reset animation to beginning."""
+        self._frame = 0
+
+
 # =============================================================================
 # LiveToolPanel Class
 # =============================================================================
@@ -2090,8 +2321,9 @@ class LiveToolPanel:
         self._result: str | None = None
         self._is_error: bool = False
         self._live: Live | None = None
-        self._throbber = NeonThrobber()
+        self._spinner = CrazySpinner(num_spinners=3)
         self._quiet_mode = quiet_mode
+        self._frame = 0  # Animation frame counter for Edit surgery visualization
 
     def _build_tool_header_content(self) -> Text:
         """Build the tool call header content.
@@ -2129,6 +2361,10 @@ class LiveToolPanel:
         # Special handling for Grep results - show match count
         if self._name == "Grep" and not self._is_error:
             return self._build_grep_result(max_lines)
+
+        # Special handling for Edit results - show harmony restored message
+        if self._name == "Edit" and not self._is_error:
+            return self._build_edit_result()
 
         result, _ = _build_result_content(self._result, self._is_error, max_lines)
         return result
@@ -2208,6 +2444,77 @@ class LiveToolPanel:
 
         return Group(result, content)
 
+    def _build_edit_result(self) -> Text:
+        """Build formatted Edit result with surgery completion message.
+
+        Returns:
+            Rich Text with harmony restored visualization.
+
+        """
+        result = Text()
+
+        # Harmony restored header with energy symbols
+        result.append("  ")
+        result.append("✓ ", style=STYLE_BOLD_GREEN)
+        result.append("HARMONY RESTORED", style=Style(color=NEON_COLORS["green"], bold=True))
+        result.append("\n\n")
+
+        # Energy flow visualization
+        flow_width = 30
+        for i in range(flow_width):
+            # Gradient from cyan through green
+            t = i / flow_width
+            color = _interpolate_color(NEON_COLORS["cyan"], NEON_COLORS["green"], t)
+            char = SURGERY_ENERGY_FLOW[i % len(SURGERY_ENERGY_FLOW)]
+            result.append(char, style=Style(color=color))
+
+        result.append("\n\n")
+
+        # Show the actual result if present
+        if self._result and self._result.strip():
+            result.append("  ", style=STYLE_DIM)
+            result.append(self._result.strip(), style=STYLE_DIM)
+
+        return result
+
+    def _build_surgery_phase_indicator(self) -> Text:
+        """Build animated surgery phase indicator for Edit tool.
+
+        Returns:
+            Rich Text with animated energy flow and phase status.
+
+        """
+        # Advance frame
+        self._frame += 1
+
+        result = Text()
+
+        # Determine current phase based on frame (cycles through phases)
+        # At 10fps refresh, 4 frames per phase = 0.4s per phase, full cycle in 1.6s
+        phase_duration = 4
+        phase_idx = (self._frame // phase_duration) % len(SURGERY_PHASES)
+        phase_name, phase_color_key = SURGERY_PHASES[phase_idx]
+        phase_color = NEON_COLORS[phase_color_key]
+
+        # Energy flow animation - cycles every frame
+        energy_idx = self._frame % len(SURGERY_ENERGY_FLOW)
+        energy_char = SURGERY_ENERGY_FLOW[energy_idx]
+
+        # Chakra symbol animation - cycles every 2 frames
+        chakra_idx = (self._frame // 2) % len(SURGERY_CHAKRA_SYMBOLS)
+        chakra_char = SURGERY_CHAKRA_SYMBOLS[chakra_idx]
+
+        result.append("\n\n  ")
+        result.append(energy_char, style=Style(color=phase_color))
+        result.append(" ", style=Style(color=phase_color))
+        result.append(chakra_char, style=Style(color=phase_color, bold=True))
+        result.append(f" {phase_name} ", style=Style(color=phase_color, bold=True))
+        result.append(chakra_char, style=Style(color=phase_color, bold=True))
+        result.append(" ", style=Style(color=phase_color))
+        result.append(energy_char, style=Style(color=phase_color))
+
+        return result
+
     def _render_panel(self) -> Panel:
         """Render the current state as a Panel.
 
@@ -2225,19 +2532,38 @@ class LiveToolPanel:
             border_color = NEON_COLORS["cyan"]
         elif self._is_error:
             border_color = NEON_COLORS["red"]
+        elif self._name == "Edit" and self._result is None:
+            # Animated border color for Edit surgery - pulse between purple and cyan
+            # At 10fps, modulo 10 = 1 second full cycle
+            pulse = abs((self._frame % 10) - 5) / 5
+            border_color = _interpolate_color(NEON_COLORS["purple"], NEON_COLORS["cyan"], pulse)
         else:
             border_color = NEON_COLORS["purple"]
 
-        # Build content: header + separator + (throbber or result)
+        # Build content: header + inline spinner (if waiting) or result
         if self._result is None:
-            # Show throbber while waiting
-            content = Group(
-                header,
-                Text("\n"),
-                self._throbber.render(width=40),
-            )
+            # Special handling for Edit - show surgery phase animation
+            if self._name == "Edit":
+                surgery_indicator = self._build_surgery_phase_indicator()
+                header_with_surgery = Text()
+                header_with_surgery.append_text(header)
+                header_with_surgery.append_text(surgery_indicator)
+                header_with_surgery.append_text(self._spinner.render())
+                content = Group(header_with_surgery)
+            else:
+                # Show spinner inline with header
+                header_with_spinner = Text()
+                header_with_spinner.append_text(header)
+                header_with_spinner.append_text(self._spinner.render())
+                content = Group(header_with_spinner)
+        elif self._name == "Skill":
+            # Skip output section for Skill calls - the header already shows skill name
+            content = Group(header)
+        elif self._quiet_mode:
+            # Quiet mode complete: header only
+            content = Group(header)
         else:
-            # Show result
+            # Normal mode: show result
             result_content = self._build_result_content_internal()
 
             # Add title for result section
@@ -2273,26 +2599,14 @@ class LiveToolPanel:
         return self._render_panel()
 
     def start(self) -> None:
-        """Start the Live context and show tool call with animated throbber.
-
-        In quiet mode, calls print_tool_call and returns without Live.
-
-        Returns:
-            None
-
-        """
-        if self._quiet_mode:
-            print_tool_call(self._console, self._name, self._args, quiet_mode=True)
-            return
-
-        # Add newline for separation
+        """Start Live context and show tool call with animated throbber."""
         self._console.print()
 
         self._live = Live(
-            self,  # Pass self so __rich__() is called each refresh frame
+            self,
             console=self._console,
             refresh_per_second=10,
-            transient=True,
+            transient=False,
         )
         self._live.start()
 
@@ -2311,45 +2625,10 @@ class LiveToolPanel:
             self._live.update(self._render_panel())
 
     def finish(self) -> None:
-        """Stop Live context and print final static panel.
-
-        In quiet mode, prints only the result section (header was already printed).
-
-        Returns:
-            None
-
-        """
-        if self._quiet_mode:
-            # In quiet mode, header was already printed by start()
-            # Always print result in a panel if we have one
-            if self._result is not None:
-                result_content = self._build_result_content_internal()
-                # Build result section with title
-                if self._is_error:
-                    result_title = Text()
-                    result_title.append("Error", style=STYLE_BOLD_RED)
-                    border_style = STYLE_RED
-                else:
-                    result_title = Text()
-                    result_title.append("Output", style=STYLE_BOLD_CYAN)
-                    border_style = STYLE_PURPLE
-                result_group = Group(result_title, Text("\n"), result_content)
-                result_panel = Panel(
-                    result_group,
-                    box=box.ROUNDED,
-                    border_style=border_style,
-                    style=STYLE_PANEL_BG,
-                    padding=(0, 1),
-                )
-                self._console.print(result_panel)
-            return
-
+        """Stop Live context. Final panel state persists on screen."""
         if self._live is not None:
             self._live.stop()
             self._live = None
-
-        # Print final panel (non-transient)
-        self._console.print(self._render_panel())
 
 
 # =============================================================================

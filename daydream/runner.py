@@ -9,10 +9,12 @@ from daydream.agent import (
     console,
     get_debug_log,
     set_debug_log,
+    set_model,
     set_quiet_mode,
 )
 from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS
 from daydream.phases import (
+    check_review_file_exists,
     phase_commit_push,
     phase_fix,
     phase_parse_feedback,
@@ -21,12 +23,13 @@ from daydream.phases import (
 )
 from daydream.ui import (
     SummaryData,
-    print_ascii_header,
+    phase_subtitle,
     print_dim,
     print_error,
     print_info,
     print_menu,
     print_phase_hero,
+    print_skipped_phases,
     print_success,
     print_summary,
     prompt_user,
@@ -40,19 +43,23 @@ class RunConfig:
     Attributes:
         target: Target directory path for the review. If None, prompts user.
         skill: Review skill to use ("python" or "frontend"). If None, prompts user.
+        model: Claude model to use ("opus", "sonnet", or "haiku"). Default is "opus".
         debug: Enable debug logging to a timestamped file in the target directory.
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
         review_only: Run review phase only without applying fixes.
+        start_at: Phase to start at ("review", "parse", "fix", or "test").
 
     """
 
     target: str | None = None
     skill: str | None = None  # "python" or "frontend"
+    model: str = "opus"
     debug: bool = False
     cleanup: bool | None = None
     quiet: bool = True
     review_only: bool = False
+    start_at: str = "review"
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -91,7 +98,7 @@ async def run(config: RunConfig | None = None) -> int:
     if config is None:
         config = RunConfig()
 
-    print_ascii_header(console, "DAYDREAM")
+    print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
     # Get target directory (from config or prompt)
     if config.target is not None:
@@ -104,31 +111,41 @@ async def run(config: RunConfig | None = None) -> int:
         print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
         return 1
 
-    # Get review skill (from config or prompt)
-    if config.skill is not None:
-        # Map skill name to full skill path
-        skill_map = {"python": "beagle:review-python", "frontend": "beagle:review-frontend"}
-        if config.skill in skill_map:
-            skill = skill_map[config.skill]
-        elif config.skill in REVIEW_SKILLS.values():
-            skill = config.skill
+    # Get review skill (from config or prompt) - not required when starting at "test"
+    skill: str | None = None
+    if config.start_at != "test":
+        if config.skill is not None:
+            # Map skill name to full skill path
+            skill_map = {"python": "beagle:review-python", "frontend": "beagle:review-frontend"}
+            if config.skill in skill_map:
+                skill = skill_map[config.skill]
+            elif config.skill in REVIEW_SKILLS.values():
+                skill = config.skill
+            else:
+                print_error(console, "Invalid Skill", f"'{config.skill}' is not a valid skill")
+                return 1
         else:
-            print_error(console, "Invalid Skill", f"'{config.skill}' is not a valid skill")
+            console.print()
+            print_menu(console, "Select review skill", [
+                ("1", "Python/FastAPI backend (review-python)"),
+                ("2", "React/TypeScript frontend (review-frontend)"),
+            ])
+
+            skill_choice = prompt_user(console, "Choice", "1")
+
+            if skill_choice not in REVIEW_SKILLS:
+                print_error(console, "Invalid Choice", f"'{skill_choice}' is not a valid option")
+                return 1
+
+            skill = REVIEW_SKILLS[skill_choice]
+
+    # Early validation: check review file exists when starting at parse or fix
+    if config.start_at in ("parse", "fix"):
+        try:
+            check_review_file_exists(target_dir)
+        except FileNotFoundError as e:
+            print_error(console, "Missing Review File", str(e))
             return 1
-    else:
-        console.print()
-        print_menu(console, "Select review skill", [
-            ("1", "Python/FastAPI backend (review-python)"),
-            ("2", "React/TypeScript frontend (review-frontend)"),
-        ])
-
-        skill_choice = prompt_user(console, "Choice", "1")
-
-        if skill_choice not in REVIEW_SKILLS:
-            print_error(console, "Invalid Choice", f"'{skill_choice}' is not a valid option")
-            return 1
-
-        skill = REVIEW_SKILLS[skill_choice]
 
     # Set up debug logging if enabled
     debug_log_path: Path | None = None
@@ -145,37 +162,47 @@ async def run(config: RunConfig | None = None) -> int:
         cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
         cleanup_enabled = cleanup_response.lower() in ("y", "yes")
 
-    # Set quiet mode
+    # Set quiet mode and model
     set_quiet_mode(config.quiet)
+    set_model(config.model)
 
     console.print()
     print_info(console, f"Target directory: {target_dir}")
-    print_info(console, f"Review skill: {skill}")
+    print_info(console, f"Model: {config.model}")
+    if skill:
+        print_info(console, f"Review skill: {skill}")
     if config.review_only:
         print_info(console, "Mode: review-only (skipping fixes)")
+    if config.start_at != "review":
+        print_skipped_phases(console, config.start_at)
     console.print()
 
     try:
-        # Phase 1: Review
-        try:
-            await phase_review(target_dir, skill)
-        except MissingSkillError as e:
-            _print_missing_skill_error(e.skill_name)
-            return 1
+        feedback_items: list[dict] = []
+        fixes_applied = 0
 
-        # Phase 2: Parse feedback
-        try:
-            feedback_items = await phase_parse_feedback(target_dir)
-        except ValueError:
-            print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
-            return 1
+        # Phase 1: Review (only if starting at review)
+        if config.start_at == "review":
+            try:
+                await phase_review(target_dir, skill)  # type: ignore[arg-type]
+            except MissingSkillError as e:
+                _print_missing_skill_error(e.skill_name)
+                return 1
+
+        # Phase 2: Parse feedback (if starting at review, parse, or fix)
+        if config.start_at in ("review", "parse", "fix"):
+            try:
+                feedback_items = await phase_parse_feedback(target_dir)
+            except ValueError:
+                print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
+                return 1
 
         # If review-only mode, show summary and exit
         if config.review_only:
             print_summary(
                 console,
                 SummaryData(
-                    skill=skill,
+                    skill=skill or "N/A",
                     target=str(target_dir),
                     feedback_count=len(feedback_items),
                     fixes_applied=0,
@@ -186,24 +213,24 @@ async def run(config: RunConfig | None = None) -> int:
             )
             return 0
 
-        # Phase 3: Apply fixes
-        fixes_applied = 0
-        if feedback_items:
-            print_phase_hero(console, 3, "HEAL", f"Applying {len(feedback_items)} fixes")
-            for i, item in enumerate(feedback_items, 1):
-                await phase_fix(target_dir, item, i, len(feedback_items))
-                fixes_applied += 1
-        else:
-            print_info(console, "No feedback items found, skipping fix phase")
+        # Phase 3: Apply fixes (if starting at review, parse, or fix)
+        if config.start_at in ("review", "parse", "fix"):
+            if feedback_items:
+                print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+                for i, item in enumerate(feedback_items, 1):
+                    await phase_fix(target_dir, item, i, len(feedback_items))
+                    fixes_applied += 1
+            else:
+                print_info(console, "No feedback items found, skipping fix phase")
 
-        # Phase 4: Test and heal
+        # Phase 4: Test and heal (always runs unless review_only)
         tests_passed, test_retries = await phase_test_and_heal(target_dir)
 
         # Print summary
         print_summary(
             console,
             SummaryData(
-                skill=skill,
+                skill=skill or "N/A",
                 target=str(target_dir),
                 feedback_count=len(feedback_items),
                 fixes_applied=fixes_applied,

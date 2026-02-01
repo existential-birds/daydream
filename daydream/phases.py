@@ -10,6 +10,7 @@ from daydream.agent import (
 )
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.ui import (
+    phase_subtitle,
     print_dim,
     print_error,
     print_fix_complete,
@@ -21,6 +22,27 @@ from daydream.ui import (
     print_warning,
     prompt_user,
 )
+
+
+def check_review_file_exists(target_dir: Path) -> None:
+    """Check that the review output file exists.
+
+    Args:
+        target_dir: Target directory containing the review output.
+
+    Raises:
+        FileNotFoundError: If the review output file doesn't exist.
+
+    """
+    review_output_path = target_dir / REVIEW_OUTPUT_FILE
+    if not review_output_path.exists():
+        msg = f"""No review file found.
+
+Expected: {review_output_path}
+
+Run a full review first:
+  daydream {target_dir} --python"""
+        raise FileNotFoundError(msg)
 
 
 async def phase_review(cwd: Path, skill: str) -> None:
@@ -37,11 +59,13 @@ async def phase_review(cwd: Path, skill: str) -> None:
         Exception: If the agent fails to execute the review skill.
 
     """
-    print_phase_hero(console, 1, "BREATHE", "[italic]\"Be guided by beauty\" —Jim Simons[/italic]")
+    print_phase_hero(console, "BREATHE", "\"Be guided by beauty\" —Jim Simons")
 
+    # Use absolute path to prevent model hallucination of paths from training data
+    review_output_path = cwd / REVIEW_OUTPUT_FILE
     prompt = f"""/{skill}
 
-Write the full review output to {REVIEW_OUTPUT_FILE} in the project root.
+Write the full review output to {review_output_path}.
 """
 
     await run_agent(cwd, prompt)
@@ -66,9 +90,11 @@ async def phase_parse_feedback(cwd: Path) -> list[dict[str, Any]]:
         ValueError: If the agent output cannot be parsed as valid JSON.
 
     """
-    print_phase_hero(console, 2, "MIND", "Parsing feedback")
+    print_phase_hero(console, "REFLECT", phase_subtitle("REFLECT"))
 
-    prompt = f"""Read the review output file at {REVIEW_OUTPUT_FILE}.
+    # Use absolute path to prevent model hallucination of paths from training data
+    review_output_path = cwd / REVIEW_OUTPUT_FILE
+    prompt = f"""Read the review output file at {review_output_path}.
 
 Extract ONLY actionable issues that need fixing. Skip these sections entirely:
 - "Good Patterns" or "Strengths"
@@ -146,7 +172,7 @@ async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
     """
     from daydream.agent import _detect_test_success
 
-    print_phase_hero(console, 4, "PROVE", "Running tests")
+    print_phase_hero(console, "AWAKEN", phase_subtitle("AWAKEN"))
 
     retries_used = 0
 

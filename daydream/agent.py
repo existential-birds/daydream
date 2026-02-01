@@ -48,6 +48,9 @@ _debug_log: TextIO | None = None
 # Quiet mode - hide tool calls and results
 _quiet_mode = False
 
+# Model to use for agent interactions
+_model = "opus"
+
 # Global console instance
 console = create_console()
 
@@ -98,6 +101,30 @@ def get_quiet_mode() -> bool:
 
     """
     return _quiet_mode
+
+
+def set_model(model: str) -> None:
+    """Set the model to use for agent interactions.
+
+    Args:
+        model: Model name ("opus", "sonnet", or "haiku").
+
+    Returns:
+        None
+
+    """
+    global _model
+    _model = model
+
+
+def get_model() -> str:
+    """Get the current model setting.
+
+    Returns:
+        The current model name.
+
+    """
+    return _model
 
 
 def set_shutdown_requested(requested: bool) -> None:
@@ -223,6 +250,7 @@ async def run_agent(cwd: Path, prompt: str) -> str:
         cwd=str(cwd),
         permission_mode="bypassPermissions",
         setting_sources=["user", "project", "local"],
+        model=_model,
     )
 
     output_parts: list[str] = []
