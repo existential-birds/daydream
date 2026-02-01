@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# Pre-push hook that matches CI checks.
+# Install with: ln -sf ../../scripts/hooks/pre-push .git/hooks/pre-push
+#
+set -euo pipefail
+
+echo "Running pre-push checks..."
+
+echo "→ Linting with ruff..."
+uv run ruff check daydream
+
+echo "→ Type checking with mypy..."
+uv run mypy daydream
+
+echo "→ Running tests..."
+uv run pytest -v
+
+echo "✓ All checks passed"

@@ -9,8 +9,9 @@ Daydream is an automated code review and fix loop using the Claude Agent SDK. It
 ## Commands
 
 ```bash
-# Install dependencies
-uv sync
+# Install dependencies and git hooks
+make install
+make hooks
 
 # Run the CLI
 daydream [TARGET] [OPTIONS]
@@ -23,6 +24,12 @@ daydream /path/to/project --python      # Python/FastAPI review
 daydream /path/to/project --typescript  # React/TypeScript review
 daydream --review-only /path/to/project # Review only, skip fixes
 daydream --debug /path/to/project       # Enable debug logging
+
+# Development
+make lint       # Run ruff linter
+make typecheck  # Run mypy type checker
+make test       # Run pytest
+make check      # Run all CI checks locally
 ```
 
 ## Architecture
