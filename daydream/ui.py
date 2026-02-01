@@ -473,7 +473,7 @@ def print_tool_call(
     in a styled panel. All tool calls are wrapped in a Panel with dark
     background and purple border.
 
-    Special handling for Skill tool calls: uses sparkles icon and displays
+    Special handling for Skill tool calls: uses ✨ icon and displays
     the skill name as a pink pill badge.
 
     Special handling for Bash tool calls: shows description and optionally
@@ -525,12 +525,52 @@ def print_tool_call(
         console.print(panel)
         return
 
-    # Special handling for Bash tool calls
-    if name == "Bash":
+    # Special handling for TodoWrite tool calls
+    if name == "TodoWrite":
         # Build header line
         header_line = Text()
         header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
         header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # 🔧
+        header_line.append("TodoWrite", style=Style(color=NEON_COLORS["pink"], bold=True))
+
+        # Build content
+        content = Text()
+        content.append_text(header_line)
+
+        # Parse and display todos list
+        todos = args.get("todos", [])
+        if isinstance(todos, list):
+            for todo in todos:
+                if isinstance(todo, dict):
+                    todo_content = todo.get("content", "")
+                    if not todo_content:
+                        continue
+                    status = todo.get("status", "pending")
+                    config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
+                    content.append("\n")
+                    content.append(f"{config['icon']} ", style=Style(color=config["color"]))
+                    content.append(todo_content, style=Style(color=config["color"]))
+        else:
+            # Fallback for non-list todos
+            content.append("\n")
+            content.append_text(_colorize_tool_args(args))
+
+        panel = Panel(
+            content,
+            box=box.ROUNDED,
+            border_style=Style(color=NEON_COLORS["purple"]),
+            style=Style(bgcolor="#1e1e2e"),
+            padding=(0, 1),
+        )
+        console.print(panel)
+        return
+
+    # Special handling for Bash tool calls
+    if name == "Bash":
+        # Build header line
+        header_line = Text()
+        # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
+        header_line.append("\U0001f528 ", style=Style(color=NEON_COLORS["orange"]))  # 🔨
         header_line.append("Bash", style=Style(color=NEON_COLORS["pink"], bold=True))
 
         # Build content
@@ -568,8 +608,8 @@ def print_tool_call(
 
         # Build header line
         header_line = Text()
-        header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
-        header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # 🔧
+        # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
+        header_line.append("\u26CF\uFE0F ", style=Style(color=NEON_COLORS["orange"]))  # ⛏️
         header_line.append("Write", style=Style(color=NEON_COLORS["pink"], bold=True))
 
         # Build content with file path
@@ -606,8 +646,8 @@ def print_tool_call(
     # Standard tool call display (other tools)
     # Build header line
     header_line = Text()
-    header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
-    header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # 🔧
+    # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
+    header_line.append("\U0001f3a0 ", style=Style(color=NEON_COLORS["orange"]))  # 🎠
     header_line.append(name, style=Style(color=NEON_COLORS["pink"], bold=True))
 
     # Build content
@@ -1831,8 +1871,8 @@ class LiveToolPanel:
         # Special handling for Skill tool calls
         if self._name == "Skill":
             header_line = Text()
-            header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
-            header_line.append("\u2728 ", style=Style(color=NEON_COLORS["yellow"]))  # Sparkles
+            # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
+            header_line.append("\u2728 ", style=Style(color=NEON_COLORS["yellow"]))  # ✨
             header_line.append("Skill", style=Style(color=NEON_COLORS["cyan"], bold=True))
             content.append_text(header_line)
             content.append("\n")
@@ -1852,11 +1892,39 @@ class LiveToolPanel:
 
             return content
 
+        # Special handling for TodoWrite tool calls
+        if self._name == "TodoWrite":
+            header_line = Text()
+            header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
+            header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # 🔧
+            header_line.append("TodoWrite", style=Style(color=NEON_COLORS["pink"], bold=True))
+            content.append_text(header_line)
+
+            # Parse and display todos list
+            todos = self._args.get("todos", [])
+            if isinstance(todos, list):
+                for todo in todos:
+                    if isinstance(todo, dict):
+                        todo_content = todo.get("content", "")
+                        if not todo_content:
+                            continue
+                        status = todo.get("status", "pending")
+                        config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
+                        content.append("\n")
+                        content.append(f"{config['icon']} ", style=Style(color=config["color"]))
+                        content.append(todo_content, style=Style(color=config["color"]))
+            else:
+                # Fallback for non-list todos
+                content.append("\n")
+                content.append_text(_colorize_tool_args(self._args))
+
+            return content
+
         # Special handling for Bash tool calls
         if self._name == "Bash":
             header_line = Text()
-            header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
-            header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # Wrench
+            # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
+            header_line.append("\U0001f528 ", style=Style(color=NEON_COLORS["orange"]))  # 🔨
             header_line.append("Bash", style=Style(color=NEON_COLORS["pink"], bold=True))
             content.append_text(header_line)
 
@@ -1881,8 +1949,8 @@ class LiveToolPanel:
             file_path = str(self._args.get("file_path", ""))
 
             header_line = Text()
-            header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
-            header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # Wrench
+            # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
+            header_line.append("\u26CF\uFE0F ", style=Style(color=NEON_COLORS["orange"]))  # ⛏️
             header_line.append("Write", style=Style(color=NEON_COLORS["pink"], bold=True))
             content.append_text(header_line)
             content.append("\n")
@@ -1893,8 +1961,8 @@ class LiveToolPanel:
 
         # Standard tool call display (other tools)
         header_line = Text()
-        header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
-        header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # Wrench
+        # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
+        header_line.append("\U0001f3a0 ", style=Style(color=NEON_COLORS["orange"]))  # 🎠
         header_line.append(self._name, style=Style(color=NEON_COLORS["pink"], bold=True))
         content.append_text(header_line)
 
