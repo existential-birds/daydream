@@ -461,6 +461,196 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
     return result
 
 
+# =============================================================================
+# Shared Tool Display Helpers
+# =============================================================================
+
+
+def _build_tool_header(
+    name: str,
+    args: dict[str, object],
+    quiet_mode: bool = False,
+) -> Text:
+    """Build styled tool header content.
+
+    Shared by print_tool_call() and LiveToolPanel._build_tool_header().
+
+    Args:
+        name: Name of the tool being called.
+        args: Dictionary of arguments passed to the tool.
+        quiet_mode: If True, hide command details for Bash tools.
+
+    Returns:
+        Rich Text containing the styled tool header.
+
+    """
+    content = Text()
+
+    # Special handling for Skill tool calls
+    if name == "Skill":
+        header_line = Text()
+        header_line.append("\u2728 ", style=Style(color=NEON_COLORS["yellow"]))  # ✨
+        header_line.append("Skill", style=Style(color=NEON_COLORS["cyan"], bold=True))
+        content.append_text(header_line)
+        content.append("\n")
+
+        # Extract and display skill name as cyan pill badge
+        skill_name = str(args.get("skill", ""))
+        skill_pill = pill(f" {skill_name} ", NEON_COLORS["cyan"], NEON_COLORS["background"])
+        content.append_text(skill_pill)
+
+        # Show args in non-quiet mode (if present)
+        if not quiet_mode:
+            skill_args = args.get("args")
+            if skill_args:
+                content.append("\n")
+                content.append("args=", style=Style(color=NEON_COLORS["purple"]))
+                content.append(str(skill_args), style=Style(color=NEON_COLORS["orange"]))
+
+        return content
+
+    # Special handling for TodoWrite tool calls
+    if name == "TodoWrite":
+        header_line = Text()
+        header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # 🔧
+        header_line.append("TodoWrite", style=Style(color=NEON_COLORS["pink"], bold=True))
+        content.append_text(header_line)
+
+        # Parse and display todos list
+        todos = args.get("todos", [])
+        if isinstance(todos, list):
+            for todo in todos:
+                if isinstance(todo, dict):
+                    todo_content = todo.get("content", "")
+                    if not todo_content:
+                        continue
+                    status = todo.get("status", "pending")
+                    config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
+                    content.append("\n")
+                    content.append(f"{config['icon']} ", style=Style(color=config["color"]))
+                    content.append(todo_content, style=Style(color=config["color"]))
+        else:
+            # Fallback for non-list todos
+            content.append("\n")
+            content.append_text(_colorize_tool_args(args))
+
+        return content
+
+    # Special handling for Bash tool calls
+    if name == "Bash":
+        header_line = Text()
+        header_line.append("\U0001f528 ", style=Style(color=NEON_COLORS["orange"]))  # 🔨
+        header_line.append("Bash", style=Style(color=NEON_COLORS["pink"], bold=True))
+        content.append_text(header_line)
+
+        # Add description if present
+        description = str(args.get("description", ""))
+        if description:
+            content.append("\n")
+            content.append(description, style=Style(color=NEON_COLORS["cyan"]))
+
+        # Add command if not in quiet mode
+        if not quiet_mode:
+            command = str(args.get("command", ""))
+            if command:
+                content.append("\n")
+                content.append("$ ", style=Style(dim=True))
+                content.append(command, style=Style(dim=True))
+
+        return content
+
+    # Special handling for Write tool (header only, content preview handled separately)
+    if name == "Write":
+        file_path = str(args.get("file_path", ""))
+
+        header_line = Text()
+        header_line.append("\u26CF\uFE0F ", style=Style(color=NEON_COLORS["orange"]))  # ⛏️
+        header_line.append("Write", style=Style(color=NEON_COLORS["pink"], bold=True))
+        content.append_text(header_line)
+        content.append("\n")
+        content.append("file_path=", style=Style(color=NEON_COLORS["cyan"]))
+        content.append(file_path, style=Style(color=NEON_COLORS["cyan"]))
+
+        return content
+
+    # Standard tool call display (other tools)
+    header_line = Text()
+    header_line.append("\U0001f3a0 ", style=Style(color=NEON_COLORS["orange"]))  # 🎠
+    header_line.append(name, style=Style(color=NEON_COLORS["pink"], bold=True))
+    content.append_text(header_line)
+
+    # Add formatted key=value pairs
+    if args:
+        content.append("\n")
+        args_text = _colorize_tool_args(args)
+        content.append_text(args_text)
+
+    return content
+
+
+def _build_result_content(
+    content: str,
+    is_error: bool = False,
+    max_lines: int = 20,
+) -> tuple[Text | Syntax | Group, bool]:
+    """Build styled result content with syntax highlighting.
+
+    Shared by print_tool_result() and LiveToolPanel._build_result_content().
+
+    Args:
+        content: The result content to display.
+        is_error: Whether this is an error result.
+        max_lines: Maximum number of lines to display.
+
+    Returns:
+        Tuple of (renderable content, was_truncated).
+
+    """
+    lines = content.split("\n")
+    truncated = False
+    total_lines = len(lines)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        truncated = True
+
+    # For non-error shell content, use Rich Syntax highlighting
+    if not is_error and _detect_shell_syntax(content):
+        display_content = "\n".join(lines)
+        syntax = Syntax(
+            display_content,
+            "bash",
+            theme="dracula",
+            line_numbers=False,
+            word_wrap=True,
+        )
+
+        if truncated:
+            truncation_text = Text()
+            truncation_text.append(
+                f"\n... ({total_lines - max_lines} more lines)",
+                style=Style(color=NEON_COLORS["yellow"], italic=True),
+            )
+            return Group(syntax, truncation_text), truncated
+        return syntax, truncated
+
+    # Build colorized text content using manual colorization
+    result_text = Text()
+    for i, line in enumerate(lines):
+        result_text.append_text(_colorize_line(line, is_error))
+        if i < len(lines) - 1:
+            result_text.append("\n")
+
+    # Add truncation indicator if needed
+    if truncated:
+        result_text.append("\n")
+        result_text.append(
+            f"... ({total_lines - max_lines} more lines)",
+            style=Style(color=NEON_COLORS["yellow"], italic=True),
+        )
+
+    return result_text, truncated
+
+
 def print_tool_call(
     console: Console,
     name: str,
@@ -489,181 +679,32 @@ def print_tool_call(
     # Newline before tool call for separation
     console.print()
 
-    # Special handling for Skill tool calls
-    if name == "Skill":
-        # Build header line
-        header_line = Text()
-        header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
-        header_line.append("\u2728 ", style=Style(color=NEON_COLORS["yellow"]))  # ✨
-        header_line.append("Skill", style=Style(color=NEON_COLORS["cyan"], bold=True))
+    # Build header using shared helper
+    content = _build_tool_header(name, args, quiet_mode)
 
-        # Build content
-        content = Text()
-        content.append_text(header_line)
-        content.append("\n")
-
-        # Extract and display skill name as cyan pill badge
-        skill_name = str(args.get("skill", ""))
-        skill_pill = pill(f" {skill_name} ", NEON_COLORS["cyan"], NEON_COLORS["background"])
-        content.append_text(skill_pill)
-
-        # Show args in non-quiet mode (if present)
-        if not quiet_mode:
-            skill_args = args.get("args")
-            if skill_args:
-                content.append("\n")
-                content.append("args=", style=Style(color=NEON_COLORS["purple"]))
-                content.append(str(skill_args), style=Style(color=NEON_COLORS["orange"]))
-
-        panel = Panel(
-            content,
-            box=box.ROUNDED,
-            border_style=Style(color=NEON_COLORS["cyan"]),  # Cyan border
-            style=Style(bgcolor="#1e1e2e"),
-            padding=(0, 1),
-        )
-        console.print(panel)
-        return
-
-    # Special handling for TodoWrite tool calls
-    if name == "TodoWrite":
-        # Build header line
-        header_line = Text()
-        header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
-        header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # 🔧
-        header_line.append("TodoWrite", style=Style(color=NEON_COLORS["pink"], bold=True))
-
-        # Build content
-        content = Text()
-        content.append_text(header_line)
-
-        # Parse and display todos list
-        todos = args.get("todos", [])
-        if isinstance(todos, list):
-            for todo in todos:
-                if isinstance(todo, dict):
-                    todo_content = todo.get("content", "")
-                    if not todo_content:
-                        continue
-                    status = todo.get("status", "pending")
-                    config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
-                    content.append("\n")
-                    content.append(f"{config['icon']} ", style=Style(color=config["color"]))
-                    content.append(todo_content, style=Style(color=config["color"]))
-        else:
-            # Fallback for non-list todos
-            content.append("\n")
-            content.append_text(_colorize_tool_args(args))
-
-        panel = Panel(
-            content,
-            box=box.ROUNDED,
-            border_style=Style(color=NEON_COLORS["purple"]),
-            style=Style(bgcolor="#1e1e2e"),
-            padding=(0, 1),
-        )
-        console.print(panel)
-        return
-
-    # Special handling for Bash tool calls
-    if name == "Bash":
-        # Build header line
-        header_line = Text()
-        # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
-        header_line.append("\U0001f528 ", style=Style(color=NEON_COLORS["orange"]))  # 🔨
-        header_line.append("Bash", style=Style(color=NEON_COLORS["pink"], bold=True))
-
-        # Build content
-        content = Text()
-        content.append_text(header_line)
-
-        # Add description if present
-        description = str(args.get("description", ""))
-        if description:
-            content.append("\n")
-            content.append(description, style=Style(color=NEON_COLORS["cyan"]))
-
-        # Add command if not in quiet mode
-        if not quiet_mode:
-            command = str(args.get("command", ""))
-            if command:
-                content.append("\n")
-                content.append("$ ", style=Style(dim=True))
-                content.append(command, style=Style(dim=True))
-
-        panel = Panel(
-            content,
-            box=box.ROUNDED,
-            border_style=Style(color=NEON_COLORS["purple"]),
-            style=Style(bgcolor="#1e1e2e"),
-            padding=(0, 1),
-        )
-        console.print(panel)
-        return
-
-    # Special handling for Write tool with markdown files
-    if name == "Write":
+    # Handle Write tool content preview (unique to static display)
+    panel_content: Group | Text = content
+    if name == "Write" and not quiet_mode:
         file_path = str(args.get("file_path", ""))
         content_str = str(args.get("content", ""))
 
-        # Build header line
-        header_line = Text()
-        # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
-        header_line.append("\u26CF\uFE0F ", style=Style(color=NEON_COLORS["orange"]))  # ⛏️
-        header_line.append("Write", style=Style(color=NEON_COLORS["pink"], bold=True))
-
-        # Build content with file path
-        content = Text()
-        content.append_text(header_line)
-        content.append("\n")
-        content.append("file_path=", style=Style(color=NEON_COLORS["cyan"]))
-        content.append(file_path, style=Style(color=NEON_COLORS["cyan"]))
-
-        # Check if it's a markdown file
-        panel_content: Group | Text
-        if file_path.endswith(".md") and content_str and not quiet_mode:
+        if file_path.endswith(".md") and content_str:
             # Render markdown content
             md_content = Markdown(content_str)
             panel_content = Group(content, Text("\n"), md_content)
-        else:
+        elif content_str:
             # Show truncated content preview for non-markdown files
-            if content_str and not quiet_mode:
-                content.append("\n")
-                preview = content_str[:200] + "..." if len(content_str) > 200 else content_str
-                content.append(preview, style=Style(color=NEON_COLORS["foreground"], dim=True))
-            panel_content = content
+            content.append("\n")
+            preview = content_str[:200] + "..." if len(content_str) > 200 else content_str
+            content.append(preview, style=Style(color=NEON_COLORS["foreground"], dim=True))
 
-        panel = Panel(
-            panel_content,
-            box=box.ROUNDED,
-            border_style=Style(color=NEON_COLORS["purple"]),
-            style=Style(bgcolor="#1e1e2e"),
-            padding=(0, 1),
-        )
-        console.print(panel)
-        return
-
-    # Standard tool call display (other tools)
-    # Build header line
-    header_line = Text()
-    # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
-    header_line.append("\U0001f3a0 ", style=Style(color=NEON_COLORS["orange"]))  # 🎠
-    header_line.append(name, style=Style(color=NEON_COLORS["pink"], bold=True))
-
-    # Build content
-    content = Text()
-    content.append_text(header_line)
-
-    # Add formatted key=value pairs
-    if args:
-        content.append("\n")
-        args_text = _colorize_tool_args(args)
-        content.append_text(args_text)
+    # Determine border color
+    border_color = NEON_COLORS["cyan"] if name == "Skill" else NEON_COLORS["purple"]
 
     panel = Panel(
-        content,
+        panel_content,
         box=box.ROUNDED,
-        border_style=Style(color=NEON_COLORS["purple"]),
+        border_style=Style(color=border_color),
         style=Style(bgcolor="#1e1e2e"),
         padding=(0, 1),
     )
@@ -928,63 +969,8 @@ def print_tool_result(
     if not content or not content.strip():
         return
 
-    lines = content.split("\n")
-    truncated = False
-    total_lines = len(lines)
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        truncated = True
-
-    # For non-error shell content, use Rich Syntax highlighting
-    if not is_error and _detect_shell_syntax(content):
-        display_content = "\n".join(lines)
-        syntax = Syntax(
-            display_content,
-            "bash",
-            theme="dracula",
-            line_numbers=False,
-            word_wrap=True,
-        )
-
-        # Add truncation indicator if needed
-        if truncated:
-            truncation_text = Text()
-            truncation_text.append(
-                f"\n... ({total_lines - max_lines} more lines)",
-                style=Style(color=NEON_COLORS["yellow"], italic=True),
-            )
-            # Create a group with syntax and truncation text
-            panel_content: Group | Syntax = Group(syntax, truncation_text)
-        else:
-            panel_content = syntax
-
-        panel = Panel(
-            panel_content,
-            box=box.ROUNDED,
-            border_style=Style(color=NEON_COLORS["purple"]),
-            title=f"[bold {NEON_COLORS['cyan']}]📤 Output[/bold {NEON_COLORS['cyan']}]",
-            title_align="left",
-            style=Style(bgcolor="#1e1e2e"),
-            expand=False,
-            padding=(0, 1),
-        )
-        console.print(panel)
-        return
-
-    # Build colorized text content using manual colorization
-    result_text = Text()
-    for i, line in enumerate(lines):
-        result_text.append_text(_colorize_line(line, is_error))
-        if i < len(lines) - 1:
-            result_text.append("\n")
-
-    # Add truncation indicator if needed
-    if truncated:
-        result_text.append("\n")
-        result_text.append(
-            f"... ({total_lines - max_lines} more lines)",
-            style=Style(color=NEON_COLORS["yellow"], italic=True),
-        )
+    # Build result content using shared helper
+    result_content, _ = _build_result_content(content, is_error, max_lines)
 
     # Determine border color and title
     if is_error:
@@ -995,7 +981,7 @@ def print_tool_result(
         title = f"[bold {NEON_COLORS['cyan']}]📤 Output[/bold {NEON_COLORS['cyan']}]"
 
     panel = Panel(
-        result_text,
+        result_content,
         box=box.ROUNDED,
         border_style=Style(color=border_color),
         title=title,
@@ -1856,128 +1842,21 @@ class LiveToolPanel:
         self._throbber = NeonThrobber()
         self._quiet_mode = quiet_mode
 
-    def _build_tool_header(self) -> Text:
+    def _build_tool_header_content(self) -> Text:
         """Build the tool call header content.
 
-        Reuses logic from print_tool_call for consistent styling.
-        Handles special cases for Bash, Skill, and Write tools.
+        Delegates to shared _build_tool_header() helper for consistent styling.
 
         Returns:
             Rich Text containing the styled tool header.
 
         """
-        content = Text()
+        return _build_tool_header(self._name, self._args, self._quiet_mode)
 
-        # Special handling for Skill tool calls
-        if self._name == "Skill":
-            header_line = Text()
-            # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
-            header_line.append("\u2728 ", style=Style(color=NEON_COLORS["yellow"]))  # ✨
-            header_line.append("Skill", style=Style(color=NEON_COLORS["cyan"], bold=True))
-            content.append_text(header_line)
-            content.append("\n")
-
-            # Extract and display skill name as cyan pill badge
-            skill_name = str(self._args.get("skill", ""))
-            skill_pill = pill(f" {skill_name} ", NEON_COLORS["cyan"], NEON_COLORS["background"])
-            content.append_text(skill_pill)
-
-            # Show args if present (always in non-quiet mode since we're in Live panel)
-            if not self._quiet_mode:
-                skill_args = self._args.get("args")
-                if skill_args:
-                    content.append("\n")
-                    content.append("args=", style=Style(color=NEON_COLORS["purple"]))
-                    content.append(str(skill_args), style=Style(color=NEON_COLORS["orange"]))
-
-            return content
-
-        # Special handling for TodoWrite tool calls
-        if self._name == "TodoWrite":
-            header_line = Text()
-            header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
-            header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # 🔧
-            header_line.append("TodoWrite", style=Style(color=NEON_COLORS["pink"], bold=True))
-            content.append_text(header_line)
-
-            # Parse and display todos list
-            todos = self._args.get("todos", [])
-            if isinstance(todos, list):
-                for todo in todos:
-                    if isinstance(todo, dict):
-                        todo_content = todo.get("content", "")
-                        if not todo_content:
-                            continue
-                        status = todo.get("status", "pending")
-                        config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
-                        content.append("\n")
-                        content.append(f"{config['icon']} ", style=Style(color=config["color"]))
-                        content.append(todo_content, style=Style(color=config["color"]))
-            else:
-                # Fallback for non-list todos
-                content.append("\n")
-                content.append_text(_colorize_tool_args(self._args))
-
-            return content
-
-        # Special handling for Bash tool calls
-        if self._name == "Bash":
-            header_line = Text()
-            # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
-            header_line.append("\U0001f528 ", style=Style(color=NEON_COLORS["orange"]))  # 🔨
-            header_line.append("Bash", style=Style(color=NEON_COLORS["pink"], bold=True))
-            content.append_text(header_line)
-
-            # Add description if present
-            description = str(self._args.get("description", ""))
-            if description:
-                content.append("\n")
-                content.append(description, style=Style(color=NEON_COLORS["cyan"]))
-
-            # Add command if not in quiet mode
-            if not self._quiet_mode:
-                command = str(self._args.get("command", ""))
-                if command:
-                    content.append("\n")
-                    content.append("$ ", style=Style(dim=True))
-                    content.append(command, style=Style(dim=True))
-
-            return content
-
-        # Special handling for Write tool
-        if self._name == "Write":
-            file_path = str(self._args.get("file_path", ""))
-
-            header_line = Text()
-            # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
-            header_line.append("\u26CF\uFE0F ", style=Style(color=NEON_COLORS["orange"]))  # ⛏️
-            header_line.append("Write", style=Style(color=NEON_COLORS["pink"], bold=True))
-            content.append_text(header_line)
-            content.append("\n")
-            content.append("file_path=", style=Style(color=NEON_COLORS["cyan"]))
-            content.append(file_path, style=Style(color=NEON_COLORS["cyan"]))
-
-            return content
-
-        # Standard tool call display (other tools)
-        header_line = Text()
-        # header_line.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # Triangle
-        header_line.append("\U0001f3a0 ", style=Style(color=NEON_COLORS["orange"]))  # 🎠
-        header_line.append(self._name, style=Style(color=NEON_COLORS["pink"], bold=True))
-        content.append_text(header_line)
-
-        # Add formatted key=value pairs
-        if self._args:
-            content.append("\n")
-            args_text = _colorize_tool_args(self._args)
-            content.append_text(args_text)
-
-        return content
-
-    def _build_result_content(self, max_lines: int = 20) -> Text | Syntax | Group:
+    def _build_result_content_internal(self, max_lines: int = 20) -> Text | Syntax | Group:
         """Build the result content with syntax highlighting.
 
-        Reuses logic from print_tool_result for consistent styling.
+        Delegates to shared _build_result_content() helper for consistent styling.
 
         Args:
             max_lines: Maximum number of lines to display.
@@ -1988,54 +1867,11 @@ class LiveToolPanel:
         """
         if self._result is None:
             return Text()
-
-        content = self._result
-        if not content.strip():
+        if not self._result.strip():
             return Text()
 
-        lines = content.split("\n")
-        truncated = False
-        total_lines = len(lines)
-        if len(lines) > max_lines:
-            lines = lines[:max_lines]
-            truncated = True
-
-        # For non-error shell content, use Rich Syntax highlighting
-        if not self._is_error and _detect_shell_syntax(content):
-            display_content = "\n".join(lines)
-            syntax = Syntax(
-                display_content,
-                "bash",
-                theme="dracula",
-                line_numbers=False,
-                word_wrap=True,
-            )
-
-            if truncated:
-                truncation_text = Text()
-                truncation_text.append(
-                    f"\n... ({total_lines - max_lines} more lines)",
-                    style=Style(color=NEON_COLORS["yellow"], italic=True),
-                )
-                return Group(syntax, truncation_text)
-            return syntax
-
-        # Build colorized text content using manual colorization
-        result_text = Text()
-        for i, line in enumerate(lines):
-            result_text.append_text(_colorize_line(line, self._is_error))
-            if i < len(lines) - 1:
-                result_text.append("\n")
-
-        # Add truncation indicator if needed
-        if truncated:
-            result_text.append("\n")
-            result_text.append(
-                f"... ({total_lines - max_lines} more lines)",
-                style=Style(color=NEON_COLORS["yellow"], italic=True),
-            )
-
-        return result_text
+        result, _ = _build_result_content(self._result, self._is_error, max_lines)
+        return result
 
     def _render_panel(self) -> Panel:
         """Render the current state as a Panel.
@@ -2047,7 +1883,7 @@ class LiveToolPanel:
 
         """
         # Build header
-        header = self._build_tool_header()
+        header = self._build_tool_header_content()
 
         # Determine border color based on tool type and error state
         if self._name == "Skill":
@@ -2067,7 +1903,7 @@ class LiveToolPanel:
             )
         else:
             # Show result
-            result_content = self._build_result_content()
+            result_content = self._build_result_content_internal()
 
             # Add title for result section
             if self._is_error:
