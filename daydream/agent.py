@@ -4,7 +4,6 @@ import re
 from pathlib import Path
 from typing import Any, TextIO
 
-import anyio
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk.types import (
     AssistantMessage,

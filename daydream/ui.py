@@ -24,7 +24,6 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
-
 # =============================================================================
 # Color Theme (Dracula-based)
 # =============================================================================
@@ -657,7 +656,9 @@ _GIT_FILE_HEADER_PATTERN = re.compile(r"^(\+\+\+|---).*$")
 _SHELL_VAR_PATTERN = re.compile(r"(\$\{?\w+\}?)")
 _SHELL_PROMPT_PATTERN = re.compile(r"^([$#>] )")
 _PIPE_REDIRECT_PATTERN = re.compile(r"(\||>>|2>&1|>&2|&>|<|>)")
-_COMMAND_PATTERN = re.compile(r"^(git|npm|pytest|python|uv|cd|ls|cat|grep|ruff|mypy|pip|docker|make|curl|wget|rm|mv|cp|mkdir|echo|export|source|bash|sh|zsh)\b")
+_COMMAND_PATTERN = re.compile(
+    r"^(git|npm|pytest|python|uv|cd|ls|cat|grep|ruff|mypy|pip|docker|make|curl|wget|rm|mv|cp|mkdir|echo|export|source|bash|sh|zsh)\b"
+)
 
 # Patterns for shell syntax detection (for Rich Syntax highlighting)
 _SHELL_DETECT_PROMPT_PATTERN = re.compile(r"^[$#]\s+", re.MULTILINE)
