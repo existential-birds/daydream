@@ -360,14 +360,14 @@ async def run_agent(
                     if msg.total_cost_usd:
                         if agent_renderer.has_content:
                             agent_renderer.finish()
-                        print()
+                        console.print()
                         print_cost(console, msg.total_cost_usd)
                         _log_debug(f"[COST] ${msg.total_cost_usd:.4f}\n")
 
             if agent_renderer.has_content:
                 agent_renderer.finish()
             tool_registry.finish_all()
-            print()
+            console.print()
         finally:
             _current_client = None
 
