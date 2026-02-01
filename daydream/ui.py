@@ -361,7 +361,102 @@ def print_ascii_header(console: Console, text: str) -> None:
 
 
 # =============================================================================
-# Phase Component
+# Phase Titles (80s Neon Magical Theme)
+# =============================================================================
+
+PHASE_TITLES = {
+    1: "GAZE",   # Mystical, peering into code
+    2: "MIND",   # Psychic understanding
+    3: "HEAL",   # Restorative magic
+    4: "PROVE",  # Mathematical certainty
+}
+
+
+# =============================================================================
+# Phase Hero Component (ASCII Art Banners)
+# =============================================================================
+
+
+def print_phase_hero(
+    console: Console,
+    phase_num: int,
+    title: str,
+    description: str,
+) -> None:
+    """Print a visually striking ASCII art phase banner with neon gradient.
+
+    Uses pyfiglet to generate ASCII art and applies a horizontal
+    gradient from cyan -> pink -> purple character-by-character.
+    Includes a decorative subtitle below the ASCII art.
+
+    Args:
+        console: Rich Console instance for output.
+        phase_num: The phase number (1-4).
+        title: The ASCII art text (e.g., "GAZE", "MIND", "HEAL", "PROVE").
+        description: Subtitle text displayed below the ASCII art.
+
+    """
+    # Generate ASCII art using pyfiglet with 'small' font for compact display
+    try:
+        ascii_art = pyfiglet.figlet_format(title, font="small")
+    except pyfiglet.FigletError:
+        # Fallback to standard font
+        ascii_art = pyfiglet.figlet_format(title, font="standard")
+
+    lines = ascii_art.rstrip("\n").split("\n")
+
+    # Find the maximum line width for gradient calculation
+    max_width = max(len(line) for line in lines) if lines else 1
+
+    # Build the gradient text
+    gradient_text = Text()
+
+    for line_idx, line in enumerate(lines):
+        if not line.strip():
+            # Empty or whitespace-only line
+            gradient_text.append(line + "\n")
+            continue
+
+        # Apply gradient character by character
+        for char_idx, char in enumerate(line):
+            if char == " ":
+                gradient_text.append(char)
+            else:
+                # Calculate position in gradient based on character position
+                position = char_idx / max_width if max_width > 0 else 0
+                color = _get_gradient_color(position)
+                gradient_text.append(char, style=Style(color=color, bold=True))
+
+        if line_idx < len(lines) - 1:
+            gradient_text.append("\n")
+
+    # Create decorative subtitle
+    tagline = Text()
+    tagline.append("\n")
+    tagline.append("       ", style=Style())
+    tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
+    tagline.append(f" {description} ", style=Style(color=NEON_COLORS["pink"], dim=True))
+    tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
+
+    # Combine ASCII art and tagline
+    full_content = Text()
+    full_content.append_text(gradient_text)
+    full_content.append_text(tagline)
+
+    # Create panel with dim purple border for subtle framing
+    panel = Panel(
+        full_content,
+        box=box.DOUBLE_EDGE,
+        border_style=Style(color=NEON_COLORS["purple"], dim=True),
+        padding=(0, 2),
+    )
+
+    console.print()  # Add spacing before
+    console.print(panel)
+
+
+# =============================================================================
+# Phase Component (Simple)
 # =============================================================================
 
 

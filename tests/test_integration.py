@@ -1,12 +1,19 @@
 """Integration tests for the full review-fix-test flow."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from daydream.runner import RunConfig, run
+from daydream.ui import NEON_THEME
+
+# =============================================================================
+# Mock SDK Types
+# =============================================================================
 
 
 @dataclass
@@ -17,10 +24,35 @@ class MockTextBlock:
 
 
 @dataclass
+class MockToolUseBlock:
+    """Mock ToolUseBlock from claude_agent_sdk.types."""
+
+    id: str
+    name: str
+    input: dict[str, Any] | None = None
+
+
+@dataclass
+class MockToolResultBlock:
+    """Mock ToolResultBlock from claude_agent_sdk.types."""
+
+    tool_use_id: str
+    content: str | None = None
+    is_error: bool = False
+
+
+@dataclass
 class MockAssistantMessage:
     """Mock AssistantMessage from claude_agent_sdk.types."""
 
-    content: list[Any]
+    content: list[Any] = field(default_factory=list)
+
+
+@dataclass
+class MockUserMessage:
+    """Mock UserMessage from claude_agent_sdk.types."""
+
+    content: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -28,6 +60,11 @@ class MockResultMessage:
     """Mock ResultMessage from claude_agent_sdk.types."""
 
     total_cost_usd: float | None = 0.001
+
+
+# =============================================================================
+# Mock SDK Clients
+# =============================================================================
 
 
 class MockClaudeSDKClient:
@@ -86,6 +123,45 @@ class MockClaudeSDKClient:
         return "OK"
 
 
+class MockClaudeSDKClientWithToolUse:
+    """Mock ClaudeSDKClient that yields tool use/result sequences.
+
+    This mock is used for integration tests that need to exercise the
+    full tool panel lifecycle: create() -> start() -> set_result() -> finish().
+    """
+
+    def __init__(self, options: Any = None, messages: list[Any] | None = None):
+        """Initialize with optional pre-configured message sequence.
+
+        Args:
+            options: SDK options (ignored).
+            messages: List of messages to yield from receive_response().
+
+        """
+        self.options = options
+        self._messages = messages or []
+        self._prompt: str = ""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def query(self, prompt: str):
+        self._prompt = prompt
+
+    async def receive_response(self):
+        """Yield the pre-configured message sequence."""
+        for msg in self._messages:
+            yield msg
+
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+
 @pytest.fixture
 def mock_sdk_client(monkeypatch):
     """Patch ClaudeSDKClient and message types with our mocks."""
@@ -94,6 +170,32 @@ def mock_sdk_client(monkeypatch):
     monkeypatch.setattr("daydream.agent.ResultMessage", MockResultMessage)
     monkeypatch.setattr("daydream.agent.TextBlock", MockTextBlock)
     return MockClaudeSDKClient
+
+
+@pytest.fixture
+def mock_sdk_with_tool_use(monkeypatch):
+    """Patch SDK types to allow tool use/result testing.
+
+    Returns a factory function to create clients with custom message sequences.
+    """
+    # Patch all the type checks used by run_agent()
+    monkeypatch.setattr("daydream.agent.AssistantMessage", MockAssistantMessage)
+    monkeypatch.setattr("daydream.agent.UserMessage", MockUserMessage)
+    monkeypatch.setattr("daydream.agent.ResultMessage", MockResultMessage)
+    monkeypatch.setattr("daydream.agent.TextBlock", MockTextBlock)
+    monkeypatch.setattr("daydream.agent.ToolUseBlock", MockToolUseBlock)
+    monkeypatch.setattr("daydream.agent.ToolResultBlock", MockToolResultBlock)
+
+    def factory(messages: list[Any]) -> type:
+        """Create a mock client class with the given message sequence."""
+
+        class ConfiguredClient(MockClaudeSDKClientWithToolUse):
+            def __init__(self, options: Any = None):
+                super().__init__(options=options, messages=messages)
+
+        return ConfiguredClient
+
+    return factory
 
 
 @pytest.fixture
@@ -147,129 +249,164 @@ async def test_full_fix_flow(mock_sdk_client, mock_ui, target_project: Path):
     assert (target_project / ".review-output.md").exists()
 
 
-def test_glob_tool_panel_displays_file_count_and_list():
-    """Test that LiveToolPanel displays Glob results with file count and formatted list."""
-    from io import StringIO
+@pytest.mark.asyncio
+async def test_glob_tool_panel_displays_file_count_and_list(mock_sdk_with_tool_use, monkeypatch):
+    """Test the full tool panel lifecycle: create -> start -> set_result -> finish.
 
-    from rich.console import Console
+    This test exercises the actual run_agent() flow by mocking the Claude SDK
+    to return a Glob ToolUseBlock followed by a ToolResultBlock with file paths.
+    """
+    from daydream.agent import run_agent, set_quiet_mode
 
-    from daydream.ui import LiveToolPanel
-
-    # Create a console that captures output
-    output = StringIO()
-    console = Console(file=output, force_terminal=True, width=120)
-
-    # Create a LiveToolPanel for the Glob tool
-    panel = LiveToolPanel(
-        console=console,
-        tool_use_id="test-glob-123",
-        name="Glob",
-        args={"pattern": "**/*.py", "path": "/project"},
-        quiet_mode=True,  # Use quiet mode to avoid Live context issues
-    )
-
-    # Set mock result with file paths
-    mock_result = """/project/src/main.py
+    # Build the message sequence that run_agent() will receive
+    tool_use_id = "test-glob-lifecycle-123"
+    glob_result = """/project/src/main.py
 /project/src/utils/helper.py
 /project/tests/test_main.py"""
 
-    panel.set_result(mock_result, is_error=False)
+    messages = [
+        # 1. AssistantMessage with ToolUseBlock triggers panel creation
+        MockAssistantMessage(content=[
+            MockToolUseBlock(
+                id=tool_use_id,
+                name="Glob",
+                input={"pattern": "**/*.py", "path": "/project"},
+            ),
+        ]),
+        # 2. UserMessage with ToolResultBlock delivers the result
+        MockUserMessage(content=[
+            MockToolResultBlock(
+                tool_use_id=tool_use_id,
+                content=glob_result,
+                is_error=False,
+            ),
+        ]),
+        # 3. ResultMessage ends the session
+        MockResultMessage(total_cost_usd=0.001),
+    ]
 
-    # Render the panel to capture output
-    # In quiet mode, we need to manually render the panel
-    rendered_panel = panel._render_panel()
-    console.print(rendered_panel)
+    # Create mock client class with our message sequence
+    mock_client_class = mock_sdk_with_tool_use(messages)
+    monkeypatch.setattr("daydream.agent.ClaudeSDKClient", mock_client_class)
 
-    # Get the captured output
+    # Capture console output using a custom console
+    output = StringIO()
+    test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
+    monkeypatch.setattr("daydream.agent.console", test_console)
+
+    # Enable quiet mode (the default for daydream)
+    set_quiet_mode(True)
+
+    # Run the agent - this exercises the full lifecycle
+    await run_agent(Path("/tmp"), "Test prompt for Glob tool")
+
+    # Verify the console output contains expected elements
     output_text = output.getvalue()
 
-    # Verify the file count is displayed
+    # Verify Glob header is displayed
+    assert "Glob" in output_text
+    assert "pattern=" in output_text
+    assert "**/*.py" in output_text
+
+    # Verify file count is displayed
     assert "Found 3 files" in output_text
 
-    # Verify the filenames are displayed
+    # Verify filenames are displayed
     assert "main.py" in output_text
     assert "helper.py" in output_text
     assert "test_main.py" in output_text
 
 
-def test_glob_tool_panel_singular_file_count():
-    """Test that LiveToolPanel shows singular 'file' for 1 result."""
-    from io import StringIO
+@pytest.mark.asyncio
+async def test_glob_tool_panel_singular_file_count(mock_sdk_with_tool_use, monkeypatch):
+    """Test that LiveToolPanel shows singular 'file' for 1 result through full lifecycle."""
+    from daydream.agent import run_agent, set_quiet_mode
 
-    from rich.console import Console
+    tool_use_id = "test-glob-singular-456"
+    glob_result = "/project/main.py"
 
-    from daydream.ui import LiveToolPanel
+    messages = [
+        MockAssistantMessage(content=[
+            MockToolUseBlock(
+                id=tool_use_id,
+                name="Glob",
+                input={"pattern": "*.py"},
+            ),
+        ]),
+        MockUserMessage(content=[
+            MockToolResultBlock(
+                tool_use_id=tool_use_id,
+                content=glob_result,
+                is_error=False,
+            ),
+        ]),
+        MockResultMessage(total_cost_usd=0.001),
+    ]
 
-    # Create a console that captures output
+    mock_client_class = mock_sdk_with_tool_use(messages)
+    monkeypatch.setattr("daydream.agent.ClaudeSDKClient", mock_client_class)
+
     output = StringIO()
-    console = Console(file=output, force_terminal=True, width=120)
+    test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
+    monkeypatch.setattr("daydream.agent.console", test_console)
 
-    # Create a LiveToolPanel for the Glob tool
-    panel = LiveToolPanel(
-        console=console,
-        tool_use_id="test-glob-single",
-        name="Glob",
-        args={"pattern": "*.py"},
-        quiet_mode=True,
-    )
+    set_quiet_mode(True)
 
-    # Set mock result with a single file path
-    mock_result = "/project/main.py"
+    await run_agent(Path("/tmp"), "Test prompt")
 
-    panel.set_result(mock_result, is_error=False)
-
-    # Render the panel
-    rendered_panel = panel._render_panel()
-    console.print(rendered_panel)
-
-    # Get the captured output
     output_text = output.getvalue()
 
     # Verify singular "file" (not "files")
     assert "Found 1 file" in output_text
-    # Make sure it's not "files"
     assert "Found 1 files" not in output_text
 
     # Verify the filename is displayed
     assert "main.py" in output_text
 
 
-def test_glob_tool_panel_truncates_long_results():
-    """Test that LiveToolPanel truncates long Glob results."""
-    from io import StringIO
+@pytest.mark.asyncio
+async def test_glob_tool_panel_truncates_long_results(mock_sdk_with_tool_use, monkeypatch):
+    """Test that LiveToolPanel truncates long Glob results through full lifecycle."""
+    from daydream.agent import run_agent, set_quiet_mode
 
-    from rich.console import Console
-
-    from daydream.ui import LiveToolPanel
-
-    # Create a console that captures output
-    output = StringIO()
-    console = Console(file=output, force_terminal=True, width=120)
-
-    # Create a LiveToolPanel for the Glob tool
-    panel = LiveToolPanel(
-        console=console,
-        tool_use_id="test-glob-truncate",
-        name="Glob",
-        args={"pattern": "**/*.py"},
-        quiet_mode=True,
-    )
-
-    # Set mock result with many file paths (more than the effective max_lines=20)
+    tool_use_id = "test-glob-truncate-789"
+    # Create 25 files (more than max_lines=20 default in _build_result_content_internal)
     mock_files = [f"/project/src/module{i}.py" for i in range(25)]
-    mock_result = "\n".join(mock_files)
+    glob_result = "\n".join(mock_files)
 
-    panel.set_result(mock_result, is_error=False)
+    messages = [
+        MockAssistantMessage(content=[
+            MockToolUseBlock(
+                id=tool_use_id,
+                name="Glob",
+                input={"pattern": "**/*.py"},
+            ),
+        ]),
+        MockUserMessage(content=[
+            MockToolResultBlock(
+                tool_use_id=tool_use_id,
+                content=glob_result,
+                is_error=False,
+            ),
+        ]),
+        MockResultMessage(total_cost_usd=0.001),
+    ]
 
-    # Render the panel
-    rendered_panel = panel._render_panel()
-    console.print(rendered_panel)
+    mock_client_class = mock_sdk_with_tool_use(messages)
+    monkeypatch.setattr("daydream.agent.ClaudeSDKClient", mock_client_class)
 
-    # Get the captured output
+    output = StringIO()
+    test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
+    monkeypatch.setattr("daydream.agent.console", test_console)
+
+    set_quiet_mode(True)
+
+    await run_agent(Path("/tmp"), "Test prompt")
+
     output_text = output.getvalue()
 
     # Verify the total file count is displayed
     assert "Found 25 files" in output_text
 
-    # Verify truncation indicator is shown (25 total - 20 displayed = 5 more)
+    # Verify truncation indicator (25 total - 20 displayed = 5 more)
     assert "and 5 more" in output_text

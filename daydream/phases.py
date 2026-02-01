@@ -16,7 +16,7 @@ from daydream.ui import (
     print_fix_progress,
     print_info,
     print_menu,
-    print_phase,
+    print_phase_hero,
     print_success,
     print_warning,
     prompt_user,
@@ -37,7 +37,7 @@ async def phase_review(cwd: Path, skill: str) -> None:
         Exception: If the agent fails to execute the review skill.
 
     """
-    print_phase(console, 1, f"Running review skill: {skill}")
+    print_phase_hero(console, 1, "GAZE", f"Running review skill: {skill}")
 
     prompt = f"""/{skill}
 
@@ -66,7 +66,7 @@ async def phase_parse_feedback(cwd: Path) -> list[dict[str, Any]]:
         ValueError: If the agent output cannot be parsed as valid JSON.
 
     """
-    print_phase(console, 2, "Parsing feedback")
+    print_phase_hero(console, 2, "MIND", "Parsing feedback")
 
     prompt = f"""Read the review output file at {REVIEW_OUTPUT_FILE}.
 
@@ -146,7 +146,7 @@ async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
     """
     from daydream.agent import _detect_test_success
 
-    print_phase(console, 4, "Running tests")
+    print_phase_hero(console, 4, "PROVE", "Running tests")
 
     retries_used = 0
 

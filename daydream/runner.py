@@ -26,7 +26,7 @@ from daydream.ui import (
     print_error,
     print_info,
     print_menu,
-    print_phase,
+    print_phase_hero,
     print_success,
     print_summary,
     prompt_user,
@@ -189,7 +189,7 @@ async def run(config: RunConfig | None = None) -> int:
         # Phase 3: Apply fixes
         fixes_applied = 0
         if feedback_items:
-            print_phase(console, 3, f"Applying {len(feedback_items)} fixes")
+            print_phase_hero(console, 3, "HEAL", f"Applying {len(feedback_items)} fixes")
             for i, item in enumerate(feedback_items, 1):
                 await phase_fix(target_dir, item, i, len(feedback_items))
                 fixes_applied += 1
