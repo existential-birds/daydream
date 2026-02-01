@@ -1,0 +1,127 @@
+name: Feature Request
+description: Suggest a new capability or improvement for Daydream
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement to Daydream. Help us understand the problem you're trying to solve and the context around your request.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the pain point, limitation, or unmet need that motivates this request. Focus on the problem, not the solution.
+      placeholder: |
+        When running the fix phase, I have no way to skip certain issues that I disagree with. This leads to unwanted changes being applied to my codebase.
+    validations:
+      required: true
+
+  - type: textarea
+    id: who-benefits
+    attributes:
+      label: Who would benefit from this?
+      description: Describe the users or scenarios where this would be valuable. What types of workflows or use cases does this enable?
+      placeholder: |
+        - Teams with strict code style requirements that differ from defaults
+        - Developers working on legacy codebases with intentional patterns
+        - Anyone who wants more control over the automated fix process
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-state
+    attributes:
+      label: How do you handle this today?
+      description: Describe any current workarounds, manual processes, or alternative tools you use. What are the limitations of these approaches?
+      placeholder: |
+        Currently I use --review-only and manually apply the fixes I agree with. This is time-consuming and defeats the purpose of automation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: success
+    attributes:
+      label: What does success look like?
+      description: Describe the ideal outcome. What would you be able to do that you can't do today? How would you know this feature is working well?
+      placeholder: |
+        I could configure which issue types to auto-fix and which to skip. Success means I can run daydream with confidence that only approved fix categories will be applied.
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and considerations
+      description: Are there any technical limitations, compatibility requirements, or edge cases to consider? What shouldn't change?
+      placeholder: |
+        - Should work with all review skill types (Python, TypeScript, etc.)
+        - Must not break existing CLI interface
+        - Should be configurable per-project or globally
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Have you thought about other ways this could be solved? What are the tradeoffs of different approaches?
+      placeholder: |
+        1. A .daydream config file in the repo (simple but static)
+        2. Interactive mode to approve each fix (granular but slow)
+        3. Post-fix review phase to undo unwanted changes (extra step)
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Which part of Daydream would this primarily affect?
+      options:
+        - CLI (argument parsing, entry point)
+        - Runner (orchestration)
+        - Review phase
+        - Parse feedback phase
+        - Fix phase
+        - Test and heal phase
+        - Agent SDK integration
+        - UI (terminal output)
+        - Beagle skills integration
+        - Configuration
+        - New component
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Estimated scope
+      description: How large of a change do you think this would be?
+      options:
+        - Small (single file, minor change)
+        - Medium (few files, new feature)
+        - Large (architectural change, new subsystem)
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Any other information, mockups, examples from other tools, or references that might help illustrate this request.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution interest
+      description: Would you be interested in contributing to this feature?
+      options:
+        - label: I'd be interested in implementing this myself with guidance
+        - label: I can help test/review an implementation
+        - label: I can provide more detailed requirements if needed
