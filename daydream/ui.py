@@ -600,6 +600,136 @@ def _build_tool_header(
 
         return content
 
+    # Special handling for Glob tool calls
+    if name == "Glob":
+        pattern = str(args.get("pattern", ""))
+        search_path = str(args.get("path", ""))
+
+        header_line = Text()
+        header_line.append("\U0001f52e ", style=STYLE_PURPLE)  # 🔮 crystal ball
+        header_line.append("Glob", style=STYLE_BOLD_PINK)
+        content.append_text(header_line)
+        content.append("\n")
+
+        # Pattern with orange highlighting (the key info)
+        content.append("pattern=", style=STYLE_PURPLE)
+        content.append(pattern, style=STYLE_ORANGE)
+
+        # Search path if provided
+        if search_path:
+            content.append("\n")
+            content.append("path=", style=STYLE_PURPLE)
+            content.append(search_path, style=STYLE_CYAN)
+
+        return content
+
+    # Special handling for Grep tool calls
+    if name == "Grep":
+        pattern = str(args.get("pattern", ""))
+        search_path = str(args.get("path", ""))
+        glob_filter = str(args.get("glob", ""))
+        file_type = str(args.get("type", ""))
+
+        header_line = Text()
+        header_line.append("\U0001f9d9 ", style=STYLE_PURPLE)  # 🧙 wizard
+        header_line.append("Grep", style=STYLE_BOLD_PINK)
+        content.append_text(header_line)
+        content.append("\n")
+
+        # Pattern with orange highlighting (the key info)
+        content.append("pattern=", style=STYLE_PURPLE)
+        content.append(pattern, style=STYLE_ORANGE)
+
+        # Search path if provided
+        if search_path:
+            content.append("\n")
+            content.append("path=", style=STYLE_PURPLE)
+            content.append(search_path, style=STYLE_CYAN)
+
+        # Glob filter if provided
+        if glob_filter:
+            content.append("\n")
+            content.append("glob=", style=STYLE_PURPLE)
+            content.append(glob_filter, style=STYLE_YELLOW)
+
+        # File type if provided
+        if file_type:
+            content.append("\n")
+            content.append("type=", style=STYLE_PURPLE)
+            content.append(file_type, style=STYLE_YELLOW)
+
+        return content
+
+    # Special handling for Read tool calls
+    if name == "Read":
+        file_path = str(args.get("file_path", ""))
+        offset = args.get("offset")
+        limit = args.get("limit")
+
+        header_line = Text()
+        header_line.append("\U0001f4dc ", style=STYLE_ORANGE)  # 📜 scroll
+        header_line.append("Read", style=STYLE_BOLD_PINK)
+        content.append_text(header_line)
+        content.append("\n")
+
+        # File path (the key info)
+        content.append("file_path=", style=STYLE_PURPLE)
+        content.append(file_path, style=STYLE_CYAN)
+
+        # Line range if specified
+        if offset is not None or limit is not None:
+            content.append("\n")
+            if offset is not None:
+                content.append("offset=", style=STYLE_PURPLE)
+                content.append(str(offset), style=STYLE_YELLOW)
+            if limit is not None:
+                if offset is not None:
+                    content.append(", ", style=STYLE_FG)
+                content.append("limit=", style=STYLE_PURPLE)
+                content.append(str(limit), style=STYLE_YELLOW)
+
+        return content
+
+    # Special handling for Edit tool calls
+    if name == "Edit":
+        file_path = str(args.get("file_path", ""))
+        old_string = str(args.get("old_string", ""))
+        new_string = str(args.get("new_string", ""))
+        replace_all = args.get("replace_all", False)
+
+        header_line = Text()
+        header_line.append("\U0001fa84 ", style=STYLE_PINK)  # 🪄 magic wand
+        header_line.append("Edit", style=STYLE_BOLD_PINK)
+        content.append_text(header_line)
+        content.append("\n")
+
+        # File path
+        content.append("file_path=", style=STYLE_PURPLE)
+        content.append(file_path, style=STYLE_CYAN)
+
+        # Replace all flag if true
+        if replace_all:
+            content.append("\n")
+            content.append("replace_all=", style=STYLE_PURPLE)
+            content.append("True", style=STYLE_PURPLE)
+
+        # Show truncated old/new strings
+        if old_string:
+            content.append("\n")
+            content.append("old_string=", style=STYLE_PURPLE)
+            preview = old_string[:50] + "..." if len(old_string) > 50 else old_string
+            preview = preview.replace("\n", "\\n")
+            content.append(f'"{preview}"', style=STYLE_RED)
+
+        if new_string:
+            content.append("\n")
+            content.append("new_string=", style=STYLE_PURPLE)
+            preview = new_string[:50] + "..." if len(new_string) > 50 else new_string
+            preview = preview.replace("\n", "\\n")
+            content.append(f'"{preview}"', style=STYLE_GREEN)
+
+        return content
+
     # Standard tool call display (other tools)
     header_line = Text()
     header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
@@ -1884,6 +2014,7 @@ class LiveToolPanel:
         """Build the result content with syntax highlighting.
 
         Delegates to shared _build_result_content() helper for consistent styling.
+        Special handling for Glob and Grep tools to show file counts and formatted lists.
 
         Args:
             max_lines: Maximum number of lines to display.
@@ -1897,8 +2028,91 @@ class LiveToolPanel:
         if not self._result.strip():
             return Text()
 
+        # Special handling for Glob results - show file count and formatted list
+        if self._name == "Glob" and not self._is_error:
+            return self._build_glob_result(max_lines)
+
+        # Special handling for Grep results - show match count
+        if self._name == "Grep" and not self._is_error:
+            return self._build_grep_result(max_lines)
+
         result, _ = _build_result_content(self._result, self._is_error, max_lines)
         return result
+
+    def _build_glob_result(self, max_lines: int = 15) -> Text:
+        """Build formatted Glob result showing file count and paths.
+
+        Args:
+            max_lines: Maximum number of files to display.
+
+        Returns:
+            Rich Text with formatted file list.
+
+        """
+        assert self._result is not None  # Caller ensures this
+        lines = [line for line in self._result.strip().split("\n") if line.strip()]
+        total_files = len(lines)
+
+        result = Text()
+
+        # Show count with sparkles
+        result.append("\u2728 ", style=STYLE_YELLOW)  # ✨
+        result.append(f"Found {total_files} file{'s' if total_files != 1 else ''}", style=STYLE_BOLD_CYAN)
+        result.append("\n")
+
+        # Show files (truncated if needed)
+        display_lines = lines[:max_lines]
+        for i, filepath in enumerate(display_lines):
+            # Extract just the filename for compact display
+            filename = filepath.rsplit("/", 1)[-1] if "/" in filepath else filepath
+            # Get parent directory for context
+            parent = filepath.rsplit("/", 1)[0] if "/" in filepath else ""
+
+            result.append("  ")
+            result.append(filename, style=STYLE_CYAN)
+            if parent:
+                # Show truncated parent path
+                if len(parent) > 40:
+                    parent = "..." + parent[-37:]
+                result.append(f"  {parent}", style=STYLE_DIM)
+            if i < len(display_lines) - 1:
+                result.append("\n")
+
+        # Show truncation indicator
+        if total_files > max_lines:
+            result.append("\n")
+            result.append(
+                f"  ... and {total_files - max_lines} more",
+                style=Style(color=NEON_COLORS["yellow"], italic=True),
+            )
+
+        return result
+
+    def _build_grep_result(self, max_lines: int = 20) -> Text | Syntax | Group:
+        """Build formatted Grep result showing match count.
+
+        Args:
+            max_lines: Maximum number of lines to display.
+
+        Returns:
+            Rich renderable with formatted grep output.
+
+        """
+        assert self._result is not None  # Caller ensures this
+        lines = [line for line in self._result.strip().split("\n") if line.strip()]
+        total_matches = len(lines)
+
+        result = Text()
+
+        # Show count with sparkles
+        result.append("\u2728 ", style=STYLE_YELLOW)  # ✨
+        result.append(f"Found {total_matches} match{'es' if total_matches != 1 else ''}", style=STYLE_BOLD_CYAN)
+        result.append("\n")
+
+        # Use standard result formatting for the actual content
+        content, _ = _build_result_content(self._result, self._is_error, max_lines)
+
+        return Group(result, content)
 
     def _render_panel(self) -> Panel:
         """Render the current state as a Panel.
@@ -1946,7 +2160,9 @@ class LiveToolPanel:
             else:
                 content = Group(
                     header,
+                    Text("\n"),
                     result_title,
+                    Text("\n"),
                     result_content,
                 )
 
@@ -2003,13 +2219,27 @@ class LiveToolPanel:
     def finish(self) -> None:
         """Stop Live context and print final static panel.
 
-        In quiet mode, this is a no-op.
+        In quiet mode, prints only the result section (header was already printed).
 
         Returns:
             None
 
         """
         if self._quiet_mode:
+            # In quiet mode, header was already printed by start()
+            # Print just the result if we have one
+            if self._result is not None and self._result.strip():
+                result_content = self._build_result_content_internal()
+                if not (isinstance(result_content, Text) and not result_content.plain.strip()):
+                    # Build result section with title
+                    if self._is_error:
+                        result_title = Text()
+                        result_title.append("\u274c Error", style=STYLE_BOLD_RED)
+                    else:
+                        result_title = Text()
+                        result_title.append("\U0001f4e4 Output", style=STYLE_BOLD_CYAN)
+                    result_group = Group(result_title, Text("\n"), result_content)
+                    self._console.print(result_group)
             return
 
         if self._live is not None:
