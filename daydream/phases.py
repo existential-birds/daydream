@@ -170,7 +170,7 @@ async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
         Tuple of (success: bool, retries_used: int)
 
     """
-    from daydream.agent import _detect_test_success
+    from daydream.agent import detect_test_success
 
     print_phase_hero(console, "AWAKEN", phase_subtitle("AWAKEN"))
 
@@ -186,7 +186,7 @@ async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
         prompt = "Run the project's test suite. Report if tests pass or fail."
         output = await run_agent(cwd, prompt)
 
-        test_passed = _detect_test_success(output)
+        test_passed = detect_test_success(output)
 
         if test_passed:
             print_success(console, "Tests passed")

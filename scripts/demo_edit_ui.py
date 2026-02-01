@@ -16,7 +16,6 @@ drawing from themes of metamorphosis, ritual magic, dream surgery, and cosmic pa
 
 import random
 import time
-from typing import Callable
 
 from rich import box
 from rich.align import Align
@@ -336,7 +335,8 @@ def demo_ritual(old_string: str, new_string: str, duration: float = 3.0) -> None
                 elif char_manifest > 0:
                     # Manifesting - ethereal shimmer
                     ethereal_idx = int((char_manifest + frame * 0.15) * len(ETHEREAL_COLORS)) % len(ETHEREAL_COLORS)
-                    content.append(char if random.random() > 0.3 else "✧", style=Style(color=ETHEREAL_COLORS[ethereal_idx]))
+                    display_char = char if random.random() > 0.3 else "✧"
+                    content.append(display_char, style=Style(color=ETHEREAL_COLORS[ethereal_idx]))
                 else:
                     content.append("·", style=Style(color="#333333"))
         else:
@@ -357,7 +357,10 @@ def demo_ritual(old_string: str, new_string: str, duration: float = 3.0) -> None
 
         return Panel(
             content,
-            title=f"[bold pink]{MOON_PHASES[frame % len(MOON_PHASES)]} RITUAL CASTING {MOON_PHASES[(frame + 3) % len(MOON_PHASES)]}[/bold pink]",
+            title=(
+                f"[bold pink]{MOON_PHASES[frame % len(MOON_PHASES)]} RITUAL CASTING "
+                f"{MOON_PHASES[(frame + 3) % len(MOON_PHASES)]}[/bold pink]"
+            ),
             border_style=Style(color=border_color),
             box=box.DOUBLE,
             padding=(1, 2),
@@ -404,7 +407,10 @@ def demo_surgery(old_string: str, new_string: str, duration: float = 3.0) -> Non
 
         # Header with energy flow indicator
         energy_flow = ENERGY_FLOW[frame % len(ENERGY_FLOW)]
-        content.append(f"  {energy_flow} ENERGY ALIGNMENT {energy_flow}\n\n", style=Style(color=NEON_COLORS["cyan"], bold=True))
+        content.append(
+            f"  {energy_flow} ENERGY ALIGNMENT {energy_flow}\n\n",
+            style=Style(color=NEON_COLORS["cyan"], bold=True),
+        )
 
         # Surgical phase
         if progress < 0.3:
@@ -441,13 +447,11 @@ def demo_surgery(old_string: str, new_string: str, duration: float = 3.0) -> Non
         if progress < 0.5:
             # Show old string with blocked energy visualization
             attention_char = "▶" if frame % 2 == 0 else "►"
-            chakra_color = interpolate_color(NEON_COLORS["red"], NEON_COLORS["orange"], pulse)
-            content.append(f"  ", style=Style(color=chakra_color))
+            content.append("  ")
             content.append(attention_char, style=Style(color=NEON_COLORS["red"], bold=True))
             content.append(f" {surgical_line:3d} ", style=Style(color=NEON_COLORS["red"], bold=True))
 
             # Old string with "blocked" visualization
-            block_intensity = 1.0 - progress * 2
             for i, char in enumerate(old_string):
                 if progress > 0.25 and i < int((progress - 0.25) * 4 * len(old_string)):
                     # Being cleared
@@ -461,8 +465,7 @@ def demo_surgery(old_string: str, new_string: str, duration: float = 3.0) -> Non
         else:
             # Show new string with flowing energy visualization
             attention_char = "◆" if frame % 2 == 0 else "◇"
-            chakra_color = interpolate_color(NEON_COLORS["cyan"], NEON_COLORS["green"], pulse)
-            content.append(f"  ", style=Style(color=chakra_color))
+            content.append("  ")
             content.append(attention_char, style=Style(color=NEON_COLORS["green"], bold=True))
             content.append(f" {surgical_line:3d} ", style=Style(color=NEON_COLORS["green"], bold=True))
 
@@ -705,7 +708,10 @@ def main() -> None:
         Group(
             Align.center(Text("EDIT TOOL VISUALIZATIONS", style=Style(color=NEON_COLORS["pink"], bold=True))),
             Text(),
-            Align.center(Text("Four psychedelic concepts for transforming code", style=Style(color=NEON_COLORS["purple"]))),
+            Align.center(Text(
+                "Four psychedelic concepts for transforming code",
+                style=Style(color=NEON_COLORS["purple"]),
+            )),
             Text(),
             Align.center(Text(f'"{old_string}" → "{new_string}"', style=Style(color=NEON_COLORS["cyan"]))),
         ),

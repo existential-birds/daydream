@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from _demo_common import create_test_repo, DEFAULT_REPO_PATH, REVIEW_OUTPUT_FILE
+from _demo_common import DEFAULT_REPO_PATH, REVIEW_OUTPUT_FILE, create_test_repo
 
 
 def main():

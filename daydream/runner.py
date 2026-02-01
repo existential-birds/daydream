@@ -3,16 +3,16 @@
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TextIO
 
 from daydream.agent import (
     MissingSkillError,
     console,
-    get_debug_log,
     set_debug_log,
     set_model,
     set_quiet_mode,
 )
-from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS
+from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, ReviewSkillChoice
 from daydream.phases import (
     check_review_file_exists,
     phase_commit_push,
@@ -133,11 +133,14 @@ async def run(config: RunConfig | None = None) -> int:
 
             skill_choice = prompt_user(console, "Choice", "1")
 
-            if skill_choice not in REVIEW_SKILLS:
+            # Convert string input to enum for REVIEW_SKILLS lookup
+            try:
+                skill_enum = ReviewSkillChoice(skill_choice)
+            except ValueError:
                 print_error(console, "Invalid Choice", f"'{skill_choice}' is not a valid option")
                 return 1
 
-            skill = REVIEW_SKILLS[skill_choice]
+            skill = REVIEW_SKILLS[skill_enum]
 
     # Early validation: check review file exists when starting at parse or fix
     if config.start_at in ("parse", "fix"):
@@ -149,10 +152,12 @@ async def run(config: RunConfig | None = None) -> int:
 
     # Set up debug logging if enabled
     debug_log_path: Path | None = None
+    debug_log_file: TextIO | None = None
     if config.debug:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         debug_log_path = target_dir / f".review-debug-{timestamp}.log"
-        set_debug_log(open(debug_log_path, "w", encoding="utf-8"))  # noqa: SIM115
+        debug_log_file = open(debug_log_path, "w", encoding="utf-8")  # noqa: SIM115
+        set_debug_log(debug_log_file)
         print_info(console, f"Debug log: {debug_log_path}")
 
     # Get cleanup setting (from config or prompt)
@@ -254,9 +259,8 @@ async def run(config: RunConfig | None = None) -> int:
             return 1
 
     finally:
-        debug_log = get_debug_log()
-        if debug_log is not None:
-            debug_log.close()
+        if debug_log_file is not None:
+            debug_log_file.close()
             set_debug_log(None)
             if debug_log_path:
                 print_info(console, f"Debug log saved: {debug_log_path}")

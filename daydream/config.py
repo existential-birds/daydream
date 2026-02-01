@@ -5,15 +5,26 @@ This module contains constants for skill mappings, file paths, and regex pattern
 used by the review and fix loop system.
 
 Exports:
-    REVIEW_SKILLS: dict[str, str] - Mapping of review type identifiers to skill names.
+    ReviewSkillChoice: Enum for review skill menu choices.
+    REVIEW_SKILLS: dict[ReviewSkillChoice, str] - Mapping of review type identifiers to skill names.
     REVIEW_OUTPUT_FILE: str - Default filename for storing review results.
     UNKNOWN_SKILL_PATTERN: str - Regex pattern for detecting unknown skill errors.
 """
 
+from enum import Enum
+
+
+class ReviewSkillChoice(Enum):
+    """Enum for review skill menu choices."""
+
+    PYTHON = "1"
+    FRONTEND = "2"
+
+
 # Skill mapping for review types
-REVIEW_SKILLS: dict[str, str] = {
-    "1": "beagle:review-python",
-    "2": "beagle:review-frontend",
+REVIEW_SKILLS: dict[ReviewSkillChoice, str] = {
+    ReviewSkillChoice.PYTHON: "beagle:review-python",
+    ReviewSkillChoice.FRONTEND: "beagle:review-frontend",
 }
 
 # Output file for review results

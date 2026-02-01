@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from _demo_common import create_test_repo, DEFAULT_REPO_PATH
+from _demo_common import DEFAULT_REPO_PATH, create_test_repo
 
 
 def run_daydream(target: Path) -> int:

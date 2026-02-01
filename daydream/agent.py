@@ -1,5 +1,6 @@
 """Agent interaction and SDK client management."""
 
+import json
 import re
 from pathlib import Path
 from typing import Any, TextIO
@@ -168,7 +169,7 @@ def _log_debug(message: str) -> None:
         _debug_log.flush()
 
 
-def _detect_test_success(output: str) -> bool:
+def detect_test_success(output: str) -> bool:
     """Detect if tests passed using pattern matching.
 
     Uses regex patterns to handle negation (e.g., "no failures" should not
@@ -329,8 +330,6 @@ def extract_json_from_output(output: str) -> list[dict[str, Any]]:
         ValueError: If no valid JSON array found
 
     """
-    import json
-
     code_block_pattern = r"```(?:json)?\s*\n?([\s\S]*?)\n?```"
     matches = re.findall(code_block_pattern, output)
 

@@ -1560,9 +1560,39 @@ def print_dim(console: Console, message: str) -> None:
 # Agent Text Component
 # =============================================================================
 
-# Track state for agent text blocks (gutter display and markdown detection)
-_agent_text_line_started = False
-_agent_text_has_markdown = False
+# =============================================================================
+# Agent Text State Class
+# =============================================================================
+
+
+class AgentTextState:
+    """State holder for agent text rendering.
+
+    Encapsulates mutable state used during streaming agent text output
+    to track gutter display and markdown detection.
+
+    This class provides thread-safe state management for concurrent
+    rendering contexts.
+
+    Attributes:
+        line_started: Whether a line has been started (gutter printed).
+        has_markdown: Whether markdown headers have been detected.
+
+    """
+
+    def __init__(self) -> None:
+        """Initialize agent text state."""
+        self.line_started: bool = False
+        self.has_markdown: bool = False
+
+    def reset(self) -> None:
+        """Reset state for a new agent response."""
+        self.line_started = False
+        self.has_markdown = False
+
+
+# Global instance for backward compatibility
+_agent_text_state = AgentTextState()
 
 
 def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
@@ -1899,14 +1929,12 @@ def print_agent_text(console: Console, text: str) -> None:
         None
 
     """
-    global _agent_text_line_started, _agent_text_has_markdown
-
     if not text:
         return
 
     # Check for markdown headers in this chunk
     if _has_markdown_headers(text):
-        _agent_text_has_markdown = True
+        _agent_text_state.has_markdown = True
 
     # Split into lines to handle multiline text
     lines = text.split("\n")
@@ -1914,18 +1942,18 @@ def print_agent_text(console: Console, text: str) -> None:
     for i, line in enumerate(lines):
         is_last = i == len(lines) - 1
 
-        if not _agent_text_line_started:
+        if not _agent_text_state.line_started:
             # Start of a new agent text block - add separation and gutter prefix
             console.print()  # Newline for separation from tool calls
             gutter = Text()
             gutter.append("│ ", style=STYLE_GREEN)
             console.print(gutter, end="")
-            _agent_text_line_started = True
+            _agent_text_state.line_started = True
 
         # Highlight and print the line content with dark green background
         # Use italic only for non-markdown content
         if line:
-            use_italic = not _agent_text_has_markdown
+            use_italic = not _agent_text_state.has_markdown
             base_style = Style(color=NEON_COLORS["green"], italic=use_italic)
             highlighted = _highlight_agent_text(line, base_style=base_style)
             highlighted.stylize(STYLE_AGENT_BG)
@@ -1934,7 +1962,7 @@ def print_agent_text(console: Console, text: str) -> None:
         # Handle newlines - reset gutter state for next line
         if not is_last:
             console.print()  # Complete the current line
-            _agent_text_line_started = False
+            _agent_text_state.line_started = False
 
 
 def reset_agent_text_state() -> None:
@@ -1947,9 +1975,7 @@ def reset_agent_text_state() -> None:
         None
 
     """
-    global _agent_text_line_started, _agent_text_has_markdown
-    _agent_text_line_started = False
-    _agent_text_has_markdown = False
+    _agent_text_state.reset()
 
 
 def print_fix_progress(
