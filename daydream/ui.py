@@ -5,10 +5,6 @@ with a Dracula-based color theme and animated elements.
 """
 
 import re
-import threading
-import time
-from collections.abc import Generator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -2079,6 +2075,11 @@ class LiveToolPanelRegistry:
             The created and started LiveToolPanel.
 
         """
+        # Finish and remove existing panel if duplicate tool_use_id
+        if tool_use_id in self._panels:
+            self._panels[tool_use_id].finish()
+            del self._panels[tool_use_id]
+
         panel = LiveToolPanel(
             console=self._console,
             tool_use_id=tool_use_id,
@@ -2129,61 +2130,6 @@ class LiveToolPanelRegistry:
         for panel in self._panels.values():
             panel.finish()
         self._panels.clear()
-
-
-# =============================================================================
-# NeonProgress Context Manager
-# =============================================================================
-
-
-@contextmanager
-def neon_progress(
-    console: Console,
-    message: str,
-    width: int = 40,
-    refresh_rate: float = 0.1,
-) -> Generator[None, None, None]:
-    """Context manager for displaying an animated progress indicator.
-
-    Shows an animated throbber while the wrapped operation executes,
-    then clears it when done.
-
-    Args:
-        console: Rich Console instance for output.
-        message: Message to display alongside the throbber.
-        width: Width of the throbber bar.
-        refresh_rate: Animation refresh rate in seconds.
-
-    Yields:
-        None - the context manager body executes with the animation running.
-
-    Example:
-        with neon_progress(console, "Loading..."):
-            do_long_operation()
-
-    """
-    throbber = NeonThrobber()
-    stop_event = threading.Event()
-
-    def render_frame() -> Text:
-        frame = Text()
-        frame.append(f"{message} ", style=STYLE_CYAN)
-        frame.append(throbber.render(width))
-        return frame
-
-    def animation_loop(live: Live) -> None:
-        while not stop_event.is_set():
-            live.update(render_frame())
-            time.sleep(refresh_rate)
-
-    with Live(render_frame(), console=console, refresh_per_second=10) as live:
-        thread = threading.Thread(target=animation_loop, args=(live,), daemon=True)
-        thread.start()
-        try:
-            yield
-        finally:
-            stop_event.set()
-            thread.join(timeout=0.5)
 
 
 # =============================================================================
