@@ -56,31 +56,44 @@ daydream -s python /path/to/project
 daydream --typescript /path/to/project
 daydream -s frontend /path/to/project
 
+# Select Claude model (default: opus)
+daydream --model sonnet /path/to/project
+daydream --model haiku /path/to/project
+
 # Review only (no fixes applied)
 daydream --review-only /path/to/project
+
+# Resume from a specific phase (requires existing .review-output.md)
+daydream --start-at parse /path/to/project   # Skip review, start at parsing
+daydream --start-at fix /path/to/project     # Skip review and parse, apply fixes
+daydream --start-at test /path/to/project    # Run tests only
 
 # Enable debug logging
 daydream --debug /path/to/project
 
-# Auto-cleanup review output after completion
-daydream --cleanup /path/to/project
+# Control cleanup of review output
+daydream --cleanup /path/to/project      # Remove .review-output.md after completion
+daydream --no-cleanup /path/to/project   # Keep .review-output.md (useful for CI)
 ```
 
 ### Command Line Options
 
-| Option          | Description                                      |
-| --------------- | ------------------------------------------------ |
-| `TARGET`        | Target directory (default: prompt interactively) |
-| `-s, --skill`   | Review skill: `python` or `frontend`             |
-| `--python`      | Shorthand for `-s python`                        |
-| `--typescript`  | Shorthand for `-s frontend`                      |
-| `--review-only` | Skip fixes, only review and parse feedback       |
-| `--debug`       | Save debug log to `.review-debug-{timestamp}.log`|
-| `--cleanup`     | Remove `.review-output.md` after completion      |
+| Option | Description |
+|--------|-------------|
+| `TARGET` | Target directory (default: prompt interactively) |
+| `-s, --skill` | Review skill: `python` or `frontend` |
+| `--python` | Shorthand for `-s python` |
+| `--typescript` | Shorthand for `-s frontend` |
+| `--model` | Claude model: `opus`, `sonnet`, or `haiku` (default: `opus`) |
+| `--review-only` | Skip fixes, only review and parse feedback |
+| `--start-at` | Start at phase: `review`, `parse`, `fix`, or `test` (default: `review`) |
+| `--debug` | Save debug log to `.review-debug-{timestamp}.log` |
+| `--cleanup` | Remove `.review-output.md` after completion |
+| `--no-cleanup` | Keep `.review-output.md` after completion |
 
 ## How It Works
 
-Daydream executes a four-phase workflow:
+Daydream executes a four-phase workflow. Use `--start-at` to resume from a specific phase (phases before the start point are skipped).
 
 ### Phase 1: Review
 
@@ -90,6 +103,8 @@ Invokes the selected Beagle review skill (e.g., `beagle:review-python`) against 
 
 Extracts actionable issues from the review output as structured JSON. Positive observations and summary sections are filtered out.
 
+**Note:** `--start-at parse` requires an existing `.review-output.md` file.
+
 ### Phase 3: Apply Fixes
 
 For each actionable issue:
@@ -97,6 +112,8 @@ For each actionable issue:
 1. Displays the issue description, file, and line number
 2. Prompts Claude to apply the minimal fix needed
 3. Shows progress as fixes are applied
+
+**Note:** `--start-at fix` requires an existing `.review-output.md` file.
 
 ### Phase 4: Test and Heal
 
@@ -109,12 +126,14 @@ Runs your project's test suite. On failure, offers interactive options:
 
 After tests pass, optionally commit and push changes.
 
+**Note:** `--start-at test` skips all other phases and runs tests directly.
+
 ## Output Files
 
-| File                             | Description                                  |
-| -------------------------------- | -------------------------------------------- |
-| `.review-output.md`              | Review results (cleaned up with `--cleanup`) |
-| `.review-debug-{timestamp}.log`  | Debug log (when `--debug` is enabled)        |
+| File | Description |
+|------|-------------|
+| `.review-output.md` | Review results (removed with `--cleanup`, required for `--start-at parse/fix`) |
+| `.review-debug-{timestamp}.log` | Debug log (created when `--debug` is enabled) |
 
 ## Architecture
 
@@ -134,10 +153,6 @@ daydream/
 - [anyio](https://anyio.readthedocs.io/) - Async I/O abstraction
 - [rich](https://rich.readthedocs.io/) - Terminal formatting and UI components
 - [pyfiglet](https://github.com/pwaller/pyfiglet) - ASCII art generation
-
-## Contributing
-
-This project is not accepting outside contributions. If you encounter a bug or have a feature request, please [open an issue](https://github.com/existential-birds/daydream/issues).
 
 ## License
 
