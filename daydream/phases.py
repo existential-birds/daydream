@@ -23,6 +23,8 @@ from daydream.ui import (
     prompt_user,
 )
 
+TEST_FIX_PROMPT = "The tests failed. Analyze the failures and fix them."
+
 
 def check_review_file_exists(target_dir: Path) -> None:
     """Check that the review output file exists.
@@ -209,8 +211,7 @@ async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            fix_prompt = "The tests failed. Analyze the failures and fix them."
-            await run_agent(cwd, fix_prompt)
+            await run_agent(cwd, TEST_FIX_PROMPT)
             retries_used += 1
             continue
 
@@ -226,8 +227,7 @@ async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
             print_warning(console, f"Invalid choice '{choice}', defaulting to fix and retry")
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            fix_prompt = "The tests failed. Analyze the failures and fix them."
-            await run_agent(cwd, fix_prompt)
+            await run_agent(cwd, TEST_FIX_PROMPT)
             retries_used += 1
             continue
 

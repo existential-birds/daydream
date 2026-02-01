@@ -27,6 +27,12 @@ REVIEW_SKILLS: dict[ReviewSkillChoice, str] = {
     ReviewSkillChoice.FRONTEND: "beagle:review-frontend",
 }
 
+# CLI skill name to full skill path mapping
+SKILL_MAP: dict[str, str] = {
+    "python": "beagle:review-python",
+    "frontend": "beagle:review-frontend",
+}
+
 # Output file for review results
 REVIEW_OUTPUT_FILE = ".review-output.md"
 

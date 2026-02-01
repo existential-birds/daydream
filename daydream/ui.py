@@ -8,7 +8,6 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
 
 import pyfiglet
 from rich import box
@@ -173,57 +172,6 @@ STATUS_CONFIG = {
     "completed": {"icon": "\u2714", "color": NEON_COLORS["green"]},  # ✔
     "failed": {"icon": "\u2717", "color": NEON_COLORS["red"]},  # ✗
 }
-
-
-# =============================================================================
-# NeonConsole Class
-# =============================================================================
-
-
-class NeonConsole:
-    """Wrapper around Rich Console providing themed output methods.
-
-    This class encapsulates all the neon-styled output functionality,
-    providing a consistent visual theme across all terminal output.
-
-    Args:
-        console: Optional Rich Console instance. If not provided,
-            a new Console with the neon theme will be created.
-
-    """
-
-    def __init__(self, console: Console | None = None) -> None:
-        """Initialize the NeonConsole.
-
-        Args:
-            console: Optional Rich Console instance. If not provided,
-                    a new Console with the neon theme will be created.
-
-        """
-        self.console = console or Console(theme=NEON_THEME)
-        self._throbber = NeonThrobber()
-
-    def print(self, *args: Any, **kwargs: Any) -> None:
-        """Pass through to underlying console.print().
-
-        Args:
-            *args: Positional arguments to pass to console.print().
-            **kwargs: Keyword arguments to pass to console.print().
-
-        Returns:
-            None
-
-        """
-        self.console.print(*args, **kwargs)
-
-    def clear(self) -> None:
-        """Clear the terminal screen.
-
-        Returns:
-            None
-
-        """
-        self.console.clear()
 
 
 def create_console() -> Console:
@@ -2955,16 +2903,6 @@ def set_shutdown_panel(panel: ShutdownPanel | None) -> None:
 # =============================================================================
 # Convenience Functions
 # =============================================================================
-
-
-def create_neon_console() -> NeonConsole:
-    """Create and return a new NeonConsole instance.
-
-    Returns:
-        Configured NeonConsole ready for use.
-
-    """
-    return NeonConsole()
 
 
 def get_status_style(status: str) -> Style:

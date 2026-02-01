@@ -50,7 +50,7 @@ cli.py → runner.py → phases.py → agent.py
   2. `phase_parse_feedback()` - Extract actionable issues as JSON
   3. `phase_fix()` - Apply fixes one-by-one
   4. `phase_test_and_heal()` - Run tests, interactive retry/fix loop
-- **agent.py**: Claude SDK client wrapper, `run_agent()` streams responses, `MissingSkillError` exception
+- **agent.py**: Claude SDK client wrapper, `run_agent()` streams responses, `AgentState` dataclass for consolidated state, `MissingSkillError` exception
 - **ui.py**: Rich-based terminal UI with Dracula theme, live-updating panels
 - **config.py**: Skill mappings, constants
 
@@ -59,7 +59,7 @@ cli.py → runner.py → phases.py → agent.py
 - All agent interactions use `ClaudeSDKClient` from `claude-agent-sdk` with `bypassPermissions` mode
 - Streaming responses are processed via async iterator over message types (AssistantMessage, UserMessage, ResultMessage)
 - Tool call panels use Rich's `Live` for animated throbbers during execution
-- Global state for shutdown handling (`_shutdown_requested`, `_current_client`)
+- Global state consolidated in `AgentState` dataclass (debug_log, quiet_mode, model, shutdown_requested) with `_current_client` for SDK instance
 
 ## Dependencies
 

@@ -2,6 +2,7 @@
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -39,21 +40,55 @@ class MissingSkillError(Exception):
         super().__init__(f"Skill '{skill_name}' is not available")
 
 
+@dataclass
+class AgentState:
+    """Consolidated state for agent module.
+
+    Attributes:
+        debug_log: File handle for debug logging, or None to disable.
+        quiet_mode: True to hide tool calls and results, False to show them.
+        model: Model name to use for agent interactions.
+        shutdown_requested: True if shutdown has been requested.
+
+    """
+
+    debug_log: TextIO | None = None
+    quiet_mode: bool = False
+    model: str = "opus"
+    shutdown_requested: bool = False
+
+
+# Module-level singleton state
+_state = AgentState()
+
 # Track the currently running client for cleanup on termination
 _current_client: ClaudeSDKClient | None = None
-_shutdown_requested = False
-
-# Debug logging file handle
-_debug_log: TextIO | None = None
-
-# Quiet mode - hide tool calls and results
-_quiet_mode = False
-
-# Model to use for agent interactions
-_model = "opus"
 
 # Global console instance
 console = create_console()
+
+
+def get_state() -> AgentState:
+    """Get the global agent state singleton.
+
+    Returns:
+        The global AgentState instance.
+
+    """
+    return _state
+
+
+def reset_state() -> None:
+    """Reset the global agent state to defaults.
+
+    Creates a new AgentState instance with default values.
+
+    Returns:
+        None
+
+    """
+    global _state
+    _state = AgentState()
 
 
 def set_debug_log(log_file: TextIO | None) -> None:
@@ -66,8 +101,7 @@ def set_debug_log(log_file: TextIO | None) -> None:
         None
 
     """
-    global _debug_log
-    _debug_log = log_file
+    _state.debug_log = log_file
 
 
 def get_debug_log() -> TextIO | None:
@@ -77,7 +111,7 @@ def get_debug_log() -> TextIO | None:
         The current debug log file handle, or None if not set.
 
     """
-    return _debug_log
+    return _state.debug_log
 
 
 def set_quiet_mode(quiet: bool) -> None:
@@ -90,8 +124,7 @@ def set_quiet_mode(quiet: bool) -> None:
         None
 
     """
-    global _quiet_mode
-    _quiet_mode = quiet
+    _state.quiet_mode = quiet
 
 
 def get_quiet_mode() -> bool:
@@ -101,7 +134,7 @@ def get_quiet_mode() -> bool:
         True if quiet mode is enabled, False otherwise.
 
     """
-    return _quiet_mode
+    return _state.quiet_mode
 
 
 def set_model(model: str) -> None:
@@ -114,8 +147,7 @@ def set_model(model: str) -> None:
         None
 
     """
-    global _model
-    _model = model
+    _state.model = model
 
 
 def get_model() -> str:
@@ -125,7 +157,7 @@ def get_model() -> str:
         The current model name.
 
     """
-    return _model
+    return _state.model
 
 
 def set_shutdown_requested(requested: bool) -> None:
@@ -138,8 +170,7 @@ def set_shutdown_requested(requested: bool) -> None:
         None
 
     """
-    global _shutdown_requested
-    _shutdown_requested = requested
+    _state.shutdown_requested = requested
 
 
 def get_shutdown_requested() -> bool:
@@ -149,7 +180,7 @@ def get_shutdown_requested() -> bool:
         True if shutdown has been requested, False otherwise.
 
     """
-    return _shutdown_requested
+    return _state.shutdown_requested
 
 
 def get_current_client() -> ClaudeSDKClient | None:
@@ -164,9 +195,9 @@ def get_current_client() -> ClaudeSDKClient | None:
 
 def _log_debug(message: str) -> None:
     """Write a message to the debug log if enabled."""
-    if _debug_log is not None:
-        _debug_log.write(message)
-        _debug_log.flush()
+    if _state.debug_log is not None:
+        _state.debug_log.write(message)
+        _state.debug_log.flush()
 
 
 def detect_test_success(output: str) -> bool:
@@ -251,7 +282,7 @@ async def run_agent(cwd: Path, prompt: str) -> str:
         cwd=str(cwd),
         permission_mode="bypassPermissions",
         setting_sources=["user", "project", "local"],
-        model=_model,
+        model=_state.model,
     )
 
     output_parts: list[str] = []
@@ -260,7 +291,7 @@ async def run_agent(cwd: Path, prompt: str) -> str:
         _current_client = client
         try:
             agent_renderer = AgentTextRenderer(console)
-            tool_registry = LiveToolPanelRegistry(console, _quiet_mode)
+            tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
 
             await client.query(prompt)
             async for msg in client.receive_response():

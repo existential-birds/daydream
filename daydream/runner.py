@@ -12,7 +12,7 @@ from daydream.agent import (
     set_model,
     set_quiet_mode,
 )
-from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, ReviewSkillChoice
+from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
 from daydream.phases import (
     check_review_file_exists,
     phase_commit_push,
@@ -116,9 +116,8 @@ async def run(config: RunConfig | None = None) -> int:
     if config.start_at != "test":
         if config.skill is not None:
             # Map skill name to full skill path
-            skill_map = {"python": "beagle:review-python", "frontend": "beagle:review-frontend"}
-            if config.skill in skill_map:
-                skill = skill_map[config.skill]
+            if config.skill in SKILL_MAP:
+                skill = SKILL_MAP[config.skill]
             elif config.skill in REVIEW_SKILLS.values():
                 skill = config.skill
             else:

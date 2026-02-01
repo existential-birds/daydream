@@ -1,7 +1,9 @@
 """Shared utilities for demo scripts."""
 
+import argparse
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 # Default test repo location (sibling to daydream)
@@ -301,3 +303,71 @@ def create_test_repo(repo_path: Path) -> Path | None:
     print("  Initialized git repo")
 
     return repo_path
+
+
+def create_argument_parser(description: str) -> argparse.ArgumentParser:
+    """Create a standard argument parser with common args for demo scripts."""
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument(
+        "repo_path",
+        nargs="?",
+        type=Path,
+        default=DEFAULT_REPO_PATH,
+        help=f"Test repo location (default: {DEFAULT_REPO_PATH})",
+    )
+    parser.add_argument("--model", default="haiku", help="Model to use (default: haiku)")
+    parser.add_argument("--skip-setup", action="store_true", help="Skip repo creation, use existing")
+    return parser
+
+
+def validate_repo_path(
+    repo_path: Path, skip_setup: bool, require_review_file: bool = False
+) -> Path | None:
+    """Validate repo path and optionally create test repo.
+
+    Returns resolved path on success, None on failure (with error printed).
+    """
+    resolved = repo_path.resolve()
+
+    if not skip_setup:
+        return create_test_repo(resolved)
+
+    if not resolved.exists():
+        print(f"Error: {resolved} does not exist")
+        return None
+
+    if require_review_file:
+        review_file = resolved / REVIEW_OUTPUT_FILE
+        if not review_file.exists():
+            print(f"Error: {review_file} does not exist")
+            print("Run demo_review.py first or remove --skip-setup")
+            return None
+
+    return resolved
+
+
+def run_daydream_command(
+    target: Path,
+    skill: str,
+    model: str,
+    start_at: str | None = None,
+    extra_args: list[str] | None = None,
+) -> int:
+    """Run the daydream command with common arguments.
+
+    Returns the subprocess return code.
+    """
+    cmd = [
+        sys.executable, "-m", "daydream",
+        str(target),
+        f"--{skill}",
+        "--model", model,
+        "--no-cleanup",
+    ]
+    if start_at:
+        cmd.extend(["--start-at", start_at])
+    if extra_args:
+        cmd.extend(extra_args)
+
+    result = subprocess.run(cmd, cwd=Path(__file__).parent.parent)
+    return result.returncode
