@@ -62,6 +62,36 @@ NEON_THEME = Theme({
     "neon.string": NEON_COLORS["orange"],
 })
 
+# =============================================================================
+# Reusable Style Constants
+# =============================================================================
+# Pre-defined Style objects for use with Text.append() and other Rich components
+# that require Style objects rather than theme strings.
+
+STYLE_CYAN = Style(color=NEON_COLORS["cyan"])
+STYLE_PURPLE = Style(color=NEON_COLORS["purple"])
+STYLE_PINK = Style(color=NEON_COLORS["pink"])
+STYLE_GREEN = Style(color=NEON_COLORS["green"])
+STYLE_YELLOW = Style(color=NEON_COLORS["yellow"])
+STYLE_ORANGE = Style(color=NEON_COLORS["orange"])
+STYLE_RED = Style(color=NEON_COLORS["red"])
+STYLE_FG = Style(color=NEON_COLORS["foreground"])
+
+# Bold variants
+STYLE_BOLD_PINK = Style(color=NEON_COLORS["pink"], bold=True)
+STYLE_BOLD_CYAN = Style(color=NEON_COLORS["cyan"], bold=True)
+STYLE_BOLD_PURPLE = Style(color=NEON_COLORS["purple"], bold=True)
+STYLE_BOLD_GREEN = Style(color=NEON_COLORS["green"], bold=True)
+STYLE_BOLD_YELLOW = Style(color=NEON_COLORS["yellow"], bold=True)
+STYLE_BOLD_RED = Style(color=NEON_COLORS["red"], bold=True)
+
+# Panel styles
+STYLE_PANEL_BG = Style(bgcolor="#1e1e2e")
+STYLE_AGENT_BG = Style(bgcolor="#051208")
+
+# Dim style
+STYLE_DIM = Style(dim=True)
+
 GRADIENT_COLORS = [
     "#881177",
     "#aa3355",
@@ -164,9 +194,9 @@ def print_header(console: Console, text: str) -> None:
 
     """
     header_panel = Panel(
-        Text(text, style=Style(color=NEON_COLORS["purple"], bold=True)),
+        Text(text, style=STYLE_BOLD_PURPLE),
         box=box.DOUBLE_EDGE,
-        border_style=Style(color=NEON_COLORS["pink"]),
+        border_style=STYLE_PINK,
         padding=(0, 2),
     )
     console.print(header_panel)
@@ -364,7 +394,7 @@ def print_phase(
     phase_text = Text()
     phase_text.append(f"{icon} ", style=Style(color=color))
     phase_text.append(f"Phase {phase_num}: ", style=Style(color=color, bold=True))
-    phase_text.append(description, style=Style(color=NEON_COLORS["foreground"]))
+    phase_text.append(description, style=STYLE_FG)
 
     panel = Panel(
         phase_text,
@@ -396,12 +426,13 @@ def pill(text: str, bg_color: str, fg_color: str) -> Text:
 
     """
     result = Text()
+    bg_style = Style(color=bg_color)
     # Left edge
-    result.append("\u258c", style=Style(color=bg_color))
+    result.append("\u258c", style=bg_style)
     # Center text with background
     result.append(text, style=Style(color=fg_color, bgcolor=bg_color, bold=True))
     # Right edge
-    result.append("\u2590", style=Style(color=bg_color))
+    result.append("\u2590", style=bg_style)
     return result
 
 
@@ -433,30 +464,30 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
 
     for i, (key, value) in enumerate(args.items()):
         if i > 0:
-            result.append(", ", style=Style(color=NEON_COLORS["foreground"]))
+            result.append(", ", style=STYLE_FG)
 
         # Key in cyan
-        result.append(str(key), style=Style(color=NEON_COLORS["cyan"]))
-        result.append("=", style=Style(color=NEON_COLORS["purple"]))
+        result.append(str(key), style=STYLE_CYAN)
+        result.append("=", style=STYLE_PURPLE)
 
         # Value styling based on type
         if isinstance(value, bool):
             # Boolean in purple
-            result.append(str(value), style=Style(color=NEON_COLORS["purple"]))
+            result.append(str(value), style=STYLE_PURPLE)
         elif isinstance(value, (int, float)):
             # Numeric value in yellow
-            result.append(str(value), style=Style(color=NEON_COLORS["yellow"]))
+            result.append(str(value), style=STYLE_YELLOW)
         elif isinstance(value, str):
             # String value - check for file paths
             if "/" in value or value.endswith((".py", ".js", ".ts", ".md", ".json", ".yaml", ".yml")):
-                result.append(value, style=Style(color=NEON_COLORS["cyan"]))
+                result.append(value, style=STYLE_CYAN)
             else:
-                result.append(value, style=Style(color=NEON_COLORS["orange"]))
+                result.append(value, style=STYLE_ORANGE)
         elif value is None:
-            result.append("None", style=Style(color=NEON_COLORS["purple"]))
+            result.append("None", style=STYLE_PURPLE)
         else:
             # Other values (dicts, lists, etc.) in foreground
-            result.append(str(value), style=Style(color=NEON_COLORS["foreground"]))
+            result.append(str(value), style=STYLE_FG)
 
     return result
 
@@ -489,8 +520,8 @@ def _build_tool_header(
     # Special handling for Skill tool calls
     if name == "Skill":
         header_line = Text()
-        header_line.append("\u2728 ", style=Style(color=NEON_COLORS["yellow"]))  # ✨
-        header_line.append("Skill", style=Style(color=NEON_COLORS["cyan"], bold=True))
+        header_line.append("\u2728 ", style=STYLE_YELLOW)  # ✨
+        header_line.append("Skill", style=STYLE_BOLD_CYAN)
         content.append_text(header_line)
         content.append("\n")
 
@@ -504,16 +535,16 @@ def _build_tool_header(
             skill_args = args.get("args")
             if skill_args:
                 content.append("\n")
-                content.append("args=", style=Style(color=NEON_COLORS["purple"]))
-                content.append(str(skill_args), style=Style(color=NEON_COLORS["orange"]))
+                content.append("args=", style=STYLE_PURPLE)
+                content.append(str(skill_args), style=STYLE_ORANGE)
 
         return content
 
     # Special handling for TodoWrite tool calls
     if name == "TodoWrite":
         header_line = Text()
-        header_line.append("\U0001f527 ", style=Style(color=NEON_COLORS["orange"]))  # 🔧
-        header_line.append("TodoWrite", style=Style(color=NEON_COLORS["pink"], bold=True))
+        header_line.append("\U0001f527 ", style=STYLE_ORANGE)  # 🔧
+        header_line.append("TodoWrite", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
 
         # Parse and display todos list
@@ -539,23 +570,23 @@ def _build_tool_header(
     # Special handling for Bash tool calls
     if name == "Bash":
         header_line = Text()
-        header_line.append("\U0001f528 ", style=Style(color=NEON_COLORS["orange"]))  # 🔨
-        header_line.append("Bash", style=Style(color=NEON_COLORS["pink"], bold=True))
+        header_line.append("\U0001f528 ", style=STYLE_ORANGE)  # 🔨
+        header_line.append("Bash", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
 
         # Add description if present
         description = str(args.get("description", ""))
         if description:
             content.append("\n")
-            content.append(description, style=Style(color=NEON_COLORS["cyan"]))
+            content.append(description, style=STYLE_CYAN)
 
         # Add command if not in quiet mode
         if not quiet_mode:
             command = str(args.get("command", ""))
             if command:
                 content.append("\n")
-                content.append("$ ", style=Style(dim=True))
-                content.append(command, style=Style(dim=True))
+                content.append("$ ", style=STYLE_DIM)
+                content.append(command, style=STYLE_DIM)
 
         return content
 
@@ -564,19 +595,19 @@ def _build_tool_header(
         file_path = str(args.get("file_path", ""))
 
         header_line = Text()
-        header_line.append("\u26CF\uFE0F ", style=Style(color=NEON_COLORS["orange"]))  # ⛏️
-        header_line.append("Write", style=Style(color=NEON_COLORS["pink"], bold=True))
+        header_line.append("\u26CF\uFE0F ", style=STYLE_ORANGE)  # ⛏️
+        header_line.append("Write", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
         content.append("\n")
-        content.append("file_path=", style=Style(color=NEON_COLORS["cyan"]))
-        content.append(file_path, style=Style(color=NEON_COLORS["cyan"]))
+        content.append("file_path=", style=STYLE_CYAN)
+        content.append(file_path, style=STYLE_CYAN)
 
         return content
 
     # Standard tool call display (other tools)
     header_line = Text()
-    header_line.append("\U0001f3a0 ", style=Style(color=NEON_COLORS["orange"]))  # 🎠
-    header_line.append(name, style=Style(color=NEON_COLORS["pink"], bold=True))
+    header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
+    header_line.append(name, style=STYLE_BOLD_PINK)
     content.append_text(header_line)
 
     # Add formatted key=value pairs
@@ -698,14 +729,14 @@ def print_tool_call(
             preview = content_str[:200] + "..." if len(content_str) > 200 else content_str
             content.append(preview, style=Style(color=NEON_COLORS["foreground"], dim=True))
 
-    # Determine border color
-    border_color = NEON_COLORS["cyan"] if name == "Skill" else NEON_COLORS["purple"]
+    # Determine border style
+    border_style = STYLE_CYAN if name == "Skill" else STYLE_PURPLE
 
     panel = Panel(
         panel_content,
         box=box.ROUNDED,
-        border_style=Style(color=border_color),
-        style=Style(bgcolor="#1e1e2e"),
+        border_style=border_style,
+        style=STYLE_PANEL_BG,
         padding=(0, 1),
     )
     console.print(panel)
@@ -798,23 +829,23 @@ def _colorize_git_line(line: str) -> Text | None:
     """
     # File headers (+++/---) - cyan bold
     if _GIT_FILE_HEADER_PATTERN.match(line):
-        return Text(line, style=Style(color=NEON_COLORS["cyan"], bold=True))
+        return Text(line, style=STYLE_BOLD_CYAN)
 
     # Diff headers (@@, diff --git, index) - purple
     if _GIT_DIFF_HEADER_PATTERN.match(line):
-        return Text(line, style=Style(color=NEON_COLORS["purple"]))
+        return Text(line, style=STYLE_PURPLE)
 
     # Added lines (+, A ) - green
     if _GIT_ADDED_PATTERN.match(line):
-        return Text(line, style=Style(color=NEON_COLORS["green"]))
+        return Text(line, style=STYLE_GREEN)
 
     # Deleted lines (-, D ) - red
     if _GIT_DELETED_PATTERN.match(line):
-        return Text(line, style=Style(color=NEON_COLORS["red"]))
+        return Text(line, style=STYLE_RED)
 
     # Modified lines (M ) - yellow
     if _GIT_MODIFIED_PATTERN.match(line):
-        return Text(line, style=Style(color=NEON_COLORS["yellow"]))
+        return Text(line, style=STYLE_YELLOW)
 
     return None
 
@@ -843,11 +874,11 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
         pos = 0
         for match in _FILE_PATH_PATTERN.finditer(line):
             if match.start() > pos:
-                result.append(line[pos:match.start()], style=Style(color=NEON_COLORS["red"]))
+                result.append(line[pos:match.start()], style=STYLE_RED)
             result.append(match.group(1), style=Style(color=NEON_COLORS["orange"], bold=True))
             pos = match.end()
         if pos < len(line):
-            result.append(line[pos:], style=Style(color=NEON_COLORS["red"]))
+            result.append(line[pos:], style=STYLE_RED)
         return result
 
     # Check for line number prefix (e.g., "  42:" or "123|")
@@ -855,8 +886,8 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
     if line_num_match:
         indent, num, sep = line_num_match.groups()
         result.append(indent, style=Style())
-        result.append(num, style=Style(color=NEON_COLORS["yellow"]))
-        result.append(sep, style=Style(color=NEON_COLORS["purple"]))
+        result.append(num, style=STYLE_YELLOW)
+        result.append(sep, style=STYLE_PURPLE)
         line = line[line_num_match.end():]
 
     # Process the rest of the line for patterns
@@ -865,52 +896,52 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
     # Find all file paths (highest priority - cyan)
     for match in _FILE_PATH_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
-                        Style(color=NEON_COLORS["cyan"])))
+                        STYLE_CYAN))
 
     # Find error keywords (red bold)
     for match in _ERROR_KEYWORDS.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
-                        Style(color=NEON_COLORS["red"], bold=True)))
+                        STYLE_BOLD_RED))
 
     # Find success keywords (green bold)
     for match in _SUCCESS_KEYWORDS.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
-                        Style(color=NEON_COLORS["green"], bold=True)))
+                        STYLE_BOLD_GREEN))
 
     # Find warning keywords (yellow bold)
     for match in _WARNING_KEYWORDS.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
-                        Style(color=NEON_COLORS["yellow"], bold=True)))
+                        STYLE_BOLD_YELLOW))
 
     # Find strings (orange)
     for match in _STRING_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(0),
-                        Style(color=NEON_COLORS["orange"])))
+                        STYLE_ORANGE))
 
     # Find arrows (pink)
     for match in _ARROW_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
-                        Style(color=NEON_COLORS["pink"], bold=True)))
+                        STYLE_BOLD_PINK))
 
     # Find brackets (purple)
     for match in _BRACKET_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
-                        Style(color=NEON_COLORS["purple"])))
+                        STYLE_PURPLE))
 
     # Find shell variables $VAR and ${VAR} (yellow)
     for match in _SHELL_VAR_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
-                        Style(color=NEON_COLORS["yellow"])))
+                        STYLE_YELLOW))
 
     # Find shell prompts at line start (cyan)
     for match in _SHELL_PROMPT_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
-                        Style(color=NEON_COLORS["cyan"])))
+                        STYLE_CYAN))
 
     # Find pipe and redirect operators (pink)
     for match in _PIPE_REDIRECT_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
-                        Style(color=NEON_COLORS["pink"])))
+                        STYLE_PINK))
 
     # Find common commands at line start (orange bold)
     for match in _COMMAND_PATTERN.finditer(line):
@@ -934,7 +965,7 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
         if start > last_end:
             # Add default styled text before this segment
             result.append(line[last_end:start],
-                         style=Style(color=NEON_COLORS["foreground"]))
+                         style=STYLE_FG)
         result.append(text, style=style)
         used_ranges.append((start, end))
         last_end = end
@@ -942,7 +973,7 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
     # Add remaining text
     if last_end < len(line):
         result.append(line[last_end:],
-                     style=Style(color=NEON_COLORS["foreground"]))
+                     style=STYLE_FG)
 
     return result
 
@@ -972,21 +1003,21 @@ def print_tool_result(
     # Build result content using shared helper
     result_content, _ = _build_result_content(content, is_error, max_lines)
 
-    # Determine border color and title
+    # Determine border style and title
     if is_error:
-        border_color = NEON_COLORS["red"]
+        border_style = STYLE_RED
         title = "[bold red]❌ Error[/bold red]"
     else:
-        border_color = NEON_COLORS["purple"]
+        border_style = STYLE_PURPLE
         title = f"[bold {NEON_COLORS['cyan']}]📤 Output[/bold {NEON_COLORS['cyan']}]"
 
     panel = Panel(
         result_content,
         box=box.ROUNDED,
-        border_style=Style(color=border_color),
+        border_style=border_style,
         title=title,
         title_align="left",
-        style=Style(bgcolor="#1e1e2e"),
+        style=STYLE_PANEL_BG,
         expand=False,
         padding=(0, 1),
     )
@@ -1069,7 +1100,7 @@ def print_thinking(console: Console, content: str, max_length: int = 300) -> Non
         title="\U0001f4ad Thinking",  # 💭
         title_align="left",
         box=box.ROUNDED,
-        border_style=Style(color=NEON_COLORS["purple"]),
+        border_style=STYLE_PURPLE,
         padding=(0, 1),
     )
     console.print(panel)
@@ -1093,18 +1124,18 @@ def print_feedback_table(console: Console, items: list[dict[str, object]]) -> No
     """
     table = Table(
         title="\U0001f4cb Issues to Fix",  # 📋
-        title_style=Style(color=NEON_COLORS["cyan"], bold=True),
+        title_style=STYLE_BOLD_CYAN,
         box=box.ROUNDED,
-        border_style=Style(color=NEON_COLORS["purple"]),
-        header_style=Style(color=NEON_COLORS["pink"], bold=True),
+        border_style=STYLE_PURPLE,
+        header_style=STYLE_BOLD_PINK,
         show_lines=True,
     )
 
-    table.add_column("#", justify="right", style=Style(color=NEON_COLORS["cyan"]))
+    table.add_column("#", justify="right", style=STYLE_CYAN)
     table.add_column("Status", justify="center")
-    table.add_column("Description", style=Style(color=NEON_COLORS["foreground"]))
-    table.add_column("File", style=Style(color=NEON_COLORS["orange"]))
-    table.add_column("Line", justify="right", style=Style(color=NEON_COLORS["yellow"]))
+    table.add_column("Description", style=STYLE_FG)
+    table.add_column("File", style=STYLE_ORANGE)
+    table.add_column("Line", justify="right", style=STYLE_YELLOW)
 
     for i, item in enumerate(items, 1):
         status = str(item.get("status", "pending"))
@@ -1145,11 +1176,11 @@ def print_error(console: Console, title: str, message: str) -> None:
 
     """
     panel = Panel(
-        Text(message, style=Style(color=NEON_COLORS["red"])),
+        Text(message, style=STYLE_RED),
         title=f"\u26a0\ufe0f  {title}",  # ⚠️
         title_align="left",
         box=box.DOUBLE_EDGE,
-        border_style=Style(color=NEON_COLORS["red"]),
+        border_style=STYLE_RED,
         padding=(0, 1),
     )
     console.print(panel)
@@ -1169,9 +1200,9 @@ def print_warning(console: Console, message: str) -> None:
 
     """
     panel = Panel(
-        Text(message, style=Style(color=NEON_COLORS["yellow"])),
+        Text(message, style=STYLE_YELLOW),
         box=box.ROUNDED,
-        border_style=Style(color=NEON_COLORS["yellow"]),
+        border_style=STYLE_YELLOW,
         padding=(0, 1),
     )
     console.print(panel)
@@ -1312,7 +1343,7 @@ def _highlight_agent_text(text: str) -> Text:
             match.start(1),
             match.end(1),
             match.group(1),
-            Style(color=NEON_COLORS["cyan"]),
+            STYLE_CYAN,
         ))
 
     # Sort segments by position, prefer longer matches
@@ -1332,7 +1363,7 @@ def _highlight_agent_text(text: str) -> Text:
 
         if start > pos:
             # Add default styled text - bright neon green
-            result.append(text[pos:start], style=Style(color=NEON_COLORS["green"]))
+            result.append(text[pos:start], style=STYLE_GREEN)
 
         result.append(display_text, style=style)
         used_ranges.append((start, end))
@@ -1340,7 +1371,7 @@ def _highlight_agent_text(text: str) -> Text:
 
     # Add remaining text - bright neon green
     if pos < len(text):
-        result.append(text[pos:], style=Style(color=NEON_COLORS["green"]))
+        result.append(text[pos:], style=STYLE_GREEN)
 
     return result
 
@@ -1406,8 +1437,8 @@ class AgentTextRenderer:
         return Panel(
             highlighted,
             box=box.ROUNDED,
-            border_style=Style(color=AGENT_TEXT_FG),
-            style=Style(bgcolor=AGENT_TEXT_BG),
+            border_style=STYLE_GREEN,
+            style=STYLE_AGENT_BG,
             padding=(0, 1),
         )
 
@@ -1519,14 +1550,14 @@ def print_agent_text(console: Console, text: str) -> None:
             # Start of a new agent text block - add separation and gutter prefix
             console.print()  # Newline for separation from tool calls
             gutter = Text()
-            gutter.append("│ ", style=Style(color=NEON_COLORS["green"]))
+            gutter.append("│ ", style=STYLE_GREEN)
             console.print(gutter, end="")
             _agent_text_line_started = True
 
         # Highlight and print the line content with dark green background
         if line:
             highlighted = _highlight_agent_text(line)
-            highlighted.stylize(Style(bgcolor="#051208"))  # Very dark green
+            highlighted.stylize(STYLE_AGENT_BG)
             console.print(highlighted, end="")
 
         # Handle newlines - reset gutter state for next line
@@ -1566,11 +1597,11 @@ def print_fix_progress(
     """
     text = Text()
     text.append("  ", style=Style())
-    text.append(f"[{item_num}/{total}] ", style=Style(color=NEON_COLORS["cyan"], bold=True))
-    text.append("Fixing: ", style=Style(color=NEON_COLORS["pink"]))
+    text.append(f"[{item_num}/{total}] ", style=STYLE_BOLD_CYAN)
+    text.append("Fixing: ", style=STYLE_PINK)
     # Truncate description
     desc = description[:60] + "..." if len(description) > 60 else description
-    text.append(desc, style=Style(color=NEON_COLORS["foreground"]))
+    text.append(desc, style=STYLE_FG)
     console.print(text)
 
 
@@ -1588,8 +1619,8 @@ def print_fix_complete(console: Console, item_num: int, total: int) -> None:
     """
     text = Text()
     text.append("  ", style=Style())
-    text.append(f"[{item_num}/{total}] ", style=Style(color=NEON_COLORS["cyan"], bold=True))
-    text.append("✔ Fix applied", style=Style(color=NEON_COLORS["green"]))
+    text.append(f"[{item_num}/{total}] ", style=STYLE_BOLD_CYAN)
+    text.append("✔ Fix applied", style=STYLE_GREEN)
     console.print(text)
 
 
@@ -1635,15 +1666,15 @@ def print_summary(console: Console, data: SummaryData) -> None:
     """
     table = Table(
         title="✨ Review Summary",
-        title_style=Style(color=NEON_COLORS["green"], bold=True),
+        title_style=STYLE_BOLD_GREEN,
         box=box.ROUNDED,
-        border_style=Style(color=NEON_COLORS["purple"]),
+        border_style=STYLE_PURPLE,
         show_header=False,
         padding=(0, 1),
     )
 
-    table.add_column("Field", style=Style(color=NEON_COLORS["cyan"]))
-    table.add_column("Value", style=Style(color=NEON_COLORS["foreground"]))
+    table.add_column("Field", style=STYLE_CYAN)
+    table.add_column("Value", style=STYLE_FG)
 
     table.add_row("Skill", data.skill)
     table.add_row("Target", data.target)
@@ -1686,15 +1717,15 @@ def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> 
     """
     menu_text = Text()
     for key, description in options:
-        menu_text.append(f"  [{key}] ", style=Style(color=NEON_COLORS["cyan"], bold=True))
-        menu_text.append(f"{description}\n", style=Style(color=NEON_COLORS["foreground"]))
+        menu_text.append(f"  [{key}] ", style=STYLE_BOLD_CYAN)
+        menu_text.append(f"{description}\n", style=STYLE_FG)
 
     panel = Panel(
         menu_text,
         title=title,
         title_align="left",
         box=box.ROUNDED,
-        border_style=Style(color=NEON_COLORS["pink"]),
+        border_style=STYLE_PINK,
         padding=(0, 1),
     )
     console.print(panel)
@@ -1718,11 +1749,11 @@ def prompt_user(console: Console, message: str, default: str = "") -> str:
 
     """
     prompt_text = Text()
-    prompt_text.append("\u25b6 ", style=Style(color=NEON_COLORS["cyan"]))  # ▶
-    prompt_text.append(message, style=Style(color=NEON_COLORS["cyan"]))
+    prompt_text.append("\u25b6 ", style=STYLE_CYAN)  # ▶
+    prompt_text.append(message, style=STYLE_CYAN)
     if default:
         prompt_text.append(f" [{default}]", style=Style(color=NEON_COLORS["foreground"], dim=True))
-    prompt_text.append(": ", style=Style(color=NEON_COLORS["cyan"]))
+    prompt_text.append(": ", style=STYLE_CYAN)
 
     console.print(prompt_text, end="")
     user_input = input()
@@ -1908,10 +1939,10 @@ class LiveToolPanel:
             # Add title for result section
             if self._is_error:
                 result_title = Text()
-                result_title.append("\u274c Error", style=Style(color=NEON_COLORS["red"], bold=True))
+                result_title.append("\u274c Error", style=STYLE_BOLD_RED)
             else:
                 result_title = Text()
-                result_title.append("\U0001f4e4 Output", style=Style(color=NEON_COLORS["cyan"], bold=True))
+                result_title.append("\U0001f4e4 Output", style=STYLE_BOLD_CYAN)
 
             if isinstance(result_content, Text) and not result_content.plain.strip():
                 # Empty result - just show header (wrap in Group for type consistency)
@@ -1927,7 +1958,7 @@ class LiveToolPanel:
             content,
             box=box.ROUNDED,
             border_style=Style(color=border_color),
-            style=Style(bgcolor="#1e1e2e"),
+            style=STYLE_PANEL_BG,
             padding=(0, 1),
         )
 
@@ -2136,7 +2167,7 @@ def neon_progress(
 
     def render_frame() -> Text:
         frame = Text()
-        frame.append(f"{message} ", style=Style(color=NEON_COLORS["cyan"]))
+        frame.append(f"{message} ", style=STYLE_CYAN)
         frame.append(throbber.render(width))
         return frame
 
@@ -2218,7 +2249,7 @@ class ShutdownPanel:
             color = config["color"]
 
             content.append(f"{icon} ", style=Style(color=color))
-            content.append(step.message, style=Style(color=NEON_COLORS["foreground"]))
+            content.append(step.message, style=STYLE_FG)
 
             if i < len(self._steps) - 1:
                 content.append("\n")
@@ -2226,7 +2257,7 @@ class ShutdownPanel:
         return Panel(
             content,
             box=box.ROUNDED,
-            border_style=Style(color=NEON_COLORS["yellow"]),
+            border_style=STYLE_YELLOW,
             padding=(0, 1),
         )
 
