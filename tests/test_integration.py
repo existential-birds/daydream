@@ -585,7 +585,10 @@ async def test_quiet_mode_error_shows_header_with_red_border(mock_sdk_with_tool_
     monkeypatch.setattr("daydream.agent.ClaudeSDKClient", mock_client_class)
 
     output = StringIO()
-    test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
+    # Force truecolor to get consistent RGB color codes across environments
+    test_console = Console(
+        file=output, force_terminal=True, width=120, theme=NEON_THEME, color_system="truecolor"
+    )
     monkeypatch.setattr("daydream.agent.console", test_console)
 
     set_quiet_mode(True)
