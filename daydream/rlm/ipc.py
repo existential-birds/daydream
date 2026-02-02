@@ -111,6 +111,10 @@ def decode_message(line: str) -> JsonRpcRequest | JsonRpcResponse:
     """
     data = json.loads(line.strip())
 
+    # Validate JSON-RPC version
+    if data.get("jsonrpc") != "2.0":
+        raise ValueError("Invalid or missing jsonrpc version")
+
     # Response has "result" or "error", request has "method"
     if "method" in data:
         return JsonRpcRequest(
@@ -119,6 +123,9 @@ def decode_message(line: str) -> JsonRpcRequest | JsonRpcResponse:
             params=data.get("params"),
         )
     else:
+        # Validate that exactly one of "result" or "error" is present
+        if "result" not in data and "error" not in data:
+            raise KeyError("result/error")
         error = None
         if "error" in data:
             err_data = data["error"]

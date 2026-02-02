@@ -57,8 +57,9 @@ class TestRLMIntegration:
         captured = capsys.readouterr()
         all_output = captured.out + captured.err
 
-        # Should either show RLM output or complete successfully
-        assert "RLM" in all_output or exit_code == 0
+        # Verify the command completed successfully
+        assert exit_code == 0
+        # Note: RLM output check ("RLM" in all_output) is optional until full implementation
 
 
 class TestRLMFallback:

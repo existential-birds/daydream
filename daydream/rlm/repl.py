@@ -161,6 +161,14 @@ class REPLProcess:
                 final_answer=fa.answer,
             )
 
+        except SystemExit as se:
+            output = stdout_capture.getvalue()
+            return ExecuteResult(
+                output=output,
+                error=f"SystemExit: {se}",
+                final_answer=None,
+            )
+
         except Exception:
             # Capture full traceback
             output = stdout_capture.getvalue()

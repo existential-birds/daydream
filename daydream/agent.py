@@ -185,7 +185,7 @@ def get_shutdown_requested() -> bool:
 async def query_llm_simple(
     cwd: Path,
     prompt: str,
-    model: str = "opus",
+    model: str | None = None,
     label: str | None = None,
 ) -> str:
     """Simple LLM query returning text response only.
@@ -199,50 +199,57 @@ async def query_llm_simple(
     Args:
         cwd: Working directory for the agent.
         prompt: The prompt to send to the agent.
-        model: Model name to use ("opus", "sonnet", or "haiku").
+        model: Optional model override (defaults to global model setting).
         label: Optional label for logging (e.g., "root", "sub-query").
 
     Returns:
         The text response from the agent.
     """
+    global _current_client
+
     log_prefix = f"[{label}] " if label else ""
+    effective_model = model if model is not None else _state.model
 
     _log_debug(f"\n{'='*80}\n")
-    _log_debug(f"{log_prefix}[QUERY_LLM_SIMPLE] model={model} cwd={cwd}\n")
+    _log_debug(f"{log_prefix}[QUERY_LLM_SIMPLE] model={effective_model} cwd={cwd}\n")
     _log_debug(f"{log_prefix}[PROMPT]\n{prompt}\n")
     _log_debug(f"{'='*80}\n\n")
 
     options = ClaudeAgentOptions(
         cwd=str(cwd),
         permission_mode="bypassPermissions",
-        model=model,
+        model=effective_model,
     )
 
     output_parts: list[str] = []
 
     async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock) and block.text:
-                        output_parts.append(block.text)
-                        _log_debug(f"{log_prefix}[TEXT] {block.text}\n")
-                    elif isinstance(block, ThinkingBlock) and block.thinking:
-                        _log_debug(f"{log_prefix}[THINKING] {block.thinking}\n")
-                    elif isinstance(block, ToolUseBlock):
-                        _log_debug(f"{log_prefix}[TOOL_USE] {block.name}({block.input})\n")
+        _current_client = client
+        try:
+            await client.query(prompt)
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock) and block.text:
+                            output_parts.append(block.text)
+                            _log_debug(f"{log_prefix}[TEXT] {block.text}\n")
+                        elif isinstance(block, ThinkingBlock) and block.thinking:
+                            _log_debug(f"{log_prefix}[THINKING] {block.thinking}\n")
+                        elif isinstance(block, ToolUseBlock):
+                            _log_debug(f"{log_prefix}[TOOL_USE] {block.name}({block.input})\n")
 
-            elif isinstance(msg, UserMessage):
-                for user_block in msg.content:
-                    if isinstance(user_block, ToolResultBlock):
-                        content_str = str(user_block.content) if user_block.content else ""
-                        error_marker = " [ERROR]" if user_block.is_error else ""
-                        _log_debug(f"{log_prefix}[TOOL_RESULT{error_marker}] {content_str}\n")
+                elif isinstance(msg, UserMessage):
+                    for user_block in msg.content:
+                        if isinstance(user_block, ToolResultBlock):
+                            content_str = str(user_block.content) if user_block.content else ""
+                            error_marker = " [ERROR]" if user_block.is_error else ""
+                            _log_debug(f"{log_prefix}[TOOL_RESULT{error_marker}] {content_str}\n")
 
-            elif isinstance(msg, ResultMessage):
-                if msg.total_cost_usd:
-                    _log_debug(f"{log_prefix}[COST] ${msg.total_cost_usd:.4f}\n")
+                elif isinstance(msg, ResultMessage):
+                    if msg.total_cost_usd:
+                        _log_debug(f"{log_prefix}[COST] ${msg.total_cost_usd:.4f}\n")
+        finally:
+            _current_client = None
 
     response = "".join(output_parts)
     _log_debug(f"{log_prefix}[RESPONSE_LENGTH] {len(response)} chars\n")
