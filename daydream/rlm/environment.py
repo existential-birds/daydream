@@ -5,7 +5,9 @@ This module defines the data structures available to model-generated code
 in the sandboxed REPL environment.
 """
 
+import re
 from dataclasses import dataclass
+from typing import Any, Callable
 
 
 @dataclass
@@ -71,3 +73,106 @@ class RepoContext:
     largest_files: list[tuple[str, int]]
     languages: list[str]
     changed_files: list[str] | None
+
+
+class FinalAnswer(Exception):
+    """Raised when FINAL() or FINAL_VAR() is called to signal completion.
+
+    Attributes:
+        answer: The final answer string to return to the user.
+    """
+
+    def __init__(self, answer: str):
+        self.answer = answer
+        super().__init__(answer)
+
+
+def build_repl_namespace(
+    ctx: RepoContext,
+    llm_query_fn: Callable[[str, str], str],
+    llm_query_parallel_fn: Callable[[list[str], str], list[str]] | None = None,
+) -> dict[str, Any]:
+    """Build the namespace dict for the REPL environment.
+
+    Creates a dictionary containing all objects and functions available
+    to model-generated code in the REPL.
+
+    Args:
+        ctx: The RepoContext with codebase data.
+        llm_query_fn: Function to call for llm_query(prompt, model).
+        llm_query_parallel_fn: Optional function for parallel queries.
+            If None, falls back to sequential calls.
+
+    Returns:
+        Dictionary to use as REPL globals/locals.
+    """
+    namespace: dict[str, Any] = {}
+
+    # Expose repo context
+    namespace["repo"] = ctx
+
+    # Wrap llm_query with default model parameter
+    def llm_query(prompt: str, model: str = "haiku") -> str:
+        """Fresh-context sub-LLM call. Returns response text."""
+        return llm_query_fn(prompt, model)
+
+    namespace["llm_query"] = llm_query
+
+    # Parallel query function
+    if llm_query_parallel_fn is not None:
+        def llm_query_parallel(prompts: list[str], model: str = "haiku") -> list[str]:
+            """Batch multiple independent queries for efficiency."""
+            return llm_query_parallel_fn(prompts, model)
+    else:
+        def llm_query_parallel(prompts: list[str], model: str = "haiku") -> list[str]:
+            """Fallback: execute queries sequentially."""
+            return [llm_query_fn(p, model) for p in prompts]
+
+    namespace["llm_query_parallel"] = llm_query_parallel
+
+    # Search function: files_containing
+    def files_containing(pattern: str) -> list[str]:
+        """Grep-like regex search, returns matching file paths."""
+        compiled = re.compile(pattern)
+        return [path for path, content in ctx.files.items() if compiled.search(content)]
+
+    namespace["files_containing"] = files_containing
+
+    # Search function: files_importing
+    def files_importing(module: str) -> list[str]:
+        """Find files that import a given module."""
+        # Match: import X, from X import, import X as Y
+        pattern = rf"(?:^|\n)\s*(?:import\s+{re.escape(module)}|from\s+{re.escape(module)}\s+import)"
+        compiled = re.compile(pattern)
+        return [path for path, content in ctx.files.items() if compiled.search(content)]
+
+    namespace["files_importing"] = files_importing
+
+    # File slice function
+    def get_file_slice(path: str, start_line: int, end_line: int) -> str:
+        """Get specific line range from a file (1-based, inclusive)."""
+        content = ctx.files.get(path, "")
+        lines = content.split("\n")
+        # Convert to 0-based index, end_line is inclusive
+        selected = lines[start_line - 1 : end_line]
+        return "\n".join(selected)
+
+    namespace["get_file_slice"] = get_file_slice
+
+    # FINAL function - signals completion with direct answer
+    def FINAL(answer: str) -> None:
+        """Signal task completion with direct answer."""
+        raise FinalAnswer(answer)
+
+    namespace["FINAL"] = FINAL
+
+    # FINAL_VAR function - signals completion using a variable
+    def FINAL_VAR(var_name: str) -> None:
+        """Signal task completion, returning a REPL variable as output."""
+        if var_name not in namespace:
+            raise NameError(f"Variable '{var_name}' not found in namespace")
+        raise FinalAnswer(str(namespace[var_name]))
+
+    namespace["FINAL_VAR"] = FINAL_VAR
+
+    return namespace
