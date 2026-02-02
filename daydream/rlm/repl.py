@@ -5,11 +5,9 @@ This module manages the Python REPL process that executes code generated
 by the model, handling IPC communication and output capture.
 """
 
-import asyncio
 import io
-import sys
 import traceback
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from typing import Callable
 

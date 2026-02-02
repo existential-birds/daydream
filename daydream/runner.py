@@ -87,6 +87,54 @@ def _print_missing_skill_error(skill_name: str) -> None:
     console.print()
 
 
+async def _run_rlm_mode(config: RunConfig, target_dir: Path) -> int:
+    """Execute RLM mode review.
+
+    Args:
+        config: Run configuration.
+        target_dir: Target directory path.
+
+    Returns:
+        Exit code (0 for success, 1 for failure).
+    """
+    from daydream.rlm import load_codebase
+
+    # Map skill to languages
+    skill_to_languages = {
+        "python": ["python"],
+        "frontend": ["typescript", "javascript"],
+    }
+    languages = skill_to_languages.get(config.skill or "python", ["python"])
+
+    print_info(console, f"[RLM] Mode: reviewing {target_dir}")
+    print_info(console, f"[RLM] Languages: {', '.join(languages)}")
+    print_info(console, f"[RLM] Model: {config.model}")
+    console.print()
+
+    # Load codebase to show stats
+    ctx = load_codebase(target_dir, languages)
+    print_info(console, f"[RLM] Files: {ctx.file_count:,}")
+    print_info(console, f"[RLM] Estimated tokens: {ctx.total_tokens:,}")
+    console.print()
+
+    if ctx.file_count == 0:
+        print_error(console, "No Files", "No matching files found in target directory")
+        return 1
+
+    # Show largest files
+    if ctx.largest_files:
+        print_dim(console, "Largest files:")
+        for path, tokens in ctx.largest_files[:5]:
+            print_dim(console, f"  {path}: {tokens:,} tokens")
+        console.print()
+
+    # TODO: Full RLM implementation
+    print_info(console, "[RLM] Full orchestration not yet implemented")
+    print_info(console, "[RLM] Codebase loaded successfully")
+
+    return 0
+
+
 async def run(config: RunConfig | None = None) -> int:
     """Execute the review and fix loop.
 
@@ -112,6 +160,10 @@ async def run(config: RunConfig | None = None) -> int:
     if not target_dir.is_dir():
         print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
         return 1
+
+    # RLM mode branch
+    if config.rlm_mode:
+        return await _run_rlm_mode(config, target_dir)
 
     # Get review skill (from config or prompt) - not required when starting at "test"
     skill: str | None = None
