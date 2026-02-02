@@ -21,6 +21,7 @@ from daydream.phases import (
     phase_review,
     phase_test_and_heal,
 )
+from daydream.rlm.errors import ContainerError, HeartbeatFailedError, REPLCrashError
 from daydream.ui import (
     SummaryData,
     phase_subtitle,
@@ -87,6 +88,112 @@ def _print_missing_skill_error(skill_name: str) -> None:
     console.print()
 
 
+def _skill_to_languages(skill: str | None) -> list[str]:
+    """Map skill name to list of languages.
+
+    Args:
+        skill: Skill name ("python" or "frontend").
+
+    Returns:
+        List of language names.
+    """
+    skill_to_languages = {
+        "python": ["python"],
+        "frontend": ["typescript", "javascript"],
+    }
+    return skill_to_languages.get(skill or "python", ["python"])
+
+
+async def run_rlm_review(cwd: Path, languages: list[str]) -> str:
+    """Execute RLM-based code review.
+
+    Args:
+        cwd: Working directory for the review.
+        languages: List of languages to include in review.
+
+    Returns:
+        Review output as markdown string.
+
+    Raises:
+        REPLCrashError: If REPL process exits unexpectedly.
+        HeartbeatFailedError: If REPL stops responding to heartbeats.
+        ContainerError: If devcontainer fails to start or crashes.
+    """
+    from daydream.rlm import load_codebase
+
+    # Load codebase to show stats
+    ctx = load_codebase(cwd, languages)
+    print_info(console, f"[RLM] Files: {ctx.file_count:,}")
+    print_info(console, f"[RLM] Estimated tokens: {ctx.total_tokens:,}")
+    console.print()
+
+    if ctx.file_count == 0:
+        raise ValueError("No matching files found in target directory")
+
+    # Show largest files
+    if ctx.largest_files:
+        print_dim(console, "Largest files:")
+        for path, tokens in ctx.largest_files[:5]:
+            print_dim(console, f"  {path}: {tokens:,} tokens")
+        console.print()
+
+    # TODO: Full RLM orchestration implementation
+    # This will be expanded to run the full REPL loop with LLM interactions
+    print_info(console, "[RLM] Full orchestration not yet implemented")
+    print_info(console, "[RLM] Codebase loaded successfully")
+
+    return "# Code Review\n\nRLM review not yet fully implemented."
+
+
+async def run_standard_review(cwd: Path, skill: str) -> str:
+    """Execute standard skill-based code review.
+
+    Args:
+        cwd: Working directory for the review.
+        skill: Full skill path (e.g., "beagle:review-python").
+
+    Returns:
+        Review output as markdown string.
+    """
+    from daydream.phases import phase_review
+
+    await phase_review(cwd, skill)
+
+    # Read the review output file
+    review_output_path = cwd / REVIEW_OUTPUT_FILE
+    if review_output_path.exists():
+        return review_output_path.read_text()
+    return ""
+
+
+async def run_rlm_review_with_fallback(
+    cwd: Path,
+    languages: list[str],
+    fallback_skill: str,
+) -> str:
+    """Execute RLM review with graceful fallback to standard review.
+
+    Attempts to run an RLM-based code review first. If RLM mode fails
+    due to container or REPL errors, falls back to the standard
+    skill-based review.
+
+    Args:
+        cwd: Working directory for the review.
+        languages: List of languages to include in review.
+        fallback_skill: Full skill path to use for fallback (e.g., "beagle:review-python").
+
+    Returns:
+        Review output as markdown string.
+    """
+    try:
+        return await run_rlm_review(cwd, languages)
+    except (REPLCrashError, HeartbeatFailedError, ContainerError) as e:
+        console.print(f"[yellow]RLM mode failed: {e}[/yellow]")
+        console.print("[yellow]Falling back to standard skill-based review...[/yellow]")
+        console.print()
+        return await run_standard_review(cwd, fallback_skill)
+
+
 async def _run_rlm_mode(config: RunConfig, target_dir: Path) -> int:
     """Execute RLM mode review.
 
@@ -97,42 +204,39 @@ async def _run_rlm_mode(config: RunConfig, target_dir: Path) -> int:
     Returns:
         Exit code (0 for success, 1 for failure).
     """
-    from daydream.rlm import load_codebase
+    languages = _skill_to_languages(config.skill)
 
-    # Map skill to languages
-    skill_to_languages = {
-        "python": ["python"],
-        "frontend": ["typescript", "javascript"],
-    }
-    languages = skill_to_languages.get(config.skill or "python", ["python"])
+    # Determine fallback skill
+    fallback_skill = SKILL_MAP.get(config.skill or "python", "beagle:review-python")
 
     print_info(console, f"[RLM] Mode: reviewing {target_dir}")
     print_info(console, f"[RLM] Languages: {', '.join(languages)}")
     print_info(console, f"[RLM] Model: {config.model}")
     console.print()
 
-    # Load codebase to show stats
-    ctx = load_codebase(target_dir, languages)
-    print_info(console, f"[RLM] Files: {ctx.file_count:,}")
-    print_info(console, f"[RLM] Estimated tokens: {ctx.total_tokens:,}")
-    console.print()
+    try:
+        review_output = await run_rlm_review_with_fallback(
+            target_dir,
+            languages,
+            fallback_skill,
+        )
 
-    if ctx.file_count == 0:
-        print_error(console, "No Files", "No matching files found in target directory")
+        # Write review output to file if we got content
+        if review_output:
+            review_output_path = target_dir / REVIEW_OUTPUT_FILE
+            review_output_path.write_text(review_output)
+            print_success(console, f"Review output written to: {review_output_path}")
+
+        return 0
+
+    except ValueError as e:
+        # No files found
+        print_error(console, "No Files", str(e))
         return 1
-
-    # Show largest files
-    if ctx.largest_files:
-        print_dim(console, "Largest files:")
-        for path, tokens in ctx.largest_files[:5]:
-            print_dim(console, f"  {path}: {tokens:,} tokens")
-        console.print()
-
-    # TODO: Full RLM implementation
-    print_info(console, "[RLM] Full orchestration not yet implemented")
-    print_info(console, "[RLM] Codebase loaded successfully")
-
-    return 0
+    except MissingSkillError as e:
+        # Fallback skill not available
+        _print_missing_skill_error(e.skill_name)
+        return 1
 
 
 async def run(config: RunConfig | None = None) -> int:
