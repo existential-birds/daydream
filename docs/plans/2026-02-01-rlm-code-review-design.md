@@ -84,7 +84,10 @@ repo.total_tokens: int              # Total token count across all files
 repo.file_count: int                # Number of files loaded
 repo.largest_files: list[str]       # Top 10 files by size
 repo.languages: list[str]           # ["python", "typescript", "go"]
+repo.file_sizes: dict[str, int]     # {path: token_count} for planning batch sizes
 ```
+
+**Design note**: The paper's system prompt exposes `context_type`, `context_total_length`, and `context_lengths` (per-chunk sizes). For code review, we provide equivalent information through `repo.file_sizes` to help the model plan efficient batching strategies.
 
 ### Core Data Structures
 
@@ -132,6 +135,8 @@ def llm_query_parallel(prompts: list[str], model: str = "haiku") -> list[str]:
     """Batch multiple independent queries for efficiency."""
 ```
 
+**Implementation note**: The `llm_query_parallel()` function is an enhancement over the paper's baseline, which used synchronous sub-calls. Parallel execution significantly reduces latency for multi-batch analyses.
+
 ### Termination Signals
 
 ```python
@@ -160,6 +165,8 @@ def get_file_slice(path: str, start_line: int, end_line: int) -> str:
 - All `print()` output captured and returned to model
 - Exceptions include full tracebacks
 - Output truncated at 50k chars with message: `"[truncated - use llm_query to analyze large outputs]"`
+
+**Why truncation matters**: This is a core RLM design principle, not just a limitation. The model cannot see full outputs, which is precisely WHY it must use `llm_query()` to analyze large data — sub-LLMs can process full content and return summarized findings that fit in the root LLM's context window.
 
 ---
 
@@ -284,9 +291,10 @@ async def run_rlm_review_with_fallback(cwd: Path, languages: list[str]) -> str:
 
 ### Sub-LLM Calls
 
-- **Fresh context every time** — No memory between calls
-- **Cheap and parallelizable** — Batch aggressively
-- **~100k chars per call** — Don't call per-file
+- **Fresh context every time** — Each call is stateless with no memory of previous queries
+- **Cheap and parallelizable** — Batch aggressively; sub-LLMs can handle ~500K characters
+- **Target ~100-200k chars per call** — Never call per-file; batch related content together
+- **Model-specific tuning may be needed** — Per the paper, some models (e.g., Qwen3-Coder) require explicit warnings against excessive sub-calls
 
 ---
 
@@ -430,11 +438,37 @@ daydream/
 
 ---
 
+## Design Decisions
+
+### Recursion Depth = 1
+
+Per the RLM paper (Section 5), we implement recursion depth of 1 for the initial release:
+- Sub-calls invoke regular LMs (Haiku), not recursive RLMs
+- This matches the paper's validated experimental setup
+- Deeper recursion is flagged as future work in both the paper and this design
+
+### Parallel Sub-LLM Execution
+
+Unlike the paper's synchronous implementation, Daydream provides `llm_query_parallel()` for concurrent sub-LLM calls:
+- Reduces latency for multi-batch analyses
+- Paper acknowledges (Section 5): "asynchronous sub-calls... can potentially significantly reduce the runtime and inference cost of RLMs"
+
+### Devcontainer Sandboxing
+
+Model-generated Python executes in an isolated container:
+- Even malicious code cannot escape the sandbox
+- Codebase mounted read-only
+- All LLM API calls route through the host process
+
+---
+
 ## Open Questions
 
 1. **Service detection**: How to automatically detect service boundaries? Directory conventions? Manifest files?
 
-2. **Recursion depth**: Paper used depth=1 (sub-calls are LMs, not RLMs). Should we support deeper recursion?
+2. **Recursion depth**: ~~Paper used depth=1 (sub-calls are LMs, not RLMs). Should we support deeper recursion?~~
+
+   **Decision**: Implement depth=1 for initial release, matching the paper's validated approach. The paper notes: "while we found strong performance on existing long-context benchmarks, we believe that future work should investigate deeper layers of recursion." Deeper recursion can be added as a future enhancement if needed.
 
 3. **Cost tracking**: Should we surface token/cost estimates during RLM review?
 
