@@ -49,6 +49,7 @@ class RunConfig:
         quiet: Suppress verbose output from the agent.
         review_only: Run review phase only without applying fixes.
         start_at: Phase to start at ("review", "parse", "fix", or "test").
+        rlm_mode: Use RLM mode for large codebase review.
 
     """
 
@@ -60,6 +61,7 @@ class RunConfig:
     quiet: bool = True
     review_only: bool = False
     start_at: str = "review"
+    rlm_mode: bool = False
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
