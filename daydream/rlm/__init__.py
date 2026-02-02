@@ -19,6 +19,7 @@ from daydream.rlm.errors import (
     REPLTimeoutError,
     RLMError,
 )
+from daydream.rlm.repl import ExecuteResult, REPLProcess
 from daydream.rlm.runner import RLMConfig, RLMRunner, load_codebase
 
 __all__ = [
@@ -38,6 +39,9 @@ __all__ = [
     "ContainerConfig",
     "DevContainer",
     "find_devcontainer_config",
+    # REPL
+    "ExecuteResult",
+    "REPLProcess",
     # Runner
     "RLMConfig",
     "RLMRunner",
