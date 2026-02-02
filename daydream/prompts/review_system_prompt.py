@@ -96,7 +96,11 @@ repo.changed_files: list[str]        # Files changed in this PR (if applicable)
 ```python
 # Sub-LLM queries (YOUR PRIMARY ANALYSIS TOOL)
 llm_query(prompt: str, model: str = "haiku") -> str
+    # IMPORTANT: Each call is STATELESS - no memory of previous queries.
+    # Batch information into calls (~100-200k chars per call).
+
 llm_query_parallel(prompts: list[str], model: str = "haiku") -> list[str]
+    # Execute multiple independent queries concurrently for efficiency.
 
 # Search and filtering
 files_containing(pattern: str) -> list[str]   # Regex search across all files
@@ -152,6 +156,8 @@ print(f"Found {{len(sql_files)}} files with SQL, {{len(auth_files)}} with auth")
 
 **⚠️ CRITICAL WARNING ⚠️**
 Every `llm_query()` call has cost and latency. NEVER call it in a loop per-file.
+Each sub-LLM call is stateless (fresh context) — batch ~100-200k chars per call.
+Sub-LLMs can handle ~500K characters, so don't under-batch!
 
 ```python
 # ❌ BAD: 50 separate LLM calls = slow + expensive
@@ -192,6 +198,10 @@ results = llm_query_parallel(prompts)  # All chunks analyzed in parallel
 ```
 
 ### Step 4: AGGREGATE INTO A BUFFER VARIABLE
+
+**Why this matters**: Variables allow you to construct outputs far longer than any single
+LLM response could produce. By building findings incrementally and using `FINAL_VAR()`,
+you can return reports of essentially unbounded length.
 
 Build your findings incrementally in a variable:
 
@@ -332,6 +342,7 @@ FINAL(\"\"\"# Review Complete
 \"\"\")
 
 # Option 2: From a variable (preferred for complex reports)
+# This allows returning outputs longer than a single LLM response could produce
 FINAL_VAR("final_report")  # Uses the final_report variable you built up
 ```
 
