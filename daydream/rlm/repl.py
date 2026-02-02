@@ -19,6 +19,25 @@ from daydream.rlm.environment import (
 )
 
 
+class StreamingStringIO(io.StringIO):
+    """StringIO that streams writes to a callback in real-time."""
+
+    def __init__(self, on_write: Callable[[str], None] | None = None):
+        """Initialize streaming StringIO.
+
+        Args:
+            on_write: Optional callback called on each write with the text.
+        """
+        super().__init__()
+        self._on_write = on_write
+
+    def write(self, s: str) -> int:
+        """Write string and notify callback."""
+        if s and self._on_write is not None:
+            self._on_write(s)
+        return super().write(s)
+
+
 @dataclass
 class ExecuteResult:
     """Result of executing code in the REPL.
@@ -89,11 +108,16 @@ class REPLProcess:
         self._namespace = None
         self._running = False
 
-    def execute(self, code: str) -> ExecuteResult:
+    def execute(
+        self,
+        code: str,
+        on_output: Callable[[str], None] | None = None,
+    ) -> ExecuteResult:
         """Execute Python code in the REPL namespace.
 
         Args:
             code: Python code to execute.
+            on_output: Optional callback for real-time output streaming.
 
         Returns:
             ExecuteResult with output, error, or final answer.
@@ -105,8 +129,8 @@ class REPLProcess:
                 final_answer=None,
             )
 
-        stdout_capture = io.StringIO()
-        stderr_capture = io.StringIO()
+        stdout_capture = StreamingStringIO(on_write=on_output)
+        stderr_capture = StreamingStringIO(on_write=on_output)
 
         try:
             with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):

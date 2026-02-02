@@ -119,7 +119,11 @@ async def run_rlm_review(cwd: Path, languages: list[str]) -> str:
         HeartbeatFailedError: If REPL stops responding to heartbeats.
         ContainerError: If devcontainer fails to start or crashes.
     """
-    from daydream.rlm import load_codebase
+    import asyncio
+
+    from daydream.agent import get_model, query_llm_simple
+    from daydream.config import RLM_LLM_QUERY_TIMEOUT
+    from daydream.rlm import RLMConfig, RLMRunner, load_codebase
 
     # Load codebase to show stats
     ctx = load_codebase(cwd, languages)
@@ -137,12 +141,147 @@ async def run_rlm_review(cwd: Path, languages: list[str]) -> str:
             print_dim(console, f"  {path}: {tokens:,} tokens")
         console.print()
 
-    # TODO: Full RLM orchestration implementation
-    # This will be expanded to run the full REPL loop with LLM interactions
-    print_info(console, "[RLM] Full orchestration not yet implemented")
-    print_info(console, "[RLM] Codebase loaded successfully")
+    # Get current event loop for sync/async bridge
+    loop = asyncio.get_running_loop()
 
-    return "# Code Review\n\nRLM review not yet fully implemented."
+    # Track iteration for logging
+    iteration_state = {"current": 0, "sub_query_count": 0}
+
+    # Create async callback for root LLM (orchestration)
+    async def call_llm(prompt: str) -> str:
+        iteration_state["current"] += 1
+        iteration = iteration_state["current"]
+        print_info(console, f"[RLM] Iteration {iteration}: Calling root LLM (model={get_model()})...")
+
+        # Log full prompt
+        print_dim(console, f"[RLM] Prompt:\n{prompt}")
+
+        response = await query_llm_simple(
+            cwd,
+            prompt,
+            model=get_model(),
+            label=f"RLM-root-iter{iteration}",
+        )
+
+        # Log full response
+        print_dim(console, f"[RLM] Response:\n{response}")
+        print_info(console, f"[RLM] Iteration {iteration}: Response received ({len(response)} chars)")
+
+        return response
+
+    # Create sync callback for sub-LLM (llm_query from REPL)
+    def llm_callback(prompt: str, model: str) -> str:
+        iteration_state["sub_query_count"] += 1
+        query_num = iteration_state["sub_query_count"]
+        iteration = iteration_state["current"]
+
+        print_dim(console, f"[RLM] Sub-query #{query_num} (iter {iteration}, model={model})...")
+
+        # Log full prompt
+        print_dim(console, f"[RLM]   Prompt:\n{prompt}")
+
+        future = asyncio.run_coroutine_threadsafe(
+            query_llm_simple(
+                cwd,
+                prompt,
+                model=model,
+                label=f"RLM-sub-iter{iteration}-q{query_num}",
+            ),
+            loop,
+        )
+        response = future.result(timeout=RLM_LLM_QUERY_TIMEOUT)
+
+        # Log full response
+        print_dim(console, f"[RLM]   Response:\n{response}")
+
+        return response
+
+    # Create and configure runner
+    config = RLMConfig(
+        workspace_path=str(cwd),
+        languages=languages,
+        model=get_model(),
+        sub_model="haiku",
+        use_container=True,  # Enable devcontainer sandboxing
+    )
+
+    # Event handler for RLM progress - captures all fields needed for Rich UI
+    def on_event(iteration: int, event_type: str, data: dict) -> None:
+        """Handle RLM runner events for logging/UI."""
+        if event_type == "iteration_start":
+            print_info(
+                console,
+                f"[RLM] === Iteration {iteration}/{data['max_iterations']} ===",
+            )
+        elif event_type == "code_extracted":
+            if data["has_code"]:
+                print_dim(console, f"[RLM] Code extracted: {data['code_length']} chars")
+                # Show full code content
+                code_preview = data["code_preview"]
+                for line in code_preview.split("\n"):
+                    print_dim(console, f"[RLM]   {line}")
+            else:
+                print_dim(console, "[RLM] No code block found in response")
+        elif event_type == "fallback_final_detection":
+            print_dim(console, "[RLM] Detected FINAL() call outside code block")
+        elif event_type == "no_code_found":
+            print_dim(console, "[RLM] Asking LLM to provide code in fenced block")
+        elif event_type == "repl_executed":
+            if data["is_error"]:
+                print_error(
+                    console,
+                    "REPL Error",
+                    f"{data['error'] if data['error'] else 'Unknown error'}",
+                )
+            else:
+                output_preview = data["output_preview"]
+                if output_preview:
+                    print_dim(console, f"[RLM] REPL output ({data['output_length']} chars):")
+                    # Show full output
+                    for line in output_preview.split("\n"):
+                        print_dim(console, f"[RLM]   {line}")
+                else:
+                    print_dim(console, "[RLM] REPL executed (no output)")
+        elif event_type == "final_answer":
+            print_success(
+                console,
+                f"[RLM] Final answer received ({data['answer_length']} chars)",
+            )
+        elif event_type == "max_iterations_reached":
+            print_error(
+                console,
+                "Max Iterations",
+                f"Stopped after {data['iterations_completed']} iterations",
+            )
+
+    runner = RLMRunner(config)
+    runner._call_llm = call_llm
+    runner._llm_callback = llm_callback
+    runner._on_event = on_event
+
+    # Container lifecycle logging (when container support is enabled)
+    if config.use_container:
+        print_info(console, "[Container] Starting devcontainer...")
+
+    try:
+        # Run orchestration
+        print_info(console, "[RLM] Starting orchestration loop...")
+        print_info(console, f"[RLM] Max iterations: {config.max_iterations}")
+        console.print()
+
+        if config.use_container:
+            print_info(console, "[Container] Ready")
+
+        result = await runner.run()
+
+        # Log final stats
+        print_info(console, f"[RLM] Completed after {iteration_state['current']} iterations")
+        print_info(console, f"[RLM] Total sub-queries: {iteration_state['sub_query_count']}")
+
+        return result
+    finally:
+        if config.use_container:
+            print_info(console, "[Container] Stopping...")
 
 
 async def run_standard_review(cwd: Path, skill: str) -> str:

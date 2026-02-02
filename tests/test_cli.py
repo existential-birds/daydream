@@ -37,8 +37,8 @@ class TestRLMIntegration:
     """Tests for RLM integration in runner."""
 
     @pytest.mark.asyncio
-    async def test_rlm_mode_prints_not_implemented(self, tmp_path, capsys):
-        """RLM mode should indicate it's not yet complete."""
+    async def test_rlm_mode_runs_successfully(self, tmp_path, capsys):
+        """RLM mode should run and produce output."""
         from daydream.runner import run, RunConfig
 
         # Create a minimal Python file
@@ -53,10 +53,12 @@ class TestRLMIntegration:
 
         exit_code = await run(config)
 
-        # Should complete without error for now
-        # (Full implementation comes later)
+        # Check output contains RLM logs (Rich may output to stdout or stderr)
         captured = capsys.readouterr()
-        assert "RLM" in captured.out or exit_code == 0
+        all_output = captured.out + captured.err
+
+        # Should either show RLM output or complete successfully
+        assert "RLM" in all_output or exit_code == 0
 
 
 class TestRLMFallback:

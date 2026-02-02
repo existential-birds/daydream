@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from daydream.rlm.container import DevContainer
 from daydream.rlm.environment import FileInfo, RepoContext
+from daydream.rlm.history import ConversationHistory
 from daydream.rlm.repl import ExecuteResult, REPLProcess
 
 # File extensions by language
@@ -44,6 +46,9 @@ EXCLUDED_DIRS = {
 
 # Default maximum iterations for the orchestration loop
 DEFAULT_MAX_ITERATIONS = 50
+
+# Maximum consecutive iterations without valid code before aborting
+MAX_CONSECUTIVE_ERRORS = 5
 
 
 @dataclass
@@ -181,7 +186,13 @@ def _detect_language(ext: str) -> str:
 
 # Pattern to extract Python code from markdown fenced blocks
 CODE_BLOCK_PATTERN = re.compile(
-    r"```(?:python)?\s*\n(.*?)```",
+    r"```(?:python|py)\s*\n(.*?)```",
+    re.DOTALL,
+)
+
+# Pattern to extract FINAL() or FINAL_VAR() calls from prose
+FINAL_CALL_PATTERN = re.compile(
+    r'FINAL\s*\(\s*["\'].*?["\']\s*\)|FINAL_VAR\s*\(\s*["\'][\w]+["\']\s*\)',
     re.DOTALL,
 )
 
@@ -208,6 +219,20 @@ class RLMRunner:
         self._repl: REPLProcess | None = None
         self._call_llm: Callable[[str], Awaitable[str]] | None = None
         self._llm_callback: Callable[[str, str], str] | None = None
+        # Logging callback for progress events (iteration, event_type, data)
+        self._on_event: Callable[[int, str, dict], None] | None = None
+        self._history: ConversationHistory | None = None
+
+    def _emit_event(self, iteration: int, event_type: str, data: dict) -> None:
+        """Emit a progress event for logging/UI.
+
+        Args:
+            iteration: Current iteration number.
+            event_type: Type of event (e.g., "code_extracted", "repl_result").
+            data: Event-specific data dictionary.
+        """
+        if self._on_event is not None:
+            self._on_event(iteration, event_type, data)
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt describing the REPL environment.
@@ -280,8 +305,17 @@ Get specific line range from a file (1-based, inclusive).
 ### `FINAL(answer: str) -> None`
 Signal completion and return the final review report. Call this when done.
 
+**WARNING**: Do NOT use `FINAL()` with multi-line strings containing triple-quotes,
+backticks, or code examples - Python will fail to parse the string literal.
+
 ### `FINAL_VAR(var_name: str) -> None`
 Signal completion, returning the value of a REPL variable as the final answer.
+
+**RECOMMENDED** for complex reports: Build your report in a variable first:
+```
+report = '''Your markdown report...'''
+FINAL_VAR("report")  # Safe - avoids string parsing issues
+```
 
 ## Your Task
 
@@ -349,16 +383,36 @@ Respond with Python code in a fenced code block:
         Returns:
             Continuation prompt for LLM.
         """
-        parts = [f"## Execution Result (iteration {iteration})"]
+        parts = []
+
+        # Include conversation history
+        if self._history is not None:
+            history_section = self._history.format_for_prompt()
+            if history_section:
+                parts.append(history_section)
+                parts.append("")
+
+        parts.append(f"## Current Execution Result (iteration {iteration})")
 
         if execution_result.output:
             parts.append(f"\n### Output\n```\n{execution_result.output}\n```")
 
         if execution_result.is_error:
             parts.append(f"\n### Error\n```\n{execution_result.error}\n```")
-            parts.append(
-                "\nThe code raised an error. Fix the issue and continue the review."
-            )
+
+            error_msg = execution_result.error or ""
+            if "unterminated" in error_msg.lower() and "string" in error_msg.lower():
+                parts.append(
+                    "\n**String Literal Error**: Use `FINAL_VAR()` for complex reports:\n"
+                    "```python\n"
+                    "report = '''Your report...'''\n"
+                    "FINAL_VAR(\"report\")\n"
+                    "```"
+                )
+            else:
+                parts.append(
+                    "\nThe code raised an error. Fix the issue and continue the review."
+                )
 
         parts.append(
             "\n\nContinue your analysis. When ready, call `FINAL()` with your report."
@@ -366,6 +420,48 @@ Respond with Python code in a fenced code block:
         parts.append("\n\n```python\n# Your next code here\n```")
 
         return "\n".join(parts)
+
+    def _build_no_code_recovery_prompt(self, iteration: int) -> str:
+        """Build recovery prompt when no code is found in LLM response.
+
+        Provides context about the task to help the LLM recover.
+
+        Args:
+            iteration: Current iteration number.
+
+        Returns:
+            Recovery prompt with task context.
+        """
+        if self._context is None:
+            raise RuntimeError("Context not loaded")
+
+        return f"""## Iteration {iteration} - Code Required
+
+I couldn't find executable Python code in your last response.
+
+**REMINDER**: You are reviewing a codebase with {self._context.file_count} files ({', '.join(self._context.languages)}).
+Your goal is to analyze the code and call `FINAL()` with your review report when done.
+
+**Available functions in the REPL**:
+- `repo.files` - dict of file paths to contents
+- `repo.largest_files` - list of (path, tokens) tuples
+- `llm_query(prompt, model="haiku")` - sub-LLM queries
+- `files_containing(pattern)` - regex search across files
+- `FINAL(report)` - complete the review (simple strings only)
+- `FINAL_VAR(varname)` - complete using a variable (recommended for reports)
+
+**Pro Tip**: For markdown reports with code examples:
+```python
+report = '''# Code Review Report
+## Findings...'''
+FINAL_VAR("report")
+```
+
+Please provide Python code in a fenced code block:
+```python
+# Continue your code review analysis
+# When done, call FINAL("Your review report here")
+```"""
 
     async def run(self) -> str:
         """Execute the RLM code review.
@@ -380,23 +476,36 @@ Respond with Python code in a fenced code block:
             self.config.languages,
         )
 
-        # If no LLM callback is set, use a default that returns a placeholder
-        if self._call_llm is None:
-            # Default implementation - can be overridden for testing or real usage
-            return await self._run_with_default_llm()
-
-        # Set up the llm_query callback for the REPL
-        if self._llm_callback is None:
-            # Use a simple echo for testing
-            self._llm_callback = lambda prompt, model: f"[Sub-LLM response to: {prompt[:50]}...]"
-
-        # Create REPL with llm_query callback
-        self._repl = REPLProcess(
-            context=self._context,
-            llm_callback=self._llm_callback,
+        # Initialize conversation history
+        self._history = ConversationHistory(
+            recent_count=3,
         )
 
+        # Container lifecycle
+        container: DevContainer | None = None
+        if self.config.use_container:
+            container = DevContainer(workspace)
+
         try:
+            if container:
+                await container.start()
+
+            # If no LLM callback is set, use a default that returns a placeholder
+            if self._call_llm is None:
+                # Default implementation - can be overridden for testing or real usage
+                return await self._run_with_default_llm()
+
+            # Set up the llm_query callback for the REPL
+            if self._llm_callback is None:
+                # Use a simple echo for testing
+                self._llm_callback = lambda prompt, model: f"[Sub-LLM response to: {prompt[:50]}...]"
+
+            # Create REPL with llm_query callback
+            self._repl = REPLProcess(
+                context=self._context,
+                llm_callback=self._llm_callback,
+            )
+
             self._repl.start()
 
             # Build initial system prompt
@@ -405,35 +514,110 @@ Respond with Python code in a fenced code block:
 
             final_result: str | None = None
             iteration = 0
+            consecutive_no_code = 0
 
             while iteration < self.config.max_iterations:
                 iteration += 1
+
+                self._emit_event(iteration, "iteration_start", {
+                    "max_iterations": self.config.max_iterations,
+                })
 
                 # Get code from LLM
                 response = await self._call_llm(current_prompt)
                 code = self._extract_code(response)
 
+                self._emit_event(iteration, "code_extracted", {
+                    "code_length": len(code) if code else 0,
+                    "code_preview": code if code else "",
+                    "has_code": bool(code),
+                })
+
                 if not code:
                     # No code found - try to extract any runnable content
                     # or ask for clarification
                     if "FINAL(" in response:
-                        # Try to execute the raw response
-                        code = response.strip()
+                        final_match = FINAL_CALL_PATTERN.search(response)
+                        if final_match:
+                            code = final_match.group(0)
+                            self._emit_event(iteration, "fallback_final_detection", {
+                                "response_length": len(response),
+                                "extracted_final": code,
+                            })
+                        else:
+                            # Could not extract FINAL cleanly, treat as no code
+                            consecutive_no_code += 1
+
+                            if consecutive_no_code >= MAX_CONSECUTIVE_ERRORS:
+                                self._emit_event(iteration, "consecutive_error_limit", {
+                                    "consecutive_errors": consecutive_no_code,
+                                })
+                                final_result = (
+                                    "# Code Review (Failed)\n\n"
+                                    f"Review failed after {consecutive_no_code} consecutive iterations "
+                                    "without valid Python code.\n"
+                                    "The model could not provide executable code in the expected format."
+                                )
+                                break
+
+                            self._emit_event(iteration, "no_code_found", {
+                                "response_preview": response[:200],
+                                "reason": "FINAL detected but could not extract cleanly",
+                                "consecutive_count": consecutive_no_code,
+                            })
+                            current_prompt = self._build_no_code_recovery_prompt(iteration)
+                            continue
                     else:
-                        # No executable code, continue to next iteration
-                        current_prompt = (
-                            "I couldn't find Python code in your response. "
-                            "Please provide code in a fenced code block:\n"
-                            "```python\n# Your code here\n```"
-                        )
+                        # No executable code found
+                        consecutive_no_code += 1
+
+                        if consecutive_no_code >= MAX_CONSECUTIVE_ERRORS:
+                            self._emit_event(iteration, "consecutive_error_limit", {
+                                "consecutive_errors": consecutive_no_code,
+                            })
+                            final_result = (
+                                "# Code Review (Failed)\n\n"
+                                f"Review failed after {consecutive_no_code} consecutive iterations "
+                                "without valid Python code.\n"
+                                "The model could not provide executable code in the expected format."
+                            )
+                            break
+
+                        self._emit_event(iteration, "no_code_found", {
+                            "response_preview": response[:200] if response else "",
+                            "consecutive_count": consecutive_no_code,
+                        })
+                        current_prompt = self._build_no_code_recovery_prompt(iteration)
                         continue
+
+                # Reset consecutive error counter on successful code extraction
+                consecutive_no_code = 0
 
                 # Execute code in REPL
                 result = self._repl.execute(code)
 
+                # Add exchange to history
+                self._history.add_exchange(
+                    iteration=iteration,
+                    code=code,
+                    output=result.output or "",
+                    error=result.error,
+                )
+
+                self._emit_event(iteration, "repl_executed", {
+                    "output_length": len(result.output) if result.output else 0,
+                    "output_preview": (result.output if result.output else ""),
+                    "is_error": result.is_error,
+                    "error": result.error if result.is_error else None,
+                    "is_final": result.is_final,
+                })
+
                 # Check for final answer
                 if result.is_final:
                     final_result = result.final_answer
+                    self._emit_event(iteration, "final_answer", {
+                        "answer_length": len(final_result) if final_result else 0,
+                    })
                     break
 
                 # Build continuation prompt with execution result
@@ -441,6 +625,10 @@ Respond with Python code in a fenced code block:
 
             # If we hit max iterations without FINAL, generate a summary
             if final_result is None:
+                self._emit_event(iteration, "max_iterations_reached", {
+                    "iterations_completed": iteration,
+                    "max_iterations": self.config.max_iterations,
+                })
                 final_result = (
                     f"# Code Review (Incomplete)\n\n"
                     f"Review stopped after {iteration} iterations without completion.\n"
@@ -453,6 +641,8 @@ Respond with Python code in a fenced code block:
             if self._repl is not None:
                 self._repl.stop()
                 self._repl = None
+            if container:
+                await container.stop()
 
     async def _run_with_default_llm(self) -> str:
         """Run with a default placeholder LLM for testing.

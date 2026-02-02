@@ -182,6 +182,74 @@ def get_shutdown_requested() -> bool:
     return _state.shutdown_requested
 
 
+async def query_llm_simple(
+    cwd: Path,
+    prompt: str,
+    model: str = "opus",
+    label: str | None = None,
+) -> str:
+    """Simple LLM query returning text response only.
+
+    Unlike run_agent(), this function:
+    - Does not render Rich UI output
+    - Does not support structured output
+    - Returns only text content
+    - Logs all fields needed for Rich UI upgrade
+
+    Args:
+        cwd: Working directory for the agent.
+        prompt: The prompt to send to the agent.
+        model: Model name to use ("opus", "sonnet", or "haiku").
+        label: Optional label for logging (e.g., "root", "sub-query").
+
+    Returns:
+        The text response from the agent.
+    """
+    log_prefix = f"[{label}] " if label else ""
+
+    _log_debug(f"\n{'='*80}\n")
+    _log_debug(f"{log_prefix}[QUERY_LLM_SIMPLE] model={model} cwd={cwd}\n")
+    _log_debug(f"{log_prefix}[PROMPT]\n{prompt}\n")
+    _log_debug(f"{'='*80}\n\n")
+
+    options = ClaudeAgentOptions(
+        cwd=str(cwd),
+        permission_mode="bypassPermissions",
+        model=model,
+    )
+
+    output_parts: list[str] = []
+
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query(prompt)
+        async for msg in client.receive_response():
+            if isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if isinstance(block, TextBlock) and block.text:
+                        output_parts.append(block.text)
+                        _log_debug(f"{log_prefix}[TEXT] {block.text}\n")
+                    elif isinstance(block, ThinkingBlock) and block.thinking:
+                        _log_debug(f"{log_prefix}[THINKING] {block.thinking}\n")
+                    elif isinstance(block, ToolUseBlock):
+                        _log_debug(f"{log_prefix}[TOOL_USE] {block.name}({block.input})\n")
+
+            elif isinstance(msg, UserMessage):
+                for user_block in msg.content:
+                    if isinstance(user_block, ToolResultBlock):
+                        content_str = str(user_block.content) if user_block.content else ""
+                        error_marker = " [ERROR]" if user_block.is_error else ""
+                        _log_debug(f"{log_prefix}[TOOL_RESULT{error_marker}] {content_str}\n")
+
+            elif isinstance(msg, ResultMessage):
+                if msg.total_cost_usd:
+                    _log_debug(f"{log_prefix}[COST] ${msg.total_cost_usd:.4f}\n")
+
+    response = "".join(output_parts)
+    _log_debug(f"{log_prefix}[RESPONSE_LENGTH] {len(response)} chars\n")
+
+    return response
+
+
 def get_current_client() -> ClaudeSDKClient | None:
     """Get the currently running client.
 
@@ -258,6 +326,7 @@ async def run_agent(
     cwd: Path,
     prompt: str,
     output_schema: dict[str, Any] | None = None,
+    model: str | None = None,
 ) -> str | Any:
     """Run agent with the given prompt and return full text output.
 
@@ -267,6 +336,7 @@ async def run_agent(
         cwd: Working directory for the agent
         prompt: The prompt to send to the agent
         output_schema: Optional JSON schema for structured output
+        model: Optional model override (defaults to global model setting)
 
     Returns:
         The full text output from the agent session, or structured data if
@@ -289,11 +359,12 @@ async def run_agent(
         else None
     )
 
+    effective_model = model if model is not None else _state.model
     options = ClaudeAgentOptions(
         cwd=str(cwd),
         permission_mode="bypassPermissions",
         setting_sources=["user", "project", "local"],
-        model=_state.model,
+        model=effective_model,
         output_format=output_format,
     )
 

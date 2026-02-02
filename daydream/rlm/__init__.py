@@ -4,7 +4,7 @@ This module provides capabilities for reviewing large codebases (1M+ tokens)
 using sandboxed Python REPL execution with sub-LLM orchestration.
 """
 
-from daydream.rlm.container import ContainerConfig, DevContainer, find_devcontainer_config
+from daydream.rlm.container import DevContainer
 from daydream.rlm.environment import (
     FileInfo,
     FinalAnswer,
@@ -19,6 +19,7 @@ from daydream.rlm.errors import (
     REPLTimeoutError,
     RLMError,
 )
+from daydream.rlm.history import ConversationHistory, Exchange
 from daydream.rlm.repl import ExecuteResult, REPLProcess
 from daydream.rlm.runner import RLMConfig, RLMRunner, load_codebase
 
@@ -29,6 +30,9 @@ __all__ = [
     "REPLTimeoutError",
     "HeartbeatFailedError",
     "ContainerError",
+    # History
+    "ConversationHistory",
+    "Exchange",
     # Environment
     "FileInfo",
     "Service",
@@ -36,9 +40,7 @@ __all__ = [
     "FinalAnswer",
     "build_repl_namespace",
     # Container
-    "ContainerConfig",
     "DevContainer",
-    "find_devcontainer_config",
     # REPL
     "ExecuteResult",
     "REPLProcess",

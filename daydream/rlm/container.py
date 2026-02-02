@@ -1,188 +1,127 @@
 # daydream/rlm/container.py
-"""Devcontainer management for sandboxed REPL execution.
+"""Devcontainer management using trailofbits/claude-code-devcontainer.
 
-This module handles starting, stopping, and executing commands in
-devcontainers for secure code execution.
+This module wraps the `devc` CLI from trailofbits/claude-code-devcontainer
+for sandboxed Python execution.
 """
 
 import asyncio
-import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from daydream.config import RLM_CONTAINER_STARTUP_TIMEOUT
 from daydream.rlm.errors import ContainerError
 
 
-@dataclass
-class ContainerConfig:
-    """Configuration for devcontainer setup.
-
-    Attributes:
-        workspace_path: Path to the workspace/repository to mount.
-        container_id: Existing container ID to use (if already running).
-        mount_readonly: Whether to mount workspace as read-only.
-    """
-
-    workspace_path: str
-    container_id: str | None = None
-    mount_readonly: bool = True
-
-
-def find_devcontainer_config(workspace_path: Path) -> Path | None:
-    """Find devcontainer.json in workspace.
-
-    Args:
-        workspace_path: Path to search for .devcontainer directory.
-
-    Returns:
-        Path to devcontainer.json if found, None otherwise.
-    """
-    devcontainer_dir = workspace_path / ".devcontainer"
-    config_file = devcontainer_dir / "devcontainer.json"
-    if config_file.exists():
-        return config_file
-    return None
-
-
 class DevContainer:
-    """Manages a devcontainer for sandboxed execution.
+    """Wrapper around trailofbits/claude-code-devcontainer.
 
-    Provides methods to start, stop, and execute commands in a
-    devcontainer environment.
+    Uses the `devc` CLI for container lifecycle management.
     """
 
-    def __init__(self, config: ContainerConfig):
-        """Initialize DevContainer with configuration.
+    def __init__(self, workspace_path: Path):
+        """Initialize DevContainer.
 
         Args:
-            config: Container configuration.
+            workspace_path: Path to the workspace to mount in container.
         """
-        self.config = config
-        self.process: asyncio.subprocess.Process | None = None
-        self.container_id: str | None = config.container_id
+        self.workspace_path = workspace_path
+        self._running = False
 
     @property
     def is_running(self) -> bool:
         """Check if container is running."""
-        return self.container_id is not None
+        return self._running
 
-    async def start(self, timeout: float = RLM_CONTAINER_STARTUP_TIMEOUT) -> None:
-        """Start the devcontainer.
+    async def _run_devc(self, args: list[str], timeout: float = 120.0) -> tuple[str, str, int]:
+        """Run a devc CLI command.
 
         Args:
-            timeout: Maximum time to wait for container to start.
+            args: Arguments to pass to devc.
+            timeout: Maximum time to wait for command.
+
+        Returns:
+            Tuple of (stdout, stderr, returncode).
+
+        Raises:
+            ContainerError: If command fails or times out.
+        """
+        cmd = ["devc", *args]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+            return stdout.decode(), stderr.decode(), proc.returncode or 0
+        except asyncio.TimeoutError:
+            raise ContainerError(f"devc command timed out after {timeout}s: {' '.join(cmd)}")
+        except FileNotFoundError:
+            raise ContainerError(
+                "devc CLI not found. Install with: "
+                "git clone https://github.com/trailofbits/claude-code-devcontainer ~/.claude-devcontainer && "
+                "~/.claude-devcontainer/install.sh self-install"
+            )
+
+    async def start(self) -> None:
+        """Start the devcontainer.
 
         Raises:
             ContainerError: If container fails to start.
         """
-        if self.is_running:
+        if self._running:
             return
 
-        workspace = Path(self.config.workspace_path)
-
-        # Check for devcontainer config
-        config_path = find_devcontainer_config(workspace)
-        if config_path is None:
-            raise ContainerError(
-                f"No .devcontainer/devcontainer.json found in {workspace}"
+        # Ensure .devcontainer config exists
+        devcontainer_dir = self.workspace_path / ".devcontainer"
+        if not devcontainer_dir.exists():
+            stdout, stderr, rc = await self._run_devc(
+                ["template", str(self.workspace_path)]
             )
+            if rc != 0:
+                raise ContainerError(f"devc template failed: {stderr}")
 
-        try:
-            # Start devcontainer using CLI
-            proc = await asyncio.create_subprocess_exec(
-                "devcontainer",
-                "up",
-                "--workspace-folder",
-                str(workspace),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+        # Start container
+        stdout, stderr, rc = await self._run_devc(["up"])
+        if rc != 0:
+            raise ContainerError(f"devc up failed: {stderr}")
 
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
-
-            if proc.returncode != 0:
-                raise ContainerError(
-                    f"devcontainer up failed: {stderr.decode()}"
-                )
-
-            # Parse container ID from output
-            output = json.loads(stdout.decode())
-            self.container_id = output.get("containerId")
-
-            if not self.container_id:
-                raise ContainerError("No container ID in devcontainer output")
-
-        except asyncio.TimeoutError:
-            raise ContainerError(f"Container startup timed out after {timeout}s")
-        except json.JSONDecodeError as e:
-            raise ContainerError(f"Failed to parse devcontainer output: {e}")
+        self._running = True
 
     async def stop(self) -> None:
         """Stop the devcontainer."""
-        if not self.is_running or self.container_id is None:
+        if not self._running:
             return
 
-        container_id = self.container_id
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "devcontainer",
-                "stop",
-                "--container-id",
-                container_id,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-        finally:
-            self.container_id = None
+        await self._run_devc(["down"])
+        self._running = False
 
-    async def exec_command(
-        self,
-        command: list[str],
-        stdin: asyncio.StreamReader | None = None,
-    ) -> tuple[asyncio.StreamWriter, asyncio.StreamReader, asyncio.StreamReader]:
-        """Execute a command in the container.
+    async def exec_python(self, code: str) -> tuple[str, str, int]:
+        """Execute Python code in the container.
 
         Args:
-            command: Command and arguments to execute.
-            stdin: Optional stdin stream to connect.
+            code: Python code to execute.
 
         Returns:
-            Tuple of (stdin_writer, stdout_reader, stderr_reader).
+            Tuple of (stdout, stderr, returncode).
 
         Raises:
             RuntimeError: If container is not running.
         """
-        if not self.is_running or self.container_id is None:
+        if not self._running:
             raise RuntimeError("Container is not running")
 
-        # Build exec command
-        exec_cmd: list[str] = [
-            "devcontainer",
-            "exec",
-            "--container-id",
-            self.container_id,
-            "-i",  # Keep stdin attached
-            *command,
-        ]
-
-        self.process = await asyncio.create_subprocess_exec(
-            *exec_cmd,
-            stdin=asyncio.subprocess.PIPE,
+        proc = await asyncio.create_subprocess_exec(
+            "devcontainer", "exec",
+            "--workspace-folder", str(self.workspace_path),
+            "python", "-c", code,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-
-        # These will not be None when PIPE is specified
-        assert self.process.stdin is not None
-        assert self.process.stdout is not None
-        assert self.process.stderr is not None
-
-        return self.process.stdin, self.process.stdout, self.process.stderr
+        stdout, stderr = await proc.communicate()
+        return stdout.decode(), stderr.decode(), proc.returncode or 0
 
     async def __aenter__(self) -> "DevContainer":
         """Async context manager entry."""
