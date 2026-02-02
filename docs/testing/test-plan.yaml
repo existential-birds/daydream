@@ -1,0 +1,525 @@
+version: 1
+metadata:
+  branch: feat/rlm-code-review
+  base: main
+  generated: "2026-02-01T23:30:00Z"
+  changes_summary: |
+    This PR introduces RLM (REPL Language Model) mode for large codebase reviews.
+    Key changes:
+    - Add --rlm CLI flag to enable RLM mode
+    - Add RLM module structure: runner, repl, environment, ipc, container, errors
+    - Integrate RLM mode into main runner with graceful fallback to standard review
+    - Add REPL process manager with code execution and llm_query callbacks
+    - Add devcontainer management for sandboxed execution
+    - Add JSON-RPC 2.0 protocol helpers for REPL communication
+
+setup:
+  stack:
+    - type: python
+      package_manager: uv
+  commands:
+    - uv sync
+    - uv run pytest -v
+  health_checks:
+    - command: uv run python -c "import daydream; print('ok')"
+      timeout: 30
+
+tests:
+  # ==========================================================================
+  # CLI Entry Point Tests
+  # ==========================================================================
+  - id: TC-01
+    name: "Verify --rlm flag is recognized"
+    context: |
+      Changed files: daydream/cli.py
+      The CLI now accepts a new --rlm flag to enable RLM mode.
+      Trace: cli.py:131-136 adds argparse argument, cli.py:153 sets rlm_mode in RunConfig
+    steps:
+      - action: bash
+        command: uv run daydream --help
+    expected: |
+      Help output should include --rlm flag with description mentioning
+      "RLM mode" or "large codebase review"
+
+  - id: TC-02
+    name: "Verify --rlm parses correctly with target"
+    context: |
+      Changed files: daydream/cli.py
+      --rlm flag should combine with target directory and skill flags
+    steps:
+      - action: bash
+        command: |
+          cd /tmp && mkdir -p rlm-test && echo "x=1" > rlm-test/main.py
+          uv run python -c "
+          import sys
+          sys.argv = ['daydream', '/tmp/rlm-test', '--rlm', '--python']
+          from daydream.cli import _parse_args
+          cfg = _parse_args()
+          print(f'rlm_mode={cfg.rlm_mode}')
+          print(f'skill={cfg.skill}')
+          print(f'target={cfg.target}')
+          "
+    expected: |
+      Output should show rlm_mode=True, skill=python, target=/tmp/rlm-test
+
+  # ==========================================================================
+  # RLM Runner Integration Tests
+  # ==========================================================================
+  - id: TC-03
+    name: "RLM mode loads codebase and shows stats"
+    context: |
+      Changed files: daydream/runner.py, daydream/rlm/runner.py
+      When RLM mode is activated, it should load files and display
+      file count and token estimates.
+      Trace: runner.py:107-145 calls load_codebase and prints stats
+    steps:
+      - action: bash
+        command: |
+          cd /tmp && rm -rf rlm-test && mkdir rlm-test
+          echo "def hello(): pass" > rlm-test/main.py
+          echo "import os" > rlm-test/utils.py
+          uv run daydream /tmp/rlm-test --rlm --python 2>&1 | head -20
+    expected: |
+      Output should include:
+      - "[RLM] Mode: reviewing" message
+      - "[RLM] Files:" with a count >= 2
+      - "[RLM] Estimated tokens:" with a number
+
+  - id: TC-04
+    name: "RLM fallback triggers on simulated error"
+    context: |
+      Changed files: daydream/runner.py
+      run_rlm_review_with_fallback should catch RLM errors and fall back
+      to standard skill-based review.
+      Trace: runner.py:169-194 implements fallback logic
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          import asyncio
+          from pathlib import Path
+          from unittest.mock import patch
+          from daydream.rlm.errors import REPLCrashError
+
+          async def test():
+              from daydream.runner import run_rlm_review_with_fallback
+
+              # Mock RLM to fail
+              async def mock_fail(cwd, langs):
+                  raise REPLCrashError('Simulated crash')
+
+              async def mock_standard(cwd, skill):
+                  return '# Fallback Review\\nContent here'
+
+              with patch('daydream.runner.run_rlm_review', mock_fail):
+                  with patch('daydream.runner.run_standard_review', mock_standard):
+                      result = await run_rlm_review_with_fallback(
+                          Path('/tmp'),
+                          ['python'],
+                          'beagle:review-python'
+                      )
+                      print(f'Got result: {result[:50]}')
+                      assert 'Fallback Review' in result
+                      print('PASS: Fallback triggered correctly')
+
+          asyncio.run(test())
+          "
+    expected: |
+      Output should show "PASS: Fallback triggered correctly" and
+      warning messages about RLM mode failure
+
+  # ==========================================================================
+  # REPL Process Tests
+  # ==========================================================================
+  - id: TC-05
+    name: "REPL executes Python code and returns output"
+    context: |
+      Changed files: daydream/rlm/repl.py
+      REPLProcess should execute code and capture stdout
+      Trace: repl.py executes in sandboxed namespace
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from daydream.rlm.repl import REPLProcess
+          from daydream.rlm.environment import RepoContext
+
+          ctx = RepoContext(
+              files={'test.py': 'x=1'},
+              structure={}, services={}, file_sizes={'test.py': 3},
+              total_tokens=3, file_count=1, largest_files=[('test.py', 3)],
+              languages=['python'], changed_files=None,
+          )
+          with REPLProcess(ctx, llm_callback=lambda p,m: '') as repl:
+              result = repl.execute('print(2 + 2)')
+              print(f'output: {result.output.strip()}')
+              print(f'is_error: {result.is_error}')
+              assert result.output.strip() == '4'
+              print('PASS')
+          "
+    expected: |
+      Output should show "output: 4", "is_error: False", and "PASS"
+
+  - id: TC-06
+    name: "REPL accesses repo context"
+    context: |
+      Changed files: daydream/rlm/repl.py, daydream/rlm/environment.py
+      REPL should expose repo object with files dict
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from daydream.rlm.repl import REPLProcess
+          from daydream.rlm.environment import RepoContext
+
+          ctx = RepoContext(
+              files={'a.py': 'import os', 'b.py': 'x=1'},
+              structure={}, services={}, file_sizes={'a.py': 10, 'b.py': 3},
+              total_tokens=13, file_count=2, largest_files=[('a.py', 10)],
+              languages=['python'], changed_files=None,
+          )
+          with REPLProcess(ctx, llm_callback=lambda p,m: '') as repl:
+              result = repl.execute('print(list(repo.files.keys()))')
+              print(f'output: {result.output.strip()}')
+              assert 'a.py' in result.output
+              assert 'b.py' in result.output
+              print('PASS')
+          "
+    expected: |
+      Output should contain both "a.py" and "b.py" and end with "PASS"
+
+  - id: TC-07
+    name: "REPL FINAL() returns final answer"
+    context: |
+      Changed files: daydream/rlm/repl.py
+      Calling FINAL() should signal completion with answer
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from daydream.rlm.repl import REPLProcess
+          from daydream.rlm.environment import RepoContext
+
+          ctx = RepoContext(
+              files={}, structure={}, services={}, file_sizes={},
+              total_tokens=0, file_count=0, largest_files=[],
+              languages=[], changed_files=None,
+          )
+          with REPLProcess(ctx, llm_callback=lambda p,m: '') as repl:
+              result = repl.execute('FINAL(\"My final report\")')
+              print(f'is_final: {result.is_final}')
+              print(f'final_answer: {result.final_answer}')
+              assert result.is_final
+              assert result.final_answer == 'My final report'
+              print('PASS')
+          "
+    expected: |
+      Output should show "is_final: True", "final_answer: My final report", and "PASS"
+
+  - id: TC-08
+    name: "REPL llm_query routes to callback"
+    context: |
+      Changed files: daydream/rlm/repl.py
+      llm_query function in REPL should invoke the provided callback
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from daydream.rlm.repl import REPLProcess
+          from daydream.rlm.environment import RepoContext
+
+          calls = []
+          def mock_llm(prompt, model):
+              calls.append((prompt, model))
+              return 'Mocked response'
+
+          ctx = RepoContext(
+              files={}, structure={}, services={}, file_sizes={},
+              total_tokens=0, file_count=0, largest_files=[],
+              languages=[], changed_files=None,
+          )
+          with REPLProcess(ctx, llm_callback=mock_llm) as repl:
+              result = repl.execute('x = llm_query(\"test prompt\")')
+              result2 = repl.execute('print(x)')
+              print(f'calls: {len(calls)}')
+              print(f'prompt: {calls[0][0]}')
+              print(f'model: {calls[0][1]}')
+              print(f'output: {result2.output.strip()}')
+              assert calls[0][0] == 'test prompt'
+              assert 'Mocked response' in result2.output
+              print('PASS')
+          "
+    expected: |
+      Output should show callback was invoked with correct prompt,
+      default model "haiku", and "PASS"
+
+  # ==========================================================================
+  # Runner Orchestration Loop Tests
+  # ==========================================================================
+  - id: TC-09
+    name: "RLMRunner extracts code from fenced blocks"
+    context: |
+      Changed files: daydream/rlm/runner.py
+      _extract_code should find Python code in markdown fences
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from pathlib import Path
+          from daydream.rlm.runner import RLMRunner, RLMConfig
+          import tempfile
+
+          with tempfile.TemporaryDirectory() as td:
+              (Path(td) / 'x.py').write_text('x=1')
+              cfg = RLMConfig(workspace_path=td, languages=['python'])
+              runner = RLMRunner(cfg)
+
+              response = '''Here is code:
+          \`\`\`python
+          print(\"hello\")
+          \`\`\`
+          '''
+              code = runner._extract_code(response)
+              print(f'extracted: {code.strip()}')
+              assert 'print' in code
+              print('PASS')
+          "
+    expected: |
+      Output should show extracted code "print(\"hello\")" and "PASS"
+
+  - id: TC-10
+    name: "RLMRunner builds system prompt with metadata"
+    context: |
+      Changed files: daydream/rlm/runner.py
+      System prompt should include file counts and available functions
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from pathlib import Path
+          from daydream.rlm.runner import RLMRunner, RLMConfig, load_codebase
+          import tempfile
+
+          with tempfile.TemporaryDirectory() as td:
+              (Path(td) / 'main.py').write_text('def main(): pass')
+              (Path(td) / 'utils.py').write_text('x = 1')
+
+              cfg = RLMConfig(workspace_path=td, languages=['python'])
+              runner = RLMRunner(cfg)
+              runner._context = load_codebase(Path(td), ['python'])
+
+              prompt = runner._build_system_prompt()
+
+              checks = [
+                  ('file count', '2' in prompt or 'files: 2' in prompt.lower()),
+                  ('llm_query', 'llm_query' in prompt),
+                  ('FINAL', 'FINAL' in prompt),
+                  ('repo.files', 'repo.files' in prompt),
+              ]
+              for name, passed in checks:
+                  status = 'OK' if passed else 'FAIL'
+                  print(f'{name}: {status}')
+
+              assert all(p for _, p in checks)
+              print('PASS')
+          "
+    expected: |
+      Output should show all checks pass and end with "PASS"
+
+  # ==========================================================================
+  # Error Handling Tests
+  # ==========================================================================
+  - id: TC-11
+    name: "REPL captures execution errors"
+    context: |
+      Changed files: daydream/rlm/repl.py
+      Errors during code execution should be captured, not raised
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from daydream.rlm.repl import REPLProcess
+          from daydream.rlm.environment import RepoContext
+
+          ctx = RepoContext(
+              files={}, structure={}, services={}, file_sizes={},
+              total_tokens=0, file_count=0, largest_files=[],
+              languages=[], changed_files=None,
+          )
+          with REPLProcess(ctx, llm_callback=lambda p,m: '') as repl:
+              result = repl.execute('undefined_variable_xyz')
+              print(f'is_error: {result.is_error}')
+              print(f'error contains NameError: {\"NameError\" in str(result.error)}')
+              assert result.is_error
+              assert 'NameError' in str(result.error)
+              print('PASS')
+          "
+    expected: |
+      Output should show is_error=True, error contains NameError, and "PASS"
+
+  - id: TC-12
+    name: "RLM errors are properly typed"
+    context: |
+      Changed files: daydream/rlm/errors.py
+      Custom error types should be available for fallback handling
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from daydream.rlm.errors import (
+              RLMError,
+              REPLCrashError,
+              HeartbeatFailedError,
+              ContainerError,
+          )
+
+          # Verify inheritance
+          assert issubclass(REPLCrashError, RLMError)
+          assert issubclass(HeartbeatFailedError, RLMError)
+          assert issubclass(ContainerError, RLMError)
+
+          # Verify instantiation
+          e1 = REPLCrashError('test')
+          e2 = HeartbeatFailedError('test')
+          e3 = ContainerError('test')
+
+          print('All error types validated')
+          print('PASS')
+          "
+    expected: |
+      Output should show "All error types validated" and "PASS"
+
+  # ==========================================================================
+  # Codebase Loading Tests
+  # ==========================================================================
+  - id: TC-13
+    name: "load_codebase filters by language"
+    context: |
+      Changed files: daydream/rlm/runner.py
+      load_codebase should only include files matching language extensions
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from pathlib import Path
+          from daydream.rlm.runner import load_codebase
+          import tempfile
+
+          with tempfile.TemporaryDirectory() as td:
+              td = Path(td)
+              (td / 'main.py').write_text('x=1')
+              (td / 'app.ts').write_text('const x=1')
+              (td / 'readme.md').write_text('# README')
+
+              ctx = load_codebase(td, ['python'])
+
+              print(f'file_count: {ctx.file_count}')
+              print(f'files: {list(ctx.files.keys())}')
+              assert ctx.file_count == 1
+              assert 'main.py' in ctx.files
+              assert 'app.ts' not in ctx.files
+              print('PASS')
+          "
+    expected: |
+      Output should show file_count=1, only main.py, and "PASS"
+
+  - id: TC-14
+    name: "load_codebase excludes node_modules"
+    context: |
+      Changed files: daydream/rlm/runner.py
+      load_codebase should skip excluded directories like node_modules
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from pathlib import Path
+          from daydream.rlm.runner import load_codebase
+          import tempfile
+
+          with tempfile.TemporaryDirectory() as td:
+              td = Path(td)
+              (td / 'src').mkdir()
+              (td / 'src' / 'main.py').write_text('x=1')
+              (td / 'node_modules').mkdir()
+              (td / 'node_modules' / 'pkg.py').write_text('y=2')
+              (td / '__pycache__').mkdir()
+              (td / '__pycache__' / 'cache.py').write_text('z=3')
+
+              ctx = load_codebase(td, ['python'])
+
+              print(f'file_count: {ctx.file_count}')
+              print(f'files: {list(ctx.files.keys())}')
+              assert ctx.file_count == 1
+              assert any('main.py' in f for f in ctx.files)
+              assert not any('node_modules' in f for f in ctx.files)
+              assert not any('__pycache__' in f for f in ctx.files)
+              print('PASS')
+          "
+    expected: |
+      Output should show file_count=1, only src/main.py, and "PASS"
+
+  # ==========================================================================
+  # Config Tests
+  # ==========================================================================
+  - id: TC-15
+    name: "RLM mode in RunConfig dataclass"
+    context: |
+      Changed files: daydream/runner.py
+      RunConfig should include rlm_mode field with default False
+    steps:
+      - action: bash
+        command: |
+          uv run python -c "
+          from daydream.runner import RunConfig
+
+          # Default
+          cfg = RunConfig()
+          print(f'default rlm_mode: {cfg.rlm_mode}')
+          assert cfg.rlm_mode is False
+
+          # Explicit True
+          cfg2 = RunConfig(rlm_mode=True)
+          print(f'explicit rlm_mode: {cfg2.rlm_mode}')
+          assert cfg2.rlm_mode is True
+
+          print('PASS')
+          "
+    expected: |
+      Output should show default=False, explicit=True, and "PASS"
+
+  # ==========================================================================
+  # Integration: Full pytest suite
+  # ==========================================================================
+  - id: TC-16
+    name: "Run full pytest suite"
+    context: |
+      All changed test files should pass.
+      Changed: tests/test_cli.py, tests/test_config.py, tests/rlm/*.py
+    steps:
+      - action: bash
+        command: uv run pytest -v --tb=short
+        timeout: 120
+    expected: |
+      All tests should pass. Look for "passed" in summary and no failures.
+
+  - id: TC-17
+    name: "Run type checking with mypy"
+    context: |
+      Changed files: all daydream/*.py and daydream/rlm/*.py
+      Type annotations should be correct
+    steps:
+      - action: bash
+        command: uv run mypy daydream --ignore-missing-imports
+    expected: |
+      No type errors. Output should be "Success" or show no error lines.
+
+  - id: TC-18
+    name: "Run linting with ruff"
+    context: |
+      Changed files: all Python files in daydream/
+      Code should follow project style guidelines
+    steps:
+      - action: bash
+        command: uv run ruff check daydream
+    expected: |
+      No linting errors. Output should be empty or show "All checks passed".
