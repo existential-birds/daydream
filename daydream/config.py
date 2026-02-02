@@ -38,3 +38,16 @@ REVIEW_OUTPUT_FILE = ".review-output.md"
 
 # Pattern to detect unknown skill errors
 UNKNOWN_SKILL_PATTERN = r"Unknown skill: ([\w:-]+)"
+
+# RLM timeout configuration (in seconds)
+RLM_REPL_INIT_TIMEOUT = 60  # REPL initialization
+RLM_CODE_EXEC_TIMEOUT = 300  # Code execution (5 min)
+RLM_HEARTBEAT_TIMEOUT = 5  # Heartbeat response
+RLM_LLM_QUERY_TIMEOUT = 60  # Sub-LLM query
+RLM_CONTAINER_STARTUP_TIMEOUT = 120  # Container startup
+
+# RLM heartbeat interval (in seconds)
+RLM_HEARTBEAT_INTERVAL = 10
+
+# RLM output truncation limit (in characters)
+RLM_OUTPUT_TRUNCATION_LIMIT = 50_000
