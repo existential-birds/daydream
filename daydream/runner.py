@@ -33,6 +33,7 @@ from daydream.ui import (
     print_skipped_phases,
     print_success,
     print_summary,
+    print_warning,
     prompt_user,
 )
 
@@ -123,10 +124,15 @@ async def run_rlm_review(cwd: Path, languages: list[str]) -> str:
 
     from daydream.agent import get_model, query_llm_simple
     from daydream.config import RLM_LLM_QUERY_TIMEOUT
-    from daydream.rlm import RLMConfig, RLMRunner, load_codebase
+    from daydream.rlm import RLMConfig, RLMRunner, get_changed_files, load_codebase
+
+    # Check for changed files (PR mode)
+    changed_files = get_changed_files(cwd)
+    if changed_files:
+        print_info(console, f"[RLM] PR mode: {len(changed_files)} changed files")
 
     # Load codebase to show stats
-    ctx = load_codebase(cwd, languages)
+    ctx = load_codebase(cwd, languages, changed_files=changed_files)
     print_info(console, f"[RLM] Files: {ctx.file_count:,}")
     print_info(console, f"[RLM] Estimated tokens: {ctx.total_tokens:,}")
     console.print()
@@ -253,6 +259,14 @@ async def run_rlm_review(cwd: Path, languages: list[str]) -> str:
                 "Max Iterations",
                 f"Stopped after {data['iterations_completed']} iterations",
             )
+        elif event_type == "review_quality_warning":
+            warnings = data.get("warnings", [])
+            if warnings:
+                print_warning(
+                    console,
+                    "Review Quality Warning: The review may not be a proper code review.\n"
+                    + "\n".join(f"  - {w}" for w in warnings),
+                )
 
     runner = RLMRunner(config)
     runner._call_llm = call_llm
@@ -277,6 +291,13 @@ async def run_rlm_review(cwd: Path, languages: list[str]) -> str:
         # Log final stats
         print_info(console, f"[RLM] Completed after {iteration_state['current']} iterations")
         print_info(console, f"[RLM] Total sub-queries: {iteration_state['sub_query_count']}")
+
+        # Warn if no sub-LLM analysis was performed
+        if iteration_state["sub_query_count"] == 0:
+            print_warning(
+                console,
+                "[RLM] Warning: No sub-LLM analysis performed - review may be superficial",
+            )
 
         return result
     finally:

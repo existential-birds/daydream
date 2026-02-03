@@ -8,10 +8,12 @@ coordinating the REPL, container, and LLM interactions.
 import asyncio
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from daydream.prompts.review_system_prompt import get_review_prompt
 from daydream.rlm.container import DevContainer
 from daydream.rlm.environment import FileInfo, RepoContext
 from daydream.rlm.history import ConversationHistory
@@ -94,6 +96,81 @@ def _estimate_tokens(content: str) -> int:
 def _should_exclude_dir(name: str) -> bool:
     """Check if directory should be excluded."""
     return name in EXCLUDED_DIRS or name.startswith(".")
+
+
+def get_changed_files(workspace: Path) -> list[str] | None:
+    """Get list of changed files compared to the default branch.
+
+    Attempts to detect files changed in the current branch compared to
+    origin/main or origin/master. Useful for PR-focused reviews.
+
+    Args:
+        workspace: Path to the git repository root.
+
+    Returns:
+        List of changed file paths relative to workspace, or None if:
+        - Not a git repository
+        - No changes found
+        - Any error occurs
+    """
+    try:
+        # Try to get the default branch name from symbolic ref
+        result = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if result.returncode == 0:
+            # Parse "refs/remotes/origin/main" -> "main"
+            default_branch = result.stdout.strip().split("/")[-1]
+        else:
+            # Fall back to trying main, then master
+            default_branch = None
+            for branch in ["main", "master"]:
+                check_result = subprocess.run(
+                    ["git", "rev-parse", "--verify", f"origin/{branch}"],
+                    cwd=workspace,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if check_result.returncode == 0:
+                    default_branch = branch
+                    break
+
+            if default_branch is None:
+                return None
+
+        # Get changed files using three-dot diff (merge-base comparison)
+        diff_result = subprocess.run(
+            ["git", "diff", "--name-only", f"origin/{default_branch}...HEAD"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if diff_result.returncode != 0:
+            return None
+
+        # Parse output into list of file paths
+        changed = [
+            line.strip()
+            for line in diff_result.stdout.strip().split("\n")
+            if line.strip()
+        ]
+
+        if not changed:
+            return None
+
+        return changed
+
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+        # Any error means we fall back to full repo review
+        return None
 
 
 def load_codebase(
@@ -209,6 +286,46 @@ class RLMRunner:
     5. Looping until FINAL is called or timeout
     """
 
+    # Patterns for validating review quality
+    # Severity markers: [CRITICAL], [HIGH], [MEDIUM], [LOW] or Critical:, High:, etc.
+    SEVERITY_PATTERN = re.compile(
+        r"\[(CRITICAL|HIGH|MEDIUM|LOW)\]|"
+        r"(Critical|High|Medium|Low)\s*:|"
+        r"Severity\s*:\s*(Critical|High|Medium|Low)",
+        re.IGNORECASE,
+    )
+
+    # File:line references like file.py:123 or path/to/file.ts:45
+    FILE_LINE_PATTERN = re.compile(
+        r"[\w./\\-]+\.(py|ts|tsx|js|jsx|go|rs|java|rb|php|c|cpp|h|hpp):\d+",
+    )
+
+    # Keywords indicating architecture summary (not a proper review)
+    ARCHITECTURE_KEYWORDS = [
+        "architecture report",
+        "codebase overview",
+        "project structure",
+        "directory structure",
+        "folder structure",
+        "system design",
+        "high-level overview",
+    ]
+
+    # Keywords indicating actual code review issues
+    ISSUE_KEYWORDS = [
+        "bug",
+        "issue",
+        "vulnerability",
+        "security",
+        "error",
+        "warning",
+        "fix",
+        "problem",
+        "defect",
+        "flaw",
+        "risk",
+    ]
+
     def __init__(self, config: RLMConfig):
         """Initialize RLM runner.
 
@@ -234,6 +351,59 @@ class RLMRunner:
         """
         if self._on_event is not None:
             self._on_event(iteration, event_type, data)
+
+    def _validate_review_quality(self, answer: str) -> tuple[bool, list[str]]:
+        """Validate that the final answer is a proper code review, not just an architecture summary.
+
+        Checks for:
+        - Severity markers like [CRITICAL], [HIGH], [MEDIUM], [LOW], or similar patterns
+        - File:line references (pattern like `file.py:123` or `path/to/file.ts:45`)
+        - Not just an architecture/structure summary without issue-related content
+
+        Args:
+            answer: The final answer string to validate.
+
+        Returns:
+            Tuple of (is_valid, list_of_warnings). is_valid is True if the review
+            appears to be a proper code review, False otherwise. list_of_warnings
+            contains specific issues found with the review quality.
+        """
+        warnings: list[str] = []
+        answer_lower = answer.lower()
+
+        # Check for severity markers
+        has_severity = bool(self.SEVERITY_PATTERN.search(answer))
+        if not has_severity:
+            warnings.append(
+                "No severity markers found (e.g., [CRITICAL], [HIGH], [MEDIUM], [LOW], "
+                "or 'Critical:', 'High:', etc.)"
+            )
+
+        # Check for file:line references
+        has_file_refs = bool(self.FILE_LINE_PATTERN.search(answer))
+        if not has_file_refs:
+            warnings.append(
+                "No file:line references found (e.g., 'file.py:123'). "
+                "Code reviews should include specific locations."
+            )
+
+        # Check if it looks like an architecture summary without issue keywords
+        has_architecture_keywords = any(
+            kw in answer_lower for kw in self.ARCHITECTURE_KEYWORDS
+        )
+        has_issue_keywords = any(kw in answer_lower for kw in self.ISSUE_KEYWORDS)
+
+        if has_architecture_keywords and not has_issue_keywords:
+            warnings.append(
+                "Review appears to be an architecture summary without actual code issues. "
+                "Expected to find bug reports, security issues, or code quality problems."
+            )
+
+        # Determine if the review is valid
+        # Valid if: has severity markers OR has file references OR has issue keywords
+        is_valid = has_severity or has_file_refs or has_issue_keywords
+
+        return is_valid, warnings
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt describing the REPL environment.
@@ -351,6 +521,7 @@ Respond with Python code in a fenced code block:
         1. Prefer code blocks containing FINAL/FINAL_VAR calls
         2. Skip blocks that look like embedded examples (bare decorators, etc.)
         3. Fall back to the last code block (most likely to be executable)
+        4. Sanitize FINAL() calls with embedded backticks
 
         Args:
             response: LLM response text.
@@ -366,7 +537,8 @@ Respond with Python code in a fenced code block:
         for match in matches:
             code = match.group(1).strip()
             if "FINAL(" in code or "FINAL_VAR(" in code:
-                return code
+                # Sanitize FINAL() calls that might have embedded backticks
+                return self._sanitize_final_call(code)
 
         # Filter out blocks that look like documentation examples
         executable_blocks = []
@@ -377,10 +549,10 @@ Respond with Python code in a fenced code block:
 
         # Return the last executable block (most likely to be the intended code)
         if executable_blocks:
-            return executable_blocks[-1]
+            return self._sanitize_final_call(executable_blocks[-1])
 
         # Fall back to last block if all were filtered
-        return matches[-1].group(1).strip()
+        return self._sanitize_final_call(matches[-1].group(1).strip())
 
     def _is_likely_example(self, code: str) -> bool:
         """Detect if code looks like a documentation example, not executable code.
@@ -410,6 +582,60 @@ Respond with Python code in a fenced code block:
                 return True
 
         return False
+
+    def _sanitize_final_call(self, code: str) -> str:
+        """Transform FINAL() calls with embedded backticks to use FINAL_VAR.
+
+        When the agent uses FINAL() with triple-quoted strings containing backticks
+        (e.g., markdown code blocks), Python may fail to parse the string literal.
+        This method detects such patterns and transforms them to use FINAL_VAR instead.
+
+        Example transformation:
+            FINAL('''# Report
+            ```code```
+            ''')
+
+        Becomes:
+            _final_report = '''# Report
+            ```code```
+            '''
+            FINAL_VAR("_final_report")
+
+        Args:
+            code: Python code string to sanitize.
+
+        Returns:
+            Sanitized code with problematic FINAL() calls transformed.
+        """
+        # Pattern to match FINAL() with triple-quoted strings
+        # Matches: FINAL(""" or FINAL(''' with optional whitespace
+        final_triple_pattern = re.compile(
+            r'FINAL\s*\(\s*("""|\'\'\')(.*?)\1\s*\)',
+            re.DOTALL,
+        )
+
+        match = final_triple_pattern.search(code)
+        if not match:
+            return code
+
+        # Check if the string content contains backticks
+        quote_style = match.group(1)
+        string_content = match.group(2)
+
+        if '`' not in string_content:
+            # No backticks, no transformation needed
+            return code
+
+        # Build the replacement: assign to variable and use FINAL_VAR
+        full_match = match.group(0)
+        variable_assignment = f"_final_report = {quote_style}{string_content}{quote_style}"
+        final_var_call = 'FINAL_VAR("_final_report")'
+
+        # Replace the FINAL() call with variable assignment + FINAL_VAR()
+        replacement = f"{variable_assignment}\n{final_var_call}"
+        sanitized_code = code.replace(full_match, replacement)
+
+        return sanitized_code
 
     def _handle_llm_query(self, prompt: str, model: str) -> str:
         """Handle llm_query callback from REPL.
@@ -573,8 +799,14 @@ Please provide Python code in a fenced code block:
 
             self._repl.start()
 
-            # Build initial system prompt
-            system_prompt = self._build_system_prompt()
+            # Build initial system prompt using the comprehensive review prompt
+            system_prompt = get_review_prompt(
+                file_count=self._context.file_count,
+                total_tokens=self._context.total_tokens,
+                languages=self._context.languages,
+                largest_files=self._context.largest_files,
+                changed_files=self._context.changed_files,
+            )
             current_prompt = system_prompt
 
             final_result: str | None = None
@@ -699,6 +931,11 @@ Please provide Python code in a fenced code block:
                     f"Review stopped after {iteration} iterations without completion.\n"
                     f"Please review the execution log for partial findings."
                 )
+
+            # Validate review quality and emit warning if issues found
+            is_valid, warnings = self._validate_review_quality(final_result)
+            if not is_valid:
+                self._emit_event(iteration, "review_quality_warning", {"warnings": warnings})
 
             return final_result
 

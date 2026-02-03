@@ -21,7 +21,7 @@ from daydream.rlm.errors import (
 )
 from daydream.rlm.history import ConversationHistory, Exchange
 from daydream.rlm.repl import ExecuteResult, REPLProcess
-from daydream.rlm.runner import RLMConfig, RLMRunner, load_codebase
+from daydream.rlm.runner import RLMConfig, RLMRunner, get_changed_files, load_codebase
 
 __all__ = [
     # Errors
@@ -47,5 +47,6 @@ __all__ = [
     # Runner
     "RLMConfig",
     "RLMRunner",
+    "get_changed_files",
     "load_codebase",
 ]

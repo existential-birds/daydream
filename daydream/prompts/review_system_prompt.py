@@ -397,6 +397,32 @@ print(f"Top paths: {{sorted(set(p.split('/')[0] for p in repo.files.keys()))}}")
 print(f"Sample files: {{list(repo.files.keys())[:10]}}")
 ```
 
+---
+
+## Required First Step
+
+On your FIRST turn, execute this exact code to determine review scope:
+
+```python
+# Determine review mode and target files
+if repo.changed_files:
+    print(f"=== PR MODE: {{len(repo.changed_files)}} changed files ===")
+    for f in repo.changed_files[:20]:
+        print(f"  - {{f}}")
+    target_files = repo.changed_files
+else:
+    print("=== FULL REPO MODE: Finding high-risk files ===")
+    # Find security-sensitive files
+    auth_files = files_containing(r"password|token|secret|api_key|credential")
+    db_files = files_containing(r"execute\\(|cursor\\.|SELECT|INSERT|UPDATE|DELETE")
+    target_files = list(set(auth_files + db_files))[:30]
+    print(f"Found {{len(target_files)}} high-risk files to review")
+    for f in target_files[:10]:
+        print(f"  - {{f}}")
+```
+
+After this first turn, proceed with the "Probe → Filter → Batch → Aggregate" strategy.
+
 Begin by exploring the codebase structure.
 '''
 
