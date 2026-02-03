@@ -470,7 +470,8 @@ Respond with Python code in a fenced code block:
                 )
 
         parts.append(
-            "\n\nContinue your analysis. When ready, call `FINAL()` with your report."
+            "\n\n**RESPOND WITH PYTHON CODE ONLY** — no prose or explanations outside code blocks. "
+            "Continue your analysis. When ready, call `FINAL()` with your report."
         )
         parts.append("\n\n```python\n# Your next code here\n```")
 
@@ -490,7 +491,7 @@ Respond with Python code in a fenced code block:
         if self._context is None:
             raise RuntimeError("Context not loaded")
 
-        return f"""## Iteration {iteration} - Code Required
+        prompt = f"""## Iteration {iteration} - Code Required
 
 I couldn't find executable Python code in your last response.
 
@@ -517,6 +518,14 @@ Please provide Python code in a fenced code block:
 # Continue your code review analysis
 # When done, call FINAL("Your review report here")
 ```"""
+
+        # Show top-level paths to help orientation
+        if self._context:
+            top_level = sorted(set(p.split('/')[0] for p in self._context.files.keys()))[:10]
+            if top_level:
+                prompt += f"\n\n**Available top-level paths**: {', '.join(top_level)}"
+
+        return prompt
 
     async def run(self) -> str:
         """Execute the RLM code review.

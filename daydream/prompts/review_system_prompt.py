@@ -67,6 +67,14 @@ def build_review_system_prompt(metadata: CodebaseMetadata) -> str:
 you will only see a portion. This is WHY you must use sub-LLM calls — they can process
 full content and return summarized findings that fit in your context window.
 
+**ONE CODE BLOCK PER TURN**: Generate exactly ONE Python code block per response.
+After execution, you'll see the output and decide your next action. This iterative approach:
+- Lets you verify each step before proceeding
+- Allows you to adapt based on actual results
+- Makes debugging easier when issues occur
+
+Do NOT generate multiple code blocks expecting them all to execute. Only the first block runs per turn.
+
 ---
 
 ## Codebase Metadata
@@ -82,16 +90,10 @@ full content and return summarized findings that fit in your context window.
 {changed_files_section}
 ---
 
-## Available Data Structures
+## ⚠️ CRITICAL API NOTE
 
-```python
-repo.files: dict[str, str]           # {{path: content}} - all source files
-repo.structure: dict[str, FileInfo]  # {{path: {{functions, classes, imports}}}}
-repo.services: dict[str, Service]    # {{name: {{root, files, dependencies}}}}
-repo.changed_files: list[str]        # Files changed in this PR (if applicable)
-```
+`repo.files` values are **strings directly**, NOT objects with a `.content` attribute!
 
-**IMPORTANT**: `repo.files` values are **strings directly**, not objects!
 ```python
 # ✅ CORRECT - direct string access:
 content = repo.files["main.py"]
@@ -99,6 +101,17 @@ first_1000 = repo.files["main.py"][:1000]
 
 # ❌ WRONG - there is no .content attribute:
 content = repo.files["main.py"].content  # AttributeError!
+```
+
+---
+
+## Available Data Structures
+
+```python
+repo.files: dict[str, str]           # {{path: content}} - all source files
+repo.structure: dict[str, FileInfo]  # {{path: {{functions, classes, imports}}}}
+repo.services: dict[str, Service]    # {{name: {{root, files, dependencies}}}}
+repo.changed_files: list[str]        # Files changed in this PR (if applicable)
 ```
 
 ## Available Functions
@@ -115,6 +128,10 @@ llm_query_parallel(prompts: list[str], model: str = "haiku") -> list[str]
 # Search and filtering
 files_containing(pattern: str) -> list[str]   # Regex search across all files
 files_importing(module: str) -> list[str]     # Find files importing a module
+
+# File discovery helpers
+file_exists(path: str) -> bool              # Check if file exists before reading
+list_files_matching(pattern: str) -> list   # Glob-like: "src/*.py", "**/*.ts"
 
 # Large file handling
 get_file_slice(path: str, start: int, end: int) -> str  # Get line range
@@ -366,6 +383,19 @@ FINAL_VAR("final_report")  # Uses the final_report variable you built up
 4. **ALWAYS use variables as buffers** — build findings incrementally
 5. **ALWAYS verify critical issues** — false positives waste developer time
 6. **Use print() liberally** — it's how you see intermediate results
+
+---
+
+## Quick Start Template
+
+Use this code to orient yourself on the first turn:
+
+```python
+# See what's available
+print(f"Files: {{len(repo.files)}}")
+print(f"Top paths: {{sorted(set(p.split('/')[0] for p in repo.files.keys()))}}")
+print(f"Sample files: {{list(repo.files.keys())[:10]}}")
+```
 
 Begin by exploring the codebase structure.
 '''

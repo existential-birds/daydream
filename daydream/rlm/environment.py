@@ -148,6 +148,21 @@ def build_repl_namespace(
 
     namespace["files_importing"] = files_importing
 
+    # File existence check
+    def file_exists(path: str) -> bool:
+        """Check if a file exists in the repository."""
+        return path in ctx.files
+
+    namespace["file_exists"] = file_exists
+
+    # Glob-like file matching
+    def list_files_matching(pattern: str) -> list[str]:
+        """List files matching a glob-like pattern (e.g., 'src/*.py', '**/*.ts')."""
+        import fnmatch
+        return [p for p in ctx.files.keys() if fnmatch.fnmatch(p, pattern)]
+
+    namespace["list_files_matching"] = list_files_matching
+
     # File slice function
     def get_file_slice(path: str, start_line: int, end_line: int) -> str:
         """Get specific line range from a file (1-based, inclusive)."""
