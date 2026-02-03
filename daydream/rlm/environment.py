@@ -133,7 +133,11 @@ def build_repl_namespace(
     # Search function: files_containing
     def files_containing(pattern: str) -> list[str]:
         """Grep-like regex search, returns matching file paths."""
-        compiled = re.compile(pattern)
+        try:
+            compiled = re.compile(pattern)
+        except re.error as e:
+            print(f"[Warning] Invalid regex pattern: {e}")
+            return []
         return [path for path, content in ctx.files.items() if compiled.search(content)]
 
     namespace["files_containing"] = files_containing
@@ -167,9 +171,13 @@ def build_repl_namespace(
     def get_file_slice(path: str, start_line: int, end_line: int) -> str:
         """Get specific line range from a file (1-based, inclusive)."""
         content = ctx.files.get(path, "")
+        if not content:
+            return ""
         lines = content.split("\n")
-        # Convert to 0-based index, end_line is inclusive
-        selected = lines[start_line - 1 : end_line]
+        # Clamp to valid range (1-based input)
+        start_idx = max(0, start_line - 1)
+        end_idx = min(len(lines), end_line)
+        selected = lines[start_idx:end_idx]
         return "\n".join(selected)
 
     namespace["get_file_slice"] = get_file_slice

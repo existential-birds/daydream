@@ -897,9 +897,11 @@ Please provide Python code in a fenced code block:
         """
         # Load codebase
         workspace = Path(self.config.workspace_path)
+        changed_files = get_changed_files(workspace)
         self._context = load_codebase(
             workspace,
             self.config.languages,
+            changed_files=changed_files,
         )
 
         # Initialize conversation history

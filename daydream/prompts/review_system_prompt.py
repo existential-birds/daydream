@@ -468,10 +468,11 @@ impact through the codebase using `files_importing()`.
 """
 
     # Insert PR context before the "Begin by exploring" line
-    return base_prompt.replace(
-        "Begin by exploring the codebase structure.",
-        pr_context + "\nBegin by exploring the changed files and their context.",
-    )
+    marker = "Begin by exploring the codebase structure."
+    replacement = pr_context + "\nBegin by exploring the changed files and their context."
+    if marker in base_prompt:
+        return base_prompt.replace(marker, replacement)
+    return base_prompt + "\n" + replacement
 
 
 # Convenience function for simple usage
