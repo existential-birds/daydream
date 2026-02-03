@@ -6,10 +6,11 @@ coordinating the REPL, container, and LLM interactions.
 """
 
 import asyncio
+import logging
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -18,6 +19,8 @@ from daydream.rlm.container import DevContainer
 from daydream.rlm.environment import FileInfo, RepoContext
 from daydream.rlm.history import ConversationHistory
 from daydream.rlm.repl import ExecuteResult, REPLProcess
+
+logger = logging.getLogger(__name__)
 
 # File extensions by language
 LANGUAGE_EXTENSIONS: dict[str, list[str]] = {
@@ -53,6 +56,9 @@ DEFAULT_MAX_ITERATIONS = 50
 # Maximum consecutive iterations without valid code before aborting
 MAX_CONSECUTIVE_ERRORS = 5
 
+# Minimum number of sub-LLM calls required for large repositories
+MIN_SUBLM_CALLS_FOR_LARGE_REPO = 2
+
 
 @dataclass
 class RLMConfig:
@@ -77,6 +83,36 @@ class RLMConfig:
     pr_number: int | None = None
     timeout: float = 600.0
     max_iterations: int = DEFAULT_MAX_ITERATIONS
+
+
+@dataclass
+class RLMMetrics:
+    """Metrics tracking for RLM runner.
+
+    Tracks tool usage and execution statistics to help understand
+    agent behavior and identify inefficiencies.
+
+    Attributes:
+        iterations: Total number of iterations completed.
+        llm_query_calls: Number of single llm_query() calls.
+        llm_query_parallel_calls: Number of llm_query_parallel() calls.
+        files_containing_calls: Number of files_containing() calls.
+        files_importing_calls: Number of files_importing() calls.
+        repo_files_accesses: Number of times repo.files was accessed.
+        unique_files_accessed: Set of unique file paths accessed.
+        code_extraction_failures: Number of times code extraction failed.
+        final_call_attempts: Number of FINAL/FINAL_VAR call attempts.
+    """
+
+    iterations: int = 0
+    llm_query_calls: int = 0
+    llm_query_parallel_calls: int = 0
+    files_containing_calls: int = 0
+    files_importing_calls: int = 0
+    repo_files_accesses: int = 0
+    unique_files_accessed: set[str] = field(default_factory=set)
+    code_extraction_failures: int = 0
+    final_call_attempts: int = 0
 
 
 def _estimate_tokens(content: str) -> int:
@@ -157,11 +193,7 @@ def get_changed_files(workspace: Path) -> list[str] | None:
             return None
 
         # Parse output into list of file paths
-        changed = [
-            line.strip()
-            for line in diff_result.stdout.strip().split("\n")
-            if line.strip()
-        ]
+        changed = [line.strip() for line in diff_result.stdout.strip().split("\n") if line.strip()]
 
         if not changed:
             return None
@@ -340,6 +372,8 @@ class RLMRunner:
         # Logging callback for progress events (iteration, event_type, data)
         self._on_event: Callable[[int, str, dict], None] | None = None
         self._history: ConversationHistory | None = None
+        # Metrics tracking
+        self._metrics = RLMMetrics()
 
     def _emit_event(self, iteration: int, event_type: str, data: dict) -> None:
         """Emit a progress event for logging/UI.
@@ -375,22 +409,18 @@ class RLMRunner:
         has_severity = bool(self.SEVERITY_PATTERN.search(answer))
         if not has_severity:
             warnings.append(
-                "No severity markers found (e.g., [CRITICAL], [HIGH], [MEDIUM], [LOW], "
-                "or 'Critical:', 'High:', etc.)"
+                "No severity markers found (e.g., [CRITICAL], [HIGH], [MEDIUM], [LOW], or 'Critical:', 'High:', etc.)"
             )
 
         # Check for file:line references
         has_file_refs = bool(self.FILE_LINE_PATTERN.search(answer))
         if not has_file_refs:
             warnings.append(
-                "No file:line references found (e.g., 'file.py:123'). "
-                "Code reviews should include specific locations."
+                "No file:line references found (e.g., 'file.py:123'). Code reviews should include specific locations."
             )
 
         # Check if it looks like an architecture summary without issue keywords
-        has_architecture_keywords = any(
-            kw in answer_lower for kw in self.ARCHITECTURE_KEYWORDS
-        )
+        has_architecture_keywords = any(kw in answer_lower for kw in self.ARCHITECTURE_KEYWORDS)
         has_issue_keywords = any(kw in answer_lower for kw in self.ISSUE_KEYWORDS)
 
         if has_architecture_keywords and not has_issue_keywords:
@@ -404,6 +434,36 @@ class RLMRunner:
         is_valid = has_severity or has_file_refs or has_issue_keywords
 
         return is_valid, warnings
+
+    def _generate_initial_probe(self) -> str:
+        """Generate the initial probe code to run before the first iteration.
+
+        This probe executes automatically to provide context to the model about
+        the repository structure and guide it toward the right approach.
+
+        Returns:
+            Python code to execute as the initial probe.
+        """
+        return """print("=== RLM Code Review Session ===")
+if repo.changed_files:
+    mode = "PR Review (" + str(len(repo.changed_files)) + " changed files)"
+else:
+    mode = "Full Repository Review"
+print(f"Mode: {mode}")
+print(f"Total files: {len(repo.files)}")
+print(f"Total tokens: {repo.total_tokens:,}")
+print(f"Languages: {', '.join(repo.languages)}")
+if repo.changed_files:
+    print("\\nChanged files to review:")
+    for f in repo.changed_files[:10]:
+        print(f"  - {f}")
+    if len(repo.changed_files) > 10:
+        print(f"  ... and {len(repo.changed_files) - 10} more")
+print("\\n📋 Next steps:")
+print("1. Use files_containing(pattern) to find relevant files")
+print("2. Use llm_query_parallel(prompts) to batch-analyze files")
+print("3. Build findings in a variable, then call FINAL_VAR()")
+"""
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt describing the REPL environment.
@@ -423,19 +483,16 @@ class RLMRunner:
             file_preview += f"\n  ... and {len(ctx.files) - 20} more files"
 
         # Build largest files section
-        largest_section = "\n".join(
-            f"  - {path}: ~{tokens:,} tokens"
-            for path, tokens in ctx.largest_files[:5]
-        )
+        largest_section = "\n".join(f"  - {path}: ~{tokens:,} tokens" for path, tokens in ctx.largest_files[:5])
 
         return f"""You are a code review agent with access to a Python REPL environment.
 
 ## Repository Context
 
 - **Files**: {ctx.file_count:,} files loaded
-- **Languages**: {', '.join(ctx.languages)}
+- **Languages**: {", ".join(ctx.languages)}
 - **Total tokens**: ~{ctx.total_tokens:,} estimated
-{f'- **Changed files (PR mode)**: {len(ctx.changed_files)} files' if ctx.changed_files else ''}
+{f"- **Changed files (PR mode)**: {len(ctx.changed_files)} files" if ctx.changed_files else ""}
 
 ### File Preview
 {file_preview}
@@ -575,8 +632,7 @@ Respond with Python code in a fenced code block:
         # Very short snippets without REPL functions are likely examples
         if len(code) < 100:
             has_repl_usage = any(
-                fn in code
-                for fn in ["print(", "repo.", "llm_query", "FINAL", "files_containing", "files_importing"]
+                fn in code for fn in ["print(", "repo.", "llm_query", "FINAL", "files_containing", "files_importing"]
             )
             if not has_repl_usage:
                 return True
@@ -622,7 +678,7 @@ Respond with Python code in a fenced code block:
         quote_style = match.group(1)
         string_content = match.group(2)
 
-        if '`' not in string_content:
+        if "`" not in string_content:
             # No backticks, no transformation needed
             return code
 
@@ -647,9 +703,90 @@ Respond with Python code in a fenced code block:
         Returns:
             LLM response text.
         """
+        self._metrics.llm_query_calls += 1
         if self._llm_callback is None:
             return "[Error: No LLM callback configured]"
         return self._llm_callback(prompt, model)
+
+    def _handle_llm_query_parallel(self, prompts: list[str], model: str) -> list[str]:
+        """Handle llm_query_parallel callback from REPL.
+
+        Args:
+            prompts: List of query prompts.
+            model: The model to use (e.g., "haiku").
+
+        Returns:
+            List of LLM response texts.
+        """
+        self._metrics.llm_query_parallel_calls += 1
+        # Fall back to sequential execution
+        return [self._handle_llm_query(p, model) for p in prompts]
+
+    def _check_sublm_usage_before_final(self) -> str | None:
+        """Check if sub-LLM usage meets minimum requirements before accepting FINAL.
+
+        For large repositories (>100k tokens), we require at least MIN_SUBLM_CALLS_FOR_LARGE_REPO
+        sub-LLM calls to ensure thorough analysis rather than superficial reviews.
+
+        Returns:
+            Warning message if requirements not met, None otherwise.
+        """
+        if self._context is None:
+            return None
+
+        # Check if this is a large repository
+        if self._context.total_tokens <= 100_000:
+            return None
+
+        # Count total sub-LLM calls
+        total_sublm_calls = self._metrics.llm_query_calls + self._metrics.llm_query_parallel_calls
+
+        # Check against minimum requirement
+        if total_sublm_calls < MIN_SUBLM_CALLS_FOR_LARGE_REPO:
+            return (
+                f"⚠️ Sub-LLM Usage Warning: Large repository ({self._context.total_tokens:,} tokens) "
+                f"but only {total_sublm_calls} sub-LLM call(s) made so far. "
+                f"For thorough analysis, please use llm_query() or llm_query_parallel() "
+                f"at least {MIN_SUBLM_CALLS_FOR_LARGE_REPO} times before calling FINAL(). "
+                f"This ensures batch processing and comprehensive review rather than superficial analysis."
+            )
+
+        return None
+
+    def _handle_files_containing(self, pattern: str) -> list[str]:
+        """Handle files_containing callback from REPL.
+
+        Args:
+            pattern: Regex pattern to search for.
+
+        Returns:
+            List of file paths matching the pattern.
+        """
+        self._metrics.files_containing_calls += 1
+        if self._context is None:
+            return []
+        compiled = re.compile(pattern)
+        results = [path for path, content in self._context.files.items() if compiled.search(content)]
+        self._metrics.unique_files_accessed.update(results)
+        return results
+
+    def _handle_files_importing(self, module: str) -> list[str]:
+        """Handle files_importing callback from REPL.
+
+        Args:
+            module: Module name to search for.
+
+        Returns:
+            List of file paths that import the module.
+        """
+        self._metrics.files_importing_calls += 1
+        if self._context is None:
+            return []
+        pattern = rf"(?:^|\n)\s*(?:import\s+{re.escape(module)}|from\s+{re.escape(module)}\s+import)"
+        compiled = re.compile(pattern)
+        results = [path for path, content in self._context.files.items() if compiled.search(content)]
+        self._metrics.unique_files_accessed.update(results)
+        return results
 
     def _build_continuation_prompt(
         self,
@@ -688,13 +825,11 @@ Respond with Python code in a fenced code block:
                     "\n**String Literal Error**: Use `FINAL_VAR()` for complex reports:\n"
                     "```python\n"
                     "report = '''Your report...'''\n"
-                    "FINAL_VAR(\"report\")\n"
+                    'FINAL_VAR("report")\n'
                     "```"
                 )
             else:
-                parts.append(
-                    "\nThe code raised an error. Fix the issue and continue the review."
-                )
+                parts.append("\nThe code raised an error. Fix the issue and continue the review.")
 
         parts.append(
             "\n\n**RESPOND WITH PYTHON CODE ONLY** — no prose or explanations outside code blocks. "
@@ -722,7 +857,7 @@ Respond with Python code in a fenced code block:
 
 I couldn't find executable Python code in your last response.
 
-**REMINDER**: You are reviewing a codebase with {self._context.file_count} files ({', '.join(self._context.languages)}).
+**REMINDER**: You are reviewing a codebase with {self._context.file_count} files ({", ".join(self._context.languages)}).
 Your goal is to analyze the code and call `FINAL()` with your review report when done.
 
 **Available functions in the REPL**:
@@ -748,7 +883,7 @@ Please provide Python code in a fenced code block:
 
         # Show top-level paths to help orientation
         if self._context:
-            top_level = sorted(set(p.split('/')[0] for p in self._context.files.keys()))[:10]
+            top_level = sorted(set(p.split("/")[0] for p in self._context.files.keys()))[:10]
             if top_level:
                 prompt += f"\n\n**Available top-level paths**: {', '.join(top_level)}"
 
@@ -791,13 +926,45 @@ Please provide Python code in a fenced code block:
                 # Use a simple echo for testing
                 self._llm_callback = lambda prompt, model: f"[Sub-LLM response to: {prompt[:50]}...]"
 
-            # Create REPL with llm_query callback
+            # Create REPL with instrumented callbacks for metrics tracking
             self._repl = REPLProcess(
                 context=self._context,
-                llm_callback=self._llm_callback,
+                llm_callback=lambda p, m: self._handle_llm_query(p, m),
+                llm_parallel_callback=lambda ps, m: self._handle_llm_query_parallel(ps, m),
             )
 
             self._repl.start()
+
+            # Execute initial probe to set context before the first iteration
+            initial_probe = self._generate_initial_probe()
+            self._emit_event(
+                0,
+                "initial_probe",
+                {
+                    "code_length": len(initial_probe),
+                },
+            )
+
+            # Run the probe in a worker thread (to avoid potential deadlocks)
+            initial_result = await asyncio.to_thread(self._repl.execute, initial_probe)
+
+            # Add probe to history as iteration 0
+            self._history.add_exchange(
+                iteration=0,
+                code=initial_probe,
+                output=initial_result.output or "",
+                error=initial_result.error,
+            )
+
+            self._emit_event(
+                0,
+                "initial_probe_executed",
+                {
+                    "output_length": len(initial_result.output) if initial_result.output else 0,
+                    "output_preview": initial_result.output if initial_result.output else "",
+                    "is_error": initial_result.is_error,
+                },
+            )
 
             # Build initial system prompt using the comprehensive review prompt
             system_prompt = get_review_prompt(
@@ -807,7 +974,17 @@ Please provide Python code in a fenced code block:
                 largest_files=self._context.largest_files,
                 changed_files=self._context.changed_files,
             )
-            current_prompt = system_prompt
+
+            # Include probe output in first prompt
+            if initial_result.output:
+                current_prompt = (
+                    f"{system_prompt}\n\n"
+                    f"## Initial Repository Scan\n\n"
+                    f"```\n{initial_result.output}\n```\n\n"
+                    f"Based on the above scan, generate Python code to continue the review."
+                )
+            else:
+                current_prompt = system_prompt
 
             final_result: str | None = None
             iteration = 0
@@ -815,40 +992,58 @@ Please provide Python code in a fenced code block:
 
             while iteration < self.config.max_iterations:
                 iteration += 1
+                self._metrics.iterations = iteration
 
-                self._emit_event(iteration, "iteration_start", {
-                    "max_iterations": self.config.max_iterations,
-                })
+                self._emit_event(
+                    iteration,
+                    "iteration_start",
+                    {
+                        "max_iterations": self.config.max_iterations,
+                    },
+                )
 
                 # Get code from LLM
                 response = await self._call_llm(current_prompt)
                 code = self._extract_code(response)
 
-                self._emit_event(iteration, "code_extracted", {
-                    "code_length": len(code) if code else 0,
-                    "code_preview": code if code else "",
-                    "has_code": bool(code),
-                })
+                self._emit_event(
+                    iteration,
+                    "code_extracted",
+                    {
+                        "code_length": len(code) if code else 0,
+                        "code_preview": code if code else "",
+                        "has_code": bool(code),
+                    },
+                )
 
                 if not code:
+                    self._metrics.code_extraction_failures += 1
                     # No code found - try to extract any runnable content
                     # or ask for clarification
                     if "FINAL(" in response:
                         final_match = FINAL_CALL_PATTERN.search(response)
                         if final_match:
                             code = final_match.group(0)
-                            self._emit_event(iteration, "fallback_final_detection", {
-                                "response_length": len(response),
-                                "extracted_final": code,
-                            })
+                            self._emit_event(
+                                iteration,
+                                "fallback_final_detection",
+                                {
+                                    "response_length": len(response),
+                                    "extracted_final": code,
+                                },
+                            )
                         else:
                             # Could not extract FINAL cleanly, treat as no code
                             consecutive_no_code += 1
 
                             if consecutive_no_code >= MAX_CONSECUTIVE_ERRORS:
-                                self._emit_event(iteration, "consecutive_error_limit", {
-                                    "consecutive_errors": consecutive_no_code,
-                                })
+                                self._emit_event(
+                                    iteration,
+                                    "consecutive_error_limit",
+                                    {
+                                        "consecutive_errors": consecutive_no_code,
+                                    },
+                                )
                                 final_result = (
                                     "# Code Review (Failed)\n\n"
                                     f"Review failed after {consecutive_no_code} consecutive iterations "
@@ -857,11 +1052,15 @@ Please provide Python code in a fenced code block:
                                 )
                                 break
 
-                            self._emit_event(iteration, "no_code_found", {
-                                "response_preview": response[:200],
-                                "reason": "FINAL detected but could not extract cleanly",
-                                "consecutive_count": consecutive_no_code,
-                            })
+                            self._emit_event(
+                                iteration,
+                                "no_code_found",
+                                {
+                                    "response_preview": response[:200],
+                                    "reason": "FINAL detected but could not extract cleanly",
+                                    "consecutive_count": consecutive_no_code,
+                                },
+                            )
                             current_prompt = self._build_no_code_recovery_prompt(iteration)
                             continue
                     else:
@@ -869,9 +1068,13 @@ Please provide Python code in a fenced code block:
                         consecutive_no_code += 1
 
                         if consecutive_no_code >= MAX_CONSECUTIVE_ERRORS:
-                            self._emit_event(iteration, "consecutive_error_limit", {
-                                "consecutive_errors": consecutive_no_code,
-                            })
+                            self._emit_event(
+                                iteration,
+                                "consecutive_error_limit",
+                                {
+                                    "consecutive_errors": consecutive_no_code,
+                                },
+                            )
                             final_result = (
                                 "# Code Review (Failed)\n\n"
                                 f"Review failed after {consecutive_no_code} consecutive iterations "
@@ -880,10 +1083,14 @@ Please provide Python code in a fenced code block:
                             )
                             break
 
-                        self._emit_event(iteration, "no_code_found", {
-                            "response_preview": response[:200] if response else "",
-                            "consecutive_count": consecutive_no_code,
-                        })
+                        self._emit_event(
+                            iteration,
+                            "no_code_found",
+                            {
+                                "response_preview": response[:200] if response else "",
+                                "consecutive_count": consecutive_no_code,
+                            },
+                        )
                         current_prompt = self._build_no_code_recovery_prompt(iteration)
                         continue
 
@@ -901,20 +1108,50 @@ Please provide Python code in a fenced code block:
                     error=result.error,
                 )
 
-                self._emit_event(iteration, "repl_executed", {
-                    "output_length": len(result.output) if result.output else 0,
-                    "output_preview": (result.output if result.output else ""),
-                    "is_error": result.is_error,
-                    "error": result.error if result.is_error else None,
-                    "is_final": result.is_final,
-                })
+                self._emit_event(
+                    iteration,
+                    "repl_executed",
+                    {
+                        "output_length": len(result.output) if result.output else 0,
+                        "output_preview": (result.output if result.output else ""),
+                        "is_error": result.is_error,
+                        "error": result.error if result.is_error else None,
+                        "is_final": result.is_final,
+                    },
+                )
 
                 # Check for final answer
                 if result.is_final:
+                    self._metrics.final_call_attempts += 1
+
+                    # Check if sub-LLM usage meets requirements before accepting FINAL
+                    sublm_warning = self._check_sublm_usage_before_final()
+                    if sublm_warning:
+                        # Log the warning and continue instead of accepting FINAL
+                        logger.warning(sublm_warning)
+                        self._emit_event(
+                            iteration,
+                            "sublm_usage_warning",
+                            {
+                                "warning": sublm_warning,
+                                "llm_query_count": self._metrics.llm_query_calls,
+                                "llm_query_parallel_count": self._metrics.llm_query_parallel_calls,
+                            },
+                        )
+
+                        # Add warning to conversation so the model knows to use sub-LLM queries
+                        current_prompt = self._build_continuation_prompt(iteration, result)
+                        current_prompt = f"{sublm_warning}\n\n{current_prompt}"
+                        continue
+
                     final_result = result.final_answer
-                    self._emit_event(iteration, "final_answer", {
-                        "answer_length": len(final_result) if final_result else 0,
-                    })
+                    self._emit_event(
+                        iteration,
+                        "final_answer",
+                        {
+                            "answer_length": len(final_result) if final_result else 0,
+                        },
+                    )
                     break
 
                 # Build continuation prompt with execution result
@@ -922,10 +1159,14 @@ Please provide Python code in a fenced code block:
 
             # If we hit max iterations without FINAL, generate a summary
             if final_result is None:
-                self._emit_event(iteration, "max_iterations_reached", {
-                    "iterations_completed": iteration,
-                    "max_iterations": self.config.max_iterations,
-                })
+                self._emit_event(
+                    iteration,
+                    "max_iterations_reached",
+                    {
+                        "iterations_completed": iteration,
+                        "max_iterations": self.config.max_iterations,
+                    },
+                )
                 final_result = (
                     f"# Code Review (Incomplete)\n\n"
                     f"Review stopped after {iteration} iterations without completion.\n"
@@ -936,6 +1177,38 @@ Please provide Python code in a fenced code block:
             is_valid, warnings = self._validate_review_quality(final_result)
             if not is_valid:
                 self._emit_event(iteration, "review_quality_warning", {"warnings": warnings})
+
+            # Emit metrics
+            self._emit_event(
+                iteration,
+                "metrics",
+                {
+                    "iterations": self._metrics.iterations,
+                    "llm_query_calls": self._metrics.llm_query_calls,
+                    "llm_query_parallel_calls": self._metrics.llm_query_parallel_calls,
+                    "files_containing_calls": self._metrics.files_containing_calls,
+                    "files_importing_calls": self._metrics.files_importing_calls,
+                    "repo_files_accesses": self._metrics.repo_files_accesses,
+                    "unique_files_accessed": len(self._metrics.unique_files_accessed),
+                    "code_extraction_failures": self._metrics.code_extraction_failures,
+                    "final_call_attempts": self._metrics.final_call_attempts,
+                },
+            )
+
+            # Log metrics summary
+            logger.info(
+                "RLM Metrics: iterations=%d, llm_query=%d, llm_query_parallel=%d, "
+                "files_containing=%d, files_importing=%d, unique_files=%d, "
+                "extraction_failures=%d, final_attempts=%d",
+                self._metrics.iterations,
+                self._metrics.llm_query_calls,
+                self._metrics.llm_query_parallel_calls,
+                self._metrics.files_containing_calls,
+                self._metrics.files_importing_calls,
+                len(self._metrics.unique_files_accessed),
+                self._metrics.code_extraction_failures,
+                self._metrics.final_call_attempts,
+            )
 
             return final_result
 

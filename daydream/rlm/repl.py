@@ -5,6 +5,7 @@ This module manages the Python REPL process that executes code generated
 by the model, handling IPC communication and output capture.
 """
 
+import ast
 import io
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
@@ -17,6 +18,40 @@ from daydream.rlm.environment import (
     RepoContext,
     build_repl_namespace,
 )
+
+# Imports blocked to prevent bypassing repo.files
+BLOCKED_IMPORTS: frozenset[str] = frozenset({"pathlib", "os", "subprocess", "shutil"})
+
+
+def _validate_code_imports(code: str) -> str | None:
+    """Check if code contains blocked imports.
+
+    Args:
+        code: Python code to validate.
+
+    Returns:
+        Error message if blocked imports found, None if OK.
+    """
+    try:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in BLOCKED_IMPORTS:
+                        return (
+                            f"Import blocked: {alias.name}. "
+                            "Use repo.files[path] to access file contents "
+                            "instead of reading from filesystem."
+                        )
+            elif isinstance(node, ast.ImportFrom) and node.module in BLOCKED_IMPORTS:
+                return (
+                    f"Import blocked: {node.module}. "
+                    "Use repo.files[path] to access file contents "
+                    "instead of reading from filesystem."
+                )
+    except SyntaxError:
+        pass  # Let exec() handle syntax errors
+    return None
 
 
 class StreamingStringIO(io.StringIO):
@@ -126,6 +161,15 @@ class REPLProcess:
             return ExecuteResult(
                 output="",
                 error="REPL is not running",
+                final_answer=None,
+            )
+
+        # Validate imports before execution
+        import_error = _validate_code_imports(code)
+        if import_error:
+            return ExecuteResult(
+                output="",
+                error=import_error,
                 final_answer=None,
             )
 
