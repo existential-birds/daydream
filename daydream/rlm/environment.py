@@ -177,7 +177,8 @@ def build_repl_namespace(
     # FINAL function - signals completion with direct answer
     def FINAL(answer: str) -> None:
         """Signal task completion with direct answer."""
-        raise FinalAnswer(answer)
+        # Convert to string in case model passes dict/list/etc
+        raise FinalAnswer(str(answer))
 
     namespace["FINAL"] = FINAL
 
