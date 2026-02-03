@@ -5,6 +5,7 @@ This module provides the main orchestration for RLM code reviews,
 coordinating the REPL, container, and LLM interactions.
 """
 
+import asyncio
 import os
 import re
 from dataclasses import dataclass
@@ -658,7 +659,7 @@ Please provide Python code in a fenced code block:
                 consecutive_no_code = 0
 
                 # Execute code in REPL
-                result = self._repl.execute(code)
+                result = await asyncio.to_thread(self._repl.execute, code)
 
                 # Add exchange to history
                 self._history.add_exchange(
