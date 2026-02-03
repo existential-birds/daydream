@@ -278,6 +278,8 @@ You have access to the following in the REPL namespace:
 
 ### `repo` - Repository Context Object
 - `repo.files` - Dict[str, str]: Mapping of file paths to their contents
+  **IMPORTANT**: Values are strings directly, NOT objects. Use `repo.files["path"]` NOT `repo.files["path"].content`
+  Example: `content = repo.files["main.py"][:1000]  # First 1000 chars`
 - `repo.structure` - Dict[str, FileInfo]: Parsed metadata for each file
 - `repo.file_sizes` - Dict[str, int]: Token counts per file
 - `repo.total_tokens` - int: Total token count
@@ -344,16 +346,69 @@ Respond with Python code in a fenced code block:
     def _extract_code(self, response: str) -> str:
         """Extract Python code from LLM response.
 
+        Uses smart extraction to avoid picking up documentation examples:
+        1. Prefer code blocks containing FINAL/FINAL_VAR calls
+        2. Skip blocks that look like embedded examples (bare decorators, etc.)
+        3. Fall back to the last code block (most likely to be executable)
+
         Args:
             response: LLM response text.
 
         Returns:
             Extracted Python code, or empty string if no code found.
         """
-        match = CODE_BLOCK_PATTERN.search(response)
-        if match:
-            return match.group(1).strip()
-        return ""
+        matches = list(CODE_BLOCK_PATTERN.finditer(response))
+        if not matches:
+            return ""
+
+        # Prefer code blocks containing FINAL/FINAL_VAR calls
+        for match in matches:
+            code = match.group(1).strip()
+            if "FINAL(" in code or "FINAL_VAR(" in code:
+                return code
+
+        # Filter out blocks that look like documentation examples
+        executable_blocks = []
+        for match in matches:
+            code = match.group(1).strip()
+            if not self._is_likely_example(code):
+                executable_blocks.append(code)
+
+        # Return the last executable block (most likely to be the intended code)
+        if executable_blocks:
+            return executable_blocks[-1]
+
+        # Fall back to last block if all were filtered
+        return matches[-1].group(1).strip()
+
+    def _is_likely_example(self, code: str) -> bool:
+        """Detect if code looks like a documentation example, not executable code.
+
+        Args:
+            code: Python code string to check.
+
+        Returns:
+            True if the code looks like an embedded example, not executable code.
+        """
+        lines = code.strip().split("\n")
+        first_line = lines[0].strip() if lines else ""
+
+        # Bare decorator without imports (likely a class definition example)
+        if first_line.startswith("@") and "import" not in code:
+            # But allow if it's using our REPL functions
+            if not any(fn in code for fn in ["repo.", "llm_query", "FINAL", "files_"]):
+                return True
+
+        # Very short snippets without REPL functions are likely examples
+        if len(code) < 100:
+            has_repl_usage = any(
+                fn in code
+                for fn in ["print(", "repo.", "llm_query", "FINAL", "files_containing", "files_importing"]
+            )
+            if not has_repl_usage:
+                return True
+
+        return False
 
     def _handle_llm_query(self, prompt: str, model: str) -> str:
         """Handle llm_query callback from REPL.

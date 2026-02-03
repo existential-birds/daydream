@@ -325,19 +325,19 @@ This will print the number of files.'''
         assert "Here's the code" not in code
 
     def test_extract_code_handles_multiple_blocks(self, tmp_path):
-        """Should extract first Python code block only."""
+        """Should extract last Python code block as fallback (most likely to be executable)."""
         (tmp_path / "x.py").write_text("x=1")
 
         cfg = RLMConfig(workspace_path=str(tmp_path), languages=["python"])
         runner = RLMRunner(cfg)
 
-        response = '''First block:
+        response = '''First block (example):
 
 ```python
 x = 1
 ```
 
-Second block:
+Second block (actual code to run):
 
 ```python
 y = 2
@@ -345,9 +345,10 @@ y = 2
 
         code = runner._extract_code(response)
 
-        assert "x = 1" in code
-        # Should only get first block
-        assert "y = 2" not in code
+        # Smart extraction prefers last block when no FINAL is present
+        # (last block is more likely to be the intended executable code)
+        assert "y = 2" in code
+        assert "x = 1" not in code
 
     def test_extract_code_handles_no_fence(self, tmp_path):
         """Should handle responses without code fences."""

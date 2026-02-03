@@ -165,6 +165,161 @@ class TestCodeBlockPattern:
         assert match is None
 
 
+class TestCodeExtraction:
+    """Tests for smart code extraction from LLM responses."""
+
+    def test_prefers_final_block(self):
+        """Should prefer code blocks containing FINAL/FINAL_VAR calls."""
+        cfg = RLMConfig(workspace_path="/repo", languages=["python"])
+        runner = RLMRunner(cfg)
+
+        # Response with documentation example followed by FINAL call
+        response = '''# Analysis Report
+
+Here's an example of the issue:
+```python
+@dataclass
+class AgentState:
+    value: int
+```
+
+Now completing the review:
+```python
+report = "Review complete"
+FINAL_VAR("report")
+```
+'''
+        code = runner._extract_code(response)
+        assert "FINAL_VAR" in code
+        assert "@dataclass" not in code
+
+    def test_skips_bare_decorator_examples(self):
+        """Should skip code that looks like documentation examples."""
+        cfg = RLMConfig(workspace_path="/repo", languages=["python"])
+        runner = RLMRunner(cfg)
+
+        # Response with a documentation example (bare decorator without imports)
+        response = '''The codebase uses dataclasses:
+```python
+@dataclass
+class Config:
+    name: str
+```
+
+Let me analyze further:
+```python
+print(f"Files: {len(repo.files)}")
+```
+'''
+        code = runner._extract_code(response)
+        # Should get the analysis code, not the example
+        assert "repo.files" in code
+        assert "@dataclass" not in code
+
+    def test_uses_last_block_as_fallback(self):
+        """Should use last code block when no FINAL and no obvious examples."""
+        cfg = RLMConfig(workspace_path="/repo", languages=["python"])
+        runner = RLMRunner(cfg)
+
+        response = '''First I'll check the structure:
+```python
+print(repo.file_count)
+```
+
+Now deeper analysis:
+```python
+for f in repo.files:
+    print(f)
+```
+'''
+        code = runner._extract_code(response)
+        # Should get the last block
+        assert "for f in repo.files" in code
+
+    def test_handles_markdown_report_with_embedded_examples(self):
+        """Should handle real-world case of report with embedded code examples."""
+        cfg = RLMConfig(workspace_path="/repo", languages=["python"])
+        runner = RLMRunner(cfg)
+
+        # This simulates the actual failure from test_run.log
+        response = '''Based on my analysis, here is the report:
+
+# Code Review Report
+
+## Architecture
+
+The code uses dataclasses:
+```python
+@dataclass
+class AgentState:
+    debug_log: TextIO | None = None
+    quiet_mode: bool = False
+```
+
+## Issues Found
+- Issue 1: Missing validation
+
+```python
+report = """# Final Report
+Found 3 issues total.
+"""
+FINAL_VAR("report")
+```
+'''
+        code = runner._extract_code(response)
+        # Should find the FINAL_VAR block, not the dataclass example
+        assert "FINAL_VAR" in code
+        assert "AgentState" not in code
+
+
+class TestIsLikelyExample:
+    """Tests for _is_likely_example helper."""
+
+    def test_bare_decorator_is_example(self):
+        """Bare decorator without imports should be detected as example."""
+        cfg = RLMConfig(workspace_path="/repo", languages=["python"])
+        runner = RLMRunner(cfg)
+
+        code = '''@dataclass
+class Config:
+    name: str'''
+        assert runner._is_likely_example(code) is True
+
+    def test_short_snippet_without_repl_is_example(self):
+        """Short code without REPL functions should be detected as example."""
+        cfg = RLMConfig(workspace_path="/repo", languages=["python"])
+        runner = RLMRunner(cfg)
+
+        code = "x = 1 + 2"
+        assert runner._is_likely_example(code) is True
+
+    def test_code_with_repo_is_not_example(self):
+        """Code using repo.* is not an example."""
+        cfg = RLMConfig(workspace_path="/repo", languages=["python"])
+        runner = RLMRunner(cfg)
+
+        code = "print(repo.files)"
+        assert runner._is_likely_example(code) is False
+
+    def test_code_with_final_is_not_example(self):
+        """Code with FINAL is not an example."""
+        cfg = RLMConfig(workspace_path="/repo", languages=["python"])
+        runner = RLMRunner(cfg)
+
+        code = 'FINAL("done")'
+        assert runner._is_likely_example(code) is False
+
+    def test_decorator_with_repl_usage_is_not_example(self):
+        """Decorator with REPL functions in body is not an example."""
+        cfg = RLMConfig(workspace_path="/repo", languages=["python"])
+        runner = RLMRunner(cfg)
+
+        code = '''@something
+def analyze():
+    print(repo.files)'''
+        assert runner._is_likely_example(code) is False
+
+
 class TestRLMRunner:
     """Tests for RLMRunner class."""
 

@@ -91,6 +91,16 @@ repo.services: dict[str, Service]    # {{name: {{root, files, dependencies}}}}
 repo.changed_files: list[str]        # Files changed in this PR (if applicable)
 ```
 
+**IMPORTANT**: `repo.files` values are **strings directly**, not objects!
+```python
+# ✅ CORRECT - direct string access:
+content = repo.files["main.py"]
+first_1000 = repo.files["main.py"][:1000]
+
+# ❌ WRONG - there is no .content attribute:
+content = repo.files["main.py"].content  # AttributeError!
+```
+
 ## Available Functions
 
 ```python
