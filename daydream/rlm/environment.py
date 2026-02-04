@@ -112,8 +112,11 @@ def build_repl_namespace(
     namespace["repo"] = ctx
 
     # Wrap llm_query with default model parameter
-    def llm_query(prompt: str, model: str = "haiku") -> str:
+    def llm_query(prompt: str, model: str = "haiku", **kwargs) -> str:
         """Fresh-context sub-LLM call. Returns response text."""
+        # Handle common misuse: model often hallucinates 'context' parameter
+        if "context" in kwargs:
+            prompt = f"{prompt}\n\n{kwargs['context']}"
         return llm_query_fn(prompt, model)
 
     namespace["llm_query"] = llm_query

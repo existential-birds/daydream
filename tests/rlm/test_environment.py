@@ -122,6 +122,29 @@ class TestBuildReplNamespace:
         assert result == "mocked"
         assert calls == [("test prompt", "haiku")]
 
+    def test_llm_query_handles_context_kwarg(self):
+        """llm_query should handle hallucinated 'context' parameter gracefully."""
+        from daydream.rlm.environment import build_repl_namespace
+
+        ctx = RepoContext(
+            files={}, structure={}, services={}, file_sizes={},
+            total_tokens=0, file_count=0, largest_files=[], languages=[],
+            changed_files=None,
+        )
+        calls = []
+
+        def mock_llm(prompt: str, model: str = "haiku") -> str:
+            calls.append((prompt, model))
+            return "analyzed"
+
+        ns = build_repl_namespace(ctx, llm_query_fn=mock_llm)
+        # Model often hallucinates a 'context' parameter - should merge into prompt
+        result = ns["llm_query"]("Analyze this code", context="def foo(): pass")
+        assert result == "analyzed"
+        assert len(calls) == 1
+        assert calls[0][0] == "Analyze this code\n\ndef foo(): pass"
+        assert calls[0][1] == "haiku"
+
     def test_namespace_contains_llm_query_parallel(self):
         """Namespace should contain llm_query_parallel function."""
         from daydream.rlm.environment import build_repl_namespace
