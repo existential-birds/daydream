@@ -128,6 +128,13 @@ def _parse_args() -> RunConfig:
         help="Claude model to use (default: opus)",
     )
 
+    parser.add_argument(
+        "--rlm",
+        action="store_true",
+        default=False,
+        help="Use RLM mode for large codebase review (1M+ tokens)",
+    )
+
     args = parser.parse_args()
 
     # Validate mutual exclusion: --start-at and --review-only
@@ -143,6 +150,7 @@ def _parse_args() -> RunConfig:
         quiet=True,
         review_only=args.review_only,
         start_at=args.start_at,
+        rlm_mode=args.rlm,
     )
 
 
