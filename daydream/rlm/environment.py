@@ -195,9 +195,29 @@ def build_repl_namespace(
 
     # FINAL_VAR function - signals completion using a variable
     def FINAL_VAR(var_name: str) -> None:
-        """Signal task completion, returning a REPL variable as output."""
+        """Signal task completion, returning a REPL variable as output.
+
+        Note: Uses the shared namespace dict which is mutated by exec().
+        Variables assigned in code blocks will be available here.
+        """
         if var_name not in namespace:
-            raise NameError(f"Variable '{var_name}' not found in namespace")
+            # Provide diagnostic info to help debug missing variables
+            available_vars = [
+                k for k in namespace.keys()
+                if not k.startswith("_") and not callable(namespace.get(k))
+            ]
+            # Filter out built-in functions we injected
+            builtin_funcs = {
+                "repo", "llm_query", "llm_query_parallel", "files_containing",
+                "files_importing", "file_exists", "list_files_matching",
+                "get_file_slice", "FINAL", "FINAL_VAR",
+            }
+            user_vars = [v for v in available_vars if v not in builtin_funcs]
+            hint = f"Available user variables: {user_vars}" if user_vars else "No user variables defined"
+            raise FinalAnswer(
+                f"[FINAL_VAR Error] Variable '{var_name}' not found in namespace. {hint}. "
+                f"Ensure the variable is assigned before calling FINAL_VAR('{var_name}')."
+            )
         raise FinalAnswer(str(namespace[var_name]))
 
     namespace["FINAL_VAR"] = FINAL_VAR

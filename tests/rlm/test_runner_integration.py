@@ -103,20 +103,16 @@ class TestRLMRunnerOrchestrationLoop:
         # Track iterations
         iterations = []
 
-        # Mock LLM that returns code, then FINAL
+        # Mock LLM that returns code, then FINAL (raw Python, no markdown)
         async def mock_llm_call(prompt: str) -> str:
             iterations.append(prompt)
             if len(iterations) == 1:
                 # First call: return code to execute
-                return '''```python
-files = list(repo.files.keys())
-print(f"Found {len(files)} files")
-```'''
+                return '''files = list(repo.files.keys())
+print(f"Found {len(files)} files")'''
             else:
                 # Second call: return FINAL
-                return '''```python
-FINAL("Review complete: 1 file found")
-```'''
+                return 'FINAL("Review complete: 1 file found")'
 
         runner._call_llm = mock_llm_call
 
@@ -137,11 +133,9 @@ FINAL("Review complete: 1 file found")
         )
         runner = RLMRunner(cfg)
 
-        # Mock LLM that immediately returns FINAL
+        # Mock LLM that immediately returns FINAL (raw Python, no markdown)
         async def mock_llm_call(prompt: str) -> str:
-            return '''```python
-FINAL("# Code Review Report\\n\\nNo issues found.")
-```'''
+            return 'FINAL("# Code Review Report\\n\\nNo issues found.")'
 
         runner._call_llm = mock_llm_call
 
@@ -167,15 +161,11 @@ FINAL("# Code Review Report\\n\\nNo issues found.")
         async def mock_llm_call(prompt: str) -> str:
             call_count[0] += 1
             if call_count[0] == 1:
-                # Return code with error
-                return '''```python
-undefined_variable  # This will raise NameError
-```'''
+                # Return code with error (raw Python, no markdown)
+                return 'undefined_variable  # This will raise NameError'
             else:
-                # After error, return FINAL
-                return '''```python
-FINAL("Review complete despite error")
-```'''
+                # After error, return FINAL (raw Python, no markdown)
+                return 'FINAL("Review complete despite error")'
 
         runner._call_llm = mock_llm_call
 
@@ -202,10 +192,8 @@ FINAL("Review complete despite error")
 
         async def mock_llm_call(prompt: str) -> str:
             call_count[0] += 1
-            # Never call FINAL - just keep executing code
-            return '''```python
-print("iteration")
-```'''
+            # Never call FINAL - just keep executing code (raw Python, no markdown)
+            return 'print("iteration")'
 
         runner._call_llm = mock_llm_call
 
@@ -233,13 +221,10 @@ print("iteration")
         async def mock_llm_call(prompt: str) -> str:
             prompts_received.append(prompt)
             if len(prompts_received) == 1:
-                return '''```python
-print("Hello from REPL")
-```'''
+                # Raw Python, no markdown
+                return 'print("Hello from REPL")'
             else:
-                return '''```python
-FINAL("Done")
-```'''
+                return 'FINAL("Done")'
 
         runner._call_llm = mock_llm_call
 
@@ -279,14 +264,11 @@ class TestRLMRunnerSubLLMCalls:
         async def mock_llm_call(prompt: str) -> str:
             call_count[0] += 1
             if call_count[0] == 1:
-                return '''```python
-analysis = llm_query("Analyze the foo function")
-print(analysis)
-```'''
+                # Raw Python, no markdown
+                return '''analysis = llm_query("Analyze the foo function")
+print(analysis)'''
             else:
-                return '''```python
-FINAL("Review done with sub-LLM analysis")
-```'''
+                return 'FINAL("Review done with sub-LLM analysis")'
 
         runner._call_llm = mock_llm_call
 
@@ -299,67 +281,33 @@ FINAL("Review done with sub-LLM analysis")
 
 
 class TestRLMRunnerCodeExtraction:
-    """Tests for extracting Python code from LLM responses."""
+    """Tests for Python-only code extraction from LLM responses."""
 
-    def test_extract_code_from_fenced_block(self, tmp_path):
-        """Should extract code from markdown fenced blocks."""
+    def test_extract_code_returns_stripped_response(self, tmp_path):
+        """Response is returned as-is (stripped) in Python-only mode."""
         (tmp_path / "x.py").write_text("x=1")
 
         cfg = RLMConfig(workspace_path=str(tmp_path), languages=["python"])
         runner = RLMRunner(cfg)
 
-        response = '''Here's the code to analyze the repository:
-
-```python
-files = list(repo.files.keys())
-print(f"Found {len(files)} files")
-```
-
-This will print the number of files.'''
+        response = '''  files = list(repo.files.keys())
+print(f"Found {len(files)} files")  '''
 
         code = runner._extract_code(response)
 
         assert "files = list(repo.files.keys())" in code
         assert "print" in code
-        # Should not include the markdown explanation
-        assert "Here's the code" not in code
+        # In Python-only mode, response IS the code (just stripped)
+        assert code == response.strip()
 
-    def test_extract_code_handles_multiple_blocks(self, tmp_path):
-        """Should extract last Python code block as fallback (most likely to be executable)."""
+    def test_extract_code_handles_final(self, tmp_path):
+        """FINAL calls are passed through as-is."""
         (tmp_path / "x.py").write_text("x=1")
 
         cfg = RLMConfig(workspace_path=str(tmp_path), languages=["python"])
         runner = RLMRunner(cfg)
 
-        response = '''First block (example):
-
-```python
-x = 1
-```
-
-Second block (actual code to run):
-
-```python
-y = 2
-```'''
-
+        response = "FINAL('Review complete')"
         code = runner._extract_code(response)
 
-        # Smart extraction prefers last block when no FINAL is present
-        # (last block is more likely to be the intended executable code)
-        assert "y = 2" in code
-        assert "x = 1" not in code
-
-    def test_extract_code_handles_no_fence(self, tmp_path):
-        """Should handle responses without code fences."""
-        (tmp_path / "x.py").write_text("x=1")
-
-        cfg = RLMConfig(workspace_path=str(tmp_path), languages=["python"])
-        runner = RLMRunner(cfg)
-
-        response = "FINAL('No code blocks needed')"
-
-        code = runner._extract_code(response)
-
-        # Should try to use the whole response or return empty
-        assert code == "" or "FINAL" in code
+        assert code == "FINAL('Review complete')"

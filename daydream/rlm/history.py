@@ -90,7 +90,7 @@ class ConversationHistory:
                     code_preview = ex.code[:code_limit]
                     if len(ex.code) > code_limit:
                         code_preview += "..."
-                    parts.append(f"```python\n{code_preview}\n```")
+                    parts.append(f"Code:\n{code_preview}")
                     if ex.output:
                         out_preview = ex.output[:output_limit]
                         if len(ex.output) > output_limit:

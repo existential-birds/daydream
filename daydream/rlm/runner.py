@@ -294,17 +294,6 @@ def _detect_language(ext: str) -> str:
     return ext_to_lang.get(ext, "unknown")
 
 
-# Pattern to extract Python code from markdown fenced blocks
-CODE_BLOCK_PATTERN = re.compile(
-    r"```(?:python|py)\s*\n(.*?)```",
-    re.DOTALL,
-)
-
-# Pattern to extract FINAL() or FINAL_VAR() calls from prose
-FINAL_CALL_PATTERN = re.compile(
-    r'FINAL\s*\(\s*["\'].*?["\']\s*\)|FINAL_VAR\s*\(\s*["\'][\w]+["\']\s*\)',
-    re.DOTALL,
-)
 
 
 class RLMRunner:
@@ -459,7 +448,7 @@ if repo.changed_files:
         print(f"  - {f}")
     if len(repo.changed_files) > 10:
         print(f"  ... and {len(repo.changed_files) - 10} more")
-print("\\n📋 Next steps:")
+print("\\nNext steps:")
 print("1. Use files_containing(pattern) to find relevant files")
 print("2. Use llm_query_parallel(prompts) to batch-analyze files")
 print("3. Build findings in a variable, then call FINAL_VAR()")
@@ -541,11 +530,7 @@ backticks, or code examples - Python will fail to parse the string literal.
 ### `FINAL_VAR(var_name: str) -> None`
 Signal completion, returning the value of a REPL variable as the final answer.
 
-**RECOMMENDED** for complex reports: Build your report in a variable first:
-```
-report = '''Your markdown report...'''
-FINAL_VAR("report")  # Safe - avoids string parsing issues
-```
+**RECOMMENDED** for complex reports: Build your report in a variable first, then use FINAL_VAR("report").
 
 ## Your Task
 
@@ -565,133 +550,23 @@ Review this codebase and produce a comprehensive code review report. Your report
 
 Start by exploring the codebase structure, then dive into specific areas of concern.
 
-Respond with Python code in a fenced code block:
-```python
-# Your code here
-```
+Respond with Python code only. Do NOT use markdown fences (```). Any non-Python text causes a SyntaxError.
 """
 
     def _extract_code(self, response: str) -> str:
         """Extract Python code from LLM response.
 
-        Uses smart extraction to avoid picking up documentation examples:
-        1. Prefer code blocks containing FINAL/FINAL_VAR calls
-        2. Skip blocks that look like embedded examples (bare decorators, etc.)
-        3. Fall back to the last code block (most likely to be executable)
-        4. Sanitize FINAL() calls with embedded backticks
+        With Python-only output mode, the LLM response IS the code.
+        Any non-Python text will cause a SyntaxError when executed,
+        which is returned to the model for self-correction.
 
         Args:
             response: LLM response text.
 
         Returns:
-            Extracted Python code, or empty string if no code found.
+            The response stripped of whitespace.
         """
-        matches = list(CODE_BLOCK_PATTERN.finditer(response))
-        if not matches:
-            return ""
-
-        # Prefer code blocks containing FINAL/FINAL_VAR calls
-        for match in matches:
-            code = match.group(1).strip()
-            if "FINAL(" in code or "FINAL_VAR(" in code:
-                # Sanitize FINAL() calls that might have embedded backticks
-                return self._sanitize_final_call(code)
-
-        # Filter out blocks that look like documentation examples
-        executable_blocks = []
-        for match in matches:
-            code = match.group(1).strip()
-            if not self._is_likely_example(code):
-                executable_blocks.append(code)
-
-        # Return the last executable block (most likely to be the intended code)
-        if executable_blocks:
-            return self._sanitize_final_call(executable_blocks[-1])
-
-        # Fall back to last block if all were filtered
-        return self._sanitize_final_call(matches[-1].group(1).strip())
-
-    def _is_likely_example(self, code: str) -> bool:
-        """Detect if code looks like a documentation example, not executable code.
-
-        Args:
-            code: Python code string to check.
-
-        Returns:
-            True if the code looks like an embedded example, not executable code.
-        """
-        lines = code.strip().split("\n")
-        first_line = lines[0].strip() if lines else ""
-
-        # Bare decorator without imports (likely a class definition example)
-        if first_line.startswith("@") and "import" not in code:
-            # But allow if it's using our REPL functions
-            if not any(fn in code for fn in ["repo.", "llm_query", "FINAL", "files_"]):
-                return True
-
-        # Very short snippets without REPL functions are likely examples
-        if len(code) < 100:
-            has_repl_usage = any(
-                fn in code for fn in ["print(", "repo.", "llm_query", "FINAL", "files_containing", "files_importing"]
-            )
-            if not has_repl_usage:
-                return True
-
-        return False
-
-    def _sanitize_final_call(self, code: str) -> str:
-        """Transform FINAL() calls with embedded backticks to use FINAL_VAR.
-
-        When the agent uses FINAL() with triple-quoted strings containing backticks
-        (e.g., markdown code blocks), Python may fail to parse the string literal.
-        This method detects such patterns and transforms them to use FINAL_VAR instead.
-
-        Example transformation:
-            FINAL('''# Report
-            ```code```
-            ''')
-
-        Becomes:
-            _final_report = '''# Report
-            ```code```
-            '''
-            FINAL_VAR("_final_report")
-
-        Args:
-            code: Python code string to sanitize.
-
-        Returns:
-            Sanitized code with problematic FINAL() calls transformed.
-        """
-        # Pattern to match FINAL() with triple-quoted strings
-        # Matches: FINAL(""" or FINAL(''' with optional whitespace
-        final_triple_pattern = re.compile(
-            r'FINAL\s*\(\s*("""|\'\'\')(.*?)\1\s*\)',
-            re.DOTALL,
-        )
-
-        match = final_triple_pattern.search(code)
-        if not match:
-            return code
-
-        # Check if the string content contains backticks
-        quote_style = match.group(1)
-        string_content = match.group(2)
-
-        if "`" not in string_content:
-            # No backticks, no transformation needed
-            return code
-
-        # Build the replacement: assign to variable and use FINAL_VAR
-        full_match = match.group(0)
-        variable_assignment = f"_final_report = {quote_style}{string_content}{quote_style}"
-        final_var_call = 'FINAL_VAR("_final_report")'
-
-        # Replace the FINAL() call with variable assignment + FINAL_VAR()
-        replacement = f"{variable_assignment}\n{final_var_call}"
-        sanitized_code = code.replace(full_match, replacement)
-
-        return sanitized_code
+        return response.strip()
 
     def _handle_llm_query(self, prompt: str, model: str) -> str:
         """Handle llm_query callback from REPL.
@@ -822,72 +697,18 @@ Respond with Python code in a fenced code block:
             error_msg = execution_result.error or ""
             if "unterminated" in error_msg.lower() and "string" in error_msg.lower():
                 parts.append(
-                    "\n**String Literal Error**: Use `FINAL_VAR()` for complex reports:\n"
-                    "```python\n"
-                    "report = '''Your report...'''\n"
-                    'FINAL_VAR("report")\n'
-                    "```"
+                    "\n**String Literal Error**: Use FINAL_VAR() for complex reports. "
+                    "Build your report in a variable, then call FINAL_VAR(\"report\")."
                 )
             else:
                 parts.append("\nThe code raised an error. Fix the issue and continue the review.")
 
         parts.append(
-            "\n\n**RESPOND WITH PYTHON CODE ONLY** — no prose or explanations outside code blocks. "
-            "Continue your analysis. When ready, call `FINAL()` with your report."
+            "\n\nOutput Python code only - no prose or markdown. "
+            "Continue your analysis. When ready, call FINAL() or FINAL_VAR() with your report."
         )
-        parts.append("\n\n```python\n# Your next code here\n```")
 
         return "\n".join(parts)
-
-    def _build_no_code_recovery_prompt(self, iteration: int) -> str:
-        """Build recovery prompt when no code is found in LLM response.
-
-        Provides context about the task to help the LLM recover.
-
-        Args:
-            iteration: Current iteration number.
-
-        Returns:
-            Recovery prompt with task context.
-        """
-        if self._context is None:
-            raise RuntimeError("Context not loaded")
-
-        prompt = f"""## Iteration {iteration} - Code Required
-
-I couldn't find executable Python code in your last response.
-
-**REMINDER**: You are reviewing a codebase with {self._context.file_count} files ({", ".join(self._context.languages)}).
-Your goal is to analyze the code and call `FINAL()` with your review report when done.
-
-**Available functions in the REPL**:
-- `repo.files` - dict of file paths to contents
-- `repo.largest_files` - list of (path, tokens) tuples
-- `llm_query(prompt, model="haiku")` - sub-LLM queries
-- `files_containing(pattern)` - regex search across files
-- `FINAL(report)` - complete the review (simple strings only)
-- `FINAL_VAR(varname)` - complete using a variable (recommended for reports)
-
-**Pro Tip**: For markdown reports with code examples:
-```python
-report = '''# Code Review Report
-## Findings...'''
-FINAL_VAR("report")
-```
-
-Please provide Python code in a fenced code block:
-```python
-# Continue your code review analysis
-# When done, call FINAL("Your review report here")
-```"""
-
-        # Show top-level paths to help orientation
-        if self._context:
-            top_level = sorted(set(p.split("/")[0] for p in self._context.files.keys()))[:10]
-            if top_level:
-                prompt += f"\n\n**Available top-level paths**: {', '.join(top_level)}"
-
-        return prompt
 
     async def run(self) -> str:
         """Execute the RLM code review.
@@ -1004,7 +825,7 @@ Please provide Python code in a fenced code block:
                     },
                 )
 
-                # Get code from LLM
+                # Get code from LLM (response IS the code in Python-only mode)
                 response = await self._call_llm(current_prompt)
                 code = self._extract_code(response)
 
@@ -1018,88 +839,46 @@ Please provide Python code in a fenced code block:
                     },
                 )
 
+                # Handle empty response
                 if not code:
                     self._metrics.code_extraction_failures += 1
-                    # No code found - try to extract any runnable content
-                    # or ask for clarification
-                    if "FINAL(" in response:
-                        final_match = FINAL_CALL_PATTERN.search(response)
-                        if final_match:
-                            code = final_match.group(0)
-                            self._emit_event(
-                                iteration,
-                                "fallback_final_detection",
-                                {
-                                    "response_length": len(response),
-                                    "extracted_final": code,
-                                },
-                            )
-                        else:
-                            # Could not extract FINAL cleanly, treat as no code
-                            consecutive_no_code += 1
+                    consecutive_no_code += 1
 
-                            if consecutive_no_code >= MAX_CONSECUTIVE_ERRORS:
-                                self._emit_event(
-                                    iteration,
-                                    "consecutive_error_limit",
-                                    {
-                                        "consecutive_errors": consecutive_no_code,
-                                    },
-                                )
-                                final_result = (
-                                    "# Code Review (Failed)\n\n"
-                                    f"Review failed after {consecutive_no_code} consecutive iterations "
-                                    "without valid Python code.\n"
-                                    "The model could not provide executable code in the expected format."
-                                )
-                                break
-
-                            self._emit_event(
-                                iteration,
-                                "no_code_found",
-                                {
-                                    "response_preview": response[:200],
-                                    "reason": "FINAL detected but could not extract cleanly",
-                                    "consecutive_count": consecutive_no_code,
-                                },
-                            )
-                            current_prompt = self._build_no_code_recovery_prompt(iteration)
-                            continue
-                    else:
-                        # No executable code found
-                        consecutive_no_code += 1
-
-                        if consecutive_no_code >= MAX_CONSECUTIVE_ERRORS:
-                            self._emit_event(
-                                iteration,
-                                "consecutive_error_limit",
-                                {
-                                    "consecutive_errors": consecutive_no_code,
-                                },
-                            )
-                            final_result = (
-                                "# Code Review (Failed)\n\n"
-                                f"Review failed after {consecutive_no_code} consecutive iterations "
-                                "without valid Python code.\n"
-                                "The model could not provide executable code in the expected format."
-                            )
-                            break
-
+                    if consecutive_no_code >= MAX_CONSECUTIVE_ERRORS:
                         self._emit_event(
                             iteration,
-                            "no_code_found",
+                            "consecutive_error_limit",
                             {
-                                "response_preview": response[:200] if response else "",
-                                "consecutive_count": consecutive_no_code,
+                                "consecutive_errors": consecutive_no_code,
                             },
                         )
-                        current_prompt = self._build_no_code_recovery_prompt(iteration)
-                        continue
+                        final_result = (
+                            "# Code Review (Failed)\n\n"
+                            f"Review failed after {consecutive_no_code} consecutive iterations "
+                            "with empty responses.\n"
+                            "The model could not provide executable code."
+                        )
+                        break
 
-                # Reset consecutive error counter on successful code extraction
+                    self._emit_event(
+                        iteration,
+                        "empty_response",
+                        {
+                            "consecutive_count": consecutive_no_code,
+                        },
+                    )
+                    # SyntaxError will be returned naturally when we try to execute empty code
+                    # For truly empty responses, provide a minimal continuation prompt
+                    current_prompt = (
+                        "Your previous response was empty. "
+                        "Output Python code only - no prose or markdown."
+                    )
+                    continue
+
+                # Reset consecutive error counter on non-empty response
                 consecutive_no_code = 0
 
-                # Execute code in REPL
+                # Execute code in REPL (SyntaxError for invalid Python is handled naturally)
                 result = await asyncio.to_thread(self._repl.execute, code)
 
                 # Add exchange to history
