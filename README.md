@@ -97,7 +97,7 @@ Daydream executes a four-phase workflow. Use `--start-at` to resume from a speci
 
 ### Phase 1: Review
 
-Invokes the selected Beagle review skill (e.g., `beagle:review-python`) against your codebase. The review output is written to `.review-output.md` in the project root.
+Invokes the selected Beagle review skill (e.g., `beagle-python:review-python`) against your codebase. The review output is written to `.review-output.md` in the project root.
 
 ### Phase 2: Parse Feedback
 

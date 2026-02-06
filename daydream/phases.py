@@ -259,7 +259,7 @@ async def phase_commit_push(cwd: Path) -> None:
     if response.lower() in ("y", "yes"):
         console.print()
         print_info(console, "Running commit-push skill...")
-        await run_agent(cwd, "/beagle:commit-push")
+        await run_agent(cwd, "/beagle-core:commit-push")
         print_success(console, "Commit and push complete")
     else:
         print_dim(console, "Skipping commit and push")
