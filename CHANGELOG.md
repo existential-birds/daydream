@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-02-06
+
+### Added
+
+- **prompts:** Add structured review system prompt module for RLM-based code review ([#5](https://github.com/existential-birds/daydream/pull/5))
+
+  New `daydream.prompts` package with `build_review_system_prompt()`, `build_pr_review_prompt()`, and `get_review_prompt()` for generating context-aware review prompts with codebase metadata, sub-LLM orchestration patterns, and batched analysis strategies.
+
+### Fixed
+
+- **config:** Update Beagle skill names from monolithic format to v2.0 per-plugin format ([#5](https://github.com/existential-birds/daydream/pull/5))
+
+  Skill references now use the correct `beagle-python:review-python`, `beagle-react:review-frontend`, and `beagle-core:commit-push` names. The previous `beagle:review-python` format stopped working after the Beagle v2.0 plugin split.
+
+- **runner:** Fix missing skill detection for new Beagle plugin name format ([#5](https://github.com/existential-birds/daydream/pull/5))
+
 ## [0.1.0] - 2026-02-01
 
 Initial release of Daydream - an automated code review and fix loop using the Claude Agent SDK.
@@ -60,5 +76,6 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/existential-birds/daydream/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/existential-birds/daydream/releases/tag/v0.1.0
