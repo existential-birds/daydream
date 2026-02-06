@@ -115,7 +115,7 @@ class MockClaudeSDKClient:
         prompt_lower = self._prompt.lower()
 
         # Phase 1: Review skill invocation
-        if "beagle:review-" in prompt_lower or "/beagle:review" in self._prompt:
+        if "beagle-" in prompt_lower and "review" in prompt_lower:
             return "Review complete. Found 1 issue to fix.", None
 
         # Phase 2: Parse feedback (looking for JSON extraction)

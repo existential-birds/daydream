@@ -66,7 +66,7 @@ def _print_missing_skill_error(skill_name: str) -> None:
     """Print error message for missing skill with installation instructions."""
     print_error(console, "Missing Skill", f"Skill '{skill_name}' is not available")
 
-    if skill_name.startswith("beagle:"):
+    if skill_name.startswith("beagle"):
         print_info(console, "The Beagle plugin is required but not installed or enabled.")
         console.print()
         print_dim(console, "To install Beagle:")

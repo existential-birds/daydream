@@ -70,4 +70,4 @@ cli.py → runner.py → phases.py → agent.py
 
 ## Prerequisites
 
-Requires the Beagle plugin for Claude Code to be installed. The review skills (`beagle:review-python`, `beagle:review-frontend`) are provided by Beagle.
+Requires the Beagle plugin for Claude Code to be installed. The review skills (`beagle-python:review-python`, `beagle-react:review-frontend`) are provided by Beagle.
