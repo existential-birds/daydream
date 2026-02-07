@@ -19,18 +19,21 @@ class ReviewSkillChoice(Enum):
 
     PYTHON = "1"
     FRONTEND = "2"
+    ELIXIR = "3"
 
 
 # Skill mapping for review types
 REVIEW_SKILLS: dict[ReviewSkillChoice, str] = {
     ReviewSkillChoice.PYTHON: "beagle-python:review-python",
     ReviewSkillChoice.FRONTEND: "beagle-react:review-frontend",
+    ReviewSkillChoice.ELIXIR: "beagle-elixir:review-elixir",
 }
 
 # CLI skill name to full skill path mapping
 SKILL_MAP: dict[str, str] = {
     "python": "beagle-python:review-python",
     "frontend": "beagle-react:review-frontend",
+    "elixir": "beagle-elixir:review-elixir",
 }
 
 # Output file for review results

@@ -128,6 +128,7 @@ async def run(config: RunConfig | None = None) -> int:
             print_menu(console, "Select review skill", [
                 ("1", "Python/FastAPI backend (review-python)"),
                 ("2", "React/TypeScript frontend (review-frontend)"),
+                ("3", "Elixir/Phoenix backend (review-elixir)"),
             ])
 
             skill_choice = prompt_user(console, "Choice", "1")

@@ -65,9 +65,9 @@ def _parse_args() -> RunConfig:
     skill_group = parser.add_mutually_exclusive_group()
     skill_group.add_argument(
         "-s", "--skill",
-        choices=["python", "frontend"],
+        choices=["python", "frontend", "elixir"],
         default=None,
-        help="Review skill: python, frontend",
+        help="Review skill: python, frontend, elixir",
     )
     skill_group.add_argument(
         "--python",
@@ -82,6 +82,13 @@ def _parse_args() -> RunConfig:
         const="frontend",
         dest="skill",
         help="Use React/TypeScript review skill",
+    )
+    skill_group.add_argument(
+        "--elixir",
+        action="store_const",
+        const="elixir",
+        dest="skill",
+        help="Use Elixir/Phoenix review skill",
     )
 
     parser.add_argument(
