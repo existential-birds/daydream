@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-02-07
+
+### Added
+
+- **cli:** Add `--pr` flag for PR feedback mode that fetches and fixes bot review comments ([#9](https://github.com/existential-birds/daydream/pull/9))
+
+  Run `daydream /path --pr 42 --bot coderabbitai[bot]` to fetch bot comments from a PR, apply fixes in parallel, commit, push, and respond. Omit the PR number to auto-detect from the current branch.
+
+- **cli:** Add `--bot` flag to specify which bot's comments to process ([#9](https://github.com/existential-birds/daydream/pull/9))
+
+- **phases:** Add parallel fix execution with up to 4 concurrent agents ([#9](https://github.com/existential-birds/daydream/pull/9))
+
+  Feedback items are fixed concurrently using `anyio` task groups with a capacity limiter, with a live-updating panel showing progress per item.
+
+- **phases:** Add `phase_fetch_pr_feedback()` to pull bot comments via `fetch-pr-feedback` skill ([#9](https://github.com/existential-birds/daydream/pull/9))
+
+- **phases:** Add `phase_respond_pr_feedback()` to post fix results back on the PR ([#9](https://github.com/existential-birds/daydream/pull/9))
+
+- **ui:** Add `ParallelFixPanel` component for tracking concurrent fix progress ([#9](https://github.com/existential-birds/daydream/pull/9))
+
+### Changed
+
+- **runner:** Refactor debug log handling to use `contextlib.ExitStack` for reliable cleanup ([#9](https://github.com/existential-birds/daydream/pull/9))
+
+- **agent:** Update signal handler to support multiple concurrent clients ([#9](https://github.com/existential-birds/daydream/pull/9))
+
 ## [0.3.0] - 2026-02-07
 
 ### Added
@@ -90,7 +116,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/existential-birds/daydream/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/existential-birds/daydream/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/existential-birds/daydream/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/existential-birds/daydream/releases/tag/v0.1.0
