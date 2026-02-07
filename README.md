@@ -167,7 +167,7 @@ PR feedback mode is mutually exclusive with `--review-only`, `--start-at`, and s
 daydream/
 ├── cli.py       # Entry point, argument parsing, signal handling
 ├── runner.py    # Main orchestration (standard + PR feedback flows)
-├── phases.py    # Phase functions (review, parse, fix, parallel fix, test, PR feedback)
+├── phases.py    # Core phases (review, parse, fix, test) + PR feedback helpers
 ├── agent.py     # Claude SDK client and helper functions
 ├── ui.py        # Neon terminal UI components (Rich-based)
 ├── config.py    # Configuration constants
