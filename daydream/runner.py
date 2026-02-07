@@ -134,7 +134,7 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     print_info(console, f"PR feedback mode: PR #{pr_number}")
     print_info(console, f"Bot: {bot}")
     print_info(console, f"Target directory: {target_dir}")
-    print_info(console, f"Model: {config.model}")
+    print_info(console, f"Model: {config.model or 'opus'}")
     console.print()
 
     # Phase 1: Fetch PR feedback
@@ -292,7 +292,7 @@ async def run(config: RunConfig | None = None) -> int:
 
         console.print()
         print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {config.model}")
+        print_info(console, f"Model: {config.model or '<backend-default>'}")
         if skill:
             print_info(console, f"Review skill: {skill}")
         if config.review_only:

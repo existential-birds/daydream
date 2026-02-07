@@ -84,6 +84,8 @@ class CodexBackend:
         thread_id: str | None = None
         last_agent_text: str | None = None
         structured_result: Any = None
+        # Track generated IDs for items missing id field (ensures start/completed match)
+        pending_item_ids: dict[str, str] = {}
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -122,14 +124,22 @@ class CodexBackend:
                     item_type = item.get("type", "")
 
                     if item_type == "command_execution":
+                        item_id = item.get("id")
+                        if not item_id:
+                            item_id = str(uuid.uuid4())
+                            pending_item_ids[f"command_execution:{item.get('command', '')}"] = item_id
                         yield ToolStartEvent(
-                            id=item.get("id", str(uuid.uuid4())),
+                            id=item_id,
                             name="shell",
                             input={"command": item.get("command", "")},
                         )
                     elif item_type == "mcp_tool_call":
+                        item_id = item.get("id")
+                        if not item_id:
+                            item_id = str(uuid.uuid4())
+                            pending_item_ids[f"mcp_tool_call:{item.get('tool', '')}"] = item_id
                         yield ToolStartEvent(
-                            id=item.get("id", str(uuid.uuid4())),
+                            id=item_id,
                             name=item.get("tool", "unknown"),
                             input=item.get("arguments", {}),
                         )
@@ -152,7 +162,10 @@ class CodexBackend:
                             yield ThinkingEvent(text=text)
 
                     elif item_type == "command_execution":
-                        item_id = item.get("id", str(uuid.uuid4()))
+                        item_id = item.get("id")
+                        if not item_id:
+                            lookup_key = f"command_execution:{item.get('command', '')}"
+                            item_id = pending_item_ids.pop(lookup_key, str(uuid.uuid4()))
                         exit_code = item.get("exit_code", -1)
                         output = item.get("aggregated_output", "")
                         status = item.get("status", "")
@@ -187,7 +200,10 @@ class CodexBackend:
                         )
 
                     elif item_type == "mcp_tool_call":
-                        item_id = item.get("id", str(uuid.uuid4()))
+                        item_id = item.get("id")
+                        if not item_id:
+                            lookup_key = f"mcp_tool_call:{item.get('tool', '')}"
+                            item_id = pending_item_ids.pop(lookup_key, str(uuid.uuid4()))
                         result_content = ""
                         if "result" in item:
                             result_content = str(item["result"].get("content", ""))

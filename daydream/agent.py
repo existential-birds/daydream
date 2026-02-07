@@ -331,7 +331,7 @@ async def run_agent(
 
             elif isinstance(event, ToolStartEvent):
                 _log_debug(f"[TOOL_USE] {event.name}({event.input})\n")
-                if use_callback and progress_callback is not None:
+                if progress_callback is not None:
                     first_arg = next(iter(event.input.values()), "") if event.input else ""
                     progress_callback(f"{event.name} {first_arg}"[:80])
                 else:
