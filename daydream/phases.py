@@ -9,7 +9,7 @@ from daydream.agent import (
     console,
     run_agent,
 )
-from daydream.backends import Backend
+from daydream.backends import Backend, ContinuationToken
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.ui import (
     ParallelFixPanel,
@@ -91,7 +91,8 @@ async def phase_review(backend: Backend, cwd: Path, skill: str) -> None:
 
     # Use absolute path to prevent model hallucination of paths from training data
     review_output_path = cwd / REVIEW_OUTPUT_FILE
-    prompt = f"""/{skill}
+    skill_invocation = backend.format_skill_invocation(skill)
+    prompt = f"""{skill_invocation}
 
 Write the full review output to {review_output_path}.
 """
@@ -199,6 +200,7 @@ async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
     print_phase_hero(console, "AWAKEN", phase_subtitle("AWAKEN"))
 
     retries_used = 0
+    continuation: ContinuationToken | None = None
 
     while True:
         console.print()
@@ -208,7 +210,7 @@ async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
             print_info(console, "Running test suite...")
 
         prompt = "Run the project's test suite. Report if tests pass or fail."
-        output, _ = await run_agent(backend, cwd, prompt)
+        output, continuation = await run_agent(backend, cwd, prompt, continuation=continuation)
 
         test_passed = detect_test_success(output)
 
@@ -233,7 +235,7 @@ async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            await run_agent(backend, cwd, TEST_FIX_PROMPT)
+            _, continuation = await run_agent(backend, cwd, TEST_FIX_PROMPT, continuation=continuation)
             retries_used += 1
             continue
 
@@ -249,7 +251,7 @@ async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
             print_warning(console, f"Invalid choice '{choice}', defaulting to fix and retry")
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            await run_agent(backend, cwd, TEST_FIX_PROMPT)
+            _, continuation = await run_agent(backend, cwd, TEST_FIX_PROMPT, continuation=continuation)
             retries_used += 1
             continue
 
@@ -270,7 +272,8 @@ async def phase_commit_push(backend: Backend, cwd: Path) -> None:
     if response.lower() in ("y", "yes"):
         console.print()
         print_info(console, "Running commit-push skill...")
-        await run_agent(backend, cwd, "/beagle-core:commit-push")
+        skill_invocation = backend.format_skill_invocation("beagle-core:commit-push")
+        await run_agent(backend, cwd, skill_invocation)
         print_success(console, "Commit and push complete")
     else:
         print_dim(console, "Skipping commit and push")
@@ -294,9 +297,11 @@ async def phase_fetch_pr_feedback(backend: Backend, cwd: Path, pr_number: int, b
     """
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
 
-    prompt = f"/beagle-core:fetch-pr-feedback --pr {pr_number} --bot {bot}"
+    skill_invocation = backend.format_skill_invocation(
+        "beagle-core:fetch-pr-feedback", f"--pr {pr_number} --bot {bot}"
+    )
 
-    await run_agent(backend, cwd, prompt)
+    await run_agent(backend, cwd, skill_invocation)
 
     output_path = cwd / REVIEW_OUTPUT_FILE
     if output_path.exists():
@@ -392,7 +397,8 @@ async def phase_commit_push_auto(backend: Backend, cwd: Path) -> None:
     """
     console.print()
     print_info(console, "Running commit-push skill...")
-    await run_agent(backend, cwd, "/beagle-core:commit-push")
+    skill_invocation = backend.format_skill_invocation("beagle-core:commit-push")
+    await run_agent(backend, cwd, skill_invocation)
     print_success(console, "Commit and push complete")
 
 
@@ -423,7 +429,9 @@ async def phase_respond_pr_feedback(
 
     print_info(console, f"Responding to PR #{pr_number} with {len(successful)} fix result(s)...")
 
-    prompt = f"/beagle-core:respond-pr-feedback --pr {pr_number} --bot {bot}"
+    skill_invocation = backend.format_skill_invocation(
+        "beagle-core:respond-pr-feedback", f"--pr {pr_number} --bot {bot}"
+    )
 
-    await run_agent(backend, cwd, prompt)
+    await run_agent(backend, cwd, skill_invocation)
     print_success(console, f"Responded to PR #{pr_number} feedback")
