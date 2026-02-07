@@ -42,7 +42,7 @@ class RunConfig:
 
     Attributes:
         target: Target directory path for the review. If None, prompts user.
-        skill: Review skill to use ("python" or "frontend"). If None, prompts user.
+        skill: Review skill to use ("python", "react", or "elixir"). If None, prompts user.
         model: Claude model to use ("opus", "sonnet", or "haiku"). Default is "opus".
         debug: Enable debug logging to a timestamped file in the target directory.
         cleanup: Remove review output file after completion. If None, prompts user.
@@ -53,7 +53,7 @@ class RunConfig:
     """
 
     target: str | None = None
-    skill: str | None = None  # "python" or "frontend"
+    skill: str | None = None  # "python", "react", or "elixir"
     model: str = "opus"
     debug: bool = False
     cleanup: bool | None = None
@@ -127,8 +127,8 @@ async def run(config: RunConfig | None = None) -> int:
             console.print()
             print_menu(console, "Select review skill", [
                 ("1", "Python/FastAPI backend (review-python)"),
-                ("2", "React/TypeScript frontend (review-frontend)"),
-                ("3", "Elixir/Phoenix backend (review-elixir)"),
+                ("2", "React/TypeScript (review-frontend)"),
+                ("3", "Elixir/Phoenix (review-elixir)"),
             ])
 
             skill_choice = prompt_user(console, "Choice", "1")
