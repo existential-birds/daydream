@@ -13,6 +13,7 @@ from daydream.agent import (
     set_model,
     set_quiet_mode,
 )
+from daydream.backends import create_backend
 from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
 from daydream.phases import (
     FixResult,
@@ -114,6 +115,8 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     pr_number = config.pr_number
     bot = config.bot
 
+    backend = create_backend("claude", model=config.model)
+
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
     console.print()
@@ -124,11 +127,11 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     console.print()
 
     # Phase 1: Fetch PR feedback
-    await phase_fetch_pr_feedback(target_dir, pr_number, bot)
+    await phase_fetch_pr_feedback(backend, target_dir, pr_number, bot)
 
     # Phase 2: Parse feedback (reused from normal flow)
     try:
-        feedback_items = await phase_parse_feedback(target_dir)
+        feedback_items = await phase_parse_feedback(backend, target_dir)
     except ValueError:
         print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
         return 1
@@ -138,7 +141,7 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         return 0
 
     # Phase 3: Fix in parallel
-    results: list[FixResult] = await phase_fix_parallel(target_dir, feedback_items)
+    results: list[FixResult] = await phase_fix_parallel(backend, target_dir, feedback_items)
 
     # If all fixes failed, abort
     successful = [r for r in results if r[1]]
@@ -154,14 +157,14 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
 
     # Phase 4: Commit and push (no user prompt)
     try:
-        await phase_commit_push_auto(target_dir)
+        await phase_commit_push_auto(backend, target_dir)
     except Exception as e:
         print_error(console, "Commit/Push Failed", str(e))
         return 1
 
     # Phase 5: Respond to PR comments
     try:
-        await phase_respond_pr_feedback(target_dir, pr_number, bot, results)
+        await phase_respond_pr_feedback(backend, target_dir, pr_number, bot, results)
     except Exception as e:
         print_warning(console, f"Failed to respond to PR comments: {e}")
         print_info(console, "Fixes were already pushed successfully.")
@@ -267,6 +270,9 @@ async def run(config: RunConfig | None = None) -> int:
         set_quiet_mode(config.quiet)
         set_model(config.model)
 
+        # Create backend
+        backend = create_backend("claude", model=config.model)
+
         # PR feedback mode: separate flow
         if config.pr_number is not None:
             return await run_pr_feedback(config, target_dir)
@@ -288,7 +294,7 @@ async def run(config: RunConfig | None = None) -> int:
         # Phase 1: Review (only if starting at review)
         if config.start_at == "review":
             try:
-                await phase_review(target_dir, skill)  # type: ignore[arg-type]
+                await phase_review(backend, target_dir, skill)  # type: ignore[arg-type]
             except MissingSkillError as e:
                 _print_missing_skill_error(e.skill_name)
                 return 1
@@ -296,7 +302,7 @@ async def run(config: RunConfig | None = None) -> int:
         # Phase 2: Parse feedback (if starting at review, parse, or fix)
         if config.start_at in ("review", "parse", "fix"):
             try:
-                feedback_items = await phase_parse_feedback(target_dir)
+                feedback_items = await phase_parse_feedback(backend, target_dir)
             except ValueError:
                 print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                 return 1
@@ -322,13 +328,13 @@ async def run(config: RunConfig | None = None) -> int:
             if feedback_items:
                 print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
                 for i, item in enumerate(feedback_items, 1):
-                    await phase_fix(target_dir, item, i, len(feedback_items))
+                    await phase_fix(backend, target_dir, item, i, len(feedback_items))
                     fixes_applied += 1
             else:
                 print_info(console, "No feedback items found, skipping fix phase")
 
         # Phase 4: Test and heal (always runs unless review_only)
-        tests_passed, test_retries = await phase_test_and_heal(target_dir)
+        tests_passed, test_retries = await phase_test_and_heal(backend, target_dir)
 
         # Print summary
         print_summary(
@@ -345,7 +351,7 @@ async def run(config: RunConfig | None = None) -> int:
 
         # Prompt for commit if tests passed
         if tests_passed:
-            await phase_commit_push(target_dir)
+            await phase_commit_push(backend, target_dir)
 
             if cleanup_enabled:
                 review_output_path = target_dir / REVIEW_OUTPUT_FILE

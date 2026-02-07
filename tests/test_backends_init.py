@@ -1,14 +1,10 @@
 # tests/test_backends_init.py
 """Tests for backend protocol, event types, and factory."""
 
-from dataclasses import fields
-from typing import Any
 
 import pytest
 
 from daydream.backends import (
-    AgentEvent,
-    Backend,
     ClaudeBackend,
     ContinuationToken,
     CostEvent,

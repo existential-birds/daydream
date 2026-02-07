@@ -10,7 +10,7 @@ import anyio
 
 from daydream.agent import (
     console,
-    get_current_clients,
+    get_current_backends,
     set_shutdown_requested,
 )
 from daydream.runner import RunConfig, run
@@ -32,7 +32,7 @@ def _signal_handler(signum: int, frame: object) -> None:
     set_shutdown_panel(panel)
     panel.start(f"Received {signal_name}, shutting down")
 
-    if get_current_clients():
+    if get_current_backends():
         panel.add_step("Terminating running agent(s)...")
 
     raise KeyboardInterrupt

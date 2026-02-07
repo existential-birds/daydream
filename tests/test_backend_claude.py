@@ -17,7 +17,6 @@ from daydream.backends import (
 )
 from daydream.backends.claude import ClaudeBackend
 
-
 # --- Mock SDK types (same pattern as test_integration.py) ---
 
 

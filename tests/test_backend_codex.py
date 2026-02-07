@@ -1,9 +1,7 @@
 # tests/test_backend_codex.py
 """Tests for CodexBackend with canned JSONL fixtures."""
 
-import json
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

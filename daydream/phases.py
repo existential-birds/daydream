@@ -9,6 +9,7 @@ from daydream.agent import (
     console,
     run_agent,
 )
+from daydream.backends import Backend
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.ui import (
     ParallelFixPanel,
@@ -71,10 +72,11 @@ Run a full review first:
         raise FileNotFoundError(msg)
 
 
-async def phase_review(cwd: Path, skill: str) -> None:
+async def phase_review(backend: Backend, cwd: Path, skill: str) -> None:
     """Phase 1: Run review skill, write output to .review-output.md.
 
     Args:
+        backend: The Backend to execute against.
         cwd: Working directory for the review
         skill: The review skill to invoke (e.g., beagle:review-python)
 
@@ -94,7 +96,7 @@ async def phase_review(cwd: Path, skill: str) -> None:
 Write the full review output to {review_output_path}.
 """
 
-    await run_agent(cwd, prompt)
+    await run_agent(backend, cwd, prompt)
 
     output_path = cwd / REVIEW_OUTPUT_FILE
     if output_path.exists():
@@ -103,10 +105,11 @@ Write the full review output to {review_output_path}.
         print_warning(console, "Review output file was not created")
 
 
-async def phase_parse_feedback(cwd: Path) -> list[dict[str, Any]]:
+async def phase_parse_feedback(backend: Backend, cwd: Path) -> list[dict[str, Any]]:
     """Phase 2: Parse feedback from review output and return validated items.
 
     Args:
+        backend: The Backend to execute against.
         cwd: Working directory containing the review output
 
     Returns:
@@ -136,7 +139,7 @@ For each issue found, return a JSON array with this structure:
 If there are no actionable issues, return an empty array: []
 """
 
-    result = await run_agent(cwd, prompt, output_schema=FEEDBACK_SCHEMA)
+    result, _ = await run_agent(backend, cwd, prompt, output_schema=FEEDBACK_SCHEMA)
 
     if not isinstance(result, dict) or "issues" not in result:
         raise ValueError(f"Expected dict with 'issues' key, got {type(result)}")
@@ -146,10 +149,11 @@ If there are no actionable issues, return an empty array: []
     return feedback_items
 
 
-async def phase_fix(cwd: Path, item: dict[str, Any], item_num: int, total: int) -> None:
+async def phase_fix(backend: Backend, cwd: Path, item: dict[str, Any], item_num: int, total: int) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
     Args:
+        backend: The Backend to execute against.
         cwd: Working directory for the fix
         item: Feedback item containing description, file, and line
         item_num: Current item number (1-indexed)
@@ -175,14 +179,15 @@ Line: {line}
 Make the minimal change needed.
 """
 
-    await run_agent(cwd, prompt)
+    await run_agent(backend, cwd, prompt)
     print_fix_complete(console, item_num, total)
 
 
-async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
+async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
     """Phase 4: Run tests and prompt user on failure for action.
 
     Args:
+        backend: The Backend to execute against.
         cwd: Working directory for running tests
 
     Returns:
@@ -203,7 +208,7 @@ async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
             print_info(console, "Running test suite...")
 
         prompt = "Run the project's test suite. Report if tests pass or fail."
-        output = await run_agent(cwd, prompt)
+        output, _ = await run_agent(backend, cwd, prompt)
 
         test_passed = detect_test_success(output)
 
@@ -228,7 +233,7 @@ async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            await run_agent(cwd, TEST_FIX_PROMPT)
+            await run_agent(backend, cwd, TEST_FIX_PROMPT)
             retries_used += 1
             continue
 
@@ -244,15 +249,16 @@ async def phase_test_and_heal(cwd: Path) -> tuple[bool, int]:
             print_warning(console, f"Invalid choice '{choice}', defaulting to fix and retry")
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            await run_agent(cwd, TEST_FIX_PROMPT)
+            await run_agent(backend, cwd, TEST_FIX_PROMPT)
             retries_used += 1
             continue
 
 
-async def phase_commit_push(cwd: Path) -> None:
+async def phase_commit_push(backend: Backend, cwd: Path) -> None:
     """Prompt user to commit and push changes.
 
     Args:
+        backend: The Backend to execute against.
         cwd: Working directory for the commit
 
     Returns:
@@ -264,16 +270,17 @@ async def phase_commit_push(cwd: Path) -> None:
     if response.lower() in ("y", "yes"):
         console.print()
         print_info(console, "Running commit-push skill...")
-        await run_agent(cwd, "/beagle-core:commit-push")
+        await run_agent(backend, cwd, "/beagle-core:commit-push")
         print_success(console, "Commit and push complete")
     else:
         print_dim(console, "Skipping commit and push")
 
 
-async def phase_fetch_pr_feedback(cwd: Path, pr_number: int, bot: str) -> None:
+async def phase_fetch_pr_feedback(backend: Backend, cwd: Path, pr_number: int, bot: str) -> None:
     """Fetch PR feedback by invoking the fetch-pr-feedback skill.
 
     Args:
+        backend: The Backend to execute against.
         cwd: Working directory for the agent
         pr_number: Pull request number to fetch feedback from
         bot: Bot username whose comments to fetch
@@ -289,7 +296,7 @@ async def phase_fetch_pr_feedback(cwd: Path, pr_number: int, bot: str) -> None:
 
     prompt = f"/beagle-core:fetch-pr-feedback --pr {pr_number} --bot {bot}"
 
-    await run_agent(cwd, prompt)
+    await run_agent(backend, cwd, prompt)
 
     output_path = cwd / REVIEW_OUTPUT_FILE
     if output_path.exists():
@@ -299,7 +306,7 @@ async def phase_fetch_pr_feedback(cwd: Path, pr_number: int, bot: str) -> None:
 
 
 async def phase_fix_parallel(
-    cwd: Path, feedback_items: list[dict[str, Any]]
+    backend: Backend, cwd: Path, feedback_items: list[dict[str, Any]]
 ) -> list[FixResult]:
     """Apply fixes for all feedback items concurrently using parallel agents.
 
@@ -307,6 +314,7 @@ async def phase_fix_parallel(
     independently; individual failures are captured without aborting others.
 
     Args:
+        backend: The Backend to execute against.
         cwd: Working directory for the fixes
         feedback_items: List of feedback items, each with description, file, line
 
@@ -346,7 +354,7 @@ Make the minimal change needed.
 
                 try:
                     async with limiter:
-                        await run_agent(cwd, prm, progress_callback=callback)
+                        await run_agent(backend, cwd, prm, progress_callback=callback)
                     panel.complete_row(idx)
                     results.append((itm, True, None))
                 except Exception as e:
@@ -371,10 +379,11 @@ Make the minimal change needed.
     return results
 
 
-async def phase_commit_push_auto(cwd: Path) -> None:
+async def phase_commit_push_auto(backend: Backend, cwd: Path) -> None:
     """Automatically commit and push changes without user prompt.
 
     Args:
+        backend: The Backend to execute against.
         cwd: Working directory for the commit
 
     Returns:
@@ -383,12 +392,12 @@ async def phase_commit_push_auto(cwd: Path) -> None:
     """
     console.print()
     print_info(console, "Running commit-push skill...")
-    await run_agent(cwd, "/beagle-core:commit-push")
+    await run_agent(backend, cwd, "/beagle-core:commit-push")
     print_success(console, "Commit and push complete")
 
 
 async def phase_respond_pr_feedback(
-    cwd: Path, pr_number: int, bot: str, results: list[FixResult]
+    backend: Backend, cwd: Path, pr_number: int, bot: str, results: list[FixResult]
 ) -> None:
     """Respond to PR feedback with results of applied fixes.
 
@@ -396,6 +405,7 @@ async def phase_respond_pr_feedback(
     skill to post replies on the pull request.
 
     Args:
+        backend: The Backend to execute against.
         cwd: Working directory for the agent
         pr_number: Pull request number to respond to
         bot: Bot username to respond as
@@ -415,5 +425,5 @@ async def phase_respond_pr_feedback(
 
     prompt = f"/beagle-core:respond-pr-feedback --pr {pr_number} --bot {bot}"
 
-    await run_agent(cwd, prompt)
+    await run_agent(backend, cwd, prompt)
     print_success(console, f"Responded to PR #{pr_number} feedback")
