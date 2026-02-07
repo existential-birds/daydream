@@ -204,6 +204,8 @@ def _parse_args() -> RunConfig:
         pr_number = _auto_detect_pr_number()
         if pr_number is None:
             parser.error("Could not auto-detect PR number from current branch. Specify --pr NUMBER explicitly.")
+    if pr_number is not None and pr_number <= 0:
+        parser.error("--pr must be a positive integer")
 
     return RunConfig(
         target=args.target,

@@ -315,6 +315,7 @@ async def phase_fix_parallel(
 
     """
     results: list[FixResult] = []
+    limiter = anyio.CapacityLimiter(4)
     panel = ParallelFixPanel(console, feedback_items)
     panel.start()
 
@@ -344,7 +345,8 @@ Make the minimal change needed.
                     panel.update_row(i, message)
 
                 try:
-                    await run_agent(cwd, prm, progress_callback=callback)
+                    async with limiter:
+                        await run_agent(cwd, prm, progress_callback=callback)
                     panel.complete_row(idx)
                     results.append((itm, True, None))
                 except Exception as e:

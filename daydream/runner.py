@@ -107,21 +107,24 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         Exit code (0 for success, 1 for failure)
 
     """
+    if config.pr_number is None or config.bot is None:
+        print_error(console, "Invalid PR config", "--pr and --bot are required for PR feedback mode.")
+        return 1
+
+    pr_number = config.pr_number
+    bot = config.bot
+
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
     console.print()
-    print_info(console, f"PR feedback mode: PR #{config.pr_number}")
-    print_info(console, f"Bot: {config.bot}")
+    print_info(console, f"PR feedback mode: PR #{pr_number}")
+    print_info(console, f"Bot: {bot}")
     print_info(console, f"Target directory: {target_dir}")
     print_info(console, f"Model: {config.model}")
     console.print()
 
     # Phase 1: Fetch PR feedback
-    await phase_fetch_pr_feedback(
-        target_dir,
-        config.pr_number,  # type: ignore[arg-type]
-        config.bot,  # type: ignore[arg-type]
-    )
+    await phase_fetch_pr_feedback(target_dir, pr_number, bot)
 
     # Phase 2: Parse feedback (reused from normal flow)
     try:
@@ -158,12 +161,7 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
 
     # Phase 5: Respond to PR comments
     try:
-        await phase_respond_pr_feedback(
-            target_dir,
-            config.pr_number,  # type: ignore[arg-type]
-            config.bot,  # type: ignore[arg-type]
-            results,
-        )
+        await phase_respond_pr_feedback(target_dir, pr_number, bot, results)
     except Exception as e:
         print_warning(console, f"Failed to respond to PR comments: {e}")
         print_info(console, "Fixes were already pushed successfully.")
@@ -172,7 +170,7 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     console.print()
     print_success(
         console,
-        f"PR #{config.pr_number}: {len(successful)} fix(es) applied"
+        f"PR #{pr_number}: {len(successful)} fix(es) applied"
         + (f", {len(failed)} failed" if failed else ""),
     )
 

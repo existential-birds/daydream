@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -49,6 +49,7 @@ class AgentState:
         quiet_mode: True to hide tool calls and results, False to show them.
         model: Model name to use for agent interactions.
         shutdown_requested: True if shutdown has been requested.
+        current_clients: List of active ClaudeSDKClient instances.
 
     """
 
@@ -56,6 +57,7 @@ class AgentState:
     quiet_mode: bool = False
     model: str = "opus"
     shutdown_requested: bool = False
+    current_clients: list["ClaudeSDKClient"] = field(default_factory=list)
 
 
 # Module-level Singletons
@@ -67,7 +69,6 @@ class AgentState:
 # Use reset_state() to restore defaults between test runs or CLI invocations.
 
 _state = AgentState()
-_current_clients: list[ClaudeSDKClient] = []
 console = create_console()
 
 
@@ -193,7 +194,7 @@ def get_current_clients() -> list[ClaudeSDKClient]:
         List of active ClaudeSDKClient instances.
 
     """
-    return list(_current_clients)
+    return list(_state.current_clients)
 
 
 def _log_debug(message: str) -> None:
@@ -308,7 +309,7 @@ async def run_agent(
     use_callback = progress_callback is not None
 
     async with ClaudeSDKClient(options=options) as client:
-        _current_clients.append(client)
+        _state.current_clients.append(client)
         try:
             if not use_callback:
                 agent_renderer = AgentTextRenderer(console)
@@ -390,7 +391,7 @@ async def run_agent(
                 tool_registry.finish_all()
                 console.print()
         finally:
-            _current_clients.remove(client)
+            _state.current_clients.remove(client)
 
     if output_schema is not None and structured_result is not None:
         return structured_result
