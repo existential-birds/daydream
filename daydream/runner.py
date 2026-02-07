@@ -64,7 +64,7 @@ class RunConfig:
 
     target: str | None = None
     skill: str | None = None  # "python", "react", or "elixir"
-    model: str = "opus"
+    model: str | None = None
     debug: bool = False
     cleanup: bool | None = None
     quiet: bool = True
@@ -72,6 +72,10 @@ class RunConfig:
     start_at: str = "review"
     pr_number: int | None = None
     bot: str | None = None
+    backend: str = "claude"
+    review_backend: str | None = None
+    fix_backend: str | None = None
+    test_backend: str | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -97,6 +101,13 @@ def _print_missing_skill_error(skill_name: str) -> None:
     console.print()
 
 
+def _resolve_backend(config: RunConfig, phase: str):
+    """Create the backend for a given phase, respecting per-phase overrides."""
+    override = getattr(config, f"{phase}_backend", None)
+    backend_name = override or config.backend
+    return create_backend(backend_name, model=config.model)
+
+
 async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     """Execute the PR feedback flow: fetch, parse, fix, commit, respond.
 
@@ -115,7 +126,7 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     pr_number = config.pr_number
     bot = config.bot
 
-    backend = create_backend("claude", model=config.model)
+    backend = create_backend(config.backend, model=config.model)
 
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
@@ -268,10 +279,12 @@ async def run(config: RunConfig | None = None) -> int:
 
         # Set quiet mode and model
         set_quiet_mode(config.quiet)
-        set_model(config.model)
+        set_model(config.model or "opus")
 
-        # Create backend
-        backend = create_backend("claude", model=config.model)
+        # Create backends (may differ per-phase if overrides are set)
+        review_backend = _resolve_backend(config, "review")
+        fix_backend = _resolve_backend(config, "fix")
+        test_backend = _resolve_backend(config, "test")
 
         # PR feedback mode: separate flow
         if config.pr_number is not None:
@@ -294,7 +307,7 @@ async def run(config: RunConfig | None = None) -> int:
         # Phase 1: Review (only if starting at review)
         if config.start_at == "review":
             try:
-                await phase_review(backend, target_dir, skill)  # type: ignore[arg-type]
+                await phase_review(review_backend, target_dir, skill)  # type: ignore[arg-type]
             except MissingSkillError as e:
                 _print_missing_skill_error(e.skill_name)
                 return 1
@@ -302,7 +315,7 @@ async def run(config: RunConfig | None = None) -> int:
         # Phase 2: Parse feedback (if starting at review, parse, or fix)
         if config.start_at in ("review", "parse", "fix"):
             try:
-                feedback_items = await phase_parse_feedback(backend, target_dir)
+                feedback_items = await phase_parse_feedback(review_backend, target_dir)
             except ValueError:
                 print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                 return 1
@@ -328,13 +341,13 @@ async def run(config: RunConfig | None = None) -> int:
             if feedback_items:
                 print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
                 for i, item in enumerate(feedback_items, 1):
-                    await phase_fix(backend, target_dir, item, i, len(feedback_items))
+                    await phase_fix(fix_backend, target_dir, item, i, len(feedback_items))
                     fixes_applied += 1
             else:
                 print_info(console, "No feedback items found, skipping fix phase")
 
         # Phase 4: Test and heal (always runs unless review_only)
-        tests_passed, test_retries = await phase_test_and_heal(backend, target_dir)
+        tests_passed, test_retries = await phase_test_and_heal(test_backend, target_dir)
 
         # Print summary
         print_summary(
@@ -351,7 +364,7 @@ async def run(config: RunConfig | None = None) -> int:
 
         # Prompt for commit if tests passed
         if tests_passed:
-            await phase_commit_push(backend, target_dir)
+            await phase_commit_push(review_backend, target_dir)
 
             if cleanup_enabled:
                 review_output_path = target_dir / REVIEW_OUTPUT_FILE
