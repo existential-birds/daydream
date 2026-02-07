@@ -224,7 +224,3 @@ def test_format_skill_invocation_with_args():
     assert result == "/beagle-core:fetch-pr-feedback --pr 42 --bot mybot"
 
 
-def test_skips_structured_output_tool():
-    """StructuredOutput tool blocks should be skipped (not yielded as ToolStartEvent)."""
-    # This is tested implicitly via the structured output test — no ToolStartEvent for StructuredOutput
-    pass

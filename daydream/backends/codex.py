@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
@@ -25,6 +26,8 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CodexError(Exception):
@@ -106,6 +109,7 @@ class CodexBackend:
                 try:
                     event = json.loads(line.decode().strip())
                 except json.JSONDecodeError:
+                    logger.debug("Failed to parse JSONL line: %s", line.decode().strip())
                     continue
 
                 event_type = event.get("type", "")

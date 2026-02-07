@@ -56,7 +56,7 @@ class AgentState:
     quiet_mode: bool = False
     model: str = "opus"
     shutdown_requested: bool = False
-    current_backends: list[Any] = field(default_factory=list)
+    current_backends: list[Backend] = field(default_factory=list)
 
 
 # Module-level Singletons
@@ -186,7 +186,7 @@ def get_shutdown_requested() -> bool:
     return _state.shutdown_requested
 
 
-def get_current_backends() -> list[Any]:
+def get_current_backends() -> list[Backend]:
     """Get all currently running backends.
 
     Returns:

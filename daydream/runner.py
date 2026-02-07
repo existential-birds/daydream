@@ -13,7 +13,7 @@ from daydream.agent import (
     set_model,
     set_quiet_mode,
 )
-from daydream.backends import create_backend
+from daydream.backends import Backend, create_backend
 from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
 from daydream.phases import (
     FixResult,
@@ -101,7 +101,7 @@ def _print_missing_skill_error(skill_name: str) -> None:
     console.print()
 
 
-def _resolve_backend(config: RunConfig, phase: str):
+def _resolve_backend(config: RunConfig, phase: str) -> Backend:
     """Create the backend for a given phase, respecting per-phase overrides."""
     override = getattr(config, f"{phase}_backend", None)
     backend_name = override or config.backend
@@ -306,8 +306,9 @@ async def run(config: RunConfig | None = None) -> int:
 
         # Phase 1: Review (only if starting at review)
         if config.start_at == "review":
+            assert skill is not None, "skill must be set when starting at review phase"
             try:
-                await phase_review(review_backend, target_dir, skill)  # type: ignore[arg-type]
+                await phase_review(review_backend, target_dir, skill)
             except MissingSkillError as e:
                 _print_missing_skill_error(e.skill_name)
                 return 1

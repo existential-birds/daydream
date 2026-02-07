@@ -62,8 +62,14 @@ def _auto_detect_pr_number() -> int | None:
         if result.returncode == 0:
             data = json.loads(result.stdout)
             return data.get("number")
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError):
         pass
+    except FileNotFoundError as e:
+        # Only catch if gh command not found, re-raise other file errors
+        if e.filename == "gh":
+            pass
+        else:
+            raise
     return None
 
 

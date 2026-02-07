@@ -7,6 +7,7 @@ import anyio
 
 from daydream.agent import (
     console,
+    detect_test_success,
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
@@ -195,8 +196,6 @@ async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
         Tuple of (success: bool, retries_used: int)
 
     """
-    from daydream.agent import detect_test_success
-
     print_phase_hero(console, "AWAKEN", phase_subtitle("AWAKEN"))
 
     retries_used = 0
@@ -350,22 +349,22 @@ Make the minimal change needed.
             # Default arguments capture loop variables by value, avoiding late-binding
             # closure issues where all tasks would reference the final loop iteration.
             async def _fix_task(
-                idx: int = index,
-                itm: dict[str, Any] = item,
-                prm: str = prompt,
+                task_index: int = index,
+                task_item: dict[str, Any] = item,
+                task_prompt: str = prompt,
             ) -> None:
-                def callback(message: str, i: int = idx) -> None:
+                def callback(message: str, i: int = task_index) -> None:
                     panel.update_row(i, message)
 
                 try:
                     async with limiter:
-                        await run_agent(backend, cwd, prm, progress_callback=callback)
-                    panel.complete_row(idx)
-                    results.append((itm, True, None))
+                        await run_agent(backend, cwd, task_prompt, progress_callback=callback)
+                    panel.complete_row(task_index)
+                    results.append((task_item, True, None))
                 except Exception as e:
                     error_msg = f"{type(e).__name__}: {e}"
-                    panel.fail_row(idx, error_msg)
-                    results.append((itm, False, error_msg))
+                    panel.fail_row(task_index, error_msg)
+                    results.append((task_item, False, error_msg))
 
             tg.start_soon(_fix_task)
 
