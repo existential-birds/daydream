@@ -1,9 +1,10 @@
 """Main orchestration logic for the review and fix loop."""
 
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TextIO
+from typing import Any
 
 from daydream.agent import (
     MissingSkillError,
@@ -14,10 +15,15 @@ from daydream.agent import (
 )
 from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
 from daydream.phases import (
+    FixResult,
     check_review_file_exists,
     phase_commit_push,
+    phase_commit_push_auto,
+    phase_fetch_pr_feedback,
     phase_fix,
+    phase_fix_parallel,
     phase_parse_feedback,
+    phase_respond_pr_feedback,
     phase_review,
     phase_test_and_heal,
 )
@@ -32,6 +38,7 @@ from daydream.ui import (
     print_skipped_phases,
     print_success,
     print_summary,
+    print_warning,
     prompt_user,
 )
 
@@ -49,6 +56,8 @@ class RunConfig:
         quiet: Suppress verbose output from the agent.
         review_only: Run review phase only without applying fixes.
         start_at: Phase to start at ("review", "parse", "fix", or "test").
+        pr_number: GitHub PR number for PR feedback mode. If None, normal mode.
+        bot: Bot username whose comments to fetch (e.g. "coderabbitai[bot]").
 
     """
 
@@ -60,6 +69,8 @@ class RunConfig:
     quiet: bool = True
     review_only: bool = False
     start_at: str = "review"
+    pr_number: int | None = None
+    bot: str | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -83,6 +94,87 @@ def _print_missing_skill_error(skill_name: str) -> None:
         print_dim(console, "Check your ~/.claude/settings.json for enabled plugins.")
 
     console.print()
+
+
+async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
+    """Execute the PR feedback flow: fetch, parse, fix, commit, respond.
+
+    Args:
+        config: Run configuration with pr_number and bot set.
+        target_dir: Resolved target directory path.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+
+    """
+    if config.pr_number is None or config.bot is None:
+        print_error(console, "Invalid PR config", "--pr and --bot are required for PR feedback mode.")
+        return 1
+
+    pr_number = config.pr_number
+    bot = config.bot
+
+    print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
+
+    console.print()
+    print_info(console, f"PR feedback mode: PR #{pr_number}")
+    print_info(console, f"Bot: {bot}")
+    print_info(console, f"Target directory: {target_dir}")
+    print_info(console, f"Model: {config.model}")
+    console.print()
+
+    # Phase 1: Fetch PR feedback
+    await phase_fetch_pr_feedback(target_dir, pr_number, bot)
+
+    # Phase 2: Parse feedback (reused from normal flow)
+    try:
+        feedback_items = await phase_parse_feedback(target_dir)
+    except ValueError:
+        print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
+        return 1
+
+    if not feedback_items:
+        print_info(console, "No actionable feedback found in PR comments.")
+        return 0
+
+    # Phase 3: Fix in parallel
+    results: list[FixResult] = await phase_fix_parallel(target_dir, feedback_items)
+
+    # If all fixes failed, abort
+    successful = [r for r in results if r[1]]
+    failed = [r for r in results if not r[1]]
+
+    if not successful:
+        print_error(
+            console,
+            "All Fixes Failed",
+            f"All {len(failed)} fix(es) failed. Aborting before commit.",
+        )
+        return 1
+
+    # Phase 4: Commit and push (no user prompt)
+    try:
+        await phase_commit_push_auto(target_dir)
+    except Exception as e:
+        print_error(console, "Commit/Push Failed", str(e))
+        return 1
+
+    # Phase 5: Respond to PR comments
+    try:
+        await phase_respond_pr_feedback(target_dir, pr_number, bot, results)
+    except Exception as e:
+        print_warning(console, f"Failed to respond to PR comments: {e}")
+        print_info(console, "Fixes were already pushed successfully.")
+
+    # Summary
+    console.print()
+    print_success(
+        console,
+        f"PR #{pr_number}: {len(successful)} fix(es) applied"
+        + (f", {len(failed)} failed" if failed else ""),
+    )
+
+    return 0
 
 
 async def run(config: RunConfig | None = None) -> int:
@@ -152,38 +244,45 @@ async def run(config: RunConfig | None = None) -> int:
 
     # Set up debug logging if enabled
     debug_log_path: Path | None = None
-    debug_log_file: TextIO | None = None
     if config.debug:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         debug_log_path = target_dir / f".review-debug-{timestamp}.log"
-        debug_log_file = open(debug_log_path, "w", encoding="utf-8")  # noqa: SIM115
-        set_debug_log(debug_log_file)
-        print_info(console, f"Debug log: {debug_log_path}")
 
-    # Get cleanup setting (from config or prompt)
-    if config.cleanup is not None:
-        cleanup_enabled = config.cleanup
-    else:
-        cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
-        cleanup_enabled = cleanup_response.lower() in ("y", "yes")
+    with contextlib.ExitStack() as stack:
+        if debug_log_path is not None:
+            debug_log_file = stack.enter_context(open(debug_log_path, "w", encoding="utf-8"))
+            set_debug_log(debug_log_file)
+            stack.callback(set_debug_log, None)
+            stack.callback(print_info, console, f"Debug log saved: {debug_log_path}")
+            print_info(console, f"Debug log: {debug_log_path}")
 
-    # Set quiet mode and model
-    set_quiet_mode(config.quiet)
-    set_model(config.model)
+        # Get cleanup setting (from config or prompt)
+        if config.cleanup is not None:
+            cleanup_enabled = config.cleanup
+        else:
+            cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
+            cleanup_enabled = cleanup_response.lower() in ("y", "yes")
 
-    console.print()
-    print_info(console, f"Target directory: {target_dir}")
-    print_info(console, f"Model: {config.model}")
-    if skill:
-        print_info(console, f"Review skill: {skill}")
-    if config.review_only:
-        print_info(console, "Mode: review-only (skipping fixes)")
-    if config.start_at != "review":
-        print_skipped_phases(console, config.start_at)
-    console.print()
+        # Set quiet mode and model
+        set_quiet_mode(config.quiet)
+        set_model(config.model)
 
-    try:
-        feedback_items: list[dict] = []
+        # PR feedback mode: separate flow
+        if config.pr_number is not None:
+            return await run_pr_feedback(config, target_dir)
+
+        console.print()
+        print_info(console, f"Target directory: {target_dir}")
+        print_info(console, f"Model: {config.model}")
+        if skill:
+            print_info(console, f"Review skill: {skill}")
+        if config.review_only:
+            print_info(console, "Mode: review-only (skipping fixes)")
+        if config.start_at != "review":
+            print_skipped_phases(console, config.start_at)
+        console.print()
+
+        feedback_items: list[dict[str, Any]] = []
         fixes_applied = 0
 
         # Phase 1: Review (only if starting at review)
@@ -257,10 +356,3 @@ async def run(config: RunConfig | None = None) -> int:
             return 0
         else:
             return 1
-
-    finally:
-        if debug_log_file is not None:
-            debug_log_file.close()
-            set_debug_log(None)
-            if debug_log_path:
-                print_info(console, f"Debug log saved: {debug_log_path}")

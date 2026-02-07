@@ -1,7 +1,8 @@
 """Agent interaction and SDK client management."""
 
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -48,6 +49,7 @@ class AgentState:
         quiet_mode: True to hide tool calls and results, False to show them.
         model: Model name to use for agent interactions.
         shutdown_requested: True if shutdown has been requested.
+        current_clients: List of active ClaudeSDKClient instances.
 
     """
 
@@ -55,15 +57,18 @@ class AgentState:
     quiet_mode: bool = False
     model: str = "opus"
     shutdown_requested: bool = False
+    current_clients: list["ClaudeSDKClient"] = field(default_factory=list)
 
 
-# Module-level singleton state
+# Module-level Singletons
+# =======================
+# This module uses a singleton pattern for global state management. The module
+# is imported once, creating these instances which persist for the process lifetime.
+# Access and modify state through the getter/setter functions below (get_state,
+# set_debug_log, set_quiet_mode, etc.) rather than accessing _state directly.
+# Use reset_state() to restore defaults between test runs or CLI invocations.
+
 _state = AgentState()
-
-# Track the currently running client for cleanup on termination
-_current_client: ClaudeSDKClient | None = None
-
-# Global console instance
 console = create_console()
 
 
@@ -182,14 +187,14 @@ def get_shutdown_requested() -> bool:
     return _state.shutdown_requested
 
 
-def get_current_client() -> ClaudeSDKClient | None:
-    """Get the currently running client.
+def get_current_clients() -> list[ClaudeSDKClient]:
+    """Get all currently running clients.
 
     Returns:
-        The currently running ClaudeSDKClient instance, or None if no client is active.
+        List of active ClaudeSDKClient instances.
 
     """
-    return _current_client
+    return list(_state.current_clients)
 
 
 def _log_debug(message: str) -> None:
@@ -258,15 +263,19 @@ async def run_agent(
     cwd: Path,
     prompt: str,
     output_schema: dict[str, Any] | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> str | Any:
     """Run agent with the given prompt and return full text output.
 
-    Streams verbose output to stdout as it's received.
+    Streams verbose output to stdout as it's received. When progress_callback
+    is provided, runs in quiet mode and routes status updates through the
+    callback instead of printing to the console.
 
     Args:
         cwd: Working directory for the agent
         prompt: The prompt to send to the agent
         output_schema: Optional JSON schema for structured output
+        progress_callback: Optional callback for status updates (enables quiet mode)
 
     Returns:
         The full text output from the agent session, or structured data if
@@ -277,8 +286,6 @@ async def run_agent(
         SystemExit: If the agent is cancelled due to script termination
 
     """
-    global _current_client
-
     _log_debug(f"\n{'='*80}\n")
     _log_debug(f"[PROMPT] cwd={cwd}\n{prompt}\n")
     _log_debug(f"{'='*80}\n\n")
@@ -299,77 +306,92 @@ async def run_agent(
 
     output_parts: list[str] = []
     structured_result: Any = None
+    use_callback = progress_callback is not None
 
     async with ClaudeSDKClient(options=options) as client:
-        _current_client = client
+        _state.current_clients.append(client)
         try:
-            agent_renderer = AgentTextRenderer(console)
-            tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
+            if not use_callback:
+                agent_renderer = AgentTextRenderer(console)
+                tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
 
             await client.query(prompt)
             async for msg in client.receive_response():
                 if isinstance(msg, AssistantMessage):
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
-                            agent_renderer.append(block.text)
                             output_parts.append(block.text)
                             _log_debug(f"[TEXT] {block.text}\n")
                             skill_match = re.search(UNKNOWN_SKILL_PATTERN, block.text)
                             if skill_match:
-                                agent_renderer.finish()
-                                tool_registry.finish_all()
+                                if not use_callback:
+                                    agent_renderer.finish()
+                                    tool_registry.finish_all()
                                 raise MissingSkillError(skill_match.group(1))
+                            if use_callback and progress_callback is not None:
+                                # Send last non-empty line to callback
+                                last_line = block.text.strip().split("\n")[-1]
+                                if last_line:
+                                    progress_callback(last_line)
+                            else:
+                                agent_renderer.append(block.text)
                         elif isinstance(block, ThinkingBlock) and block.thinking:
-                            if agent_renderer.has_content:
-                                agent_renderer.finish()
-                            print_thinking(console, block.thinking)
                             _log_debug(f"[THINKING] {block.thinking}\n")
+                            if not use_callback:
+                                if agent_renderer.has_content:
+                                    agent_renderer.finish()
+                                print_thinking(console, block.thinking)
                         elif isinstance(block, ToolUseBlock):
-                            if block.name == "StructuredOutput":
-                                # Skip panel - handled in ResultMessage
-                                _log_debug(f"[TOOL_USE] {block.name}({block.input})\n")
-                                continue
-                            if agent_renderer.has_content:
-                                agent_renderer.finish()
-                            tool_registry.create(block.id, block.name, block.input or {})
                             _log_debug(f"[TOOL_USE] {block.name}({block.input})\n")
+                            if block.name == "StructuredOutput":
+                                continue
+                            if use_callback and progress_callback is not None:
+                                first_arg = next(iter(block.input.values()), "") if block.input else ""
+                                progress_callback(f"{block.name} {first_arg}"[:80])
+                            else:
+                                if agent_renderer.has_content:
+                                    agent_renderer.finish()
+                                tool_registry.create(block.id, block.name, block.input or {})
 
                 elif isinstance(msg, UserMessage):
                     for user_block in msg.content:
                         if isinstance(user_block, ToolResultBlock):
                             content_str = str(user_block.content) if user_block.content else ""
-                            panel = tool_registry.get(user_block.tool_use_id)
-                            if panel:
-                                panel.set_result(content_str, user_block.is_error or False)
-                                panel.finish()
-                                tool_registry.remove(user_block.tool_use_id)
-                            else:
-                                _log_debug(f"[WARN] No panel for tool_use_id={user_block.tool_use_id}\n")
                             error_marker = " [ERROR]" if user_block.is_error else ""
                             _log_debug(f"[TOOL_RESULT{error_marker}] {content_str}\n")
+                            if not use_callback:
+                                panel = tool_registry.get(user_block.tool_use_id)
+                                if panel:
+                                    panel.set_result(content_str, user_block.is_error or False)
+                                    panel.finish()
+                                    tool_registry.remove(user_block.tool_use_id)
+                                else:
+                                    _log_debug(f"[WARN] No panel for tool_use_id={user_block.tool_use_id}\n")
 
                 elif isinstance(msg, ResultMessage):
                     if msg.structured_output is not None:
                         structured_result = msg.structured_output
-                        # Format issues as agent text
-                        issues = structured_result.get("issues", [])
-                        if issues:
-                            lines = [f"[{i['id']}] {i['file']}:{i['line']} - {i['description']}" for i in issues]
-                            agent_renderer.append("\n".join(lines))
                         _log_debug(f"[STRUCTURED_OUTPUT] {structured_result}\n")
+                        if not use_callback:
+                            issues = structured_result.get("issues", [])
+                            if issues:
+                                lines = [f"[{i['id']}] {i['file']}:{i['line']} - {i['description']}" for i in issues]
+                                agent_renderer.append("\n".join(lines))
                     if msg.total_cost_usd:
-                        if agent_renderer.has_content:
-                            agent_renderer.finish()
-                        console.print()
-                        print_cost(console, msg.total_cost_usd)
                         _log_debug(f"[COST] ${msg.total_cost_usd:.4f}\n")
+                        if not use_callback:
+                            if agent_renderer.has_content:
+                                agent_renderer.finish()
+                            console.print()
+                            print_cost(console, msg.total_cost_usd)
 
-            if agent_renderer.has_content:
-                agent_renderer.finish()
-            tool_registry.finish_all()
-            console.print()
+            if not use_callback:
+                if agent_renderer.has_content:
+                    agent_renderer.finish()
+                tool_registry.finish_all()
+                console.print()
         finally:
-            _current_client = None
+            _state.current_clients.remove(client)
 
     if output_schema is not None and structured_result is not None:
         return structured_result

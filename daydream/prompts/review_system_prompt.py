@@ -7,7 +7,6 @@ LLM agents with tool use and code execution environments.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -18,7 +17,7 @@ class CodebaseMetadata:
     total_tokens: int
     languages: list[str]
     largest_files: list[tuple[str, int]]  # (path, token_count)
-    changed_files: Optional[list[str]] = None  # For PR reviews
+    changed_files: list[str] | None = None  # For PR reviews
 
 
 def build_review_system_prompt(metadata: CodebaseMetadata) -> str:
@@ -403,9 +402,9 @@ def get_review_prompt(
     total_tokens: int,
     languages: list[str],
     largest_files: list[tuple[str, int]],
-    changed_files: Optional[list[str]] = None,
-    pr_title: Optional[str] = None,
-    pr_description: Optional[str] = None,
+    changed_files: list[str] | None = None,
+    pr_title: str | None = None,
+    pr_description: str | None = None,
 ) -> str:
     """
     Convenience function to generate a review prompt.

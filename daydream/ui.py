@@ -142,6 +142,12 @@ PHASE_SUBTITLES = {
         "testing the vision",
         "reality reasserts itself",
     ],
+    "LISTEN": [
+        "hearing what was spoken",
+        "the echoes return",
+        "voices from the waking world",
+        "attending to the murmurs",
+    ],
 }
 
 
@@ -2898,6 +2904,148 @@ def set_shutdown_panel(panel: ShutdownPanel | None) -> None:
     """
     global _shutdown_panel
     _shutdown_panel = panel
+
+
+# =============================================================================
+# Parallel Fix Panel
+# =============================================================================
+
+PARALLEL_SPINNER_FRAMES = ["◜", "◠", "◝", "◞", "◡", "◟"]
+
+
+class ParallelFixPanel:
+    """Live-updating panel showing progress of parallel fix agents.
+
+    Displays a Rich Table with one row per agent, showing spinner/status icon,
+    fix label, file:line, and latest output from the agent stream.
+
+    Args:
+        console: Rich Console instance for output.
+        items: List of feedback items, each with 'file' and 'line' keys.
+
+    """
+
+    def __init__(self, console: Console, items: list[dict]) -> None:
+        self._console = console
+        self._items = items
+        self._statuses: list[str] = ["pending"] * len(items)  # pending | running | completed | failed
+        self._messages: list[str] = ["Waiting..."] * len(items)
+        self._frame = 0
+        self._live: Live | None = None
+
+    def _build_table(self) -> Panel:
+        """Build the display table with current state."""
+        table = Table(
+            show_header=False,
+            show_edge=False,
+            box=None,
+            padding=(0, 1),
+            expand=True,
+        )
+        table.add_column("icon", width=3, no_wrap=True)
+        table.add_column("label", width=7, no_wrap=True)
+        table.add_column("file", width=25, no_wrap=True)
+        table.add_column("status", ratio=1, no_wrap=True)
+
+        for i, item in enumerate(self._items):
+            file_loc = f"{item.get('file', '?')}:{item.get('line', '?')}"
+            status = self._statuses[i]
+            message = self._messages[i]
+
+            if status == "running":
+                icon = Text(PARALLEL_SPINNER_FRAMES[self._frame % len(PARALLEL_SPINNER_FRAMES)], style=STYLE_CYAN)
+            elif status == "completed":
+                icon = Text("\u2713", style=STYLE_GREEN)
+            elif status == "failed":
+                icon = Text("\u2717", style=STYLE_RED)
+            else:
+                icon = Text("\u00b7", style=STYLE_DIM)
+
+            label = Text(f"fix-{i + 1}", style=STYLE_PURPLE)
+            file_text = Text(file_loc, style=STYLE_CYAN)
+            msg_text = Text(message, style=STYLE_FG if status == "running" else STYLE_DIM)
+
+            table.add_row(icon, label, file_text, msg_text)
+
+        total = len(self._items)
+        completed = sum(1 for s in self._statuses if s == "completed")
+        failed = sum(1 for s in self._statuses if s == "failed")
+        running = sum(1 for s in self._statuses if s == "running")
+
+        title_parts = [f"Fixing {total} issues"]
+        if completed > 0:
+            title_parts.append(f"{completed} done")
+        if failed > 0:
+            title_parts.append(f"{failed} failed")
+        if running > 0:
+            title_parts.append(f"{running} active")
+
+        return Panel(
+            table,
+            title=Text(" \u2022 ".join(title_parts), style=STYLE_BOLD_PINK),
+            border_style=STYLE_PINK,
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+
+    def start(self) -> None:
+        """Start the live display."""
+        self._live = Live(
+            self._build_table(),
+            console=self._console,
+            refresh_per_second=8,
+            transient=False,
+        )
+        self._live.start()
+
+    def update_row(self, index: int, message: str) -> None:
+        """Update the status message for a specific row.
+
+        Args:
+            index: Row index (0-based).
+            message: New status message to display.
+
+        """
+        if 0 <= index < len(self._items):
+            self._statuses[index] = "running"
+            self._messages[index] = message
+            self._frame += 1
+            if self._live:
+                self._live.update(self._build_table())
+
+    def complete_row(self, index: int) -> None:
+        """Mark a row as completed.
+
+        Args:
+            index: Row index (0-based).
+
+        """
+        if 0 <= index < len(self._items):
+            self._statuses[index] = "completed"
+            self._messages[index] = "Complete"
+            if self._live:
+                self._live.update(self._build_table())
+
+    def fail_row(self, index: int, error: str = "Failed") -> None:
+        """Mark a row as failed.
+
+        Args:
+            index: Row index (0-based).
+            error: Error message to display.
+
+        """
+        if 0 <= index < len(self._items):
+            self._statuses[index] = "failed"
+            self._messages[index] = f"Failed: {error}"
+            if self._live:
+                self._live.update(self._build_table())
+
+    def finish(self) -> None:
+        """Stop the live display."""
+        if self._live:
+            self._live.update(self._build_table())
+            self._live.stop()
+            self._live = None
 
 
 # =============================================================================

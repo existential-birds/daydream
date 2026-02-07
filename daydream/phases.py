@@ -3,12 +3,15 @@
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from daydream.agent import (
     console,
     run_agent,
 )
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.ui import (
+    ParallelFixPanel,
     phase_subtitle,
     print_dim,
     print_error,
@@ -43,6 +46,8 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
     },
     "required": ["issues"],
 }
+
+FixResult = tuple[dict[str, Any], bool, str | None]
 
 
 def check_review_file_exists(target_dir: Path) -> None:
@@ -263,3 +268,152 @@ async def phase_commit_push(cwd: Path) -> None:
         print_success(console, "Commit and push complete")
     else:
         print_dim(console, "Skipping commit and push")
+
+
+async def phase_fetch_pr_feedback(cwd: Path, pr_number: int, bot: str) -> None:
+    """Fetch PR feedback by invoking the fetch-pr-feedback skill.
+
+    Args:
+        cwd: Working directory for the agent
+        pr_number: Pull request number to fetch feedback from
+        bot: Bot username whose comments to fetch
+
+    Returns:
+        None
+
+    Raises:
+        Exception: If the agent fails to fetch PR feedback.
+
+    """
+    print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
+
+    prompt = f"/beagle-core:fetch-pr-feedback --pr {pr_number} --bot {bot}"
+
+    await run_agent(cwd, prompt)
+
+    output_path = cwd / REVIEW_OUTPUT_FILE
+    if output_path.exists():
+        print_success(console, f"PR feedback written to: {output_path}")
+    else:
+        print_warning(console, "PR feedback file was not created")
+
+
+async def phase_fix_parallel(
+    cwd: Path, feedback_items: list[dict[str, Any]]
+) -> list[FixResult]:
+    """Apply fixes for all feedback items concurrently using parallel agents.
+
+    Launches one agent per feedback item in a task group. Each agent runs
+    independently; individual failures are captured without aborting others.
+
+    Args:
+        cwd: Working directory for the fixes
+        feedback_items: List of feedback items, each with description, file, line
+
+    Returns:
+        List of (item, success, error) tuples for each feedback item
+
+    """
+    results: list[FixResult] = []
+    limiter = anyio.CapacityLimiter(4)
+    panel = ParallelFixPanel(console, feedback_items)
+    panel.start()
+
+    async with anyio.create_task_group() as tg:
+        for index, item in enumerate(feedback_items):
+            description = item.get("description", "No description")
+            file_path = item.get("file", "Unknown file")
+            line = item.get("line", "Unknown")
+
+            prompt = f"""Fix this issue:
+{description}
+
+File: {file_path}
+Line: {line}
+
+Make the minimal change needed.
+"""
+
+            # Default arguments capture loop variables by value, avoiding late-binding
+            # closure issues where all tasks would reference the final loop iteration.
+            async def _fix_task(
+                idx: int = index,
+                itm: dict[str, Any] = item,
+                prm: str = prompt,
+            ) -> None:
+                def callback(message: str, i: int = idx) -> None:
+                    panel.update_row(i, message)
+
+                try:
+                    async with limiter:
+                        await run_agent(cwd, prm, progress_callback=callback)
+                    panel.complete_row(idx)
+                    results.append((itm, True, None))
+                except Exception as e:
+                    error_msg = f"{type(e).__name__}: {e}"
+                    panel.fail_row(idx, error_msg)
+                    results.append((itm, False, error_msg))
+
+            tg.start_soon(_fix_task)
+
+    panel.finish()
+
+    succeeded = sum(1 for _, ok, _ in results if ok)
+    failed = sum(1 for _, ok, _ in results if not ok)
+
+    if succeeded > 0:
+        print_success(console, f"{succeeded} fix(es) applied successfully")
+    if failed > 0:
+        print_warning(console, f"{failed} fix(es) failed")
+    if succeeded == 0 and failed > 0:
+        print_error(console, "All fixes failed", "No changes were applied")
+
+    return results
+
+
+async def phase_commit_push_auto(cwd: Path) -> None:
+    """Automatically commit and push changes without user prompt.
+
+    Args:
+        cwd: Working directory for the commit
+
+    Returns:
+        None
+
+    """
+    console.print()
+    print_info(console, "Running commit-push skill...")
+    await run_agent(cwd, "/beagle-core:commit-push")
+    print_success(console, "Commit and push complete")
+
+
+async def phase_respond_pr_feedback(
+    cwd: Path, pr_number: int, bot: str, results: list[FixResult]
+) -> None:
+    """Respond to PR feedback with results of applied fixes.
+
+    Filters to successful results only and invokes the respond-pr-feedback
+    skill to post replies on the pull request.
+
+    Args:
+        cwd: Working directory for the agent
+        pr_number: Pull request number to respond to
+        bot: Bot username to respond as
+        results: List of (item, success, error) tuples from phase_fix_parallel
+
+    Returns:
+        None
+
+    """
+    successful = [(item, ok, err) for item, ok, err in results if ok]
+
+    if not successful:
+        print_warning(console, "No successful fixes to report")
+        return
+
+    print_info(console, f"Responding to PR #{pr_number} with {len(successful)} fix result(s)...")
+
+    prompt = f"/beagle-core:respond-pr-feedback --pr {pr_number} --bot {bot}"
+
+    await run_agent(cwd, prompt)
+    print_success(console, f"Responded to PR #{pr_number} feedback")

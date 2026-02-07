@@ -29,12 +29,8 @@ REVIEW_SKILLS: dict[ReviewSkillChoice, str] = {
     ReviewSkillChoice.ELIXIR: "beagle-elixir:review-elixir",
 }
 
-# CLI skill name to full skill path mapping
-SKILL_MAP: dict[str, str] = {
-    "python": "beagle-python:review-python",
-    "react": "beagle-react:review-frontend",
-    "elixir": "beagle-elixir:review-elixir",
-}
+# CLI skill name to full skill path mapping (derived from REVIEW_SKILLS to avoid duplication)
+SKILL_MAP: dict[str, str] = {choice.name.lower(): skill for choice, skill in REVIEW_SKILLS.items()}
 
 # Output file for review results
 REVIEW_OUTPUT_FILE = ".review-output.md"

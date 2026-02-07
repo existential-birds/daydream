@@ -1,14 +1,16 @@
 """CLI entry point for daydream."""
 
 import argparse
+import json
 import signal
+import subprocess
 import sys
 
 import anyio
 
 from daydream.agent import (
     console,
-    get_current_client,
+    get_current_clients,
     set_shutdown_requested,
 )
 from daydream.runner import RunConfig, run
@@ -30,8 +32,8 @@ def _signal_handler(signum: int, frame: object) -> None:
     set_shutdown_panel(panel)
     panel.start(f"Received {signal_name}, shutting down")
 
-    if get_current_client() is not None:
-        panel.add_step("Terminating running agent...")
+    if get_current_clients():
+        panel.add_step("Terminating running agent(s)...")
 
     raise KeyboardInterrupt
 
@@ -40,6 +42,29 @@ def _install_signal_handlers() -> None:
     """Install signal handlers for graceful shutdown."""
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
+
+
+def _auto_detect_pr_number() -> int | None:
+    """Auto-detect PR number from the current branch via gh CLI.
+
+    Returns:
+        The PR number if found, or None if detection fails.
+
+    """
+    try:
+        # Safe: hardcoded command with no user input
+        result = subprocess.run(  # noqa: S603, S607
+            ["gh", "pr", "view", "--json", "number"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            return data.get("number")
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        pass
+    return None
 
 
 def _parse_args() -> RunConfig:
@@ -129,6 +154,23 @@ def _parse_args() -> RunConfig:
     )
 
     parser.add_argument(
+        "--pr",
+        nargs="?",
+        const=-1,
+        default=None,
+        type=int,
+        metavar="NUMBER",
+        help="PR feedback mode: fetch and fix bot review comments (auto-detect PR if number omitted)",
+    )
+
+    parser.add_argument(
+        "--bot",
+        default=None,
+        metavar="BOT_NAME",
+        help="Bot username to filter PR comments (required with --pr)",
+    )
+
+    parser.add_argument(
         "--model",
         choices=["opus", "sonnet", "haiku"],
         default="opus",
@@ -141,6 +183,30 @@ def _parse_args() -> RunConfig:
     if args.start_at != "review" and args.review_only:
         parser.error("--start-at and --review-only are mutually exclusive")
 
+    # Validate --pr mutual exclusions
+    if args.pr is not None:
+        if not args.bot:
+            parser.error("--bot is required when using --pr")
+        if args.review_only:
+            parser.error("--pr and --review-only are mutually exclusive")
+        if args.start_at != "review":
+            parser.error("--pr and --start-at are mutually exclusive")
+        if args.skill:
+            parser.error("--pr and skill flags are mutually exclusive")
+
+    # Validate --bot without --pr
+    if args.bot and args.pr is None:
+        parser.error("--bot requires --pr")
+
+    # Auto-detect PR number if --pr used without a number
+    pr_number = args.pr
+    if pr_number == -1:
+        pr_number = _auto_detect_pr_number()
+        if pr_number is None:
+            parser.error("Could not auto-detect PR number from current branch. Specify --pr NUMBER explicitly.")
+    if pr_number is not None and pr_number <= 0:
+        parser.error("--pr must be a positive integer")
+
     return RunConfig(
         target=args.target,
         skill=args.skill,
@@ -150,6 +216,8 @@ def _parse_args() -> RunConfig:
         quiet=True,
         review_only=args.review_only,
         start_at=args.start_at,
+        pr_number=pr_number,
+        bot=args.bot,
     )
 
 
