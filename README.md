@@ -1,5 +1,7 @@
 # daydream
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/existential-birds/daydream)
+
 Automated code review and fix loop using the Claude Agent SDK.
 
 Daydream launches review agents equipped with [Beagle](https://github.com/existential-birds/beagle) skills—specialized knowledge modules that use progressive disclosure to give reviewers precise understanding of your technology stack. The agent parses actionable feedback, applies fixes automatically, and validates changes by running your test suite.
