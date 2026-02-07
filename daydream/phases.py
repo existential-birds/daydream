@@ -348,8 +348,9 @@ Make the minimal change needed.
                     panel.complete_row(idx)
                     results.append((itm, True, None))
                 except Exception as e:
-                    panel.fail_row(idx, str(e))
-                    results.append((itm, False, str(e)))
+                    error_msg = f"{type(e).__name__}: {e}"
+                    panel.fail_row(idx, error_msg)
+                    results.append((itm, False, error_msg))
 
             tg.start_soon(_fix_task)
 

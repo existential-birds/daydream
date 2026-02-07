@@ -1,9 +1,10 @@
 """Main orchestration logic for the review and fix loop."""
 
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any
 
 from daydream.agent import (
     MissingSkillError,
@@ -245,15 +246,16 @@ async def run(config: RunConfig | None = None) -> int:
 
     # Set up debug logging if enabled
     debug_log_path: Path | None = None
-    debug_log_file: TextIO | None = None
     if config.debug:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         debug_log_path = target_dir / f".review-debug-{timestamp}.log"
-        debug_log_file = open(debug_log_path, "w", encoding="utf-8")  # noqa: SIM115
 
-    try:
-        if debug_log_file is not None:
+    with contextlib.ExitStack() as stack:
+        if debug_log_path is not None:
+            debug_log_file = stack.enter_context(open(debug_log_path, "w", encoding="utf-8"))
             set_debug_log(debug_log_file)
+            stack.callback(set_debug_log, None)
+            stack.callback(print_info, console, f"Debug log saved: {debug_log_path}")
             print_info(console, f"Debug log: {debug_log_path}")
 
         # Get cleanup setting (from config or prompt)
@@ -356,10 +358,3 @@ async def run(config: RunConfig | None = None) -> int:
             return 0
         else:
             return 1
-
-    finally:
-        if debug_log_file is not None:
-            debug_log_file.close()
-            set_debug_log(None)
-            if debug_log_path:
-                print_info(console, f"Debug log saved: {debug_log_path}")
