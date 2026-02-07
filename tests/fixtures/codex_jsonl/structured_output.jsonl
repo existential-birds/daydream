@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"th_struct"}
+{"type":"item.started","item":{"type":"agent_message","id":"msg_1","content":[]}}
+{"type":"item.completed","item":{"type":"agent_message","id":"msg_1","content":[{"type":"text","text":"{\"issues\":[{\"id\":1,\"description\":\"Fix type hints\",\"file\":\"app.py\",\"line\":5}]}"}]}}
+{"type":"turn.completed","usage":{"input_tokens":150,"output_tokens":80}}

@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"th_def456"}
+{"type":"item.started","item":{"type":"reasoning","id":"reason_1","content":[]}}
+{"type":"item.completed","item":{"type":"reasoning","id":"reason_1","content":[{"type":"text","text":"Let me run a command"}]}}
+{"type":"item.started","item":{"type":"command_execution","id":"cmd_1","command":"ls -la","status":"running"}}
+{"type":"item.completed","item":{"type":"command_execution","id":"cmd_1","command":"ls -la","status":"completed","exit_code":0,"aggregated_output":"file.py\ntest.py"}}
+{"type":"item.completed","item":{"type":"file_change","id":"fc_1","file_path":"main.py","action":"modified"}}
+{"type":"item.started","item":{"type":"agent_message","id":"msg_1","content":[]}}
+{"type":"item.completed","item":{"type":"agent_message","id":"msg_1","content":[{"type":"text","text":"Done!"}]}}
+{"type":"turn.completed","usage":{"input_tokens":200,"output_tokens":100}}

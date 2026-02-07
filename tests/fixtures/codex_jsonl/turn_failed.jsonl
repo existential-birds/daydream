@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"th_fail"}
+{"type":"turn.failed","error":{"message":"Model returned an error","code":"model_error"}}
