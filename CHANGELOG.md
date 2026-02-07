@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-07
+
+### Added
+
+- **cli:** Add `--elixir` flag and `-s elixir` option for Elixir/Phoenix code reviews ([#7](https://github.com/existential-birds/daydream/pull/7))
+
+  Wires the `beagle-elixir:review-elixir` skill into daydream, covering OTP patterns, LiveView, ExUnit, security, and performance reviews.
+
+### Changed
+
+- **Breaking:** Rename `-s frontend` to `-s react` for the React/TypeScript review skill ([#7](https://github.com/existential-birds/daydream/pull/7))
+
+  **Migration:** Replace `-s frontend` with `-s react` in any scripts or CI configurations. The `--typescript` flag continues to work unchanged.
+
 ## [0.2.0] - 2026-02-06
 
 ### Added
@@ -76,6 +90,7 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/existential-birds/daydream/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/existential-birds/daydream/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/existential-birds/daydream/releases/tag/v0.1.0
