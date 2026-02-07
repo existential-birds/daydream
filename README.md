@@ -11,6 +11,8 @@ Daydream launches review agents equipped with [Beagle](https://github.com/existe
 - **Stack-aware reviews**: Beagle skills progressively load framework-specific knowledge (FastAPI patterns, React hooks, SwiftUI lifecycle, etc.) as the reviewer encounters relevant code
 - **Intelligent parsing**: Extracts actionable issues from review output, skipping positive observations
 - **Automated fixes**: Applies fixes one-by-one with minimal changes
+- **PR feedback mode**: Fetch bot review comments from a PR, fix in parallel, and respond automatically
+- **Parallel execution**: Up to 4 concurrent fix agents with live progress tracking
 - **Test validation**: Runs your test suite and offers interactive retry/fix options on failure
 - **Commit integration**: Optionally commit and push changes when complete
 - **Neon terminal UI**: Retro-styled interface with Dracula theme and animated progress
@@ -21,6 +23,7 @@ Daydream launches review agents equipped with [Beagle](https://github.com/existe
 - [uv](https://docs.astral.sh/uv/) package manager
 - [Claude Code](https://claude.ai/code) CLI
 - [Beagle](https://github.com/existential-birds/beagle) plugin for Claude Code
+- [GitHub CLI](https://cli.github.com/) (`gh`) — required for PR feedback mode
 
 Install Beagle before using daydream:
 
@@ -74,6 +77,10 @@ daydream --debug /path/to/project
 # Control cleanup of review output
 daydream --cleanup /path/to/project      # Remove .review-output.md after completion
 daydream --no-cleanup /path/to/project   # Keep .review-output.md (useful for CI)
+
+# PR feedback mode - fetch and fix bot review comments
+daydream --pr 42 --bot "coderabbitai[bot]" /path/to/project
+daydream --pr --bot "coderabbitai[bot]" /path/to/project   # Auto-detect PR from branch
 ```
 
 ### Command Line Options
@@ -88,25 +95,31 @@ daydream --no-cleanup /path/to/project   # Keep .review-output.md (useful for CI
 | `--model` | Claude model: `opus`, `sonnet`, or `haiku` (default: `opus`) |
 | `--review-only` | Skip fixes, only review and parse feedback |
 | `--start-at` | Start at phase: `review`, `parse`, `fix`, or `test` (default: `review`) |
+| `--pr [NUMBER]` | PR feedback mode: fetch and fix bot review comments (auto-detects PR if omitted) |
+| `--bot BOT_NAME` | Bot username to filter PR comments (required with `--pr`) |
 | `--debug` | Save debug log to `.review-debug-{timestamp}.log` |
 | `--cleanup` | Remove `.review-output.md` after completion |
 | `--no-cleanup` | Keep `.review-output.md` after completion |
 
 ## How It Works
 
-Daydream executes a four-phase workflow. Use `--start-at` to resume from a specific phase (phases before the start point are skipped).
+Daydream has two modes: **standard review mode** for full codebase reviews, and **PR feedback mode** for resolving bot review comments on pull requests.
 
-### Phase 1: Review
+### Standard Review Mode
+
+Executes a four-phase workflow. Use `--start-at` to resume from a specific phase (phases before the start point are skipped).
+
+#### Phase 1: Review
 
 Invokes the selected Beagle review skill (e.g., `beagle-python:review-python`) against your codebase. The review output is written to `.review-output.md` in the project root.
 
-### Phase 2: Parse Feedback
+#### Phase 2: Parse Feedback
 
 Extracts actionable issues from the review output as structured JSON. Positive observations and summary sections are filtered out.
 
 **Note:** `--start-at parse` requires an existing `.review-output.md` file.
 
-### Phase 3: Apply Fixes
+#### Phase 3: Apply Fixes
 
 For each actionable issue:
 
@@ -116,7 +129,7 @@ For each actionable issue:
 
 **Note:** `--start-at fix` requires an existing `.review-output.md` file.
 
-### Phase 4: Test and Heal
+#### Phase 4: Test and Heal
 
 Runs your project's test suite. On failure, offers interactive options:
 
@@ -129,6 +142,18 @@ After tests pass, optionally commit and push changes.
 
 **Note:** `--start-at test` skips all other phases and runs tests directly.
 
+### PR Feedback Mode
+
+Activated with `--pr` and `--bot`. Fetches bot review comments from a GitHub PR and resolves them automatically.
+
+1. **Fetch**: Pulls bot comments from the PR via the `fetch-pr-feedback` Beagle skill
+2. **Parse**: Extracts actionable issues from the fetched feedback (reuses standard parser)
+3. **Fix**: Applies fixes concurrently with up to 4 parallel agents, each tackling one issue
+4. **Commit & Push**: Automatically commits and pushes all changes
+5. **Respond**: Posts fix results back on the PR as comment replies
+
+PR feedback mode is mutually exclusive with `--review-only`, `--start-at`, and skill flags (`--python`, `--typescript`, `--elixir`).
+
 ## Output Files
 
 | File | Description |
@@ -140,12 +165,13 @@ After tests pass, optionally commit and push changes.
 
 ```text
 daydream/
-├── cli.py      # Entry point, argument parsing, signal handling
-├── runner.py   # Main orchestration logic and RunConfig
-├── phases.py   # Phase functions (review, parse, fix, test)
-├── agent.py    # Claude SDK client and helper functions
-├── ui.py       # Neon terminal UI components (Rich-based)
-└── config.py   # Configuration constants
+├── cli.py       # Entry point, argument parsing, signal handling
+├── runner.py    # Main orchestration (standard + PR feedback flows)
+├── phases.py    # Phase functions (review, parse, fix, parallel fix, test, PR feedback)
+├── agent.py     # Claude SDK client and helper functions
+├── ui.py        # Neon terminal UI components (Rich-based)
+├── config.py    # Configuration constants
+└── prompts/     # Review system prompt templates
 ```
 
 ## Dependencies
