@@ -54,7 +54,7 @@ daydream -s python /path/to/project
 
 # Use React/TypeScript review skill
 daydream --typescript /path/to/project
-daydream -s frontend /path/to/project
+daydream -s react /path/to/project
 
 # Select Claude model (default: opus)
 daydream --model sonnet /path/to/project
@@ -81,9 +81,10 @@ daydream --no-cleanup /path/to/project   # Keep .review-output.md (useful for CI
 | Option | Description |
 |--------|-------------|
 | `TARGET` | Target directory (default: prompt interactively) |
-| `-s, --skill` | Review skill: `python` or `frontend` |
+| `-s, --skill` | Review skill: `python`, `react`, or `elixir` |
 | `--python` | Shorthand for `-s python` |
-| `--typescript` | Shorthand for `-s frontend` |
+| `--typescript` | Shorthand for `-s react` |
+| `--elixir` | Shorthand for `-s elixir` |
 | `--model` | Claude model: `opus`, `sonnet`, or `haiku` (default: `opus`) |
 | `--review-only` | Skip fixes, only review and parse feedback |
 | `--start-at` | Start at phase: `review`, `parse`, `fix`, or `test` (default: `review`) |
