@@ -4,39 +4,39 @@
 
 Automated code review and fix loop powered by Claude and Codex.
 
-Daydream launches review agents equipped with [Beagle](https://github.com/existential-birds/beagle) skills—specialized knowledge modules that use progressive disclosure to give reviewers precise understanding of your technology stack. The agent parses actionable feedback, applies fixes automatically, and validates changes by running your test suite.
+Daydream launches review agents equipped with [Beagle](https://github.com/existential-birds/beagle) skills — specialized knowledge modules for your technology stack (FastAPI, React, Phoenix, and more). It parses actionable feedback from the review, applies fixes automatically, and validates changes by running your test suite.
 
 ![demo](https://github.com/user-attachments/assets/60a80645-36de-410e-afa7-7a96efef3f57)
 
 ## Features
 
-- **Stack-aware reviews**: Beagle skills progressively load framework-specific knowledge (FastAPI patterns, React hooks, SwiftUI lifecycle, etc.) as the reviewer encounters relevant code
+- **Stack-aware reviews**: Beagle skills load framework-specific knowledge (FastAPI patterns, React hooks, Phoenix lifecycle, etc.) as the reviewer encounters relevant code
 - **Intelligent parsing**: Extracts actionable issues from review output, skipping positive observations
 - **Automated fixes**: Applies fixes one-by-one with minimal changes
-- **PR feedback mode**: Fetch bot review comments from a PR, fix in parallel, and respond automatically
-- **Multi-backend support**: Run reviews with Claude (default) or OpenAI Codex, with per-phase backend overrides
+- **PR feedback mode**: Fetches bot review comments from a PR, fixes in parallel, and responds automatically
+- **Multi-backend support**: Claude (default) or OpenAI Codex, with per-phase backend overrides
 - **Parallel execution**: Up to 4 concurrent fix agents with live progress tracking
 - **Test validation**: Runs your test suite and offers interactive retry/fix options on failure
-- **Commit integration**: Optionally commit and push changes when complete
-- **Neon terminal UI**: Retro-styled interface with Dracula theme and animated progress
+- **Commit integration**: Optionally commits and pushes changes when complete
 
 ## Prerequisites
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) package manager
 - [Claude Code](https://claude.ai/code) CLI
-- [Beagle](https://github.com/existential-birds/beagle) plugin for Claude Code
 - [Codex CLI](https://openai.com/codex) — required when using `--backend codex`
 - [GitHub CLI](https://cli.github.com/) (`gh`) — required for PR feedback mode
 
-Install Beagle before using daydream:
+### Install Beagle
+
+Daydream requires the [Beagle](https://github.com/existential-birds/beagle) plugin for Claude Code.
 
 ```bash
 claude plugin marketplace add https://github.com/existential-birds/beagle
 claude plugin install beagle
 ```
 
-Verify by running `/beagle:` in Claude Code—you should see the command list.
+Verify by running `/beagle:` in Claude Code — you should see the command list.
 
 ## Installation
 
@@ -49,75 +49,62 @@ uv sync
 ## Usage
 
 ```bash
-# Interactive mode - prompts for target directory and skill
-daydream
-
-# Specify target directory
-daydream /path/to/project
-
-# Use Python/FastAPI review skill
+# Review a project with a specific skill
 daydream --python /path/to/project
-daydream -s python /path/to/project
-
-# Use React/TypeScript review skill
 daydream --typescript /path/to/project
-daydream -s react /path/to/project
+daydream --elixir /path/to/project
 
-# Select model (default: backend-specific)
-daydream --model sonnet /path/to/project
+# Review only, skip fixes
+daydream --review-only /path/to/project
 
-# Use Codex backend
+# Use Codex backend instead of Claude
 daydream --backend codex /path/to/project
-daydream -b codex --model gpt-5.3-codex /path/to/project
+
+# Fix bot review comments on a PR
+daydream --pr 42 --bot "coderabbitai[bot]" /path/to/project
+```
+
+### More Examples
+
+```bash
+# Resume from a specific phase (requires existing .review-output.md)
+daydream --start-at fix /path/to/project
 
 # Mix backends per phase
 daydream --backend codex --fix-backend claude /path/to/project
 
-# Review only (no fixes applied)
-daydream --review-only /path/to/project
+# Select model explicitly
+daydream --model sonnet /path/to/project
 
-# Resume from a specific phase (requires existing .review-output.md)
-daydream --start-at parse /path/to/project   # Skip review, start at parsing
-daydream --start-at fix /path/to/project     # Skip review and parse, apply fixes
-daydream --start-at test /path/to/project    # Run tests only
-
-# Enable debug logging
-daydream --debug /path/to/project
-
-# Control cleanup of review output
-daydream --cleanup /path/to/project      # Remove .review-output.md after completion
-daydream --no-cleanup /path/to/project   # Keep .review-output.md (useful for CI)
-
-# PR feedback mode - fetch and fix bot review comments
-daydream --pr 42 --bot "coderabbitai[bot]" /path/to/project
-daydream --pr --bot "coderabbitai[bot]" /path/to/project   # Auto-detect PR from branch
+# Auto-detect PR number from current branch
+daydream --pr --bot "coderabbitai[bot]" /path/to/project
 ```
 
 ### Command Line Options
 
-| Option | Description |
-|--------|-------------|
-| `TARGET` | Target directory (default: prompt interactively) |
-| `-s, --skill` | Review skill: `python`, `react`, or `elixir` |
-| `--python` | Shorthand for `-s python` |
-| `--typescript` | Shorthand for `-s react` |
-| `--elixir` | Shorthand for `-s elixir` |
-| `-b, --backend` | Agent backend: `claude` (default) or `codex` |
-| `--review-backend` | Override backend for the review phase |
-| `--fix-backend` | Override backend for the fix phase |
-| `--test-backend` | Override backend for the test phase |
-| `--model` | Model name (default: backend-specific — `opus` for Claude, `gpt-5.3-codex` for Codex) |
-| `--review-only` | Skip fixes, only review and parse feedback |
-| `--start-at` | Start at phase: `review`, `parse`, `fix`, or `test` (default: `review`) |
-| `--pr [NUMBER]` | PR feedback mode: fetch and fix bot review comments (auto-detects PR if omitted) |
-| `--bot BOT_NAME` | Bot username to filter PR comments (required with `--pr`) |
-| `--debug` | Save debug log to `.review-debug-{timestamp}.log` |
-| `--cleanup` | Remove `.review-output.md` after completion |
-| `--no-cleanup` | Keep `.review-output.md` after completion |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `TARGET` | Target directory | Prompt interactively |
+| `-s, --skill` | Review skill: `python`, `react`, or `elixir` | Prompt interactively |
+| `--python` | Shorthand for `-s python` | |
+| `--typescript` | Shorthand for `-s react` | |
+| `--elixir` | Shorthand for `-s elixir` | |
+| `-b, --backend` | Agent backend: `claude` or `codex` | `claude` |
+| `--review-backend` | Override backend for the review phase | `--backend` value |
+| `--fix-backend` | Override backend for the fix phase | `--backend` value |
+| `--test-backend` | Override backend for the test phase | `--backend` value |
+| `--model` | Model name (`opus` for Claude, `gpt-5.3-codex` for Codex) | Backend-specific |
+| `--review-only` | Skip fixes, only review and parse feedback | |
+| `--start-at` | Start at phase: `review`, `parse`, `fix`, or `test` | `review` |
+| `--pr [NUMBER]` | PR feedback mode (auto-detects PR number if omitted) | |
+| `--bot BOT_NAME` | Bot username to filter PR comments (required with `--pr`) | |
+| `--debug` | Save debug log to `.review-debug-{timestamp}.log` | |
+| `--cleanup` | Remove `.review-output.md` after completion | |
+| `--no-cleanup` | Keep `.review-output.md` after completion | |
 
 ## How It Works
 
-Daydream has two modes: **standard review mode** for full codebase reviews, and **PR feedback mode** for resolving bot review comments on pull requests. Both modes support multiple backends. Use `--backend codex` to run with OpenAI Codex instead of Claude, or mix backends per phase with `--review-backend`, `--fix-backend`, and `--test-backend`.
+Daydream has two modes: **standard review mode** for full codebase reviews, and **PR feedback mode** for resolving bot review comments on pull requests. Both modes support multiple backends (Claude and Codex), including per-phase overrides.
 
 ### Standard Review Mode
 
@@ -138,7 +125,7 @@ Extracts actionable issues from the review output as structured JSON. Positive o
 For each actionable issue:
 
 1. Displays the issue description, file, and line number
-2. Prompts Claude to apply the minimal fix needed
+2. Prompts the agent to apply the minimal fix needed
 3. Shows progress as fixes are applied
 
 **Note:** `--start-at fix` requires an existing `.review-output.md` file.
@@ -148,7 +135,7 @@ For each actionable issue:
 Runs your project's test suite. On failure, offers interactive options:
 
 - **Retry tests**: Run again without fixes
-- **Fix and retry**: Launch Claude to analyze and fix failures
+- **Fix and retry**: Launch the agent to analyze and fix failures
 - **Ignore**: Mark as passed and continue
 - **Abort**: Exit with failure status
 
