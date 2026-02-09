@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
@@ -25,6 +26,9 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+
+_SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
+_CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
 
 
 def _raw_log(message: str) -> None:
@@ -45,10 +49,7 @@ def _unwrap_shell_command(command: str) -> str:
 
     This extracts just the inner command for display purposes.
     """
-    import re
-
-    # Match /bin/{zsh,bash,sh} -lc, then capture the rest
-    m = re.match(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", command, re.DOTALL)
+    m = _SHELL_WRAPPER_RE.match(command)
     if not m:
         return command
     inner = m.group(1)
@@ -58,7 +59,7 @@ def _unwrap_shell_command(command: str) -> str:
     ):
         inner = inner[1:-1]
     # Strip leading "cd /some/path &&" if present
-    inner = re.sub(r"^cd\s+\S+\s*&&\s*", "", inner)
+    inner = _CD_PREFIX_RE.sub("", inner)
     return inner.strip()
 
 
