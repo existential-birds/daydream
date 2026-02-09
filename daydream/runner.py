@@ -277,14 +277,24 @@ async def run(config: RunConfig | None = None) -> int:
             cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
             cleanup_enabled = cleanup_response.lower() in ("y", "yes")
 
-        # Set quiet mode and model
-        set_quiet_mode(config.quiet)
-        set_model(config.model or "opus")
-
         # Create backends (may differ per-phase if overrides are set)
         review_backend = _resolve_backend(config, "review")
         fix_backend = _resolve_backend(config, "fix")
         test_backend = _resolve_backend(config, "test")
+
+        # Set quiet mode: force off for Codex backends since their shell
+        # commands are the primary output the user needs to see.
+        quiet = config.quiet
+        if quiet:
+            codex_in_use = config.backend == "codex" or any(
+                b == "codex"
+                for b in (config.review_backend, config.fix_backend, config.test_backend)
+                if b is not None
+            )
+            if codex_in_use:
+                quiet = False
+        set_quiet_mode(quiet)
+        set_model(config.model or "opus")
 
         # PR feedback mode: separate flow
         if config.pr_number is not None:
