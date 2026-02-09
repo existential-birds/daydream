@@ -199,7 +199,7 @@ def _parse_args() -> RunConfig:
     parser.add_argument(
         "--model",
         default=None,
-        help="Model to use (default: backend-specific). Examples: opus, sonnet, haiku, gpt-5.3-codex",
+        help="Model to use (default: backend-specific). Examples: opus, sonnet, haiku, gpt-5.2-codex",
     )
 
     args = parser.parse_args()

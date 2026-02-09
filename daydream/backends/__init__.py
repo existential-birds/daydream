@@ -117,7 +117,7 @@ def create_backend(name: str, model: str | None = None) -> Backend:
         return ClaudeBackend(model=model or "opus")
     if name == "codex":
         from daydream.backends.codex import CodexBackend
-        return CodexBackend(model=model or "gpt-5.3-codex")
+        return CodexBackend(model=model or "gpt-5.2-codex")
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude' or 'codex'.")
 
 

@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"th_streamed"}
+{"type":"item.started","item":{"type":"command_execution","id":"cmd_1","command":"cat review.md","status":"running"}}
+{"type":"item.completed","item":{"type":"command_execution","id":"cmd_1","command":"cat review.md","status":"completed","exit_code":0,"aggregated_output":"review content"}}
+{"type":"item.started","item":{"type":"agent_message","id":"msg_1","content":[]}}
+{"type":"item.updated","item":{"type":"agent_message","id":"msg_1","content":[{"type":"text","text":"{\"issues\":[{\"id\":1,"}]}}
+{"type":"item.updated","item":{"type":"agent_message","id":"msg_1","content":[{"type":"text","text":"\"description\":\"Missing type hint\","}]}}
+{"type":"item.updated","item":{"type":"agent_message","id":"msg_1","content":[{"type":"text","text":"\"file\":\"app.py\",\"line\":10}]}"}]}}
+{"type":"item.completed","item":{"type":"agent_message","id":"msg_1","content":[]}}
+{"type":"turn.completed","usage":{"input_tokens":200,"output_tokens":80}}

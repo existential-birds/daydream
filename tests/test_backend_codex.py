@@ -14,7 +14,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.backends.codex import CodexBackend, CodexError
+from daydream.backends.codex import CodexBackend, CodexError, _unwrap_shell_command
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
@@ -49,7 +49,7 @@ def _make_mock_process(fixture_name: str):
 
 @pytest.mark.asyncio
 async def test_simple_text_events():
-    backend = CodexBackend(model="gpt-5.3-codex")
+    backend = CodexBackend(model="gpt-5.2-codex")
     mock_proc = _make_mock_process("simple_text.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -154,6 +154,96 @@ async def test_continuation_token_resumes():
         assert "th_prev" in flat_args
 
 
+@pytest.mark.asyncio
+async def test_streamed_structured_output_via_item_updated():
+    """Text delivered via item.updated deltas (item.completed has empty content)."""
+    backend = CodexBackend()
+    mock_proc = _make_mock_process("streamed_structured_output.jsonl")
+    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
+            events.append(event)
+
+    result_events = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(result_events) == 1
+    assert result_events[0].structured_output == {
+        "issues": [{"id": 1, "description": "Missing type hint", "file": "app.py", "line": 10}]
+    }
+
+    # Text should also be yielded as a TextEvent
+    text_events = [e for e in events if isinstance(e, TextEvent)]
+    assert len(text_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_output_text_content_blocks():
+    """agent_message with output_text content blocks (schema-constrained)."""
+    backend = CodexBackend()
+    mock_proc = _make_mock_process("output_text_blocks.jsonl")
+    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
+            events.append(event)
+
+    result_events = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(result_events) == 1
+    assert result_events[0].structured_output == {
+        "issues": [{"id": 1, "description": "Bad import", "file": "main.py", "line": 3}]
+    }
+
+
+@pytest.mark.asyncio
+async def test_toplevel_text_field():
+    """Real Codex format: text directly on item, not in content blocks."""
+    backend = CodexBackend()
+    mock_proc = _make_mock_process("toplevel_text.jsonl")
+    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
+            events.append(event)
+
+    # reasoning with top-level text → ThinkingEvent
+    thinking = [e for e in events if isinstance(e, ThinkingEvent)]
+    assert len(thinking) == 1
+    assert "read the review" in thinking[0].text
+
+    # agent_message with top-level text containing JSON → structured output
+    result_events = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(result_events) == 1
+    assert result_events[0].structured_output == {
+        "issues": [{"id": 1, "description": "Missing yield for non-result events", "file": "agents/architect.py", "line": 134}]
+    }
+
+    # Also emitted as TextEvent
+    text_events = [e for e in events if isinstance(e, TextEvent)]
+    assert len(text_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_turn_completed_result_field():
+    """Structured output returned in turn.completed result field."""
+    backend = CodexBackend()
+    mock_proc = _make_mock_process("turn_completed_result.jsonl")
+    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
+            events.append(event)
+
+    result_events = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(result_events) == 1
+    assert result_events[0].structured_output == {
+        "issues": [{"id": 1, "description": "Unused variable", "file": "utils.py", "line": 22}]
+    }
+
+
 def test_format_skill_invocation():
     backend = CodexBackend()
     # Should strip namespace prefix and use $ syntax
@@ -171,3 +261,33 @@ def test_format_skill_invocation_no_namespace():
     backend = CodexBackend()
     result = backend.format_skill_invocation("commit-push")
     assert result == "$commit-push"
+
+
+class TestUnwrapShellCommand:
+    """Tests for _unwrap_shell_command helper."""
+
+    def test_zsh_wrapper_with_cd(self):
+        cmd = '/bin/zsh -lc "cd /home/user/project && make test"'
+        assert _unwrap_shell_command(cmd) == "make test"
+
+    def test_bash_wrapper_with_cd(self):
+        cmd = '/bin/bash -lc "cd /tmp/work && pytest -x"'
+        assert _unwrap_shell_command(cmd) == "pytest -x"
+
+    def test_sh_wrapper_with_cd(self):
+        cmd = '/bin/sh -lc "cd /app && echo hello"'
+        assert _unwrap_shell_command(cmd) == "echo hello"
+
+    def test_wrapper_without_cd(self):
+        cmd = '/bin/zsh -lc "ls -la"'
+        assert _unwrap_shell_command(cmd) == "ls -la"
+
+    def test_plain_command_passthrough(self):
+        assert _unwrap_shell_command("ls -la") == "ls -la"
+
+    def test_empty_command(self):
+        assert _unwrap_shell_command("") == ""
+
+    def test_single_quotes(self):
+        cmd = "/bin/zsh -lc 'cd /project && git status'"
+        assert _unwrap_shell_command(cmd) == "git status"

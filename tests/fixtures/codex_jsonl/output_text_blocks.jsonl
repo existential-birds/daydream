@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"th_outtext"}
+{"type":"item.started","item":{"type":"agent_message","id":"msg_1","content":[]}}
+{"type":"item.completed","item":{"type":"agent_message","id":"msg_1","content":[{"type":"output_text","text":"{\"issues\":[{\"id\":1,\"description\":\"Bad import\",\"file\":\"main.py\",\"line\":3}]}"}]}}
+{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":60}}

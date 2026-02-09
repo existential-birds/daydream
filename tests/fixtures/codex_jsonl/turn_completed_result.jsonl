@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"th_turnresult"}
+{"type":"item.started","item":{"type":"command_execution","id":"cmd_1","command":"cat review.md","status":"running"}}
+{"type":"item.completed","item":{"type":"command_execution","id":"cmd_1","command":"cat review.md","status":"completed","exit_code":0,"aggregated_output":"review content"}}
+{"type":"turn.completed","usage":{"input_tokens":200,"output_tokens":90},"result":{"issues":[{"id":1,"description":"Unused variable","file":"utils.py","line":22}]}}

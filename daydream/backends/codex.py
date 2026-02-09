@@ -30,6 +30,31 @@ from daydream.backends import (
 logger = logging.getLogger(__name__)
 
 
+def _raw_log(message: str) -> None:
+    """Log raw event to the agent debug log if available."""
+    # Lazy import to avoid circular dependency at module load time
+    from daydream.agent import _log_debug
+    _log_debug(message)
+
+
+def _unwrap_shell_command(command: str) -> str:
+    """Strip shell wrapper from Codex command_execution commands.
+
+    Codex wraps commands as ``/bin/zsh -lc "cd /path && actual command"``.
+    This extracts just the inner command for display purposes.
+    """
+    import re
+
+    # Match /bin/{zsh,bash,sh} -lc "..." or '...'
+    m = re.match(r"""/bin/(?:zsh|bash|sh)\s+-lc\s+["'](.+)["']\s*$""", command, re.DOTALL)
+    if not m:
+        return command
+    inner = m.group(1)
+    # Strip leading "cd /some/path &&" if present
+    inner = re.sub(r"^cd\s+\S+\s*&&\s*", "", inner)
+    return inner.strip()
+
+
 class CodexError(Exception):
     """Raised when a Codex turn fails."""
 
@@ -40,7 +65,7 @@ class CodexBackend:
     Translates Codex JSONL events into the unified AgentEvent stream.
     """
 
-    def __init__(self, model: str = "gpt-5.3-codex"):
+    def __init__(self, model: str = "gpt-5.2-codex"):
         self.model = model
         self._process: asyncio.subprocess.Process | None = None
 
@@ -86,6 +111,9 @@ class CodexBackend:
         structured_result: Any = None
         # Track generated IDs for items missing id field (ensures start/completed match)
         pending_item_ids: dict[str, str] = {}
+        # Accumulate text from item.updated deltas for agent_message items
+        # keyed by item id
+        updated_text: dict[str, list[str]] = {}
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -108,13 +136,15 @@ class CodexBackend:
                 if not line:
                     break
 
+                raw_line = line.decode().strip()
                 try:
-                    event = json.loads(line.decode().strip())
+                    event = json.loads(raw_line)
                 except json.JSONDecodeError:
-                    logger.debug("Failed to parse JSONL line: %s", line.decode().strip())
+                    _raw_log(f"[CODEX_RAW] unparseable: {raw_line[:500]}\n")
                     continue
 
                 event_type = event.get("type", "")
+                _raw_log(f"[CODEX_RAW] {raw_line[:1000]}\n")
 
                 if event_type == "thread.started":
                     thread_id = event.get("thread_id")
@@ -128,10 +158,11 @@ class CodexBackend:
                         if not item_id:
                             item_id = str(uuid.uuid4())
                             pending_item_ids[f"command_execution:{item.get('command', '')}"] = item_id
+                        raw_cmd = item.get("command", "")
                         yield ToolStartEvent(
                             id=item_id,
                             name="shell",
-                            input={"command": item.get("command", "")},
+                            input={"command": _unwrap_shell_command(raw_cmd)},
                         )
                     elif item_type == "mcp_tool_call":
                         item_id = item.get("id")
@@ -146,18 +177,37 @@ class CodexBackend:
                     # agent_message and reasoning item.started are no-ops
                     # (text is empty, we wait for item.completed)
 
+                elif event_type == "item.updated":
+                    item = event.get("item", {})
+                    item_type = item.get("type", "")
+                    item_id = item.get("id", "")
+
+                    if item_type in ("agent_message", "reasoning"):
+                        text = self._extract_text(item)
+                        if text and item_id:
+                            updated_text.setdefault(item_id, []).append(text)
+
                 elif event_type == "item.completed":
                     item = event.get("item", {})
                     item_type = item.get("type", "")
 
                     if item_type == "agent_message":
                         text = self._extract_text(item)
+                        # Fall back to text accumulated from item.updated deltas
+                        if not text:
+                            item_id = item.get("id", "")
+                            parts = updated_text.pop(item_id, [])
+                            text = "".join(parts)
                         if text:
                             last_agent_text = text
                             yield TextEvent(text=text)
 
                     elif item_type == "reasoning":
                         text = self._extract_text(item)
+                        if not text:
+                            item_id = item.get("id", "")
+                            parts = updated_text.pop(item_id, [])
+                            text = "".join(parts)
                         if text:
                             yield ThinkingEvent(text=text)
 
@@ -229,6 +279,21 @@ class CodexBackend:
                         except json.JSONDecodeError:
                             pass
 
+                    # Fallback: check for result/output field directly on turn.completed
+                    if output_schema and structured_result is None:
+                        for key in ("result", "output"):
+                            raw = event.get(key)
+                            if raw is not None:
+                                if isinstance(raw, dict):
+                                    structured_result = raw
+                                elif isinstance(raw, str) and raw.strip():
+                                    try:
+                                        structured_result = json.loads(raw)
+                                    except json.JSONDecodeError:
+                                        pass
+                                if structured_result is not None:
+                                    break
+
                     continuation_token = None
                     if thread_id:
                         continuation_token = ContinuationToken(
@@ -244,6 +309,9 @@ class CodexBackend:
                 elif event_type == "turn.failed":
                     error = event.get("error", {})
                     raise CodexError(error.get("message", "Unknown Codex error"))
+
+                elif event_type not in ("turn.started",):
+                    _raw_log(f"[CODEX_UNHANDLED] {event_type}: {json.dumps(event)[:500]}\n")
 
             await self._process.wait()
 
@@ -290,11 +358,20 @@ class CodexBackend:
 
     @staticmethod
     def _extract_text(item: dict[str, Any]) -> str:
-        """Extract text from a Codex item's content blocks."""
+        """Extract text from a Codex item.
+
+        Codex items may carry text either as a top-level ``text`` field
+        or inside ``content`` blocks (with type ``text`` or ``output_text``).
+        """
+        # Top-level text field (real Codex CLI format)
+        top = item.get("text")
+        if isinstance(top, str) and top:
+            return top
+        # Content-block format (legacy / alternative)
         content = item.get("content", [])
         parts = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
+            if isinstance(block, dict) and block.get("type") in ("text", "output_text"):
                 parts.append(block.get("text", ""))
         return "".join(parts)
 

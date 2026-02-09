@@ -317,7 +317,10 @@ async def run(config: RunConfig | None = None) -> int:
         if config.start_at in ("review", "parse", "fix"):
             try:
                 feedback_items = await phase_parse_feedback(review_backend, target_dir)
-            except ValueError:
+            except ValueError as exc:
+                from daydream.agent import _log_debug
+
+                _log_debug(f"[PHASE2_ERROR] {exc}\n")
                 print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                 return 1
 

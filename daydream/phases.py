@@ -1,5 +1,6 @@
 """Phase functions for the review and fix loop."""
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -43,13 +44,55 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
                     "line": {"type": "integer"},
                 },
                 "required": ["id", "description", "file", "line"],
+                "additionalProperties": False,
             },
         },
     },
     "required": ["issues"],
+    "additionalProperties": False,
 }
 
 FixResult = tuple[dict[str, Any], bool, str | None]
+
+
+def _detect_default_branch(cwd: Path) -> str | None:
+    """Detect the default branch (main/master) for the repository.
+
+    Returns:
+        The default branch name, or None if detection fails.
+
+    """
+    # Try the remote HEAD symbolic ref first (most reliable)
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            # Output is like "refs/remotes/origin/main"
+            return result.stdout.strip().rsplit("/", 1)[-1]
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # Fallback: check if main or master exists locally
+    for branch in ("main", "master"):
+        try:
+            result = subprocess.run(  # noqa: S603
+                ["git", "rev-parse", "--verify", branch],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return branch
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    return None
 
 
 def check_review_file_exists(target_dir: Path) -> None:
@@ -93,8 +136,25 @@ async def phase_review(backend: Backend, cwd: Path, skill: str) -> None:
     # Use absolute path to prevent model hallucination of paths from training data
     review_output_path = cwd / REVIEW_OUTPUT_FILE
     skill_invocation = backend.format_skill_invocation(skill)
-    prompt = f"""{skill_invocation}
 
+    # Detect the base branch so the agent knows what to diff against.
+    # Without this, agents (especially Codex) may run `git diff` with no
+    # base ref, which only shows uncommitted changes and misses all
+    # committed work on the branch.
+    base_branch = _detect_default_branch(cwd)
+    if base_branch:
+        diff_instruction = (
+            f"\nReview the changes on the current branch compared to `{base_branch}`. "
+            f"Use `git diff {base_branch}...HEAD` to get the diff.\n"
+        )
+    else:
+        diff_instruction = (
+            "\nReview the changes on the current branch compared to the default branch. "
+            "Use `git diff main...HEAD` or `git diff master...HEAD` to get the diff.\n"
+        )
+
+    prompt = f"""{skill_invocation}
+{diff_instruction}
 Write the full review output to {review_output_path}.
 """
 
@@ -132,18 +192,29 @@ Extract ONLY actionable issues that need fixing. Skip these sections entirely:
 - "Summary" sections
 - Any positive observations
 
-For each issue found, return a JSON array with this structure:
-[
-  {{"id": 1, "description": "Brief description of the issue", "file": "path/to/file.py", "line": 42}},
-  ...
-]
+For each issue found, return a JSON object with this structure:
+{{"issues": [
+  {{"id": 1, "description": "Brief description of the issue", "file": "path/to/file.py", "line": 42}}
+]}}
 
-If there are no actionable issues, return an empty array: []
+If there are no actionable issues, return: {{"issues": []}}
 """
 
     result, _ = await run_agent(backend, cwd, prompt, output_schema=FEEDBACK_SCHEMA)
 
     if not isinstance(result, dict) or "issues" not in result:
+        from daydream.agent import _log_debug
+
+        _log_debug(
+            f"[PARSE_FAIL] expected dict with 'issues', "
+            f"got {type(result).__name__}: {result!r:.500}\n"
+        )
+        # When structured output and JSON fallback both fail (e.g. empty
+        # response), treat as "no issues" rather than crashing.
+        if isinstance(result, str) and not result.strip():
+            _log_debug("[PARSE_FALLBACK] empty result, treating as no issues\n")
+            print_warning(console, "Agent returned empty response; treating as no actionable issues")
+            return []
         raise ValueError(f"Expected dict with 'issues' key, got {type(result)}")
 
     feedback_items = result["issues"]

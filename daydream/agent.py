@@ -1,5 +1,6 @@
 """Agent interaction and backend management."""
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -296,13 +297,22 @@ async def run_agent(
     result_continuation: ContinuationToken | None = None
     use_callback = progress_callback is not None
 
+    if output_schema is not None:
+        _log_debug(f"[SCHEMA] {output_schema}\n")
+
     _state.current_backends.append(backend)
     try:
         if not use_callback:
             agent_renderer = AgentTextRenderer(console)
             tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
 
-        async for event in backend.execute(cwd, prompt, output_schema, continuation):
+        try:
+            event_iter = backend.execute(cwd, prompt, output_schema, continuation)
+        except Exception as exc:
+            _log_debug(f"[EXECUTE_INIT_ERROR] {type(exc).__name__}: {exc}\n")
+            raise
+
+        async for event in event_iter:
             if isinstance(event, TextEvent):
                 output_parts.append(event.text)
                 _log_debug(f"[TEXT] {event.text}\n")
@@ -377,9 +387,27 @@ async def run_agent(
                 agent_renderer.finish()
             tool_registry.finish_all()
             console.print()
+    except Exception as exc:
+        _log_debug(f"[EXECUTE_ERROR] {type(exc).__name__}: {exc}\n")
+        raise
     finally:
         _state.current_backends.remove(backend)
 
     if output_schema is not None and structured_result is not None:
+        _log_debug(f"[SCHEMA_OK] structured_result={structured_result!r}\n")
         return structured_result, result_continuation
+    if output_schema is not None:
+        raw = "".join(output_parts)
+        _log_debug(
+            f"[SCHEMA_MISS] output_schema set but structured_result is None; "
+            f"raw text ({len(raw)} chars): {raw[:500]!r}\n"
+        )
+        # Fallback: try to JSON-parse the raw text when structured output failed
+        if raw.strip():
+            try:
+                parsed = json.loads(raw)
+                _log_debug(f"[SCHEMA_FALLBACK] parsed raw text as JSON: {parsed!r}\n")
+                return parsed, result_continuation
+            except (json.JSONDecodeError, ValueError):
+                _log_debug("[SCHEMA_FALLBACK] raw text is not valid JSON\n")
     return "".join(output_parts), result_continuation

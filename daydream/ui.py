@@ -586,7 +586,7 @@ def _build_tool_header(
         return content
 
     # Special handling for Bash tool calls
-    if name == "Bash":
+    if name in ("Bash", "shell"):
         header_line = Text()
         header_line.append("\U0001f528 ", style=STYLE_ORANGE)  # 🔨
         header_line.append("Bash", style=STYLE_BOLD_PINK)
@@ -1282,11 +1282,12 @@ class LiveThinkingPanel:
         title.append_text(self._spinner.render())
 
         return Panel(
-            Text(self._content, style=Style(color=NEON_COLORS["purple"], italic=True)),
+            Markdown(self._content),
             title=title,
             title_align="left",
             box=box.ROUNDED,
             border_style=STYLE_PURPLE,
+            style=Style(color=NEON_COLORS["purple"], italic=True),
             padding=(0, 1),
         )
 
@@ -1303,11 +1304,12 @@ class LiveThinkingPanel:
         # Print final static panel
         self._console.print(
             Panel(
-                Text(self._content, style=Style(color=NEON_COLORS["purple"], italic=True)),
+                Markdown(self._content),
                 title="\U0001f4ad Thinking",  # 💭
                 title_align="left",
                 box=box.ROUNDED,
                 border_style=STYLE_PURPLE,
+                style=Style(color=NEON_COLORS["purple"], italic=True),
                 padding=(0, 1),
             )
         )
