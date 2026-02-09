@@ -204,7 +204,6 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
     # Capture summary data
     captured_summary = {}
 
-    original_print_summary = None
     import daydream.runner as runner_mod
     original_print_summary = runner_mod.print_summary
 

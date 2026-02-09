@@ -357,6 +357,10 @@ async def run(config: RunConfig | None = None) -> int:
         ) -> tuple[list[dict[str, Any]], int, int, bool, bool]:
             """Execute one iteration of the review-parse-fix-test loop.
 
+            This nested function intentionally captures outer scope variables
+            (target_dir, skill, backends, config, console) to avoid an unwieldy
+            parameter list for a helper used only within run().
+
             Args:
                 iteration: Current iteration number (1-based).
 
@@ -436,10 +440,15 @@ async def run(config: RunConfig | None = None) -> int:
                 # while loop exhausted without break — max iterations reached
                 if feedback_items:
                     tests_passed = False
+                    # Deduplicate by (file, line, description) to avoid inflated counts
+                    unique_issues = {
+                        (item.get("file"), item.get("line"), item.get("description"))
+                        for item in feedback_items
+                    }
                     print_warning(
                         console,
                         f"Reached max iterations ({config.max_iterations}), "
-                        f"{len(feedback_items)} issues found across all iterations",
+                        f"{len(unique_issues)} unique issues found across all iterations",
                     )
 
         else:
