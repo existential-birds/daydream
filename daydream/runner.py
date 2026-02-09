@@ -442,6 +442,8 @@ async def run(config: RunConfig | None = None) -> int:
                         f"Reached max iterations ({config.max_iterations}), "
                         f"{len(unique_issues)} unique issues found across all iterations",
                     )
+                    # Mark as failed when max iterations reached with unresolved issues
+                    tests_passed = False
 
         else:
             # --- Single-pass mode (existing behavior) ---
