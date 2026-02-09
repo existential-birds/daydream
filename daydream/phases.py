@@ -56,6 +56,37 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
 FixResult = tuple[dict[str, Any], bool, str | None]
 
 
+def revert_uncommitted_changes(cwd: Path) -> bool:
+    """Discard all uncommitted changes (tracked and untracked).
+
+    Used after a failed iteration to restore the last committed state.
+
+    Returns:
+        True if revert succeeded, False otherwise.
+
+    """
+    try:
+        subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            ["git", "checkout", "."],
+            capture_output=True,
+            cwd=cwd,
+            timeout=10,
+            shell=False,
+            check=True,
+        )
+        subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            ["git", "clean", "-fd"],
+            capture_output=True,
+            cwd=cwd,
+            timeout=10,
+            shell=False,
+            check=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return True
+
+
 def _detect_default_branch(cwd: Path) -> str | None:
     """Detect the default branch (main/master) for the repository.
 
@@ -449,6 +480,28 @@ Make the minimal change needed.
         print_error(console, "All fixes failed", "No changes were applied")
 
     return results
+
+
+async def phase_commit_iteration(backend: Backend, cwd: Path, iteration: int) -> None:
+    """Commit all changes from the current loop iteration.
+
+    Ensures a clean working tree before the next review iteration starts.
+    Does NOT push — the final push happens at the end of the loop.
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Working directory for the commit
+        iteration: Current iteration number (used in commit message)
+
+    """
+    prompt = (
+        f"Commit all staged and unstaged changes with the message: "
+        f"\"daydream: iteration {iteration} fixes\". "
+        f"Do NOT push. Only commit."
+    )
+    print_info(console, f"Committing iteration {iteration} changes...")
+    await run_agent(backend, cwd, prompt)
+    print_success(console, f"Iteration {iteration} changes committed")
 
 
 async def phase_commit_push_auto(backend: Backend, cwd: Path) -> None:

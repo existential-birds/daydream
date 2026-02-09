@@ -19,6 +19,7 @@ from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, Review
 from daydream.phases import (
     FixResult,
     check_review_file_exists,
+    phase_commit_iteration,
     phase_commit_push,
     phase_commit_push_auto,
     phase_fetch_pr_feedback,
@@ -27,6 +28,7 @@ from daydream.phases import (
     phase_respond_pr_feedback,
     phase_review,
     phase_test_and_heal,
+    revert_uncommitted_changes,
 )
 from daydream.ui import (
     SummaryData,
@@ -391,8 +393,15 @@ async def run(config: RunConfig | None = None) -> int:
                 test_retries += retries
 
                 if not tests_passed:
-                    print_warning(console, f"Tests failed on iteration {iteration}")
+                    print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
+                    if revert_uncommitted_changes(target_dir):
+                        print_info(console, "Reverted to last committed state")
+                    else:
+                        print_warning(console, "Failed to revert changes")
                     break
+
+                # Commit iteration changes so the next review sees a clean tree
+                await phase_commit_iteration(fix_backend, target_dir, iteration)
 
             else:
                 # while loop exhausted without break — max iterations reached

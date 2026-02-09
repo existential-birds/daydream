@@ -80,6 +80,7 @@ class LoopMockBackend:
         self._tests_pass = tests_pass
         self._parse_call = 0
         self.call_log: list[str] = []
+        self.commit_calls: list[str] = []
 
     async def execute(self, cwd, prompt, output_schema=None, continuation=None):
         prompt_lower = prompt.lower()
@@ -105,6 +106,10 @@ class LoopMockBackend:
                 yield TextEvent(text="All 1 tests passed. 0 failed.")
             else:
                 yield TextEvent(text="1 test failed.")
+            yield ResultEvent(structured_output=None, continuation=None)
+        elif "commit all" in prompt_lower and "do not push" in prompt_lower:
+            self.commit_calls.append(prompt_lower)
+            yield TextEvent(text="Committed iteration changes.")
             yield ResultEvent(structured_output=None, continuation=None)
         elif "commit-push" in prompt_lower:
             yield TextEvent(text="Committed.")
@@ -174,11 +179,16 @@ async def test_loop_respects_max_iterations(loop_target, mock_ui_loop, monkeypat
 
 @pytest.mark.asyncio
 async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
-    """Tests fail mid-loop -> stops immediately, exits 1."""
+    """Tests fail mid-loop -> reverts changes, stops immediately, exits 1."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
     backend = LoopMockBackend(review_results=[[issue], [issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+
+    reverted = []
+    monkeypatch.setattr(
+        "daydream.runner.revert_uncommitted_changes", lambda cwd: (reverted.append(cwd) or True)
+    )
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -188,6 +198,7 @@ async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch
 
     assert exit_code == 1
     assert backend._parse_call == 1  # stopped after first iteration
+    assert len(reverted) == 1  # revert was called
 
 
 @pytest.mark.asyncio
@@ -245,3 +256,103 @@ async def test_loop_false_single_pass(loop_target, mock_ui_loop, monkeypatch):
 
     assert exit_code == 0
     assert backend._parse_call == 1  # single pass only
+    assert backend.commit_calls == []  # no iteration commits in single-pass
+
+
+@pytest.mark.asyncio
+async def test_loop_commits_between_iterations(loop_target, mock_ui_loop, monkeypatch):
+    """Each successful iteration commits changes before the next review."""
+    issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
+    # Iteration 1: issue found, Iteration 2: issue found, Iteration 3: clean
+    backend = LoopMockBackend(review_results=[[issue], [issue], []])
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+
+    config = RunConfig(
+        target=str(loop_target), skill="python", quiet=True,
+        cleanup=False, loop=True, max_iterations=5,
+    )
+    exit_code = await run(config)
+
+    assert exit_code == 0
+    # Two successful iterations with fixes -> two commits
+    assert len(backend.commit_calls) == 2
+    assert "iteration 1" in backend.commit_calls[0]
+    assert "iteration 2" in backend.commit_calls[1]
+
+
+@pytest.mark.asyncio
+async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
+    """No iteration commit when tests fail; changes are reverted."""
+    issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
+    backend = LoopMockBackend(review_results=[[issue]], tests_pass=False)
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
+
+    config = RunConfig(
+        target=str(loop_target), skill="python", quiet=True,
+        cleanup=False, loop=True, max_iterations=5,
+    )
+    exit_code = await run(config)
+
+    assert exit_code == 1
+    assert backend.commit_calls == []  # no commit on failure
+
+
+@pytest.mark.asyncio
+async def test_loop_no_commit_on_clean_first_iteration(loop_target, mock_ui_loop, monkeypatch):
+    """No commit when first iteration is already clean (no fixes applied)."""
+    backend = LoopMockBackend(review_results=[[]])
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+
+    config = RunConfig(
+        target=str(loop_target), skill="python", quiet=True,
+        cleanup=False, loop=True, max_iterations=5,
+    )
+    exit_code = await run(config)
+
+    assert exit_code == 0
+    assert backend.commit_calls == []  # nothing to commit
+
+
+def test_revert_uncommitted_changes(tmp_path):
+    """revert_uncommitted_changes restores tracked files and removes untracked."""
+    import subprocess
+
+    from daydream.phases import revert_uncommitted_changes
+
+    # Set up a git repo with one committed file
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path, capture_output=True, check=True,
+    )
+    tracked = tmp_path / "tracked.py"
+    tracked.write_text("original")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=tmp_path, capture_output=True, check=True,
+    )
+
+    # Dirty the working tree
+    tracked.write_text("modified")
+    untracked = tmp_path / "new_file.py"
+    untracked.write_text("junk")
+
+    assert revert_uncommitted_changes(tmp_path) is True
+    assert tracked.read_text() == "original"
+    assert not untracked.exists()
+
+
+def test_revert_uncommitted_changes_not_a_repo(tmp_path):
+    """Returns False when cwd is not a git repo."""
+    from daydream.phases import revert_uncommitted_changes
+
+    assert revert_uncommitted_changes(tmp_path) is False
