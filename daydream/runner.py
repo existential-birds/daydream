@@ -352,57 +352,85 @@ async def run(config: RunConfig | None = None) -> int:
         tests_passed = True
         iteration = 0
 
+        async def _run_loop_iteration(
+            iteration: int,
+        ) -> tuple[list[dict[str, Any]], int, int, bool, bool]:
+            """Execute one iteration of the review-parse-fix-test loop.
+
+            Args:
+                iteration: Current iteration number (1-based).
+
+            Returns:
+                Tuple of (items, fixes_count, retries, tests_passed, should_continue).
+                should_continue is False if the loop should break (clean review or test failure).
+
+            Raises:
+                MissingSkillError: If the review skill is not available.
+                ValueError: If feedback parsing fails.
+
+            """
+            if iteration > 1:
+                (target_dir / REVIEW_OUTPUT_FILE).unlink(missing_ok=True)
+                print_iteration_divider(console, iteration, config.max_iterations)
+
+            # Phase 1: Review
+            assert skill is not None, "skill must be set when starting at review phase"
+            await phase_review(review_backend, target_dir, skill)
+
+            # Phase 2: Parse feedback
+            items = await phase_parse_feedback(review_backend, target_dir)
+
+            if not items:
+                print_info(console, f"Clean review on iteration {iteration}")
+                return [], 0, 0, True, False  # should_continue=False (clean)
+
+            # Phase 3: Fix
+            print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+            fixes_count = 0
+            for i, item in enumerate(items, 1):
+                await phase_fix(fix_backend, target_dir, item, i, len(items))
+                fixes_count += 1
+
+            # Phase 4: Test
+            passed, retries = await phase_test_and_heal(test_backend, target_dir)
+
+            if not passed:
+                print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
+                if revert_uncommitted_changes(target_dir):
+                    print_info(console, "Reverted to last committed state")
+                else:
+                    print_warning(console, "Failed to revert changes")
+                return items, fixes_count, retries, False, False  # should_continue=False (failed)
+
+            # Commit iteration changes so the next review sees a clean tree
+            await phase_commit_iteration(fix_backend, target_dir, iteration)
+
+            return items, fixes_count, retries, True, True  # should_continue=True
+
         if config.loop:
             # --- Loop mode: repeat review-parse-fix-test ---
             while iteration < config.max_iterations:
                 iteration += 1
 
-                if iteration > 1:
-                    (target_dir / REVIEW_OUTPUT_FILE).unlink(missing_ok=True)
-                    print_iteration_divider(console, iteration, config.max_iterations)
-
-                # Phase 1: Review
-                assert skill is not None, "skill must be set when starting at review phase"
                 try:
-                    await phase_review(review_backend, target_dir, skill)
+                    items, fixes_count, retries, passed, should_continue = await _run_loop_iteration(
+                        iteration
+                    )
                 except MissingSkillError as e:
                     _print_missing_skill_error(e.skill_name)
                     return 1
-
-                # Phase 2: Parse feedback
-                try:
-                    items = await phase_parse_feedback(review_backend, target_dir)
                 except ValueError as exc:
                     _log_debug(f"[PHASE2_ERROR] {exc}\n")
                     print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                     return 1
 
-                if not items:
-                    print_info(console, f"Clean review on iteration {iteration}")
-                    break
-
                 feedback_items.extend(items)
-
-                # Phase 3: Fix
-                print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
-                for i, item in enumerate(items, 1):
-                    await phase_fix(fix_backend, target_dir, item, i, len(items))
-                    fixes_applied += 1
-
-                # Phase 4: Test
-                tests_passed, retries = await phase_test_and_heal(test_backend, target_dir)
+                fixes_applied += fixes_count
                 test_retries += retries
+                tests_passed = passed
 
-                if not tests_passed:
-                    print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
-                    if revert_uncommitted_changes(target_dir):
-                        print_info(console, "Reverted to last committed state")
-                    else:
-                        print_warning(console, "Failed to revert changes")
+                if not should_continue:
                     break
-
-                # Commit iteration changes so the next review sees a clean tree
-                await phase_commit_iteration(fix_backend, target_dir, iteration)
 
             else:
                 # while loop exhausted without break — max iterations reached

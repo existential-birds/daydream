@@ -1,24 +1,24 @@
 """Tests for continuous loop mode."""
 
-import pytest
+import re
+from io import StringIO
+from pathlib import Path
+from typing import Any
 
-from daydream.runner import RunConfig
+import pytest
+from rich.console import Console
+
+from daydream.backends import ResultEvent, TextEvent
+from daydream.runner import RunConfig, run
+from daydream.ui import NEON_THEME, SummaryData, print_iteration_divider, print_summary
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def test_runconfig_loop_defaults():
     config = RunConfig()
     assert config.loop is False
     assert config.max_iterations == 5
-
-
-import re
-from io import StringIO
-
-from rich.console import Console
-
-from daydream.ui import NEON_THEME, print_iteration_divider
-
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def strip_ansi(text: str) -> str:
@@ -32,9 +32,6 @@ def test_print_iteration_divider():
     plain = strip_ansi(output.getvalue())
     assert "Iteration 2 of 5" in plain
     assert "━" in plain
-
-
-from daydream.ui import SummaryData, print_summary
 
 
 def test_summary_data_loop_fields_default():
@@ -58,13 +55,6 @@ def test_summary_loop_mode_shows_iterations():
     plain = strip_ansi(output.getvalue())
     assert "Iterations" in plain
     assert "3" in plain
-
-
-from pathlib import Path
-from typing import Any
-
-from daydream.backends import ResultEvent, TextEvent
-from daydream.runner import RunConfig, run
 
 
 class LoopMockBackend:

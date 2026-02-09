@@ -74,14 +74,17 @@ def revert_uncommitted_changes(cwd: Path) -> bool:
             shell=False,
             check=True,
         )
-        subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        clean_result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
             ["git", "clean", "-fd"],
             capture_output=True,
+            text=True,
             cwd=cwd,
             timeout=10,
             shell=False,
             check=True,
         )
+        if clean_result.stdout.strip():
+            _log_debug(f"[REVERT] git clean removed:\n{clean_result.stdout}")
     except (subprocess.SubprocessError, OSError):
         return False
     return True
