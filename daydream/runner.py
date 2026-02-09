@@ -358,6 +358,7 @@ async def run(config: RunConfig | None = None) -> int:
                 iteration += 1
 
                 if iteration > 1:
+                    (target_dir / REVIEW_OUTPUT_FILE).unlink(missing_ok=True)
                     print_iteration_divider(console, iteration, config.max_iterations)
 
                 # Phase 1: Review
