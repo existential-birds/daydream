@@ -482,3 +482,51 @@ async def test_skill_tool_panel_collapses_output(monkeypatch):
 
     # Verify "Launching skill:" text is NOT displayed (the redundant output)
     assert "Launching skill:" not in plain_text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_tool_panels_display_results(monkeypatch):
+    """Test that concurrent tool panels (e.g. Codex parallel commands) all show results.
+
+    When multiple ToolStartEvents arrive before any ToolResultEvents (as happens
+    with the Codex backend's parallel command execution), all panels should
+    eventually display their results without display corruption.
+    """
+    from daydream.agent import run_agent, set_quiet_mode
+
+    # Simulate 3 concurrent commands (all started before any complete)
+    events = [
+        ToolStartEvent(id="cmd-1", name="shell", input={"command": "git diff -- file1.py"}),
+        ToolStartEvent(id="cmd-2", name="shell", input={"command": "git diff -- file2.py"}),
+        ToolStartEvent(id="cmd-3", name="shell", input={"command": "git diff -- file3.py"}),
+        ToolResultEvent(id="cmd-1", output="+added line in file1", is_error=False),
+        ToolResultEvent(id="cmd-2", output="+added line in file2", is_error=False),
+        ToolResultEvent(id="cmd-3", output="+added line in file3", is_error=False),
+        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
+        ResultEvent(structured_output=None, continuation=None),
+    ]
+
+    backend = MockBackendWithEvents(events)
+
+    monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
+
+    output = StringIO()
+    test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
+    monkeypatch.setattr("daydream.agent.console", test_console)
+
+    set_quiet_mode(False)
+
+    await run_agent(backend, Path("/tmp"), "Test prompt")
+
+    output_text = output.getvalue()
+    plain_text = strip_ansi(output_text)
+
+    # All three results should appear in the output
+    assert "+added line in file1" in plain_text
+    assert "+added line in file2" in plain_text
+    assert "+added line in file3" in plain_text
+
+    # All three commands should be shown
+    assert "git diff -- file1.py" in plain_text
+    assert "git diff -- file2.py" in plain_text
+    assert "git diff -- file3.py" in plain_text

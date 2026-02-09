@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import pyfiglet
 from rich import box
 from rich.align import Align
-from rich.console import Console, Group
+from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -2618,12 +2618,35 @@ class LiveToolPanel:
 # =============================================================================
 
 
+class _ActivePanelsGroup:
+    """Renderable that dynamically renders all active panels in a registry.
+
+    Used as the target for a single shared ``Live`` instance so that
+    multiple concurrent tool panels animate without conflicting.
+    """
+
+    def __init__(self, registry: "LiveToolPanelRegistry") -> None:
+        self._registry = registry
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        """Yield each active panel's rendered output."""
+        for tid in self._registry._active_order:
+            panel = self._registry._panels.get(tid)
+            if panel:
+                yield panel._render_panel()
+
+
 class LiveToolPanelRegistry:
     """Registry for tracking multiple concurrent tool panels.
 
-    Provides a central registry for LiveToolPanel instances, indexed by
-    tool_use_id. This enables correlation between ToolUseBlock and
-    ToolResultBlock events when processing streaming responses.
+    Manages a **single** ``Rich.Live`` instance that renders all active
+    panels together, preventing the display corruption that occurs when
+    multiple ``Live`` contexts compete for the terminal (as happens with
+    the Codex backend's parallel command execution).
+
+    When a panel is finalized (result received), the shared ``Live`` is
+    stopped, the finished panel is printed statically, and the ``Live``
+    is restarted for any remaining active panels.
 
     Args:
         console: Rich Console instance for creating panels.
@@ -2650,6 +2673,9 @@ class LiveToolPanelRegistry:
         self._console = console
         self._quiet_mode = quiet_mode
         self._panels: dict[str, LiveToolPanel] = {}
+        self._active_order: list[str] = []
+        self._live: Live | None = None
+        self._group = _ActivePanelsGroup(self)
 
     def create(
         self,
@@ -2657,7 +2683,11 @@ class LiveToolPanelRegistry:
         name: str,
         args: dict[str, object],
     ) -> LiveToolPanel:
-        """Create and register a new panel, then start it.
+        """Create and register a new panel.
+
+        The panel is added to the shared ``Live`` context which renders
+        all active panels together.  Individual panels do **not** own
+        their own ``Live`` instance.
 
         Args:
             tool_use_id: Unique identifier for the tool use.
@@ -2665,13 +2695,12 @@ class LiveToolPanelRegistry:
             args: Dictionary of arguments passed to the tool.
 
         Returns:
-            The created and started LiveToolPanel.
+            The created LiveToolPanel.
 
         """
-        # Finish and remove existing panel if duplicate tool_use_id
+        # Finalize existing panel if duplicate tool_use_id
         if tool_use_id in self._panels:
-            self._panels[tool_use_id].finish()
-            del self._panels[tool_use_id]
+            self._finalize_panel(tool_use_id)
 
         panel = LiveToolPanel(
             console=self._console,
@@ -2681,7 +2710,13 @@ class LiveToolPanelRegistry:
             quiet_mode=self._quiet_mode,
         )
         self._panels[tool_use_id] = panel
-        panel.start()
+        self._active_order.append(tool_use_id)
+
+        # Print a blank line before the first panel group
+        if self._live is None:
+            self._console.print()
+
+        self._ensure_live()
         return panel
 
     def get(self, tool_use_id: str) -> LiveToolPanel | None:
@@ -2697,9 +2732,10 @@ class LiveToolPanelRegistry:
         return self._panels.get(tool_use_id)
 
     def remove(self, tool_use_id: str) -> None:
-        """Remove a panel from the registry.
+        """Remove a panel from the registry and print its final state.
 
-        Call this after finishing a panel to clean up the registry.
+        Stops the shared ``Live``, prints the finalized panel statically,
+        then restarts ``Live`` for any remaining active panels.
 
         Args:
             tool_use_id: The unique identifier of the tool use to remove.
@@ -2708,21 +2744,68 @@ class LiveToolPanelRegistry:
             None
 
         """
-        self._panels.pop(tool_use_id, None)
+        self._finalize_panel(tool_use_id)
 
     def finish_all(self) -> None:
         """Finalize all remaining panels.
 
-        Calls finish() on each panel and clears the registry.
-        Use this for cleanup when a response ends unexpectedly.
+        Stops the shared ``Live`` and prints each panel's current state
+        statically.  Use this for cleanup when a response ends
+        unexpectedly.
 
         Returns:
             None
 
         """
-        for panel in self._panels.values():
-            panel.finish()
+        self._stop_live()
+        for tid in list(self._active_order):
+            panel = self._panels.get(tid)
+            if panel:
+                self._console.print(panel._render_panel())
+        self._active_order.clear()
         self._panels.clear()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_live(self) -> None:
+        """Start the shared ``Live`` if there are active panels."""
+        if self._active_order:
+            if self._live is None:
+                self._live = Live(
+                    self._group,
+                    console=self._console,
+                    refresh_per_second=10,
+                    transient=True,
+                )
+                self._live.start()
+        else:
+            self._stop_live()
+
+    def _stop_live(self) -> None:
+        """Stop the shared ``Live`` instance (if running)."""
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+    def _finalize_panel(self, tool_use_id: str) -> None:
+        """Remove a panel from the active set and print its final state."""
+        if tool_use_id not in self._active_order:
+            self._panels.pop(tool_use_id, None)
+            return
+
+        panel = self._panels.pop(tool_use_id, None)
+        self._active_order.remove(tool_use_id)
+
+        # Stop Live so we can print the finalized panel statically
+        self._stop_live()
+
+        if panel:
+            self._console.print(panel._render_panel())
+
+        # Restart Live for remaining active panels
+        self._ensure_live()
 
 
 # =============================================================================
