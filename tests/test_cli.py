@@ -70,3 +70,24 @@ def test_test_backend_override(monkeypatch):
     ])
     config = _parse_args()
     assert config.test_backend == "codex"
+
+
+def test_loop_flag_default_off(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--python"])
+    config = _parse_args()
+    assert config.loop is False
+    assert config.max_iterations == 5
+
+
+def test_loop_flag_enabled(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--python", "--loop"])
+    config = _parse_args()
+    assert config.loop is True
+
+
+def test_max_iterations_flag(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "/tmp/project", "--python", "--loop", "--max-iterations", "10",
+    ])
+    config = _parse_args()
+    assert config.max_iterations == 10

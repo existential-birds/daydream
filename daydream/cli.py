@@ -202,6 +202,22 @@ def _parse_args() -> RunConfig:
         help="Model to use (default: backend-specific). Examples: opus, sonnet, haiku, gpt-5.3-codex",
     )
 
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        default=False,
+        help="Repeat review-fix-test cycle until zero issues or max iterations",
+    )
+
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=5,
+        metavar="N",
+        dest="max_iterations",
+        help="Maximum loop iterations (default: 5, only meaningful with --loop)",
+    )
+
     args = parser.parse_args()
 
     # Validate mutual exclusion: --start-at and --review-only
@@ -247,6 +263,8 @@ def _parse_args() -> RunConfig:
         review_backend=args.review_backend,
         fix_backend=args.fix_backend,
         test_backend=args.test_backend,
+        loop=args.loop,
+        max_iterations=args.max_iterations,
     )
 
 
