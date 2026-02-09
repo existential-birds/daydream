@@ -18,6 +18,7 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.style import Style
+from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -1991,6 +1992,14 @@ def print_fix_complete(console: Console, item_num: int, total: int) -> None:
     text.append(f"[{item_num}/{total}] ", style=STYLE_BOLD_CYAN)
     text.append("✔ Fix applied", style=STYLE_GREEN)
     console.print(text)
+
+
+def print_iteration_divider(console: Console, iteration: int, max_iterations: int) -> None:
+    """Print an iteration divider for loop mode."""
+    console.print()
+    label = f" Iteration {iteration} of {max_iterations} "
+    console.print(Rule(label, style=STYLE_PURPLE, characters="━"))
+    console.print()
 
 
 # =============================================================================
