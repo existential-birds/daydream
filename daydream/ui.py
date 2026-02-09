@@ -17,8 +17,8 @@ from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.style import Style
 from rich.rule import Rule
+from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
