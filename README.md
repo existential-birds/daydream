@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/existential-birds/daydream)
 
-Automated code review and fix loop using the Claude Agent SDK.
+Automated code review and fix loop powered by Claude and Codex.
 
 Daydream launches review agents equipped with [Beagle](https://github.com/existential-birds/beagle) skills—specialized knowledge modules that use progressive disclosure to give reviewers precise understanding of your technology stack. The agent parses actionable feedback, applies fixes automatically, and validates changes by running your test suite.
 
@@ -14,6 +14,7 @@ Daydream launches review agents equipped with [Beagle](https://github.com/existe
 - **Intelligent parsing**: Extracts actionable issues from review output, skipping positive observations
 - **Automated fixes**: Applies fixes one-by-one with minimal changes
 - **PR feedback mode**: Fetch bot review comments from a PR, fix in parallel, and respond automatically
+- **Multi-backend support**: Run reviews with Claude (default) or OpenAI Codex, with per-phase backend overrides
 - **Parallel execution**: Up to 4 concurrent fix agents with live progress tracking
 - **Test validation**: Runs your test suite and offers interactive retry/fix options on failure
 - **Commit integration**: Optionally commit and push changes when complete
@@ -25,6 +26,7 @@ Daydream launches review agents equipped with [Beagle](https://github.com/existe
 - [uv](https://docs.astral.sh/uv/) package manager
 - [Claude Code](https://claude.ai/code) CLI
 - [Beagle](https://github.com/existential-birds/beagle) plugin for Claude Code
+- [Codex CLI](https://openai.com/codex) — required when using `--backend codex`
 - [GitHub CLI](https://cli.github.com/) (`gh`) — required for PR feedback mode
 
 Install Beagle before using daydream:
@@ -61,9 +63,15 @@ daydream -s python /path/to/project
 daydream --typescript /path/to/project
 daydream -s react /path/to/project
 
-# Select Claude model (default: opus)
+# Select model (default: backend-specific)
 daydream --model sonnet /path/to/project
-daydream --model haiku /path/to/project
+
+# Use Codex backend
+daydream --backend codex /path/to/project
+daydream -b codex --model gpt-5.3-codex /path/to/project
+
+# Mix backends per phase
+daydream --backend codex --fix-backend claude /path/to/project
 
 # Review only (no fixes applied)
 daydream --review-only /path/to/project
@@ -94,7 +102,11 @@ daydream --pr --bot "coderabbitai[bot]" /path/to/project   # Auto-detect PR from
 | `--python` | Shorthand for `-s python` |
 | `--typescript` | Shorthand for `-s react` |
 | `--elixir` | Shorthand for `-s elixir` |
-| `--model` | Claude model: `opus`, `sonnet`, or `haiku` (default: `opus`) |
+| `-b, --backend` | Agent backend: `claude` (default) or `codex` |
+| `--review-backend` | Override backend for the review phase |
+| `--fix-backend` | Override backend for the fix phase |
+| `--test-backend` | Override backend for the test phase |
+| `--model` | Model name (default: backend-specific — `opus` for Claude, `gpt-5.3-codex` for Codex) |
 | `--review-only` | Skip fixes, only review and parse feedback |
 | `--start-at` | Start at phase: `review`, `parse`, `fix`, or `test` (default: `review`) |
 | `--pr [NUMBER]` | PR feedback mode: fetch and fix bot review comments (auto-detects PR if omitted) |
@@ -105,7 +117,7 @@ daydream --pr --bot "coderabbitai[bot]" /path/to/project   # Auto-detect PR from
 
 ## How It Works
 
-Daydream has two modes: **standard review mode** for full codebase reviews, and **PR feedback mode** for resolving bot review comments on pull requests.
+Daydream has two modes: **standard review mode** for full codebase reviews, and **PR feedback mode** for resolving bot review comments on pull requests. Both modes support multiple backends. Use `--backend codex` to run with OpenAI Codex instead of Claude, or mix backends per phase with `--review-backend`, `--fix-backend`, and `--test-backend`.
 
 ### Standard Review Mode
 
@@ -170,10 +182,14 @@ daydream/
 ├── cli.py       # Entry point, argument parsing, signal handling
 ├── runner.py    # Main orchestration (standard + PR feedback flows)
 ├── phases.py    # Core phases (review, parse, fix, test) + PR feedback helpers
-├── agent.py     # Claude SDK client and helper functions
+├── agent.py     # Agent event consumer and helper functions
 ├── ui.py        # Neon terminal UI components (Rich-based)
 ├── config.py    # Configuration constants
-└── prompts/     # Review system prompt templates
+├── prompts/     # Review system prompt templates
+└── backends/    # Backend abstraction layer
+    ├── __init__.py  # Backend protocol, event types, create_backend() factory
+    ├── claude.py    # Claude SDK backend
+    └── codex.py     # OpenAI Codex CLI backend (JSONL event stream)
 ```
 
 ## Dependencies
