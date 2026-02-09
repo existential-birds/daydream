@@ -112,7 +112,7 @@ class CodexBackend:
             args.extend(["--output-schema", schema_path])
 
         if continuation and continuation.backend == "codex":
-            args.extend(["resume", continuation.data["thread_id"], "-"])
+            args.extend(["resume", continuation.data["thread_id"]])
 
         thread_id: str | None = None
         last_agent_text: str | None = None

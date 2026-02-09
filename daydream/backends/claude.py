@@ -123,11 +123,9 @@ class ClaudeBackend:
                 self._client = None
 
     async def cancel(self) -> None:
-        """Cancel the running agent.
-
-        The SDK client is cleaned up via the async context manager in execute().
-        Cancellation is triggered by raising KeyboardInterrupt from a signal handler.
-        """
+        """Cancel the running agent."""
+        if self._client is not None:
+            await self._client.interrupt()
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
         """Format a skill invocation for Claude.

@@ -8,6 +8,7 @@ from typing import Any
 
 from daydream.agent import (
     MissingSkillError,
+    _log_debug,
     console,
     set_debug_log,
     set_model,
@@ -336,8 +337,6 @@ async def run(config: RunConfig | None = None) -> int:
             try:
                 feedback_items = await phase_parse_feedback(review_backend, target_dir)
             except ValueError as exc:
-                from daydream.agent import _log_debug
-
                 _log_debug(f"[PHASE2_ERROR] {exc}\n")
                 print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                 return 1

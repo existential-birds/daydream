@@ -364,7 +364,7 @@ async def run_agent(
                     _log_debug(
                         f"[TOOL_RESULT_PANEL] id={event.id} "
                         f"panel_found={panel is not None} "
-                        f"panel_name={panel._name if panel else 'N/A'}\n"
+                        f"panel_name={panel.name if panel else 'N/A'}\n"
                     )
                     if panel:
                         panel.set_result(event.output, event.is_error)

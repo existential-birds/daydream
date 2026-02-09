@@ -7,6 +7,7 @@ from typing import Any
 import anyio
 
 from daydream.agent import (
+    _log_debug,
     console,
     detect_test_success,
     run_agent,
@@ -203,8 +204,6 @@ If there are no actionable issues, return: {{"issues": []}}
     result, _ = await run_agent(backend, cwd, prompt, output_schema=FEEDBACK_SCHEMA)
 
     if not isinstance(result, dict) or "issues" not in result:
-        from daydream.agent import _log_debug
-
         _log_debug(
             f"[PARSE_FAIL] expected dict with 'issues', "
             f"got {type(result).__name__}: {result!r:.500}\n"
