@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-02-09
+
+### Added
+
+- **backends:** Add backend abstraction layer with `Backend` protocol and unified `AgentEvent` stream ([#12](https://github.com/existential-birds/daydream/pull/12))
+
+  Introduces `daydream/backends/` package with `create_backend()` factory, enabling multiple AI backends behind a common interface. Phase functions now accept a `Backend` parameter and consume unified events instead of SDK-specific message types.
+
+- **backends:** Add `CodexBackend` for OpenAI Codex CLI integration ([#12](https://github.com/existential-birds/daydream/pull/12))
+
+  Spawns `codex exec --experimental-json` as a subprocess and parses the JSONL event stream into unified `AgentEvent` types. Supports structured output, tool use, and continuation tokens for thread resumption.
+
+- **cli:** Add `--backend` / `-b` flag to select AI backend (`claude` or `codex`) ([#12](https://github.com/existential-birds/daydream/pull/12))
+
+- **cli:** Add per-phase backend overrides via `--review-backend`, `--fix-backend`, and `--test-backend` flags ([#12](https://github.com/existential-birds/daydream/pull/12))
+
+### Changed
+
+- **cli:** Change `--model` to accept any string instead of a fixed choice list ([#12](https://github.com/existential-birds/daydream/pull/12))
+
+  Previously restricted to `sonnet`, `opus`, `haiku`. Now accepts arbitrary model identifiers so Codex models (e.g., `gpt-5.3-codex`) work as well.
+
+- **agent:** Simplify `agent.py` to consume unified `AgentEvent` stream, removing all Claude SDK imports ([#12](https://github.com/existential-birds/daydream/pull/12))
+
+- **phases:** Wire continuation tokens through the test-and-heal retry loop for Codex thread resumption ([#12](https://github.com/existential-birds/daydream/pull/12))
+
 ## [0.4.0] - 2026-02-07
 
 ### Added
@@ -116,7 +142,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.4.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/existential-birds/daydream/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/existential-birds/daydream/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/existential-birds/daydream/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/existential-birds/daydream/compare/v0.1.0...v0.2.0
