@@ -64,7 +64,7 @@ def _detect_default_branch(cwd: Path) -> str | None:
     """
     # Try the remote HEAD symbolic ref first (most reliable)
     try:
-        result = subprocess.run(  # noqa: S603
+        result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
             ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
             capture_output=True,
             text=True,
@@ -80,7 +80,7 @@ def _detect_default_branch(cwd: Path) -> str | None:
     # Fallback: check if main or master exists locally
     for branch in ("main", "master"):
         try:
-            result = subprocess.run(  # noqa: S603
+            result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
                 ["git", "rev-parse", "--verify", branch],
                 capture_output=True,
                 text=True,

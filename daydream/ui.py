@@ -2321,6 +2321,11 @@ class LiveToolPanel:
         self._quiet_mode = quiet_mode
         self._frame = 0  # Animation frame counter for Edit surgery visualization
 
+    @property
+    def name(self) -> str:
+        """Return the tool name."""
+        return self._name
+
     def _build_tool_header_content(self) -> Text:
         """Build the tool call header content.
 

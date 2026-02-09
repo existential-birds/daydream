@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
@@ -26,8 +25,6 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def _raw_log(message: str) -> None:
