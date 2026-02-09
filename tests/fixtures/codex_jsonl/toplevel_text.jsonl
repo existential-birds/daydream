@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"th_toplevel"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Let me read the review file"}}
+{"type":"item.started","item":{"type":"command_execution","id":"cmd_1","command":"cat review.md","status":"running"}}
+{"type":"item.completed","item":{"type":"command_execution","id":"cmd_1","command":"cat review.md","status":"completed","exit_code":0,"aggregated_output":"review content"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"{\"issues\":[{\"id\":1,\"description\":\"Missing yield for non-result events\",\"file\":\"agents/architect.py\",\"line\":134}]}"}}
+{"type":"turn.completed","usage":{"input_tokens":29912,"output_tokens":210}}

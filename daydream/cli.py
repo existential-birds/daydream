@@ -10,7 +10,7 @@ import anyio
 
 from daydream.agent import (
     console,
-    get_current_clients,
+    get_current_backends,
     set_shutdown_requested,
 )
 from daydream.runner import RunConfig, run
@@ -32,7 +32,7 @@ def _signal_handler(signum: int, frame: object) -> None:
     set_shutdown_panel(panel)
     panel.start(f"Received {signal_name}, shutting down")
 
-    if get_current_clients():
+    if get_current_backends():
         panel.add_step("Terminating running agent(s)...")
 
     raise KeyboardInterrupt
@@ -63,6 +63,7 @@ def _auto_detect_pr_number() -> int | None:
             data = json.loads(result.stdout)
             return data.get("number")
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        # FileNotFoundError occurs when gh CLI is not installed
         pass
     return None
 
@@ -171,10 +172,34 @@ def _parse_args() -> RunConfig:
     )
 
     parser.add_argument(
+        "--backend", "-b",
+        choices=["claude", "codex"],
+        default="claude",
+        help="Agent backend: claude (default) or codex",
+    )
+    parser.add_argument(
+        "--review-backend",
+        choices=["claude", "codex"],
+        default=None,
+        help="Override backend for review phase",
+    )
+    parser.add_argument(
+        "--fix-backend",
+        choices=["claude", "codex"],
+        default=None,
+        help="Override backend for fix phase",
+    )
+    parser.add_argument(
+        "--test-backend",
+        choices=["claude", "codex"],
+        default=None,
+        help="Override backend for test phase",
+    )
+
+    parser.add_argument(
         "--model",
-        choices=["opus", "sonnet", "haiku"],
-        default="opus",
-        help="Claude model to use (default: opus)",
+        default=None,
+        help="Model to use (default: backend-specific). Examples: opus, sonnet, haiku, gpt-5.3-codex",
     )
 
     args = parser.parse_args()
@@ -218,6 +243,10 @@ def _parse_args() -> RunConfig:
         start_at=args.start_at,
         pr_number=pr_number,
         bot=args.bot,
+        backend=args.backend,
+        review_backend=args.review_backend,
+        fix_backend=args.fix_backend,
+        test_backend=args.test_backend,
     )
 
 

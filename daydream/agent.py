@@ -1,22 +1,22 @@
-"""Agent interaction and SDK client management."""
+"""Agent interaction and backend management."""
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-from claude_agent_sdk.types import (
-    AssistantMessage,
-    ResultMessage,
-    TextBlock,
-    ThinkingBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
+from daydream.backends import (
+    Backend,
+    ContinuationToken,
+    CostEvent,
+    ResultEvent,
+    TextEvent,
+    ThinkingEvent,
+    ToolResultEvent,
+    ToolStartEvent,
 )
-
 from daydream.config import UNKNOWN_SKILL_PATTERN
 from daydream.ui import (
     AgentTextRenderer,
@@ -49,7 +49,7 @@ class AgentState:
         quiet_mode: True to hide tool calls and results, False to show them.
         model: Model name to use for agent interactions.
         shutdown_requested: True if shutdown has been requested.
-        current_clients: List of active ClaudeSDKClient instances.
+        current_backends: List of active backend instances.
 
     """
 
@@ -57,7 +57,7 @@ class AgentState:
     quiet_mode: bool = False
     model: str = "opus"
     shutdown_requested: bool = False
-    current_clients: list["ClaudeSDKClient"] = field(default_factory=list)
+    current_backends: list[Backend] = field(default_factory=list)
 
 
 # Module-level Singletons
@@ -187,14 +187,14 @@ def get_shutdown_requested() -> bool:
     return _state.shutdown_requested
 
 
-def get_current_clients() -> list[ClaudeSDKClient]:
-    """Get all currently running clients.
+def get_current_backends() -> list[Backend]:
+    """Get all currently running backends.
 
     Returns:
-        List of active ClaudeSDKClient instances.
+        List of active backend instances.
 
     """
-    return list(_state.current_clients)
+    return list(_state.current_backends)
 
 
 def _log_debug(message: str) -> None:
@@ -260,139 +260,167 @@ def detect_test_success(output: str) -> bool:
 
 
 async def run_agent(
+    backend: Backend,
     cwd: Path,
     prompt: str,
     output_schema: dict[str, Any] | None = None,
     progress_callback: Callable[[str], None] | None = None,
-) -> str | Any:
-    """Run agent with the given prompt and return full text output.
+    continuation: ContinuationToken | None = None,
+) -> tuple[str | Any, ContinuationToken | None]:
+    """Run agent with the given prompt and return output plus continuation token.
 
     Streams verbose output to stdout as it's received. When progress_callback
     is provided, runs in quiet mode and routes status updates through the
     callback instead of printing to the console.
 
     Args:
-        cwd: Working directory for the agent
-        prompt: The prompt to send to the agent
-        output_schema: Optional JSON schema for structured output
-        progress_callback: Optional callback for status updates (enables quiet mode)
+        backend: The Backend to execute against.
+        cwd: Working directory for the agent.
+        prompt: The prompt to send to the agent.
+        output_schema: Optional JSON schema for structured output.
+        progress_callback: Optional callback for status updates (quiet mode).
+        continuation: Optional continuation token for multi-turn.
 
     Returns:
-        The full text output from the agent session, or structured data if
-        output_schema is provided
+        Tuple of (output, continuation_token). Output is text or structured data.
 
     Raises:
-        MissingSkillError: If a required skill is not available
-        SystemExit: If the agent is cancelled due to script termination
+        MissingSkillError: If a required skill is not available.
 
     """
     _log_debug(f"\n{'='*80}\n")
     _log_debug(f"[PROMPT] cwd={cwd}\n{prompt}\n")
     _log_debug(f"{'='*80}\n\n")
 
-    output_format = (
-        {"type": "json_schema", "schema": output_schema}
-        if output_schema
-        else None
-    )
-
-    options = ClaudeAgentOptions(
-        cwd=str(cwd),
-        permission_mode="bypassPermissions",
-        setting_sources=["user", "project", "local"],
-        model=_state.model,
-        output_format=output_format,
-    )
-
     output_parts: list[str] = []
     structured_result: Any = None
+    result_continuation: ContinuationToken | None = None
     use_callback = progress_callback is not None
 
-    async with ClaudeSDKClient(options=options) as client:
-        _state.current_clients.append(client)
+    if output_schema is not None:
+        _log_debug(f"[SCHEMA] {output_schema}\n")
+
+    _state.current_backends.append(backend)
+    try:
+        if not use_callback:
+            agent_renderer = AgentTextRenderer(console)
+            tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
+
         try:
-            if not use_callback:
-                agent_renderer = AgentTextRenderer(console)
-                tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
+            event_iter = backend.execute(cwd, prompt, output_schema, continuation)
+        except Exception as exc:
+            _log_debug(f"[EXECUTE_INIT_ERROR] {type(exc).__name__}: {exc}\n")
+            raise
 
-            await client.query(prompt)
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, TextBlock) and block.text:
-                            output_parts.append(block.text)
-                            _log_debug(f"[TEXT] {block.text}\n")
-                            skill_match = re.search(UNKNOWN_SKILL_PATTERN, block.text)
-                            if skill_match:
-                                if not use_callback:
-                                    agent_renderer.finish()
-                                    tool_registry.finish_all()
-                                raise MissingSkillError(skill_match.group(1))
-                            if use_callback and progress_callback is not None:
-                                # Send last non-empty line to callback
-                                last_line = block.text.strip().split("\n")[-1]
-                                if last_line:
-                                    progress_callback(last_line)
-                            else:
-                                agent_renderer.append(block.text)
-                        elif isinstance(block, ThinkingBlock) and block.thinking:
-                            _log_debug(f"[THINKING] {block.thinking}\n")
-                            if not use_callback:
-                                if agent_renderer.has_content:
-                                    agent_renderer.finish()
-                                print_thinking(console, block.thinking)
-                        elif isinstance(block, ToolUseBlock):
-                            _log_debug(f"[TOOL_USE] {block.name}({block.input})\n")
-                            if block.name == "StructuredOutput":
-                                continue
-                            if use_callback and progress_callback is not None:
-                                first_arg = next(iter(block.input.values()), "") if block.input else ""
-                                progress_callback(f"{block.name} {first_arg}"[:80])
-                            else:
-                                if agent_renderer.has_content:
-                                    agent_renderer.finish()
-                                tool_registry.create(block.id, block.name, block.input or {})
+        async for event in event_iter:
+            if isinstance(event, TextEvent):
+                output_parts.append(event.text)
+                _log_debug(f"[TEXT] {event.text}\n")
 
-                elif isinstance(msg, UserMessage):
-                    for user_block in msg.content:
-                        if isinstance(user_block, ToolResultBlock):
-                            content_str = str(user_block.content) if user_block.content else ""
-                            error_marker = " [ERROR]" if user_block.is_error else ""
-                            _log_debug(f"[TOOL_RESULT{error_marker}] {content_str}\n")
-                            if not use_callback:
-                                panel = tool_registry.get(user_block.tool_use_id)
-                                if panel:
-                                    panel.set_result(content_str, user_block.is_error or False)
-                                    panel.finish()
-                                    tool_registry.remove(user_block.tool_use_id)
-                                else:
-                                    _log_debug(f"[WARN] No panel for tool_use_id={user_block.tool_use_id}\n")
+                # Check for missing skill error
+                skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
+                if skill_match:
+                    if not use_callback:
+                        agent_renderer.finish()
+                        tool_registry.finish_all()
+                    raise MissingSkillError(skill_match.group(1))
 
-                elif isinstance(msg, ResultMessage):
-                    if msg.structured_output is not None:
-                        structured_result = msg.structured_output
-                        _log_debug(f"[STRUCTURED_OUTPUT] {structured_result}\n")
-                        if not use_callback:
-                            issues = structured_result.get("issues", [])
-                            if issues:
-                                lines = [f"[{i['id']}] {i['file']}:{i['line']} - {i['description']}" for i in issues]
-                                agent_renderer.append("\n".join(lines))
-                    if msg.total_cost_usd:
-                        _log_debug(f"[COST] ${msg.total_cost_usd:.4f}\n")
-                        if not use_callback:
-                            if agent_renderer.has_content:
-                                agent_renderer.finish()
-                            console.print()
-                            print_cost(console, msg.total_cost_usd)
+                if use_callback and progress_callback is not None:
+                    last_line = event.text.strip().split("\n")[-1]
+                    if last_line:
+                        progress_callback(last_line)
+                else:
+                    agent_renderer.append(event.text)
 
-            if not use_callback:
-                if agent_renderer.has_content:
-                    agent_renderer.finish()
-                tool_registry.finish_all()
-                console.print()
-        finally:
-            _state.current_clients.remove(client)
+            elif isinstance(event, ThinkingEvent):
+                _log_debug(f"[THINKING] {event.text}\n")
+                if not use_callback:
+                    if agent_renderer.has_content:
+                        agent_renderer.finish()
+                    print_thinking(console, event.text)
+
+            elif isinstance(event, ToolStartEvent):
+                _log_debug(
+                    f"[TOOL_USE] {event.name}({event.input}) "
+                    f"id={event.id} use_callback={use_callback}\n"
+                )
+                if progress_callback is not None:
+                    first_arg = next(iter(event.input.values()), "") if event.input else ""
+                    progress_callback(f"{event.name} {first_arg}"[:80])
+                else:
+                    if agent_renderer.has_content:
+                        agent_renderer.finish()
+                    tool_registry.create(event.id, event.name, event.input)
+
+            elif isinstance(event, ToolResultEvent):
+                _log_debug(
+                    f"[TOOL_RESULT{' [ERROR]' if event.is_error else ''}] "
+                    f"id={event.id} output_len={len(event.output)} "
+                    f"output_preview={event.output[:200]!r} "
+                    f"use_callback={use_callback}\n"
+                )
+                if not use_callback:
+                    panel = tool_registry.get(event.id)
+                    _log_debug(
+                        f"[TOOL_RESULT_PANEL] id={event.id} "
+                        f"panel_found={panel is not None} "
+                        f"panel_name={panel.name if panel else 'N/A'}\n"
+                    )
+                    if panel:
+                        panel.set_result(event.output, event.is_error)
+                        panel.finish()
+                        tool_registry.remove(event.id)
+                    else:
+                        _log_debug(f"[WARN] No panel for tool_use_id={event.id}\n")
+
+            elif isinstance(event, CostEvent):
+                if event.cost_usd:
+                    _log_debug(f"[COST] ${event.cost_usd:.4f}\n")
+                    if not use_callback:
+                        if agent_renderer.has_content:
+                            agent_renderer.finish()
+                        console.print()
+                        print_cost(console, event.cost_usd)
+                elif event.input_tokens is not None:
+                    _log_debug(f"[TOKENS] in={event.input_tokens} out={event.output_tokens}\n")
+
+            elif isinstance(event, ResultEvent):
+                if event.structured_output is not None:
+                    structured_result = event.structured_output
+                    _log_debug(f"[STRUCTURED_OUTPUT] {structured_result}\n")
+                    if not use_callback:
+                        issues = structured_result.get("issues", []) if isinstance(structured_result, dict) else []
+                        if issues:
+                            lines = [f"[{i['id']}] {i['file']}:{i['line']} - {i['description']}" for i in issues]
+                            agent_renderer.append("\n".join(lines))
+                result_continuation = event.continuation
+
+        if not use_callback:
+            if agent_renderer.has_content:
+                agent_renderer.finish()
+            tool_registry.finish_all()
+            console.print()
+    except Exception as exc:
+        _log_debug(f"[EXECUTE_ERROR] {type(exc).__name__}: {exc}\n")
+        raise
+    finally:
+        _state.current_backends.remove(backend)
 
     if output_schema is not None and structured_result is not None:
-        return structured_result
-    return "".join(output_parts)
+        _log_debug(f"[SCHEMA_OK] structured_result={structured_result!r}\n")
+        return structured_result, result_continuation
+    if output_schema is not None:
+        raw = "".join(output_parts)
+        _log_debug(
+            f"[SCHEMA_MISS] output_schema set but structured_result is None; "
+            f"raw text ({len(raw)} chars): {raw[:500]!r}\n"
+        )
+        # Fallback: try to JSON-parse the raw text when structured output failed
+        if raw.strip():
+            try:
+                parsed = json.loads(raw)
+                _log_debug(f"[SCHEMA_FALLBACK] parsed raw text as JSON: {parsed!r}\n")
+                return parsed, result_continuation
+            except (json.JSONDecodeError, ValueError):
+                _log_debug("[SCHEMA_FALLBACK] raw text is not valid JSON\n")
+    return "".join(output_parts), result_continuation
