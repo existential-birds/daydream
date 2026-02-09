@@ -2584,9 +2584,7 @@ class LiveToolPanel:
             else:
                 content = Group(
                     header,
-                    Text("\n"),
                     result_title,
-                    Text("\n"),
                     result_content,
                 )
 

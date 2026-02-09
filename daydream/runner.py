@@ -22,7 +22,6 @@ from daydream.phases import (
     phase_commit_push_auto,
     phase_fetch_pr_feedback,
     phase_fix,
-    phase_fix_parallel,
     phase_parse_feedback,
     phase_respond_pr_feedback,
     phase_review,
@@ -126,7 +125,8 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     pr_number = config.pr_number
     bot = config.bot
 
-    backend = create_backend(config.backend, model=config.model)
+    review_backend = _resolve_backend(config, "review")
+    fix_backend = _resolve_backend(config, "fix")
 
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
@@ -138,11 +138,11 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     console.print()
 
     # Phase 1: Fetch PR feedback
-    await phase_fetch_pr_feedback(backend, target_dir, pr_number, bot)
+    await phase_fetch_pr_feedback(review_backend, target_dir, pr_number, bot)
 
     # Phase 2: Parse feedback (reused from normal flow)
     try:
-        feedback_items = await phase_parse_feedback(backend, target_dir)
+        feedback_items = await phase_parse_feedback(review_backend, target_dir)
     except ValueError:
         print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
         return 1
@@ -151,8 +151,16 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         print_info(console, "No actionable feedback found in PR comments.")
         return 0
 
-    # Phase 3: Fix in parallel
-    results: list[FixResult] = await phase_fix_parallel(backend, target_dir, feedback_items)
+    # Phase 3: Fix issues sequentially to avoid concurrent access to a
+    # single mutable backend instance.
+    results: list[FixResult] = []
+    total_items = len(feedback_items)
+    for idx, item in enumerate(feedback_items, start=1):
+        try:
+            await phase_fix(fix_backend, target_dir, item, idx, total_items)
+            results.append((item, True, None))
+        except Exception as e:
+            results.append((item, False, f"{type(e).__name__}: {e}"))
 
     # If all fixes failed, abort
     successful = [r for r in results if r[1]]
@@ -168,14 +176,14 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
 
     # Phase 4: Commit and push (no user prompt)
     try:
-        await phase_commit_push_auto(backend, target_dir)
+        await phase_commit_push_auto(review_backend, target_dir)
     except Exception as e:
         print_error(console, "Commit/Push Failed", str(e))
         return 1
 
     # Phase 5: Respond to PR comments
     try:
-        await phase_respond_pr_feedback(backend, target_dir, pr_number, bot, results)
+        await phase_respond_pr_feedback(review_backend, target_dir, pr_number, bot, results)
     except Exception as e:
         print_warning(console, f"Failed to respond to PR comments: {e}")
         print_info(console, "Fixes were already pushed successfully.")
