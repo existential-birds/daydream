@@ -114,7 +114,7 @@ class CodexBackend:
             args.extend(["--output-schema", schema_path])
 
         if continuation and continuation.backend == "codex":
-            args.extend(["resume", continuation.data["thread_id"]])
+            args.extend(["resume", continuation.data["thread_id"], "-"])
 
         thread_id: str | None = None
         last_agent_text: str | None = None
@@ -326,6 +326,14 @@ class CodexBackend:
             await self._process.wait()
 
         finally:
+            proc = self._process
+            if proc is not None and proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
             self._process = None
             if schema_path:
                 Path(schema_path).unlink(missing_ok=True)

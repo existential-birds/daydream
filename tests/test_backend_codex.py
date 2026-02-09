@@ -217,7 +217,14 @@ async def test_toplevel_text_field():
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1
     assert result_events[0].structured_output == {
-        "issues": [{"id": 1, "description": "Missing yield for non-result events", "file": "agents/architect.py", "line": 134}]
+        "issues": [
+            {
+                "id": 1,
+                "description": "Missing yield for non-result events",
+                "file": "agents/architect.py",
+                "line": 134,
+            }
+        ]
     }
 
     # Also emitted as TextEvent
