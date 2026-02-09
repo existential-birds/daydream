@@ -32,3 +32,29 @@ def test_print_iteration_divider():
     plain = strip_ansi(output.getvalue())
     assert "Iteration 2 of 5" in plain
     assert "━" in plain
+
+
+from daydream.ui import SummaryData, print_summary
+
+
+def test_summary_data_loop_fields_default():
+    data = SummaryData(
+        skill="python", target="/tmp", feedback_count=3,
+        fixes_applied=3, test_retries=0, tests_passed=True,
+    )
+    assert data.loop_mode is False
+    assert data.iterations_used == 1
+
+
+def test_summary_loop_mode_shows_iterations():
+    output = StringIO()
+    test_console = Console(file=output, force_terminal=True, width=80, theme=NEON_THEME)
+    data = SummaryData(
+        skill="python", target="/tmp", feedback_count=8,
+        fixes_applied=8, test_retries=1, tests_passed=True,
+        loop_mode=True, iterations_used=3,
+    )
+    print_summary(test_console, data)
+    plain = strip_ansi(output.getvalue())
+    assert "Iterations" in plain
+    assert "3" in plain

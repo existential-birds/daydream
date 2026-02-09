@@ -2029,6 +2029,8 @@ class SummaryData:
     test_retries: int
     tests_passed: bool
     review_only: bool = False
+    loop_mode: bool = False
+    iterations_used: int = 1
 
 
 def print_summary(console: Console, data: SummaryData) -> None:
@@ -2064,6 +2066,8 @@ def print_summary(console: Console, data: SummaryData) -> None:
         table.add_row("Mode", mode_badge)
     else:
         # Full mode: show fix and test stats
+        if data.loop_mode:
+            table.add_row("Iterations", str(data.iterations_used))
         table.add_row("Fixes Applied", str(data.fixes_applied))
         table.add_row("Test Retries", str(data.test_retries))
 
