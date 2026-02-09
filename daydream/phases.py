@@ -76,7 +76,7 @@ def _detect_default_branch(cwd: Path) -> str | None:
         if result.returncode == 0:
             # Output is like "refs/remotes/origin/main"
             return result.stdout.strip().rsplit("/", 1)[-1]
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.SubprocessError, OSError):
         pass
 
     # Fallback: check if main or master exists locally
@@ -92,7 +92,7 @@ def _detect_default_branch(cwd: Path) -> str | None:
             )
             if result.returncode == 0:
                 return branch
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+        except (subprocess.SubprocessError, OSError):
             pass
 
     return None

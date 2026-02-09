@@ -194,6 +194,7 @@ async def test_execute_yields_tool_events(patch_sdk):
     assert len(tool_result_events) == 1
     assert tool_result_events[0].output == "file.py"
     assert tool_result_events[0].is_error is False
+    assert tool_start_events[0].id == tool_result_events[0].id  # Verify ID correlation
 
 
 @pytest.mark.asyncio

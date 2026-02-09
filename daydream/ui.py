@@ -7,6 +7,7 @@ with a Dracula-based color theme and animated elements.
 import random
 import re
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import pyfiglet
@@ -2665,10 +2666,8 @@ class _ActivePanelsGroup:
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         """Yield each active panel's rendered output."""
-        for tid in self._registry._active_order:
-            panel = self._registry._panels.get(tid)
-            if panel:
-                yield panel._render_panel()
+        for panel in self._registry.iter_active_panels():
+            yield panel._render_panel()
 
 
 class LiveToolPanelRegistry:
@@ -2771,6 +2770,18 @@ class LiveToolPanelRegistry:
 
         """
         return self._panels.get(tool_use_id)
+
+    def iter_active_panels(self) -> Iterator[LiveToolPanel]:
+        """Iterate over active panels in order.
+
+        Yields:
+            LiveToolPanel instances in the order they were created.
+
+        """
+        for tid in self._active_order:
+            panel = self._panels.get(tid)
+            if panel:
+                yield panel
 
     def remove(self, tool_use_id: str) -> None:
         """Remove a panel from the registry and print its final state.

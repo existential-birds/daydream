@@ -12,7 +12,7 @@ import json
 import re
 import tempfile
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -31,17 +31,12 @@ _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
 _CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
 
 
-_log_debug_fn: Callable[[str], None] | None = None
-
-
 def _raw_log(message: str) -> None:
     """Log raw event to the agent debug log if available."""
-    global _log_debug_fn
     # Lazy import to avoid circular dependency at module load time
-    if _log_debug_fn is None:
-        from daydream.agent import _log_debug
-        _log_debug_fn = _log_debug
-    _log_debug_fn(message)
+    from daydream.agent import _log_debug
+
+    _log_debug(message)
 
 
 def _unwrap_shell_command(command: str) -> str:
@@ -243,7 +238,10 @@ class CodexBackend:
                         item_id = item.get("id")
                         if not item_id:
                             lookup_key = f"command_execution:{item.get('command', '')}"
-                            item_id = pending_item_ids.pop(lookup_key, str(uuid.uuid4()))
+                            item_id = pending_item_ids.pop(lookup_key, None)
+                            if item_id is None:
+                                item_id = str(uuid.uuid4())
+                                _raw_log(f"[CODEX_WARN] pending ID lookup miss for {lookup_key}, generated {item_id}\n")
                         exit_code = item.get("exit_code", -1)
                         output = item.get("aggregated_output", "")
                         status = item.get("status", "")
@@ -281,7 +279,10 @@ class CodexBackend:
                         item_id = item.get("id")
                         if not item_id:
                             lookup_key = f"mcp_tool_call:{item.get('tool', '')}"
-                            item_id = pending_item_ids.pop(lookup_key, str(uuid.uuid4()))
+                            item_id = pending_item_ids.pop(lookup_key, None)
+                            if item_id is None:
+                                item_id = str(uuid.uuid4())
+                                _raw_log(f"[CODEX_WARN] pending ID lookup miss for {lookup_key}, generated {item_id}\n")
                         result_content = ""
                         if "result" in item:
                             result_content = str(item["result"].get("content", ""))
