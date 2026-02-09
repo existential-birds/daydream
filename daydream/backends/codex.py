@@ -12,7 +12,7 @@ import json
 import re
 import tempfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +31,17 @@ _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
 _CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
 
 
+_log_debug_fn: Callable[[str], None] | None = None
+
+
 def _raw_log(message: str) -> None:
     """Log raw event to the agent debug log if available."""
+    global _log_debug_fn
     # Lazy import to avoid circular dependency at module load time
-    from daydream.agent import _log_debug
-    _log_debug(message)
+    if _log_debug_fn is None:
+        from daydream.agent import _log_debug
+        _log_debug_fn = _log_debug
+    _log_debug_fn(message)
 
 
 def _unwrap_shell_command(command: str) -> str:

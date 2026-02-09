@@ -101,16 +101,29 @@ def _print_missing_skill_error(skill_name: str) -> None:
     console.print()
 
 
-def _resolve_backend(config: RunConfig, phase: str) -> Backend:
-    """Create the backend for a given phase, respecting per-phase overrides.
+def _resolve_backend(
+    config: RunConfig, phase: str, cache: dict[str, Backend] | None = None
+) -> Backend:
+    """Get or create the backend for a given phase, respecting per-phase overrides.
 
-    Note: This intentionally creates a new backend instance on each call.
-    While this means multiple instances when the same backend is used for all
-    phases, backends are lightweight and this keeps the per-phase override
-    logic simple and stateless.
+    Args:
+        config: Run configuration with backend settings.
+        phase: Phase name ("review", "fix", or "test").
+        cache: Optional dict to cache backends by name. When provided, backends
+               are reused if the same backend name is requested multiple times.
+
+    Returns:
+        Backend instance for the phase.
+
     """
     override = getattr(config, f"{phase}_backend", None)
     backend_name = override or config.backend
+
+    if cache is not None:
+        if backend_name not in cache:
+            cache[backend_name] = create_backend(backend_name, model=config.model)
+        return cache[backend_name]
+
     return create_backend(backend_name, model=config.model)
 
 
@@ -132,8 +145,9 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     pr_number = config.pr_number
     bot = config.bot
 
-    review_backend = _resolve_backend(config, "review")
-    fix_backend = _resolve_backend(config, "fix")
+    backend_cache: dict[str, Backend] = {}
+    review_backend = _resolve_backend(config, "review", backend_cache)
+    fix_backend = _resolve_backend(config, "fix", backend_cache)
 
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
@@ -293,9 +307,10 @@ async def run(config: RunConfig | None = None) -> int:
             cleanup_enabled = cleanup_response.lower() in ("y", "yes")
 
         # Create backends (may differ per-phase if overrides are set)
-        review_backend = _resolve_backend(config, "review")
-        fix_backend = _resolve_backend(config, "fix")
-        test_backend = _resolve_backend(config, "test")
+        backend_cache: dict[str, Backend] = {}
+        review_backend = _resolve_backend(config, "review", backend_cache)
+        fix_backend = _resolve_backend(config, "fix", backend_cache)
+        test_backend = _resolve_backend(config, "test", backend_cache)
 
         # Set quiet mode: force off for Codex backends since their shell
         # commands are the primary output the user needs to see.

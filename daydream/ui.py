@@ -2665,12 +2665,7 @@ class _ActivePanelsGroup:
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         """Yield each active panel's rendered output."""
-        active = self._registry._active_order
-        panels_found = sum(1 for t in active if t in self._registry._panels)
-        _ui_debug(
-            f"[LIVE_REFRESH] active_order={active} panels_found={panels_found}\n"
-        )
-        for tid in active:
+        for tid in self._registry._active_order:
             panel = self._registry._panels.get(tid)
             if panel:
                 yield panel._render_panel()

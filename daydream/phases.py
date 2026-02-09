@@ -71,6 +71,7 @@ def _detect_default_branch(cwd: Path) -> str | None:
             text=True,
             cwd=cwd,
             timeout=5,
+            shell=False,
         )
         if result.returncode == 0:
             # Output is like "refs/remotes/origin/main"
@@ -87,6 +88,7 @@ def _detect_default_branch(cwd: Path) -> str | None:
                 text=True,
                 cwd=cwd,
                 timeout=5,
+                shell=False,
             )
             if result.returncode == 0:
                 return branch
