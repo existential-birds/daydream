@@ -102,7 +102,13 @@ def _print_missing_skill_error(skill_name: str) -> None:
 
 
 def _resolve_backend(config: RunConfig, phase: str) -> Backend:
-    """Create the backend for a given phase, respecting per-phase overrides."""
+    """Create the backend for a given phase, respecting per-phase overrides.
+
+    Note: This intentionally creates a new backend instance on each call.
+    While this means multiple instances when the same backend is used for all
+    phases, backends are lightweight and this keeps the per-phase override
+    logic simple and stateless.
+    """
     override = getattr(config, f"{phase}_backend", None)
     backend_name = override or config.backend
     return create_backend(backend_name, model=config.model)

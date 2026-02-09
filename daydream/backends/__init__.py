@@ -73,10 +73,7 @@ class ResultEvent:
     continuation: ContinuationToken | None
 
 
-AgentEvent = (
-    TextEvent | ThinkingEvent | ToolStartEvent
-    | ToolResultEvent | CostEvent | ResultEvent
-)
+AgentEvent = TextEvent | ThinkingEvent | ToolStartEvent | ToolResultEvent | CostEvent | ResultEvent
 
 
 class Backend(Protocol):

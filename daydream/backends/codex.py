@@ -117,11 +117,25 @@ class CodexBackend:
         thread_id: str | None = None
         last_agent_text: str | None = None
         structured_result: Any = None
-        # Track generated IDs for items missing id field (ensures start/completed match)
-        pending_item_ids: dict[str, str] = {}
-        # Accumulate text from item.updated deltas for agent_message items
-        # keyed by item id
-        updated_text: dict[str, list[str]] = {}
+
+        # Event correlation state
+        # ─────────────────────────────────────────────────────────────────────
+        # Codex JSONL events arrive as item.started → item.updated* → item.completed
+        # sequences. Two challenges require explicit correlation tracking:
+        #
+        # 1. Missing IDs: Some item.started events lack an `id` field, but the
+        #    corresponding item.completed must emit a ToolResultEvent with the
+        #    same ID as the ToolStartEvent. We generate a UUID at item.started
+        #    and store it keyed by item type + unique content (e.g., command text).
+        #    On item.completed, we look up and pop that ID to maintain pairing.
+        #
+        # 2. Incremental text: For agent_message and reasoning items, text may
+        #    arrive incrementally via item.updated events (each containing a delta),
+        #    while item.completed may have empty text. We accumulate deltas by
+        #    item ID during updates, then join them on completion if needed.
+        # ─────────────────────────────────────────────────────────────────────
+        pending_item_ids: dict[str, str] = {}  # "type:content" → generated UUID
+        updated_text: dict[str, list[str]] = {}  # item_id → [text deltas]
 
         try:
             self._process = await asyncio.create_subprocess_exec(
