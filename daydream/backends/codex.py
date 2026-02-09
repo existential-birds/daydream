@@ -40,16 +40,26 @@ def _raw_log(message: str) -> None:
 def _unwrap_shell_command(command: str) -> str:
     """Strip shell wrapper from Codex command_execution commands.
 
-    Codex wraps commands as ``/bin/zsh -lc "cd /path && actual command"``.
+    Codex wraps commands in three forms::
+
+        /bin/zsh -lc 'actual command'      (single-quoted)
+        /bin/zsh -lc "actual command"      (double-quoted)
+        /bin/zsh -lc actual command         (unquoted)
+
     This extracts just the inner command for display purposes.
     """
     import re
 
-    # Match /bin/{zsh,bash,sh} -lc "..." or '...'
-    m = re.match(r"""/bin/(?:zsh|bash|sh)\s+-lc\s+["'](.+)["']\s*$""", command, re.DOTALL)
+    # Match /bin/{zsh,bash,sh} -lc, then capture the rest
+    m = re.match(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", command, re.DOTALL)
     if not m:
         return command
     inner = m.group(1)
+    # Strip surrounding quotes if present
+    if (inner.startswith('"') and inner.endswith('"')) or (
+        inner.startswith("'") and inner.endswith("'")
+    ):
+        inner = inner[1:-1]
     # Strip leading "cd /some/path &&" if present
     inner = re.sub(r"^cd\s+\S+\s*&&\s*", "", inner)
     return inner.strip()

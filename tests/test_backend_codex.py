@@ -291,3 +291,17 @@ class TestUnwrapShellCommand:
     def test_single_quotes(self):
         cmd = "/bin/zsh -lc 'cd /project && git status'"
         assert _unwrap_shell_command(cmd) == "git status"
+
+    def test_unquoted_simple(self):
+        """Real Codex format: no quotes around simple commands."""
+        assert _unwrap_shell_command("/bin/zsh -lc ls") == "ls"
+
+    def test_single_quoted_git_diff(self):
+        """Real Codex format: single-quoted multi-word command."""
+        cmd = "/bin/zsh -lc 'git diff main...HEAD'"
+        assert _unwrap_shell_command(cmd) == "git diff main...HEAD"
+
+    def test_double_quoted_sed(self):
+        """Real Codex format: double-quoted command with inner single quotes."""
+        cmd = """/bin/zsh -lc "sed -n '1,260p' amelia/agents/architect.py\""""
+        assert _unwrap_shell_command(cmd) == "sed -n '1,260p' amelia/agents/architect.py"
