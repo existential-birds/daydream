@@ -340,7 +340,10 @@ async def run_agent(
                     print_thinking(console, event.text)
 
             elif isinstance(event, ToolStartEvent):
-                _log_debug(f"[TOOL_USE] {event.name}({event.input})\n")
+                _log_debug(
+                    f"[TOOL_USE] {event.name}({event.input}) "
+                    f"id={event.id} use_callback={use_callback}\n"
+                )
                 if progress_callback is not None:
                     first_arg = next(iter(event.input.values()), "") if event.input else ""
                     progress_callback(f"{event.name} {first_arg}"[:80])
@@ -350,9 +353,19 @@ async def run_agent(
                     tool_registry.create(event.id, event.name, event.input)
 
             elif isinstance(event, ToolResultEvent):
-                _log_debug(f"[TOOL_RESULT{' [ERROR]' if event.is_error else ''}] {event.output}\n")
+                _log_debug(
+                    f"[TOOL_RESULT{' [ERROR]' if event.is_error else ''}] "
+                    f"id={event.id} output_len={len(event.output)} "
+                    f"output_preview={event.output[:200]!r} "
+                    f"use_callback={use_callback}\n"
+                )
                 if not use_callback:
                     panel = tool_registry.get(event.id)
+                    _log_debug(
+                        f"[TOOL_RESULT_PANEL] id={event.id} "
+                        f"panel_found={panel is not None} "
+                        f"panel_name={panel._name if panel else 'N/A'}\n"
+                    )
                     if panel:
                         panel.set_result(event.output, event.is_error)
                         panel.finish()
