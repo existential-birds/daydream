@@ -108,7 +108,7 @@ class ClaudeBackend:
                     elif isinstance(msg, ResultMessage):
                         if msg.structured_output is not None:
                             structured_result = msg.structured_output
-                        if msg.total_cost_usd:
+                        if msg.total_cost_usd is not None:
                             yield CostEvent(
                                 cost_usd=msg.total_cost_usd,
                                 input_tokens=None,
