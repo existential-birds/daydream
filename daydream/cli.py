@@ -239,6 +239,13 @@ def _parse_args() -> RunConfig:
     if args.bot and args.pr is None:
         parser.error("--bot requires --pr")
 
+    # Validate --loop mutual exclusions
+    if args.loop:
+        if args.review_only:
+            parser.error("--loop and --review-only are mutually exclusive")
+        if args.start_at != "review":
+            parser.error("--loop requires starting at review phase (incompatible with --start-at)")
+
     # Auto-detect PR number if --pr used without a number
     pr_number = args.pr
     if pr_number == -1:
@@ -247,6 +254,11 @@ def _parse_args() -> RunConfig:
             parser.error("Could not auto-detect PR number from current branch. Specify --pr NUMBER explicitly.")
     if pr_number is not None and pr_number <= 0:
         parser.error("--pr must be a positive integer")
+
+    # Warn if --max-iterations without --loop
+    if args.max_iterations != 5 and not args.loop:
+        import warnings
+        warnings.warn("--max-iterations has no effect without --loop", stacklevel=1)
 
     return RunConfig(
         target=args.target,
