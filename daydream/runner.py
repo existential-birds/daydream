@@ -34,6 +34,7 @@ from daydream.ui import (
     print_dim,
     print_error,
     print_info,
+    print_iteration_divider,
     print_menu,
     print_phase_hero,
     print_skipped_phases,
@@ -345,53 +346,114 @@ async def run(config: RunConfig | None = None) -> int:
 
         feedback_items: list[dict[str, Any]] = []
         fixes_applied = 0
+        test_retries = 0
+        tests_passed = True
+        iteration = 0
 
-        # Phase 1: Review (only if starting at review)
-        if config.start_at == "review":
-            assert skill is not None, "skill must be set when starting at review phase"
-            try:
-                await phase_review(review_backend, target_dir, skill)
-            except MissingSkillError as e:
-                _print_missing_skill_error(e.skill_name)
-                return 1
+        if config.loop:
+            # --- Loop mode: repeat review-parse-fix-test ---
+            while iteration < config.max_iterations:
+                iteration += 1
 
-        # Phase 2: Parse feedback (if starting at review, parse, or fix)
-        if config.start_at in ("review", "parse", "fix"):
-            try:
-                feedback_items = await phase_parse_feedback(review_backend, target_dir)
-            except ValueError as exc:
-                _log_debug(f"[PHASE2_ERROR] {exc}\n")
-                print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
-                return 1
+                if iteration > 1:
+                    print_iteration_divider(console, iteration, config.max_iterations)
 
-        # If review-only mode, show summary and exit
-        if config.review_only:
-            print_summary(
-                console,
-                SummaryData(
-                    skill=skill or "N/A",
-                    target=str(target_dir),
-                    feedback_count=len(feedback_items),
-                    fixes_applied=0,
-                    test_retries=0,
-                    tests_passed=True,
-                    review_only=True,
-                ),
-            )
-            return 0
+                # Phase 1: Review
+                assert skill is not None, "skill must be set when starting at review phase"
+                try:
+                    await phase_review(review_backend, target_dir, skill)
+                except MissingSkillError as e:
+                    _print_missing_skill_error(e.skill_name)
+                    return 1
 
-        # Phase 3: Apply fixes (if starting at review, parse, or fix)
-        if config.start_at in ("review", "parse", "fix"):
-            if feedback_items:
+                # Phase 2: Parse feedback
+                try:
+                    items = await phase_parse_feedback(review_backend, target_dir)
+                except ValueError as exc:
+                    _log_debug(f"[PHASE2_ERROR] {exc}\n")
+                    print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
+                    return 1
+
+                if not items:
+                    print_info(console, f"Clean review on iteration {iteration}")
+                    break
+
+                feedback_items.extend(items)
+
+                # Phase 3: Fix
                 print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
-                for i, item in enumerate(feedback_items, 1):
-                    await phase_fix(fix_backend, target_dir, item, i, len(feedback_items))
+                for i, item in enumerate(items, 1):
+                    await phase_fix(fix_backend, target_dir, item, i, len(items))
                     fixes_applied += 1
-            else:
-                print_info(console, "No feedback items found, skipping fix phase")
 
-        # Phase 4: Test and heal (always runs unless review_only)
-        tests_passed, test_retries = await phase_test_and_heal(test_backend, target_dir)
+                # Phase 4: Test
+                tests_passed, retries = await phase_test_and_heal(test_backend, target_dir)
+                test_retries += retries
+
+                if not tests_passed:
+                    print_warning(console, f"Tests failed on iteration {iteration}")
+                    break
+
+            else:
+                # while loop exhausted without break — max iterations reached
+                if feedback_items:
+                    tests_passed = False
+                    print_warning(
+                        console,
+                        f"Reached max iterations ({config.max_iterations}), "
+                        f"{len(feedback_items)} issues found across all iterations",
+                    )
+
+        else:
+            # --- Single-pass mode (existing behavior) ---
+
+            # Phase 1: Review
+            if config.start_at == "review":
+                assert skill is not None, "skill must be set when starting at review phase"
+                try:
+                    await phase_review(review_backend, target_dir, skill)
+                except MissingSkillError as e:
+                    _print_missing_skill_error(e.skill_name)
+                    return 1
+
+            # Phase 2: Parse feedback
+            if config.start_at in ("review", "parse", "fix"):
+                try:
+                    feedback_items = await phase_parse_feedback(review_backend, target_dir)
+                except ValueError as exc:
+                    _log_debug(f"[PHASE2_ERROR] {exc}\n")
+                    print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
+                    return 1
+
+            # Review-only exit
+            if config.review_only:
+                print_summary(
+                    console,
+                    SummaryData(
+                        skill=skill or "N/A",
+                        target=str(target_dir),
+                        feedback_count=len(feedback_items),
+                        fixes_applied=0,
+                        test_retries=0,
+                        tests_passed=True,
+                        review_only=True,
+                    ),
+                )
+                return 0
+
+            # Phase 3: Fix
+            if config.start_at in ("review", "parse", "fix"):
+                if feedback_items:
+                    print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+                    for i, item in enumerate(feedback_items, 1):
+                        await phase_fix(fix_backend, target_dir, item, i, len(feedback_items))
+                        fixes_applied += 1
+                else:
+                    print_info(console, "No feedback items found, skipping fix phase")
+
+            # Phase 4: Test
+            tests_passed, test_retries = await phase_test_and_heal(test_backend, target_dir)
+            iteration = 1
 
         # Print summary
         print_summary(
@@ -403,10 +465,12 @@ async def run(config: RunConfig | None = None) -> int:
                 fixes_applied=fixes_applied,
                 test_retries=test_retries,
                 tests_passed=tests_passed,
+                loop_mode=config.loop,
+                iterations_used=iteration if config.loop else 1,
             ),
         )
 
-        # Prompt for commit if tests passed
+        # Commit if tests passed
         if tests_passed:
             await phase_commit_push(review_backend, target_dir)
 

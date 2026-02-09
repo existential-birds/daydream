@@ -319,12 +319,8 @@ async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
             return False, retries_used
 
         else:
-            print_warning(console, f"Invalid choice '{choice}', defaulting to fix and retry")
-            console.print()
-            print_info(console, "Launching agent to fix test failures...")
-            _, continuation = await run_agent(backend, cwd, TEST_FIX_PROMPT, continuation=continuation)
-            retries_used += 1
-            continue
+            print_warning(console, f"Invalid choice '{choice}', aborting")
+            return False, retries_used
 
 
 async def phase_commit_push(backend: Backend, cwd: Path) -> None:
