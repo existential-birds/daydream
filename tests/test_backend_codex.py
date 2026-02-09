@@ -49,7 +49,7 @@ def _make_mock_process(fixture_name: str):
 
 @pytest.mark.asyncio
 async def test_simple_text_events():
-    backend = CodexBackend(model="gpt-5.2-codex")
+    backend = CodexBackend(model="gpt-5.3-codex")
     mock_proc = _make_mock_process("simple_text.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):

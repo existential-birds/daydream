@@ -89,7 +89,7 @@ def test_create_backend_codex_default():
     # Import here to avoid circular — just check it's not ClaudeBackend
     from daydream.backends.codex import CodexBackend
     assert isinstance(backend, CodexBackend)
-    assert backend.model == "gpt-5.2-codex"
+    assert backend.model == "gpt-5.3-codex"
 
 
 def test_create_backend_codex_custom_model():
