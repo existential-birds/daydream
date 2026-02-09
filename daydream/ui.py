@@ -2019,6 +2019,8 @@ class SummaryData:
         test_retries: Number of times tests were retried.
         tests_passed: Whether all tests passed after fixes.
         review_only: If True, only review was performed (no fixes).
+        loop_mode: If True, loop mode was enabled for iterative fixes.
+        iterations_used: Number of loop iterations used (1 if not in loop mode).
 
     """
 

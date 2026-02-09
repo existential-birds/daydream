@@ -85,7 +85,8 @@ def revert_uncommitted_changes(cwd: Path) -> bool:
         )
         if clean_result.stdout.strip():
             _log_debug(f"[REVERT] git clean removed:\n{clean_result.stdout}")
-    except (subprocess.SubprocessError, OSError):
+    except (subprocess.SubprocessError, OSError) as e:
+        _log_debug(f"[REVERT] failed: {type(e).__name__}: {e}")
         return False
     return True
 

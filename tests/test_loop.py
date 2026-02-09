@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
 from daydream.ui import NEON_THEME, SummaryData, print_iteration_divider, print_summary
 
@@ -57,7 +57,7 @@ def test_summary_loop_mode_shows_iterations():
     assert "3" in plain
 
 
-class LoopMockBackend:
+class LoopMockBackend(Backend):
     """Mock backend that returns different results on successive calls.
 
     Tracks call count and uses prompt content to determine responses.

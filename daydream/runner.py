@@ -352,17 +352,12 @@ async def run(config: RunConfig | None = None) -> int:
         tests_passed = True
         iteration = 0
 
-        async def _run_loop_iteration(
-            iteration: int,
-        ) -> tuple[list[dict[str, Any]], int, int, bool, bool]:
+        async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
             """Execute one iteration of the review-parse-fix-test loop.
 
             This nested function intentionally captures outer scope variables
-            (target_dir, skill, backends, config, console) to avoid an unwieldy
-            parameter list for a helper used only within run().
-
-            Args:
-                iteration: Current iteration number (1-based).
+            (target_dir, skill, backends, config, console, iteration) to avoid
+            an unwieldy parameter list for a helper used only within run().
 
             Returns:
                 Tuple of (items, fixes_count, retries, tests_passed, should_continue).
@@ -417,9 +412,7 @@ async def run(config: RunConfig | None = None) -> int:
                 iteration += 1
 
                 try:
-                    items, fixes_count, retries, passed, should_continue = await _run_loop_iteration(
-                        iteration
-                    )
+                    items, fixes_count, retries, passed, should_continue = await _run_loop_iteration()
                 except MissingSkillError as e:
                     _print_missing_skill_error(e.skill_name)
                     return 1
@@ -439,7 +432,6 @@ async def run(config: RunConfig | None = None) -> int:
             else:
                 # while loop exhausted without break — max iterations reached
                 if feedback_items:
-                    tests_passed = False
                     # Deduplicate by (file, line, description) to avoid inflated counts
                     unique_issues = {
                         (item.get("file"), item.get("line"), item.get("description"))

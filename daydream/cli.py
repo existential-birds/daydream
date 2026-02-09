@@ -258,7 +258,7 @@ def _parse_args() -> RunConfig:
 
     # Warn if --max-iterations without --loop
     if args.max_iterations != 5 and not args.loop:
-        warnings.warn("--max-iterations has no effect without --loop", stacklevel=1)
+        warnings.warn("--max-iterations has no effect without --loop", stacklevel=2)
 
     return RunConfig(
         target=args.target,
