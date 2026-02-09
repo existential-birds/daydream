@@ -353,6 +353,7 @@ async def run_agent(
                     tool_registry.create(event.id, event.name, event.input)
 
             elif isinstance(event, ToolResultEvent):
+                output_parts.append(event.output)
                 _log_debug(
                     f"[TOOL_RESULT{' [ERROR]' if event.is_error else ''}] "
                     f"id={event.id} output_len={len(event.output)} "
