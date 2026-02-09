@@ -76,6 +76,8 @@ class RunConfig:
     review_backend: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
+    loop: bool = False
+    max_iterations: int = 5
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
