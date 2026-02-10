@@ -1,5 +1,4 @@
 # daydream
-
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/existential-birds/daydream)
 
 Automated code review and fix loop powered by Claude and Codex.
