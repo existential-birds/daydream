@@ -29,7 +29,44 @@ from daydream.ui import (
     prompt_user,
 )
 
-TEST_FIX_PROMPT = "The tests failed. Analyze the failures and fix them."
+TEST_OUTPUT_TAIL_LINES = 100
+
+
+def _build_fix_prompt(
+    test_output: str,
+    feedback_items: list[dict[str, Any]] | None = None,
+) -> str:
+    """Build an enriched prompt for the fix agent with test output and file context.
+
+    Args:
+        test_output: Raw test output text.
+        feedback_items: Optional list of feedback items with 'file' keys.
+
+    Returns:
+        Prompt string with truncated test output and file list.
+
+    """
+    lines = test_output.splitlines()
+    if len(lines) > TEST_OUTPUT_TAIL_LINES:
+        truncated = "\n".join(lines[-TEST_OUTPUT_TAIL_LINES:])
+        output_section = f"Here is the tail of the test output:\n\n{truncated}"
+    else:
+        output_section = f"Here is the test output:\n\n{test_output}"
+
+    parts = [f"The tests failed. {output_section}"]
+
+    if feedback_items:
+        files = sorted({item["file"] for item in feedback_items if "file" in item})
+        if files:
+            file_list = "\n".join(f"- {f}" for f in files)
+            parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
+
+    parts.append("\nAnalyze the failures and fix them.")
+    if feedback_items:
+        parts.append("Focus on the files listed above.")
+
+    return "\n".join(parts)
+
 
 FEEDBACK_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -292,12 +329,18 @@ Make the minimal change needed.
     print_fix_complete(console, item_num, total)
 
 
-async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
+async def phase_test_and_heal(
+    backend: Backend,
+    cwd: Path,
+    feedback_items: list[dict[str, Any]] | None = None,
+) -> tuple[bool, int]:
     """Phase 4: Run tests and prompt user on failure for action.
 
     Args:
         backend: The Backend to execute against.
         cwd: Working directory for running tests
+        feedback_items: Optional list of feedback items from the fix phase,
+            used to enrich the fix prompt with file context.
 
     Returns:
         Tuple of (success: bool, retries_used: int)
@@ -341,8 +384,10 @@ async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            _, continuation = await run_agent(backend, cwd, TEST_FIX_PROMPT, continuation=continuation)
+            fix_prompt = _build_fix_prompt(output, feedback_items)
+            _, _ = await run_agent(backend, cwd, fix_prompt)
             retries_used += 1
+            continuation = None
             continue
 
         elif choice == "3":

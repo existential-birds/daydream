@@ -391,7 +391,7 @@ async def run(config: RunConfig | None = None) -> int:
                 fixes_count += 1
 
             # Phase 4: Test
-            passed, retries = await phase_test_and_heal(test_backend, target_dir)
+            passed, retries = await phase_test_and_heal(test_backend, target_dir, feedback_items=items)
 
             if not passed:
                 print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
@@ -493,7 +493,9 @@ async def run(config: RunConfig | None = None) -> int:
                     print_info(console, "No feedback items found, skipping fix phase")
 
             # Phase 4: Test
-            tests_passed, test_retries = await phase_test_and_heal(test_backend, target_dir)
+            tests_passed, test_retries = await phase_test_and_heal(
+                test_backend, target_dir, feedback_items=feedback_items
+            )
             iteration = 1
 
         # Print summary
