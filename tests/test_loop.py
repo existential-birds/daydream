@@ -71,12 +71,14 @@ class LoopMockBackend(Backend):
         self._parse_call = 0
         self.call_log: list[str] = []
         self.commit_calls: list[str] = []
+        self.review_prompts: list[str] = []
 
     async def execute(self, cwd, prompt, output_schema=None, continuation=None):
         prompt_lower = prompt.lower()
         self.call_log.append(prompt_lower[:80])
 
         if "beagle-" in prompt_lower and "review" in prompt_lower:
+            self.review_prompts.append(prompt)
             yield TextEvent(text="Review complete.")
             yield ResultEvent(structured_output=None, continuation=None)
         elif "extract" in prompt_lower and "json" in prompt_lower:
@@ -123,8 +125,11 @@ def loop_target(tmp_path: Path) -> Path:
     project.mkdir()
     (project / "main.py").write_text("def hello():\n    return 'world'\n")
     (project / ".review-output.md").write_text("# Review\n\n1. Issue in main.py:1\n")
-    # Loop mode requires a clean git repo (dirty-tree preflight check)
-    subprocess.run(["git", "init"], cwd=project, capture_output=True, check=True)
+    # Loop mode requires a clean git repo (dirty-tree preflight check).
+    # Use "main" as the default branch so _detect_default_branch() finds it.
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=project, capture_output=True, check=True,
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=project, capture_output=True, check=True,
@@ -136,6 +141,11 @@ def loop_target(tmp_path: Path) -> Path:
     subprocess.run(["git", "add", "."], cwd=project, capture_output=True, check=True)
     subprocess.run(
         ["git", "commit", "-m", "init"],
+        cwd=project, capture_output=True, check=True,
+    )
+    # Create a feature branch so the test runs on a non-main branch
+    subprocess.run(
+        ["git", "checkout", "-b", "feature-branch"],
         cwd=project, capture_output=True, check=True,
     )
     return project
@@ -413,3 +423,79 @@ def test_revert_uncommitted_changes_not_a_repo(tmp_path):
     from daydream.phases import revert_uncommitted_changes
 
     assert revert_uncommitted_changes(tmp_path) is False
+
+
+@pytest.mark.asyncio
+async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_loop, monkeypatch):
+    """Iteration 1 diffs against main; iteration 2 diffs against the SHA from iteration 1's commit."""
+    import subprocess
+
+    issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
+    # Iteration 1: issue found, Iteration 2: clean review
+    backend = LoopMockBackend(review_results=[[issue], []])
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+
+    config = RunConfig(
+        target=str(loop_target), skill="python", quiet=True,
+        cleanup=False, loop=True, max_iterations=5,
+    )
+    exit_code = await run(config)
+    assert exit_code == 0
+
+    # Should have two review prompts (one per iteration)
+    assert len(backend.review_prompts) == 2
+
+    # Iteration 1: should diff against base branch (main)
+    assert "git diff main...HEAD" in backend.review_prompts[0]
+
+    # Iteration 2: should diff against a commit SHA, not main
+    prompt2 = backend.review_prompts[1]
+    assert "main...HEAD" not in prompt2
+    # The SHA is a 40-char hex string embedded in the prompt
+    assert "git diff " in prompt2
+    # Extract and validate the SHA format
+    import re
+    sha_match = re.search(r"git diff ([0-9a-f]{40})\.\.\.HEAD", prompt2)
+    assert sha_match is not None, f"Expected SHA-based diff in prompt: {prompt2}"
+
+    # Verify the SHA is a real commit in the repo
+    result = subprocess.run(
+        ["git", "cat-file", "-t", sha_match.group(1)],
+        capture_output=True, text=True, cwd=loop_target,
+    )
+    assert result.stdout.strip() == "commit"
+
+
+@pytest.mark.asyncio
+async def test_loop_diff_base_unchanged_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
+    """When tests fail, diff_base stays None — next iteration (if any) uses full branch diff."""
+    issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
+    # Two iterations of issues, tests always fail
+    backend = LoopMockBackend(review_results=[[issue], [issue]], tests_pass=False)
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
+
+    # Track _get_head_sha calls
+    sha_calls: list[Path] = []
+    original_get_head_sha = None
+
+    import daydream.runner as runner_mod
+    original_get_head_sha = runner_mod._get_head_sha
+
+    def tracking_get_head_sha(cwd: Path) -> str | None:
+        sha_calls.append(cwd)
+        return original_get_head_sha(cwd)
+
+    monkeypatch.setattr("daydream.runner._get_head_sha", tracking_get_head_sha)
+
+    config = RunConfig(
+        target=str(loop_target), skill="python", quiet=True,
+        cleanup=False, loop=True, max_iterations=5,
+    )
+    exit_code = await run(config)
+
+    assert exit_code == 1
+    # Tests fail -> early return before commit -> _get_head_sha never called
+    assert len(sha_calls) == 0
