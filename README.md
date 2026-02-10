@@ -6,7 +6,6 @@ Automated code review and fix loop powered by Claude and Codex.
 Daydream launches review agents equipped with [Beagle](https://github.com/existential-birds/beagle) skills — specialized knowledge modules for your technology stack (FastAPI, React, Phoenix, and more). It parses actionable feedback from the review, applies fixes automatically, and validates changes by running your test suite.
 
 ![demo](https://github.com/user-attachments/assets/60a80645-36de-410e-afa7-7a96efef3f57)
-
 ## Features
 
 - **Stack-aware reviews**: Beagle skills load framework-specific knowledge (FastAPI patterns, React hooks, Phoenix lifecycle, etc.) as the reviewer encounters relevant code
