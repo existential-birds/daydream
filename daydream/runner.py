@@ -139,6 +139,29 @@ def _resolve_backend(
     return create_backend(backend_name, model=config.model)
 
 
+def _get_head_sha(cwd: Path) -> str | None:
+    """Get the current HEAD commit SHA.
+
+    Returns:
+        The full SHA string, or None if the command fails.
+
+    """
+    try:
+        result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=5,
+            shell=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return None
+
+
 async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     """Execute the PR feedback flow: fetch, parse, fix, commit, respond.
 
@@ -358,6 +381,7 @@ async def run(config: RunConfig | None = None) -> int:
         test_retries = 0
         tests_passed = True
         iteration = 0
+        diff_base: str | None = None
 
         async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
             """Execute one iteration of the review-parse-fix-test loop.
@@ -375,13 +399,15 @@ async def run(config: RunConfig | None = None) -> int:
                 ValueError: If feedback parsing fails.
 
             """
+            nonlocal diff_base
+
             if iteration > 1:
                 (target_dir / REVIEW_OUTPUT_FILE).unlink(missing_ok=True)
                 print_iteration_divider(console, iteration, config.max_iterations)
 
             # Phase 1: Review
             assert skill is not None, "skill must be set when starting at review phase"
-            await phase_review(review_backend, target_dir, skill)
+            await phase_review(review_backend, target_dir, skill, diff_base=diff_base)
 
             # Phase 2: Parse feedback
             items = await phase_parse_feedback(review_backend, target_dir)
@@ -410,6 +436,10 @@ async def run(config: RunConfig | None = None) -> int:
 
             # Commit iteration changes so the next review sees a clean tree
             await phase_commit_iteration(fix_backend, target_dir, iteration)
+
+            # Record the commit SHA so the next iteration reviews only
+            # changes made after this point (incremental diff).
+            diff_base = _get_head_sha(target_dir)
 
             return items, fixes_count, retries, True, True  # should_continue=True
 

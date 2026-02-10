@@ -191,13 +191,16 @@ Run a full review first:
         raise FileNotFoundError(msg)
 
 
-async def phase_review(backend: Backend, cwd: Path, skill: str) -> None:
+async def phase_review(backend: Backend, cwd: Path, skill: str, *, diff_base: str | None = None) -> None:
     """Phase 1: Run review skill, write output to .review-output.md.
 
     Args:
         backend: The Backend to execute against.
         cwd: Working directory for the review
         skill: The review skill to invoke (e.g., beagle:review-python)
+        diff_base: Optional commit SHA to diff against. When provided, the review
+            covers only changes since that commit (used for incremental reviews
+            in loop mode). When None, diffs against the base branch.
 
     Returns:
         None
@@ -212,21 +215,28 @@ async def phase_review(backend: Backend, cwd: Path, skill: str) -> None:
     review_output_path = cwd / REVIEW_OUTPUT_FILE
     skill_invocation = backend.format_skill_invocation(skill)
 
-    # Detect the base branch so the agent knows what to diff against.
-    # Without this, agents (especially Codex) may run `git diff` with no
-    # base ref, which only shows uncommitted changes and misses all
-    # committed work on the branch.
-    base_branch = _detect_default_branch(cwd)
-    if base_branch:
+    if diff_base:
+        # Incremental review: only review changes since the last iteration commit
         diff_instruction = (
-            f"\nReview the changes on the current branch compared to `{base_branch}`. "
-            f"Use `git diff {base_branch}...HEAD` to get the diff.\n"
+            f"\nReview ONLY the changes since commit {diff_base}. "
+            f"Use `git diff {diff_base}...HEAD` to get the diff.\n"
         )
     else:
-        diff_instruction = (
-            "\nReview the changes on the current branch compared to the default branch. "
-            "Use `git diff main...HEAD` or `git diff master...HEAD` to get the diff.\n"
-        )
+        # Full branch review: detect the base branch so the agent knows what
+        # to diff against.  Without this, agents (especially Codex) may run
+        # `git diff` with no base ref, which only shows uncommitted changes
+        # and misses all committed work on the branch.
+        base_branch = _detect_default_branch(cwd)
+        if base_branch:
+            diff_instruction = (
+                f"\nReview the changes on the current branch compared to `{base_branch}`. "
+                f"Use `git diff {base_branch}...HEAD` to get the diff.\n"
+            )
+        else:
+            diff_instruction = (
+                "\nReview the changes on the current branch compared to the default branch. "
+                "Use `git diff main...HEAD` or `git diff master...HEAD` to get the diff.\n"
+            )
 
     prompt = f"""{skill_invocation}
 {diff_instruction}
