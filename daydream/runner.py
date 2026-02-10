@@ -448,9 +448,10 @@ async def run(config: RunConfig | None = None) -> int:
                     return 1
 
                 feedback_items.extend(items)
-                fixes_applied += fixes_count
                 test_retries += retries
                 tests_passed = passed
+                if passed:
+                    fixes_applied += fixes_count
 
                 if not should_continue:
                     break

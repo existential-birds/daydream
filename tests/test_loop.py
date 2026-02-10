@@ -307,6 +307,36 @@ async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkeypatch):
+    """Fixes from a failed iteration are not counted in the summary."""
+    issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
+    backend = LoopMockBackend(review_results=[[issue]], tests_pass=False)
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
+
+    captured_summary: dict[str, Any] = {}
+
+    import daydream.runner as runner_mod
+    original_print_summary = runner_mod.print_summary
+
+    def capture_summary(console, data):
+        captured_summary["fixes_applied"] = data.fixes_applied
+        original_print_summary(console, data)
+
+    monkeypatch.setattr("daydream.runner.print_summary", capture_summary)
+
+    config = RunConfig(
+        target=str(loop_target), skill="python", quiet=True,
+        cleanup=False, loop=True, max_iterations=5,
+    )
+    exit_code = await run(config)
+
+    assert exit_code == 1
+    assert captured_summary["fixes_applied"] == 0  # reverted fixes excluded
+
+
+@pytest.mark.asyncio
 async def test_loop_no_commit_on_clean_first_iteration(loop_target, mock_ui_loop, monkeypatch):
     """No commit when first iteration is already clean (no fixes applied)."""
     backend = LoopMockBackend(review_results=[[]])
