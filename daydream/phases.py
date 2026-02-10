@@ -29,7 +29,44 @@ from daydream.ui import (
     prompt_user,
 )
 
-TEST_FIX_PROMPT = "The tests failed. Analyze the failures and fix them."
+TEST_OUTPUT_TAIL_LINES = 100
+
+
+def _build_fix_prompt(
+    test_output: str,
+    feedback_items: list[dict[str, Any]] | None = None,
+) -> str:
+    """Build an enriched prompt for the fix agent with test output and file context.
+
+    Args:
+        test_output: Raw test output text.
+        feedback_items: Optional list of feedback items with 'file' keys.
+
+    Returns:
+        Prompt string with truncated test output and file list.
+
+    """
+    lines = test_output.splitlines()
+    if len(lines) > TEST_OUTPUT_TAIL_LINES:
+        truncated = "\n".join(lines[-TEST_OUTPUT_TAIL_LINES:])
+        output_section = f"Here is the tail of the test output:\n\n{truncated}"
+    else:
+        output_section = f"Here is the test output:\n\n{test_output}"
+
+    parts = [f"The tests failed. {output_section}"]
+
+    if feedback_items:
+        files = sorted({item["file"] for item in feedback_items if "file" in item})
+        if files:
+            file_list = "\n".join(f"- {f}" for f in files)
+            parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
+
+    parts.append("\nAnalyze the failures and fix them.")
+    if feedback_items:
+        parts.append("Focus on the files listed above.")
+
+    return "\n".join(parts)
+
 
 FEEDBACK_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -54,6 +91,41 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
 }
 
 FixResult = tuple[dict[str, Any], bool, str | None]
+
+
+def revert_uncommitted_changes(cwd: Path) -> bool:
+    """Discard all uncommitted changes (tracked and untracked).
+
+    Used after a failed iteration to restore the last committed state.
+
+    Returns:
+        True if revert succeeded, False otherwise.
+
+    """
+    try:
+        subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            ["git", "checkout", "."],
+            capture_output=True,
+            cwd=cwd,
+            timeout=10,
+            shell=False,
+            check=True,
+        )
+        clean_result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            ["git", "clean", "-fd"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=10,
+            shell=False,
+            check=True,
+        )
+        if clean_result.stdout.strip():
+            _log_debug(f"[REVERT] git clean removed:\n{clean_result.stdout}")
+    except (subprocess.SubprocessError, OSError) as e:
+        _log_debug(f"[REVERT] failed: {type(e).__name__}: {e}")
+        return False
+    return True
 
 
 def _detect_default_branch(cwd: Path) -> str | None:
@@ -257,12 +329,18 @@ Make the minimal change needed.
     print_fix_complete(console, item_num, total)
 
 
-async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
+async def phase_test_and_heal(
+    backend: Backend,
+    cwd: Path,
+    feedback_items: list[dict[str, Any]] | None = None,
+) -> tuple[bool, int]:
     """Phase 4: Run tests and prompt user on failure for action.
 
     Args:
         backend: The Backend to execute against.
         cwd: Working directory for running tests
+        feedback_items: Optional list of feedback items from the fix phase,
+            used to enrich the fix prompt with file context.
 
     Returns:
         Tuple of (success: bool, retries_used: int)
@@ -306,8 +384,10 @@ async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            _, continuation = await run_agent(backend, cwd, TEST_FIX_PROMPT, continuation=continuation)
+            fix_prompt = _build_fix_prompt(output, feedback_items)
+            _, _ = await run_agent(backend, cwd, fix_prompt)
             retries_used += 1
+            continuation = None
             continue
 
         elif choice == "3":
@@ -319,12 +399,8 @@ async def phase_test_and_heal(backend: Backend, cwd: Path) -> tuple[bool, int]:
             return False, retries_used
 
         else:
-            print_warning(console, f"Invalid choice '{choice}', defaulting to fix and retry")
-            console.print()
-            print_info(console, "Launching agent to fix test failures...")
-            _, continuation = await run_agent(backend, cwd, TEST_FIX_PROMPT, continuation=continuation)
-            retries_used += 1
-            continue
+            print_warning(console, f"Invalid choice '{choice}', aborting")
+            return False, retries_used
 
 
 async def phase_commit_push(backend: Backend, cwd: Path) -> None:
@@ -453,6 +529,28 @@ Make the minimal change needed.
         print_error(console, "All fixes failed", "No changes were applied")
 
     return results
+
+
+async def phase_commit_iteration(backend: Backend, cwd: Path, iteration: int) -> None:
+    """Commit all changes from the current loop iteration.
+
+    Ensures a clean working tree before the next review iteration starts.
+    Does NOT push — the final push happens at the end of the loop.
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Working directory for the commit
+        iteration: Current iteration number (used in commit message)
+
+    """
+    prompt = (
+        f"Commit all staged and unstaged changes with the message: "
+        f"\"daydream: iteration {iteration} fixes\". "
+        f"Do NOT push. Only commit."
+    )
+    print_info(console, f"Committing iteration {iteration} changes...")
+    await run_agent(backend, cwd, prompt)
+    print_success(console, f"Iteration {iteration} changes committed")
 
 
 async def phase_commit_push_auto(backend: Backend, cwd: Path) -> None:

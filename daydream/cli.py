@@ -5,6 +5,7 @@ import json
 import signal
 import subprocess
 import sys
+import warnings
 
 import anyio
 
@@ -202,6 +203,22 @@ def _parse_args() -> RunConfig:
         help="Model to use (default: backend-specific). Examples: opus, sonnet, haiku, gpt-5.3-codex",
     )
 
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        default=False,
+        help="Repeat review-fix-test cycle until zero issues or max iterations",
+    )
+
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=5,
+        metavar="N",
+        dest="max_iterations",
+        help="Maximum loop iterations (default: 5, only meaningful with --loop)",
+    )
+
     args = parser.parse_args()
 
     # Validate mutual exclusion: --start-at and --review-only
@@ -223,6 +240,13 @@ def _parse_args() -> RunConfig:
     if args.bot and args.pr is None:
         parser.error("--bot requires --pr")
 
+    # Validate --loop mutual exclusions
+    if args.loop:
+        if args.review_only:
+            parser.error("--loop and --review-only are mutually exclusive")
+        if args.start_at != "review":
+            parser.error("--loop requires starting at review phase (incompatible with --start-at)")
+
     # Auto-detect PR number if --pr used without a number
     pr_number = args.pr
     if pr_number == -1:
@@ -231,6 +255,10 @@ def _parse_args() -> RunConfig:
             parser.error("Could not auto-detect PR number from current branch. Specify --pr NUMBER explicitly.")
     if pr_number is not None and pr_number <= 0:
         parser.error("--pr must be a positive integer")
+
+    # Warn if --max-iterations without --loop
+    if args.max_iterations != 5 and not args.loop:
+        warnings.warn("--max-iterations has no effect without --loop", stacklevel=2)
 
     return RunConfig(
         target=args.target,
@@ -247,6 +275,8 @@ def _parse_args() -> RunConfig:
         review_backend=args.review_backend,
         fix_backend=args.fix_backend,
         test_backend=args.test_backend,
+        loop=args.loop,
+        max_iterations=args.max_iterations,
     )
 
 

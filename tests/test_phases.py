@@ -12,8 +12,8 @@ from daydream.config import REVIEW_OUTPUT_FILE
 
 
 @pytest.mark.asyncio
-async def test_phase_test_and_heal_passes_continuation(tmp_path, monkeypatch):
-    """Test that continuation token is threaded through test retries."""
+async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch):
+    """Test that fix-and-retry starts fresh (no continuation) with enriched prompt."""
     from daydream.phases import phase_test_and_heal
 
     monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
@@ -26,25 +26,27 @@ async def test_phase_test_and_heal_passes_continuation(tmp_path, monkeypatch):
 
     call_count = 0
     token = ContinuationToken(backend="codex", data={"thread_id": "th_test"})
+    captured_prompts: list[str] = []
+    captured_continuations: list[ContinuationToken | None] = []
 
-    class ContinuationBackend:
+    class FreshContextBackend:
         async def execute(self, cwd, prompt, output_schema=None, continuation=None):
             nonlocal call_count
             call_count += 1
+            captured_prompts.append(prompt)
+            captured_continuations.append(continuation)
             if call_count == 1:
                 # First call: tests fail
                 yield TextEvent(text="1 failed, 0 passed")
                 yield ResultEvent(structured_output=None, continuation=token)
             elif call_count == 2:
-                # Fix call: should receive the continuation token
-                assert continuation is token, f"Expected continuation token on fix call, got {continuation}"
+                # Fix call: should start fresh (no continuation)
                 yield TextEvent(text="Fixed")
-                yield ResultEvent(structured_output=None, continuation=token)
+                yield ResultEvent(structured_output=None, continuation=None)
             else:
-                # Retry: tests pass, should receive token
-                assert continuation is token, f"Expected continuation token on retry, got {continuation}"
+                # Retry: tests pass, should also start fresh
                 yield TextEvent(text="All 1 tests passed")
-                yield ResultEvent(structured_output=None, continuation=token)
+                yield ResultEvent(structured_output=None, continuation=None)
 
         async def cancel(self):
             pass
@@ -56,12 +58,30 @@ async def test_phase_test_and_heal_passes_continuation(tmp_path, monkeypatch):
     choices = iter(["2"])
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"))
 
-    backend = ContinuationBackend()
-    success, retries = await phase_test_and_heal(backend, tmp_path)
+    feedback_items = [
+        {"id": 1, "description": "Bug in handler", "file": "src/handler.py", "line": 10},
+        {"id": 2, "description": "Missing import", "file": "src/utils.py", "line": 1},
+    ]
+
+    backend = FreshContextBackend()
+    success, retries = await phase_test_and_heal(backend, tmp_path, feedback_items=feedback_items)
 
     assert success is True
     assert retries == 1
     assert call_count == 3
+
+    # Fix call (call_count == 2) should have no continuation (fresh start)
+    assert captured_continuations[1] is None, "Fix call should start fresh with no continuation"
+
+    # Retry call (call_count == 3) should also have no continuation
+    assert captured_continuations[2] is None, "Retry after fix should start fresh"
+
+    # Fix prompt should contain test failure output and file paths
+    fix_prompt = captured_prompts[1]
+    assert "1 failed, 0 passed" in fix_prompt
+    assert "src/handler.py" in fix_prompt
+    assert "src/utils.py" in fix_prompt
+    assert "Analyze the failures and fix them" in fix_prompt
 
 
 @pytest.mark.asyncio
@@ -122,3 +142,66 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch):
     result = await phase_parse_feedback(JsonTextBackend(), tmp_path)
     assert len(result) == 1
     assert result[0]["file"] == "foo.py"
+
+
+class TestBuildFixPrompt:
+    """Tests for _build_fix_prompt helper."""
+
+    def test_short_output_included_fully(self):
+        from daydream.phases import _build_fix_prompt
+
+        output = "FAILED test_foo.py::test_bar - AssertionError"
+        result = _build_fix_prompt(output)
+
+        assert "Here is the test output:" in result
+        assert "tail" not in result
+        assert output in result
+        assert "Analyze the failures and fix them" in result
+
+    def test_long_output_truncated(self):
+        from daydream.phases import TEST_OUTPUT_TAIL_LINES, _build_fix_prompt
+
+        lines = [f"line {i}" for i in range(200)]
+        output = "\n".join(lines)
+        result = _build_fix_prompt(output)
+
+        assert "tail of the test output" in result
+        # Should contain the last 100 lines
+        assert "line 199" in result
+        assert "line 100" in result
+        # Should NOT contain early lines
+        assert "line 0\n" not in result
+        assert f"line {200 - TEST_OUTPUT_TAIL_LINES - 1}\n" not in result
+
+    def test_feedback_items_adds_file_list(self):
+        from daydream.phases import _build_fix_prompt
+
+        items = [
+            {"id": 1, "description": "Bug", "file": "src/foo.py", "line": 10},
+            {"id": 2, "description": "Typo", "file": "src/bar.py", "line": 5},
+            {"id": 3, "description": "Dup", "file": "src/foo.py", "line": 20},
+        ]
+        result = _build_fix_prompt("test failed", items)
+
+        assert "- src/bar.py" in result
+        assert "- src/foo.py" in result
+        assert "Focus on the files listed above" in result
+        # Deduplication: foo.py should appear only once
+        assert result.count("- src/foo.py") == 1
+
+    def test_none_feedback_items_omits_file_section(self):
+        from daydream.phases import _build_fix_prompt
+
+        result = _build_fix_prompt("test failed", None)
+
+        assert "Files modified" not in result
+        assert "Focus on the files" not in result
+        assert "Analyze the failures and fix them" in result
+
+    def test_empty_feedback_items_omits_file_section(self):
+        from daydream.phases import _build_fix_prompt
+
+        result = _build_fix_prompt("test failed", [])
+
+        assert "Files modified" not in result
+        assert "Focus on the files" not in result

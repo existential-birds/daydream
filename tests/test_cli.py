@@ -70,3 +70,50 @@ def test_test_backend_override(monkeypatch):
     ])
     config = _parse_args()
     assert config.test_backend == "codex"
+
+
+def test_loop_flag_default_off(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--python"])
+    config = _parse_args()
+    assert config.loop is False
+    assert config.max_iterations == 5
+
+
+def test_loop_flag_enabled(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--python", "--loop"])
+    config = _parse_args()
+    assert config.loop is True
+
+
+def test_max_iterations_flag(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "/tmp/project", "--python", "--loop", "--max-iterations", "10",
+    ])
+    config = _parse_args()
+    assert config.max_iterations == 10
+
+
+def test_loop_review_only_conflict(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "/tmp/project", "--python", "--loop", "--review-only",
+    ])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_loop_start_at_conflict(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "/tmp/project", "--python", "--loop", "--start-at", "fix",
+    ])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_max_iterations_without_loop_accepted(monkeypatch, capsys):
+    """--max-iterations without --loop is accepted but prints a warning."""
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "/tmp/project", "--python", "--max-iterations", "3",
+    ])
+    config = _parse_args()
+    assert config.max_iterations == 3
+    assert config.loop is False
