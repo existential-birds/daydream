@@ -117,10 +117,27 @@ class LoopMockBackend(Backend):
 
 @pytest.fixture
 def loop_target(tmp_path: Path) -> Path:
+    import subprocess
+
     project = tmp_path / "loop_project"
     project.mkdir()
     (project / "main.py").write_text("def hello():\n    return 'world'\n")
     (project / ".review-output.md").write_text("# Review\n\n1. Issue in main.py:1\n")
+    # Loop mode requires a clean git repo (dirty-tree preflight check)
+    subprocess.run(["git", "init"], cwd=project, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=project, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=project, capture_output=True, check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=project, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=project, capture_output=True, check=True,
+    )
     return project
 
 
@@ -304,6 +321,27 @@ async def test_loop_no_commit_on_clean_first_iteration(loop_target, mock_ui_loop
 
     assert exit_code == 0
     assert backend.commit_calls == []  # nothing to commit
+
+
+@pytest.mark.asyncio
+async def test_loop_rejects_dirty_working_tree(loop_target, mock_ui_loop, monkeypatch):
+    """Loop mode aborts with exit code 1 when the working tree is dirty."""
+    import subprocess
+
+    # Dirty the working tree
+    (loop_target / "untracked.py").write_text("dirty")
+
+    backend = LoopMockBackend(review_results=[[]])
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+
+    config = RunConfig(
+        target=str(loop_target), skill="python", quiet=True,
+        cleanup=False, loop=True, max_iterations=5,
+    )
+    exit_code = await run(config)
+
+    assert exit_code == 1
+    assert backend._parse_call == 0  # never reached review phase
 
 
 def test_revert_uncommitted_changes(tmp_path):

@@ -1,6 +1,7 @@
 """Main orchestration logic for the review and fix loop."""
 
 import contextlib
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +63,12 @@ class RunConfig:
         start_at: Phase to start at ("review", "parse", "fix", or "test").
         pr_number: GitHub PR number for PR feedback mode. If None, normal mode.
         bot: Bot username whose comments to fetch (e.g. "coderabbitai[bot]").
+        backend: Default backend to use ("claude" or "codex"). Default is "claude".
+        review_backend: Override backend for the review phase. If None, uses backend.
+        fix_backend: Override backend for the fix phase. If None, uses backend.
+        test_backend: Override backend for the test phase. If None, uses backend.
+        loop: Enable continuous review/fix/test iterations. Default is False.
+        max_iterations: Maximum number of loop iterations before exiting. Default is 5.
 
     """
 
@@ -407,6 +414,25 @@ async def run(config: RunConfig | None = None) -> int:
             return items, fixes_count, retries, True, True  # should_continue=True
 
         if config.loop:
+            # Guard: loop mode reverts uncommitted changes on failure,
+            # so refuse to start if the working tree is dirty.
+            status = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                cwd=target_dir,
+                timeout=10,
+                shell=False,
+            )
+            if status.returncode != 0 or status.stdout.strip():
+                print_error(
+                    console,
+                    "Dirty Working Tree",
+                    "Loop mode requires a clean repo because failed iterations"
+                    " discard uncommitted changes.",
+                )
+                return 1
+
             # --- Loop mode: repeat review-parse-fix-test ---
             while iteration < config.max_iterations:
                 iteration += 1
