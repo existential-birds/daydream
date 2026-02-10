@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-02-09
+
+### Added
+
+- **cli:** Add `--loop` flag for continuous review-fix-test loop mode ([#14](https://github.com/existential-birds/daydream/pull/14))
+
+  Repeats the full review → parse → fix → test cycle until zero issues are found or the iteration cap is reached. Each successful iteration auto-commits changes; failed iterations revert to the last known-good state.
+
+- **cli:** Add `--max-iterations` flag to cap loop iterations (default: 5) ([#14](https://github.com/existential-birds/daydream/pull/14))
+
+- **runner:** Add dirty working tree preflight check in loop mode to prevent data loss ([#14](https://github.com/existential-birds/daydream/pull/14))
+
+- **ui:** Add iteration divider banner between loop cycles ([#14](https://github.com/existential-birds/daydream/pull/14))
+
+### Fixed
+
+- **agent:** Include tool result output in test pass/fail detection ([#14](https://github.com/existential-birds/daydream/pull/14))
+
+  `detect_test_success` now receives actual pytest output from tool results instead of only agent prose, making pass/fail detection reliable.
+
+- **phases:** Enrich test-and-heal fix prompt with truncated test output and changed file list ([#14](https://github.com/existential-birds/daydream/pull/14))
+
+- **runner:** Clean up stale `.review-output.md` between loop iterations to prevent review contamination ([#14](https://github.com/existential-birds/daydream/pull/14))
+
+- **runner:** Exit with code 1 when max iterations reached with unresolved issues ([#14](https://github.com/existential-birds/daydream/pull/14))
+
+- **runner:** Exclude reverted fixes from summary fix count ([#14](https://github.com/existential-birds/daydream/pull/14))
+
 ## [0.5.0] - 2026-02-09
 
 ### Added
@@ -142,7 +170,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/existential-birds/daydream/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/existential-birds/daydream/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/existential-birds/daydream/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/existential-birds/daydream/compare/v0.2.0...v0.3.0
