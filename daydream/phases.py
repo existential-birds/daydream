@@ -556,9 +556,9 @@ async def phase_commit_iteration(backend: Backend, cwd: Path, iteration: int) ->
     prompt = (
         "Stage all changes and commit using a conventional commit message. "
         "Review the diff to write a meaningful summary of what was fixed or changed. "
-        "Use the format: fix: <concise summary of changes>\n\n"
-        "If multiple categories of changes exist, pick the dominant one "
-        "(fix, refactor, style, perf, etc.). "
+        "Use the format: <type>: <concise summary of changes>\n\n"
+        "Pick the most appropriate type from: fix, refactor, style, perf. "
+        "If multiple categories of changes exist, pick the dominant one. "
         "Keep the subject line under 72 characters. "
         "Add a body with bullet points if there are multiple distinct changes. "
         f"End the body with: Iteration: {iteration}\n\n"
