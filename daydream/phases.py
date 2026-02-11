@@ -554,9 +554,15 @@ async def phase_commit_iteration(backend: Backend, cwd: Path, iteration: int) ->
 
     """
     prompt = (
-        f"Commit all staged and unstaged changes with the message: "
-        f"\"daydream: iteration {iteration} fixes\". "
-        f"Do NOT push. Only commit."
+        "Stage all changes and commit using a conventional commit message. "
+        "Review the diff to write a meaningful summary of what was fixed or changed. "
+        "Use the format: fix: <concise summary of changes>\n\n"
+        "If multiple categories of changes exist, pick the dominant one "
+        "(fix, refactor, style, perf, etc.). "
+        "Keep the subject line under 72 characters. "
+        "Add a body with bullet points if there are multiple distinct changes. "
+        f"End the body with: Iteration: {iteration}\n\n"
+        "Do NOT push. Only commit."
     )
     print_info(console, f"Committing iteration {iteration} changes...")
     await run_agent(backend, cwd, prompt)
