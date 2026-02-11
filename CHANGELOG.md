@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-02-10
+
+### Fixed
+
+- **loop:** Use conventional commit messages for iteration commits ([#19](https://github.com/existential-birds/daydream/pull/19))
+
+  Iteration commits now describe what was actually changed (e.g., `fix(auth): remove unused import`) instead of the generic `daydream: iteration N fixes` message, making git history self-documenting.
+
+### Security
+
+- **deps:** Update cryptography from 46.0.4 to 46.0.5 ([#18](https://github.com/existential-birds/daydream/pull/18))
+
 ## [0.6.1] - 2026-02-10
 
 ### Fixed
@@ -178,7 +190,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.6.1...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/existential-birds/daydream/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/existential-birds/daydream/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/existential-birds/daydream/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/existential-birds/daydream/compare/v0.4.0...v0.5.0
