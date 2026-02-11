@@ -99,7 +99,7 @@ class LoopMockBackend(Backend):
             else:
                 yield TextEvent(text="1 test failed.")
             yield ResultEvent(structured_output=None, continuation=None)
-        elif "commit all" in prompt_lower and "do not push" in prompt_lower:
+        elif "stage all changes and commit" in prompt_lower and "do not push" in prompt_lower:
             self.commit_calls.append(prompt_lower)
             yield TextEvent(text="Committed iteration changes.")
             yield ResultEvent(structured_output=None, continuation=None)
@@ -293,8 +293,8 @@ async def test_loop_commits_between_iterations(loop_target, mock_ui_loop, monkey
     assert exit_code == 0
     # Two successful iterations with fixes -> two commits
     assert len(backend.commit_calls) == 2
-    assert "iteration 1" in backend.commit_calls[0]
-    assert "iteration 2" in backend.commit_calls[1]
+    assert "iteration: 1" in backend.commit_calls[0]
+    assert "iteration: 2" in backend.commit_calls[1]
 
 
 @pytest.mark.asyncio
