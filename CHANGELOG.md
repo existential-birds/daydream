@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-02-14
+
+### Fixed
+
+- **loop:** Capture diff base before commit so next iteration sees the diff ([#21](https://github.com/existential-birds/daydream/pull/21))
+
+  `diff_base` was recorded after `phase_commit_iteration()`, making it equal to HEAD. The next iteration's incremental diff was empty, causing the reviewer to see no changes. The base is now captured before the commit, producing a meaningful pre-fix → post-fix diff.
+
 ## [0.6.2] - 2026-02-10
 
 ### Fixed
@@ -190,7 +198,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.6.2...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/existential-birds/daydream/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/existential-birds/daydream/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/existential-birds/daydream/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/existential-birds/daydream/compare/v0.5.0...v0.6.0
