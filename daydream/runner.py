@@ -434,12 +434,13 @@ async def run(config: RunConfig | None = None) -> int:
                     print_warning(console, "Failed to revert changes")
                 return items, fixes_count, retries, False, False  # should_continue=False (failed)
 
+            # Record the pre-commit SHA so the next iteration reviews
+            # the changes introduced by this iteration's commit
+            # (diff from pre-commit HEAD to post-commit HEAD).
+            diff_base = _get_head_sha(target_dir)
+
             # Commit iteration changes so the next review sees a clean tree
             await phase_commit_iteration(fix_backend, target_dir, iteration)
-
-            # Record the commit SHA so the next iteration reviews only
-            # changes made after this point (incremental diff).
-            diff_base = _get_head_sha(target_dir)
 
             return items, fixes_count, retries, True, True  # should_continue=True
 
