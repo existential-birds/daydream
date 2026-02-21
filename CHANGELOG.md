@@ -204,7 +204,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.6.3...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/existential-birds/daydream/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/existential-birds/daydream/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/existential-birds/daydream/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/existential-birds/daydream/compare/v0.6.0...v0.6.1
