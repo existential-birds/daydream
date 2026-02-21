@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-02-21
+
+### Added
+
+- **cli:** Add `--go` flag for Go backend code review using `beagle-go:review-go` ([#23](https://github.com/existential-birds/daydream/pull/23))
+
 ## [0.6.3] - 2026-02-14
 
 ### Fixed
