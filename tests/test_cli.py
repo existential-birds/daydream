@@ -117,3 +117,8 @@ def test_max_iterations_without_loop_accepted(monkeypatch, capsys):
     config = _parse_args()
     assert config.max_iterations == 3
     assert config.loop is False
+
+
+def test_skill_map_includes_go():
+    from daydream.config import SKILL_MAP
+    assert SKILL_MAP["go"] == "beagle-go:review-go"
