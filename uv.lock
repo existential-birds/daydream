@@ -191,7 +191,7 @@ wheels = [
 
 [[package]]
 name = "daydream"
-version = "0.6.1"
+version = "0.6.3"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },

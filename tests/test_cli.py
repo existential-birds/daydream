@@ -6,6 +6,7 @@ import sys
 import pytest
 
 from daydream.cli import _parse_args
+from daydream.config import SKILL_MAP
 
 
 def test_default_backend_is_claude(monkeypatch):
@@ -117,3 +118,19 @@ def test_max_iterations_without_loop_accepted(monkeypatch, capsys):
     config = _parse_args()
     assert config.max_iterations == 3
     assert config.loop is False
+
+
+def test_skill_map_includes_go():
+    assert SKILL_MAP["go"] == "beagle-go:review-go"
+
+
+def test_go_flag(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--go"])
+    config = _parse_args()
+    assert config.skill == "go"
+
+
+def test_skill_choice_go(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", "go"])
+    config = _parse_args()
+    assert config.skill == "go"

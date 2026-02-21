@@ -71,6 +71,7 @@ class ClaudeBackend:
             setting_sources=["user", "project", "local"],
             model=self.model,
             output_format=output_format,
+            max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
         )
 
         structured_result: Any = None
