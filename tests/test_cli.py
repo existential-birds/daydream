@@ -122,3 +122,15 @@ def test_max_iterations_without_loop_accepted(monkeypatch, capsys):
 
 def test_skill_map_includes_go():
     assert SKILL_MAP["go"] == "beagle-go:review-go"
+
+
+def test_go_flag(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--go"])
+    config = _parse_args()
+    assert config.skill == "go"
+
+
+def test_skill_choice_go(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", "go"])
+    config = _parse_args()
+    assert config.skill == "go"
