@@ -1,6 +1,8 @@
 # tests/test_phases.py
 """Tests for phase functions with backend abstraction."""
 
+import subprocess
+
 import pytest
 
 from daydream.backends import (
@@ -205,9 +207,6 @@ class TestBuildFixPrompt:
 
         assert "Files modified" not in result
         assert "Focus on the files" not in result
-
-
-import subprocess
 
 
 def test_git_diff_returns_diff(tmp_path):

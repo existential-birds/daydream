@@ -1,6 +1,7 @@
 """Phase functions for the review and fix loop."""
 
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -943,8 +944,6 @@ def _write_plan_markdown(
         original_issues: Full issue list (for severity/recommendation metadata).
 
     """
-    from datetime import datetime
-
     issue_map = {i["id"]: i for i in original_issues}
     plan = plan_data.get("plan", plan_data)  # Handle both wrapped and unwrapped
 
@@ -1060,8 +1059,6 @@ Diff for context:
     daydream_dir.mkdir(exist_ok=True)
 
     # Write plan file
-    from datetime import datetime
-
     timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     plan_path = daydream_dir / f"plan-{timestamp}.md"
 

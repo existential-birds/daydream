@@ -535,8 +535,8 @@ async def test_concurrent_tool_panels_display_results(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_trust_full_flow(tmp_path, monkeypatch):
     """Integration test: full --trust-the-technology flow through all three phases."""
-    import subprocess
     import os
+    import subprocess
 
     # Set up a git repo with a branch
     env = {**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
@@ -582,7 +582,9 @@ async def test_run_trust_full_flow(tmp_path, monkeypatch):
                             "summary": "Extract string to constant",
                             "issues": [{
                                 "id": 1, "title": "Use constants",
-                                "changes": [{"file": "app.py", "description": "Extract to constant", "action": "modify"}],
+                                "changes": [
+                                    {"file": "app.py", "description": "Extract to constant", "action": "modify"}
+                                ],
                             }],
                         }
                     },
@@ -637,8 +639,8 @@ async def test_run_trust_full_flow(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_run_trust_does_not_prompt_for_skill(tmp_path, monkeypatch):
     """--ttt mode should never prompt for skill selection."""
-    import subprocess
     import os
+    import subprocess
 
     env = {**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"}

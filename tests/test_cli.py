@@ -202,7 +202,9 @@ def test_phase_subtitles_include_wonder_and_envision():
 
 def test_print_issues_table_renders(capsys):
     from io import StringIO
+
     from rich.console import Console
+
     from daydream.ui import NEON_THEME, print_issues_table
 
     test_console = Console(file=StringIO(), theme=NEON_THEME, force_terminal=True)

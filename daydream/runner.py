@@ -301,10 +301,7 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
         return 0
 
     # Phase 3: Generate plan
-    plan_path = await phase_generate_plan(backend, target_dir, diff, intent_summary, issues)
-
-    if plan_path:
-        print_success(console, f"Plan written to {plan_path}")
+    await phase_generate_plan(backend, target_dir, diff, intent_summary, issues)
 
     return 0
 
