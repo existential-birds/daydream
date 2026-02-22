@@ -19,16 +19,22 @@ from daydream.backends import Backend, create_backend
 from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
 from daydream.phases import (
     FixResult,
+    _git_branch,
+    _git_diff,
+    _git_log,
     check_review_file_exists,
+    phase_alternative_review,
     phase_commit_iteration,
     phase_commit_push,
     phase_commit_push_auto,
     phase_fetch_pr_feedback,
     phase_fix,
+    phase_generate_plan,
     phase_parse_feedback,
     phase_respond_pr_feedback,
     phase_review,
     phase_test_and_heal,
+    phase_understand_intent,
     revert_uncommitted_changes,
 )
 from daydream.ui import (
@@ -256,6 +262,53 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     return 0
 
 
+async def run_trust(config: RunConfig, target_dir: Path) -> int:
+    """Execute the trust-the-technology flow: understand, evaluate, plan.
+
+    Args:
+        config: Run configuration.
+        target_dir: Resolved target directory path.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+
+    """
+    backend = _resolve_backend(config, "review")
+
+    # Gather git context
+    diff = _git_diff(target_dir)
+    log = _git_log(target_dir)
+    branch = _git_branch(target_dir)
+
+    if not diff:
+        print_warning(console, "No diff found — nothing to review")
+        return 0
+
+    console.print()
+    print_info(console, f"Target directory: {target_dir}")
+    print_info(console, f"Branch: {branch}")
+    print_info(console, f"Model: {config.model or '<backend-default>'}")
+    console.print()
+
+    # Phase 1: Understand intent
+    intent_summary = await phase_understand_intent(backend, target_dir, diff, log, branch)
+
+    # Phase 2: Alternative review
+    issues = await phase_alternative_review(backend, target_dir, diff, intent_summary)
+
+    if not issues:
+        print_success(console, "No issues found — the implementation looks good!")
+        return 0
+
+    # Phase 3: Generate plan
+    plan_path = await phase_generate_plan(backend, target_dir, diff, intent_summary, issues)
+
+    if plan_path:
+        print_success(console, f"Plan written to {plan_path}")
+
+    return 0
+
+
 async def run(config: RunConfig | None = None) -> int:
     """Execute the review and fix loop.
 
@@ -283,8 +336,9 @@ async def run(config: RunConfig | None = None) -> int:
         return 1
 
     # Get review skill (from config or prompt) - not required when starting at "test"
+    # or when using trust-the-technology mode (which has its own flow)
     skill: str | None = None
-    if config.start_at != "test":
+    if config.start_at != "test" and not config.trust_the_technology:
         if config.skill is not None:
             # Map skill name to full skill path
             if config.skill in SKILL_MAP:
@@ -336,7 +390,10 @@ async def run(config: RunConfig | None = None) -> int:
             print_info(console, f"Debug log: {debug_log_path}")
 
         # Get cleanup setting (from config or prompt)
-        if config.cleanup is not None:
+        # Trust-the-technology mode doesn't produce review files, so skip cleanup prompt.
+        if config.trust_the_technology:
+            cleanup_enabled = False
+        elif config.cleanup is not None:
             cleanup_enabled = config.cleanup
         else:
             cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
@@ -365,6 +422,10 @@ async def run(config: RunConfig | None = None) -> int:
         # PR feedback mode: separate flow
         if config.pr_number is not None:
             return await run_pr_feedback(config, target_dir)
+
+        # Trust-the-technology mode: separate flow
+        if config.trust_the_technology:
+            return await run_trust(config, target_dir)
 
         console.print()
         print_info(console, f"Target directory: {target_dir}")
