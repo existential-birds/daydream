@@ -226,7 +226,26 @@ def _parse_args() -> RunConfig:
         help="Maximum loop iterations (default: 5, only meaningful with --loop)",
     )
 
+    parser.add_argument(
+        "--trust-the-technology", "--ttt",
+        action="store_true",
+        default=False,
+        dest="trust_the_technology",
+        help="Technology-agnostic review: understand intent, evaluate alternatives, generate plan",
+    )
+
     args = parser.parse_args()
+
+    # Validate --trust-the-technology mutual exclusions
+    if args.trust_the_technology:
+        if args.skill:
+            parser.error("--trust-the-technology and skill flags are mutually exclusive")
+        if args.review_only:
+            parser.error("--trust-the-technology and --review-only are mutually exclusive")
+        if args.loop:
+            parser.error("--trust-the-technology and --loop are mutually exclusive")
+        if args.pr is not None:
+            parser.error("--trust-the-technology and --pr are mutually exclusive")
 
     # Validate mutual exclusion: --start-at and --review-only
     if args.start_at != "review" and args.review_only:
@@ -284,6 +303,7 @@ def _parse_args() -> RunConfig:
         test_backend=args.test_backend,
         loop=args.loop,
         max_iterations=args.max_iterations,
+        trust_the_technology=args.trust_the_technology,
     )
 
 

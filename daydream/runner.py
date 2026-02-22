@@ -88,6 +88,7 @@ class RunConfig:
     test_backend: str | None = None
     loop: bool = False
     max_iterations: int = 5
+    trust_the_technology: bool = False
 
 
 def _print_missing_skill_error(skill_name: str) -> None:

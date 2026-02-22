@@ -134,3 +134,59 @@ def test_skill_choice_go(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", "go"])
     config = _parse_args()
     assert config.skill == "go"
+
+
+def test_trust_the_technology_flag(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--trust-the-technology"])
+    config = _parse_args()
+    assert config.trust_the_technology is True
+
+
+def test_ttt_short_flag(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--ttt"])
+    config = _parse_args()
+    assert config.trust_the_technology is True
+
+
+def test_ttt_excludes_skill_flags(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--ttt", "--python"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_ttt_excludes_review_only(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--ttt", "--review-only"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_ttt_excludes_loop(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--ttt", "--loop"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_ttt_excludes_pr(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--ttt", "--pr", "1", "--bot", "x"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_ttt_compatible_with_backend(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--ttt", "--backend", "codex"])
+    config = _parse_args()
+    assert config.trust_the_technology is True
+    assert config.backend == "codex"
+
+
+def test_ttt_compatible_with_model(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--ttt", "--model", "sonnet"])
+    config = _parse_args()
+    assert config.trust_the_technology is True
+    assert config.model == "sonnet"
+
+
+def test_ttt_default_is_false(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--python"])
+    config = _parse_args()
+    assert config.trust_the_technology is False
