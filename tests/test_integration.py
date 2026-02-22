@@ -632,3 +632,54 @@ async def test_run_trust_full_flow(tmp_path, monkeypatch):
     assert len(plan_files) == 1
     content = plan_files[0].read_text()
     assert "Implementation Plan" in content
+
+
+@pytest.mark.asyncio
+async def test_run_trust_does_not_prompt_for_skill(tmp_path, monkeypatch):
+    """--ttt mode should never prompt for skill selection."""
+    import subprocess
+    import os
+
+    env = {**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "f.txt").write_text("a")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, env=env)
+    subprocess.run(["git", "checkout", "-b", "feat"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "f.txt").write_text("b")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "change"], cwd=tmp_path, capture_output=True, env=env)
+
+    class MinimalBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+            yield TextEvent(text="Intent: changes f.txt.")
+            yield ResultEvent(structured_output={"issues": []}, continuation=None)
+        async def cancel(self): pass
+        def format_skill_invocation(self, k, a=""): return f"/{k}"
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: MinimalBackend())
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_issues_table", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    # confirm intent
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    # This should NOT be called — if skill prompt_user is called, fail
+    def runner_prompt_trap(*args, **kwargs):
+        raise AssertionError("Should not prompt for skill selection in --ttt mode")
+    monkeypatch.setattr("daydream.runner.prompt_user", runner_prompt_trap)
+
+    config = RunConfig(target=str(tmp_path), trust_the_technology=True)
+    exit_code = await run(config)
+    assert exit_code == 0
