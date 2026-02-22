@@ -481,3 +481,101 @@ async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch):
     )
 
     assert issues == []
+
+
+@pytest.mark.asyncio
+async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch):
+    """Selected issues produce a markdown plan file in .daydream/."""
+    from daydream.phases import phase_generate_plan
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    structured_plan = {
+        "plan": {
+            "summary": "Refactor auth to use dependency injection",
+            "issues": [
+                {
+                    "id": 1,
+                    "title": "Use dependency injection",
+                    "changes": [
+                        {"file": "src/service.py", "description": "Extract interface", "action": "modify"},
+                    ],
+                },
+            ],
+        }
+    }
+
+    class PlanBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+            yield TextEvent(text="Here's the plan.")
+            yield ResultEvent(structured_output=structured_plan, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    issues = [
+        {"id": 1, "title": "Use dependency injection", "description": "Hard-coded deps",
+         "recommendation": "Use constructor injection", "severity": "high", "files": ["src/service.py"]},
+        {"id": 2, "title": "Missing tests", "description": "No coverage",
+         "recommendation": "Add tests", "severity": "low", "files": ["src/test.py"]},
+    ]
+
+    # User selects issue 1 only
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
+
+    plan_path = await phase_generate_plan(
+        PlanBackend(), tmp_path,
+        diff="diff --git ...",
+        intent_summary="Adds authentication service",
+        issues=issues,
+    )
+
+    assert plan_path is not None
+    assert plan_path.exists()
+    assert (tmp_path / ".daydream").is_dir()
+    content = plan_path.read_text()
+    assert "Implementation Plan" in content
+    assert "dependency injection" in content.lower()
+
+
+@pytest.mark.asyncio
+async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch):
+    """User enters 'none' — no plan file generated."""
+    from daydream.phases import phase_generate_plan
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    class NeverCalledBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+            raise AssertionError("Should not be called when user selects 'none'")
+            yield  # make it an async generator
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    issues = [{"id": 1, "title": "Issue", "description": "Desc",
+               "recommendation": "Fix", "severity": "low", "files": []}]
+
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "none")
+
+    plan_path = await phase_generate_plan(
+        NeverCalledBackend(), tmp_path,
+        diff="diff ...",
+        intent_summary="Test intent",
+        issues=issues,
+    )
+
+    assert plan_path is None
+    assert not (tmp_path / ".daydream").exists()

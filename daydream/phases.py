@@ -146,6 +146,47 @@ ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "plan": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "issues": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "title": {"type": "string"},
+                            "changes": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "action": {"type": "string", "enum": ["modify", "create", "delete"]},
+                                    },
+                                    "required": ["file", "description", "action"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["id", "title", "changes"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["summary", "issues"],
+            "additionalProperties": False,
+        },
+    },
+    "required": ["plan"],
+    "additionalProperties": False,
+}
+
 FixResult = tuple[dict[str, Any], bool, str | None]
 
 
@@ -883,3 +924,148 @@ Diff:
         print_info(console, "No issues found — the implementation looks good")
 
     return issues
+
+
+def _write_plan_markdown(
+    plan_path: Path,
+    plan_data: dict[str, Any],
+    intent_summary: str,
+    branch: str,
+    original_issues: list[dict[str, Any]],
+) -> None:
+    """Write the plan data as a markdown file.
+
+    Args:
+        plan_path: Path to write the markdown file.
+        plan_data: Structured plan output from the agent.
+        intent_summary: Confirmed intent summary.
+        branch: Current branch name.
+        original_issues: Full issue list (for severity/recommendation metadata).
+
+    """
+    from datetime import datetime
+
+    issue_map = {i["id"]: i for i in original_issues}
+    plan = plan_data.get("plan", plan_data)  # Handle both wrapped and unwrapped
+
+    lines = [
+        "# Implementation Plan",
+        f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"**Branch:** {branch}",
+        "",
+        "## Intent",
+        intent_summary,
+        "",
+        "## Plan Summary",
+        plan.get("summary", "No summary provided."),
+        "",
+    ]
+
+    for plan_issue in plan.get("issues", []):
+        issue_id = plan_issue.get("id", "?")
+        title = plan_issue.get("title", "Untitled")
+        original = issue_map.get(issue_id, {})
+
+        lines.append(f"## Issue {issue_id}: {title}")
+        lines.append(f"**Severity:** {original.get('severity', 'unknown')}")
+        if original.get("description"):
+            lines.append(f"**Problem:** {original['description']}")
+        if original.get("recommendation"):
+            lines.append(f"**Recommendation:** {original['recommendation']}")
+        lines.append("")
+
+        changes = plan_issue.get("changes", [])
+        if changes:
+            lines.append("### Changes")
+            for change in changes:
+                action = change.get("action", "modify")
+                file_path = change.get("file", "unknown")
+                desc = change.get("description", "")
+                lines.append(f"- **{action}** `{file_path}` — {desc}")
+            lines.append("")
+
+    plan_path.write_text("\n".join(lines))
+
+
+async def phase_generate_plan(
+    backend: Backend,
+    cwd: Path,
+    diff: str,
+    intent_summary: str,
+    issues: list[dict[str, Any]],
+) -> Path | None:
+    """Phase: Generate an implementation plan for selected issues.
+
+    Prompts the user to select which issues to address, then launches an
+    agent to create a detailed plan. Writes the plan as markdown to
+    .daydream/plan-{timestamp}.md.
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Working directory (plan written relative to this).
+        diff: Git diff output.
+        intent_summary: Confirmed intent summary.
+        issues: Full list of issues from phase_alternative_review.
+
+    Returns:
+        Path to the generated plan file, or None if user skipped.
+
+    """
+    print_phase_hero(console, "ENVISION", phase_subtitle("ENVISION"))
+
+    console.print()
+    response = prompt_user(
+        console,
+        "Create an implementation plan? Enter issue numbers (e.g., 1,3,5) or 'all', or 'none' to skip",
+        "all",
+    )
+
+    selected_ids = _parse_issue_selection(response, issues)
+    if not selected_ids:
+        print_dim(console, "Skipping plan generation")
+        return None
+
+    selected_issues = [i for i in issues if i["id"] in selected_ids]
+    issues_text = "\n".join(
+        f"- #{i['id']} [{i.get('severity', '?')}] {i.get('title', 'No title')}: "
+        f"{i.get('description', '')} → {i.get('recommendation', '')}"
+        for i in selected_issues
+    )
+
+    prompt = f"""The intent of this PR is:
+{intent_summary}
+
+Create a detailed implementation plan for fixing these issues:
+{issues_text}
+
+For each issue, specify what files to change, what the change should be,
+and why. Make this actionable enough to hand to another developer or agent.
+
+Diff for context:
+{diff}
+"""
+
+    console.print()
+    print_info(console, f"Generating plan for {len(selected_issues)} issue(s)...")
+
+    result, _ = await run_agent(backend, cwd, prompt, output_schema=PLAN_SCHEMA)
+
+    if not isinstance(result, dict):
+        _log_debug(f"[TTT_PLAN] unexpected result type: {type(result).__name__}\n")
+        print_warning(console, "Failed to generate structured plan")
+        return None
+
+    # Ensure .daydream/ directory exists
+    daydream_dir = cwd / ".daydream"
+    daydream_dir.mkdir(exist_ok=True)
+
+    # Write plan file
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    plan_path = daydream_dir / f"plan-{timestamp}.md"
+
+    _write_plan_markdown(plan_path, result, intent_summary, _git_branch(cwd), selected_issues)
+
+    print_success(console, f"Plan written to {plan_path}")
+    return plan_path
