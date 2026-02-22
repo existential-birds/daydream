@@ -170,6 +170,75 @@ def _detect_default_branch(cwd: Path) -> str | None:
     return None
 
 
+def _git_diff(cwd: Path) -> str:
+    """Get the diff of current branch against the default branch.
+
+    Returns:
+        The diff output, or empty string if detection fails or no diff.
+
+    """
+    base_branch = _detect_default_branch(cwd)
+    if not base_branch:
+        return ""
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "diff", f"{base_branch}...HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=30,
+            shell=False,
+        )
+        return result.stdout if result.returncode == 0 else ""
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def _git_log(cwd: Path) -> str:
+    """Get the commit log of the current branch since diverging from default branch.
+
+    Returns:
+        The log output, or empty string if detection fails.
+
+    """
+    base_branch = _detect_default_branch(cwd)
+    if not base_branch:
+        return ""
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "log", f"{base_branch}..HEAD", "--oneline"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=10,
+            shell=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def _git_branch(cwd: Path) -> str:
+    """Get the current branch name.
+
+    Returns:
+        The branch name, or empty string if detection fails.
+
+    """
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=5,
+            shell=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
 def check_review_file_exists(target_dir: Path) -> None:
     """Check that the review output file exists.
 

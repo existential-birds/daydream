@@ -205,3 +205,82 @@ class TestBuildFixPrompt:
 
         assert "Files modified" not in result
         assert "Focus on the files" not in result
+
+
+import subprocess
+
+
+def test_git_diff_returns_diff(tmp_path):
+    """Test _git_diff returns diff output against default branch."""
+    from daydream.phases import _git_diff
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "file.txt").write_text("hello")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True,
+                    env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+                         "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"})
+    subprocess.run(["git", "checkout", "-b", "feature"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "file.txt").write_text("world")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "change"], cwd=tmp_path, capture_output=True,
+                    env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+                         "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"})
+
+    diff = _git_diff(tmp_path)
+    assert "hello" in diff or "world" in diff
+
+
+def test_git_log_returns_log(tmp_path):
+    """Test _git_log returns commit log."""
+    from daydream.phases import _git_log
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "file.txt").write_text("hello")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=tmp_path, capture_output=True,
+                    env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+                         "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"})
+    subprocess.run(["git", "checkout", "-b", "feature"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "new.txt").write_text("new")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "add new file"], cwd=tmp_path, capture_output=True,
+                    env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+                         "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"})
+
+    log = _git_log(tmp_path)
+    assert "add new file" in log
+
+
+def test_git_branch_returns_branch(tmp_path):
+    """Test _git_branch returns current branch name."""
+    from daydream.phases import _git_branch
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "my-feature"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "file.txt").write_text("x")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True,
+                    env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+                         "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"})
+
+    branch = _git_branch(tmp_path)
+    assert branch == "my-feature"
+
+
+def test_git_diff_empty_when_no_changes(tmp_path):
+    """Test _git_diff returns empty string when branch has no diff."""
+    from daydream.phases import _git_diff
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "file.txt").write_text("hello")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True,
+                    env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+                         "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"})
+
+    diff = _git_diff(tmp_path)
+    assert diff == ""
