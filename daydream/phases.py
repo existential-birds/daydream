@@ -689,3 +689,76 @@ async def phase_respond_pr_feedback(
 
     await run_agent(backend, cwd, skill_invocation)
     print_success(console, f"Responded to PR #{pr_number} feedback")
+
+
+async def phase_understand_intent(
+    backend: Backend,
+    cwd: Path,
+    diff: str,
+    log: str,
+    branch: str,
+) -> str:
+    """Phase: Understand the intent of the PR through conversational confirmation.
+
+    The agent examines the diff, commit log, and branch name to understand
+    what the PR is trying to accomplish. The user confirms or corrects until
+    the understanding is accurate.
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Working directory for exploration.
+        diff: Git diff output (main...HEAD).
+        log: Git log output (main..HEAD --oneline).
+        branch: Current branch name.
+
+    Returns:
+        The confirmed intent summary string.
+
+    """
+    print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
+
+    prompt = f"""You have full access to explore the codebase. Examine the diff below and the codebase to understand the intent of these changes. Present your understanding concisely — what problem is being solved and how.
+
+Branch: {branch}
+
+Commit log:
+{log}
+
+Diff:
+{diff}
+"""
+
+    while True:
+        console.print()
+        print_info(console, "Agent is analyzing the changes...")
+
+        output, _ = await run_agent(backend, cwd, prompt)
+        intent_text = output if isinstance(output, str) else str(output)
+
+        console.print()
+        response = prompt_user(
+            console,
+            "Is this understanding correct? [y/provide correction]",
+            "y",
+        )
+
+        if response.lower() in ("y", "yes"):
+            return intent_text
+
+        # User provided a correction — build new prompt with context
+        prompt = f"""You previously described the intent of these changes as:
+
+{intent_text}
+
+The user corrected your understanding: {response}
+
+Re-examine the codebase and diff, and present an updated understanding of the intent.
+
+Branch: {branch}
+
+Commit log:
+{log}
+
+Diff:
+{diff}
+"""

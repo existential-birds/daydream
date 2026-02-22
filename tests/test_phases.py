@@ -284,3 +284,117 @@ def test_git_diff_empty_when_no_changes(tmp_path):
 
     diff = _git_diff(tmp_path)
     assert diff == ""
+
+
+@pytest.mark.asyncio
+async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch):
+    """User confirms the agent's understanding on the first attempt."""
+    from daydream.phases import phase_understand_intent
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    class IntentBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+            yield TextEvent(text="This PR adds a login page with email/password authentication.")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    # User confirms with "y"
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    result = await phase_understand_intent(
+        IntentBackend(), tmp_path,
+        diff="diff --git a/login.py ...",
+        log="abc1234 add login page",
+        branch="feat/login",
+    )
+
+    assert "login" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeypatch):
+    """User corrects the agent's understanding, then confirms on second attempt."""
+    from daydream.phases import phase_understand_intent
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    call_count = 0
+
+    class IntentBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield TextEvent(text="This PR adds a signup page.")
+                yield ResultEvent(structured_output=None, continuation=None)
+            else:
+                yield TextEvent(text="This PR adds a login page with OAuth support.")
+                yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    # First: correction, second: confirm
+    responses = iter(["No, it's a login page with OAuth, not signup", "y"])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(responses))
+
+    result = await phase_understand_intent(
+        IntentBackend(), tmp_path,
+        diff="diff --git ...",
+        log="abc1234 add login",
+        branch="feat/login",
+    )
+
+    assert call_count == 2
+    assert "login" in result.lower()
+
+
+def test_parse_issue_selection_all():
+    from daydream.phases import _parse_issue_selection
+    issues = [{"id": 1}, {"id": 2}, {"id": 3}]
+    assert _parse_issue_selection("all", issues) == [1, 2, 3]
+
+
+def test_parse_issue_selection_none():
+    from daydream.phases import _parse_issue_selection
+    issues = [{"id": 1}, {"id": 2}]
+    assert _parse_issue_selection("none", issues) == []
+    assert _parse_issue_selection("", issues) == []
+
+
+def test_parse_issue_selection_specific():
+    from daydream.phases import _parse_issue_selection
+    issues = [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}]
+    assert _parse_issue_selection("1,3,5", issues) == [1, 3, 5]
+
+
+def test_parse_issue_selection_with_spaces():
+    from daydream.phases import _parse_issue_selection
+    issues = [{"id": 1}, {"id": 2}, {"id": 3}]
+    assert _parse_issue_selection("1, 3", issues) == [1, 3]
+
+
+def test_parse_issue_selection_invalid_ignored():
+    from daydream.phases import _parse_issue_selection
+    issues = [{"id": 1}, {"id": 2}]
+    # "99" doesn't exist, silently ignored
+    assert _parse_issue_selection("1,99", issues) == [1]
+
+
+def test_parse_issue_selection_single():
+    from daydream.phases import _parse_issue_selection
+    issues = [{"id": 1}, {"id": 2}]
+    assert _parse_issue_selection("2", issues) == [2]
