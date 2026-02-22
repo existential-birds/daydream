@@ -157,6 +157,18 @@ PHASE_SUBTITLES = {
         "voices from the waking world",
         "attending to the murmurs",
     ],
+    "WONDER": [
+        "imagining what could be",
+        "seeing with different eyes",
+        "questioning the obvious",
+        "the road not taken",
+    ],
+    "ENVISION": [
+        "shaping the path forward",
+        "drawing the map",
+        "from thought to intention",
+        "the blueprint emerges",
+    ],
 }
 
 

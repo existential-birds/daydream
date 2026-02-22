@@ -190,3 +190,29 @@ def test_ttt_default_is_false(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--python"])
     config = _parse_args()
     assert config.trust_the_technology is False
+
+
+def test_phase_subtitles_include_wonder_and_envision():
+    from daydream.ui import PHASE_SUBTITLES
+    assert "WONDER" in PHASE_SUBTITLES
+    assert "ENVISION" in PHASE_SUBTITLES
+    assert len(PHASE_SUBTITLES["WONDER"]) >= 2
+    assert len(PHASE_SUBTITLES["ENVISION"]) >= 2
+
+
+def test_print_issues_table_renders(capsys):
+    from io import StringIO
+    from rich.console import Console
+    from daydream.ui import NEON_THEME, print_issues_table
+
+    test_console = Console(file=StringIO(), theme=NEON_THEME, force_terminal=True)
+    issues = [
+        {"id": 1, "title": "Bad pattern", "severity": "high", "description": "Uses antipattern",
+         "recommendation": "Refactor", "files": ["src/main.py"]},
+        {"id": 2, "title": "Missing test", "severity": "low", "description": "No test coverage",
+         "recommendation": "Add tests", "files": ["src/utils.py"]},
+    ]
+    print_issues_table(test_console, issues)
+    output = test_console.file.getvalue()
+    assert "Bad pattern" in output
+    assert "Missing test" in output
