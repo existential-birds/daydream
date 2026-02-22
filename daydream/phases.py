@@ -22,6 +22,7 @@ from daydream.ui import (
     print_fix_complete,
     print_fix_progress,
     print_info,
+    print_issues_table,
     print_menu,
     print_phase_hero,
     print_success,
@@ -113,6 +114,30 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
                     "line": {"type": "integer"},
                 },
                 "required": ["id", "description", "file", "line"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["issues"],
+    "additionalProperties": False,
+}
+
+ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "recommendation": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "files": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id", "title", "description", "recommendation", "severity", "files"],
                 "additionalProperties": False,
             },
         },
@@ -748,7 +773,8 @@ async def phase_understand_intent(
     """
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
 
-    prompt = f"""You have full access to explore the codebase. Examine the diff below and the codebase to understand the intent of these changes. Present your understanding concisely — what problem is being solved and how.
+    prompt = f"""You have full access to explore the codebase. Examine the diff below and the codebase to \
+understand the intent of these changes. Present your understanding concisely — what problem is being solved and how.
 
 Branch: {branch}
 
@@ -793,3 +819,67 @@ Commit log:
 Diff:
 {diff}
 """
+
+
+async def phase_alternative_review(
+    backend: Backend,
+    cwd: Path,
+    diff: str,
+    intent_summary: str,
+) -> list[dict[str, Any]]:
+    """Phase: Evaluate whether there's a better way to implement the PR.
+
+    A fresh agent receives the confirmed intent summary and explores the
+    codebase to identify issues — both architectural alternatives and
+    incremental improvements.
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Working directory for exploration.
+        diff: Git diff output.
+        intent_summary: Confirmed intent summary from phase_understand_intent.
+
+    Returns:
+        List of issue dicts, each with id, title, description, recommendation,
+        severity, and files keys.
+
+    """
+    print_phase_hero(console, "WONDER", phase_subtitle("WONDER"))
+
+    prompt = f"""The intent of this PR has been confirmed as:
+
+{intent_summary}
+
+Given this intent, explore the codebase and evaluate the implementation
+in the diff below. Would you have done this differently?
+
+Return a numbered list of issues covering both architectural alternatives
+and incremental improvements. For each issue, include: a sequential id
+number, a brief title, a description of what's wrong or could be better,
+your recommended alternative, a severity level (high/medium/low), and
+the relevant file paths.
+
+If the implementation is solid and you wouldn't change anything, return an empty issues list.
+
+Diff:
+{diff}
+"""
+
+    console.print()
+    print_info(console, "Agent is evaluating the implementation...")
+
+    result, _ = await run_agent(backend, cwd, prompt, output_schema=ALTERNATIVE_REVIEW_SCHEMA)
+
+    if isinstance(result, dict) and "issues" in result:
+        issues = result["issues"]
+    else:
+        _log_debug(f"[TTT_REVIEW] unexpected result type: {type(result).__name__}: {result!r:.500}\n")
+        issues = []
+
+    if issues:
+        print_info(console, f"Found {len(issues)} issues")
+        print_issues_table(console, issues)
+    else:
+        print_info(console, "No issues found — the implementation looks good")
+
+    return issues
