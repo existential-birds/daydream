@@ -398,3 +398,86 @@ def test_parse_issue_selection_single():
     from daydream.phases import _parse_issue_selection
     issues = [{"id": 1}, {"id": 2}]
     assert _parse_issue_selection("2", issues) == [2]
+
+
+@pytest.mark.asyncio
+async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch):
+    """Agent returns numbered issues via structured output."""
+    from daydream.phases import phase_alternative_review
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_issues_table", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    structured_issues = {
+        "issues": [
+            {
+                "id": 1,
+                "title": "Use dependency injection",
+                "description": "Hard-coded dependencies make testing difficult",
+                "recommendation": "Use constructor injection",
+                "severity": "high",
+                "files": ["src/service.py"],
+            },
+            {
+                "id": 2,
+                "title": "Missing error handling",
+                "description": "No error handling for API calls",
+                "recommendation": "Add try/except with retries",
+                "severity": "medium",
+                "files": ["src/api.py"],
+            },
+        ]
+    }
+
+    class ReviewBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+            yield TextEvent(text="Found 2 issues.")
+            yield ResultEvent(structured_output=structured_issues, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    issues = await phase_alternative_review(
+        ReviewBackend(), tmp_path,
+        diff="diff --git ...",
+        intent_summary="Adds a user authentication service.",
+    )
+
+    assert len(issues) == 2
+    assert issues[0]["title"] == "Use dependency injection"
+    assert issues[1]["severity"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch):
+    """Agent finds no issues — returns empty list."""
+    from daydream.phases import phase_alternative_review
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_issues_table", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    class NoIssuesBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+            yield TextEvent(text="Implementation looks good.")
+            yield ResultEvent(structured_output={"issues": []}, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    issues = await phase_alternative_review(
+        NoIssuesBackend(), tmp_path,
+        diff="diff --git ...",
+        intent_summary="Adds a login page.",
+    )
+
+    assert issues == []

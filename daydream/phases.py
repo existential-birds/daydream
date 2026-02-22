@@ -68,6 +68,37 @@ def _build_fix_prompt(
     return "\n".join(parts)
 
 
+def _parse_issue_selection(user_input: str, issues: list[dict[str, Any]]) -> list[int]:
+    """Parse user's issue selection into a list of issue IDs.
+
+    Args:
+        user_input: User input string ("all", "none", "", or comma-separated IDs).
+        issues: Full list of issue dicts with "id" keys.
+
+    Returns:
+        List of selected issue IDs. Empty list means skip.
+
+    """
+    cleaned = user_input.strip().lower()
+
+    if cleaned in ("none", ""):
+        return []
+
+    if cleaned == "all":
+        return [issue["id"] for issue in issues]
+
+    valid_ids = {issue["id"] for issue in issues}
+    selected = []
+    for part in cleaned.split(","):
+        part = part.strip()
+        if part.isdigit():
+            issue_id = int(part)
+            if issue_id in valid_ids:
+                selected.append(issue_id)
+
+    return selected
+
+
 FEEDBACK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
