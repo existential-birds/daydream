@@ -395,8 +395,9 @@ async def run_agent(
                             for i in issues:
                                 if "file" in i and "line" in i:
                                     desc = i.get("description", "")
+                                    issue_id = i.get("id", "?")
                                     formatted.append(
-                                        f"[{i['id']}] {i['file']}:{i['line']} - {desc}"
+                                        f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
                                     )
                                 else:
                                     label = i.get("title", i.get("description", ""))
