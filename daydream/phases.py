@@ -1,6 +1,7 @@
 """Phase functions for the review and fix loop."""
 
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from daydream.ui import (
     print_fix_complete,
     print_fix_progress,
     print_info,
+    print_issues_table,
     print_menu,
     print_phase_hero,
     print_success,
@@ -68,6 +70,37 @@ def _build_fix_prompt(
     return "\n".join(parts)
 
 
+def _parse_issue_selection(user_input: str, issues: list[dict[str, Any]]) -> list[int]:
+    """Parse user's issue selection into a list of issue IDs.
+
+    Args:
+        user_input: User input string ("all", "none", "", or comma-separated IDs).
+        issues: Full list of issue dicts with "id" keys.
+
+    Returns:
+        List of selected issue IDs. Empty list means skip.
+
+    """
+    cleaned = user_input.strip().lower()
+
+    if cleaned in ("none", ""):
+        return []
+
+    if cleaned == "all":
+        return [issue["id"] for issue in issues]
+
+    valid_ids = {issue["id"] for issue in issues}
+    selected = []
+    for part in cleaned.split(","):
+        part = part.strip()
+        if part.isdigit():
+            issue_id = int(part)
+            if issue_id in valid_ids:
+                selected.append(issue_id)
+
+    return selected
+
+
 FEEDBACK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -87,6 +120,71 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["issues"],
+    "additionalProperties": False,
+}
+
+ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "recommendation": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "files": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id", "title", "description", "recommendation", "severity", "files"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["issues"],
+    "additionalProperties": False,
+}
+
+PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "plan": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "issues": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "title": {"type": "string"},
+                            "changes": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "action": {"type": "string", "enum": ["modify", "create", "delete"]},
+                                    },
+                                    "required": ["file", "description", "action"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["id", "title", "changes"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["summary", "issues"],
+            "additionalProperties": False,
+        },
+    },
+    "required": ["plan"],
     "additionalProperties": False,
 }
 
@@ -168,6 +266,75 @@ def _detect_default_branch(cwd: Path) -> str | None:
             pass
 
     return None
+
+
+def _git_diff(cwd: Path) -> str:
+    """Get the diff of current branch against the default branch.
+
+    Returns:
+        The diff output, or empty string if detection fails or no diff.
+
+    """
+    base_branch = _detect_default_branch(cwd)
+    if not base_branch:
+        return ""
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "diff", f"{base_branch}...HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=30,
+            shell=False,
+        )
+        return result.stdout if result.returncode == 0 else ""
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def _git_log(cwd: Path) -> str:
+    """Get the commit log of the current branch since diverging from default branch.
+
+    Returns:
+        The log output, or empty string if detection fails.
+
+    """
+    base_branch = _detect_default_branch(cwd)
+    if not base_branch:
+        return ""
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "log", f"{base_branch}..HEAD", "--oneline"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=10,
+            shell=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def _git_branch(cwd: Path) -> str:
+    """Get the current branch name.
+
+    Returns:
+        The branch name, or empty string if detection fails.
+
+    """
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=5,
+            shell=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (subprocess.SubprocessError, OSError):
+        return ""
 
 
 def check_review_file_exists(target_dir: Path) -> None:
@@ -620,3 +787,282 @@ async def phase_respond_pr_feedback(
 
     await run_agent(backend, cwd, skill_invocation)
     print_success(console, f"Responded to PR #{pr_number} feedback")
+
+
+async def phase_understand_intent(
+    backend: Backend,
+    cwd: Path,
+    diff: str,
+    log: str,
+    branch: str,
+) -> str:
+    """Phase: Understand the intent of the PR through conversational confirmation.
+
+    The agent examines the diff, commit log, and branch name to understand
+    what the PR is trying to accomplish. The user confirms or corrects until
+    the understanding is accurate.
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Working directory for exploration.
+        diff: Git diff output (main...HEAD).
+        log: Git log output (main..HEAD --oneline).
+        branch: Current branch name.
+
+    Returns:
+        The confirmed intent summary string.
+
+    """
+    print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
+
+    prompt = f"""You have full access to explore the codebase. Examine the diff below and the codebase to \
+understand the intent of these changes. Present your understanding concisely — what problem is being solved and how.
+
+Branch: {branch}
+
+Commit log:
+{log}
+
+Diff:
+{diff}
+"""
+
+    while True:
+        console.print()
+        print_info(console, "Agent is analyzing the changes...")
+
+        output, _ = await run_agent(backend, cwd, prompt)
+        intent_text = output if isinstance(output, str) else str(output)
+
+        console.print()
+        response = prompt_user(
+            console,
+            "Is this understanding correct? [y/provide correction]",
+            "y",
+        )
+
+        if response.lower() in ("y", "yes"):
+            return intent_text
+
+        # User provided a correction — build new prompt with context
+        prompt = f"""You previously described the intent of these changes as:
+
+{intent_text}
+
+The user corrected your understanding: {response}
+
+Re-examine the codebase and diff, and present an updated understanding of the intent.
+
+Branch: {branch}
+
+Commit log:
+{log}
+
+Diff:
+{diff}
+"""
+
+
+async def phase_alternative_review(
+    backend: Backend,
+    cwd: Path,
+    diff: str,
+    intent_summary: str,
+) -> list[dict[str, Any]]:
+    """Phase: Evaluate whether there's a better way to implement the PR.
+
+    A fresh agent receives the confirmed intent summary and explores the
+    codebase to identify issues — both architectural alternatives and
+    incremental improvements.
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Working directory for exploration.
+        diff: Git diff output.
+        intent_summary: Confirmed intent summary from phase_understand_intent.
+
+    Returns:
+        List of issue dicts, each with id, title, description, recommendation,
+        severity, and files keys.
+
+    """
+    print_phase_hero(console, "WONDER", phase_subtitle("WONDER"))
+
+    prompt = f"""The intent of this PR has been confirmed as:
+
+{intent_summary}
+
+Given this intent, explore the codebase and evaluate the implementation
+in the diff below. Would you have done this differently?
+
+Return a numbered list of issues covering both architectural alternatives
+and incremental improvements. For each issue, include: a sequential id
+number, a brief title, a description of what's wrong or could be better,
+your recommended alternative, a severity level (high/medium/low), and
+the relevant file paths.
+
+If the implementation is solid and you wouldn't change anything, return an empty issues list.
+
+Diff:
+{diff}
+"""
+
+    console.print()
+    print_info(console, "Agent is evaluating the implementation...")
+
+    result, _ = await run_agent(backend, cwd, prompt, output_schema=ALTERNATIVE_REVIEW_SCHEMA)
+
+    if isinstance(result, dict) and "issues" in result:
+        issues = result["issues"]
+    else:
+        _log_debug(f"[TTT_REVIEW] unexpected result type: {type(result).__name__}: {result!r:.500}\n")
+        issues = []
+
+    if issues:
+        print_info(console, f"Found {len(issues)} issues")
+        print_issues_table(console, issues)
+    else:
+        print_info(console, "No issues found — the implementation looks good")
+
+    return issues
+
+
+def _write_plan_markdown(
+    plan_path: Path,
+    plan_data: dict[str, Any],
+    intent_summary: str,
+    branch: str,
+    original_issues: list[dict[str, Any]],
+) -> None:
+    """Write the plan data as a markdown file.
+
+    Args:
+        plan_path: Path to write the markdown file.
+        plan_data: Structured plan output from the agent.
+        intent_summary: Confirmed intent summary.
+        branch: Current branch name.
+        original_issues: Full issue list (for severity/recommendation metadata).
+
+    """
+    issue_map = {i["id"]: i for i in original_issues}
+    plan = plan_data.get("plan", plan_data)  # Handle both wrapped and unwrapped
+
+    lines = [
+        "# Implementation Plan",
+        f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"**Branch:** {branch}",
+        "",
+        "## Intent",
+        intent_summary,
+        "",
+        "## Plan Summary",
+        plan.get("summary", "No summary provided."),
+        "",
+    ]
+
+    for plan_issue in plan.get("issues", []):
+        issue_id = plan_issue.get("id", "?")
+        title = plan_issue.get("title", "Untitled")
+        original = issue_map.get(issue_id, {})
+
+        lines.append(f"## Issue {issue_id}: {title}")
+        lines.append(f"**Severity:** {original.get('severity', 'unknown')}")
+        if original.get("description"):
+            lines.append(f"**Problem:** {original['description']}")
+        if original.get("recommendation"):
+            lines.append(f"**Recommendation:** {original['recommendation']}")
+        lines.append("")
+
+        changes = plan_issue.get("changes", [])
+        if changes:
+            lines.append("### Changes")
+            for change in changes:
+                action = change.get("action", "modify")
+                file_path = change.get("file", "unknown")
+                desc = change.get("description", "")
+                lines.append(f"- **{action}** `{file_path}` — {desc}")
+            lines.append("")
+
+    plan_path.write_text("\n".join(lines))
+
+
+async def phase_generate_plan(
+    backend: Backend,
+    cwd: Path,
+    diff: str,
+    intent_summary: str,
+    issues: list[dict[str, Any]],
+) -> Path | None:
+    """Phase: Generate an implementation plan for selected issues.
+
+    Prompts the user to select which issues to address, then launches an
+    agent to create a detailed plan. Writes the plan as markdown to
+    .daydream/plan-{timestamp}.md.
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Working directory (plan written relative to this).
+        diff: Git diff output.
+        intent_summary: Confirmed intent summary.
+        issues: Full list of issues from phase_alternative_review.
+
+    Returns:
+        Path to the generated plan file, or None if user skipped.
+
+    """
+    print_phase_hero(console, "ENVISION", phase_subtitle("ENVISION"))
+
+    console.print()
+    response = prompt_user(
+        console,
+        "Create an implementation plan? Enter issue numbers (e.g., 1,3,5) or 'all', or 'none' to skip",
+        "all",
+    )
+
+    selected_ids = _parse_issue_selection(response, issues)
+    if not selected_ids:
+        print_dim(console, "Skipping plan generation")
+        return None
+
+    selected_issues = [i for i in issues if i["id"] in selected_ids]
+    issues_text = "\n".join(
+        f"- #{i['id']} [{i.get('severity', '?')}] {i.get('title', 'No title')}: "
+        f"{i.get('description', '')} → {i.get('recommendation', '')}"
+        for i in selected_issues
+    )
+
+    prompt = f"""The intent of this PR is:
+{intent_summary}
+
+Create a detailed implementation plan for fixing these issues:
+{issues_text}
+
+For each issue, specify what files to change, what the change should be,
+and why. Make this actionable enough to hand to another developer or agent.
+
+Diff for context:
+{diff}
+"""
+
+    console.print()
+    print_info(console, f"Generating plan for {len(selected_issues)} issue(s)...")
+
+    result, _ = await run_agent(backend, cwd, prompt, output_schema=PLAN_SCHEMA)
+
+    if not isinstance(result, dict):
+        _log_debug(f"[TTT_PLAN] unexpected result type: {type(result).__name__}\n")
+        print_warning(console, "Failed to generate structured plan")
+        return None
+
+    # Ensure .daydream/ directory exists
+    daydream_dir = cwd / ".daydream"
+    daydream_dir.mkdir(exist_ok=True)
+
+    # Write plan file
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    plan_path = daydream_dir / f"plan-{timestamp}.md"
+
+    _write_plan_markdown(plan_path, result, intent_summary, _git_branch(cwd), selected_issues)
+
+    print_success(console, f"Plan written to {plan_path}")
+    return plan_path

@@ -157,6 +157,18 @@ PHASE_SUBTITLES = {
         "voices from the waking world",
         "attending to the murmurs",
     ],
+    "WONDER": [
+        "imagining what could be",
+        "seeing with different eyes",
+        "questioning the obvious",
+        "the road not taken",
+    ],
+    "ENVISION": [
+        "shaping the path forward",
+        "drawing the map",
+        "from thought to intention",
+        "the blueprint emerges",
+    ],
 }
 
 
@@ -2081,6 +2093,58 @@ def print_summary(console: Console, data: SummaryData) -> None:
         table.add_row("Tests", status_badge)
 
     console.print(table)
+
+
+# =============================================================================
+# Issue Table Component
+# =============================================================================
+
+
+def print_issues_table(console: Console, issues: list[dict]) -> None:
+    """Display issues as a numbered Rich table.
+
+    Args:
+        console: Rich Console instance.
+        issues: List of issue dicts with id, title, severity, description,
+                recommendation, files keys.
+
+    """
+    table = Table(
+        box=box.SIMPLE_HEAVY,
+        border_style=STYLE_PURPLE,
+        show_header=True,
+        header_style=STYLE_BOLD_CYAN,
+    )
+    table.add_column("#", style=STYLE_YELLOW, width=4)
+    table.add_column("Severity", style=STYLE_ORANGE, width=8)
+    table.add_column("Issue", style=STYLE_FG)
+
+    severity_style = {"high": STYLE_RED, "medium": STYLE_YELLOW, "low": STYLE_GREEN}
+
+    for issue in issues:
+        sev = issue.get("severity", "medium")
+        table.add_row(
+            str(issue.get("id", "?")),
+            Text(sev, style=severity_style.get(sev, STYLE_FG)),
+            issue.get("title", issue.get("description", "No title")),
+        )
+
+    console.print()
+    console.print(table)
+
+    # Print full details for each issue
+    for issue in issues:
+        console.print()
+        issue_id = issue.get("id", "?")
+        title = issue.get("title", "No title")
+        console.print(Text(f"  #{issue_id}: {title}", style=STYLE_BOLD_PINK))
+        if "description" in issue:
+            console.print(Text(f"  {issue['description']}", style=STYLE_FG))
+        if "recommendation" in issue:
+            console.print(Text(f"  Recommendation: {issue['recommendation']}", style=STYLE_CYAN))
+        if "files" in issue and issue["files"]:
+            files_str = ", ".join(issue["files"])
+            console.print(Text(f"  Files: {files_str}", style=STYLE_DIM))
 
 
 # =============================================================================
