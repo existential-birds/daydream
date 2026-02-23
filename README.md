@@ -157,7 +157,7 @@ Activated with `--ttt`. A three-phase conversational review that works with any 
 2. **Evaluate alternatives**: Reviews the changes and identifies potential improvements as numbered issues
 3. **Generate plan**: For your selected issues, writes an implementation plan to `.daydream/plan-{timestamp}.md`
 
-Trust-the-technology mode is mutually exclusive with skill flags (`--python`, `--typescript`, `--elixir`), `--review-only`, `--loop`, and `--pr`.
+Trust-the-technology mode is mutually exclusive with `-s/--skill` and skill shorthands (`--python`, `--typescript`, `--elixir`, `--go`), `--review-only`, `--loop`, and `--pr`.
 
 ### PR Feedback Mode
 

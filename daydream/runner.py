@@ -365,7 +365,8 @@ async def run(config: RunConfig | None = None) -> int:
             skill = REVIEW_SKILLS[skill_enum]
 
     # Early validation: check review file exists when starting at parse or fix
-    if config.start_at in ("parse", "fix"):
+    # (not needed for trust-the-technology mode which has its own flow)
+    if config.start_at in ("parse", "fix") and not config.trust_the_technology:
         try:
             check_review_file_exists(target_dir)
         except FileNotFoundError as e:
