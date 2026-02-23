@@ -8,6 +8,7 @@ Daydream launches review agents equipped with [Beagle](https://github.com/existe
 ![demo](https://github.com/user-attachments/assets/60a80645-36de-410e-afa7-7a96efef3f57)
 ## Features
 
+- **Trust the technology**: Stack-agnostic review mode (`--ttt`) that understands your PR intent, evaluates alternatives, and generates an implementation plan
 - **Stack-aware reviews**: Beagle skills load framework-specific knowledge (FastAPI patterns, React hooks, Phoenix lifecycle, etc.) as the reviewer encounters relevant code
 - **Intelligent parsing**: Extracts actionable issues from review output, skipping positive observations
 - **Automated fixes**: Applies fixes one-by-one with minimal changes
@@ -58,6 +59,9 @@ daydream --review-only /path/to/project
 # Use Codex backend instead of Claude
 daydream --backend codex /path/to/project
 
+# Technology-agnostic review with plan generation
+daydream --ttt /path/to/project
+
 # Fix bot review comments on a PR
 daydream --pr 42 --bot "coderabbitai[bot]" /path/to/project
 ```
@@ -92,6 +96,7 @@ daydream --pr --bot "coderabbitai[bot]" /path/to/project
 | `--fix-backend` | Override backend for the fix phase | `--backend` value |
 | `--test-backend` | Override backend for the test phase | `--backend` value |
 | `--model` | Model name (`opus` for Claude, `gpt-5.3-codex` for Codex) | Backend-specific |
+| `--trust-the-technology, --ttt` | Technology-agnostic review: understand intent, evaluate alternatives, generate plan | |
 | `--review-only` | Skip fixes, only review and parse feedback | |
 | `--start-at` | Start at phase: `review`, `parse`, `fix`, or `test` | `review` |
 | `--pr [NUMBER]` | PR feedback mode (auto-detects PR number if omitted) | |
@@ -102,7 +107,7 @@ daydream --pr --bot "coderabbitai[bot]" /path/to/project
 
 ## How It Works
 
-Daydream has two modes: **standard review mode** for full codebase reviews, and **PR feedback mode** for resolving bot review comments on pull requests. Both modes support multiple backends (Claude and Codex), including per-phase overrides.
+Daydream has three modes: **standard review mode** for full codebase reviews, **trust-the-technology mode** for stack-agnostic conversational reviews, and **PR feedback mode** for resolving bot review comments on pull requests. All modes support multiple backends (Claude and Codex), including per-phase overrides.
 
 ### Standard Review Mode
 
@@ -141,6 +146,16 @@ After tests pass, optionally commit and push changes.
 
 **Note:** `--start-at test` skips all other phases and runs tests directly.
 
+### Trust the Technology Mode
+
+Activated with `--ttt`. A three-phase conversational review that works with any technology stack — no Beagle skills required.
+
+1. **Understand intent**: Explores the git diff and commit history to build context, then presents its understanding for you to confirm or correct
+2. **Evaluate alternatives**: Reviews the changes and identifies potential improvements as numbered issues
+3. **Generate plan**: For your selected issues, writes an implementation plan to `.daydream/plan-{timestamp}.md`
+
+Trust-the-technology mode is mutually exclusive with skill flags (`--python`, `--typescript`, `--elixir`), `--review-only`, `--loop`, and `--pr`.
+
 ### PR Feedback Mode
 
 Activated with `--pr` and `--bot`. Fetches bot review comments from a GitHub PR and resolves them automatically.
@@ -159,6 +174,7 @@ PR feedback mode is mutually exclusive with `--review-only`, `--start-at`, and s
 |------|-------------|
 | `.review-output.md` | Review results (removed with `--cleanup`, required for `--start-at parse/fix`) |
 | `.review-debug-{timestamp}.log` | Debug log (created when `--debug` is enabled) |
+| `.daydream/plan-{timestamp}.md` | Implementation plan (created by `--ttt` mode) |
 
 ## Architecture
 
