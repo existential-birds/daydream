@@ -308,9 +308,12 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
     # User confirms with "y"
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git a/login.py ...")
+
     result = await phase_understand_intent(
         IntentBackend(), tmp_path,
-        diff="diff --git a/login.py ...",
+        diff_path=diff_file,
         log="abc1234 add login page",
         branch="feat/login",
     )
@@ -350,9 +353,12 @@ async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeyp
     responses = iter(["No, it's a login page with OAuth, not signup", "y"])
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(responses))
 
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git ...")
+
     result = await phase_understand_intent(
         IntentBackend(), tmp_path,
-        diff="diff --git ...",
+        diff_path=diff_file,
         log="abc1234 add login",
         branch="feat/login",
     )
@@ -441,9 +447,12 @@ async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch):
         def format_skill_invocation(self, skill_key, args=""):
             return f"/{skill_key}"
 
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git ...")
+
     issues = await phase_alternative_review(
         ReviewBackend(), tmp_path,
-        diff="diff --git ...",
+        diff_path=diff_file,
         intent_summary="Adds a user authentication service.",
     )
 
@@ -473,9 +482,12 @@ async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch):
         def format_skill_invocation(self, skill_key, args=""):
             return f"/{skill_key}"
 
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git ...")
+
     issues = await phase_alternative_review(
         NoIssuesBackend(), tmp_path,
-        diff="diff --git ...",
+        diff_path=diff_file,
         intent_summary="Adds a login page.",
     )
 
@@ -528,9 +540,12 @@ async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch):
     # User selects issue 1 only
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
 
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git ...")
+
     plan_path = await phase_generate_plan(
         PlanBackend(), tmp_path,
-        diff="diff --git ...",
+        diff_path=diff_file,
         intent_summary="Adds authentication service",
         issues=issues,
     )
@@ -569,9 +584,12 @@ async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch):
 
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "none")
 
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff ...")
+
     plan_path = await phase_generate_plan(
         NeverCalledBackend(), tmp_path,
-        diff="diff ...",
+        diff_path=diff_file,
         intent_summary="Test intent",
         issues=issues,
     )

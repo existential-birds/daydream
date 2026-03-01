@@ -284,6 +284,12 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
         print_warning(console, "No diff found — nothing to review")
         return 0
 
+    # Write diff to file to avoid exceeding prompt size limits
+    daydream_dir = target_dir / ".daydream"
+    daydream_dir.mkdir(exist_ok=True)
+    diff_path = daydream_dir / "diff.patch"
+    diff_path.write_text(diff)
+
     console.print()
     print_info(console, f"Target directory: {target_dir}")
     print_info(console, f"Branch: {branch}")
@@ -291,17 +297,17 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
     console.print()
 
     # Phase 1: Understand intent
-    intent_summary = await phase_understand_intent(backend, target_dir, diff, log, branch)
+    intent_summary = await phase_understand_intent(backend, target_dir, diff_path, log, branch)
 
     # Phase 2: Alternative review
-    issues = await phase_alternative_review(backend, target_dir, diff, intent_summary)
+    issues = await phase_alternative_review(backend, target_dir, diff_path, intent_summary)
 
     if not issues:
         print_success(console, "No issues found — the implementation looks good!")
         return 0
 
     # Phase 3: Generate plan
-    await phase_generate_plan(backend, target_dir, diff, intent_summary, issues)
+    await phase_generate_plan(backend, target_dir, diff_path, intent_summary, issues)
 
     return 0
 

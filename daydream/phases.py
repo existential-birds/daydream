@@ -792,7 +792,7 @@ async def phase_respond_pr_feedback(
 async def phase_understand_intent(
     backend: Backend,
     cwd: Path,
-    diff: str,
+    diff_path: Path,
     log: str,
     branch: str,
 ) -> str:
@@ -805,7 +805,7 @@ async def phase_understand_intent(
     Args:
         backend: The Backend to execute against.
         cwd: Working directory for exploration.
-        diff: Git diff output (main...HEAD).
+        diff_path: Path to the diff file on disk.
         log: Git log output (main..HEAD --oneline).
         branch: Current branch name.
 
@@ -815,16 +815,14 @@ async def phase_understand_intent(
     """
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
 
-    prompt = f"""You have full access to explore the codebase. Examine the diff below and the codebase to \
-understand the intent of these changes. Present your understanding concisely — what problem is being solved and how.
+    prompt = f"""You have full access to explore the codebase. Read the diff file at {diff_path} \
+and examine the codebase to understand the intent of these changes. \
+Present your understanding concisely — what problem is being solved and how.
 
 Branch: {branch}
 
 Commit log:
 {log}
-
-Diff:
-{diff}
 """
 
     while True:
@@ -851,22 +849,19 @@ Diff:
 
 The user corrected your understanding: {response}
 
-Re-examine the codebase and diff, and present an updated understanding of the intent.
+Re-examine the codebase and the diff at {diff_path}, and present an updated understanding of the intent.
 
 Branch: {branch}
 
 Commit log:
 {log}
-
-Diff:
-{diff}
 """
 
 
 async def phase_alternative_review(
     backend: Backend,
     cwd: Path,
-    diff: str,
+    diff_path: Path,
     intent_summary: str,
 ) -> list[dict[str, Any]]:
     """Phase: Evaluate whether there's a better way to implement the PR.
@@ -878,7 +873,7 @@ async def phase_alternative_review(
     Args:
         backend: The Backend to execute against.
         cwd: Working directory for exploration.
-        diff: Git diff output.
+        diff_path: Path to the diff file on disk.
         intent_summary: Confirmed intent summary from phase_understand_intent.
 
     Returns:
@@ -893,7 +888,7 @@ async def phase_alternative_review(
 {intent_summary}
 
 Given this intent, explore the codebase and evaluate the implementation
-in the diff below. Would you have done this differently?
+in the diff at {diff_path}. Would you have done this differently?
 
 Return a numbered list of issues covering both architectural alternatives
 and incremental improvements. For each issue, include: a sequential id
@@ -902,9 +897,6 @@ your recommended alternative, a severity level (high/medium/low), and
 the relevant file paths.
 
 If the implementation is solid and you wouldn't change anything, return an empty issues list.
-
-Diff:
-{diff}
 """
 
     console.print()
@@ -989,7 +981,7 @@ def _write_plan_markdown(
 async def phase_generate_plan(
     backend: Backend,
     cwd: Path,
-    diff: str,
+    diff_path: Path,
     intent_summary: str,
     issues: list[dict[str, Any]],
 ) -> Path | None:
@@ -1002,7 +994,7 @@ async def phase_generate_plan(
     Args:
         backend: The Backend to execute against.
         cwd: Working directory (plan written relative to this).
-        diff: Git diff output.
+        diff_path: Path to the diff file on disk.
         intent_summary: Confirmed intent summary.
         issues: Full list of issues from phase_alternative_review.
 
@@ -1040,8 +1032,7 @@ Create a detailed implementation plan for fixing these issues:
 For each issue, specify what files to change, what the change should be,
 and why. Make this actionable enough to hand to another developer or agent.
 
-Diff for context:
-{diff}
+The diff is available at {diff_path} for context.
 """
 
     console.print()
