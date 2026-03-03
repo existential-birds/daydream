@@ -376,8 +376,8 @@ def test_parse_issue_selection_all():
 def test_parse_issue_selection_none():
     from daydream.phases import _parse_issue_selection
     issues = [{"id": 1}, {"id": 2}]
-    assert _parse_issue_selection("none", issues) == []
-    assert _parse_issue_selection("", issues) == []
+    assert _parse_issue_selection("none", issues) is None
+    assert _parse_issue_selection("", issues) is None
 
 
 def test_parse_issue_selection_specific():

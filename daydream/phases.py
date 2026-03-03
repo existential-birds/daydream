@@ -70,7 +70,7 @@ def _build_fix_prompt(
     return "\n".join(parts)
 
 
-def _parse_issue_selection(user_input: str, issues: list[dict[str, Any]]) -> list[int]:
+def _parse_issue_selection(user_input: str, issues: list[dict[str, Any]]) -> list[int] | None:
     """Parse user's issue selection into a list of issue IDs.
 
     Args:
@@ -78,13 +78,13 @@ def _parse_issue_selection(user_input: str, issues: list[dict[str, Any]]) -> lis
         issues: Full list of issue dicts with "id" keys.
 
     Returns:
-        List of selected issue IDs. Empty list means skip.
+        List of selected issue IDs, or None for explicit skip.
 
     """
     cleaned = user_input.strip().lower()
 
     if cleaned in ("none", ""):
-        return []
+        return None
 
     if cleaned == "all":
         return [issue["id"] for issue in issues]
@@ -268,16 +268,16 @@ def _detect_default_branch(cwd: Path) -> str | None:
     return None
 
 
-def _git_diff(cwd: Path) -> str:
+def _git_diff(cwd: Path) -> str | None:
     """Get the diff of current branch against the default branch.
 
     Returns:
-        The diff output, or empty string if detection fails or no diff.
+        The diff output, empty string if no diff, or None if base branch detection fails.
 
     """
     base_branch = _detect_default_branch(cwd)
     if not base_branch:
-        return ""
+        return None
     try:
         result = subprocess.run(  # noqa: S603
             ["git", "diff", f"{base_branch}...HEAD"],
@@ -287,9 +287,9 @@ def _git_diff(cwd: Path) -> str:
             timeout=30,
             shell=False,
         )
-        return result.stdout if result.returncode == 0 else ""
+        return result.stdout if result.returncode == 0 else None
     except (subprocess.SubprocessError, OSError):
-        return ""
+        return None
 
 
 def _git_log(cwd: Path) -> str:
@@ -1012,8 +1012,11 @@ async def phase_generate_plan(
     )
 
     selected_ids = _parse_issue_selection(response, issues)
-    if not selected_ids:
+    if selected_ids is None:
         print_dim(console, "Skipping plan generation")
+        return None
+    if not selected_ids:
+        print_warning(console, "No valid issue numbers found in selection")
         return None
 
     selected_issues = [i for i in issues if i["id"] in selected_ids]

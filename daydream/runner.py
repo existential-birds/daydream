@@ -280,7 +280,10 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
     log = _git_log(target_dir)
     branch = _git_branch(target_dir)
 
-    if not diff:
+    if diff is None:
+        print_error(console, "Git Error", "Unable to determine base branch for diff")
+        return 1
+    if not diff.strip():
         print_warning(console, "No diff found — nothing to review")
         return 0
 
