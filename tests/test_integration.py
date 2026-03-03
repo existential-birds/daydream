@@ -530,3 +530,158 @@ async def test_concurrent_tool_panels_display_results(monkeypatch):
     assert "git diff -- file1.py" in plain_text
     assert "git diff -- file2.py" in plain_text
     assert "git diff -- file3.py" in plain_text
+
+
+@pytest.mark.asyncio
+async def test_run_trust_full_flow(tmp_path, monkeypatch):
+    """Integration test: full --trust-the-technology flow through all three phases."""
+    import os
+    import subprocess
+
+    # Set up a git repo with a branch
+    env = {**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "app.py").write_text("print('hello')")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, env=env)
+    subprocess.run(["git", "checkout", "-b", "feat/test"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "app.py").write_text("print('world')")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "change"], cwd=tmp_path, capture_output=True, env=env)
+
+    call_count = 0
+
+    class TrustMockBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Phase 1: understand intent
+                yield TextEvent(text="This PR changes the hello message to world.")
+                yield ResultEvent(structured_output=None, continuation=None)
+            elif call_count == 2:
+                # Phase 2: alternative review
+                yield TextEvent(text="Found 1 issue.")
+                yield ResultEvent(
+                    structured_output={
+                        "issues": [{
+                            "id": 1, "title": "Use constants", "description": "Hardcoded string",
+                            "recommendation": "Use a constant", "severity": "low", "files": ["app.py"],
+                        }]
+                    },
+                    continuation=None,
+                )
+            elif call_count == 3:
+                # Phase 3: generate plan
+                yield TextEvent(text="Plan generated.")
+                yield ResultEvent(
+                    structured_output={
+                        "plan": {
+                            "summary": "Extract string to constant",
+                            "issues": [{
+                                "id": 1, "title": "Use constants",
+                                "changes": [
+                                    {"file": "app.py", "description": "Extract to constant", "action": "modify"}
+                                ],
+                            }],
+                        }
+                    },
+                    continuation=None,
+                )
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: TrustMockBackend())
+
+    # Mock UI functions
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_issues_table", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    # Mock runner UI
+    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    # Phase 1: user confirms intent; Phase 3: user selects "all" issues
+    prompt_calls = iter(["y", "all"])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(prompt_calls))
+
+    config = RunConfig(
+        target=str(tmp_path),
+        trust_the_technology=True,
+    )
+
+    exit_code = await run(config)
+
+    assert exit_code == 0
+    assert call_count == 3
+    # Plan file should exist in .daydream/
+    daydream_dir = tmp_path / ".daydream"
+    assert daydream_dir.exists()
+    plan_files = list(daydream_dir.glob("plan-*.md"))
+    assert len(plan_files) == 1
+    content = plan_files[0].read_text()
+    assert "Implementation Plan" in content
+
+
+@pytest.mark.asyncio
+async def test_run_trust_does_not_prompt_for_skill(tmp_path, monkeypatch):
+    """--ttt mode should never prompt for skill selection."""
+    import os
+    import subprocess
+
+    env = {**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "f.txt").write_text("a")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, env=env)
+    subprocess.run(["git", "checkout", "-b", "feat"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "f.txt").write_text("b")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "change"], cwd=tmp_path, capture_output=True, env=env)
+
+    class MinimalBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+            yield TextEvent(text="Intent: changes f.txt.")
+            yield ResultEvent(structured_output={"issues": []}, continuation=None)
+        async def cancel(self): pass
+        def format_skill_invocation(self, k, a=""): return f"/{k}"
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: MinimalBackend())
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_issues_table", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    # confirm intent
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    # This should NOT be called — if skill prompt_user is called, fail
+    def runner_prompt_trap(*args, **kwargs):
+        raise AssertionError("Should not prompt for skill selection in --ttt mode")
+    monkeypatch.setattr("daydream.runner.prompt_user", runner_prompt_trap)
+
+    config = RunConfig(target=str(tmp_path), trust_the_technology=True)
+    exit_code = await run(config)
+    assert exit_code == 0

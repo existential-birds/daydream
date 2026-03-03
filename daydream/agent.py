@@ -391,8 +391,18 @@ async def run_agent(
                     if not use_callback:
                         issues = structured_result.get("issues", []) if isinstance(structured_result, dict) else []
                         if issues:
-                            lines = [f"[{i['id']}] {i['file']}:{i['line']} - {i['description']}" for i in issues]
-                            agent_renderer.append("\n".join(lines))
+                            formatted = []
+                            for i in issues:
+                                if "file" in i and "line" in i:
+                                    desc = i.get("description", "")
+                                    issue_id = i.get("id", "?")
+                                    formatted.append(
+                                        f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
+                                    )
+                                else:
+                                    label = i.get("title", i.get("description", ""))
+                                    formatted.append(f"[{i.get('id', '?')}] {label}")
+                            agent_renderer.append("\n".join(formatted))
                 result_continuation = event.continuation
 
         if not use_callback:
