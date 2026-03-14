@@ -136,6 +136,22 @@ def test_skill_choice_go(monkeypatch):
     assert config.skill == "go"
 
 
+def test_skill_map_includes_rust():
+    assert SKILL_MAP["rust"] == "beagle-rust:review-rust"
+
+
+def test_rust_flag(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--rust"])
+    config = _parse_args()
+    assert config.skill == "rust"
+
+
+def test_skill_choice_rust(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", "rust"])
+    config = _parse_args()
+    assert config.skill == "rust"
+
+
 def test_trust_the_technology_flag(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--trust-the-technology"])
     config = _parse_args()

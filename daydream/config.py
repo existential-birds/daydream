@@ -21,6 +21,7 @@ class ReviewSkillChoice(Enum):
     REACT = "2"
     ELIXIR = "3"
     GO = "4"
+    RUST = "5"
 
 
 # Skill mapping for review types
@@ -29,6 +30,7 @@ REVIEW_SKILLS: dict[ReviewSkillChoice, str] = {
     ReviewSkillChoice.REACT: "beagle-react:review-frontend",
     ReviewSkillChoice.ELIXIR: "beagle-elixir:review-elixir",
     ReviewSkillChoice.GO: "beagle-go:review-go",
+    ReviewSkillChoice.RUST: "beagle-rust:review-rust",
 }
 
 # CLI skill name to full skill path mapping (derived from REVIEW_SKILLS to avoid duplication)
