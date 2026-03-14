@@ -52,6 +52,8 @@ uv sync
 daydream --python /path/to/project
 daydream --typescript /path/to/project
 daydream --elixir /path/to/project
+daydream --go /path/to/project
+daydream --rust /path/to/project
 
 # Review only, skip fixes
 daydream --review-only /path/to/project
@@ -87,11 +89,12 @@ daydream --pr --bot "coderabbitai[bot]" /path/to/project
 | Option | Description | Default |
 |--------|-------------|---------|
 | `TARGET` | Target directory | Prompt interactively |
-| `-s, --skill` | Review skill: `python`, `react`, or `elixir` | Prompt interactively |
+| `-s, --skill` | Review skill: `python`, `react`, `elixir`, `go`, `rust` | Prompt interactively |
 | `--python` | Shorthand for `-s python` | |
 | `--typescript` | Shorthand for `-s react` | |
 | `--elixir` | Shorthand for `-s elixir` | |
 | `--go` | Shorthand for `-s go` | |
+| `--rust` | Shorthand for `-s rust` | |
 | `-b, --backend` | Agent backend: `claude` or `codex` | `claude` |
 | `--review-backend` | Override backend for the review phase | `--backend` value |
 | `--fix-backend` | Override backend for the fix phase | `--backend` value |
@@ -157,7 +160,7 @@ Activated with `--ttt`. A three-phase conversational review that works with any 
 2. **Evaluate alternatives**: Reviews the changes and identifies potential improvements as numbered issues
 3. **Generate plan**: For your selected issues, writes an implementation plan to `.daydream/plan-{timestamp}.md`
 
-Trust-the-technology mode is mutually exclusive with `-s/--skill` and skill shorthands (`--python`, `--typescript`, `--elixir`, `--go`), `--review-only`, `--loop`, and `--pr`. The `--start-at` flag is ignored in this mode.
+Trust-the-technology mode is mutually exclusive with `-s/--skill` and skill shorthands (`--python`, `--typescript`, `--elixir`, `--go`, `--rust`), `--review-only`, `--loop`, and `--pr`. The `--start-at` flag is ignored in this mode.
 
 ### PR Feedback Mode
 
@@ -169,7 +172,7 @@ Activated with `--pr` and `--bot`. Fetches bot review comments from a GitHub PR 
 4. **Commit & Push**: Automatically commits and pushes all changes
 5. **Respond**: Posts fix results back on the PR as comment replies
 
-PR feedback mode is mutually exclusive with `--review-only`, `--start-at`, and skill flags (`--python`, `--typescript`, `--elixir`).
+PR feedback mode is mutually exclusive with `--review-only`, `--start-at`, and skill flags (`--python`, `--typescript`, `--elixir`, `--go`, `--rust`).
 
 ## Output Files
 
