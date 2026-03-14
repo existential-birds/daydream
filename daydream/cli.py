@@ -92,9 +92,9 @@ def _parse_args() -> RunConfig:
     skill_group = parser.add_mutually_exclusive_group()
     skill_group.add_argument(
         "-s", "--skill",
-        choices=["python", "react", "elixir", "go", "rust"],
+        choices=["python", "react", "elixir", "go", "rust", "ios"],
         default=None,
-        help="Review skill: python, react, elixir, go, rust",
+        help="Review skill: python, react, elixir, go, rust, ios",
     )
     skill_group.add_argument(
         "--python",
@@ -130,6 +130,13 @@ def _parse_args() -> RunConfig:
         const="rust",
         dest="skill",
         help="Use Rust review skill",
+    )
+    skill_group.add_argument(
+        "--ios",
+        action="store_const",
+        const="ios",
+        dest="skill",
+        help="Use iOS/SwiftUI review skill",
     )
 
     parser.add_argument(

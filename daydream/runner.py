@@ -362,6 +362,7 @@ async def run(config: RunConfig | None = None) -> int:
                 ("3", "Elixir/Phoenix (review-elixir)"),
                 ("4", "Go backend (review-go)"),
                 ("5", "Rust (review-rust)"),
+                ("6", "iOS/SwiftUI (review-ios)"),
             ])
 
             skill_choice = prompt_user(console, "Choice", "1")
