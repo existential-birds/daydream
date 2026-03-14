@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-03-14
+
+### Added
+
+- **cli:** Add `--ios` flag and `-s ios` option for iOS/SwiftUI code review using `beagle-ios:review-ios` ([#32](https://github.com/existential-birds/daydream/pull/32))
+
 ## [0.9.0] - 2026-03-14
 
 ### Added
@@ -225,7 +231,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.9.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/existential-birds/daydream/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/existential-birds/daydream/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/existential-birds/daydream/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/existential-birds/daydream/compare/v0.6.3...v0.7.0
