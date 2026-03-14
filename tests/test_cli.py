@@ -152,6 +152,22 @@ def test_skill_choice_rust(monkeypatch):
     assert config.skill == "rust"
 
 
+def test_skill_map_includes_ios():
+    assert SKILL_MAP["ios"] == "beagle-ios:review-ios"
+
+
+def test_ios_flag(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--ios"])
+    config = _parse_args()
+    assert config.skill == "ios"
+
+
+def test_skill_choice_ios(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", "ios"])
+    config = _parse_args()
+    assert config.skill == "ios"
+
+
 def test_trust_the_technology_flag(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--trust-the-technology"])
     config = _parse_args()
