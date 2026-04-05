@@ -19,7 +19,6 @@ Requirements for this milestone. Each maps to roadmap phases.
 - [ ] **AGNT-01**: 3-5 parallel pre-scan subagents explore affected areas before review
 - [ ] **AGNT-02**: Review agent spawns on-demand explorer subagents when it encounters uncertainty
 - [ ] **AGNT-03**: Backend protocol extended with `agents` parameter for subagent support
-- [ ] **AGNT-04**: Exploration budget system enforces hard caps (depth, files, tokens, time)
 
 ### Review Quality
 
@@ -58,9 +57,10 @@ Deferred to future release. Tracked but not in current roadmap.
 
 | Feature | Reason |
 |---------|--------|
+| Exploration budget system (AGNT-04) | Unnecessary complexity for v1 |
 | mem0 integration | Heavy infrastructure (LLM + embedder + vector store) conflicts with CLI tool ethos |
 | Full codebase indexing/embedding | Agent has direct file access via tools; the filesystem is the index |
-| Custom orchestration framework | Use SDK subagents — explicitly ruled out in project goals |
+| Custom orchestration framework | Use SDK subagents -- explicitly ruled out in project goals |
 | Style/formatting nitpicks | Linters handle this better; #1 source of review fatigue |
 | Comment volume maximization | Optimize for precision over recall; best tools produce ~3.6 comments per PR |
 | Real-time streaming exploration results | Simple progress indicator sufficient; complexity without quality gain |
@@ -72,28 +72,27 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EXPL-01 | TBD | Pending |
-| EXPL-02 | TBD | Pending |
-| EXPL-03 | TBD | Pending |
-| EXPL-04 | TBD | Pending |
-| AGNT-01 | TBD | Pending |
-| AGNT-02 | TBD | Pending |
-| AGNT-03 | TBD | Pending |
-| AGNT-04 | TBD | Pending |
-| QUAL-01 | TBD | Pending |
-| QUAL-02 | TBD | Pending |
-| QUAL-03 | TBD | Pending |
-| OUTP-01 | TBD | Pending |
-| OUTP-02 | TBD | Pending |
-| INFR-01 | TBD | Pending |
-| INFR-02 | TBD | Pending |
-| INFR-03 | TBD | Pending |
+| EXPL-01 | Phase 2 | Pending |
+| EXPL-02 | Phase 2 | Pending |
+| EXPL-03 | Phase 2 | Pending |
+| EXPL-04 | Phase 2 | Pending |
+| AGNT-01 | Phase 2 | Pending |
+| AGNT-02 | Phase 4 | Pending |
+| AGNT-03 | Phase 1 | Pending |
+| QUAL-01 | Phase 3 | Pending |
+| QUAL-02 | Phase 3 | Pending |
+| QUAL-03 | Phase 3 | Pending |
+| OUTP-01 | Phase 3 | Pending |
+| OUTP-02 | Phase 3 | Pending |
+| INFR-01 | Phase 1 | Pending |
+| INFR-02 | Phase 1 | Pending |
+| INFR-03 | Phase 1 | Pending |
 
 **Coverage:**
-- v1 requirements: 16 total
-- Mapped to phases: 0
-- Unmapped: 16
+- v1 requirements: 15 total
+- Mapped to phases: 15
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-05*
-*Last updated: 2026-04-05 after initial definition*
+*Last updated: 2026-04-05 after roadmap revision (removed AGNT-04)*
