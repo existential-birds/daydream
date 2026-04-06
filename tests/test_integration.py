@@ -41,7 +41,7 @@ class MockBackend:
         self._prompt: str = ""
         self._call_count = 0
 
-    async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+    async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
         self._prompt = prompt
         self._call_count += 1
         if self._events is not None:
@@ -90,7 +90,7 @@ class MockBackendWithEvents:
     def __init__(self, events: list):
         self._events = events
 
-    async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+    async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
         for event in self._events:
             yield event
 
@@ -554,7 +554,7 @@ async def test_run_trust_full_flow(tmp_path, monkeypatch):
     call_count = 0
 
     class TrustMockBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -655,7 +655,7 @@ async def test_run_trust_does_not_prompt_for_skill(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-m", "change"], cwd=tmp_path, capture_output=True, env=env)
 
     class MinimalBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
             yield TextEvent(text="Intent: changes f.txt.")
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
         async def cancel(self): pass
