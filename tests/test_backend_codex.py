@@ -312,3 +312,23 @@ class TestUnwrapShellCommand:
         """Real Codex format: double-quoted command with inner single quotes."""
         cmd = """/bin/zsh -lc "sed -n '1,260p' amelia/agents/architect.py\""""
         assert _unwrap_shell_command(cmd) == "sed -n '1,260p' amelia/agents/architect.py"
+
+
+@pytest.mark.asyncio
+async def test_execute_ignores_agents():
+    """CodexBackend should accept agents kwarg and silently ignore it."""
+    backend = CodexBackend()
+    mock_proc = _make_mock_process("simple_text.jsonl")
+
+    mock_agent = {"description": "test", "prompt": "test"}
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Test", agents=[mock_agent]):
+            events.append(event)
+
+    # Should still produce normal events
+    text_events = [e for e in events if isinstance(e, TextEvent)]
+    result_events = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(text_events) >= 1
+    assert len(result_events) == 1
