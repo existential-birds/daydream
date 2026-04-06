@@ -8,6 +8,10 @@ exploration failures.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 
 @dataclass
@@ -124,3 +128,31 @@ class ExplorationContext:
             return ""
 
         return "# Exploration Context\n\n" + "\n\n".join(sections) + "\n"
+
+
+async def safe_explore(
+    explore_fn: Callable[..., Awaitable[ExplorationContext]],
+    *args: Any,
+    **kwargs: Any,
+) -> ExplorationContext:
+    """Run exploration with graceful degradation.
+
+    Catches any exception from explore_fn and returns an empty
+    ExplorationContext instead. Displays a warning banner via Rich UI.
+
+    Args:
+        explore_fn: Async callable that performs exploration.
+        *args: Positional args forwarded to explore_fn.
+        **kwargs: Keyword args forwarded to explore_fn.
+
+    Returns:
+        ExplorationContext from explore_fn, or empty ExplorationContext on failure.
+    """
+    try:
+        return await explore_fn(*args, **kwargs)
+    except Exception:
+        from daydream.ui import create_console, print_warning
+
+        console = create_console()
+        print_warning(console, "Exploration failed -- proceeding with review only")
+        return ExplorationContext()

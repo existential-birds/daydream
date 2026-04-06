@@ -1,7 +1,9 @@
 # tests/test_exploration.py
 """Tests for exploration context data structures and prompt rendering."""
 
-from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
+from unittest.mock import AsyncMock, patch
+
+from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo, safe_explore
 
 
 def test_file_info_creates_valid_instance():
@@ -99,3 +101,42 @@ def test_partial_context_only_includes_populated_sections():
     assert "## Codebase Conventions" not in output
     assert "## Dependencies" not in output
     assert "## Project Guidelines" not in output
+
+
+async def test_safe_explore_returns_result_on_success():
+    expected = ExplorationContext(
+        affected_files=[FileInfo("main.py", "modified", "App entry")],
+        guidelines=["Use type hints"],
+    )
+
+    async def fake_explore() -> ExplorationContext:
+        return expected
+
+    result = await safe_explore(fake_explore)
+    assert result is expected
+    assert result.affected_files == expected.affected_files
+
+
+async def test_safe_explore_returns_empty_on_failure():
+    async def failing_explore() -> ExplorationContext:
+        raise RuntimeError("SDK timeout")
+
+    result = await safe_explore(failing_explore)
+    assert result.affected_files == []
+    assert result.conventions == []
+    assert result.dependencies == []
+    assert result.guidelines == []
+    assert result.raw_notes == ""
+
+
+@patch("daydream.ui.print_warning")
+@patch("daydream.ui.create_console")
+async def test_safe_explore_shows_warning_on_failure(mock_create_console, mock_print_warning):
+    mock_console = object()
+    mock_create_console.return_value = mock_console
+
+    async def failing_explore() -> ExplorationContext:
+        raise RuntimeError("SDK timeout")
+
+    await safe_explore(failing_explore)
+    mock_print_warning.assert_called_once_with(mock_console, "Exploration failed -- proceeding with review only")
