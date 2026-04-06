@@ -70,7 +70,7 @@ Architecture: `cli.py -> runner.py -> phases.py -> agent.py -> backends/`
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Use SDK subagents, not custom orchestration | Less code to maintain, leverage SDK improvements | -- Pending |
+| Use SDK subagents, not custom orchestration | Less code to maintain, leverage SDK improvements | Validated in Phase 1 — Backend.execute() accepts AgentDefinition lists |
 | Unified exploration for TTT + normal flows | Avoid duplicating exploration logic across flows | -- Pending |
 | Pre-scan + on-demand hybrid | Pre-scan catches known areas, on-demand handles surprises | -- Pending |
 
@@ -92,4 +92,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-05 after initialization*
+*Last updated: 2026-04-06 after Phase 1 completion — exploration infrastructure in place*
