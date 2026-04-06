@@ -28,11 +28,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. `Backend.execute()` accepts an optional `agents` parameter without breaking existing calls
   3. `ExplorationContext` dataclass can be instantiated and serialized to structured text for prompt injection
   4. Exploration failure (timeout, SDK error) produces a fallback empty context and does not block review
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
+- [ ] 01-01-PLAN.md — SDK version bump + Backend protocol extension with agents kwarg
+- [ ] 01-02-PLAN.md — ExplorationContext data structures and graceful degradation
 
 ### Phase 2: Pre-scan Exploration
 **Goal**: Parallel subagents explore affected codebase areas before review starts
