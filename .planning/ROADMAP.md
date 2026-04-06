@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — SDK version bump + Backend protocol extension with agents kwarg
+- [x] 01-01-PLAN.md — SDK version bump + Backend protocol extension with agents kwarg
 - [x] 01-02-PLAN.md — ExplorationContext data structures and graceful degradation
 
 ### Phase 2: Pre-scan Exploration

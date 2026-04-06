@@ -18,7 +18,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 - [ ] **AGNT-01**: 3-5 parallel pre-scan subagents explore affected areas before review
 - [ ] **AGNT-02**: Review agent spawns on-demand explorer subagents when it encounters uncertainty
-- [ ] **AGNT-03**: Backend protocol extended with `agents` parameter for subagent support
+- [x] **AGNT-03**: Backend protocol extended with `agents` parameter for subagent support
 
 ### Review Quality
 
@@ -33,7 +33,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Infrastructure
 
-- [ ] **INFR-01**: `claude-agent-sdk` bumped to `>=0.1.52` for `AgentDefinition` support
+- [x] **INFR-01**: `claude-agent-sdk` bumped to `>=0.1.52` for `AgentDefinition` support
 - [x] **INFR-02**: Exploration results aggregated into structured `ExplorationContext` for review prompt injection
 - [x] **INFR-03**: Exploration degrades gracefully (review proceeds if exploration fails)
 
@@ -78,13 +78,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | EXPL-04 | Phase 2 | Pending |
 | AGNT-01 | Phase 2 | Pending |
 | AGNT-02 | Phase 4 | Pending |
-| AGNT-03 | Phase 1 | Pending |
+| AGNT-03 | Phase 1 | Complete |
 | QUAL-01 | Phase 3 | Pending |
 | QUAL-02 | Phase 3 | Pending |
 | QUAL-03 | Phase 3 | Pending |
 | OUTP-01 | Phase 3 | Pending |
 | OUTP-02 | Phase 3 | Pending |
-| INFR-01 | Phase 1 | Pending |
+| INFR-01 | Phase 1 | Complete |
 | INFR-02 | Phase 1 | Complete |
 | INFR-03 | Phase 1 | Complete |
 
