@@ -44,11 +44,13 @@ Plans:
   3. Exploration subagents read project guidelines (CLAUDE.md, config files) as part of their scan
   4. `detect_affected_files()` correctly identifies changed files and their immediate imports/callers from the git diff
   5. Exploration scales with diff size (skip for trivial diffs, single agent for small, parallel for large)
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 02-01: TBD
-- [ ] 02-02: TBD
+- [ ] 02-01-PLAN.md — Wave 0: fix Backend agents-shape, install tree-sitter, create test scaffolds + diff fixtures
+- [ ] 02-02-PLAN.md — tree_sitter_index: LANGUAGES registry, parser cache, detect_affected_files()
+- [ ] 02-03-PLAN.md — Subagent prompts/schemas/EXPLORATION_AGENTS + merge_contexts()
+- [ ] 02-04-PLAN.md — exploration_runner orchestrator + wire into run()/run_trust() + UX + Codex guard
 
 ### Phase 3: Review Integration
 **Goal**: Review and plan generation recommendations are grounded in actual codebase context from exploration
