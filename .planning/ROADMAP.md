@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 Plans:
 - [ ] 01-01-PLAN.md — SDK version bump + Backend protocol extension with agents kwarg
-- [ ] 01-02-PLAN.md — ExplorationContext data structures and graceful degradation
+- [x] 01-02-PLAN.md — ExplorationContext data structures and graceful degradation
 
 ### Phase 2: Pre-scan Exploration
 **Goal**: Parallel subagents explore affected codebase areas before review starts

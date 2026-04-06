@@ -34,8 +34,8 @@ Requirements for this milestone. Each maps to roadmap phases.
 ### Infrastructure
 
 - [ ] **INFR-01**: `claude-agent-sdk` bumped to `>=0.1.52` for `AgentDefinition` support
-- [ ] **INFR-02**: Exploration results aggregated into structured `ExplorationContext` for review prompt injection
-- [ ] **INFR-03**: Exploration degrades gracefully (review proceeds if exploration fails)
+- [x] **INFR-02**: Exploration results aggregated into structured `ExplorationContext` for review prompt injection
+- [x] **INFR-03**: Exploration degrades gracefully (review proceeds if exploration fails)
 
 ## v2 Requirements
 
@@ -85,8 +85,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OUTP-01 | Phase 3 | Pending |
 | OUTP-02 | Phase 3 | Pending |
 | INFR-01 | Phase 1 | Pending |
-| INFR-02 | Phase 1 | Pending |
-| INFR-03 | Phase 1 | Pending |
+| INFR-02 | Phase 1 | Complete |
+| INFR-03 | Phase 1 | Complete |
 
 **Coverage:**
 - v1 requirements: 15 total
