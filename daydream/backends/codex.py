@@ -84,6 +84,7 @@ class CodexBackend:
         prompt: str,
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
+        agents: list[Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Execute a prompt via Codex CLI and yield unified events.
 
@@ -92,6 +93,7 @@ class CodexBackend:
             prompt: The prompt to send.
             output_schema: Optional JSON schema for structured output.
             continuation: Optional token for thread resumption.
+            agents: Ignored by Codex backend. Accepted for protocol compatibility.
 
         Yields:
             AgentEvent instances.
