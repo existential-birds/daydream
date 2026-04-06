@@ -2,6 +2,8 @@
 """Tests for backend protocol, event types, and factory."""
 
 
+from pathlib import Path
+
 import pytest
 
 from daydream.backends import (
@@ -102,3 +104,48 @@ def test_create_backend_codex_custom_model():
 def test_create_backend_invalid_raises():
     with pytest.raises(ValueError, match="Unknown backend"):
         create_backend("invalid")
+
+
+def test_agent_definition_importable():
+    """AgentDefinition should be importable from claude_agent_sdk.types."""
+    from claude_agent_sdk.types import AgentDefinition
+
+    # Should be able to construct one
+    agent = AgentDefinition(
+        description="test agent",
+        prompt="do stuff",
+        tools=["Read"],
+        model="sonnet",
+    )
+    assert agent.description == "test agent"
+
+
+@pytest.mark.asyncio
+async def test_backend_execute_accepts_agents_kwarg():
+    """MockBackend (satisfying Backend protocol) should accept agents=None."""
+    from collections.abc import AsyncIterator
+    from daydream.backends import AgentEvent, Backend
+
+    class MockBackendWithAgents:
+        async def execute(
+            self,
+            cwd,
+            prompt,
+            output_schema=None,
+            continuation=None,
+            agents=None,
+        ) -> AsyncIterator[AgentEvent]:
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async def cancel(self) -> None:
+            pass
+
+        def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+            return f"/{skill_key}"
+
+    backend: Backend = MockBackendWithAgents()
+    events = []
+    async for event in backend.execute(Path("/tmp"), "test", agents=None):
+        events.append(event)
+    assert len(events) == 1

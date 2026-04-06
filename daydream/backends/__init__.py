@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from claude_agent_sdk.types import AgentDefinition
+
 
 @dataclass
 class TextEvent:
@@ -88,6 +90,7 @@ class Backend(Protocol):
         prompt: str,
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
+        agents: list[AgentDefinition] | None = None,
     ) -> AsyncIterator[AgentEvent]: ...
 
     async def cancel(self) -> None: ...

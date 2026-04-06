@@ -225,3 +225,72 @@ def test_format_skill_invocation_with_args():
     assert result == "/beagle-core:fetch-pr-feedback --pr 42 --bot mybot"
 
 
+class MockClaudeSDKClientCapture:
+    """Mock client that captures the options it was constructed with."""
+
+    captured_options = None
+
+    def __init__(self, options: Any = None):
+        MockClaudeSDKClientCapture.captured_options = options
+        self._prompt: str = ""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def query(self, prompt: str):
+        self._prompt = prompt
+
+    async def receive_response(self):
+        yield MockAssistantMessage(content=[MockTextBlock(text="OK")])
+        yield MockResultMessage(total_cost_usd=0.01)
+
+
+@pytest.mark.asyncio
+async def test_execute_passes_agents_to_options(patch_sdk):
+    """When agents list is provided, ClaudeBackend passes agents dict to ClaudeAgentOptions."""
+    from claude_agent_sdk.types import AgentDefinition
+
+    patch_sdk(MockClaudeSDKClientCapture)
+    backend = ClaudeBackend(model="opus")
+
+    agent = AgentDefinition(
+        description="explorer",
+        prompt="explore the code",
+        tools=["Read", "Grep"],
+        model="sonnet",
+    )
+
+    events = []
+    async for event in backend.execute(Path("/tmp"), "Go", agents=[agent]):
+        events.append(event)
+
+    # Verify options had agents dict
+    opts = MockClaudeSDKClientCapture.captured_options
+    assert opts is not None
+    assert hasattr(opts, "agents")
+    assert opts.agents is not None
+    agents_dict = opts.agents
+    assert "explorer-0" in agents_dict
+    assert agents_dict["explorer-0"] is agent
+
+
+@pytest.mark.asyncio
+async def test_execute_without_agents_no_agents_in_options(patch_sdk):
+    """When agents=None, ClaudeAgentOptions should NOT have agents set."""
+    patch_sdk(MockClaudeSDKClientCapture)
+    backend = ClaudeBackend(model="opus")
+
+    events = []
+    async for event in backend.execute(Path("/tmp"), "Go", agents=None):
+        events.append(event)
+
+    opts = MockClaudeSDKClientCapture.captured_options
+    assert opts is not None
+    # agents should either not be set or be None
+    agents_val = getattr(opts, "agents", None)
+    assert agents_val is None
+
+

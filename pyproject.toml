@@ -4,7 +4,7 @@ version = "0.10.0"
 description = "Automated code review and fix loop using Claude"
 requires-python = ">=3.12"
 dependencies = [
-    "claude-agent-sdk>=0.1.27",
+    "claude-agent-sdk==0.1.52",
     "anyio>=4.0",
     "rich>=13.0",
     "pyfiglet>=1.0",

@@ -1,11 +1,16 @@
 """Agent interaction and backend management."""
 
+from __future__ import annotations
+
 import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
+
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import AgentDefinition
 
 from daydream.backends import (
     Backend,
@@ -266,6 +271,7 @@ async def run_agent(
     output_schema: dict[str, Any] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     continuation: ContinuationToken | None = None,
+    agents: list[AgentDefinition] | None = None,
 ) -> tuple[str | Any, ContinuationToken | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -280,6 +286,7 @@ async def run_agent(
         output_schema: Optional JSON schema for structured output.
         progress_callback: Optional callback for status updates (quiet mode).
         continuation: Optional continuation token for multi-turn.
+        agents: Optional list of AgentDefinition for subagent support.
 
     Returns:
         Tuple of (output, continuation_token). Output is text or structured data.
@@ -307,7 +314,7 @@ async def run_agent(
             tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
 
         try:
-            event_iter = backend.execute(cwd, prompt, output_schema, continuation)
+            event_iter = backend.execute(cwd, prompt, output_schema, continuation, agents=agents)
         except Exception as exc:
             _log_debug(f"[EXECUTE_INIT_ERROR] {type(exc).__name__}: {exc}\n")
             raise

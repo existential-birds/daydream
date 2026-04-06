@@ -9,6 +9,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk.types import (
+    AgentDefinition,
     AssistantMessage,
     ResultMessage,
     TextBlock,
@@ -46,6 +47,7 @@ class ClaudeBackend:
         prompt: str,
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
+        agents: list[AgentDefinition] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Execute a prompt and yield unified events.
 
@@ -54,6 +56,7 @@ class ClaudeBackend:
             prompt: The prompt to send.
             output_schema: Optional JSON schema for structured output.
             continuation: Ignored by Claude backend.
+            agents: Optional list of AgentDefinition for subagent support.
 
         Yields:
             AgentEvent instances.
@@ -73,6 +76,9 @@ class ClaudeBackend:
             output_format=output_format,
             max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
         )
+
+        if agents:
+            options.agents = {f"explorer-{i}": a for i, a in enumerate(agents)}
 
         structured_result: Any = None
 
