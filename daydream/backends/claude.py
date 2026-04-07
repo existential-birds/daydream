@@ -47,7 +47,7 @@ class ClaudeBackend:
         prompt: str,
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
-        agents: list[AgentDefinition] | None = None,
+        agents: dict[str, AgentDefinition] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Execute a prompt and yield unified events.
 
@@ -56,7 +56,9 @@ class ClaudeBackend:
             prompt: The prompt to send.
             output_schema: Optional JSON schema for structured output.
             continuation: Ignored by Claude backend.
-            agents: Optional list of AgentDefinition for subagent support.
+            agents: Optional mapping of specialist name -> AgentDefinition for
+                subagent support. Keys are the specialist names the lead agent
+                dispatches by; they MUST be preserved verbatim.
 
         Yields:
             AgentEvent instances.
@@ -78,7 +80,7 @@ class ClaudeBackend:
         )
 
         if agents:
-            options.agents = {f"explorer-{i}": a for i, a in enumerate(agents)}
+            options.agents = agents
 
         structured_result: Any = None
 

@@ -271,7 +271,7 @@ async def run_agent(
     output_schema: dict[str, Any] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     continuation: ContinuationToken | None = None,
-    agents: list[AgentDefinition] | None = None,
+    agents: dict[str, AgentDefinition] | None = None,
 ) -> tuple[str | Any, ContinuationToken | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -286,7 +286,7 @@ async def run_agent(
         output_schema: Optional JSON schema for structured output.
         progress_callback: Optional callback for status updates (quiet mode).
         continuation: Optional continuation token for multi-turn.
-        agents: Optional list of AgentDefinition for subagent support.
+        agents: Optional mapping of specialist name -> AgentDefinition.
 
     Returns:
         Tuple of (output, continuation_token). Output is text or structured data.

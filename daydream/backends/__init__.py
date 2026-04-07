@@ -90,7 +90,7 @@ class Backend(Protocol):
         prompt: str,
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
-        agents: list[AgentDefinition] | None = None,
+        agents: dict[str, AgentDefinition] | None = None,
     ) -> AsyncIterator[AgentEvent]: ...
 
     async def cancel(self) -> None: ...

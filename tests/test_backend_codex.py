@@ -324,7 +324,7 @@ async def test_execute_ignores_agents():
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
-        async for event in backend.execute(Path("/tmp"), "Test", agents=[mock_agent]):
+        async for event in backend.execute(Path("/tmp"), "Test", agents={"explorer": mock_agent}):
             events.append(event)
 
     # Should still produce normal events
