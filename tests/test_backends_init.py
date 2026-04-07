@@ -124,6 +124,7 @@ def test_agent_definition_importable():
 async def test_backend_execute_accepts_agents_kwarg():
     """MockBackend (satisfying Backend protocol) should accept agents=None."""
     from collections.abc import AsyncIterator
+
     from daydream.backends import AgentEvent, Backend
 
     class MockBackendWithAgents:
