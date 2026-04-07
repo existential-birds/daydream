@@ -11,8 +11,8 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 - [ ] **EXPL-01**: System maps impact surface from diff (affected files + transitive dependencies)
 - [ ] **EXPL-02**: System reads diff-adjacent files (touched files + their immediate imports/callers)
-- [ ] **EXPL-03**: System detects codebase conventions/patterns before review starts
-- [ ] **EXPL-04**: Exploration subagents read project guidelines (CLAUDE.md, .coderabbit.yaml, etc.)
+- [x] **EXPL-03**: System detects codebase conventions/patterns before review starts
+- [x] **EXPL-04**: Exploration subagents read project guidelines (CLAUDE.md, .coderabbit.yaml, etc.)
 
 ### Subagents
 
@@ -74,8 +74,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | EXPL-01 | Phase 2 | Pending |
 | EXPL-02 | Phase 2 | Pending |
-| EXPL-03 | Phase 2 | Pending |
-| EXPL-04 | Phase 2 | Pending |
+| EXPL-03 | Phase 2 | Complete (02-03) |
+| EXPL-04 | Phase 2 | Complete (02-03) |
 | AGNT-01 | Phase 2 | Pending |
 | AGNT-02 | Phase 4 | Pending |
 | AGNT-03 | Phase 1 | Complete |

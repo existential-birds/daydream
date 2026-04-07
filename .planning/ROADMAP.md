@@ -49,7 +49,7 @@ Plans:
 Plans:
 - [ ] 02-01-PLAN.md — Wave 0: fix Backend agents-shape, install tree-sitter, create test scaffolds + diff fixtures
 - [ ] 02-02-PLAN.md — tree_sitter_index: LANGUAGES registry, parser cache, detect_affected_files()
-- [ ] 02-03-PLAN.md — Subagent prompts/schemas/EXPLORATION_AGENTS + merge_contexts()
+- [x] 02-03-PLAN.md — Subagent prompts/schemas/EXPLORATION_AGENTS + merge_contexts()
 - [ ] 02-04-PLAN.md — exploration_runner orchestrator + wire into run()/run_trust() + UX + Codex guard
 
 ### Phase 3: Review Integration
