@@ -22,14 +22,14 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Review Quality
 
-- [ ] **QUAL-01**: Cross-file dependency tracing follows call chains to catch breaking changes
-- [ ] **QUAL-02**: Each recommendation carries confidence score (HIGH/MEDIUM/LOW) with rationale
-- [ ] **QUAL-03**: Recommendations contradicting existing codebase conventions are filtered out
+- [x] **QUAL-01**: Cross-file dependency tracing follows call chains to catch breaking changes
+- [x] **QUAL-02**: Each recommendation carries confidence score (HIGH/MEDIUM/LOW) with rationale
+- [x] **QUAL-03**: Recommendations contradicting existing codebase conventions are filtered out
 
 ### Output Quality
 
-- [ ] **OUTP-01**: TTT plan generation references actual file paths, signatures, and patterns from exploration
-- [ ] **OUTP-02**: Both TTT and normal review flows use the same exploration architecture
+- [x] **OUTP-01**: TTT plan generation references actual file paths, signatures, and patterns from exploration
+- [x] **OUTP-02**: Both TTT and normal review flows use the same exploration architecture
 
 ### Infrastructure
 
@@ -79,11 +79,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AGNT-01 | Phase 2 | Complete |
 | AGNT-02 | Phase 4 | Pending |
 | AGNT-03 | Phase 1 | Complete |
-| QUAL-01 | Phase 3 | Pending |
-| QUAL-02 | Phase 3 | Pending |
-| QUAL-03 | Phase 3 | Pending |
-| OUTP-01 | Phase 3 | Pending |
-| OUTP-02 | Phase 3 | Pending |
+| QUAL-01 | Phase 3 | Complete |
+| QUAL-02 | Phase 3 | Complete |
+| QUAL-03 | Phase 3 | Complete |
+| OUTP-01 | Phase 3 | Complete |
+| OUTP-02 | Phase 3 | Complete |
 | INFR-01 | Phase 1 | Complete |
 | INFR-02 | Phase 1 | Complete |
 | INFR-03 | Phase 1 | Complete |

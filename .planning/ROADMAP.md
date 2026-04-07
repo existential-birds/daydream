@@ -62,11 +62,12 @@ Plans:
   3. Recommendations that contradict detected codebase conventions are filtered or flagged before presentation
   4. TTT plan generation references actual file paths, function signatures, and patterns discovered during exploration
   5. Both TTT (`--ttt`) and normal review flows use the same exploration architecture and produce exploration-enriched output
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 03-01: TBD
-- [ ] 03-02: TBD
+- [x] 03-00-PLAN.md — Wave 0: shared ExplorationContext fixture + xfail test scaffolds for all schema/prompt/UI behaviors
+- [ ] 03-01-PLAN.md — Wave 1: extend FEEDBACK/ALTERNATIVE_REVIEW/PLAN schemas + shared confidence/convention/grounding prompt helpers wired into all four phase builders
+- [ ] 03-02-PLAN.md — Wave 2: TTT plan renderer visual distinction for ungrounded plan steps
 
 ### Phase 4: On-demand Exploration
 **Goal**: Review agent can spawn focused explorer subagents mid-review when it encounters uncertainty
