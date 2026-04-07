@@ -41,7 +41,6 @@ def test_exploration_live_panel_marks_pending_as_failed_on_exit():
     assert panel.states["test-mapper"] == "failed"
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2 renderer pending")
 def test_plan_renderer_dims_ungrounded_steps():
     from rich.console import Console
 

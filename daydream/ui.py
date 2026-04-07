@@ -3413,3 +3413,46 @@ def get_status_style(status: str) -> Style:
     """
     config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
     return Style(color=config["color"])
+
+
+def render_ttt_plan(console: Console, plan: dict) -> None:
+    """Render a TTT plan, visually distinguishing ungrounded steps.
+
+    Plan steps with a non-empty ``references`` list render with default style
+    and their references inline beneath the change line. Steps with an empty
+    ``references`` list render dimmed with an ``(ungrounded)`` marker so the
+    user can spot LOW-grounded recommendations at a glance (D-08).
+
+    Args:
+        console: Rich console to render into.
+        plan: Plan dict. May be the flat shape ``{"changes": [...]}`` or the
+            nested shape ``{"plan": {"issues": [{"changes": [...]}, ...]}}``.
+
+    """
+    changes: list[dict] = []
+    if isinstance(plan.get("changes"), list):
+        changes = list(plan["changes"])
+    else:
+        nested = plan.get("plan", {}) if isinstance(plan.get("plan"), dict) else {}
+        for issue in nested.get("issues", []) or []:
+            if isinstance(issue, dict):
+                changes.extend(issue.get("changes", []) or [])
+
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        file_path = change.get("file", "")
+        description = change.get("description", "")
+        references = change.get("references") or []
+        line = f"{file_path}: {description}" if file_path else description
+
+        if references:
+            console.print(line)
+            for ref in references:
+                if not isinstance(ref, dict):
+                    continue
+                ref_file = ref.get("file", "")
+                ref_symbol = ref.get("symbol", "")
+                console.print(f"    [dim]→ {ref_file}::{ref_symbol}[/dim]")
+        else:
+            console.print(f"[dim]{line}[/dim] [yellow](ungrounded)[/yellow]")
