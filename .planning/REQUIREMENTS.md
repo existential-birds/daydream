@@ -9,14 +9,14 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Exploration
 
-- [ ] **EXPL-01**: System maps impact surface from diff (affected files + transitive dependencies)
-- [ ] **EXPL-02**: System reads diff-adjacent files (touched files + their immediate imports/callers)
+- [x] **EXPL-01**: System maps impact surface from diff (affected files + transitive dependencies)
+- [x] **EXPL-02**: System reads diff-adjacent files (touched files + their immediate imports/callers)
 - [x] **EXPL-03**: System detects codebase conventions/patterns before review starts
 - [x] **EXPL-04**: Exploration subagents read project guidelines (CLAUDE.md, .coderabbit.yaml, etc.)
 
 ### Subagents
 
-- [ ] **AGNT-01**: 3-5 parallel pre-scan subagents explore affected areas before review
+- [x] **AGNT-01**: 3-5 parallel pre-scan subagents explore affected areas before review
 - [ ] **AGNT-02**: Review agent spawns on-demand explorer subagents when it encounters uncertainty
 - [x] **AGNT-03**: Backend protocol extended with `agents` parameter for subagent support
 
@@ -72,11 +72,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EXPL-01 | Phase 2 | Pending |
-| EXPL-02 | Phase 2 | Pending |
+| EXPL-01 | Phase 2 | Complete |
+| EXPL-02 | Phase 2 | Complete |
 | EXPL-03 | Phase 2 | Complete (02-03) |
 | EXPL-04 | Phase 2 | Complete (02-03) |
-| AGNT-01 | Phase 2 | Pending |
+| AGNT-01 | Phase 2 | Complete |
 | AGNT-02 | Phase 4 | Pending |
 | AGNT-03 | Phase 1 | Complete |
 | QUAL-01 | Phase 3 | Pending |
