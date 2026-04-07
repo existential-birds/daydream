@@ -3,7 +3,7 @@
 
 from unittest.mock import AsyncMock, patch
 
-from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo, safe_explore
+from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo, merge_contexts, safe_explore
 
 
 def test_file_info_creates_valid_instance():
@@ -140,3 +140,66 @@ async def test_safe_explore_shows_warning_on_failure(mock_create_console, mock_p
 
     await safe_explore(failing_explore)
     mock_print_warning.assert_called_once_with(mock_console, "Exploration failed -- proceeding with review only")
+
+
+def test_merge_pattern_scanner_result():
+    partial = ExplorationContext(
+        conventions=[Convention(name="snake_case", description="use snake_case for functions", source="inferred")]
+    )
+    merged = merge_contexts(ExplorationContext(), partial)
+    assert len(merged.conventions) == 1
+    assert merged.conventions[0].name == "snake_case"
+
+
+def test_merge_contexts_empty():
+    merged = merge_contexts()
+    assert merged.affected_files == []
+    assert merged.conventions == []
+    assert merged.dependencies == []
+    assert merged.guidelines == []
+    assert merged.raw_notes == ""
+
+
+def test_merge_contexts_single_returns_fresh_lists():
+    original = ExplorationContext(guidelines=["a", "b"])
+    merged = merge_contexts(original)
+    assert merged.guidelines == ["a", "b"]
+    assert merged.guidelines is not original.guidelines
+
+
+def test_merge_contexts_dedups_file_info():
+    a = ExplorationContext(affected_files=[FileInfo("a.py", "modified", "short")])
+    b = ExplorationContext(affected_files=[FileInfo("a.py", "modified", "this is a much longer summary")])
+    merged = merge_contexts(a, b)
+    assert len(merged.affected_files) == 1
+    assert merged.affected_files[0].summary == "this is a much longer summary"
+
+
+def test_merge_contexts_dedups_dependencies():
+    dep = Dependency("a.py", "b.py", "imports")
+    a = ExplorationContext(dependencies=[dep])
+    b = ExplorationContext(dependencies=[Dependency("a.py", "b.py", "imports")])
+    merged = merge_contexts(a, b)
+    assert len(merged.dependencies) == 1
+
+
+def test_merge_contexts_dedups_conventions_and_guidelines():
+    a = ExplorationContext(
+        conventions=[Convention("snake", "desc1", "CLAUDE.md")],
+        guidelines=["use type hints"],
+    )
+    b = ExplorationContext(
+        conventions=[Convention("snake", "desc2", "inferred")],
+        guidelines=["use type hints", "no print statements"],
+    )
+    merged = merge_contexts(a, b)
+    assert len(merged.conventions) == 1
+    assert len(merged.guidelines) == 2
+
+
+def test_merge_contexts_joins_raw_notes():
+    a = ExplorationContext(raw_notes="first")
+    b = ExplorationContext(raw_notes="")
+    c = ExplorationContext(raw_notes="second")
+    merged = merge_contexts(a, b, c)
+    assert merged.raw_notes == "first\n\nsecond"
