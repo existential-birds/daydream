@@ -596,3 +596,113 @@ async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch):
 
     assert plan_path is None
     assert not (tmp_path / ".daydream").exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 03 Wave 0 — failing scaffolds (xfail-strict until Wave 1 lands)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 1 implementation pending")
+def test_feedback_schema_requires_confidence_and_rationale():
+    from daydream.phases import FEEDBACK_SCHEMA
+
+    required = FEEDBACK_SCHEMA["properties"]["issues"]["items"]["required"]
+    assert "confidence" in required
+    assert "rationale" in required
+    confidence = FEEDBACK_SCHEMA["properties"]["issues"]["items"]["properties"]["confidence"]
+    assert confidence["enum"] == ["HIGH", "MEDIUM", "LOW"]
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 1 implementation pending")
+def test_alternative_review_schema_requires_confidence_and_rationale():
+    from daydream.phases import ALTERNATIVE_REVIEW_SCHEMA
+
+    required = ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["required"]
+    assert "confidence" in required
+    assert "rationale" in required
+    confidence = ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["properties"]["confidence"]
+    assert confidence["enum"] == ["HIGH", "MEDIUM", "LOW"]
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 1 implementation pending")
+def test_parse_feedback_rejects_unlabeled():
+    from daydream.phases import _validate_issue  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError):
+        _validate_issue({"id": "1", "description": "x", "file": "a.py", "line": 1})
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 1 implementation pending")
+def test_review_prompt_includes_dependency_impact(exploration_context_fixture):
+    from daydream.phases import build_review_prompt  # type: ignore[attr-defined]
+
+    prompt = build_review_prompt(exploration_context=exploration_context_fixture)
+    assert "Dependency Impact" in prompt
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 1 implementation pending")
+def test_review_prompt_distinguishes_convention_cases(exploration_context_fixture):
+    from daydream.phases import build_review_prompt  # type: ignore[attr-defined]
+
+    prompt = build_review_prompt(exploration_context=exploration_context_fixture)
+    assert "DROP IT" in prompt
+    assert "flag it as HIGH" in prompt
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 1 implementation pending")
+def test_plan_schema_requires_references():
+    from daydream.phases import PLAN_SCHEMA
+
+    items = PLAN_SCHEMA["properties"]["changes"]["items"]
+    assert "references" in items["required"]
+    ref_items = items["properties"]["references"]["items"]
+    assert "file" in ref_items["required"]
+    assert "symbol" in ref_items["required"]
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 1 implementation pending")
+def test_plan_prompt_forbids_fabrication(exploration_context_fixture):
+    from daydream.phases import build_plan_prompt  # type: ignore[attr-defined]
+
+    prompt = build_plan_prompt(exploration_context=exploration_context_fixture)
+    assert "Do not invent" in prompt
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 1 implementation pending")
+def test_all_phase_builders_inject_exploration(exploration_context_fixture):
+    from daydream.phases import (  # type: ignore[attr-defined]
+        build_alternative_review_prompt,
+        build_intent_prompt,
+        build_plan_prompt,
+        build_review_prompt,
+    )
+
+    section = exploration_context_fixture.to_prompt_section()
+    for builder in (
+        build_review_prompt,
+        build_intent_prompt,
+        build_alternative_review_prompt,
+        build_plan_prompt,
+    ):
+        prompt = builder(exploration_context=exploration_context_fixture)
+        assert section in prompt
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 1 implementation pending")
+def test_all_phase_builders_use_shared_instructions(exploration_context_fixture):
+    from daydream.phases import (  # type: ignore[attr-defined]
+        build_alternative_review_prompt,
+        build_intent_prompt,
+        build_plan_prompt,
+        build_review_prompt,
+    )
+
+    for builder in (
+        build_review_prompt,
+        build_intent_prompt,
+        build_alternative_review_prompt,
+        build_plan_prompt,
+    ):
+        prompt = builder(exploration_context=exploration_context_fixture)
+        assert "Confidence and Convention Rules" in prompt
