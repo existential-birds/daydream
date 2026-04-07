@@ -1,0 +1,19 @@
+diff --git a/src/api.ts b/src/api.ts
+index 1111111..2222222 100644
+--- a/src/api.ts
++++ b/src/api.ts
+@@ -1,1 +1,6 @@
+ // API module
++import { User } from "./models";
++
++export function getUser(): User {
++  return new User();
++}
+diff --git a/src/models.ts b/src/models.ts
+index 3333333..4444444 100644
+--- a/src/models.ts
++++ b/src/models.ts
+@@ -1,1 +1,3 @@
+ // Models module
++
++export class User {}
