@@ -249,48 +249,71 @@ class MockClaudeSDKClientCapture:
 
 
 @pytest.mark.asyncio
-async def test_execute_passes_agents_to_options(patch_sdk):
-    """When agents list is provided, ClaudeBackend passes agents dict to ClaudeAgentOptions."""
+async def test_execute_passes_agents_dict_to_options(patch_sdk):
+    """Agents dict must reach ClaudeAgentOptions with original keys preserved verbatim."""
     from claude_agent_sdk.types import AgentDefinition
 
     patch_sdk(MockClaudeSDKClientCapture)
     backend = ClaudeBackend(model="opus")
 
-    agent = AgentDefinition(
-        description="explorer",
-        prompt="explore the code",
+    pattern_scanner = AgentDefinition(
+        description="pattern scanner",
+        prompt="scan patterns",
+        tools=["Read", "Grep"],
+        model="sonnet",
+    )
+    dependency_tracer = AgentDefinition(
+        description="dependency tracer",
+        prompt="trace deps",
         tools=["Read", "Grep"],
         model="sonnet",
     )
 
+    agents = {
+        "pattern-scanner": pattern_scanner,
+        "dependency-tracer": dependency_tracer,
+    }
+
     events = []
-    async for event in backend.execute(Path("/tmp"), "Go", agents=[agent]):
+    async for event in backend.execute(Path("/tmp"), "Go", agents=agents):
         events.append(event)
 
-    # Verify options had agents dict
     opts = MockClaudeSDKClientCapture.captured_options
     assert opts is not None
-    assert hasattr(opts, "agents")
-    assert opts.agents is not None
-    agents_dict = opts.agents
-    assert "explorer-0" in agents_dict
-    assert agents_dict["explorer-0"] is agent
+    assert opts.agents == {
+        "pattern-scanner": pattern_scanner,
+        "dependency-tracer": dependency_tracer,
+    }
+    # No key rewriting
+    assert "explorer-0" not in opts.agents
+    assert "explorer-1" not in opts.agents
 
 
 @pytest.mark.asyncio
-async def test_execute_without_agents_no_agents_in_options(patch_sdk):
-    """When agents=None, ClaudeAgentOptions should NOT have agents set."""
+async def test_execute_passes_none_when_no_agents(patch_sdk):
+    """When agents=None, ClaudeAgentOptions should not carry an agents dict."""
     patch_sdk(MockClaudeSDKClientCapture)
     backend = ClaudeBackend(model="opus")
 
     events = []
-    async for event in backend.execute(Path("/tmp"), "Go", agents=None):
+    async for event in backend.execute(Path("/tmp"), "Go"):
         events.append(event)
 
     opts = MockClaudeSDKClientCapture.captured_options
     assert opts is not None
-    # agents should either not be set or be None
     agents_val = getattr(opts, "agents", None)
     assert agents_val is None
+
+
+def test_backend_protocol_agents_param_is_dict_typed():
+    """The Backend protocol's execute.agents annotation must be dict[str, AgentDefinition]."""
+    from daydream.backends import Backend
+
+    annotations = Backend.execute.__annotations__
+    assert "agents" in annotations
+    annotation = annotations["agents"]
+    # Annotation may be a string (from __future__ annotations) or a real type
+    annotation_str = annotation if isinstance(annotation, str) else repr(annotation)
+    assert "dict[str, AgentDefinition]" in annotation_str
 
 
