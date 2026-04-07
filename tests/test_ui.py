@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from daydream.ui import ExplorationLivePanel, create_console
 
 
@@ -37,3 +39,30 @@ def test_exploration_live_panel_marks_pending_as_failed_on_exit():
     assert panel.states["pattern-scanner"] == "done"
     assert panel.states["dependency-tracer"] == "failed"
     assert panel.states["test-mapper"] == "failed"
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 2 renderer pending")
+def test_plan_renderer_dims_ungrounded_steps():
+    from rich.console import Console
+
+    from daydream.ui import render_ttt_plan  # type: ignore[attr-defined]
+
+    plan = {
+        "changes": [
+            {
+                "file": "x.py",
+                "description": "grounded change",
+                "references": [{"file": "x.py", "symbol": "f"}],
+            },
+            {
+                "file": "y.py",
+                "description": "ungrounded change",
+                "references": [],
+            },
+        ]
+    }
+
+    console = Console(record=True)
+    render_ttt_plan(console, plan)
+    output = console.export_text()
+    assert "(ungrounded)" in output

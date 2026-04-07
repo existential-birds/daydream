@@ -748,3 +748,53 @@ async def test_codex_backend_raises_on_agents(tmp_path: Path):
     with pytest.raises(NotImplementedError, match="Codex backend does not support exploration"):
         async for _ in backend.execute(tmp_path, "prompt", agents={"x": object()}):
             pass
+
+
+@pytest.mark.xfail(strict=True, reason="Wave 1+2 implementation pending")
+async def test_exploration_enriched_output_both_flows(tmp_path, exploration_context_fixture):
+    """Both run() and run_trust() should surface confidence + rationale on parsed issues."""
+    from daydream.runner import RunConfig, run, run_trust  # type: ignore[attr-defined]
+
+    enriched_issue = {
+        "id": "1",
+        "description": "x",
+        "file": "a.py",
+        "line": 1,
+        "confidence": "HIGH",
+        "rationale": "verified by Convention snake_case_modules",
+    }
+
+    class _MB:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def execute(self, *a, **kw):
+            yield TextEvent(text="ok")
+            yield ResultEvent(result=self.payload, cost_usd=0.0, duration_ms=1)
+
+        async def cancel(self):
+            return None
+
+        def format_skill_invocation(self, key, args=None):
+            return f"/{key}"
+
+    payload = {"issues": [enriched_issue]}
+    cfg_normal = RunConfig(
+        target_dir=tmp_path,
+        exploration_context=exploration_context_fixture,
+    )
+    cfg_normal.review_backend = _MB(payload)
+    cfg_trust = RunConfig(
+        target_dir=tmp_path,
+        trust_the_technology=True,
+        exploration_context=exploration_context_fixture,
+    )
+    cfg_trust.review_backend = _MB(payload)
+
+    normal_issues = await run(cfg_normal)
+    trust_issues = await run_trust(cfg_trust)
+
+    for issues in (normal_issues, trust_issues):
+        assert issues
+        assert "confidence" in issues[0]
+        assert "rationale" in issues[0]
