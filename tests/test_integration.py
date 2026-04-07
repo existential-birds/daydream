@@ -750,16 +750,30 @@ async def test_codex_backend_raises_on_agents(tmp_path: Path):
             pass
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 1+2 implementation pending")
 async def test_exploration_enriched_output_both_flows(tmp_path, exploration_context_fixture):
-    """Both run() and run_trust() should surface confidence + rationale on parsed issues."""
-    from daydream.runner import RunConfig, run, run_trust  # type: ignore[attr-defined]
+    """Both normal and TTT flows surface confidence + rationale on parsed issues.
 
-    enriched_issue = {
-        "id": "1",
+    Exercises `phase_parse_feedback` (normal flow) and `phase_alternative_review`
+    (TTT flow) directly: both return parsed issue lists, and both must carry the
+    schema-enforced confidence/rationale fields per QUAL-02.
+    """
+    from daydream.phases import phase_alternative_review, phase_parse_feedback
+
+    enriched_normal_issue = {
+        "id": 1,
         "description": "x",
         "file": "a.py",
         "line": 1,
+        "confidence": "HIGH",
+        "rationale": "verified by Convention snake_case_modules",
+    }
+    enriched_trust_issue = {
+        "id": 1,
+        "title": "t",
+        "description": "x",
+        "recommendation": "y",
+        "severity": "high",
+        "files": ["a.py"],
         "confidence": "HIGH",
         "rationale": "verified by Convention snake_case_modules",
     }
@@ -770,7 +784,7 @@ async def test_exploration_enriched_output_both_flows(tmp_path, exploration_cont
 
         async def execute(self, *a, **kw):
             yield TextEvent(text="ok")
-            yield ResultEvent(result=self.payload, cost_usd=0.0, duration_ms=1)
+            yield ResultEvent(structured_output=self.payload, continuation=None)
 
         async def cancel(self):
             return None
@@ -778,21 +792,22 @@ async def test_exploration_enriched_output_both_flows(tmp_path, exploration_cont
         def format_skill_invocation(self, key, args=None):
             return f"/{key}"
 
-    payload = {"issues": [enriched_issue]}
-    cfg_normal = RunConfig(
-        target_dir=tmp_path,
-        exploration_context=exploration_context_fixture,
-    )
-    cfg_normal.review_backend = _MB(payload)
-    cfg_trust = RunConfig(
-        target_dir=tmp_path,
-        trust_the_technology=True,
-        exploration_context=exploration_context_fixture,
-    )
-    cfg_trust.review_backend = _MB(payload)
+    # Normal flow: phase_parse_feedback returns list of validated issues
+    (tmp_path / ".review-output.md").write_text("# Review\n")
+    normal_backend = _MB({"issues": [enriched_normal_issue]})
+    normal_issues = await phase_parse_feedback(normal_backend, tmp_path)
 
-    normal_issues = await run(cfg_normal)
-    trust_issues = await run_trust(cfg_trust)
+    # TTT flow: phase_alternative_review returns list of issues
+    diff_path = tmp_path / "diff.txt"
+    diff_path.write_text("diff")
+    trust_backend = _MB({"issues": [enriched_trust_issue]})
+    trust_issues = await phase_alternative_review(
+        trust_backend,
+        tmp_path,
+        diff_path,
+        "intent summary",
+        exploration_context=exploration_context_fixture,
+    )
 
     for issues in (normal_issues, trust_issues):
         assert issues
