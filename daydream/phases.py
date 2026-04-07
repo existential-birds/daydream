@@ -114,8 +114,10 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
                     "description": {"type": "string"},
                     "file": {"type": "string"},
                     "line": {"type": "integer"},
+                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "rationale": {"type": "string"},
                 },
-                "required": ["id", "description", "file", "line"],
+                "required": ["id", "description", "file", "line", "confidence", "rationale"],
                 "additionalProperties": False,
             },
         },
@@ -138,8 +140,19 @@ ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
                     "recommendation": {"type": "string"},
                     "severity": {"type": "string", "enum": ["high", "medium", "low"]},
                     "files": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "rationale": {"type": "string"},
                 },
-                "required": ["id", "title", "description", "recommendation", "severity", "files"],
+                "required": [
+                    "id",
+                    "title",
+                    "description",
+                    "recommendation",
+                    "severity",
+                    "files",
+                    "confidence",
+                    "rationale",
+                ],
                 "additionalProperties": False,
             },
         },
@@ -170,8 +183,20 @@ PLAN_SCHEMA: dict[str, Any] = {
                                         "file": {"type": "string"},
                                         "description": {"type": "string"},
                                         "action": {"type": "string", "enum": ["modify", "create", "delete"]},
+                                        "references": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "file": {"type": "string"},
+                                                    "symbol": {"type": "string"},
+                                                },
+                                                "required": ["file", "symbol"],
+                                                "additionalProperties": False,
+                                            },
+                                        },
                                     },
-                                    "required": ["file", "description", "action"],
+                                    "required": ["file", "description", "action", "references"],
                                     "additionalProperties": False,
                                 },
                             },
@@ -188,6 +213,220 @@ PLAN_SCHEMA: dict[str, Any] = {
     "required": ["plan"],
     "additionalProperties": False,
 }
+
+
+def _confidence_and_convention_instructions() -> str:
+    """Prompt language for QUAL-02 confidence labeling and QUAL-03 convention handling.
+
+    Called by all four phase prompt builders to keep them in lockstep on these
+    rules. Returns a markdown section that should be appended after the
+    Exploration Context section.
+
+    Returns:
+        Markdown-formatted instruction block as a single string.
+
+    """
+    return (
+        "## Confidence and Convention Rules\n\n"
+        "For every issue you report, you MUST set `confidence` and `rationale`:\n"
+        "- HIGH: directly verified by a specific entry in the Exploration Context above. "
+        "Your rationale MUST name the specific Dependency edge, Convention entry, or "
+        "affected file that supports the issue.\n"
+        "- MEDIUM: consistent with the Exploration Context but not pinned to a specific entry.\n"
+        "- LOW: inferred from the diff alone, no exploration evidence. Your rationale MUST "
+        "state 'no exploration evidence'.\n\n"
+        "Convention handling has TWO distinct cases — do not conflate them:\n"
+        "1. Before proposing a fix, check it against the Codebase Conventions section. "
+        "If your fix would violate a convention, DROP IT — do not include it.\n"
+        "2. If the reviewed code itself violates a convention, that IS the issue. "
+        "flag it as HIGH confidence and cite the convention by name in `rationale`.\n\n"
+        "You are reviewing AI-generated code. Be strict. Prefer LOW over MEDIUM when uncertain."
+    )
+
+
+def _plan_grounding_instructions() -> str:
+    """Prompt language for OUTP-01 plan reference grounding.
+
+    Returns:
+        Markdown-formatted instruction block as a single string.
+
+    """
+    return (
+        "## Plan Reference Grounding\n\n"
+        "For every change in the plan, populate `references` with `{file, symbol}` entries "
+        "drawn ONLY from the Exploration Context above. Do not invent file paths or symbol "
+        "names. If you cannot ground a step in the Exploration Context, leave `references` "
+        "as an empty array — the renderer will flag ungrounded steps for the user."
+    )
+
+
+def _dependency_impact_instructions() -> str:
+    """Prompt language for QUAL-01 cross-file dependency surfacing in review output.
+
+    Returns:
+        Markdown-formatted instruction block as a single string.
+
+    """
+    return (
+        "## Dependency Impact\n\n"
+        "Begin your review output with a 'Dependency Impact' section that summarizes the "
+        "call-chain analysis from the Exploration Context dependencies above before listing "
+        "any issues. When an individual issue's rationale cites a dependency, include the "
+        "file:symbol reference inline within that issue."
+    )
+
+
+def _validate_issue(issue: dict[str, Any]) -> None:
+    """Validate a parsed feedback issue carries the required confidence/rationale fields.
+
+    Args:
+        issue: Issue dict produced by structured-output parsing.
+
+    Raises:
+        ValueError: If `confidence` or `rationale` is missing or empty.
+
+    """
+    confidence = issue.get("confidence")
+    if not confidence or confidence not in ("HIGH", "MEDIUM", "LOW"):
+        raise ValueError(f"Issue is missing or has invalid confidence label: {issue!r}")
+    rationale = issue.get("rationale")
+    if not rationale:
+        raise ValueError(f"Issue is missing rationale: {issue!r}")
+
+
+def _exploration_section(exploration_context: ExplorationContext | None) -> str:
+    """Render the exploration context as a prompt section, or empty string."""
+    if exploration_context is None:
+        return ""
+    return exploration_context.to_prompt_section() or ""
+
+
+def build_review_prompt(
+    *,
+    skill_invocation: str = "",
+    diff_instruction: str = "",
+    review_output_path: str = "",
+    exploration_context: ExplorationContext | None = None,
+) -> str:
+    """Assemble the prompt for `phase_review`.
+
+    Args:
+        skill_invocation: Backend-formatted skill invocation string.
+        diff_instruction: Diff scope instruction text.
+        review_output_path: Absolute path the agent should write its review to.
+        exploration_context: Optional exploration context to prepend.
+
+    Returns:
+        Fully assembled prompt string.
+
+    """
+    parts: list[str] = []
+    section = _exploration_section(exploration_context)
+    if section:
+        parts.append(section)
+    parts.append(_confidence_and_convention_instructions())
+    parts.append(_dependency_impact_instructions())
+    body = (
+        f"{skill_invocation}\n"
+        f"{diff_instruction}\n"
+        f"Write the full review output to {review_output_path}.\n"
+    )
+    parts.append(body)
+    return "\n".join(parts)
+
+
+def build_intent_prompt(
+    *,
+    diff_path: str = "",
+    branch: str = "",
+    log: str = "",
+    exploration_context: ExplorationContext | None = None,
+) -> str:
+    """Assemble the prompt for `phase_understand_intent`.
+
+    Returns:
+        Fully assembled prompt string.
+
+    """
+    parts: list[str] = []
+    section = _exploration_section(exploration_context)
+    if section:
+        parts.append(section)
+    parts.append(_confidence_and_convention_instructions())
+    body = (
+        f"You have full access to explore the codebase. Read the diff file at {diff_path} "
+        f"and examine the codebase to understand the intent of these changes. "
+        f"Present your understanding concisely — what problem is being solved and how.\n\n"
+        f"Branch: {branch}\n\n"
+        f"Commit log:\n{log}\n"
+    )
+    parts.append(body)
+    return "\n".join(parts)
+
+
+def build_alternative_review_prompt(
+    *,
+    intent_summary: str = "",
+    diff_path: str = "",
+    exploration_context: ExplorationContext | None = None,
+) -> str:
+    """Assemble the prompt for `phase_alternative_review`.
+
+    Returns:
+        Fully assembled prompt string.
+
+    """
+    parts: list[str] = []
+    section = _exploration_section(exploration_context)
+    if section:
+        parts.append(section)
+    parts.append(_confidence_and_convention_instructions())
+    body = (
+        f"The intent of this PR has been confirmed as:\n\n"
+        f"{intent_summary}\n\n"
+        f"Given this intent, explore the codebase and evaluate the implementation "
+        f"in the diff at {diff_path}. Would you have done this differently?\n\n"
+        f"Return a numbered list of issues covering both architectural alternatives "
+        f"and incremental improvements. For each issue, include: a sequential id "
+        f"number, a brief title, a description of what's wrong or could be better, "
+        f"your recommended alternative, a severity level (high/medium/low), and "
+        f"the relevant file paths.\n\n"
+        f"If the implementation is solid and you wouldn't change anything, return an empty issues list.\n"
+    )
+    parts.append(body)
+    return "\n".join(parts)
+
+
+def build_plan_prompt(
+    *,
+    intent_summary: str = "",
+    issues_text: str = "",
+    diff_path: str = "",
+    exploration_context: ExplorationContext | None = None,
+) -> str:
+    """Assemble the prompt for `phase_generate_plan`.
+
+    Returns:
+        Fully assembled prompt string.
+
+    """
+    parts: list[str] = []
+    section = _exploration_section(exploration_context)
+    if section:
+        parts.append(section)
+    parts.append(_confidence_and_convention_instructions())
+    parts.append(_plan_grounding_instructions())
+    body = (
+        f"The intent of this PR is:\n\n"
+        f"{intent_summary}\n\n"
+        f"Create a detailed implementation plan for fixing these issues:\n"
+        f"{issues_text}\n\n"
+        f"For each issue, specify what files to change, what the change should be, "
+        f"and why. Make this actionable enough to hand to another developer or agent.\n\n"
+        f"The diff is available at {diff_path} for context. Do not invent file paths or symbols.\n"
+    )
+    parts.append(body)
+    return "\n".join(parts)
 
 FixResult = tuple[dict[str, Any], bool, str | None]
 
@@ -413,15 +652,12 @@ async def phase_review(
                 "Use `git diff main...HEAD` or `git diff master...HEAD` to get the diff.\n"
             )
 
-    prompt = f"""{skill_invocation}
-{diff_instruction}
-Write the full review output to {review_output_path}.
-"""
-
-    if exploration_context is not None:
-        section = exploration_context.to_prompt_section()
-        if section:
-            prompt = section + "\n" + prompt
+    prompt = build_review_prompt(
+        skill_invocation=skill_invocation,
+        diff_instruction=diff_instruction,
+        review_output_path=str(review_output_path),
+        exploration_context=exploration_context,
+    )
 
     await run_agent(backend, cwd, prompt)
 
@@ -830,20 +1066,12 @@ async def phase_understand_intent(
     """
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
 
-    prompt = f"""You have full access to explore the codebase. Read the diff file at {diff_path} \
-and examine the codebase to understand the intent of these changes. \
-Present your understanding concisely — what problem is being solved and how.
-
-Branch: {branch}
-
-Commit log:
-{log}
-"""
-
-    if exploration_context is not None:
-        section = exploration_context.to_prompt_section()
-        if section:
-            prompt = section + "\n" + prompt
+    prompt = build_intent_prompt(
+        diff_path=str(diff_path),
+        branch=branch,
+        log=log,
+        exploration_context=exploration_context,
+    )
 
     while True:
         console.print()
@@ -905,26 +1133,11 @@ async def phase_alternative_review(
     """
     print_phase_hero(console, "WONDER", phase_subtitle("WONDER"))
 
-    prompt = f"""The intent of this PR has been confirmed as:
-
-{intent_summary}
-
-Given this intent, explore the codebase and evaluate the implementation
-in the diff at {diff_path}. Would you have done this differently?
-
-Return a numbered list of issues covering both architectural alternatives
-and incremental improvements. For each issue, include: a sequential id
-number, a brief title, a description of what's wrong or could be better,
-your recommended alternative, a severity level (high/medium/low), and
-the relevant file paths.
-
-If the implementation is solid and you wouldn't change anything, return an empty issues list.
-"""
-
-    if exploration_context is not None:
-        section = exploration_context.to_prompt_section()
-        if section:
-            prompt = section + "\n" + prompt
+    prompt = build_alternative_review_prompt(
+        intent_summary=intent_summary,
+        diff_path=str(diff_path),
+        exploration_context=exploration_context,
+    )
 
     console.print()
     print_info(console, "Agent is evaluating the implementation...")
@@ -1055,22 +1268,12 @@ async def phase_generate_plan(
         for i in selected_issues
     )
 
-    prompt = f"""The intent of this PR is:
-{intent_summary}
-
-Create a detailed implementation plan for fixing these issues:
-{issues_text}
-
-For each issue, specify what files to change, what the change should be,
-and why. Make this actionable enough to hand to another developer or agent.
-
-The diff is available at {diff_path} for context.
-"""
-
-    if exploration_context is not None:
-        section = exploration_context.to_prompt_section()
-        if section:
-            prompt = section + "\n" + prompt
+    prompt = build_plan_prompt(
+        intent_summary=intent_summary,
+        issues_text=issues_text,
+        diff_path=str(diff_path),
+        exploration_context=exploration_context,
+    )
 
     console.print()
     print_info(console, f"Generating plan for {len(selected_issues)} issue(s)...")
