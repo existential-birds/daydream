@@ -66,7 +66,7 @@ Plans:
 
 Plans:
 - [x] 03-00-PLAN.md — Wave 0: shared ExplorationContext fixture + xfail test scaffolds for all schema/prompt/UI behaviors
-- [ ] 03-01-PLAN.md — Wave 1: extend FEEDBACK/ALTERNATIVE_REVIEW/PLAN schemas + shared confidence/convention/grounding prompt helpers wired into all four phase builders
+- [x] 03-01-PLAN.md — Wave 1: extend FEEDBACK/ALTERNATIVE_REVIEW/PLAN schemas + shared confidence/convention/grounding prompt helpers wired into all four phase builders
 - [ ] 03-02-PLAN.md — Wave 2: TTT plan renderer visual distinction for ungrounded plan steps
 
 ### Phase 4: On-demand Exploration
