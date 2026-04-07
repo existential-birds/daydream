@@ -100,8 +100,16 @@ class CodexBackend:
 
         Raises:
             CodexError: If the Codex turn fails.
+            NotImplementedError: If ``agents`` is supplied (Codex backend
+                does not support exploration subagents).
 
         """
+        if agents is not None:
+            raise NotImplementedError(
+                "Codex backend does not support exploration subagents; "
+                "use --backend claude for exploration."
+            )
+
         args = [
             "codex", "exec", "--experimental-json",
             "--model", self.model,

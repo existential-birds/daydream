@@ -15,6 +15,7 @@ from daydream.agent import (
 )
 from daydream.backends import Backend, ContinuationToken
 from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.exploration import ExplorationContext
 from daydream.ui import (
     ParallelFixPanel,
     phase_subtitle,
@@ -358,7 +359,14 @@ Run a full review first:
         raise FileNotFoundError(msg)
 
 
-async def phase_review(backend: Backend, cwd: Path, skill: str, *, diff_base: str | None = None) -> None:
+async def phase_review(
+    backend: Backend,
+    cwd: Path,
+    skill: str,
+    *,
+    diff_base: str | None = None,
+    exploration_context: ExplorationContext | None = None,
+) -> None:
     """Phase 1: Run review skill, write output to .review-output.md.
 
     Args:
@@ -409,6 +417,11 @@ async def phase_review(backend: Backend, cwd: Path, skill: str, *, diff_base: st
 {diff_instruction}
 Write the full review output to {review_output_path}.
 """
+
+    if exploration_context is not None:
+        section = exploration_context.to_prompt_section()
+        if section:
+            prompt = section + "\n" + prompt
 
     await run_agent(backend, cwd, prompt)
 
@@ -795,6 +808,8 @@ async def phase_understand_intent(
     diff_path: Path,
     log: str,
     branch: str,
+    *,
+    exploration_context: ExplorationContext | None = None,
 ) -> str:
     """Phase: Understand the intent of the PR through conversational confirmation.
 
@@ -824,6 +839,11 @@ Branch: {branch}
 Commit log:
 {log}
 """
+
+    if exploration_context is not None:
+        section = exploration_context.to_prompt_section()
+        if section:
+            prompt = section + "\n" + prompt
 
     while True:
         console.print()
@@ -863,6 +883,8 @@ async def phase_alternative_review(
     cwd: Path,
     diff_path: Path,
     intent_summary: str,
+    *,
+    exploration_context: ExplorationContext | None = None,
 ) -> list[dict[str, Any]]:
     """Phase: Evaluate whether there's a better way to implement the PR.
 
@@ -898,6 +920,11 @@ the relevant file paths.
 
 If the implementation is solid and you wouldn't change anything, return an empty issues list.
 """
+
+    if exploration_context is not None:
+        section = exploration_context.to_prompt_section()
+        if section:
+            prompt = section + "\n" + prompt
 
     console.print()
     print_info(console, "Agent is evaluating the implementation...")
@@ -984,6 +1011,8 @@ async def phase_generate_plan(
     diff_path: Path,
     intent_summary: str,
     issues: list[dict[str, Any]],
+    *,
+    exploration_context: ExplorationContext | None = None,
 ) -> Path | None:
     """Phase: Generate an implementation plan for selected issues.
 
@@ -1037,6 +1066,11 @@ and why. Make this actionable enough to hand to another developer or agent.
 
 The diff is available at {diff_path} for context.
 """
+
+    if exploration_context is not None:
+        section = exploration_context.to_prompt_section()
+        if section:
+            prompt = section + "\n" + prompt
 
     console.print()
     print_info(console, f"Generating plan for {len(selected_issues)} issue(s)...")

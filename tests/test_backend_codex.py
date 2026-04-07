@@ -315,20 +315,11 @@ class TestUnwrapShellCommand:
 
 
 @pytest.mark.asyncio
-async def test_execute_ignores_agents():
-    """CodexBackend should accept agents kwarg and silently ignore it."""
+async def test_execute_raises_on_agents():
+    """CodexBackend refuses agents= with NotImplementedError (Plan 02-04)."""
     backend = CodexBackend()
-    mock_proc = _make_mock_process("simple_text.jsonl")
-
     mock_agent = {"description": "test", "prompt": "test"}
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Test", agents={"explorer": mock_agent}):
-            events.append(event)
-
-    # Should still produce normal events
-    text_events = [e for e in events if isinstance(e, TextEvent)]
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(text_events) >= 1
-    assert len(result_events) == 1
+    with pytest.raises(NotImplementedError, match="Codex backend does not support exploration"):
+        async for _ in backend.execute(Path("/tmp"), "Test", agents={"explorer": mock_agent}):
+            pass

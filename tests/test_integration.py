@@ -685,3 +685,66 @@ async def test_run_trust_does_not_prompt_for_skill(tmp_path, monkeypatch):
     config = RunConfig(target=str(tmp_path), trust_the_technology=True)
     exit_code = await run(config)
     assert exit_code == 0
+
+
+# =============================================================================
+# Phase 02-04: Pre-scan exploration wiring
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_run_populates_exploration_context(monkeypatch, target_project: Path, mock_ui):
+    """run() populates config.exploration_context before phase_review fires."""
+    from daydream.exploration import ExplorationContext
+    from tests.test_exploration_runner import _AgentsRecordingMockBackend
+
+    fixtures = Path(__file__).parent / "fixtures" / "diffs"
+    diff_text = (
+        (fixtures / "python_multifile.diff").read_text()
+        + (fixtures / "typescript_multifile.diff").read_text()
+    )
+
+    # Force the diff source so exploration runs even in a tmp dir.
+    monkeypatch.setattr("daydream.runner._git_diff", lambda cwd: diff_text)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_phase_review(backend, cwd, skill, *, diff_base=None, exploration_context=None):
+        captured["exploration_context"] = exploration_context
+
+    async def fake_phase_parse_feedback(backend, cwd):
+        return []
+
+    async def fake_phase_test_and_heal(backend, cwd, feedback_items=None):
+        return True, 0
+
+    async def fake_phase_commit_push(backend, cwd):
+        return None
+
+    monkeypatch.setattr("daydream.runner.phase_review", fake_phase_review)
+    monkeypatch.setattr("daydream.runner.phase_parse_feedback", fake_phase_parse_feedback)
+    monkeypatch.setattr("daydream.runner.phase_test_and_heal", fake_phase_test_and_heal)
+    monkeypatch.setattr("daydream.runner.phase_commit_push", fake_phase_commit_push)
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None: _AgentsRecordingMockBackend(),
+    )
+
+    config = RunConfig(target=str(target_project), skill="python", quiet=True, cleanup=False)
+    exit_code = await run(config)
+
+    assert exit_code == 0
+    assert isinstance(config.exploration_context, ExplorationContext)
+    assert "exploration_context" in captured
+    assert captured["exploration_context"] is config.exploration_context
+
+
+@pytest.mark.asyncio
+async def test_codex_backend_raises_on_agents(tmp_path: Path):
+    """CodexBackend.execute() refuses agents= with NotImplementedError."""
+    from daydream.backends.codex import CodexBackend
+
+    backend = CodexBackend()
+    with pytest.raises(NotImplementedError, match="Codex backend does not support exploration"):
+        async for _ in backend.execute(tmp_path, "prompt", agents={"x": object()}):
+            pass
