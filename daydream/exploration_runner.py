@@ -253,8 +253,6 @@ async def pre_scan(
     repo_root: Path,
     diff_text: str,
     depth: int = 1,
-    *,
-    live_panel: "Any | None" = None,
 ) -> ExplorationContext:
     """Run the pre-scan exploration pipeline for a diff.
 
@@ -276,8 +274,6 @@ async def pre_scan(
         repo_root: Repository root used by ``detect_affected_files``.
         diff_text: Raw git diff string.
         depth: Static-resolution depth (forwarded to ``detect_affected_files``).
-        live_panel: Optional UI panel; specialist start/done callbacks are
-            issued through it as the run progresses.
 
     Returns:
         Merged ``ExplorationContext``.
@@ -307,10 +303,6 @@ async def pre_scan(
     else:
         agents = dict(EXPLORATION_AGENTS)
 
-    if live_panel is not None:
-        for name in agents:
-            live_panel.mark_start(name)
-
     prompt = _build_lead_prompt(tier, diff_text, static_files)
 
     try:
@@ -323,25 +315,15 @@ async def pre_scan(
         )
     except Exception as exc:
         _log_debug(f"[PRE_SCAN] run_agent raised: {type(exc).__name__}: {exc}\n")
-        if live_panel is not None:
-            for name in agents:
-                live_panel.mark_failed(name, str(exc))
         return static_context
 
     if not isinstance(structured, dict):
         _log_debug(
             f"[PRE_SCAN] envelope parse miss: structured={type(structured).__name__}\n"
         )
-        if live_panel is not None:
-            for name in agents:
-                live_panel.mark_failed(name, "no structured output")
         return static_context
 
     subagent_context = _parse_envelope(structured)
-
-    if live_panel is not None:
-        for name in agents:
-            live_panel.mark_done(name)
 
     return merge_contexts(static_context, subagent_context)
 
