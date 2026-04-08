@@ -40,7 +40,6 @@ from daydream.phases import (
     revert_uncommitted_changes,
 )
 from daydream.ui import (
-    ExplorationLivePanel,
     SummaryData,
     phase_subtitle,
     print_dim,
@@ -311,16 +310,13 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
         config.exploration_context = ExplorationContext()
     else:
         print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-        panel = ExplorationLivePanel(console, tier=tier)
-        with panel:
-            config.exploration_context = await safe_explore(
-                pre_scan,
-                backend,
-                target_dir,
-                diff,
-                config.exploration_depth,
-                live_panel=panel,
-            )
+        config.exploration_context = await safe_explore(
+            pre_scan,
+            backend,
+            target_dir,
+            diff,
+            config.exploration_depth,
+        )
 
     # Phase 1: Understand intent
     intent_summary = await phase_understand_intent(
@@ -491,16 +487,13 @@ async def run(config: RunConfig | None = None) -> int:
                 config.exploration_context = ExplorationContext()
             else:
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                panel = ExplorationLivePanel(console, tier=tier)
-                with panel:
-                    config.exploration_context = await safe_explore(
-                        pre_scan,
-                        review_backend,
-                        target_dir,
-                        diff_text,
-                        config.exploration_depth,
-                        live_panel=panel,
-                    )
+                config.exploration_context = await safe_explore(
+                    pre_scan,
+                    review_backend,
+                    target_dir,
+                    diff_text,
+                    config.exploration_depth,
+                )
 
         feedback_items: list[dict[str, Any]] = []
         fixes_applied = 0
