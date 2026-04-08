@@ -795,6 +795,19 @@ def _build_tool_header(
 
         return content
 
+    # Special handling for Task tool calls — description/prompt rendered as markdown
+    # below the header (see _build_tool_body_extras).
+    if name == "Task":
+        header_line = Text()
+        header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
+        header_line.append("Task", style=STYLE_BOLD_PINK)
+        subagent = str(args.get("subagent_type", ""))
+        if subagent:
+            header_line.append("  ")
+            header_line.append(subagent, style=STYLE_CYAN)
+        content.append_text(header_line)
+        return content
+
     # Standard tool call display (other tools)
     header_line = Text()
     header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
@@ -808,6 +821,25 @@ def _build_tool_header(
         content.append_text(args_text)
 
     return content
+
+
+def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
+    """Return extra renderables to display between header and result.
+
+    Currently used for the Task tool, whose `description` and `prompt`
+    arguments are rendered as Markdown so bold/italic/code/lists display
+    properly instead of as a flat key=value dump.
+    """
+    if name != "Task":
+        return []
+    extras: list = []
+    description = str(args.get("description", "")).strip()
+    prompt = str(args.get("prompt", "")).strip()
+    if description:
+        extras.append(Markdown(f"**{description}**"))
+    if prompt:
+        extras.append(Markdown(prompt))
+    return extras
 
 
 def _build_result_content(
@@ -919,6 +951,10 @@ def print_tool_call(
             content.append("\n")
             preview = content_str[:200] + "..." if len(content_str) > 200 else content_str
             content.append(preview, style=Style(color=NEON_COLORS["foreground"], dim=True))
+    elif name == "Task":
+        extras = _build_tool_body_extras(name, args)
+        if extras:
+            panel_content = Group(content, *extras)
 
     # Determine border style
     border_style = STYLE_CYAN if name == "Skill" else STYLE_PURPLE
@@ -1327,7 +1363,7 @@ class LiveThinkingPanel:
 
         """
         self._console.print()
-        with Live(self, console=self._console, refresh_per_second=10, transient=True):
+        with Live(self, console=self._console, refresh_per_second=10, transient=True, vertical_overflow="visible"):
             time.sleep(duration)
         # Print final static panel
         self._console.print(
@@ -1840,6 +1876,7 @@ class AgentTextRenderer:
             console=self._console,
             refresh_per_second=10,
             transient=True,  # Remove the live display when done
+            vertical_overflow="visible",
         )
         self._live.start()
         self._started = True
@@ -2629,6 +2666,9 @@ class LiveToolPanel:
         else:
             border_color = NEON_COLORS["purple"]
 
+        # Markdown body extras (e.g. Task description/prompt)
+        body_extras = _build_tool_body_extras(self._name, self._args)
+
         # Build content: header + inline spinner (if waiting) or result
         if self._result is None:
             # Special handling for Edit - show surgery phase animation
@@ -2644,13 +2684,13 @@ class LiveToolPanel:
                 header_with_spinner = Text()
                 header_with_spinner.append_text(header)
                 header_with_spinner.append_text(self._spinner.render())
-                content = Group(header_with_spinner)
+                content = Group(header_with_spinner, *body_extras)
         elif self._name == "Skill":
             # Skip output section for Skill calls - the header already shows skill name
             content = Group(header)
         elif self._quiet_mode:
             # Quiet mode complete: header only
-            content = Group(header)
+            content = Group(header, *body_extras)
         else:
             # Normal mode: show result
             result_content = self._build_result_content_internal()
@@ -2665,10 +2705,11 @@ class LiveToolPanel:
 
             if isinstance(result_content, Text) and not result_content.plain.strip():
                 # Empty result - just show header (wrap in Group for type consistency)
-                content = Group(header)
+                content = Group(header, *body_extras)
             else:
                 content = Group(
                     header,
+                    *body_extras,
                     result_title,
                     result_content,
                 )
@@ -2694,6 +2735,7 @@ class LiveToolPanel:
             console=self._console,
             refresh_per_second=10,
             transient=False,
+            vertical_overflow="visible",
         )
         self._live.start()
 
@@ -2909,6 +2951,7 @@ class LiveToolPanelRegistry:
                     console=self._console,
                     refresh_per_second=10,
                     transient=True,
+                    vertical_overflow="visible",
                 )
                 self._live.start()
         else:
@@ -3044,6 +3087,7 @@ class ShutdownPanel:
             console=self._console,
             refresh_per_second=10,
             transient=True,
+            vertical_overflow="visible",
         )
         self._live.start()
 
@@ -3223,6 +3267,7 @@ class ParallelFixPanel:
             console=self._console,
             refresh_per_second=8,
             transient=False,
+            vertical_overflow="visible",
         )
         self._live.start()
 
