@@ -838,7 +838,15 @@ def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
     if description:
         extras.append(Markdown(f"**{description}**"))
     if prompt:
-        extras.append(Markdown(prompt))
+        prompt_lines = prompt.split("\n")
+        max_prompt_lines = 10
+        if len(prompt_lines) > max_prompt_lines:
+            remaining = len(prompt_lines) - max_prompt_lines
+            truncated_prompt = "\n".join(prompt_lines[:max_prompt_lines])
+            truncated_prompt += f"\n\n_... ({remaining} more lines)_"
+            extras.append(Markdown(truncated_prompt))
+        else:
+            extras.append(Markdown(prompt))
     return extras
 
 
@@ -1363,7 +1371,7 @@ class LiveThinkingPanel:
 
         """
         self._console.print()
-        with Live(self, console=self._console, refresh_per_second=10, transient=True, vertical_overflow="visible"):
+        with Live(self, console=self._console, refresh_per_second=10, transient=True):
             time.sleep(duration)
         # Print final static panel
         self._console.print(
@@ -2735,7 +2743,6 @@ class LiveToolPanel:
             console=self._console,
             refresh_per_second=10,
             transient=False,
-            vertical_overflow="visible",
         )
         self._live.start()
 
@@ -2951,7 +2958,6 @@ class LiveToolPanelRegistry:
                     console=self._console,
                     refresh_per_second=10,
                     transient=True,
-                    vertical_overflow="visible",
                 )
                 self._live.start()
         else:
@@ -3087,7 +3093,6 @@ class ShutdownPanel:
             console=self._console,
             refresh_per_second=10,
             transient=True,
-            vertical_overflow="visible",
         )
         self._live.start()
 
@@ -3267,7 +3272,6 @@ class ParallelFixPanel:
             console=self._console,
             refresh_per_second=8,
             transient=False,
-            vertical_overflow="visible",
         )
         self._live.start()
 
