@@ -1,7 +1,7 @@
 # tests/test_exploration.py
 """Tests for exploration context data structures and prompt rendering."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo, merge_contexts, safe_explore
 

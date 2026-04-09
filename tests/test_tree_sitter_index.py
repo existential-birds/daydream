@@ -23,7 +23,9 @@ def test_python_impact_surface(tmp_path: Path):
         tmp_path,
         {
             "daydream_demo/__init__.py": "",
-            "daydream_demo/api.py": '"""API module."""\nfrom .models import User\n\ndef get_user():\n    return User()\n',
+            "daydream_demo/api.py": (
+                '"""API module."""\nfrom .models import User\n\ndef get_user():\n    return User()\n'
+            ),
             "daydream_demo/models.py": '"""Models module."""\n\nclass User:\n    pass\n',
         },
     )
@@ -43,7 +45,10 @@ def test_typescript_impact_surface(tmp_path: Path):
     repo = _materialize(
         tmp_path,
         {
-            "src/api.ts": '// API module\nimport { User } from "./models";\n\nexport function getUser(): User {\n  return new User();\n}\n',
+            "src/api.ts": (
+                '// API module\nimport { User } from "./models";\n\n'
+                "export function getUser(): User {\n  return new User();\n}\n"
+            ),
             "src/models.ts": "// Models module\n\nexport class User {}\n",
         },
     )
@@ -61,7 +66,10 @@ def test_go_impact_surface(tmp_path: Path):
     repo = _materialize(
         tmp_path,
         {
-            "api.go": 'package main\n\nimport "example.com/m/models"\n\nfunc GetUser() *models.User {\n\treturn &models.User{}\n}\n',
+            "api.go": (
+                'package main\n\nimport "example.com/m/models"\n\n'
+                "func GetUser() *models.User {\n\treturn &models.User{}\n}\n"
+            ),
             "models/user.go": "// user model\npackage models\ntype User struct{}\n",
         },
     )

@@ -352,7 +352,6 @@ def build_intent_prompt(
     section = _exploration_section(exploration_context)
     if section:
         parts.append(section)
-    parts.append(_confidence_and_convention_instructions())
     body = (
         f"You have full access to explore the codebase. Read the diff file at {diff_path} "
         f"and examine the codebase to understand the intent of these changes. "

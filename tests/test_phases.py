@@ -681,19 +681,25 @@ def test_all_phase_builders_inject_exploration(exploration_context_fixture):
         assert section in prompt
 
 
-def test_all_phase_builders_use_shared_instructions(exploration_context_fixture):
+def test_issue_producing_builders_use_shared_instructions(exploration_context_fixture):
     from daydream.phases import (  # type: ignore[attr-defined]
         build_alternative_review_prompt,
-        build_intent_prompt,
         build_plan_prompt,
         build_review_prompt,
     )
 
     for builder in (
         build_review_prompt,
-        build_intent_prompt,
         build_alternative_review_prompt,
         build_plan_prompt,
     ):
         prompt = builder(exploration_context=exploration_context_fixture)
         assert "Confidence and Convention Rules" in prompt
+
+
+def test_intent_builder_omits_issue_instructions(exploration_context_fixture):
+    from daydream.phases import build_intent_prompt
+
+    prompt = build_intent_prompt(exploration_context=exploration_context_fixture)
+    assert "Confidence and Convention Rules" not in prompt
+    assert "issue" not in prompt.lower()
