@@ -2836,8 +2836,12 @@ class LiveToolPanelRegistry:
         self._quiet_mode = quiet_mode
         self._panels: dict[str, LiveToolPanel] = {}
         self._active_order: list[str] = []
+        self._static_ids: set[str] = set()
         self._live: Live | None = None
         self._group = _ActivePanelsGroup(self)
+
+    # Tool names whose panels should scroll inline rather than pin via Live.
+    _STATIC_TOOL_NAMES: frozenset[str] = frozenset({"Task"})
 
     def create(
         self,
@@ -2878,6 +2882,16 @@ class LiveToolPanelRegistry:
             quiet_mode=self._quiet_mode,
         )
         self._panels[tool_use_id] = panel
+
+        # Static tools (e.g. Task) scroll inline instead of joining Live.
+        if name in self._STATIC_TOOL_NAMES:
+            self._static_ids.add(tool_use_id)
+            self._stop_live()
+            self._console.print()
+            self._console.print(panel._render_panel())
+            self._ensure_live()
+            return panel
+
         self._active_order.append(tool_use_id)
 
         # Print a blank line before the first panel group
@@ -2971,6 +2985,15 @@ class LiveToolPanelRegistry:
 
     def _finalize_panel(self, tool_use_id: str) -> None:
         """Remove a panel from the active set and print its final state."""
+        if tool_use_id in self._static_ids:
+            self._static_ids.discard(tool_use_id)
+            panel = self._panels.pop(tool_use_id, None)
+            if panel is not None:
+                self._stop_live()
+                self._console.print(panel._render_panel())
+                self._ensure_live()
+            return
+
         if tool_use_id not in self._active_order:
             _ui_debug(
                 f"[REGISTRY_FINALIZE] id={tool_use_id} NOT in active_order "
