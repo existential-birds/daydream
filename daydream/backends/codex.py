@@ -93,18 +93,19 @@ class CodexBackend:
             prompt: The prompt to send.
             output_schema: Optional JSON schema for structured output.
             continuation: Optional token for thread resumption.
-            agents: Ignored by Codex backend. Accepted for protocol compatibility.
+            agents: Optional subagent mapping. Codex does not support non-empty
+                subagent maps and will raise if provided.
 
         Yields:
             AgentEvent instances.
 
         Raises:
             CodexError: If the Codex turn fails.
-            NotImplementedError: If ``agents`` is supplied (Codex backend
+            NotImplementedError: If ``agents`` is non-empty (Codex backend
                 does not support exploration subagents).
 
         """
-        if agents is not None:
+        if agents:
             raise NotImplementedError(
                 "Codex backend does not support exploration subagents; "
                 "use --backend claude for exploration."

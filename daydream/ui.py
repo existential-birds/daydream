@@ -1883,7 +1883,7 @@ class AgentTextRenderer:
             self,  # Pass self so Live calls __rich__() on each refresh
             console=self._console,
             refresh_per_second=10,
-            transient=True,  # Remove the live display when done
+            transient=False,
             vertical_overflow="visible",
         )
         self._live.start()
@@ -1919,12 +1919,9 @@ class AgentTextRenderer:
 
         """
         if self._live is not None:
+            self._live.update(self._render_panel(show_spinner=False), refresh=True)
             self._live.stop()
             self._live = None
-
-        # Print the final panel (non-transient, without spinner)
-        if self._buffer:
-            self._console.print(self._render_panel(show_spinner=False))
 
         # Reset state
         self._buffer = []

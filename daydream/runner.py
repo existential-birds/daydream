@@ -304,19 +304,21 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
     console.print()
 
     # Pre-scan exploration: populate config.exploration_context before phase 1.
-    tier = select_tier(count_changed_files(diff or ""))
-    if tier == "skip":
-        print_dim(console, "Skipping exploration -- trivial diff")
-        config.exploration_context = ExplorationContext()
-    else:
-        print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-        config.exploration_context = await safe_explore(
-            pre_scan,
-            backend,
-            target_dir,
-            diff,
-            config.exploration_depth,
-        )
+    # Skip when already pre-populated (e.g. injected by caller or tests).
+    if config.exploration_context is None:
+        tier = select_tier(count_changed_files(diff or ""))
+        if tier == "skip":
+            print_dim(console, "Skipping exploration -- trivial diff")
+            config.exploration_context = ExplorationContext()
+        else:
+            print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+            config.exploration_context = await safe_explore(
+                pre_scan,
+                backend,
+                target_dir,
+                diff,
+                config.exploration_depth,
+            )
 
     # Phase 1: Understand intent
     intent_summary = await phase_understand_intent(
