@@ -3396,12 +3396,12 @@ def render_ttt_plan(console: Console, plan: dict) -> None:
         line = f"{file_path}: {description}" if file_path else description
 
         if references:
-            console.print(line)
+            console.print(Text(line))
             for ref in references:
                 if not isinstance(ref, dict):
                     continue
                 ref_file = ref.get("file", "")
                 ref_symbol = ref.get("symbol", "")
-                console.print(f"    [dim]→ {ref_file}::{ref_symbol}[/dim]")
+                console.print(Text.assemble(("    → ", STYLE_DIM), (f"{ref_file}::{ref_symbol}", STYLE_DIM)))
         else:
-            console.print(f"[dim]{line}[/dim] [yellow](ungrounded)[/yellow]")
+            console.print(Text.assemble((line, STYLE_DIM), (" (ungrounded)", "yellow")))
