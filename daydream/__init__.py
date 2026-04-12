@@ -17,4 +17,4 @@ Submodules:
     ui: User interface utilities for terminal output.
 """
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
