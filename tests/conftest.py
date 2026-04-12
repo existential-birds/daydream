@@ -1,5 +1,7 @@
 """Shared pytest fixtures for the daydream test suite."""
 
+from pathlib import Path
+
 import pytest
 
 from daydream.exploration import (
@@ -41,3 +43,11 @@ def exploration_context_fixture() -> ExplorationContext:
             ),
         ],
     )
+
+
+@pytest.fixture
+def exploration_dir_fixture(tmp_path: Path, exploration_context_fixture: ExplorationContext) -> Path:
+    """Write exploration context to a temp dir for phase prompt tests."""
+    exploration_dir = tmp_path / "exploration"
+    exploration_context_fixture.write_to_dir(exploration_dir)
+    return exploration_dir

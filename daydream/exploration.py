@@ -8,6 +8,7 @@ exploration failures.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -128,6 +129,90 @@ class ExplorationContext:
             return ""
 
         return "# Exploration Context\n\n" + "\n\n".join(sections) + "\n"
+
+    def write_to_dir(self, exploration_dir: Path) -> Path:
+        """Write exploration results as markdown files for on-demand agent access."""
+        exploration_dir.mkdir(parents=True, exist_ok=True)
+
+        # affected_files.md
+        if self.affected_files:
+            lines = ["# Affected Files\n", "Files relevant to the current review, discovered by exploration.\n",
+                     "| File | Role | Summary |", "|------|------|---------|"]
+            for f in self.affected_files:
+                lines.append(f"| `{f.path}` | {f.role} | {f.summary} |")
+            (exploration_dir / "affected_files.md").write_text("\n".join(lines) + "\n")
+        else:
+            (exploration_dir / "affected_files.md").write_text("# Affected Files\n\nNo data collected.\n")
+
+        # conventions.md
+        if self.conventions or self.guidelines:
+            lines = ["# Codebase Conventions\n", "Conventions detected during pre-scan exploration.\n"]
+            if self.conventions:
+                lines.append("## Conventions")
+                for c in self.conventions:
+                    line = f"- **{c.name}**: {c.description}"
+                    if c.source:
+                        line += f" (source: {c.source})"
+                    lines.append(line)
+                lines.append("")
+            if self.guidelines:
+                lines.append("## Project Guidelines")
+                for g in self.guidelines:
+                    lines.append(f"- {g}")
+                lines.append("")
+            (exploration_dir / "conventions.md").write_text("\n".join(lines))
+        else:
+            (exploration_dir / "conventions.md").write_text("# Codebase Conventions\n\nNo data collected.\n")
+
+        # dependencies.md
+        if self.dependencies:
+            lines = ["# Dependencies\n", "Import and call relationships between files.\n",
+                     "| Source | Relationship | Target |", "|--------|-------------|--------|"]
+            for d in self.dependencies:
+                lines.append(f"| `{d.source}` | {d.relationship} | `{d.target}` |")
+            (exploration_dir / "dependencies.md").write_text("\n".join(lines) + "\n")
+        else:
+            (exploration_dir / "dependencies.md").write_text("# Dependencies\n\nNo data collected.\n")
+
+        # summary.md
+        summary_lines = ["# Exploration Summary\n", "Pre-scan exploration results for the current review.\n",
+                         "| File | Contents |", "|------|----------|"]
+        if self.affected_files:
+            role_counts: dict[str, int] = {}
+            for f in self.affected_files:
+                role_counts[f.role] = role_counts.get(f.role, 0) + 1
+            role_str = ", ".join(f"{v} {k}" for k, v in role_counts.items())
+            summary_lines.append(f"| `affected_files.md` | {len(self.affected_files)} files ({role_str}) |")
+        else:
+            summary_lines.append("| `affected_files.md` | No data collected |")
+
+        conv_count = len(self.conventions)
+        guide_count = len(self.guidelines)
+        if conv_count or guide_count:
+            parts: list[str] = []
+            if conv_count:
+                parts.append(f"{conv_count} convention{'s' if conv_count != 1 else ''}")
+            if guide_count:
+                parts.append(f"{guide_count} guideline{'s' if guide_count != 1 else ''}")
+            summary_lines.append(f"| `conventions.md` | {', '.join(parts)} |")
+        else:
+            summary_lines.append("| `conventions.md` | No data collected |")
+
+        if self.dependencies:
+            dep_count = len(self.dependencies)
+            summary_lines.append(
+                f"| `dependencies.md` | {dep_count} dependency edge{'s' if dep_count != 1 else ''} |"
+            )
+        else:
+            summary_lines.append("| `dependencies.md` | No data collected |")
+
+        summary_text = "\n".join(summary_lines) + "\n"
+        if self.raw_notes:
+            summary_text += f"\n## Additional Notes\n{self.raw_notes}\n"
+
+        (exploration_dir / "summary.md").write_text(summary_text)
+
+        return exploration_dir
 
 
 async def safe_explore(

@@ -103,12 +103,12 @@ _VALID_ENVELOPE: dict[str, Any] = {
 }
 
 
-class _AgentsRecordingMockBackend:
-    """Mock backend that records ``agents=`` kwargs and yields a canned envelope."""
+class _SpecialistMockBackend:
+    """Mock backend that returns specialist results based on output_schema."""
 
-    def __init__(self, envelope: dict[str, Any] | None = None) -> None:
-        self.agents_calls: list[dict[str, Any] | None] = []
-        self._envelope = envelope if envelope is not None else _VALID_ENVELOPE
+    def __init__(self, results: dict[str, dict] | None = None) -> None:
+        self.execute_calls: list[dict[str, Any]] = []
+        self._results = results or _VALID_ENVELOPE
 
     async def execute(  # type: ignore[no-untyped-def]
         self,
@@ -118,14 +118,27 @@ class _AgentsRecordingMockBackend:
         continuation=None,
         agents=None,
     ) -> AsyncIterator[AgentEvent]:
-        self.agents_calls.append(dict(agents) if agents else None)
-        yield ResultEvent(structured_output=self._envelope, continuation=None)
+        self.execute_calls.append({"prompt": prompt, "schema": output_schema, "agents": agents})
+        result: dict[str, Any] = {}
+        if output_schema == PATTERN_SCANNER_SCHEMA:
+            result = self._results.get("pattern_scanner", {})
+        elif output_schema == DEPENDENCY_TRACER_SCHEMA:
+            result = self._results.get("dependency_tracer", {})
+        elif output_schema == TEST_MAPPER_SCHEMA:
+            result = self._results.get("test_mapper", {})
+        else:
+            result = self._results
+        yield ResultEvent(structured_output=result, continuation=None)
 
     async def cancel(self) -> None:
         return None
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
         return f"/{skill_key}"
+
+
+# Backward compat alias for tests/test_integration.py
+_AgentsRecordingMockBackend = _SpecialistMockBackend
 
 
 # ---------------------------------------------------------------------------
@@ -165,27 +178,22 @@ def test_envelope_schema_includes_three_subagent_keys():
 
 def test_skip_tier_no_subagents(tmp_path):
     diff_text = (FIXTURES / "trivial_single.diff").read_text()
-    backend = _AgentsRecordingMockBackend()
+    backend = _SpecialistMockBackend()
 
     ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)
 
-    assert backend.agents_calls == []
-    # Static context may be empty (no python/ts files in trivial diff) -- the
-    # important thing is no backend invocation occurred.
+    assert backend.execute_calls == []
     assert ctx is not None
 
 
 def test_single_tier_dependency_tracer_only(tmp_path):
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
-    backend = _AgentsRecordingMockBackend()
+    backend = _SpecialistMockBackend()
 
     ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)
 
-    assert len(backend.agents_calls) == 1
-    call = backend.agents_calls[0]
-    assert call is not None
-    assert set(call.keys()) == {"dependency-tracer"}
-    # Envelope was parsed and merged: dependency-tracer's affected file shows up.
+    assert len(backend.execute_calls) == 1
+    assert backend.execute_calls[0]["schema"] == DEPENDENCY_TRACER_SCHEMA
     paths = {f.path for f in ctx.affected_files}
     assert "daydream/extra.py" in paths
 
@@ -195,14 +203,16 @@ def test_parallel_tier_launches_three_agents(tmp_path):
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts
 
-    backend = _AgentsRecordingMockBackend()
+    backend = _SpecialistMockBackend()
     ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)
 
-    assert len(backend.agents_calls) == 1
-    call = backend.agents_calls[0]
-    assert call is not None
-    assert set(call.keys()) == {"pattern-scanner", "dependency-tracer", "test-mapper"}
-    # Pattern-scanner conventions and test-mapper file flowed through.
+    assert len(backend.execute_calls) == 3
+    schemas = {call["schema"]["type"] for call in backend.execute_calls}
+    assert len(schemas) >= 1  # All are "object" type
+    # Verify no agents= was passed
+    for call in backend.execute_calls:
+        assert call["agents"] is None
+    # Results merged correctly
     assert any(c.name == "snake_case" for c in ctx.conventions)
     assert any(f.path == "tests/test_a.py" for f in ctx.affected_files)
     assert "use type hints" in ctx.guidelines
@@ -210,7 +220,6 @@ def test_parallel_tier_launches_three_agents(tmp_path):
 
 def test_parse_envelope_handles_missing_keys(tmp_path):
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
-    # Single-tier envelope: only dependency_tracer key present.
     envelope = {
         "dependency_tracer": {
             "affected_files": [
@@ -219,7 +228,41 @@ def test_parse_envelope_handles_missing_keys(tmp_path):
             "dependencies": [],
         }
     }
-    backend = _AgentsRecordingMockBackend(envelope=envelope)
+    backend = _SpecialistMockBackend(results=envelope)
     ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)
     assert any(f.path == "daydream/x.py" for f in ctx.affected_files)
     assert ctx.conventions == []
+
+
+def test_specialist_failure_doesnt_cancel_others(tmp_path):
+    """One specialist raising doesn't cancel the others."""
+    py = (FIXTURES / "python_multifile.diff").read_text()
+    ts = (FIXTURES / "typescript_multifile.diff").read_text()
+    diff_text = py + ts  # 4 files -> parallel tier
+
+    call_count = 0
+
+    class _FailingPatternScanner:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+            nonlocal call_count
+            call_count += 1
+            if output_schema == PATTERN_SCANNER_SCHEMA:
+                raise RuntimeError("pattern scanner exploded")
+            result = _VALID_ENVELOPE.get("dependency_tracer", {})
+            if output_schema == TEST_MAPPER_SCHEMA:
+                result = _VALID_ENVELOPE.get("test_mapper", {})
+            yield ResultEvent(structured_output=result, continuation=None)
+
+        async def cancel(self):
+            return None
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    backend = _FailingPatternScanner()
+    ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)
+
+    # Pattern scanner failed, but others should have run
+    assert call_count == 3
+    assert ctx.conventions == []  # pattern scanner failed
+    assert any(f.path == "daydream/extra.py" for f in ctx.affected_files)

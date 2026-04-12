@@ -203,3 +203,80 @@ def test_merge_contexts_joins_raw_notes():
     c = ExplorationContext(raw_notes="second")
     merged = merge_contexts(a, b, c)
     assert merged.raw_notes == "first\n\nsecond"
+
+
+def test_write_to_dir_creates_all_files(tmp_path):
+    ctx = ExplorationContext(
+        affected_files=[FileInfo("src/app.py", "modified", "Main entry point")],
+        conventions=[Convention("snake_case", "All functions use snake_case", "CLAUDE.md")],
+        dependencies=[Dependency("app.py", "utils.py", "imports")],
+        guidelines=["Use type annotations everywhere"],
+        raw_notes="Found interesting patterns.",
+    )
+    exploration_dir = tmp_path / "exploration"
+    ctx.write_to_dir(exploration_dir)
+
+    assert (exploration_dir / "summary.md").exists()
+    assert (exploration_dir / "affected_files.md").exists()
+    assert (exploration_dir / "conventions.md").exists()
+    assert (exploration_dir / "dependencies.md").exists()
+
+    affected = (exploration_dir / "affected_files.md").read_text()
+    assert "src/app.py" in affected
+    assert "modified" in affected
+
+    conventions = (exploration_dir / "conventions.md").read_text()
+    assert "snake_case" in conventions
+    assert "Use type annotations everywhere" in conventions
+
+    deps = (exploration_dir / "dependencies.md").read_text()
+    assert "app.py" in deps
+    assert "utils.py" in deps
+
+    summary = (exploration_dir / "summary.md").read_text()
+    assert "affected_files.md" in summary
+    assert "Additional Notes" in summary
+    assert "Found interesting patterns." in summary
+
+
+def test_write_to_dir_empty_context(tmp_path):
+    ctx = ExplorationContext()
+    exploration_dir = tmp_path / "exploration"
+    ctx.write_to_dir(exploration_dir)
+
+    for name in ("summary.md", "affected_files.md", "conventions.md", "dependencies.md"):
+        path = exploration_dir / name
+        assert path.exists()
+
+    assert "No data collected" in (exploration_dir / "affected_files.md").read_text()
+    assert "No data collected" in (exploration_dir / "conventions.md").read_text()
+    assert "No data collected" in (exploration_dir / "dependencies.md").read_text()
+
+
+def test_write_to_dir_creates_directory(tmp_path):
+    ctx = ExplorationContext()
+    nested = tmp_path / "a" / "b" / "exploration"
+    ctx.write_to_dir(nested)
+    assert nested.is_dir()
+    assert (nested / "summary.md").exists()
+
+
+def test_write_to_dir_returns_path(tmp_path):
+    ctx = ExplorationContext()
+    exploration_dir = tmp_path / "exploration"
+    result = ctx.write_to_dir(exploration_dir)
+    assert result == exploration_dir
+
+
+def test_write_to_dir_partial_context(tmp_path):
+    ctx = ExplorationContext(
+        affected_files=[FileInfo("a.py", "modified", "Entry point")],
+    )
+    exploration_dir = tmp_path / "exploration"
+    ctx.write_to_dir(exploration_dir)
+
+    affected = (exploration_dir / "affected_files.md").read_text()
+    assert "a.py" in affected
+
+    assert "No data collected" in (exploration_dir / "conventions.md").read_text()
+    assert "No data collected" in (exploration_dir / "dependencies.md").read_text()

@@ -1,13 +1,13 @@
 """Pre-scan orchestrator.
 
 Counts changed files in a diff, selects an exploration tier (skip / single /
-parallel), launches specialist subagents via ``Backend.execute(agents=...)``,
-parses each specialist's structured-JSON envelope into a partial
+parallel), launches specialist ``backend.execute()`` calls in parallel (one
+per specialist), parses each specialist's structured-JSON result into a partial
 ``ExplorationContext``, and merges everything (including the static tree-sitter
 file map from ``detect_affected_files``) into a single context.
 
 The orchestrator is intentionally tier-driven so a trivial diff produces zero
-backend calls and a multi-file diff fans out to three specialists in one call.
+backend calls and a multi-file diff fans out to three parallel specialists.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from daydream.exploration import (
 )
 from daydream.prompts.exploration_subagents import (
     DEPENDENCY_TRACER_SCHEMA,
-    EXPLORATION_AGENTS,
     PATTERN_SCANNER_SCHEMA,
     TEST_MAPPER_SCHEMA,
     build_dependency_tracer_prompt,
@@ -35,8 +34,6 @@ from daydream.tree_sitter_index import detect_affected_files
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from claude_agent_sdk.types import AgentDefinition
 
     from daydream.backends import Backend
 
@@ -88,65 +85,6 @@ def select_tier(file_count: int) -> Tier:
     if file_count <= 3:
         return "single"
     return "parallel"
-
-
-def _build_lead_prompt(
-    tier: Tier,
-    diff_text: str,
-    static_files: list[FileInfo],
-) -> str:
-    """Construct the lead-agent prompt that delegates to specialists."""
-    file_paths = [f.path for f in static_files]
-    pattern_block = build_pattern_scanner_prompt(diff_text, file_paths)
-    dependency_block = build_dependency_tracer_prompt(diff_text, static_files)
-    test_block = build_test_mapper_prompt(diff_text, file_paths)
-
-    if tier == "single":
-        return f"""You are the lead exploration agent. You have ONE specialist available:
-- `dependency-tracer`: extends the import graph by grepping call sites.
-
-Delegate to the dependency-tracer specialist, then emit a SINGLE JSON object
-matching the envelope schema with the `dependency_tracer` key populated from
-the specialist's response. Other keys may be omitted.
-
-<dependency-tracer-instructions>
-{dependency_block}
-</dependency-tracer-instructions>
-
-Return ONLY a JSON object of the shape:
-{{
-  "dependency_tracer": {{ ...DEPENDENCY_TRACER_SCHEMA fields... }}
-}}
-"""
-
-    return f"""You are the lead exploration agent. You have THREE specialists available:
-- `pattern-scanner`: detects conventions and reads guideline files.
-- `dependency-tracer`: extends the import graph by grepping call sites.
-- `test-mapper`: locates test files for each modified source file.
-
-Delegate to ALL THREE specialists IN PARALLEL, then emit a SINGLE JSON object
-matching the envelope schema with `pattern_scanner`, `dependency_tracer`, and
-`test_mapper` keys populated from their respective responses.
-
-<pattern-scanner-instructions>
-{pattern_block}
-</pattern-scanner-instructions>
-
-<dependency-tracer-instructions>
-{dependency_block}
-</dependency-tracer-instructions>
-
-<test-mapper-instructions>
-{test_block}
-</test-mapper-instructions>
-
-Return ONLY a JSON object of the shape:
-{{
-  "pattern_scanner": {{ ...PATTERN_SCANNER_SCHEMA fields... }},
-  "dependency_tracer": {{ ...DEPENDENCY_TRACER_SCHEMA fields... }},
-  "test_mapper": {{ ...TEST_MAPPER_SCHEMA fields... }}
-}}
-"""
 
 
 def _coerce_file_infos(entries: Any) -> list[FileInfo]:
@@ -260,14 +198,9 @@ async def pre_scan(
         1. Build a static affected-files list from ``detect_affected_files``.
         2. Count unique files in the diff and pick a tier.
         3. For ``"skip"`` -- return the static context, no backend call.
-        4. For ``"single"`` / ``"parallel"`` -- launch one ``Backend.execute()``
-           call with the appropriate ``agents=`` mapping, parse the envelope,
+        4. For ``"single"`` / ``"parallel"`` -- launch parallel
+           ``backend.execute()`` calls (one per specialist), parse results,
            merge with the static context.
-
-    Subagent failure (parse miss, exception inside the lead) downgrades to the
-    static context only -- this is enforced via the outer ``safe_explore``
-    wrapper at the call site, but ``pre_scan`` itself never raises on a
-    structured-output miss.
 
     Args:
         backend: Backend to invoke.
@@ -278,8 +211,8 @@ async def pre_scan(
     Returns:
         Merged ``ExplorationContext``.
     """
-    # Lazy imports to avoid pulling agent.py into module-load time and to
-    # match the project convention used elsewhere (see daydream/exploration.py).
+    import anyio
+
     from daydream.agent import _log_debug, run_agent
 
     static_files: list[FileInfo] = []
@@ -296,35 +229,41 @@ async def pre_scan(
     if tier == "skip":
         return static_context
 
-    if tier == "single":
-        agents: dict[str, AgentDefinition] = {
-            "dependency-tracer": EXPLORATION_AGENTS["dependency-tracer"],
-        }
-    else:
-        agents = dict(EXPLORATION_AGENTS)
+    results: dict[str, Any] = {}
 
-    prompt = _build_lead_prompt(tier, diff_text, static_files)
+    async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
+        try:
+            structured, _ = await run_agent(backend, repo_root, prompt, output_schema=schema)
+            if isinstance(structured, dict):
+                results[name] = structured
+        except Exception as exc:
+            _log_debug(f"[PRE_SCAN] specialist {name} failed: {type(exc).__name__}: {exc}\n")
 
-    try:
-        structured, _ = await run_agent(
-            backend,
-            repo_root,
-            prompt,
-            output_schema=EXPLORATION_ENVELOPE_SCHEMA,
-            agents=agents,
-        )
-    except Exception as exc:
-        _log_debug(f"[PRE_SCAN] run_agent raised: {type(exc).__name__}: {exc}\n")
+    file_paths = [f.path for f in static_files]
+
+    async with anyio.create_task_group() as tg:
+        if tier == "single":
+            dep_prompt = build_dependency_tracer_prompt(diff_text, static_files)
+            tg.start_soon(_run_specialist, "dependency_tracer", dep_prompt, DEPENDENCY_TRACER_SCHEMA)
+        else:  # parallel
+            tg.start_soon(
+                _run_specialist, "pattern_scanner",
+                build_pattern_scanner_prompt(diff_text, file_paths), PATTERN_SCANNER_SCHEMA,
+            )
+            tg.start_soon(
+                _run_specialist, "dependency_tracer",
+                build_dependency_tracer_prompt(diff_text, static_files), DEPENDENCY_TRACER_SCHEMA,
+            )
+            tg.start_soon(
+                _run_specialist, "test_mapper",
+                build_test_mapper_prompt(diff_text, file_paths), TEST_MAPPER_SCHEMA,
+            )
+
+    if not results:
+        _log_debug("[PRE_SCAN] no specialist results collected\n")
         return static_context
 
-    if not isinstance(structured, dict):
-        _log_debug(
-            f"[PRE_SCAN] envelope parse miss: structured={type(structured).__name__}\n"
-        )
-        return static_context
-
-    subagent_context = _parse_envelope(structured)
-
+    subagent_context = _parse_envelope(results)
     return merge_contexts(static_context, subagent_context)
 
 

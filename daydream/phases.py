@@ -15,7 +15,6 @@ from daydream.agent import (
 )
 from daydream.backends import Backend, ContinuationToken
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.exploration import ExplorationContext
 from daydream.ui import (
     ParallelFixPanel,
     phase_subtitle,
@@ -294,11 +293,16 @@ def _validate_issue(issue: dict[str, Any]) -> None:
         raise ValueError(f"Issue is missing rationale: {issue!r}")
 
 
-def _exploration_section(exploration_context: ExplorationContext | None) -> str:
-    """Render the exploration context as a prompt section, or empty string."""
-    if exploration_context is None:
+def _exploration_pointer(exploration_dir: Path | None) -> str:
+    """Return a short prompt pointer to exploration files, or empty string."""
+    if exploration_dir is None:
         return ""
-    return exploration_context.to_prompt_section() or ""
+    return (
+        f"Pre-scan exploration results are available in {exploration_dir}/.\n"
+        f"Read {exploration_dir}/summary.md for an index of what was found.\n"
+        f"Reference individual files as needed during your review — "
+        f"do NOT read them all up front.\n"
+    )
 
 
 def build_review_prompt(
@@ -306,7 +310,7 @@ def build_review_prompt(
     skill_invocation: str = "",
     diff_instruction: str = "",
     review_output_path: str = "",
-    exploration_context: ExplorationContext | None = None,
+    exploration_dir: Path | None = None,
 ) -> str:
     """Assemble the prompt for `phase_review`.
 
@@ -314,16 +318,16 @@ def build_review_prompt(
         skill_invocation: Backend-formatted skill invocation string.
         diff_instruction: Diff scope instruction text.
         review_output_path: Absolute path the agent should write its review to.
-        exploration_context: Optional exploration context to prepend.
+        exploration_dir: Optional path to exploration output directory.
 
     Returns:
         Fully assembled prompt string.
 
     """
     parts: list[str] = []
-    section = _exploration_section(exploration_context)
-    if section:
-        parts.append(section)
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     body = (
@@ -340,7 +344,7 @@ def build_intent_prompt(
     diff_path: str = "",
     branch: str = "",
     log: str = "",
-    exploration_context: ExplorationContext | None = None,
+    exploration_dir: Path | None = None,
 ) -> str:
     """Assemble the prompt for `phase_understand_intent`.
 
@@ -349,9 +353,9 @@ def build_intent_prompt(
 
     """
     parts: list[str] = []
-    section = _exploration_section(exploration_context)
-    if section:
-        parts.append(section)
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
     body = (
         f"You have full access to explore the codebase. Read the diff file at {diff_path} "
         f"and examine the codebase to understand the intent of these changes. "
@@ -367,7 +371,7 @@ def build_alternative_review_prompt(
     *,
     intent_summary: str = "",
     diff_path: str = "",
-    exploration_context: ExplorationContext | None = None,
+    exploration_dir: Path | None = None,
 ) -> str:
     """Assemble the prompt for `phase_alternative_review`.
 
@@ -376,9 +380,9 @@ def build_alternative_review_prompt(
 
     """
     parts: list[str] = []
-    section = _exploration_section(exploration_context)
-    if section:
-        parts.append(section)
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
     parts.append(_confidence_and_convention_instructions())
     body = (
         f"The intent of this PR has been confirmed as:\n\n"
@@ -401,7 +405,7 @@ def build_plan_prompt(
     intent_summary: str = "",
     issues_text: str = "",
     diff_path: str = "",
-    exploration_context: ExplorationContext | None = None,
+    exploration_dir: Path | None = None,
 ) -> str:
     """Assemble the prompt for `phase_generate_plan`.
 
@@ -410,9 +414,9 @@ def build_plan_prompt(
 
     """
     parts: list[str] = []
-    section = _exploration_section(exploration_context)
-    if section:
-        parts.append(section)
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
     parts.append(_confidence_and_convention_instructions())
     parts.append(_plan_grounding_instructions())
     body = (
@@ -603,7 +607,7 @@ async def phase_review(
     skill: str,
     *,
     diff_base: str | None = None,
-    exploration_context: ExplorationContext | None = None,
+    exploration_dir: Path | None = None,
 ) -> None:
     """Phase 1: Run review skill, write output to .review-output.md.
 
@@ -655,7 +659,7 @@ async def phase_review(
         skill_invocation=skill_invocation,
         diff_instruction=diff_instruction,
         review_output_path=str(review_output_path),
-        exploration_context=exploration_context,
+        exploration_dir=exploration_dir,
     )
 
     await run_agent(backend, cwd, prompt)
@@ -1044,7 +1048,7 @@ async def phase_understand_intent(
     log: str,
     branch: str,
     *,
-    exploration_context: ExplorationContext | None = None,
+    exploration_dir: Path | None = None,
 ) -> str:
     """Phase: Understand the intent of the PR through conversational confirmation.
 
@@ -1069,7 +1073,7 @@ async def phase_understand_intent(
         diff_path=str(diff_path),
         branch=branch,
         log=log,
-        exploration_context=exploration_context,
+        exploration_dir=exploration_dir,
     )
 
     while True:
@@ -1111,7 +1115,7 @@ async def phase_alternative_review(
     diff_path: Path,
     intent_summary: str,
     *,
-    exploration_context: ExplorationContext | None = None,
+    exploration_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Phase: Evaluate whether there's a better way to implement the PR.
 
@@ -1135,7 +1139,7 @@ async def phase_alternative_review(
     prompt = build_alternative_review_prompt(
         intent_summary=intent_summary,
         diff_path=str(diff_path),
-        exploration_context=exploration_context,
+        exploration_dir=exploration_dir,
     )
 
     console.print()
@@ -1224,7 +1228,7 @@ async def phase_generate_plan(
     intent_summary: str,
     issues: list[dict[str, Any]],
     *,
-    exploration_context: ExplorationContext | None = None,
+    exploration_dir: Path | None = None,
 ) -> Path | None:
     """Phase: Generate an implementation plan for selected issues.
 
@@ -1271,7 +1275,7 @@ async def phase_generate_plan(
         intent_summary=intent_summary,
         issues_text=issues_text,
         diff_path=str(diff_path),
-        exploration_context=exploration_context,
+        exploration_dir=exploration_dir,
     )
 
     console.print()

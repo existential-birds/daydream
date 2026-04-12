@@ -1,6 +1,7 @@
 """Main orchestration logic for the review and fix loop."""
 
 import contextlib
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -320,16 +321,21 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
                 config.exploration_depth,
             )
 
+    # Materialise exploration to disk so phase prompts can reference files.
+    exploration_dir: Path | None = None
+    if config.exploration_context is not None:
+        exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
+
     # Phase 1: Understand intent
     intent_summary = await phase_understand_intent(
         backend, target_dir, diff_path, log, branch,
-        exploration_context=config.exploration_context,
+        exploration_dir=exploration_dir,
     )
 
     # Phase 2: Alternative review
     issues = await phase_alternative_review(
         backend, target_dir, diff_path, intent_summary,
-        exploration_context=config.exploration_context,
+        exploration_dir=exploration_dir,
     )
 
     if not issues:
@@ -337,10 +343,15 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
         return 0
 
     # Phase 3: Generate plan
-    await phase_generate_plan(
-        backend, target_dir, diff_path, intent_summary, issues,
-        exploration_context=config.exploration_context,
-    )
+    try:
+        await phase_generate_plan(
+            backend, target_dir, diff_path, intent_summary, issues,
+            exploration_dir=exploration_dir,
+        )
+    finally:
+        exploration_cleanup = target_dir / ".daydream" / "exploration"
+        if exploration_cleanup.is_dir():
+            shutil.rmtree(exploration_cleanup)
 
     return 0
 
@@ -503,6 +514,7 @@ async def run(config: RunConfig | None = None) -> int:
         tests_passed = True
         iteration = 0
         diff_base: str | None = None
+        exploration_dir: Path | None = None
 
         async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
             """Execute one iteration of the review-parse-fix-test loop.
@@ -530,7 +542,7 @@ async def run(config: RunConfig | None = None) -> int:
             assert skill is not None, "skill must be set when starting at review phase"
             await phase_review(
                 review_backend, target_dir, skill, diff_base=diff_base,
-                exploration_context=config.exploration_context,
+                exploration_dir=exploration_dir,
             )
 
             # Phase 2: Parse feedback
@@ -588,6 +600,12 @@ async def run(config: RunConfig | None = None) -> int:
                 )
                 return 1
 
+            # Materialise exploration to disk so phase prompts can reference files.
+            if config.exploration_context is not None:
+                exp_parent = target_dir / ".daydream"
+                exp_parent.mkdir(exist_ok=True)
+                exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
+
             # --- Loop mode: repeat review-parse-fix-test ---
             while iteration < config.max_iterations:
                 iteration += 1
@@ -630,13 +648,19 @@ async def run(config: RunConfig | None = None) -> int:
         else:
             # --- Single-pass mode (existing behavior) ---
 
+            # Materialise exploration to disk so phase prompts can reference files.
+            if config.exploration_context is not None:
+                exp_parent = target_dir / ".daydream"
+                exp_parent.mkdir(exist_ok=True)
+                exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
+
             # Phase 1: Review
             if config.start_at == "review":
                 assert skill is not None, "skill must be set when starting at review phase"
                 try:
                     await phase_review(
                         review_backend, target_dir, skill,
-                        exploration_context=config.exploration_context,
+                        exploration_dir=exploration_dir,
                     )
                 except MissingSkillError as e:
                     _print_missing_skill_error(e.skill_name)
@@ -697,6 +721,11 @@ async def run(config: RunConfig | None = None) -> int:
                 iterations_used=iteration if config.loop else 1,
             ),
         )
+
+        # Clean up exploration files before exit
+        exploration_cleanup = target_dir / ".daydream" / "exploration"
+        if exploration_cleanup.is_dir():
+            shutil.rmtree(exploration_cleanup)
 
         # Commit if tests passed
         if tests_passed:

@@ -709,8 +709,8 @@ async def test_run_populates_exploration_context(monkeypatch, target_project: Pa
 
     captured: dict[str, Any] = {}
 
-    async def fake_phase_review(backend, cwd, skill, *, diff_base=None, exploration_context=None):
-        captured["exploration_context"] = exploration_context
+    async def fake_phase_review(backend, cwd, skill, *, diff_base=None, exploration_dir=None):
+        captured["exploration_dir"] = exploration_dir
 
     async def fake_phase_parse_feedback(backend, cwd):
         return []
@@ -735,8 +735,8 @@ async def test_run_populates_exploration_context(monkeypatch, target_project: Pa
 
     assert exit_code == 0
     assert isinstance(config.exploration_context, ExplorationContext)
-    assert "exploration_context" in captured
-    assert captured["exploration_context"] is config.exploration_context
+    assert "exploration_dir" in captured
+    assert captured["exploration_dir"] is not None
 
 
 @pytest.mark.asyncio
@@ -750,7 +750,7 @@ async def test_codex_backend_raises_on_agents(tmp_path: Path):
             pass
 
 
-async def test_exploration_enriched_output_both_flows(tmp_path, exploration_context_fixture):
+async def test_exploration_enriched_output_both_flows(tmp_path):
     """Both normal and TTT flows surface confidence + rationale on parsed issues.
 
     Exercises `phase_parse_feedback` (normal flow) and `phase_alternative_review`
@@ -806,7 +806,7 @@ async def test_exploration_enriched_output_both_flows(tmp_path, exploration_cont
         tmp_path,
         diff_path,
         "intent summary",
-        exploration_context=exploration_context_fixture,
+        exploration_dir=tmp_path,
     )
 
     for issues in (normal_issues, trust_issues):
