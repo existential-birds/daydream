@@ -41,7 +41,7 @@ class MockBackend:
         self._prompt: str = ""
         self._call_count = 0
 
-    async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+    async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
         self._prompt = prompt
         self._call_count += 1
         if self._events is not None:
@@ -90,7 +90,7 @@ class MockBackendWithEvents:
     def __init__(self, events: list):
         self._events = events
 
-    async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+    async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
         for event in self._events:
             yield event
 
@@ -554,7 +554,7 @@ async def test_run_trust_full_flow(tmp_path, monkeypatch):
     call_count = 0
 
     class TrustMockBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -655,7 +655,7 @@ async def test_run_trust_does_not_prompt_for_skill(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-m", "change"], cwd=tmp_path, capture_output=True, env=env)
 
     class MinimalBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
             yield TextEvent(text="Intent: changes f.txt.")
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
         async def cancel(self): pass
@@ -685,3 +685,131 @@ async def test_run_trust_does_not_prompt_for_skill(tmp_path, monkeypatch):
     config = RunConfig(target=str(tmp_path), trust_the_technology=True)
     exit_code = await run(config)
     assert exit_code == 0
+
+
+# =============================================================================
+# Phase 02-04: Pre-scan exploration wiring
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_run_populates_exploration_context(monkeypatch, target_project: Path, mock_ui):
+    """run() populates config.exploration_context before phase_review fires."""
+    from daydream.exploration import ExplorationContext
+    from tests.test_exploration_runner import _AgentsRecordingMockBackend
+
+    fixtures = Path(__file__).parent / "fixtures" / "diffs"
+    diff_text = (
+        (fixtures / "python_multifile.diff").read_text()
+        + (fixtures / "typescript_multifile.diff").read_text()
+    )
+
+    # Force the diff source so exploration runs even in a tmp dir.
+    monkeypatch.setattr("daydream.runner._git_diff", lambda cwd: diff_text)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_phase_review(backend, cwd, skill, *, diff_base=None, exploration_dir=None):
+        captured["exploration_dir"] = exploration_dir
+
+    async def fake_phase_parse_feedback(backend, cwd):
+        return []
+
+    async def fake_phase_test_and_heal(backend, cwd, feedback_items=None):
+        return True, 0
+
+    async def fake_phase_commit_push(backend, cwd):
+        return None
+
+    monkeypatch.setattr("daydream.runner.phase_review", fake_phase_review)
+    monkeypatch.setattr("daydream.runner.phase_parse_feedback", fake_phase_parse_feedback)
+    monkeypatch.setattr("daydream.runner.phase_test_and_heal", fake_phase_test_and_heal)
+    monkeypatch.setattr("daydream.runner.phase_commit_push", fake_phase_commit_push)
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None: _AgentsRecordingMockBackend(),
+    )
+
+    config = RunConfig(target=str(target_project), skill="python", quiet=True, cleanup=False)
+    exit_code = await run(config)
+
+    assert exit_code == 0
+    assert isinstance(config.exploration_context, ExplorationContext)
+    assert "exploration_dir" in captured
+    assert captured["exploration_dir"] is not None
+
+
+@pytest.mark.asyncio
+async def test_codex_backend_raises_on_agents(tmp_path: Path):
+    """CodexBackend.execute() refuses agents= with NotImplementedError."""
+    from daydream.backends.codex import CodexBackend
+
+    backend = CodexBackend()
+    with pytest.raises(NotImplementedError, match="Codex backend does not support exploration"):
+        async for _ in backend.execute(tmp_path, "prompt", agents={"x": object()}):
+            pass
+
+
+async def test_exploration_enriched_output_both_flows(tmp_path):
+    """Both normal and TTT flows surface confidence + rationale on parsed issues.
+
+    Exercises `phase_parse_feedback` (normal flow) and `phase_alternative_review`
+    (TTT flow) directly: both return parsed issue lists, and both must carry the
+    schema-enforced confidence/rationale fields per QUAL-02.
+    """
+    from daydream.phases import phase_alternative_review, phase_parse_feedback
+
+    enriched_normal_issue = {
+        "id": 1,
+        "description": "x",
+        "file": "a.py",
+        "line": 1,
+        "confidence": "HIGH",
+        "rationale": "verified by Convention snake_case_modules",
+    }
+    enriched_trust_issue = {
+        "id": 1,
+        "title": "t",
+        "description": "x",
+        "recommendation": "y",
+        "severity": "high",
+        "files": ["a.py"],
+        "confidence": "HIGH",
+        "rationale": "verified by Convention snake_case_modules",
+    }
+
+    class _MB:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def execute(self, *a, **kw):
+            yield TextEvent(text="ok")
+            yield ResultEvent(structured_output=self.payload, continuation=None)
+
+        async def cancel(self):
+            return None
+
+        def format_skill_invocation(self, key, args=None):
+            return f"/{key}"
+
+    # Normal flow: phase_parse_feedback returns list of validated issues
+    (tmp_path / ".review-output.md").write_text("# Review\n")
+    normal_backend = _MB({"issues": [enriched_normal_issue]})
+    normal_issues = await phase_parse_feedback(normal_backend, tmp_path)
+
+    # TTT flow: phase_alternative_review returns list of issues
+    diff_path = tmp_path / "diff.txt"
+    diff_path.write_text("diff")
+    trust_backend = _MB({"issues": [enriched_trust_issue]})
+    trust_issues = await phase_alternative_review(
+        trust_backend,
+        tmp_path,
+        diff_path,
+        "intent summary",
+        exploration_dir=tmp_path,
+    )
+
+    for issues in (normal_issues, trust_issues):
+        assert issues
+        assert "confidence" in issues[0]
+        assert "rationale" in issues[0]

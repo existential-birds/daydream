@@ -84,6 +84,7 @@ class CodexBackend:
         prompt: str,
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Execute a prompt via Codex CLI and yield unified events.
 
@@ -92,14 +93,24 @@ class CodexBackend:
             prompt: The prompt to send.
             output_schema: Optional JSON schema for structured output.
             continuation: Optional token for thread resumption.
+            agents: Optional subagent mapping. Codex does not support non-empty
+                subagent maps and will raise if provided.
 
         Yields:
             AgentEvent instances.
 
         Raises:
             CodexError: If the Codex turn fails.
+            NotImplementedError: If ``agents`` is non-empty (Codex backend
+                does not support exploration subagents).
 
         """
+        if agents:
+            raise NotImplementedError(
+                "Codex backend does not support exploration subagents; "
+                "use --backend claude for exploration."
+            )
+
         args = [
             "codex", "exec", "--experimental-json",
             "--model", self.model,

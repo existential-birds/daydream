@@ -4,10 +4,15 @@ version = "0.10.0"
 description = "Automated code review and fix loop using Claude"
 requires-python = ">=3.12"
 dependencies = [
-    "claude-agent-sdk>=0.1.27",
+    "claude-agent-sdk==0.1.52",
     "anyio>=4.0",
     "rich>=13.0",
     "pyfiglet>=1.0",
+    "tree-sitter==0.25.2",
+    "tree-sitter-python==0.25.0",
+    "tree-sitter-typescript==0.23.2",
+    "tree-sitter-go==0.25.0",
+    "tree-sitter-rust==0.24.2",
 ]
 
 [dependency-groups]

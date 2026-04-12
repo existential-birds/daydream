@@ -1,6 +1,7 @@
 """Main orchestration logic for the review and fix loop."""
 
 import contextlib
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +18,8 @@ from daydream.agent import (
 )
 from daydream.backends import Backend, create_backend
 from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
+from daydream.exploration import ExplorationContext, safe_explore
+from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
 from daydream.phases import (
     FixResult,
     _git_branch,
@@ -95,6 +98,8 @@ class RunConfig:
     loop: bool = False
     max_iterations: int = 5
     trust_the_technology: bool = False
+    exploration_context: ExplorationContext | None = None
+    exploration_depth: int = 1
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -299,18 +304,54 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
     print_info(console, f"Model: {config.model or '<backend-default>'}")
     console.print()
 
+    # Pre-scan exploration: populate config.exploration_context before phase 1.
+    # Skip when already pre-populated (e.g. injected by caller or tests).
+    if config.exploration_context is None:
+        tier = select_tier(count_changed_files(diff or ""))
+        if tier == "skip":
+            print_dim(console, "Skipping exploration -- trivial diff")
+            config.exploration_context = ExplorationContext()
+        else:
+            print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+            config.exploration_context = await safe_explore(
+                pre_scan,
+                backend,
+                target_dir,
+                diff,
+                config.exploration_depth,
+            )
+
+    # Materialise exploration to disk so phase prompts can reference files.
+    exploration_dir: Path | None = None
+    if config.exploration_context is not None:
+        exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
+
     # Phase 1: Understand intent
-    intent_summary = await phase_understand_intent(backend, target_dir, diff_path, log, branch)
+    intent_summary = await phase_understand_intent(
+        backend, target_dir, diff_path, log, branch,
+        exploration_dir=exploration_dir,
+    )
 
     # Phase 2: Alternative review
-    issues = await phase_alternative_review(backend, target_dir, diff_path, intent_summary)
+    issues = await phase_alternative_review(
+        backend, target_dir, diff_path, intent_summary,
+        exploration_dir=exploration_dir,
+    )
 
     if not issues:
         print_success(console, "No issues found — the implementation looks good!")
         return 0
 
     # Phase 3: Generate plan
-    await phase_generate_plan(backend, target_dir, diff_path, intent_summary, issues)
+    try:
+        await phase_generate_plan(
+            backend, target_dir, diff_path, intent_summary, issues,
+            exploration_dir=exploration_dir,
+        )
+    finally:
+        exploration_cleanup = target_dir / ".daydream" / "exploration"
+        if exploration_cleanup.is_dir():
+            shutil.rmtree(exploration_cleanup)
 
     return 0
 
@@ -448,12 +489,32 @@ async def run(config: RunConfig | None = None) -> int:
             print_skipped_phases(console, config.start_at)
         console.print()
 
+        # Pre-scan exploration: populate config.exploration_context before
+        # the first phase_review() call. Only runs when starting at "review"
+        # (later start phases skip review, so exploration would be wasted).
+        if config.start_at == "review" and config.exploration_context is None:
+            diff_text = _git_diff(target_dir) or ""
+            tier = select_tier(count_changed_files(diff_text))
+            if tier == "skip":
+                print_dim(console, "Skipping exploration -- trivial diff")
+                config.exploration_context = ExplorationContext()
+            else:
+                print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+                config.exploration_context = await safe_explore(
+                    pre_scan,
+                    review_backend,
+                    target_dir,
+                    diff_text,
+                    config.exploration_depth,
+                )
+
         feedback_items: list[dict[str, Any]] = []
         fixes_applied = 0
         test_retries = 0
         tests_passed = True
         iteration = 0
         diff_base: str | None = None
+        exploration_dir: Path | None = None
 
         async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
             """Execute one iteration of the review-parse-fix-test loop.
@@ -479,7 +540,10 @@ async def run(config: RunConfig | None = None) -> int:
 
             # Phase 1: Review
             assert skill is not None, "skill must be set when starting at review phase"
-            await phase_review(review_backend, target_dir, skill, diff_base=diff_base)
+            await phase_review(
+                review_backend, target_dir, skill, diff_base=diff_base,
+                exploration_dir=exploration_dir,
+            )
 
             # Phase 2: Parse feedback
             items = await phase_parse_feedback(review_backend, target_dir)
@@ -536,6 +600,12 @@ async def run(config: RunConfig | None = None) -> int:
                 )
                 return 1
 
+            # Materialise exploration to disk so phase prompts can reference files.
+            if config.exploration_context is not None:
+                exp_parent = target_dir / ".daydream"
+                exp_parent.mkdir(exist_ok=True)
+                exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
+
             # --- Loop mode: repeat review-parse-fix-test ---
             while iteration < config.max_iterations:
                 iteration += 1
@@ -578,11 +648,20 @@ async def run(config: RunConfig | None = None) -> int:
         else:
             # --- Single-pass mode (existing behavior) ---
 
+            # Materialise exploration to disk so phase prompts can reference files.
+            if config.exploration_context is not None:
+                exp_parent = target_dir / ".daydream"
+                exp_parent.mkdir(exist_ok=True)
+                exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
+
             # Phase 1: Review
             if config.start_at == "review":
                 assert skill is not None, "skill must be set when starting at review phase"
                 try:
-                    await phase_review(review_backend, target_dir, skill)
+                    await phase_review(
+                        review_backend, target_dir, skill,
+                        exploration_dir=exploration_dir,
+                    )
                 except MissingSkillError as e:
                     _print_missing_skill_error(e.skill_name)
                     return 1
@@ -642,6 +721,11 @@ async def run(config: RunConfig | None = None) -> int:
                 iterations_used=iteration if config.loop else 1,
             ),
         )
+
+        # Clean up exploration files before exit
+        exploration_cleanup = target_dir / ".daydream" / "exploration"
+        if exploration_cleanup.is_dir():
+            shutil.rmtree(exploration_cleanup)
 
         # Commit if tests passed
         if tests_passed:

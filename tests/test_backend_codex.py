@@ -312,3 +312,14 @@ class TestUnwrapShellCommand:
         """Real Codex format: double-quoted command with inner single quotes."""
         cmd = """/bin/zsh -lc "sed -n '1,260p' amelia/agents/architect.py\""""
         assert _unwrap_shell_command(cmd) == "sed -n '1,260p' amelia/agents/architect.py"
+
+
+@pytest.mark.asyncio
+async def test_execute_raises_on_agents():
+    """CodexBackend refuses agents= with NotImplementedError (Plan 02-04)."""
+    backend = CodexBackend()
+    mock_agent = {"description": "test", "prompt": "test"}
+
+    with pytest.raises(NotImplementedError, match="Codex backend does not support exploration"):
+        async for _ in backend.execute(Path("/tmp"), "Test", agents={"explorer": mock_agent}):
+            pass

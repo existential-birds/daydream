@@ -225,3 +225,95 @@ def test_format_skill_invocation_with_args():
     assert result == "/beagle-core:fetch-pr-feedback --pr 42 --bot mybot"
 
 
+class MockClaudeSDKClientCapture:
+    """Mock client that captures the options it was constructed with."""
+
+    captured_options = None
+
+    def __init__(self, options: Any = None):
+        MockClaudeSDKClientCapture.captured_options = options
+        self._prompt: str = ""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def query(self, prompt: str):
+        self._prompt = prompt
+
+    async def receive_response(self):
+        yield MockAssistantMessage(content=[MockTextBlock(text="OK")])
+        yield MockResultMessage(total_cost_usd=0.01)
+
+
+@pytest.mark.asyncio
+async def test_execute_passes_agents_dict_to_options(patch_sdk):
+    """Agents dict must reach ClaudeAgentOptions with original keys preserved verbatim."""
+    from claude_agent_sdk.types import AgentDefinition
+
+    patch_sdk(MockClaudeSDKClientCapture)
+    backend = ClaudeBackend(model="opus")
+
+    pattern_scanner = AgentDefinition(
+        description="pattern scanner",
+        prompt="scan patterns",
+        tools=["Read", "Grep"],
+        model="sonnet",
+    )
+    dependency_tracer = AgentDefinition(
+        description="dependency tracer",
+        prompt="trace deps",
+        tools=["Read", "Grep"],
+        model="sonnet",
+    )
+
+    agents = {
+        "pattern-scanner": pattern_scanner,
+        "dependency-tracer": dependency_tracer,
+    }
+
+    events = []
+    async for event in backend.execute(Path("/tmp"), "Go", agents=agents):
+        events.append(event)
+
+    opts = MockClaudeSDKClientCapture.captured_options
+    assert opts is not None
+    assert opts.agents == {
+        "pattern-scanner": pattern_scanner,
+        "dependency-tracer": dependency_tracer,
+    }
+    # No key rewriting
+    assert "explorer-0" not in opts.agents
+    assert "explorer-1" not in opts.agents
+
+
+@pytest.mark.asyncio
+async def test_execute_passes_none_when_no_agents(patch_sdk):
+    """When agents=None, ClaudeAgentOptions should not carry an agents dict."""
+    patch_sdk(MockClaudeSDKClientCapture)
+    backend = ClaudeBackend(model="opus")
+
+    events = []
+    async for event in backend.execute(Path("/tmp"), "Go"):
+        events.append(event)
+
+    opts = MockClaudeSDKClientCapture.captured_options
+    assert opts is not None
+    agents_val = getattr(opts, "agents", None)
+    assert agents_val is None
+
+
+def test_backend_protocol_agents_param_is_dict_typed():
+    """The Backend protocol's execute.agents annotation must be dict[str, AgentDefinition]."""
+    from daydream.backends import Backend
+
+    annotations = Backend.execute.__annotations__
+    assert "agents" in annotations
+    annotation = annotations["agents"]
+    # Annotation may be a string (from __future__ annotations) or a real type
+    annotation_str = annotation if isinstance(annotation, str) else repr(annotation)
+    assert "dict[str, AgentDefinition]" in annotation_str
+
+

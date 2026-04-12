@@ -795,6 +795,19 @@ def _build_tool_header(
 
         return content
 
+    # Special handling for Task tool calls — description/prompt rendered as markdown
+    # below the header (see _build_tool_body_extras).
+    if name == "Task":
+        header_line = Text()
+        header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
+        header_line.append("Task", style=STYLE_BOLD_PINK)
+        subagent = str(args.get("subagent_type", ""))
+        if subagent:
+            header_line.append("  ")
+            header_line.append(subagent, style=STYLE_CYAN)
+        content.append_text(header_line)
+        return content
+
     # Standard tool call display (other tools)
     header_line = Text()
     header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
@@ -808,6 +821,33 @@ def _build_tool_header(
         content.append_text(args_text)
 
     return content
+
+
+def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
+    """Return extra renderables to display between header and result.
+
+    Currently used for the Task tool, whose `description` and `prompt`
+    arguments are rendered as Markdown so bold/italic/code/lists display
+    properly instead of as a flat key=value dump.
+    """
+    if name != "Task":
+        return []
+    extras: list = []
+    description = str(args.get("description", "")).strip()
+    prompt = str(args.get("prompt", "")).strip()
+    if description:
+        extras.append(Markdown(f"**{description}**"))
+    if prompt:
+        prompt_lines = prompt.split("\n")
+        max_prompt_lines = 10
+        if len(prompt_lines) > max_prompt_lines:
+            remaining = len(prompt_lines) - max_prompt_lines
+            truncated_prompt = "\n".join(prompt_lines[:max_prompt_lines])
+            truncated_prompt += f"\n\n_... ({remaining} more lines)_"
+            extras.append(Markdown(truncated_prompt))
+        else:
+            extras.append(Markdown(prompt))
+    return extras
 
 
 def _build_result_content(
@@ -919,6 +959,10 @@ def print_tool_call(
             content.append("\n")
             preview = content_str[:200] + "..." if len(content_str) > 200 else content_str
             content.append(preview, style=Style(color=NEON_COLORS["foreground"], dim=True))
+    elif name == "Task":
+        extras = _build_tool_body_extras(name, args)
+        if extras:
+            panel_content = Group(content, *extras)
 
     # Determine border style
     border_style = STYLE_CYAN if name == "Skill" else STYLE_PURPLE
@@ -1839,7 +1883,8 @@ class AgentTextRenderer:
             self,  # Pass self so Live calls __rich__() on each refresh
             console=self._console,
             refresh_per_second=10,
-            transient=True,  # Remove the live display when done
+            transient=False,
+            vertical_overflow="visible",
         )
         self._live.start()
         self._started = True
@@ -1874,12 +1919,9 @@ class AgentTextRenderer:
 
         """
         if self._live is not None:
+            self._live.update(self._render_panel(show_spinner=False), refresh=True)
             self._live.stop()
             self._live = None
-
-        # Print the final panel (non-transient, without spinner)
-        if self._buffer:
-            self._console.print(self._render_panel(show_spinner=False))
 
         # Reset state
         self._buffer = []
@@ -2629,6 +2671,9 @@ class LiveToolPanel:
         else:
             border_color = NEON_COLORS["purple"]
 
+        # Markdown body extras (e.g. Task description/prompt)
+        body_extras = _build_tool_body_extras(self._name, self._args)
+
         # Build content: header + inline spinner (if waiting) or result
         if self._result is None:
             # Special handling for Edit - show surgery phase animation
@@ -2644,13 +2689,13 @@ class LiveToolPanel:
                 header_with_spinner = Text()
                 header_with_spinner.append_text(header)
                 header_with_spinner.append_text(self._spinner.render())
-                content = Group(header_with_spinner)
+                content = Group(header_with_spinner, *body_extras)
         elif self._name == "Skill":
             # Skip output section for Skill calls - the header already shows skill name
             content = Group(header)
         elif self._quiet_mode:
             # Quiet mode complete: header only
-            content = Group(header)
+            content = Group(header, *body_extras)
         else:
             # Normal mode: show result
             result_content = self._build_result_content_internal()
@@ -2665,10 +2710,11 @@ class LiveToolPanel:
 
             if isinstance(result_content, Text) and not result_content.plain.strip():
                 # Empty result - just show header (wrap in Group for type consistency)
-                content = Group(header)
+                content = Group(header, *body_extras)
             else:
                 content = Group(
                     header,
+                    *body_extras,
                     result_title,
                     result_content,
                 )
@@ -2787,8 +2833,12 @@ class LiveToolPanelRegistry:
         self._quiet_mode = quiet_mode
         self._panels: dict[str, LiveToolPanel] = {}
         self._active_order: list[str] = []
+        self._static_ids: set[str] = set()
         self._live: Live | None = None
         self._group = _ActivePanelsGroup(self)
+
+    # Tool names whose panels should scroll inline rather than pin via Live.
+    _STATIC_TOOL_NAMES: frozenset[str] = frozenset({"Task"})
 
     def create(
         self,
@@ -2829,6 +2879,16 @@ class LiveToolPanelRegistry:
             quiet_mode=self._quiet_mode,
         )
         self._panels[tool_use_id] = panel
+
+        # Static tools (e.g. Task) scroll inline instead of joining Live.
+        if name in self._STATIC_TOOL_NAMES:
+            self._static_ids.add(tool_use_id)
+            self._stop_live()
+            self._console.print()
+            self._console.print(panel._render_panel())
+            self._ensure_live()
+            return panel
+
         self._active_order.append(tool_use_id)
 
         # Print a blank line before the first panel group
@@ -2922,6 +2982,15 @@ class LiveToolPanelRegistry:
 
     def _finalize_panel(self, tool_use_id: str) -> None:
         """Remove a panel from the active set and print its final state."""
+        if tool_use_id in self._static_ids:
+            self._static_ids.discard(tool_use_id)
+            panel = self._panels.pop(tool_use_id, None)
+            if panel is not None:
+                self._stop_live()
+                self._console.print(panel._render_panel())
+                self._ensure_live()
+            return
+
         if tool_use_id not in self._active_order:
             _ui_debug(
                 f"[REGISTRY_FINALIZE] id={tool_use_id} NOT in active_order "
@@ -3293,3 +3362,46 @@ def get_status_style(status: str) -> Style:
     """
     config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
     return Style(color=config["color"])
+
+
+def render_ttt_plan(console: Console, plan: dict) -> None:
+    """Render a TTT plan, visually distinguishing ungrounded steps.
+
+    Plan steps with a non-empty ``references`` list render with default style
+    and their references inline beneath the change line. Steps with an empty
+    ``references`` list render dimmed with an ``(ungrounded)`` marker so the
+    user can spot LOW-grounded recommendations at a glance (D-08).
+
+    Args:
+        console: Rich console to render into.
+        plan: Plan dict. May be the flat shape ``{"changes": [...]}`` or the
+            nested shape ``{"plan": {"issues": [{"changes": [...]}, ...]}}``.
+
+    """
+    changes: list[dict] = []
+    if isinstance(plan.get("changes"), list):
+        changes = list(plan["changes"])
+    else:
+        nested = plan.get("plan", {}) if isinstance(plan.get("plan"), dict) else {}
+        for issue in nested.get("issues", []) or []:
+            if isinstance(issue, dict):
+                changes.extend(issue.get("changes", []) or [])
+
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        file_path = change.get("file", "")
+        description = change.get("description", "")
+        references = change.get("references") or []
+        line = f"{file_path}: {description}" if file_path else description
+
+        if references:
+            console.print(Text(line))
+            for ref in references:
+                if not isinstance(ref, dict):
+                    continue
+                ref_file = ref.get("file", "")
+                ref_symbol = ref.get("symbol", "")
+                console.print(Text.assemble(("    → ", STYLE_DIM), (f"{ref_file}::{ref_symbol}", STYLE_DIM)))
+        else:
+            console.print(Text.assemble((line, STYLE_DIM), (" (ungrounded)", "yellow")))

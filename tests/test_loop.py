@@ -73,7 +73,7 @@ class LoopMockBackend(Backend):
         self.commit_calls: list[str] = []
         self.review_prompts: list[str] = []
 
-    async def execute(self, cwd, prompt, output_schema=None, continuation=None):
+    async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
         prompt_lower = prompt.lower()
         self.call_log.append(prompt_lower[:80])
 
@@ -366,7 +366,6 @@ async def test_loop_no_commit_on_clean_first_iteration(loop_target, mock_ui_loop
 @pytest.mark.asyncio
 async def test_loop_rejects_dirty_working_tree(loop_target, mock_ui_loop, monkeypatch):
     """Loop mode aborts with exit code 1 when the working tree is dirty."""
-    import subprocess
 
     # Dirty the working tree
     (loop_target / "untracked.py").write_text("dirty")

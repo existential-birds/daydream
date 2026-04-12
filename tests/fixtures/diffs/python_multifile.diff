@@ -1,0 +1,19 @@
+diff --git a/daydream_demo/api.py b/daydream_demo/api.py
+index 1111111..2222222 100644
+--- a/daydream_demo/api.py
++++ b/daydream_demo/api.py
+@@ -1,2 +1,6 @@
+ """API module."""
++from .models import User
++
++def get_user():
++    return User()
+diff --git a/daydream_demo/models.py b/daydream_demo/models.py
+index 3333333..4444444 100644
+--- a/daydream_demo/models.py
++++ b/daydream_demo/models.py
+@@ -1,1 +1,4 @@
+ """Models module."""
++
++class User:
++    pass

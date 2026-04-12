@@ -1,0 +1,19 @@
+diff --git a/src/api.rs b/src/api.rs
+index 1111111..2222222 100644
+--- a/src/api.rs
++++ b/src/api.rs
+@@ -1,1 +1,6 @@
+ // api module
++use crate::models::User;
++
++pub fn get_user() -> User {
++    User
++}
+diff --git a/src/models.rs b/src/models.rs
+index 3333333..4444444 100644
+--- a/src/models.rs
++++ b/src/models.rs
+@@ -1,1 +1,3 @@
+ // models module
++
++pub struct User;
