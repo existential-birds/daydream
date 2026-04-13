@@ -115,7 +115,8 @@ FINAL_VAR(var_name: str) -> None  # Provide final answer from a variable
 
 1. **Security vulnerabilities** — injection, auth bypass, secrets exposure
 2. **Performance problems** — N+1 queries, unbounded loops, memory leaks
-3. **Error handling gaps** — uncaught exceptions, silent failures
+3. **Error handling gaps** — uncaught exceptions, silent failures on critical paths
+   (NOT best-effort/diagnostic operations that intentionally log-and-continue)
 4. **Cross-service impact** — breaking changes, dependency issues
 
 ---
