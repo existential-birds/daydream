@@ -215,7 +215,7 @@ PLAN_SCHEMA: dict[str, Any] = {
 
 
 def _confidence_and_convention_instructions() -> str:
-    """Prompt language for QUAL-02 confidence labeling and QUAL-03 convention handling.
+    """Prompt language for QUAL-02 confidence, QUAL-03 conventions, QUAL-04 error handling.
 
     Called by all four phase prompt builders to keep them in lockstep on these
     rules. Returns a markdown section that should be appended after the
@@ -239,7 +239,25 @@ def _confidence_and_convention_instructions() -> str:
         "If your fix would violate a convention, DROP IT — do not include it.\n"
         "2. If the reviewed code itself violates a convention, that IS the issue. "
         "flag it as HIGH confidence and cite the convention by name in `rationale`.\n\n"
-        "You are reviewing AI-generated code. Be strict. Prefer LOW over MEDIUM when uncertain."
+        "You are reviewing AI-generated code. Be strict. Prefer LOW over MEDIUM when uncertain.\n\n"
+        "## Error Handling Semantics (QUAL-04)\n\n"
+        "Not all caught-and-logged errors are bugs. Before flagging error handling as\n"
+        "an issue, classify the operation's criticality:\n\n"
+        "- **Critical path**: The caller NEEDS this result to proceed (e.g., loading\n"
+        "  config, connecting to database, parsing user input). Swallowing errors here\n"
+        "  IS a bug — flag it.\n"
+        "- **Best-effort / diagnostic**: The operation is non-essential (e.g., writing\n"
+        "  telemetry, flushing debug traces, updating timestamps, sending analytics).\n"
+        "  Logging a warning and continuing is the CORRECT pattern — it prevents a\n"
+        "  secondary failure from masking or killing the primary operation.\n\n"
+        "A `warn!()` + continue after a non-critical operation is intentional graceful\n"
+        "degradation, not a 'silent failure.' Changing it to error propagation (`?`,\n"
+        "`return Err`, `unwrap`) would make the system MORE fragile, not less.\n\n"
+        "When reporting an error handling issue:\n"
+        "- State whether the operation is critical-path or best-effort\n"
+        "- If best-effort, explain why propagation would be better than logging\n"
+        "- If you cannot articulate why the caller benefits from receiving the error,\n"
+        "  DROP the finding"
     )
 
 
@@ -751,7 +769,10 @@ async def phase_fix(backend: Backend, cwd: Path, item: dict[str, Any], item_num:
 File: {file_path}
 Line: {line}
 
-Make the minimal change needed.
+Make the minimal change needed. Do NOT change error handling semantics
+(e.g., converting warn-and-continue to error propagation, or vice versa)
+unless the issue description specifically explains why the current error
+handling strategy is wrong for that code path.
 """
 
     await run_agent(backend, cwd, prompt)
@@ -920,7 +941,10 @@ async def phase_fix_parallel(
 File: {file_path}
 Line: {line}
 
-Make the minimal change needed.
+Make the minimal change needed. Do NOT change error handling semantics
+(e.g., converting warn-and-continue to error propagation, or vice versa)
+unless the issue description specifically explains why the current error
+handling strategy is wrong for that code path.
 """
 
             # Default arguments capture loop variables by value, avoiding late-binding
