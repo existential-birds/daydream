@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-04-13
+
+### Fixed
+
+- **prompts:** Add QUAL-04 error handling semantics guardrail to reduce false positives on intentional log-and-continue patterns ([#38](https://github.com/existential-birds/daydream/pull/38))
+
+  The reviewer now distinguishes critical-path errors (which should be flagged) from best-effort/diagnostic operations (telemetry, debug traces, analytics) that intentionally log a warning and continue. Fix prompts also prevent agents from changing error handling semantics unless the issue specifically explains why the current strategy is wrong.
+
 ## [0.11.0] - 2026-04-12
 
 ### Added
@@ -243,7 +251,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.11.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/existential-birds/daydream/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/existential-birds/daydream/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/existential-birds/daydream/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/existential-birds/daydream/compare/v0.8.0...v0.9.0
