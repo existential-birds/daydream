@@ -250,19 +250,19 @@ EXPLORATION_AGENTS: dict[str, AgentDefinition] = {
     "pattern-scanner": AgentDefinition(
         description="Detects codebase conventions and reads guideline files (CLAUDE.md, .coderabbit.yaml, etc).",
         prompt=PATTERN_SCANNER_SYSTEM_PROMPT,
-        tools=["Read", "Glob", "Grep"],
+        tools=["Bash", "Read", "Glob", "Grep"],
         model="inherit",
     ),
     "dependency-tracer": AgentDefinition(
         description="Extends the import graph by grepping call sites and emits Dependency edges.",
         prompt=DEPENDENCY_TRACER_SYSTEM_PROMPT,
-        tools=["Read", "Glob", "Grep"],
+        tools=["Bash", "Read", "Glob", "Grep"],
         model="inherit",
     ),
     "test-mapper": AgentDefinition(
         description="Locates test files for modified source files via conventional path mapping.",
         prompt=TEST_MAPPER_SYSTEM_PROMPT,
-        tools=["Read", "Glob", "Grep"],
+        tools=["Bash", "Read", "Glob", "Grep"],
         model="inherit",
     ),
 }
