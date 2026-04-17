@@ -229,11 +229,11 @@ def detect_test_success(output: str) -> bool:
     output_lower = output.lower()
 
     # Extract counts — tolerate "N failed" and "N tests failed" with any separator.
-    failed_match = re.search(r"(\d+)\s+(?:tests?\s+)?failed", output_lower)
-    passed_match = re.search(r"(\d+)\s+(?:tests?\s+)?passed", output_lower)
+    failed_match = re.search(r"(\d[\d,]*)\s+(?:tests?\s+)?fail(?:ed|ures?)\b", output_lower)
+    passed_match = re.search(r"(\d[\d,]*)\s+(?:tests?\s+)?passed\b", output_lower)
 
-    failed_count = int(failed_match.group(1)) if failed_match else None
-    passed_count = int(passed_match.group(1)) if passed_match else None
+    failed_count = int(failed_match.group(1).replace(",", "")) if failed_match else None
+    passed_count = int(passed_match.group(1).replace(",", "")) if passed_match else None
 
     # Any non-zero failure count means failure, full stop.
     if failed_count is not None and failed_count > 0:
@@ -248,7 +248,7 @@ def detect_test_success(output: str) -> bool:
         r"test suite passed",
         r"all tests pass",
         r"no (?:test )?failures?",
-        r"0 failures?",
+        r"\b0\s+failures?\b",
     ]
     for pattern in success_sentinels:
         if re.search(pattern, output_lower):

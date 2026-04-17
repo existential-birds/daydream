@@ -94,3 +94,23 @@ def test_assertion_error() -> None:
 def test_zero_failures_sentinel() -> None:
     """'0 failures' sentinel alone is success."""
     assert detect_test_success("Results: 0 failures") is True
+
+
+def test_ten_failures_not_success() -> None:
+    """Regression: '10 failures' must not match the '0 failures?' sentinel via substring."""
+    assert detect_test_success("Results: 10 failures") is False
+
+
+def test_comma_separated_counts_with_zero_failures() -> None:
+    """Large suites format counts with commas; must still pass with zero failures."""
+    assert detect_test_success("1,234 passed / 0 failures") is True
+
+
+def test_bare_failures_wording() -> None:
+    """The wording `N failures` (no 'failed') must register as failure."""
+    assert detect_test_success("5 failures during the run") is False
+
+
+def test_comma_separated_failed_count() -> None:
+    """Comma-grouped failure counts must register as failure."""
+    assert detect_test_success("1,002 passed, 2,500 failed") is False
