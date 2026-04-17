@@ -225,6 +225,15 @@ def _parse_args() -> RunConfig:
     )
 
     parser.add_argument(
+        "--ignore-path",
+        action="append",
+        default=[],
+        metavar="PATH",
+        dest="ignore_paths",
+        help="Exclude path from diff (repeatable, e.g. --ignore-path .planning --ignore-path vendor)",
+    )
+
+    parser.add_argument(
         "--loop",
         action="store_true",
         default=False,
@@ -315,6 +324,7 @@ def _parse_args() -> RunConfig:
         review_backend=args.review_backend,
         fix_backend=args.fix_backend,
         test_backend=args.test_backend,
+        ignore_paths=args.ignore_paths,
         loop=args.loop,
         max_iterations=args.max_iterations,
         trust_the_technology=args.trust_the_technology,

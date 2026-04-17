@@ -285,6 +285,62 @@ def test_git_diff_empty_when_no_changes(tmp_path):
     assert diff == ""
 
 
+def _init_repo_with_exclude_fixture(tmp_path):
+    """Create a repo with a main branch, then a feature branch touching tracked
+    files and files under .planning/."""
+    env = {**__import__("os").environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "file.txt").write_text("hello")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, env=env)
+    subprocess.run(["git", "checkout", "-b", "feature"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "file.txt").write_text("world-change")
+    (tmp_path / ".planning").mkdir()
+    (tmp_path / ".planning" / "notes.md").write_text("planning-only-content")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "feature work"], cwd=tmp_path, capture_output=True, env=env)
+
+
+def test_git_diff_exclude_filters_out_directory(tmp_path):
+    """_git_diff with exclude should drop matching files from the diff."""
+    from daydream.phases import _git_diff
+
+    _init_repo_with_exclude_fixture(tmp_path)
+
+    diff = _git_diff(tmp_path, exclude=[".planning"])
+    assert diff is not None
+    assert "planning-only-content" not in diff
+    assert "world-change" in diff
+
+
+def test_git_diff_exclude_empty_list_matches_none(tmp_path):
+    """Passing an empty exclude list should behave identically to None."""
+    from daydream.phases import _git_diff
+
+    _init_repo_with_exclude_fixture(tmp_path)
+
+    diff_no_arg = _git_diff(tmp_path)
+    diff_empty = _git_diff(tmp_path, exclude=[])
+    assert diff_no_arg == diff_empty
+    # Sanity: the planning content is present when no exclude is applied.
+    assert diff_no_arg is not None
+    assert "planning-only-content" in diff_no_arg
+
+
+def test_git_diff_no_exclude_still_works(tmp_path):
+    """Regression: _git_diff with no exclude arg returns full diff."""
+    from daydream.phases import _git_diff
+
+    _init_repo_with_exclude_fixture(tmp_path)
+
+    diff = _git_diff(tmp_path)
+    assert diff is not None
+    assert "planning-only-content" in diff
+    assert "world-change" in diff
+
+
 @pytest.mark.asyncio
 async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch):
     """User confirms the agent's understanding on the first attempt."""

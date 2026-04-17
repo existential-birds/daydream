@@ -529,8 +529,13 @@ def _detect_default_branch(cwd: Path) -> str | None:
     return None
 
 
-def _git_diff(cwd: Path) -> str | None:
+def _git_diff(cwd: Path, exclude: list[str] | None = None) -> str | None:
     """Get the diff of current branch against the default branch.
+
+    Args:
+        cwd: Repository working directory.
+        exclude: Optional list of paths to exclude from the diff via git's
+            `:(exclude)` magic pathspec. Each entry may be a file or directory.
 
     Returns:
         The diff output, empty string if no diff, or None if base branch detection fails.
@@ -539,9 +544,14 @@ def _git_diff(cwd: Path) -> str | None:
     base_branch = _detect_default_branch(cwd)
     if not base_branch:
         return None
+    args = ["git", "diff", f"{base_branch}...HEAD"]
+    if exclude:
+        args.append("--")
+        args.append(".")
+        args.extend(f":(exclude){p.rstrip('/')}" for p in exclude)
     try:
         result = subprocess.run(  # noqa: S603
-            ["git", "diff", f"{base_branch}...HEAD"],
+            args,
             capture_output=True,
             text=True,
             cwd=cwd,
@@ -626,6 +636,7 @@ async def phase_review(
     *,
     diff_base: str | None = None,
     exploration_dir: Path | None = None,
+    exclude: list[str] | None = None,
 ) -> None:
     """Phase 1: Run review skill, write output to .review-output.md.
 
@@ -636,6 +647,8 @@ async def phase_review(
         diff_base: Optional commit SHA to diff against. When provided, the review
             covers only changes since that commit (used for incremental reviews
             in loop mode). When None, diffs against the base branch.
+        exclude: Optional list of paths the agent should exclude when it runs
+            `git diff` itself. Applied via git's `:(exclude)` magic pathspec.
 
     Returns:
         None
@@ -672,6 +685,17 @@ async def phase_review(
                 "\nReview the changes on the current branch compared to the default branch. "
                 "Use `git diff main...HEAD` or `git diff master...HEAD` to get the diff.\n"
             )
+
+    if exclude:
+        excluded_paths = ", ".join(exclude)
+        pathspec_args = " ".join(f"':(exclude){p.rstrip('/')}'" for p in exclude)
+        # Use the detected base_branch when we have one; otherwise fall back to main.
+        base_for_example = diff_base or _detect_default_branch(cwd) or "main"
+        ref = f"{base_for_example}...HEAD" if not diff_base else f"{diff_base}...HEAD"
+        diff_instruction += (
+            f"\nExclude these paths from the diff: {excluded_paths}. "
+            f"Use git pathspec magic, e.g. `git diff {ref} -- . {pathspec_args}`.\n"
+        )
 
     prompt = build_review_prompt(
         skill_invocation=skill_invocation,
