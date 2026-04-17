@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-04-17
+
+### Added
+
+- **cli:** Add repeatable `--ignore-path PATH` flag to exclude directories from review ([#42](https://github.com/existential-birds/daydream/pull/42))
+
+  Injects git `:(exclude)` pathspecs into diff collection and instructs review-phase agents to apply the same filter. Useful for excluding `.planning/`, `vendor/`, or generated directories in monorepos so diff noise doesn't drown out real review signal.
+
+### Fixed
+
+- **exploration:** Stop embedding full diff text in specialist subagent prompts ([#42](https://github.com/existential-birds/daydream/pull/42))
+
+  Pattern-scanner, dependency-tracer, and test-mapper subagents now receive affected file paths plus a diff ref and fetch per-file diffs on demand via their existing tools. Fixes "Prompt is too long" failures on monorepo-sized diffs (15k+ lines) by dropping token cost from O(total_diff) to O(per-file lookups).
+- **agent:** Correct `detect_test_success()` false negatives on clean-pass outputs ([#42](https://github.com/existential-birds/daydream/pull/42))
+
+  The matcher now extracts structured counts first and falls through to sentinel phrases, handling cases the previous regex missed: "N tests passed" / "0 tests failed" on separate lines, the word "tests" appearing between the count and "failed", and Cargo's native `test result: ok. N passed; 0 failed;` summary. Stops the heal loop from retrying already-passing test runs.
+
+### Security
+
+- **deps:** Bump pyjwt 2.11.0 → 2.12.1 for CVE fix (accepts unknown `crit` header extensions — high) ([#42](https://github.com/existential-birds/daydream/pull/42))
+- **deps:** Bump python-multipart 0.0.22 → 0.0.26 for DoS-via-large-preamble CVE fix ([#41](https://github.com/existential-birds/daydream/pull/41), [#42](https://github.com/existential-birds/daydream/pull/42))
+- **deps:** Bump pygments 2.19.2 → 2.20.0 for ReDoS CVE in GUID regex ([#42](https://github.com/existential-birds/daydream/pull/42))
+
 ## [0.11.1] - 2026-04-13
 
 ### Fixed
