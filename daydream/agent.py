@@ -228,16 +228,32 @@ def detect_test_success(output: str) -> bool:
 
     output_lower = output.lower()
 
-    # Extract counts — tolerate "N failed" and "N tests failed" with any separator.
-    failed_match = re.search(r"(\d[\d,]*)\s+(?:tests?\s+)?fail(?:ed|ures?)\b", output_lower)
-    passed_match = re.search(r"(\d[\d,]*)\s+(?:tests?\s+)?passed\b", output_lower)
-
-    failed_count = int(failed_match.group(1).replace(",", "")) if failed_match else None
-    passed_count = int(passed_match.group(1).replace(",", "")) if passed_match else None
+    # Extract ALL counts — tolerate "N failed" and "N tests failed" with any separator.
+    # Using finditer so a later non-zero count cannot be hidden by an earlier "0 failed".
+    failed_counts = [
+        int(match.group(1).replace(",", ""))
+        for match in re.finditer(r"(\d[\d,]*)\s+(?:tests?\s+)?fail(?:ed|ures?)\b", output_lower)
+    ]
+    passed_counts = [
+        int(match.group(1).replace(",", ""))
+        for match in re.finditer(r"(\d[\d,]*)\s+(?:tests?\s+)?passed\b", output_lower)
+    ]
 
     # Any non-zero failure count means failure, full stop.
-    if failed_count is not None and failed_count > 0:
+    if any(count > 0 for count in failed_counts):
         return False
+
+    # Hard negative signals win over success sentinels — a traceback or assertion error
+    # later in the output must not be masked by an earlier "all tests pass" phrase.
+    error_patterns = [
+        r"tests? failing",
+        r"test failure",
+        r"assertion error",
+        r"traceback",
+    ]
+    for pattern in error_patterns:
+        if re.search(pattern, output_lower):
+            return False
 
     # Explicit sentinels emitted by tooling / the test agent.
     success_sentinels = [
@@ -255,19 +271,10 @@ def detect_test_success(output: str) -> bool:
             return True
 
     # Structured: saw a passed count and an explicit 0-failure count.
-    if passed_count is not None and passed_count > 0 and failed_count == 0:
+    has_explicit_zero_failed = any(count == 0 for count in failed_counts)
+    max_passed = max(passed_counts) if passed_counts else None
+    if max_passed is not None and max_passed > 0 and has_explicit_zero_failed:
         return True
-
-    # Hard negative signals (not count-based).
-    error_patterns = [
-        r"tests? failing",
-        r"test failure",
-        r"assertion error",
-        r"traceback",
-    ]
-    for pattern in error_patterns:
-        if re.search(pattern, output_lower):
-            return False
 
     # Conservative fallback: bare "passed" with no count is not enough.
     return False

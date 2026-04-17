@@ -114,3 +114,22 @@ def test_bare_failures_wording() -> None:
 def test_comma_separated_failed_count() -> None:
     """Comma-grouped failure counts must register as failure."""
     assert detect_test_success("1,002 passed, 2,500 failed") is False
+
+
+def test_later_nonzero_failed_not_hidden_by_earlier_zero() -> None:
+    """A later non-zero failure count must not be masked by an earlier '0 failed'."""
+    output = """First attempt: 10 passed, 0 failed
+Retry after flake: 8 passed, 5 failed
+"""
+    assert detect_test_success(output) is False
+
+
+def test_traceback_overrides_success_sentinel() -> None:
+    """A traceback later in the output must override an earlier success phrase."""
+    output = """all tests pass
+...but then:
+Traceback (most recent call last):
+  File "x.py", line 1, in <module>
+    foo()
+"""
+    assert detect_test_success(output) is False
