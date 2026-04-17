@@ -705,11 +705,13 @@ async def test_run_populates_exploration_context(monkeypatch, target_project: Pa
     )
 
     # Force the diff source so exploration runs even in a tmp dir.
-    monkeypatch.setattr("daydream.runner._git_diff", lambda cwd: diff_text)
+    monkeypatch.setattr("daydream.runner._git_diff", lambda cwd, exclude=None: diff_text)
 
     captured: dict[str, Any] = {}
 
-    async def fake_phase_review(backend, cwd, skill, *, diff_base=None, exploration_dir=None):
+    async def fake_phase_review(
+        backend, cwd, skill, *, diff_base=None, exploration_dir=None, exclude=None,
+    ):
         captured["exploration_dir"] = exploration_dir
 
     async def fake_phase_parse_feedback(backend, cwd):

@@ -163,8 +163,23 @@ Emit a FileInfo entry with role="test" for each test file you find.
 # ---------------------------------------------------------------------------
 
 
-def build_pattern_scanner_prompt(diff_text: str, affected_files: list[str]) -> str:
-    """Build the per-run pattern-scanner prompt with diff and known files injected."""
+def build_pattern_scanner_prompt(affected_files: list[str], diff_ref: str) -> str:
+    """Build the per-run pattern-scanner prompt.
+
+    The prompt passes the affected file list and a diff ref. The specialist
+    fetches diff content per-file on demand via its own tools rather than
+    receiving the full diff inline, which keeps context small for large diffs.
+
+    Args:
+        affected_files: Paths of files touched by the diff under review.
+        diff_ref: Git ref (e.g. base branch or SHA) the specialist can diff against.
+
+    Returns:
+        The fully-rendered prompt string, including the JSON schema block.
+
+    Raises:
+        None.
+    """
     files_block = "\n".join(f"- {p}" for p in affected_files) or "- (none yet)"
     return f"""You are the **pattern-scanner** specialist. Detect codebase conventions
 and read guideline files relevant to the changes below.
@@ -179,16 +194,31 @@ Instructions:
 {files_block}
 </affected_files>
 
-<diff>
-{diff_text}
-</diff>
+To inspect changes, run `git diff {diff_ref} -- <file>` for any file listed in
+<affected_files>, or Read/Grep the file directly. Do NOT dump the full diff —
+work file-by-file so your context stays small.
 
 {_schema_block(PATTERN_SCANNER_SCHEMA)}
 """
 
 
-def build_dependency_tracer_prompt(diff_text: str, affected_files: list[FileInfo]) -> str:
-    """Build the per-run dependency-tracer prompt."""
+def build_dependency_tracer_prompt(affected_files: list[FileInfo], diff_ref: str) -> str:
+    """Build the per-run dependency-tracer prompt.
+
+    The prompt passes the affected file list and a diff ref. The specialist
+    fetches diff content per-file on demand via its own tools rather than
+    receiving the full diff inline.
+
+    Args:
+        affected_files: FileInfo entries for files reachable from the diff, each carrying a `path` and `role`.
+        diff_ref: Git ref the specialist can diff against when probing call sites.
+
+    Returns:
+        The fully-rendered prompt string, including the JSON schema block.
+
+    Raises:
+        None.
+    """
     files_block = "\n".join(f"- {f.path} ({f.role})" for f in affected_files) or "- (none yet)"
     return f"""You are the **dependency-tracer** specialist. Extend the affected-files
 list beyond the static-resolved imports by grepping for call sites and
@@ -199,16 +229,31 @@ emit a Dependency record.
 {files_block}
 </affected_files>
 
-<diff>
-{diff_text}
-</diff>
+To inspect changes, run `git diff {diff_ref} -- <file>` for any file listed in
+<affected_files>, or Read/Grep the file directly. Do NOT dump the full diff —
+work file-by-file so your context stays small.
 
 {_schema_block(DEPENDENCY_TRACER_SCHEMA)}
 """
 
 
-def build_test_mapper_prompt(diff_text: str, affected_files: list[str]) -> str:
-    """Build the per-run test-mapper prompt."""
+def build_test_mapper_prompt(affected_files: list[str], diff_ref: str) -> str:
+    """Build the per-run test-mapper prompt.
+
+    The prompt passes the affected file list and a diff ref. The specialist
+    fetches diff content per-file on demand via its own tools rather than
+    receiving the full diff inline.
+
+    Args:
+        affected_files: Paths of files touched by the diff under review.
+        diff_ref: Git ref the specialist can diff against when locating test files.
+
+    Returns:
+        The fully-rendered prompt string, including the JSON schema block.
+
+    Raises:
+        None.
+    """
     files_block = "\n".join(f"- {p}" for p in affected_files) or "- (none yet)"
     return f"""You are the **test-mapper** specialist. Locate test files for each modified
 source file using conventional path mapping (tests/test_X.py, *.test.ts,
@@ -219,9 +264,9 @@ each test file you find.
 {files_block}
 </affected_files>
 
-<diff>
-{diff_text}
-</diff>
+To inspect changes, run `git diff {diff_ref} -- <file>` for any file listed in
+<affected_files>, or Read/Grep the file directly. Do NOT dump the full diff —
+work file-by-file so your context stays small.
 
 {_schema_block(TEST_MAPPER_SCHEMA)}
 """
@@ -235,19 +280,19 @@ EXPLORATION_AGENTS: dict[str, AgentDefinition] = {
     "pattern-scanner": AgentDefinition(
         description="Detects codebase conventions and reads guideline files (CLAUDE.md, .coderabbit.yaml, etc).",
         prompt=PATTERN_SCANNER_SYSTEM_PROMPT,
-        tools=["Read", "Glob", "Grep"],
+        tools=["Bash", "Read", "Glob", "Grep"],
         model="inherit",
     ),
     "dependency-tracer": AgentDefinition(
         description="Extends the import graph by grepping call sites and emits Dependency edges.",
         prompt=DEPENDENCY_TRACER_SYSTEM_PROMPT,
-        tools=["Read", "Glob", "Grep"],
+        tools=["Bash", "Read", "Glob", "Grep"],
         model="inherit",
     ),
     "test-mapper": AgentDefinition(
         description="Locates test files for modified source files via conventional path mapping.",
         prompt=TEST_MAPPER_SYSTEM_PROMPT,
-        tools=["Read", "Glob", "Grep"],
+        tools=["Bash", "Read", "Glob", "Grep"],
         model="inherit",
     ),
 }

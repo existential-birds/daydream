@@ -3,7 +3,7 @@
 import contextlib
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
 from daydream.phases import (
     FixResult,
+    _detect_default_branch,
     _git_branch,
     _git_diff,
     _git_log,
@@ -78,6 +79,8 @@ class RunConfig:
         test_backend: Override backend for the test phase. If None, uses backend.
         loop: Enable continuous review/fix/test iterations. Default is False.
         max_iterations: Maximum number of loop iterations before exiting. Default is 5.
+        ignore_paths: Paths to exclude from diffs (passed to `git :(exclude)` pathspecs
+            and surfaced in review prompts). Default is an empty list.
 
     """
 
@@ -100,6 +103,7 @@ class RunConfig:
     trust_the_technology: bool = False
     exploration_context: ExplorationContext | None = None
     exploration_depth: int = 1
+    ignore_paths: list[str] = field(default_factory=list)
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -149,6 +153,18 @@ def _resolve_backend(
         return cache[backend_name]
 
     return create_backend(backend_name, model=config.model)
+
+
+def _compute_diff_ref(cwd: Path) -> str:
+    """Compute the diff ref to hand to exploration specialists.
+
+    Returns ``"{base_branch}...HEAD"`` when a default branch is detected, else
+    falls back to ``"HEAD"`` so specialists can still run ``git diff HEAD -- <file>``.
+    """
+    base_branch = _detect_default_branch(cwd)
+    if base_branch:
+        return f"{base_branch}...HEAD"
+    return "HEAD"
 
 
 def _get_head_sha(cwd: Path) -> str | None:
@@ -281,7 +297,7 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
     backend = _resolve_backend(config, "review")
 
     # Gather git context
-    diff = _git_diff(target_dir)
+    diff = _git_diff(target_dir, exclude=config.ignore_paths)
     log = _git_log(target_dir)
     branch = _git_branch(target_dir)
 
@@ -319,6 +335,7 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
                 target_dir,
                 diff,
                 config.exploration_depth,
+                diff_ref=_compute_diff_ref(target_dir),
             )
 
     # Materialise exploration to disk so phase prompts can reference files.
@@ -493,7 +510,7 @@ async def run(config: RunConfig | None = None) -> int:
         # the first phase_review() call. Only runs when starting at "review"
         # (later start phases skip review, so exploration would be wasted).
         if config.start_at == "review" and config.exploration_context is None:
-            diff_text = _git_diff(target_dir) or ""
+            diff_text = _git_diff(target_dir, exclude=config.ignore_paths) or ""
             tier = select_tier(count_changed_files(diff_text))
             if tier == "skip":
                 print_dim(console, "Skipping exploration -- trivial diff")
@@ -506,6 +523,7 @@ async def run(config: RunConfig | None = None) -> int:
                     target_dir,
                     diff_text,
                     config.exploration_depth,
+                    diff_ref=_compute_diff_ref(target_dir),
                 )
 
         feedback_items: list[dict[str, Any]] = []
@@ -543,6 +561,7 @@ async def run(config: RunConfig | None = None) -> int:
             await phase_review(
                 review_backend, target_dir, skill, diff_base=diff_base,
                 exploration_dir=exploration_dir,
+                exclude=config.ignore_paths,
             )
 
             # Phase 2: Parse feedback
@@ -661,6 +680,7 @@ async def run(config: RunConfig | None = None) -> int:
                     await phase_review(
                         review_backend, target_dir, skill,
                         exploration_dir=exploration_dir,
+                        exclude=config.ignore_paths,
                     )
                 except MissingSkillError as e:
                     _print_missing_skill_error(e.skill_name)

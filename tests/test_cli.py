@@ -224,6 +224,30 @@ def test_ttt_default_is_false(monkeypatch):
     assert config.trust_the_technology is False
 
 
+def test_ignore_paths_default_empty(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--python"])
+    config = _parse_args()
+    assert config.ignore_paths == []
+
+
+def test_ignore_paths_single(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "/tmp/project", "--python", "--ignore-path", ".planning",
+    ])
+    config = _parse_args()
+    assert config.ignore_paths == [".planning"]
+
+
+def test_ignore_paths_repeatable(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "/tmp/project", "--python",
+        "--ignore-path", ".planning",
+        "--ignore-path", "vendor",
+    ])
+    config = _parse_args()
+    assert config.ignore_paths == [".planning", "vendor"]
+
+
 def test_phase_subtitles_include_wonder_and_envision():
     from daydream.ui import PHASE_SUBTITLES
     assert "WONDER" in PHASE_SUBTITLES

@@ -212,8 +212,9 @@ def _log_debug(message: str) -> None:
 def detect_test_success(output: str) -> bool:
     """Detect if tests passed using pattern matching.
 
-    Uses regex patterns to handle negation (e.g., "no failures" should not
-    trigger failure detection).
+    Extracts structured pass/fail counts first (tolerating "N tests failed"
+    wording and any separator between counts), then falls through to sentinel
+    pass-phrases emitted by tooling or agents.
 
     Args:
         output: Agent output containing test results
@@ -222,46 +223,61 @@ def detect_test_success(output: str) -> bool:
         True if tests clearly passed, False otherwise
 
     """
+    if not output:
+        return False
+
     output_lower = output.lower()
 
-    # Strong success patterns (explicit pass statements)
-    success_patterns = [
-        r"all \d+ tests? passed",
-        r"tests? passed successfully",
-        r"test suite passed",
-        r"\d+ passed,? 0 failed",
-        r"0 failed,? \d+ passed",
-        r"passed:? \d+.*failed:? 0",
-        r"no (?:test )?failures",
-        r"0 failures",
-        r"all tests pass",
+    # Extract ALL counts — tolerate "N failed" and "N tests failed" with any separator.
+    # Using finditer so a later non-zero count cannot be hidden by an earlier "0 failed".
+    failed_counts = [
+        int(match.group(1).replace(",", ""))
+        for match in re.finditer(r"(\d[\d,]*)\s+(?:tests?\s+)?fail(?:ed|ures?)\b", output_lower)
+    ]
+    passed_counts = [
+        int(match.group(1).replace(",", ""))
+        for match in re.finditer(r"(\d[\d,]*)\s+(?:tests?\s+)?passed\b", output_lower)
     ]
 
-    # Check for strong success patterns
-    for pattern in success_patterns:
-        if re.search(pattern, output_lower):
-            return True
+    # Any non-zero failure count means failure, full stop.
+    if any(count > 0 for count in failed_counts):
+        return False
 
-    # Failure patterns that indicate actual failures (not negated)
-    failure_patterns = [
-        r"(?<!no )(?<!0 )(?<!\d )failed",
-        r"\d+ failed",
+    # Hard negative signals win over success sentinels — a traceback or assertion error
+    # later in the output must not be masked by an earlier "all tests pass" phrase.
+    error_patterns = [
         r"tests? failing",
         r"test failure",
         r"assertion error",
         r"traceback",
     ]
-
-    # Check for failure patterns
-    for pattern in failure_patterns:
-        if pattern == r"\d+ failed":
-            match = re.search(r"(\d+) failed", output_lower)
-            if match and int(match.group(1)) > 0:
-                return False
-        elif re.search(pattern, output_lower):
+    for pattern in error_patterns:
+        if re.search(pattern, output_lower):
             return False
 
-    return "passed" in output_lower
+    # Explicit sentinels emitted by tooling / the test agent.
+    success_sentinels = [
+        r"test result:\s*ok",           # cargo / rust native
+        r"tests?\s+pass(?:ed)?\s*[✅✓]", # agent emoji summary ("Tests PASS ✅")
+        r"all \d+ tests? passed",
+        r"tests? passed successfully",
+        r"test suite passed",
+        r"all tests pass",
+        r"no (?:test )?failures?",
+        r"\b0\s+failures?\b",
+    ]
+    for pattern in success_sentinels:
+        if re.search(pattern, output_lower):
+            return True
+
+    # Structured: saw a passed count and an explicit 0-failure count.
+    has_explicit_zero_failed = any(count == 0 for count in failed_counts)
+    max_passed = max(passed_counts) if passed_counts else None
+    if max_passed is not None and max_passed > 0 and has_explicit_zero_failed:
+        return True
+
+    # Conservative fallback: bare "passed" with no count is not enough.
+    return False
 
 
 async def run_agent(
