@@ -22,6 +22,7 @@ from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
 from daydream.phases import (
     FixResult,
+    _detect_default_branch,
     _git_branch,
     _git_diff,
     _git_log,
@@ -149,6 +150,18 @@ def _resolve_backend(
         return cache[backend_name]
 
     return create_backend(backend_name, model=config.model)
+
+
+def _compute_diff_ref(cwd: Path) -> str:
+    """Compute the diff ref to hand to exploration specialists.
+
+    Returns ``"{base_branch}...HEAD"`` when a default branch is detected, else
+    falls back to ``"HEAD"`` so specialists can still run ``git diff HEAD -- <file>``.
+    """
+    base_branch = _detect_default_branch(cwd)
+    if base_branch:
+        return f"{base_branch}...HEAD"
+    return "HEAD"
 
 
 def _get_head_sha(cwd: Path) -> str | None:
@@ -319,6 +332,7 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
                 target_dir,
                 diff,
                 config.exploration_depth,
+                diff_ref=_compute_diff_ref(target_dir),
             )
 
     # Materialise exploration to disk so phase prompts can reference files.
@@ -506,6 +520,7 @@ async def run(config: RunConfig | None = None) -> int:
                     target_dir,
                     diff_text,
                     config.exploration_depth,
+                    diff_ref=_compute_diff_ref(target_dir),
                 )
 
         feedback_items: list[dict[str, Any]] = []

@@ -39,11 +39,13 @@ def test_pattern_scanner_prompt_includes_guideline_files():
     assert "CLAUDE.md" in PATTERN_SCANNER_SYSTEM_PROMPT
     assert ".coderabbit.yaml" in PATTERN_SCANNER_SYSTEM_PROMPT
 
-    dynamic = build_pattern_scanner_prompt("diff text", ["daydream/foo.py"])
+    dynamic = build_pattern_scanner_prompt(["daydream/foo.py"], "main...HEAD")
     assert "CLAUDE.md" in dynamic
     assert ".coderabbit.yaml" in dynamic
-    assert "diff text" in dynamic
+    assert "main...HEAD" in dynamic
     assert "daydream/foo.py" in dynamic
+    # Regression guard: raw diff text must never be embedded.
+    assert "<diff>" not in dynamic
 
     assert set(EXPLORATION_AGENTS.keys()) == {"pattern-scanner", "dependency-tracer", "test-mapper"}
     assert EXPLORATION_AGENTS["pattern-scanner"].model == "inherit"
@@ -54,18 +56,21 @@ def test_pattern_scanner_prompt_includes_guideline_files():
 
 def test_dependency_tracer_prompt_mentions_affected_files():
     files = [FileInfo("daydream/a.py", "modified"), FileInfo("daydream/b.py", "modified")]
-    prompt = build_dependency_tracer_prompt("some diff", files)
+    prompt = build_dependency_tracer_prompt(files, "main...HEAD")
     assert "daydream/a.py" in prompt
     assert "daydream/b.py" in prompt
-    assert "some diff" in prompt
+    assert "main...HEAD" in prompt
     assert "```json" in prompt
+    assert "<diff>" not in prompt
 
 
 def test_test_mapper_prompt_instructs_mapping():
-    prompt = build_test_mapper_prompt("diff", ["daydream/x.py"])
+    prompt = build_test_mapper_prompt(["daydream/x.py"], "main...HEAD")
     assert "test" in prompt.lower()
     assert "daydream/x.py" in prompt
+    assert "main...HEAD" in prompt
     assert "```json" in prompt
+    assert "<diff>" not in prompt
 
 
 def test_schemas_are_valid_objects():
@@ -209,9 +214,10 @@ def test_parallel_tier_launches_three_agents(tmp_path):
     assert len(backend.execute_calls) == 3
     schemas = {call["schema"]["type"] for call in backend.execute_calls}
     assert len(schemas) >= 1  # All are "object" type
-    # Verify no agents= was passed
+    # Verify no agents= was passed and no raw diff leaked into specialist prompts
     for call in backend.execute_calls:
         assert call["agents"] is None
+        assert "<diff>" not in call["prompt"]
     # Results merged correctly
     assert any(c.name == "snake_case" for c in ctx.conventions)
     assert any(f.path == "tests/test_a.py" for f in ctx.affected_files)

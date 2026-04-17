@@ -191,6 +191,7 @@ async def pre_scan(
     repo_root: Path,
     diff_text: str,
     depth: int = 1,
+    diff_ref: str = "HEAD",
 ) -> ExplorationContext:
     """Run the pre-scan exploration pipeline for a diff.
 
@@ -205,8 +206,11 @@ async def pre_scan(
     Args:
         backend: Backend to invoke.
         repo_root: Repository root used by ``detect_affected_files``.
-        diff_text: Raw git diff string.
+        diff_text: Raw git diff string (used locally for file detection only;
+            never embedded in specialist prompts).
         depth: Static-resolution depth (forwarded to ``detect_affected_files``).
+        diff_ref: Git ref or range (e.g. ``"main...HEAD"``) passed to specialist
+            prompts so they can run ``git diff <ref> -- <file>`` per file.
 
     Returns:
         Merged ``ExplorationContext``.
@@ -243,20 +247,20 @@ async def pre_scan(
 
     async with anyio.create_task_group() as tg:
         if tier == "single":
-            dep_prompt = build_dependency_tracer_prompt(diff_text, static_files)
+            dep_prompt = build_dependency_tracer_prompt(static_files, diff_ref)
             tg.start_soon(_run_specialist, "dependency_tracer", dep_prompt, DEPENDENCY_TRACER_SCHEMA)
         else:  # parallel
             tg.start_soon(
                 _run_specialist, "pattern_scanner",
-                build_pattern_scanner_prompt(diff_text, file_paths), PATTERN_SCANNER_SCHEMA,
+                build_pattern_scanner_prompt(file_paths, diff_ref), PATTERN_SCANNER_SCHEMA,
             )
             tg.start_soon(
                 _run_specialist, "dependency_tracer",
-                build_dependency_tracer_prompt(diff_text, static_files), DEPENDENCY_TRACER_SCHEMA,
+                build_dependency_tracer_prompt(static_files, diff_ref), DEPENDENCY_TRACER_SCHEMA,
             )
             tg.start_soon(
                 _run_specialist, "test_mapper",
-                build_test_mapper_prompt(diff_text, file_paths), TEST_MAPPER_SCHEMA,
+                build_test_mapper_prompt(file_paths, diff_ref), TEST_MAPPER_SCHEMA,
             )
 
     if not results:
