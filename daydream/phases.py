@@ -713,12 +713,24 @@ async def phase_review(
         print_warning(console, "Review output file was not created")
 
 
-async def phase_parse_feedback(backend: Backend, cwd: Path) -> list[dict[str, Any]]:
+async def phase_parse_feedback(
+    backend: Backend,
+    cwd: Path,
+    *,
+    input_path: Path | None = None,
+) -> list[dict[str, Any]]:
     """Phase 2: Parse feedback from review output and return validated items.
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory containing the review output
+        cwd: Working directory containing the review output (also used as the
+            agent's cwd).
+        input_path: Optional explicit path to the review markdown to parse.
+            When None (default), reads ``cwd / REVIEW_OUTPUT_FILE``, preserving
+            behavior for single-skill, PR feedback, and TTT flows. When
+            provided, reads that path instead — used by deep-mode's pre-merge
+            parse stage to iterate per-stack outputs without overwriting each
+            other at the shared REVIEW_OUTPUT_FILE location.
 
     Returns:
         List of validated feedback items with id, description, file, line
@@ -730,7 +742,7 @@ async def phase_parse_feedback(backend: Backend, cwd: Path) -> list[dict[str, An
     print_phase_hero(console, "REFLECT", phase_subtitle("REFLECT"))
 
     # Use absolute path to prevent model hallucination of paths from training data
-    review_output_path = cwd / REVIEW_OUTPUT_FILE
+    review_output_path = input_path if input_path is not None else cwd / REVIEW_OUTPUT_FILE
     prompt = f"""Read the review output file at {review_output_path}.
 
 Extract ONLY actionable issues that need fixing. Skip these sections entirely:
