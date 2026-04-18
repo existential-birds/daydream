@@ -490,6 +490,16 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
     finally:
         exploration_cleanup = target_dir / ".daydream" / "exploration"
         if exploration_cleanup.is_dir():
-            shutil.rmtree(exploration_cleanup)
+            # Best-effort cleanup: an rmtree failure here would otherwise
+            # escape the finally and replace the run's real exit code with a
+            # cleanup exception, hiding the actual outcome from the caller.
+            try:
+                shutil.rmtree(exploration_cleanup)
+            except OSError as exc:
+                print_warning(
+                    console,
+                    f"Failed to clean up exploration artifacts at "
+                    f"{exploration_cleanup}: {exc}",
+                )
         # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
         # subsequent --start-at resumes can find the artifacts they need.

@@ -213,10 +213,10 @@ async def test_fresh_context_per_stage(multi_stack_target: Path, monkeypatch: py
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
     # At minimum: intent + alternatives + 3 per-stack + 3 parse + 1 merge = 9 distinct calls.
-    assert len(stub.calls) >= 8
-    # Distinct by prompt (no test here about continuation, just that each stage fires a separate execute).
+    assert len(stub.calls) >= 9
+    # Each stage fires a distinct Backend.execute call -- prompts must be unique.
     prompts = [c["prompt"] for c in stub.calls]
-    assert len(set(prompts)) == len(prompts) or len(prompts) >= 8
+    assert len(set(prompts)) == len(prompts)
 
 
 async def test_artifacts_on_disk(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
