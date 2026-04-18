@@ -15,6 +15,7 @@ phase primitive (D-39).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from dataclasses import asdict, is_dataclass
@@ -74,8 +75,13 @@ except ImportError:  # pragma: no cover -- only hit when Phases 1-4 absent
 # (D-31 cost_usd=None caveat). Imported here so tests can monkeypatch it.
 from daydream.backends.codex import CodexBackend  # noqa: E402
 
-# Match git diff file headers to extract the list of changed files.
-_DIFF_FILE_HEADER = re.compile(r"^(?:diff --git a/(\S+)|\+\+\+ b/(\S+))", re.MULTILINE)
+# Per-file block splitter (splits the unified diff at each `diff --git` header).
+_DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
+# `+++ ` and `--- ` file headers inside a single block.
+_DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (\S+)", re.MULTILINE)
+_DIFF_MINUS_HEADER = re.compile(r"^--- (\S+)", re.MULTILINE)
+# Fallback header for binary / mode-only diffs that lack `--- / +++`.
+_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)")
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
 _PIPELINE_STAGE_NAMES: list[str] = [
@@ -104,11 +110,47 @@ def total_agent_count(stack_count: int) -> int:
     return 2 + stack_count + stack_count + 1
 
 
+def get_installed_skills() -> set[str] | None:
+    """Detect which Beagle review-skill plugins are installed.
+
+    Reads the Claude Code plugin registry at
+    ``$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json`` (default
+    ``~/.claude``) and maps installed plugin names back to ``SKILL_MAP``
+    stack keys. Each stack's Beagle skill lives in a plugin named
+    ``beagle-<stack>``; a stack is considered "installed" iff that plugin
+    is present.
+
+    Returns:
+        Set of installed stack keys (subset of ``SKILL_MAP.keys()``), or
+        ``None`` if the registry cannot be read (missing file, bad JSON).
+        ``None`` signals "unknown" so callers can fall back to optimistic
+        availability without forcing every stack through generic.
+    """
+    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+    registry = config_dir / "plugins" / "installed_plugins.json"
+    try:
+        data = json.loads(registry.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    # Keys in the registry look like "<plugin-name>@<marketplace>".
+    installed_plugins = {key.split("@", 1)[0] for key in data.get("plugins", {})}
+    installed: set[str] = set()
+    for stack_key, skill_invocation in SKILL_MAP.items():
+        # SKILL_MAP values are "<plugin-name>:<skill-name>".
+        plugin_prefix = skill_invocation.split(":", 1)[0]
+        if plugin_prefix in installed_plugins:
+            installed.add(stack_key)
+    return installed
+
+
 def _diff_changed_files(diff: str) -> list[str]:
     """Extract changed files from a unified diff.
 
-    Prefers ``+++ b/<path>`` lines over ``diff --git a/<path>`` because
-    the former survives renames where the a-side path no longer exists.
+    Parses one file per ``diff --git`` block and contributes a single path
+    for each. Prefers the post-state path (``+++ b/<path>``) so renames
+    produce only the destination. Falls back to the pre-state path for
+    deletions (``+++ /dev/null``) and to the ``diff --git`` header for
+    binary / mode-only diffs that lack ``---``/``+++`` lines.
 
     Args:
         diff: Unified diff text.
@@ -117,10 +159,27 @@ def _diff_changed_files(diff: str) -> list[str]:
         Unique, insertion-ordered list of changed file paths (excluding
         ``/dev/null`` sentinels).
     """
+
+    def _strip_prefix(path: str, prefix: str) -> str:
+        return path[len(prefix) :] if path.startswith(prefix) else path
+
     files: list[str] = []
-    for match in _DIFF_FILE_HEADER.finditer(diff):
-        path = match.group(1) or match.group(2)
-        if path and path != "/dev/null" and path not in files:
+    for block in _DIFF_BLOCK_SPLIT.split(diff):
+        if not block.startswith("diff --git "):
+            continue
+        path: str | None = None
+        plus = _DIFF_PLUS_HEADER.search(block)
+        if plus and plus.group(1) != "/dev/null":
+            path = _strip_prefix(plus.group(1), "b/")
+        if path is None:
+            minus = _DIFF_MINUS_HEADER.search(block)
+            if minus and minus.group(1) != "/dev/null":
+                path = _strip_prefix(minus.group(1), "a/")
+        if path is None:
+            git = _DIFF_GIT_HEADER.match(block)
+            if git:
+                path = git.group(2)
+        if path and path not in files:
             files.append(path)
     return files
 
@@ -221,7 +280,12 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
 
     # ------ Stack detection (from diff file list) ------
     changed_files = _diff_changed_files(diff)
-    stacks = detect_stacks(changed_files, skill_availability=set(SKILL_MAP.keys()))
+    installed = get_installed_skills()
+    # Optimistic fallback when detection fails: SDK-level MissingSkillError is
+    # still caught downstream in phase_per_stack_reviews, so preserving the
+    # pre-D-16 behavior is safer than routing everything to generic.
+    skill_availability = installed if installed is not None else set(SKILL_MAP.keys())
+    stacks = detect_stacks(changed_files, skill_availability=skill_availability)
 
     # ------ Pre-flight notice (D-30, D-31) ------
     stack_lines = [_stack_preflight_line(s) for s in stacks]
@@ -316,17 +380,27 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
         if config.start_at != "fix":
             print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
 
-            # Pre-merge parse pass (D-21).
             per_stack_records_paths: list[Path] = []
             all_records: list[dict[str, Any]] = []
-            for stack_name, output_path in per_stack_outputs.items():
-                records = await phase_parse_feedback(
-                    backend, target_dir, input_path=output_path
-                )
-                records_path = per_stack_records_path(dd, stack_name)
-                records_path.write_text(json.dumps(records, indent=2))
-                per_stack_records_paths.append(records_path)
-                all_records.extend(records)
+            if config.start_at == "merge":
+                # Resume: the stack-*-records.json files are the validated
+                # prerequisite (see check_deep_artifacts). Load them directly
+                # so resume works even after per-stack review.md files have
+                # been cleaned up.
+                for records_path in sorted(dd.glob("stack-*-records.json")):
+                    records = json.loads(records_path.read_text())
+                    per_stack_records_paths.append(records_path)
+                    all_records.extend(records)
+            else:
+                # Pre-merge parse pass (D-21).
+                for stack_name, output_path in per_stack_outputs.items():
+                    records = await phase_parse_feedback(
+                        backend, target_dir, input_path=output_path
+                    )
+                    records_path = per_stack_records_path(dd, stack_name)
+                    records_path.write_text(json.dumps(records, indent=2))
+                    per_stack_records_paths.append(records_path)
+                    all_records.extend(records)
 
             # Dedup pre-filter (D-27).
             alt_issues_for_dedup: list[dict[str, Any]] = (

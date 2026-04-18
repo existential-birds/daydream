@@ -491,6 +491,47 @@ async def test_resume_overwrites(multi_stack_target: Path, monkeypatch: pytest.M
     assert "STALE CONTENT" not in old.read_text()
 
 
+async def test_resume_merge_consumes_saved_records(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--start-at merge loads stack-*-records.json and does NOT re-parse reviews.
+
+    Regression: previously the merge branch always re-ran phase_parse_feedback
+    against reconstructed stack-*-review.md paths, so resume failed when those
+    markdown files were absent even though the validated records.json existed.
+    """
+    import json
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    # Prime saved records but intentionally NOT the review.md files -- the
+    # resume path must consume records.json directly.
+    (deep / "stack-python-records.json").write_text(
+        json.dumps([{"id": 1, "description": "py issue", "file": "api.py", "line": 1}])
+    )
+    (deep / "stack-react-records.json").write_text(
+        json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1}])
+    )
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+
+    # Parse phase must NOT have been invoked (records already on disk).
+    parse_calls = [c for c in stub.calls if "extract only actionable issues" in c["prompt"].lower()]
+    assert parse_calls == [], f"unexpected parse invocations on merge resume: {len(parse_calls)}"
+
+    # Merge agent must have run and produced the merged report.
+    merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
+    assert len(merge_calls) == 1
+    from daydream.config import REVIEW_OUTPUT_FILE
+    assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists()
+
+
 async def test_stage_ui_surfacing(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-44: UI prints [stage N/5: ...] at each stage boundary."""
     progress_calls: list[tuple[int, int, str]] = []
@@ -511,3 +552,152 @@ async def test_stage_ui_surfacing(multi_stack_target: Path, monkeypatch: pytest.
     assert stage_numbers == {1, 2, 3, 4, 5}
     # Total is always 5.
     assert all(c[1] == 5 for c in progress_calls)
+
+
+def _write_plugin_registry(config_dir: Path, plugin_names: list[str]) -> None:
+    registry = config_dir / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        '{"version": 2, "plugins": {'
+        + ", ".join(f'"{name}@marketplace": []' for name in plugin_names)
+        + "}}"
+    )
+
+
+def test_get_installed_skills_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All per-stack beagle plugins present -> full SKILL_MAP coverage."""
+    from daydream.config import SKILL_MAP
+    from daydream.deep.orchestrator import get_installed_skills
+
+    plugin_names = [skill.split(":", 1)[0] for skill in SKILL_MAP.values()]
+    _write_plugin_registry(tmp_path, plugin_names)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    assert get_installed_skills() == set(SKILL_MAP.keys())
+
+
+def test_get_installed_skills_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing beagle-go plugin -> go is excluded from availability."""
+    from daydream.deep.orchestrator import get_installed_skills
+
+    _write_plugin_registry(tmp_path, ["beagle-python", "beagle-react"])
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    result = get_installed_skills()
+    assert result == {"python", "react"}
+
+
+def test_get_installed_skills_missing_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing registry file -> None (signals 'unknown' to the caller)."""
+    from daydream.deep.orchestrator import get_installed_skills
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    assert get_installed_skills() is None
+
+
+def test_get_installed_skills_malformed_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unparseable registry -> None (fall back to optimistic availability)."""
+    from daydream.deep.orchestrator import get_installed_skills
+
+    registry = tmp_path / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text("not json {{{")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    assert get_installed_skills() is None
+
+
+def test_run_deep_routes_missing_skill_to_generic(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When beagle-react is absent, React files route to the generic bucket.
+
+    Regression: previously orchestrator passed ``set(SKILL_MAP.keys())`` as
+    availability, so detect_stacks kept React as its own stack, the per-stack
+    agent raised MissingSkillError, and phase_per_stack_reviews silently
+    dropped the React findings.
+    """
+    import anyio
+
+    from daydream.deep import detection as _detection
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    # Registry with only python installed -- react and markdown should route to generic.
+    _write_plugin_registry(tmp_path, ["beagle-python"])
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    captured: dict[str, list[_detection.StackAssignment]] = {}
+    real_detect = _detection.detect_stacks
+
+    def _spy(files: list[str], **kwargs: Any) -> list[_detection.StackAssignment]:
+        result = real_detect(files, **kwargs)
+        captured["stacks"] = result
+        return result
+
+    monkeypatch.setattr("daydream.deep.orchestrator.detect_stacks", _spy)
+
+    exit_code = anyio.run(_run_deep, multi_stack_target)
+    assert exit_code == 0
+
+    stacks = {s.stack_name for s in captured["stacks"]}
+    # Python remains, but React (no skill installed) must have fallen through to generic.
+    assert "python" in stacks
+    assert "react" not in stacks
+    assert "generic" in stacks
+
+
+def test_diff_changed_files_rename_single_entry() -> None:
+    """Rename diff contributes only the destination path, not both sides."""
+    from daydream.deep.orchestrator import _diff_changed_files
+
+    rename_diff = (
+        "diff --git a/foo.py b/foo.ts\n"
+        "similarity index 85%\n"
+        "rename from foo.py\n"
+        "rename to foo.ts\n"
+        "--- a/foo.py\n"
+        "+++ b/foo.ts\n"
+        "@@ -1 +1 @@\n"
+        "-x = 1\n"
+        "+const x = 1;\n"
+    )
+    assert _diff_changed_files(rename_diff) == ["foo.ts"]
+
+
+def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
+    """Non-rename diff shapes emit exactly one path each."""
+    from daydream.deep.orchestrator import _diff_changed_files
+
+    mixed = (
+        "diff --git a/keep.py b/keep.py\n"
+        "--- a/keep.py\n"
+        "+++ b/keep.py\n"
+        "@@ -1 +1 @@\n"
+        "-x = 1\n"
+        "+x = 2\n"
+        "diff --git a/new.py b/new.py\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/new.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+x = 1\n"
+        "diff --git a/old.py b/old.py\n"
+        "deleted file mode 100644\n"
+        "--- a/old.py\n"
+        "+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n"
+        "-x = 1\n"
+        "diff --git a/logo.png b/logo.png\n"
+        "index 1234..5678 100644\n"
+        "Binary files a/logo.png and b/logo.png differ\n"
+    )
+    assert _diff_changed_files(mixed) == ["keep.py", "new.py", "old.py", "logo.png"]

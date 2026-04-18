@@ -280,8 +280,20 @@ def test_phase_primitives_unmodified() -> None:
 
 
 def test_existing_tests_still_collect() -> None:
-    """D-40: existing tests still import and collect."""
-    import tests.test_cli  # noqa: F401
-    import tests.test_integration  # noqa: F401
-    import tests.test_loop  # noqa: F401
-    import tests.test_phases  # noqa: F401
+    """D-40: existing tests still import and collect.
+
+    Loads the target test modules by absolute file path via ``importlib``
+    so the check doesn't depend on ``tests`` being resolvable as a package
+    on ``sys.path`` — a sibling repository can shadow that name when
+    multiple projects share a ``PYTHONPATH`` root.
+    """
+    import importlib.util
+
+    tests_dir = Path(__file__).parent
+    for name in ("test_cli", "test_integration", "test_loop", "test_phases"):
+        spec = importlib.util.spec_from_file_location(
+            f"_d40_probe_{name}", tests_dir / f"{name}.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
