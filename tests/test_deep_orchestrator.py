@@ -9,10 +9,7 @@ simulate the full review pipeline without talking to a real SDK.
 
 from __future__ import annotations
 
-import io
-import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -52,14 +49,10 @@ class _StubBackend:
         )
         pl = prompt.lower()
 
-        # TTT intent phase -> returns plain text.
-        if "describe what these changes are trying to achieve" in pl or "confirm your understanding" in pl:
-            yield TextEvent(text="The PR updates greetings across stacks.")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
         # TTT alternative-review phase -> structured output.
-        if "alternative" in pl and "evaluate" in pl:
+        # (Checked BEFORE intent because the alt prompt embeds the intent summary
+        # which contains the word "intent", defeating a naive substring check.)
+        if "would you have done this differently" in pl or "evaluate the implementation" in pl:
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output={
@@ -78,6 +71,13 @@ class _StubBackend:
             )
             return
 
+        # TTT intent phase -> plain text. Discriminator: "understand the intent"
+        # + "commit log:" are both unique to build_intent_prompt.
+        if "understand the intent of these changes" in pl:
+            yield TextEvent(text="The PR updates greetings across stacks.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
         # Per-stack review -> write a markdown file + emit done.
         m = re.search(r"you are reviewing the (\S+) stack", pl)
         if m is None:
@@ -86,7 +86,8 @@ class _StubBackend:
             # Extract the output path the prompt asks the agent to write.
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
             if out_match is not None:
-                out_path = Path(out_match.group(1))
+                raw = out_match.group(1).rstrip(".")
+                out_path = Path(raw)
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 stack = m.group(1)
                 out_path.write_text(
@@ -113,7 +114,8 @@ class _StubBackend:
         if "cross-stack merge agent" in pl:
             out_match = re.search(r"write the complete report to (\S+)", prompt, flags=re.IGNORECASE)
             if out_match is not None:
-                out_path = Path(out_match.group(1))
+                raw = out_match.group(1).rstrip(".")
+                out_path = Path(raw)
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_text(
                     "# Review\n\n"
@@ -167,7 +169,8 @@ def _install_stub_backend(
 async def _run_deep(target: Path, *, start_at: str = "review") -> int:
     from daydream.runner import RunConfig, run
 
-    config = RunConfig(target=str(target), deep=True, start_at=start_at)
+    # cleanup=False suppresses the interactive cleanup prompt in runner.run().
+    config = RunConfig(target=str(target), deep=True, start_at=start_at, cleanup=False)
     return await run(config)
 
 
@@ -179,14 +182,15 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    # Classify each call by inspecting prompt content.
+    # Classify each call by inspecting prompt content. Alt is checked before
+    # intent because the alt prompt embeds the intent summary text.
     order: list[str] = []
     for call in stub.calls:
         pl = call["prompt"].lower()
-        if "describe what these changes are trying to achieve" in pl:
-            order.append("intent")
-        elif "alternative" in pl and "evaluate" in pl:
+        if "would you have done this differently" in pl or "evaluate the implementation" in pl:
             order.append("alternatives")
+        elif "understand the intent of these changes" in pl:
+            order.append("intent")
         elif "you are reviewing the" in pl and "stack" in pl:
             order.append("per-stack")
         elif "extract only actionable issues" in pl:
@@ -249,16 +253,20 @@ async def test_per_stack_context_isolation(multi_stack_target: Path, monkeypatch
     ]
     assert per_stack_prompts, "expected per-stack prompts"
     # Each per-stack prompt should mention its own stack's file but NOT foreign files.
-    python_prompt = next((p for p in per_stack_prompts if "api.py" in p and "the python stack" in p.lower()), None)
-    react_prompt = next((p for p in per_stack_prompts if "app.tsx" in p.lower() and "the react stack" in p.lower()), None)
+    python_prompt = next(
+        (p for p in per_stack_prompts if "api.py" in p and "the python stack" in p.lower()),
+        None,
+    )
+    react_prompt = next(
+        (p for p in per_stack_prompts if "app.tsx" in p.lower() and "the react stack" in p.lower()),
+        None,
+    )
     assert python_prompt is not None
     assert react_prompt is not None
-    # Python prompt should not embed React files in its scope instruction.
-    python_scope_line = next(
-        line for line in python_prompt.splitlines() if "focus only on these files" in line.lower()
-    )
-    # next line holds the actual file list (per build_per_stack_prompt).
-    assert "App.tsx" not in python_prompt.split("Focus ONLY on these files:")[1].split("\n", 2)[1]
+    # The scope instruction's file-list line (right after the "Focus ONLY on these files:" header)
+    # must not embed React files in the Python stack prompt.
+    python_scope_files_line = python_prompt.split("Focus ONLY on these files:")[1].split("\n", 2)[1]
+    assert "App.tsx" not in python_scope_files_line
 
 
 async def test_parallel_fan_out(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:

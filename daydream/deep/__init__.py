@@ -14,6 +14,7 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.dedup import CandidatePair, build_dedup_candidates
 from daydream.deep.detection import StackAssignment, detect_stacks
+from daydream.deep.orchestrator import run_deep, total_agent_count
 from daydream.deep.prompts import (
     DOC_REVIEW_NOTICE,
     build_generic_fallback_prompt,
@@ -37,4 +38,6 @@ __all__ = [
     "intent_path",
     "per_stack_records_path",
     "per_stack_review_path",
+    "run_deep",
+    "total_agent_count",
 ]

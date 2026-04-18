@@ -3405,3 +3405,66 @@ def render_ttt_plan(console: Console, plan: dict) -> None:
                 console.print(Text.assemble(("    → ", STYLE_DIM), (f"{ref_file}::{ref_symbol}", STYLE_DIM)))
         else:
             console.print(Text.assemble((line, STYLE_DIM), (" (ungrounded)", "yellow")))
+
+
+# =============================================================================
+# Deep-review Mode UI (D-30, D-31, D-44)
+# =============================================================================
+
+
+def print_stage_progress(console: Console, current: int, total: int, name: str) -> None:
+    """Print a ``[stage N/M: name]`` banner at deep-mode stage boundaries (D-44).
+
+    Args:
+        console: Rich Console instance for output.
+        current: Current stage number (1-indexed).
+        total: Total number of stages.
+        name: Human-readable stage name.
+    """
+    console.print(f"[neon.cyan]\u25b6[/] [neon.fg][stage {current}/{total}: {name}][/]")
+
+
+def print_preflight_notice(
+    console: Console,
+    *,
+    stages: list[str],
+    stack_lines: list[str],
+    agent_count: int,
+    codex_in_use: bool,
+    exploration_available: bool,
+) -> None:
+    """Print the deep-mode pre-flight notice (D-30, D-31).
+
+    Lists the stages, detected stacks, skill per stack, and total agent
+    count. Surfaces the ``cost_usd=None`` caveat when the Codex backend
+    is in use, because the Codex CLI does not report per-stage cost.
+
+    Args:
+        console: Rich Console instance for output.
+        stages: Ordered list of stage display names.
+        stack_lines: Per-stack human-readable summary lines.
+        agent_count: Total agent invocation count (D-30 formula).
+        codex_in_use: True when any active backend is Codex (D-31).
+        exploration_available: True when the exploration infrastructure
+            (Phases 1-4) is installed and the pre-scan is wired in.
+    """
+    console.print("[neon.cyan]\u25b6[/] [neon.fg]Deep-review pipeline pre-flight[/]")
+    if exploration_available:
+        console.print("Exploration pre-scan: enabled (runs before stage 1)", style="dim")
+    else:
+        console.print(
+            "Exploration pre-scan: unavailable (deep pipeline runs without grounding)",
+            style="dim yellow",
+        )
+    console.print("[neon.fg]  Stages:[/]")
+    for idx, stage in enumerate(stages, start=1):
+        console.print(f"    {idx}. {stage}")
+    console.print("[neon.fg]  Detected stacks:[/]")
+    for line in stack_lines:
+        console.print(f"    - {line}")
+    console.print(f"[neon.fg]  Total agents: {agent_count}[/]")
+    if codex_in_use:
+        console.print(
+            "[neon.yellow]  \u26a0 Codex backend: per-stage cost_usd=None "
+            "(cost not reported by codex CLI)[/]"
+        )

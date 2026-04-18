@@ -402,9 +402,9 @@ async def run(config: RunConfig | None = None) -> int:
         return 1
 
     # Get review skill (from config or prompt) - not required when starting at "test"
-    # or when using trust-the-technology mode (which has its own flow)
+    # or when using trust-the-technology / deep modes (which have their own flows)
     skill: str | None = None
-    if config.start_at != "test" and not config.trust_the_technology:
+    if config.start_at != "test" and not config.trust_the_technology and not config.deep:
         if config.skill is not None:
             # Map skill name to full skill path
             if config.skill in SKILL_MAP:
@@ -437,8 +437,13 @@ async def run(config: RunConfig | None = None) -> int:
             skill = REVIEW_SKILLS[skill_enum]
 
     # Early validation: check review file exists when starting at parse or fix
-    # (not needed for trust-the-technology mode which has its own flow)
-    if config.start_at in ("parse", "fix") and not config.trust_the_technology:
+    # (not needed for trust-the-technology or deep modes -- both have their
+    # own resume-gate validation).
+    if (
+        config.start_at in ("parse", "fix")
+        and not config.trust_the_technology
+        and not config.deep
+    ):
         try:
             check_review_file_exists(target_dir)
         except FileNotFoundError as e:
@@ -496,6 +501,11 @@ async def run(config: RunConfig | None = None) -> int:
         # Trust-the-technology mode: separate flow
         if config.trust_the_technology:
             return await run_trust(config, target_dir)
+
+        # Deep-review mode: separate flow (D-01, D-07).
+        if config.deep:
+            from daydream.deep.orchestrator import run_deep
+            return await run_deep(config, target_dir)
 
         console.print()
         print_info(console, f"Target directory: {target_dir}")
