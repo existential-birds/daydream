@@ -12,6 +12,7 @@ from daydream.deep.artifacts import (
     per_stack_records_path,
     per_stack_review_path,
 )
+from daydream.deep.dedup import CandidatePair, build_dedup_candidates
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.prompts import (
     DOC_REVIEW_NOTICE,
@@ -21,8 +22,10 @@ from daydream.deep.prompts import (
 
 __all__ = [
     "DOC_REVIEW_NOTICE",
+    "CandidatePair",
     "StackAssignment",
     "alternatives_path",
+    "build_dedup_candidates",
     "build_generic_fallback_prompt",
     "build_per_stack_prompt",
     "check_deep_artifacts",
