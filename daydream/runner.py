@@ -79,6 +79,7 @@ class RunConfig:
         test_backend: Override backend for the test phase. If None, uses backend.
         loop: Enable continuous review/fix/test iterations. Default is False.
         max_iterations: Maximum number of loop iterations before exiting. Default is 5.
+        deep: Run the deep-review pipeline (TTT + per-stack + cross-stack merge). D-01.
         ignore_paths: Paths to exclude from diffs (passed to `git :(exclude)` pathspecs
             and surfaced in review prompts). Default is an empty list.
 
@@ -101,6 +102,7 @@ class RunConfig:
     loop: bool = False
     max_iterations: int = 5
     trust_the_technology: bool = False
+    deep: bool = False
     exploration_context: ExplorationContext | None = None
     exploration_depth: int = 1
     ignore_paths: list[str] = field(default_factory=list)
