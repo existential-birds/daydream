@@ -43,6 +43,8 @@ class ParsedIssue:
         title: Short issue title (first line of the body).
         body: Full issue body (rationale + recommendation).
         is_cross_stack: True when the issue spans multiple stacks.
+        confidence: Normalised HIGH / MEDIUM / LOW, if known.
+        severity: Normalised high / medium / low, if known.
     """
 
     path: str
@@ -50,6 +52,8 @@ class ParsedIssue:
     title: str
     body: str
     is_cross_stack: bool = False
+    confidence: str | None = None
+    severity: str | None = None
 
 
 @dataclass
@@ -69,6 +73,9 @@ class PRInfo:
 class _ClassifiedIssues:
     inline: list[dict[str, Any]] = field(default_factory=list)
     body_only: list[ParsedIssue] = field(default_factory=list)
+    # Parallel list to `inline`: the original ParsedIssue for each inline
+    # comment. Used to roll severity/confidence into the summary body.
+    inline_issues: list[ParsedIssue] = field(default_factory=list)
 
 
 # --- Public entry points ----------------------------------------------------
@@ -79,7 +86,7 @@ async def post_review_to_pr_from_report(
     report_path: Path,
     *,
     console: Console,
-    summary_prefix: str = "",
+    mode_label: str = "deep review",
 ) -> None:
     """Parse a deep-mode `.review-output.md` and offer to post to the PR.
 
@@ -87,7 +94,7 @@ async def post_review_to_pr_from_report(
         target_dir: Repo root.
         report_path: Path to the merged review report.
         console: Rich console for user-facing output.
-        summary_prefix: Optional text prepended to the review body.
+        mode_label: Short label for the review mode (used in body template).
     """
     if not report_path.exists():
         return
@@ -96,12 +103,7 @@ async def post_review_to_pr_from_report(
     if not issues:
         print_info(console, "No parseable issues in review output; skipping PR post.")
         return
-    await _post(
-        target_dir,
-        issues,
-        console=console,
-        summary_prefix=summary_prefix or "Daydream deep review findings.",
-    )
+    await _post(target_dir, issues, console=console, mode_label=mode_label)
 
 
 async def post_review_to_pr_from_alt_issues(
@@ -109,7 +111,7 @@ async def post_review_to_pr_from_alt_issues(
     alt_issues: list[dict[str, Any]],
     *,
     console: Console,
-    summary_prefix: str = "",
+    mode_label: str = "trust-the-technology",
 ) -> None:
     """Convert alt-review issues (from `--ttt`) and offer to post to the PR.
 
@@ -117,17 +119,12 @@ async def post_review_to_pr_from_alt_issues(
         target_dir: Repo root.
         alt_issues: Issue dicts from `phase_alternative_review`.
         console: Rich console for user-facing output.
-        summary_prefix: Optional text prepended to the review body.
+        mode_label: Short label for the review mode (used in body template).
     """
     issues = alt_issues_to_parsed(alt_issues)
     if not issues:
         return
-    await _post(
-        target_dir,
-        issues,
-        console=console,
-        summary_prefix=summary_prefix or "Daydream trust-the-technology findings.",
-    )
+    await _post(target_dir, issues, console=console, mode_label=mode_label)
 
 
 # --- Parsers ---------------------------------------------------------------
@@ -135,6 +132,17 @@ async def post_review_to_pr_from_alt_issues(
 
 _ISSUES_HEADER = re.compile(r"^## (?:Cross-Stack Issues|Issues)\s*$", re.MULTILINE)
 _XSTACK_HEADER = re.compile(r"^## Cross-Stack Issues\s*$", re.MULTILINE)
+# Tolerates bold markers in either position: "**Confidence:** HIGH",
+# "**Confidence**: HIGH", or bare "Confidence: HIGH".
+_CONFIDENCE_LINE = re.compile(
+    r"[Cc]onfidence[:*\s]+(HIGH|MEDIUM|LOW|High|Medium|Low|high|medium|low)"
+)
+_SEVERITY_LINE = re.compile(
+    r"[Ss]everity[:*\s]+(high|medium|low|HIGH|MEDIUM|LOW|High|Medium|Low)"
+)
+
+DAYDREAM_REPO_URL = "https://github.com/existential-birds/daydream"
+DAYDREAM_FOOTER = f"<sub>🧙 Posted by [daydream]({DAYDREAM_REPO_URL})</sub>"
 _NEXT_SECTION = re.compile(r"^## ", re.MULTILINE)
 # Matches "N. [path:line] Title" or "N. [path] Title" with optional
 # leading `[cross-stack]` marker.
@@ -181,10 +189,22 @@ def parse_report(text: str) -> list[ParsedIssue]:
                     title=title,
                     body=body,
                     is_cross_stack=section_is_xstack or title.lower().startswith("[cross-stack]"),
+                    confidence=_extract_confidence(body),
+                    severity=_extract_severity(body),
                 )
             )
 
     return issues
+
+
+def _extract_confidence(text: str) -> str | None:
+    m = _CONFIDENCE_LINE.search(text)
+    return m.group(1).upper() if m else None
+
+
+def _extract_severity(text: str) -> str | None:
+    m = _SEVERITY_LINE.search(text)
+    return m.group(1).lower() if m else None
 
 
 def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
@@ -202,17 +222,29 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
         title = str(raw.get("title", "")).strip()
         description = str(raw.get("description", "")).strip()
         recommendation = str(raw.get("recommendation", "")).strip()
-        severity = str(raw.get("severity", "")).strip()
+        severity = str(raw.get("severity", "")).strip().lower() or None
+        confidence = str(raw.get("confidence", "")).strip().upper() or None
         body_parts = []
         if severity:
             body_parts.append(f"**Severity:** {severity}")
+        if confidence:
+            body_parts.append(f"**Confidence:** {confidence}")
         if description:
             body_parts.append(description)
         if recommendation:
             body_parts.append(f"**Recommendation:** {recommendation}")
         body = "\n\n".join(body_parts)
         for path in files:
-            out.append(ParsedIssue(path=str(path), line=None, title=title, body=body))
+            out.append(
+                ParsedIssue(
+                    path=str(path),
+                    line=None,
+                    title=title,
+                    body=body,
+                    confidence=confidence,
+                    severity=severity,
+                )
+            )
     return out
 
 
@@ -449,12 +481,25 @@ def classify(
                 "body": _format_inline_body(issue),
             }
         )
+        out.inline_issues.append(issue)
     return out
 
 
 def _format_inline_body(issue: ParsedIssue) -> str:
     header = f"**{issue.title}**" if issue.title else ""
-    return f"{header}\n\n{issue.body}".strip()
+    tags = _format_tag_line(issue)
+    parts = [p for p in (header, tags, issue.body) if p]
+    return "\n\n".join(parts + [DAYDREAM_FOOTER]).strip()
+
+
+def _format_tag_line(issue: ParsedIssue) -> str:
+    """Render severity/confidence badges for a single issue, if set."""
+    bits: list[str] = []
+    if issue.severity:
+        bits.append(f"severity: `{issue.severity}`")
+    if issue.confidence:
+        bits.append(f"confidence: `{issue.confidence}`")
+    return " · ".join(bits)
 
 
 def _format_body_section(body_only: list[ParsedIssue]) -> str:
@@ -464,25 +509,75 @@ def _format_body_section(body_only: list[ParsedIssue]) -> str:
     for issue in body_only:
         prefix = "[cross-stack] " if issue.is_cross_stack else ""
         loc = f"`{issue.path}`" + (f":{issue.line}" if issue.line else "")
-        lines.append(f"### {prefix}{issue.title} ({loc})\n\n{issue.body}\n")
+        tags = _format_tag_line(issue)
+        tag_block = f"\n{tags}\n" if tags else ""
+        lines.append(f"### {prefix}{issue.title} ({loc})\n{tag_block}\n{issue.body}\n")
     return "\n".join(lines)
 
 
+def _count_labels(
+    issues: list[ParsedIssue], attr: str, order: tuple[str, ...]
+) -> list[str]:
+    """Return ordered `N LABEL` strings for non-empty counts."""
+    counts: dict[str, int] = {}
+    for issue in issues:
+        val = getattr(issue, attr)
+        if val:
+            counts[val] = counts.get(val, 0) + 1
+    out: list[str] = []
+    for key in order:
+        n = counts.get(key, 0)
+        if n:
+            out.append(f"{n} {key}")
+    return out
+
+
 def build_payload(
-    pr: PRInfo, summary_prefix: str, classified: _ClassifiedIssues
+    pr: PRInfo, mode_label: str, classified: _ClassifiedIssues
 ) -> dict[str, Any]:
-    """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`."""
-    body_chunks = []
-    if summary_prefix:
-        body_chunks.append(summary_prefix.strip())
+    """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
+
+    The review body follows a fixed template so every run looks the same:
+        🧙 Daydream <mode_label> review
+        N inline, M non-inline
+        Severity / Confidence breakdowns (when known)
+        Non-inline findings (when any)
+        Repo link footer
+    """
+    all_issues_with_inline_meta = [*classified.body_only]
+    # Inline comments live as dicts in classified.inline; we still want
+    # their confidence/severity in the summary counts, so peek at the
+    # original ParsedIssue list by cross-referencing path+line is brittle.
+    # Instead, carry counts we already have from body_only plus inline
+    # metadata we stamp at classify time via the ParsedIssue objects.
+    # (See classify: we store the original issue on _ClassifiedIssues.)
+    all_issues_with_inline_meta.extend(classified.inline_issues)
+
     inline_count = len(classified.inline)
     body_count = len(classified.body_only)
-    body_chunks.append(
-        f"{inline_count} inline comment(s), {body_count} non-inline finding(s)."
+
+    body_chunks: list[str] = []
+    body_chunks.append(f"🧙 [Daydream]({DAYDREAM_REPO_URL}) {mode_label} review")
+    body_chunks.append(f"{inline_count} inline comment(s), {body_count} non-inline finding(s).")
+
+    severity_parts = _count_labels(
+        all_issues_with_inline_meta, "severity", ("high", "medium", "low")
     )
+    if severity_parts:
+        body_chunks.append("**Severity:** " + ", ".join(severity_parts))
+
+    confidence_parts = _count_labels(
+        all_issues_with_inline_meta, "confidence", ("HIGH", "MEDIUM", "LOW")
+    )
+    if confidence_parts:
+        body_chunks.append("**Confidence:** " + ", ".join(confidence_parts))
+
     body_section = _format_body_section(classified.body_only)
     if body_section:
         body_chunks.append(body_section)
+
+    body_chunks.append(DAYDREAM_FOOTER)
+
     payload: dict[str, Any] = {
         "commit_id": pr.head_sha,
         "event": "COMMENT",
@@ -500,7 +595,7 @@ async def _post(
     issues: list[ParsedIssue],
     *,
     console: Console,
-    summary_prefix: str,
+    mode_label: str,
 ) -> None:
     pr = find_open_pr(target_dir)
     if pr is None:
@@ -528,7 +623,7 @@ async def _post(
         print_info(console, "Skipped posting to PR.")
         return
 
-    payload = build_payload(pr, summary_prefix, classified)
+    payload = build_payload(pr, mode_label, classified)
     with tempfile.NamedTemporaryFile(
         mode="w",
         prefix=f"pr-{pr.number}-review-",

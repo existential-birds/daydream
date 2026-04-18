@@ -32,8 +32,12 @@ Some prose.
 ## Issues
 1. [src/foo.py:42] **Null check missing**
    The function `compute_total` dereferences `items` without a guard.
+   **Severity:** high
+   **Confidence:** HIGH
 2. [src/bar.ts:10] **Type mismatch**
    Variable `count` is typed `string` but assigned a number.
+   Severity: medium
+   Confidence: MEDIUM
 3. [docs/README.md] File-level note
    No line hint; general doc feedback.
 
@@ -50,14 +54,38 @@ def test_parse_report_extracts_all_sections() -> None:
     assert issues[0].line == 42
     assert issues[0].title == "**Null check missing**"
     assert not issues[0].is_cross_stack
+    assert issues[0].severity == "high"
+    assert issues[0].confidence == "HIGH"
+
+    # Parsing also picks up un-bolded `Severity: medium` form.
+    assert issues[1].severity == "medium"
+    assert issues[1].confidence == "MEDIUM"
 
     assert issues[2].path == "docs/README.md"
     assert issues[2].line is None
-    assert not issues[2].is_cross_stack
+    assert issues[2].severity is None
+    assert issues[2].confidence is None
 
     assert issues[3].is_cross_stack
     assert issues[3].path == "src/api.py"
     assert issues[3].line == 5
+
+
+def test_inline_body_has_footer_and_tags() -> None:
+    issue = ParsedIssue(
+        path="a.py",
+        line=10,
+        title="Null deref",
+        body="rationale here",
+        confidence="HIGH",
+        severity="high",
+    )
+    body = pr_review._format_inline_body(issue)
+    assert "**Null deref**" in body
+    assert "severity: `high`" in body
+    assert "confidence: `HIGH`" in body
+    assert body.rstrip().endswith("</sub>")
+    assert pr_review.DAYDREAM_REPO_URL in body
 
 
 def test_parse_report_handles_no_issues_section() -> None:
@@ -82,6 +110,8 @@ def test_alt_issues_to_parsed_produces_one_per_file() -> None:
     assert all(i.line is None for i in issues)
     assert "Recommendation" in issues[0].body
     assert "Severity" in issues[0].body
+    assert issues[0].severity == "low"
+    assert issues[0].confidence == "HIGH"
 
 
 def test_alt_issues_to_parsed_skips_no_files() -> None:
@@ -162,6 +192,8 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
     assert result.inline[0]["path"] == "a.py"
     assert result.inline[0]["line"] == 10
     assert result.inline[0]["side"] == "RIGHT"
+    assert len(result.inline_issues) == 1
+    assert result.inline_issues[0].path == "a.py"
     body_paths = [i.path for i in result.body_only]
     assert set(body_paths) == {"b.py", "c.py"}
 
@@ -170,16 +202,43 @@ def test_build_payload_shape(pr: PRInfo) -> None:
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
         body_only=[
-            ParsedIssue(path="b.py", line=None, title="File note", body="desc")
+            ParsedIssue(
+                path="b.py",
+                line=None,
+                title="File note",
+                body="desc",
+                confidence="MEDIUM",
+                severity="low",
+            )
+        ],
+        inline_issues=[
+            ParsedIssue(
+                path="a.py",
+                line=10,
+                title="t",
+                body="b",
+                confidence="HIGH",
+                severity="high",
+            )
         ],
     )
-    payload = build_payload(pr, "Test summary.", classified)
+    payload = build_payload(pr, "deep review", classified)
     assert payload["commit_id"] == "head123"
     assert payload["event"] == "COMMENT"
     assert payload["comments"] == classified.inline
-    assert "Test summary." in payload["body"]
-    assert "Non-inline findings" in payload["body"]
-    assert "1 inline comment(s), 1 non-inline finding(s)" in payload["body"]
+
+    body = payload["body"]
+    # Template header with wizard emoji + daydream repo link.
+    assert "🧙" in body
+    assert pr_review.DAYDREAM_REPO_URL in body
+    assert "deep review" in body
+    # Counts and breakdowns.
+    assert "1 inline comment(s), 1 non-inline finding(s)" in body
+    assert "**Severity:**" in body and "1 high" in body and "1 low" in body
+    assert "**Confidence:**" in body and "1 HIGH" in body and "1 MEDIUM" in body
+    # Non-inline section + footer.
+    assert "Non-inline findings" in body
+    assert body.rstrip().endswith("</sub>")
 
 
 def test_find_open_pr_returns_none_on_empty_list(
@@ -247,7 +306,7 @@ async def test_post_skips_when_no_pr(
         tmp_path,
         [ParsedIssue(path="x.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
-        summary_prefix="s",
+        mode_label="deep review",
     )
     assert warnings and "No open PR" in warnings[0]
 
@@ -287,7 +346,7 @@ async def test_post_cleans_tmp_file_on_success(
         tmp_path,
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
-        summary_prefix="s",
+        mode_label="deep review",
     )
     # Tmp file was deleted after success.
     assert not captured["path"].exists()
@@ -321,7 +380,7 @@ async def test_post_warns_and_keeps_file_on_failure(
         tmp_path,
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
-        summary_prefix="s",
+        mode_label="deep review",
     )
     assert warnings
     assert "no comments were posted" in warnings[0].lower()
@@ -362,7 +421,7 @@ async def test_post_skipped_when_user_declines(
         tmp_path,
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
-        summary_prefix="s",
+        mode_label="deep review",
     )
     assert not submit_called
 
