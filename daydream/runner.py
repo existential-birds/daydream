@@ -372,6 +372,13 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
         if exploration_cleanup.is_dir():
             shutil.rmtree(exploration_cleanup)
 
+    # Offer to post findings as inline PR review comments.
+    from daydream.pr_review import post_review_to_pr_from_alt_issues
+
+    await post_review_to_pr_from_alt_issues(
+        target_dir, issues, console=console
+    )
+
     return 0
 
 

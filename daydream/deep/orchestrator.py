@@ -360,6 +360,13 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
             )
             return 1
 
+        # Offer to post findings as inline PR review comments.
+        from daydream.pr_review import post_review_to_pr_from_report
+
+        await post_review_to_pr_from_report(
+            target_dir, merged_report, console=console
+        )
+
         answer = prompt_user(console, "Apply fixes now? [y/N]", "n")
         if answer.strip().lower() not in ("y", "yes"):
             print_success(console, f"Report written to {merged_report}. Exiting.")
