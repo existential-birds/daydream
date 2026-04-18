@@ -1,34 +1,30 @@
 """Dedup pre-filter tests (D-27).
 
-Every test is xfail(strict=True) until Wave 3 plan 05-07 implements the
-``daydream.deep.dedup`` module with ``build_dedup_candidates(...)``.
+Covers ``daydream.deep.dedup.build_dedup_candidates`` which emits
+``CandidatePair`` entries where a per-stack record and a TTT alternative
+finding share at least one file AND have normalized-title bigram Jaccard
+similarity >= 0.5.
 """
 
-import pytest
+from daydream.deep.dedup import build_dedup_candidates
 
 
-@pytest.mark.xfail(reason="Wave 3 plan 05-07 not yet implemented", strict=True)
-def test_candidate_pairs_file_overlap_only() -> None:
-    """D-27: file-overlap heuristic emits a candidate pair.
+def test_file_overlap_without_title_similarity_produces_no_pair() -> None:
+    """D-27: file overlap alone is insufficient — both gates must hold.
 
-    When a per-stack record and a TTT alternative share a file path, the
-    dedup pre-filter must surface them as a candidate pair for the merge
-    agent to make the final same-concern judgment.
+    Matching file paths with disjoint titles must NOT surface a candidate
+    pair; D-27 requires BOTH file overlap AND title similarity >= 0.5.
     """
-    from daydream.deep.dedup import build_dedup_candidates
-
-    per_stack = [{"id": "1", "file": "api.py", "title": "Missing return type"}]
-    ttt_alts = [{"files": ["api.py"], "title": "Type hint coverage"}]
+    per_stack = [
+        {"id": "1", "file": "api.py", "line": 1, "description": "Missing return type"},
+    ]
+    ttt_alts = [{"files": ["api.py"], "title": "Frontend styling drift"}]
     pairs = build_dedup_candidates(per_stack, ttt_alts)
-    assert len(pairs) >= 1
-    assert any(p.record_file == "api.py" and "api.py" in p.alt_files for p in pairs)
+    assert pairs == []
 
 
-@pytest.mark.xfail(reason="Wave 3 plan 05-07 not yet implemented", strict=True)
 def test_candidate_pairs_file_and_title() -> None:
     """D-27: file overlap + similar title -> pair."""
-    from daydream.deep.dedup import build_dedup_candidates
-
     records = [
         {"id": "1", "file": "api.py", "line": 42, "description": "Missing input validation on login"},
     ]
@@ -39,12 +35,40 @@ def test_candidate_pairs_file_and_title() -> None:
     assert len(pairs) >= 1
 
 
-@pytest.mark.xfail(reason="Wave 3 plan 05-07 not yet implemented", strict=True)
 def test_candidate_pairs_disjoint() -> None:
     """D-27: no file overlap AND no title overlap -> no pair."""
-    from daydream.deep.dedup import build_dedup_candidates
-
     records = [{"id": "1", "file": "api.py", "line": 1, "description": "SQL injection"}]
     alt_issues = [{"title": "Frontend styling drift", "files": ["App.tsx"]}]
     pairs = build_dedup_candidates(records, alt_issues=alt_issues)
+    assert pairs == []
+
+
+def test_jaccard_similarity_threshold_met() -> None:
+    """D-27: records with high-similarity titles + shared file -> pair."""
+    records = [
+        {
+            "id": "r1",
+            "file": "api.py",
+            "line": 10,
+            "description": "Missing input validation on login endpoint",
+        }
+    ]
+    alt_issues = [
+        {
+            "title": "Input validation missing on login endpoint",
+            "files": ["api.py"],
+        }
+    ]
+    pairs = build_dedup_candidates(records, alt_issues)
+    assert len(pairs) == 1
+    assert pairs[0].similarity >= 0.5
+    assert pairs[0].record_id == "r1"
+    assert "api.py" in pairs[0].alt_files
+
+
+def test_file_overlap_alone_insufficient() -> None:
+    """D-27: file overlap without title similarity -> no pair."""
+    records = [{"id": "r1", "file": "api.py", "line": 1, "description": "SQL injection"}]
+    alt_issues = [{"title": "Logging verbosity too high", "files": ["api.py"]}]
+    pairs = build_dedup_candidates(records, alt_issues)
     assert pairs == []
