@@ -100,3 +100,42 @@ def test_prompts_embed_no_full_file_contents(tmp_path: Path) -> None:
     )
     # Heuristic: no line longer than 400 chars (an embedded diff would blow this up)
     assert all(len(line) < 400 for line in out.splitlines())
+
+
+def test_per_stack_prompt_points_at_diff_path(tmp_path: Path) -> None:
+    """Prompt references diff_path for agents to read directly."""
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    assert str(p["diff_path"]) in out
+
+
+def test_per_stack_prompt_omits_bare_git_diff_command(tmp_path: Path) -> None:
+    """Prompt must NOT suggest `git diff -- <files>` without a base ref.
+
+    Without a base ref that command only shows uncommitted workspace changes;
+    on a clean PR branch it returns empty and hides every committed change.
+    """
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    assert "git diff --no-color -- api.py" not in out
+    assert "git diff -- api.py" not in out
+
+
+def test_generic_fallback_prompt_omits_bare_git_diff_command(tmp_path: Path) -> None:
+    """Generic fallback must not embed the broken git-diff command either."""
+    p = _paths(tmp_path)
+    out = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    assert "git diff --no-color -- config.yaml" not in out
+    assert "git diff -- config.yaml" not in out
+    # diff_path must still be referenced.
+    assert str(p["diff_path"]) in out

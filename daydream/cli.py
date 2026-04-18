@@ -298,10 +298,21 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
             )
         if args.review_only:
             parser.error("--deep and --review-only are mutually exclusive")
+        if args.skill:
+            parser.error(
+                "--deep and skill flags are mutually exclusive "
+                "(deep mode detects stacks and invokes per-stack skills internally)"
+            )
         if args.start_at == "parse":
             parser.error(
                 "--start-at parse is ambiguous under --deep "
                 "(two parse points in the deep pipeline); "
+                "use --start-at fix to resume after the merged report"
+            )
+        if args.start_at == "test":
+            parser.error(
+                "--start-at test is not supported under --deep "
+                "(deep resume stages are ttt|per-stack|merge|fix); "
                 "use --start-at fix to resume after the merged report"
             )
 

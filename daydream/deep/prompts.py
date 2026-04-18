@@ -48,12 +48,16 @@ def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
 
 
 def _diff_instruction(diff_path: Path, files: list[str]) -> str:
-    joined = " ".join(files)
+    joined = ", ".join(files)
+    # Point agents at diff_path directly. A bare `git diff -- <files>` command
+    # only surfaces uncommitted workspace changes; on a clean PR branch it
+    # would return empty and hide every committed change. diff_path already
+    # contains the full base..HEAD diff.
     return (
-        f"The full diff is at {diff_path}. Focus on changes in your stack's files "
-        f"using:\n"
-        f"  git diff --no-color -- {joined}\n"
-        f"from within the repository root."
+        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
+        f"do NOT run `git diff` without a base ref -- on a clean branch that "
+        f"returns empty and hides committed changes.\n"
+        f"Focus on hunks that touch your stack's files: {joined}."
     )
 
 
@@ -105,6 +109,7 @@ def build_merge_prompt(
     dedup_candidates_path: Path,
     output_path: Path,
     exploration_dir: Path | None = None,
+    failed_stacks: dict[str, str] | None = None,
 ) -> str:
     """Assemble the cross-stack merge prompt (D-23..D-27).
 
@@ -122,6 +127,10 @@ def build_merge_prompt(
         dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
         output_path: Where the merge agent must write the unified report (D-24).
         exploration_dir: Pre-scan exploration directory (if available).
+        failed_stacks: Optional stack_name -> failure reason for stacks whose
+            per-stack agent raised. The merge prompt includes an explicit
+            "Uncovered stacks" block so the merge report can call out missing
+            coverage instead of silently pretending the run was complete.
 
     Returns:
         Assembled prompt string.
@@ -137,6 +146,17 @@ def build_merge_prompt(
         f"Dedup pre-filter candidate pairs: {dedup_candidates_path}\n"
         f"Per-stack parsed records:\n{records_block}"
     )
+    if failed_stacks:
+        failed_block = "\n".join(
+            f"  - {name}: {reason}" for name, reason in sorted(failed_stacks.items())
+        )
+        parts.append(
+            "Uncovered stacks (per-stack agent raised; no records available):\n"
+            f"{failed_block}\n"
+            "In the merged report add a '## Uncovered Stacks' section listing each "
+            "stack above. Do NOT silently omit them -- downstream readers must be "
+            "able to tell 'no findings' apart from 'this stack never ran'."
+        )
     parts.append(
         "You are the cross-stack merge agent. Read every artifact above by path -- "
         "do NOT re-run any reviews. Your only output is the merged markdown report."

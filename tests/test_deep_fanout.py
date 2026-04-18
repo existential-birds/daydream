@@ -75,7 +75,7 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path) -> None:
     backend = _RecordingBackend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
-    results = await phase_per_stack_reviews(
+    results, failures = await phase_per_stack_reviews(
         backend,
         tmp_path,
         _mk_stacks(),
@@ -85,6 +85,7 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path) -> None:
     )
 
     assert set(results.keys()) == {"python", "react", "generic"}
+    assert failures == {}
     assert len(backend.prompts) == 3
 
 
@@ -110,7 +111,7 @@ async def test_fan_out_unique_output_paths(tmp_path: Path) -> None:
     backend = _RecordingBackend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
-    results = await phase_per_stack_reviews(
+    results, _ = await phase_per_stack_reviews(
         backend,
         tmp_path,
         _mk_stacks(),
@@ -146,7 +147,7 @@ async def test_fan_out_closure_capture(tmp_path: Path) -> None:
 
 
 async def test_fan_out_continues_after_one_failure(tmp_path: Path) -> None:
-    """A single stack failure does not abort the whole fan-out."""
+    """A single stack failure does not abort the whole fan-out, and is reported."""
 
     class _FlakyBackend(_RecordingBackend):
         async def execute(
@@ -167,7 +168,7 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path) -> None:
     backend = _FlakyBackend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
-    results = await phase_per_stack_reviews(
+    results, failures = await phase_per_stack_reviews(
         backend,
         tmp_path,
         _mk_stacks(),
@@ -179,3 +180,6 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path) -> None:
     assert "python" in results
     assert "generic" in results
     assert "react" not in results
+    # Failure surfaces in the returned failures dict with the exception reason.
+    assert "react" in failures
+    assert "simulated react failure" in failures["react"]

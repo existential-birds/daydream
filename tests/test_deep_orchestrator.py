@@ -701,3 +701,87 @@ def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
         "Binary files a/logo.png and b/logo.png differ\n"
     )
     assert _diff_changed_files(mixed) == ["keep.py", "new.py", "old.py", "logo.png"]
+
+
+async def test_merge_prompt_lists_records_in_sorted_order(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pre-merge parse iterates sorted(per_stack_outputs.items()) so the merge
+    prompt's records list is stable across runs regardless of which per-stack
+    task completed first."""
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    merge_prompts = [c["prompt"] for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
+    assert merge_prompts, "merge agent was not invoked"
+    prompt = merge_prompts[0]
+
+    # build_merge_prompt writes records under "Per-stack parsed records:" as
+    # "  - <path>" lines.
+    lines = prompt.splitlines()
+    start = next((i for i, line in enumerate(lines) if "per-stack parsed records:" in line.lower()), None)
+    assert start is not None, "merge prompt missing per-stack records block"
+
+    record_paths: list[str] = []
+    for line in lines[start + 1:]:
+        if line.startswith("  - "):
+            record_paths.append(line[4:].strip())
+        elif line.strip() == "":
+            break
+        else:
+            break
+
+    assert record_paths, "no record paths found in merge prompt"
+    assert record_paths == sorted(record_paths), (
+        f"records not in sorted order: {record_paths}"
+    )
+
+
+async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-stack agent failure must:
+      1) persist to per-stack-failures.json under .daydream/deep/,
+      2) appear in the merge prompt under an 'Uncovered stacks' block,
+    so the merge agent can call it out instead of silently ignoring the gap.
+    """
+    import json as _json
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    # Wrap the stub's execute so the REACT per-stack prompt raises. Everything
+    # else (TTT, parse, merge, other stacks) keeps the stub's normal behavior.
+    original_execute = stub.execute
+
+    def _maybe_fail(cwd, prompt, output_schema=None, continuation=None, agents=None):
+        pl = prompt.lower()
+        if "you are reviewing the react stack" in pl:
+            async def _fail():
+                raise RuntimeError("simulated react failure")
+                yield  # pragma: no cover -- unreachable; satisfies async-gen typing
+            return _fail()
+        return original_execute(cwd, prompt, output_schema, continuation, agents)
+
+    stub.execute = _maybe_fail  # type: ignore[method-assign]
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    failures_p = multi_stack_target / ".daydream" / "deep" / "per-stack-failures.json"
+    assert failures_p.is_file(), "failures file should be persisted for merge-resume"
+    failures_payload = _json.loads(failures_p.read_text())
+    assert "react" in failures_payload
+    assert "simulated react failure" in failures_payload["react"]
+
+    merge_prompts = [
+        c["prompt"] for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()
+    ]
+    assert merge_prompts, "merge agent was not invoked"
+    prompt = merge_prompts[0]
+    assert "Uncovered stacks" in prompt
+    assert "react" in prompt
+    assert "simulated react failure" in prompt

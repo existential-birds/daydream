@@ -42,3 +42,16 @@ def test_deep_mutex(other_flag: list[str]) -> None:
     """D-06: --deep is mutually exclusive with --pr, --loop, --ttt, --review-only."""
     with pytest.raises(SystemExit):
         _parse_args(["target", "--deep", *other_flag])
+
+
+def test_deep_rejects_start_at_test() -> None:
+    """--start-at test is not a valid deep resume stage; reject at CLI boundary."""
+    with pytest.raises(SystemExit):
+        _parse_args(["target", "--deep", "--start-at", "test"])
+
+
+@pytest.mark.parametrize("skill_flag", ["--python", "--typescript", "--elixir", "--go", "--rust"])
+def test_deep_rejects_skill_flag(skill_flag: str) -> None:
+    """Skill flags are ignored under --deep; reject at CLI boundary instead."""
+    with pytest.raises(SystemExit):
+        _parse_args(["target", "--deep", skill_flag])

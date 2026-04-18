@@ -177,7 +177,14 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
     def fake_resolve(_td: Path, _sha: str, issue: ParsedIssue) -> int | None:
         return issue.line
 
-    def fake_hunks(_td: Path, _base: str, _head: str, path: str) -> list[tuple[int, int]]:
+    def fake_hunks(
+        _td: Path,
+        _base: str,
+        _head: str,
+        path: str,
+        *,
+        pr_number: int | None = None,
+    ) -> list[tuple[int, int]]:
         if path == "a.py":
             return [(8, 12)]  # 10 is inside
         if path == "b.py":
@@ -461,3 +468,110 @@ def test_resolve_line_none_when_missing_file(
     monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
     issue = ParsedIssue(path="gone.py", line=1, title="t", body="b")
     assert pr_review.resolve_line(tmp_path, "head", issue) is None
+
+
+# --- file_hunks git-diff + gh-pr-diff fallback ----------------------------
+
+
+_GH_PR_DIFF = (
+    "diff --git a/x.py b/x.py\n"
+    "--- a/x.py\n"
+    "+++ b/x.py\n"
+    "@@ -1,3 +10,5 @@\n"
+    " old\n"
+    "+new1\n"
+    "+new2\n"
+    "diff --git a/other.py b/other.py\n"
+    "--- a/other.py\n"
+    "+++ b/other.py\n"
+    "@@ -1 +1,2 @@\n"
+    "+noise\n"
+)
+
+
+def test_file_hunks_uses_git_diff_when_it_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Happy path: git diff returns a valid diff; gh is not consulted."""
+    gh_called = False
+
+    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
+        nonlocal gh_called
+        if cmd[:2] == ["git", "diff"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                (
+                    b"diff --git a/x.py b/x.py\n"
+                    b"--- a/x.py\n"
+                    b"+++ b/x.py\n"
+                    b"@@ -1,3 +20,2 @@\n"
+                    b"+a\n"
+                ),
+                b"",
+            )
+        if cmd[:3] == ["gh", "pr", "diff"]:
+            gh_called = True
+        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+
+    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
+    hunks = pr_review.file_hunks(tmp_path, "base", "head", "x.py", pr_number=42)
+    assert hunks == [(20, 21)]
+    assert gh_called is False
+
+
+def test_file_hunks_falls_back_to_gh_when_base_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When git diff fails (base_sha unreachable), gh pr diff rescues the hunks."""
+
+    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
+        if cmd[:2] == ["git", "diff"]:
+            # Simulate "fatal: bad revision 'base..head'" -> non-zero exit.
+            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal: bad revision")
+        if cmd[:3] == ["gh", "pr", "diff"]:
+            return subprocess.CompletedProcess(cmd, 0, _GH_PR_DIFF.encode(), b"")
+        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+
+    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
+    hunks = pr_review.file_hunks(tmp_path, "rewritten_base", "head", "x.py", pr_number=42)
+    # Must come from the x.py block only -- the other.py hunk starts at line 1 and
+    # must NOT leak into x.py's result.
+    assert hunks == [(10, 14)]
+
+
+def test_file_hunks_no_fallback_without_pr_number(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without a pr_number, file_hunks returns empty instead of calling gh."""
+    gh_called = False
+
+    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
+        nonlocal gh_called
+        if cmd[:2] == ["git", "diff"]:
+            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal")
+        if cmd[:3] == ["gh", "pr", "diff"]:
+            gh_called = True
+        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+
+    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
+    hunks = pr_review.file_hunks(tmp_path, "base", "head", "x.py")
+    assert hunks == []
+    assert gh_called is False
+
+
+def test_file_hunks_gh_fallback_handles_subprocess_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If gh itself errors out, file_hunks returns empty without raising."""
+
+    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
+        if cmd[:2] == ["git", "diff"]:
+            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal")
+        if cmd[:3] == ["gh", "pr", "diff"]:
+            raise subprocess.SubprocessError("gh not found")
+        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+
+    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
+    hunks = pr_review.file_hunks(tmp_path, "base", "head", "x.py", pr_number=42)
+    assert hunks == []

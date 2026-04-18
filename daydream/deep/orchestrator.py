@@ -31,6 +31,7 @@ from daydream.deep.artifacts import (
     check_deep_artifacts,
     dedup_candidates_path,
     deep_dir,
+    per_stack_failures_path,
     per_stack_records_path,
 )
 from daydream.deep.artifacts import (
@@ -356,9 +357,10 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
             )
 
         # ------ Stage 3: per-stack fan-out ------
+        failed_stacks: dict[str, str] = {}
         if config.start_at not in ("merge", "fix"):
             print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
-            per_stack_outputs = await phase_per_stack_reviews(
+            per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
                 backend,
                 target_dir,
                 stacks,
@@ -367,6 +369,14 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                 alternatives_path=alts_p,
                 exploration_dir=exploration_dir,
             )
+            # Persist so a later `--start-at merge` resume can still surface
+            # uncovered stacks (the in-memory failure map otherwise dies here).
+            failures_p = per_stack_failures_path(dd)
+            if failed_stacks:
+                failures_p.write_text(json.dumps(failed_stacks, indent=2, sort_keys=True))
+            elif failures_p.exists():
+                # Fresh successful run supersedes any stale failures record.
+                failures_p.unlink()
         else:
             # Resume: reconstruct the expected per-stack output paths on disk.
             from daydream.deep.artifacts import per_stack_review_path
@@ -375,6 +385,16 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                 stack.stack_name: per_stack_review_path(dd, stack.stack_name)
                 for stack in stacks
             }
+            # Resume also resurrects any prior failure summary so the merge
+            # prompt can still note uncovered stacks.
+            failures_p = per_stack_failures_path(dd)
+            if failures_p.is_file():
+                try:
+                    loaded = json.loads(failures_p.read_text())
+                    if isinstance(loaded, dict):
+                        failed_stacks = {str(k): str(v) for k, v in loaded.items()}
+                except json.JSONDecodeError:
+                    failed_stacks = {}
 
         # ------ Stage 4: pre-merge parse + dedup + cross-stack merge ------
         if config.start_at != "fix":
@@ -393,7 +413,11 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                     all_records.extend(records)
             else:
                 # Pre-merge parse pass (D-21).
-                for stack_name, output_path in per_stack_outputs.items():
+                # Sort by stack_name so merge input order doesn't depend on the
+                # completion order of the parallel per-stack tasks that
+                # populated `per_stack_outputs` -- keeps the merge prompt and
+                # global issue numbering reproducible across runs.
+                for stack_name, output_path in sorted(per_stack_outputs.items()):
                     records = await phase_parse_feedback(
                         backend, target_dir, input_path=output_path
                     )
@@ -421,6 +445,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                 alternatives_path=alts_p,
                 dedup_candidates_path=dedup_p,
                 exploration_dir=exploration_dir,
+                failed_stacks=failed_stacks or None,
             )
 
         # ------ Stage 5: optional fix gate (D-28, D-29) ------

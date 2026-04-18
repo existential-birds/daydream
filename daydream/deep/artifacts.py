@@ -71,6 +71,16 @@ def dedup_candidates_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "dedup-candidates.json"
 
 
+def per_stack_failures_path(deep_dir_path: Path) -> Path:
+    """Per-stack agent failure summary ({stack_name: reason} JSON).
+
+    Persisted so a resume at `merge` can still surface uncovered stacks in the
+    final report -- otherwise the failure info lives only in-memory inside the
+    per-stack fan-out call.
+    """
+    return deep_dir_path / "per-stack-failures.json"
+
+
 def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
     """Validate predecessor artifacts exist for the given resume stage.
 
@@ -89,14 +99,16 @@ def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
     missing: list[Path] = []
 
     # Regular file prerequisites.
+    # Use is_file() (not exists()) so a directory sharing the prereq name doesn't
+    # pass the gate and fail later in less actionable places.
     for name in _DEEP_STAGE_PREREQS[stage]:
         p = deep_dir_path / name
-        if not p.exists():
+        if not p.is_file():
             missing.append(p)
 
     # Merge stage additionally needs at least one stack-*-records.json.
     if stage == "merge":
-        records = list(deep_dir_path.glob("stack-*-records.json"))
+        records = [p for p in deep_dir_path.glob("stack-*-records.json") if p.is_file()]
         if not records:
             missing.append(deep_dir_path / "stack-*-records.json")
 
@@ -104,7 +116,7 @@ def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
     if stage == "fix":
         target_dir = deep_dir_path.parent.parent
         merged = target_dir / REVIEW_OUTPUT_FILE
-        if not merged.exists():
+        if not merged.is_file():
             missing.append(merged)
 
     if missing:

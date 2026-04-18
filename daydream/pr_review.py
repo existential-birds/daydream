@@ -405,16 +405,37 @@ def resolve_line(
 
 
 _HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+# Splits a unified diff on each `diff --git` header so we can pick out the
+# block for a single file from a full-PR diff.
+_DIFF_BLOCK_SPLIT = re.compile(r"(?m)^(?=diff --git )")
 
 
 def file_hunks(
-    target_dir: Path, base_sha: str, head_sha: str, path: str
+    target_dir: Path,
+    base_sha: str,
+    head_sha: str,
+    path: str,
+    *,
+    pr_number: int | None = None,
 ) -> list[tuple[int, int]]:
     """Return (start, end) inclusive line ranges on the head side for `path`.
 
-    Falls back to `gh pr diff` if `git diff` can't resolve `base_sha`
-    (common when the base has been rewritten upstream).
+    Primary path: ``git diff <base_sha>..<head_sha> -- <path>``.
+
+    Fallback path: when the git invocation fails (returncode != 0 or raises --
+    common when ``base_sha`` has been rewritten out of the local history) and a
+    ``pr_number`` is available, re-derive the hunks from ``gh pr diff <num>``.
+    The gh diff is a full PR diff, so we slice out the block for ``path``
+    before parsing hunks to avoid attributing other files' hunks to this one.
+
+    Args:
+        target_dir: Repo root.
+        base_sha: Base commit SHA (may be unreachable locally after a rebase).
+        head_sha: Head commit SHA.
+        path: Repo-relative file path.
+        pr_number: Optional PR number; enables the ``gh pr diff`` fallback.
     """
+    git_failed = False
     try:
         r = _run(
             [
@@ -428,10 +449,44 @@ def file_hunks(
             target_dir,
             timeout=20,
         )
-        diff_text = r.stdout.decode(errors="replace") if r.returncode == 0 else ""
+        if r.returncode == 0:
+            diff_text = r.stdout.decode(errors="replace")
+        else:
+            git_failed = True
+            diff_text = ""
     except (subprocess.SubprocessError, OSError):
+        git_failed = True
         diff_text = ""
+
+    if git_failed and pr_number is not None:
+        diff_text = _gh_pr_diff_for_path(target_dir, pr_number, path)
+
     return _parse_hunks(diff_text)
+
+
+def _gh_pr_diff_for_path(target_dir: Path, pr_number: int, path: str) -> str:
+    """Fetch the PR's full diff via `gh pr diff` and return just the block for `path`."""
+    try:
+        r = _run(
+            ["gh", "pr", "diff", str(pr_number)],
+            target_dir,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return ""
+    if r.returncode != 0:
+        return ""
+    full_diff = r.stdout.decode(errors="replace")
+    # Pick the `diff --git a/<path> b/<path>` block.
+    needle_a = f"a/{path} "
+    needle_b = f"b/{path}\n"
+    for block in _DIFF_BLOCK_SPLIT.split(full_diff):
+        if not block.startswith("diff --git "):
+            continue
+        header_line = block.split("\n", 1)[0]
+        if needle_a in header_line or header_line.endswith(f"b/{path}") or needle_b in header_line:
+            return block
+    return ""
 
 
 def _parse_hunks(diff_text: str) -> list[tuple[int, int]]:
@@ -468,7 +523,11 @@ def classify(
             continue
         if issue.path not in hunks_cache:
             hunks_cache[issue.path] = file_hunks(
-                target_dir, pr.base_sha, pr.head_sha, issue.path
+                target_dir,
+                pr.base_sha,
+                pr.head_sha,
+                issue.path,
+                pr_number=pr.number,
             )
         if not within_hunk(line, hunks_cache[issue.path]):
             out.body_only.append(issue)

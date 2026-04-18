@@ -1380,7 +1380,7 @@ async def phase_per_stack_reviews(
     intent_path: Path,
     alternatives_path: Path,
     exploration_dir: Path | None = None,
-) -> dict[str, Path]:
+) -> tuple[dict[str, Path], dict[str, str]]:
     """Run one review agent per detected stack concurrently (D-17).
 
     Mirrors phase_fix_parallel's capacity-limiter + task-group + default-arg closure
@@ -1397,9 +1397,13 @@ async def phase_per_stack_reviews(
         exploration_dir: Optional pre-scan exploration directory.
 
     Returns:
-        Mapping of stack_name -> per-stack review output Path for stacks that
-        completed successfully. A stack with an agent failure is omitted from the
-        returned dict (its exception is logged via get_debug_log).
+        Tuple of ``(successes, failures)``:
+          - ``successes``: stack_name -> per-stack review output Path for stacks
+            that produced a review.
+          - ``failures``: stack_name -> "<ExceptionType>: <message>" for stacks
+            whose agent raised. Callers MUST surface this to the user and to the
+            merge agent so that missing coverage is visible instead of silently
+            dropped.
 
     """
     from daydream.deep.artifacts import deep_dir as _deep_dir
@@ -1411,6 +1415,7 @@ async def phase_per_stack_reviews(
 
     deep_dir_path = _deep_dir(cwd)
     results: dict[str, Path] = {}
+    failures: dict[str, str] = {}
     limiter = anyio.CapacityLimiter(4)
 
     async with anyio.create_task_group() as tg:
@@ -1449,17 +1454,25 @@ async def phase_per_stack_reviews(
                         await run_agent(backend, cwd, task_prompt)
                     results[stack_name] = task_output
                 except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                    reason = f"{type(e).__name__}: {e}"
+                    failures[stack_name] = reason
                     debug = get_debug_log()
                     if debug is not None:
                         debug.write(
-                            f"[STAGE] per-stack {stack_name} failed: "
-                            f"{type(e).__name__}: {e}\n"
+                            f"[STAGE] per-stack {stack_name} failed: {reason}\n"
                         )
                         debug.flush()
+                    # Surface to the user so a dropped stack isn't invisible
+                    # outside the debug log.
+                    print_warning(
+                        console,
+                        f"Per-stack review for '{stack_name}' failed ({reason}); "
+                        "merge report will note this stack as uncovered.",
+                    )
 
             tg.start_soon(_task)
 
-    return results
+    return results, failures
 
 
 async def phase_cross_stack_merge(
@@ -1471,6 +1484,7 @@ async def phase_cross_stack_merge(
     alternatives_path: Path,
     dedup_candidates_path: Path,
     exploration_dir: Path | None = None,
+    failed_stacks: dict[str, str] | None = None,
 ) -> Path:
     """Run the cross-stack merge agent and return the output-report path (D-23..D-27).
 
@@ -1485,6 +1499,9 @@ async def phase_cross_stack_merge(
         alternatives_path: Path to TTT alternatives.json.
         dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
         exploration_dir: Optional pre-scan exploration directory.
+        failed_stacks: Optional stack_name -> reason dict for per-stack agents
+            that failed. Passed through to the merge prompt so the merged
+            report can call out uncovered stacks explicitly.
 
     Returns:
         Path to the merged report at ``cwd / REVIEW_OUTPUT_FILE``.
@@ -1500,6 +1517,7 @@ async def phase_cross_stack_merge(
         dedup_candidates_path=dedup_candidates_path,
         output_path=output_path,
         exploration_dir=exploration_dir,
+        failed_stacks=failed_stacks,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     await run_agent(backend, cwd, prompt)
