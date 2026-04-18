@@ -3,7 +3,7 @@
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
@@ -11,9 +11,13 @@ from daydream.agent import (
     _log_debug,
     console,
     detect_test_success,
+    get_debug_log,
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
+
+if TYPE_CHECKING:
+    from daydream.deep.detection import StackAssignment
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.ui import (
     ParallelFixPanel,
@@ -1360,3 +1364,99 @@ async def phase_generate_plan(
 
     print_success(console, f"Plan written to {plan_path}")
     return plan_path
+
+
+# -------------------------
+# Deep-mode: per-stack fan-out
+# -------------------------
+
+
+async def phase_per_stack_reviews(
+    backend: Backend,
+    cwd: Path,
+    stacks: list["StackAssignment"],
+    *,
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    exploration_dir: Path | None = None,
+) -> dict[str, Path]:
+    """Run one review agent per detected stack concurrently (D-17).
+
+    Mirrors phase_fix_parallel's capacity-limiter + task-group + default-arg closure
+    capture pattern. Per D-38, uses orchestrator-level parallelism -- never passes
+    the ``agents`` kwarg (Codex does not support SDK-level sub-agent spawning).
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Target directory (repo root).
+        stacks: Routed stack assignments (see daydream.deep.detection.detect_stacks).
+        diff_path: Path to the full diff on disk.
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        exploration_dir: Optional pre-scan exploration directory.
+
+    Returns:
+        Mapping of stack_name -> per-stack review output Path for stacks that
+        completed successfully. A stack with an agent failure is omitted from the
+        returned dict (its exception is logged via get_debug_log).
+
+    """
+    from daydream.deep.artifacts import deep_dir as _deep_dir
+    from daydream.deep.artifacts import per_stack_review_path
+    from daydream.deep.prompts import (
+        build_generic_fallback_prompt,
+        build_per_stack_prompt,
+    )
+
+    deep_dir_path = _deep_dir(cwd)
+    results: dict[str, Path] = {}
+    limiter = anyio.CapacityLimiter(4)
+
+    async with anyio.create_task_group() as tg:
+        for stack in stacks:
+            output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
+            if stack.skill_invocation is None:
+                prompt = build_generic_fallback_prompt(
+                    files=stack.files,
+                    diff_path=diff_path,
+                    intent_path=intent_path,
+                    alternatives_path=alternatives_path,
+                    output_path=output_path,
+                    exploration_dir=exploration_dir,
+                    is_docs_only=stack.is_docs_only,
+                )
+            else:
+                prompt = build_per_stack_prompt(
+                    skill_invocation=stack.skill_invocation,
+                    stack_name=stack.stack_name,
+                    files=stack.files,
+                    diff_path=diff_path,
+                    intent_path=intent_path,
+                    alternatives_path=alternatives_path,
+                    output_path=output_path,
+                    exploration_dir=exploration_dir,
+                )
+
+            # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
+            async def _task(
+                stack_name: str = stack.stack_name,
+                task_prompt: str = prompt,
+                task_output: Path = output_path,
+            ) -> None:
+                try:
+                    async with limiter:
+                        await run_agent(backend, cwd, task_prompt)
+                    results[stack_name] = task_output
+                except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                    debug = get_debug_log()
+                    if debug is not None:
+                        debug.write(
+                            f"[STAGE] per-stack {stack_name} failed: "
+                            f"{type(e).__name__}: {e}\n"
+                        )
+                        debug.flush()
+
+            tg.start_soon(_task)
+
+    return results
