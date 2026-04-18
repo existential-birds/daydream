@@ -1,15 +1,10 @@
-"""Deep-mode artifact path + check_deep_artifacts tests (D-18, D-36, D-37).
-
-Every test is xfail(strict=True) until Wave 2 plan 05-03 implements the
-``daydream.deep.artifacts`` module.
-"""
+"""Deep-mode artifact path + check_deep_artifacts tests (D-18, D-36, D-37)."""
 
 from pathlib import Path
 
 import pytest
 
 
-@pytest.mark.xfail(reason="Wave 2 plan 05-03 not yet implemented", strict=True)
 def test_per_stack_path_scheme(tmp_path: Path) -> None:
     """D-18: per-stack output path is deterministic + unique."""
     from daydream.deep.artifacts import per_stack_review_path
@@ -21,7 +16,6 @@ def test_per_stack_path_scheme(tmp_path: Path) -> None:
     assert p2.name == "stack-react-review.md"
 
 
-@pytest.mark.xfail(reason="Wave 2 plan 05-03 not yet implemented", strict=True)
 def test_check_deep_artifacts_missing(tmp_path: Path) -> None:
     """D-36: check_deep_artifacts raises FileNotFoundError when predecessor missing."""
     from daydream.deep.artifacts import check_deep_artifacts
@@ -34,7 +28,6 @@ def test_check_deep_artifacts_missing(tmp_path: Path) -> None:
     assert "--start-at" in str(excinfo.value)
 
 
-@pytest.mark.xfail(reason="Wave 2 plan 05-03 not yet implemented", strict=True)
 def test_check_deep_artifacts_merge_requires_records(tmp_path: Path) -> None:
     """D-37: --start-at merge needs per-stack records on disk."""
     from daydream.deep.artifacts import check_deep_artifacts
@@ -48,7 +41,6 @@ def test_check_deep_artifacts_merge_requires_records(tmp_path: Path) -> None:
     assert "stack-*-records.json" in str(excinfo.value)
 
 
-@pytest.mark.xfail(reason="Wave 2 plan 05-03 not yet implemented", strict=True)
 def test_check_deep_artifacts_passes_when_present(tmp_path: Path) -> None:
     """D-36: check passes silently when all predecessors exist."""
     from daydream.deep.artifacts import check_deep_artifacts
