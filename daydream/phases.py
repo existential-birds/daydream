@@ -1460,3 +1460,47 @@ async def phase_per_stack_reviews(
             tg.start_soon(_task)
 
     return results
+
+
+async def phase_cross_stack_merge(
+    backend: Backend,
+    cwd: Path,
+    *,
+    per_stack_records_paths: list[Path],
+    intent_path: Path,
+    alternatives_path: Path,
+    dedup_candidates_path: Path,
+    exploration_dir: Path | None = None,
+) -> Path:
+    """Run the cross-stack merge agent and return the output-report path (D-23..D-27).
+
+    Writes the merged markdown report to ``cwd / REVIEW_OUTPUT_FILE`` (D-24/D-42).
+    Per D-38, never passes the ``agents`` kwarg (Codex parity).
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Target directory (repo root). The report is written here.
+        per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
+        exploration_dir: Optional pre-scan exploration directory.
+
+    Returns:
+        Path to the merged report at ``cwd / REVIEW_OUTPUT_FILE``.
+
+    """
+    from daydream.deep.prompts import build_merge_prompt
+
+    output_path = cwd / REVIEW_OUTPUT_FILE
+    prompt = build_merge_prompt(
+        per_stack_records_paths=per_stack_records_paths,
+        intent_path=intent_path,
+        alternatives_path=alternatives_path,
+        dedup_candidates_path=dedup_candidates_path,
+        output_path=output_path,
+        exploration_dir=exploration_dir,
+    )
+    print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
+    await run_agent(backend, cwd, prompt)
+    return output_path

@@ -17,6 +17,7 @@ from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.prompts import (
     DOC_REVIEW_NOTICE,
     build_generic_fallback_prompt,
+    build_merge_prompt,
     build_per_stack_prompt,
 )
 
@@ -27,6 +28,7 @@ __all__ = [
     "alternatives_path",
     "build_dedup_candidates",
     "build_generic_fallback_prompt",
+    "build_merge_prompt",
     "build_per_stack_prompt",
     "check_deep_artifacts",
     "dedup_candidates_path",

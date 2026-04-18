@@ -97,6 +97,84 @@ def build_per_stack_prompt(
     return "\n\n".join(parts)
 
 
+def build_merge_prompt(
+    *,
+    per_stack_records_paths: list[Path],
+    intent_path: Path,
+    alternatives_path: Path,
+    dedup_candidates_path: Path,
+    output_path: Path,
+    exploration_dir: Path | None = None,
+) -> str:
+    """Assemble the cross-stack merge prompt (D-23..D-27).
+
+    The merged report MUST:
+      - live at output_path (single-file contract, D-24/D-42)
+      - carry a flat globally-numbered ## Issues list (D-25)
+      - have a ## Cross-Stack Issues subsection that CONTINUES the numbering (D-25)
+      - prefix every cross-stack title with the literal "[cross-stack]" (D-26, normative)
+      - collapse duplicates per dedup candidate adjudication (D-27)
+
+    Args:
+        per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
+        output_path: Where the merge agent must write the unified report (D-24).
+        exploration_dir: Pre-scan exploration directory (if available).
+
+    Returns:
+        Assembled prompt string.
+    """
+    records_block = "\n".join(f"  - {p}" for p in per_stack_records_paths)
+    parts: list[str] = []
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
+    parts.append(
+        f"TTT intent summary: {intent_path}\n"
+        f"TTT alternative-review findings: {alternatives_path}\n"
+        f"Dedup pre-filter candidate pairs: {dedup_candidates_path}\n"
+        f"Per-stack parsed records:\n{records_block}"
+    )
+    parts.append(
+        "You are the cross-stack merge agent. Read every artifact above by path -- "
+        "do NOT re-run any reviews. Your only output is the merged markdown report."
+    )
+    parts.append(
+        "Dedup adjudication:\n"
+        "  - For each candidate pair in dedup-candidates.json, decide whether the two\n"
+        "    findings describe the same concern. If yes, emit ONE entry citing both\n"
+        "    sources as combined evidence. If no, emit both entries independently.\n"
+        "  - Concerns that span multiple stacks (contract drift, shared-type "
+        "mismatches, API-contract misalignment) go in ## Cross-Stack Issues."
+    )
+    parts.append(
+        "Report format (MANDATORY):\n\n"
+        "# Review\n\n"
+        "## Per-Stack Context\n"
+        "(optional human-readable per-stack summaries; phase_parse_feedback ignores "
+        "this section)\n\n"
+        "## Issues\n"
+        "1. [FILE:LINE] TITLE\n"
+        "   rationale / recommendation\n"
+        "2. [FILE:LINE] TITLE\n"
+        "   ...\n\n"
+        "## Cross-Stack Issues\n"
+        "<continues the SAME numbering -- do NOT reset to 1>\n"
+        "N. [cross-stack] [FILE:LINE] TITLE\n"
+        "   rationale citing each per-stack source that contributed\n\n"
+        "Rules:\n"
+        "  - Every cross-stack title MUST begin with the literal prefix [cross-stack].\n"
+        "  - Numbering is flat and global; cross-stack continues per-stack numbering.\n"
+        "  - Per-stack human-readable context may appear above ## Issues under "
+        "## Per-Stack Context, but all actionable issues live in the two lists above.\n"
+        "  - Do not invent issues not supported by the source records."
+    )
+    parts.append(f"Write the complete report to {output_path}.")
+    return "\n\n".join(parts)
+
+
 def build_generic_fallback_prompt(
     *,
     files: list[str],
