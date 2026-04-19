@@ -517,6 +517,12 @@ async def test_resume_merge_consumes_saved_records(
     (deep / "stack-react-records.json").write_text(
         json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1}])
     )
+    # Markdown routes to the generic bucket; prime its records too so the
+    # merge-resume validation (every detected stack must have records or be
+    # in failed_stacks) passes.
+    (deep / "stack-generic-records.json").write_text(
+        json.dumps([{"id": 1, "description": "docs issue", "file": "README.md", "line": 1}])
+    )
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
@@ -785,3 +791,145 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     assert "Uncovered stacks" in prompt
     assert "react" in prompt
     assert "simulated react failure" in prompt
+
+
+def test_get_installed_skills_non_dict_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-dict root JSON -> None (fall back to optimistic availability).
+
+    Regression: previously `data.get("plugins", {})` raised AttributeError
+    when the registry parsed to a non-dict, aborting deep mode instead of
+    returning None.
+    """
+    from daydream.deep.orchestrator import get_installed_skills
+
+    registry = tmp_path / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text("[]")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    assert get_installed_skills() is None
+
+
+def test_get_installed_skills_non_dict_plugins_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`plugins` field is not a mapping -> None.
+
+    Regression: previously iterating ``data.get("plugins", {})`` raised
+    TypeError when the `plugins` field was e.g. a list, aborting deep
+    mode instead of returning None.
+    """
+    from daydream.deep.orchestrator import get_installed_skills
+
+    registry = tmp_path / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text('{"version": 2, "plugins": ["beagle-python@marketplace"]}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    assert get_installed_skills() is None
+
+
+async def test_resume_merge_errors_on_missing_stack_records(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--start-at merge must fail loudly when a detected stack has no records.
+
+    Regression: previously the merge branch globbed whatever ``stack-*-records.json``
+    files happened to exist on disk, so a detected stack with no prior records
+    would silently disappear from the merged report.
+    """
+    import json
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    # Prime records for python only; react and generic are missing.
+    (deep / "stack-python-records.json").write_text(
+        json.dumps([{"id": 1, "description": "py issue", "file": "api.py", "line": 1}])
+    )
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 1
+
+    # Merge agent must NOT have run -- the orchestrator bailed before it.
+    merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
+    assert merge_calls == []
+
+
+async def test_resume_merge_allows_missing_records_for_failed_stacks(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stack listed in per-stack-failures.json is allowed to be missing.
+
+    The merge agent still runs and the missing bucket is surfaced as an
+    uncovered stack rather than being flagged as a records-file gap.
+    """
+    import json
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    (deep / "stack-python-records.json").write_text(
+        json.dumps([{"id": 1, "description": "py issue", "file": "api.py", "line": 1}])
+    )
+    (deep / "stack-react-records.json").write_text(
+        json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1}])
+    )
+    # No records for the generic bucket, but it's listed as a prior failure.
+    (deep / "per-stack-failures.json").write_text(
+        json.dumps({"generic": "simulated generic failure"})
+    )
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+
+    merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
+    assert len(merge_calls) == 1
+
+
+async def test_resume_fix_skips_pr_post(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--start-at fix must not call post_review_to_pr_from_report.
+
+    Regression: posting is a non-idempotent GitHub write. Calling it on every
+    fix resume would produce duplicate inline reviews on the same PR.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    post_calls: list[dict[str, Any]] = []
+
+    async def _spy(
+        target_dir: Path, report_path: Path, *, console: Any, mode_label: str = "deep review"
+    ) -> None:
+        post_calls.append({"target_dir": target_dir, "report_path": report_path})
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _spy)
+
+    # Prime every artifact the fix-resume gate needs.
+    deep = multi_stack_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    (multi_stack_target / REVIEW_OUTPUT_FILE).write_text(
+        "# Review\n\n## Issues\n\n1. [api.py:1] primed issue\n   rationale\n"
+    )
+
+    exit_code = await _run_deep(multi_stack_target, start_at="fix")
+    assert exit_code == 0
+    assert post_calls == [], (
+        f"post_review_to_pr_from_report should be skipped on --start-at fix, got {len(post_calls)} call(s)"
+    )

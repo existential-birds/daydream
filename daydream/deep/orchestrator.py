@@ -133,8 +133,16 @@ def get_installed_skills() -> set[str] | None:
         data = json.loads(registry.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+    # Structurally invalid payloads (non-dict root, non-dict `plugins`) also
+    # signal "unknown" so callers fall back to optimistic availability
+    # instead of aborting deep mode on an AttributeError / TypeError.
+    if not isinstance(data, dict):
+        return None
+    plugins = data.get("plugins")
+    if not isinstance(plugins, dict):
+        return None
     # Keys in the registry look like "<plugin-name>@<marketplace>".
-    installed_plugins = {key.split("@", 1)[0] for key in data.get("plugins", {})}
+    installed_plugins = {key.split("@", 1)[0] for key in plugins}
     installed: set[str] = set()
     for stack_key, skill_invocation in SKILL_MAP.items():
         # SKILL_MAP values are "<plugin-name>:<skill-name>".
@@ -403,11 +411,28 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
             per_stack_records_paths: list[Path] = []
             all_records: list[dict[str, Any]] = []
             if config.start_at == "merge":
-                # Resume: the stack-*-records.json files are the validated
-                # prerequisite (see check_deep_artifacts). Load them directly
-                # so resume works even after per-stack review.md files have
-                # been cleaned up.
-                for records_path in sorted(dd.glob("stack-*-records.json")):
+                # Resume: validate a records file exists for every detected
+                # stack (except ones explicitly in `failed_stacks`). A bare
+                # `dd.glob` could silently drop a current stack whose prior
+                # records file is absent, producing an authoritative-looking
+                # merged report that is missing an entire language bucket.
+                expected_paths: list[Path] = []
+                missing_stacks: list[str] = []
+                for stack in stacks:
+                    records_path = per_stack_records_path(dd, stack.stack_name)
+                    if records_path.is_file():
+                        expected_paths.append(records_path)
+                    elif stack.stack_name not in failed_stacks:
+                        missing_stacks.append(stack.stack_name)
+                if missing_stacks:
+                    print_error(
+                        console,
+                        "Missing Per-Stack Records",
+                        "Missing parsed records for: "
+                        + ", ".join(sorted(missing_stacks)),
+                    )
+                    return 1
+                for records_path in sorted(expected_paths):
                     records = json.loads(records_path.read_text())
                     per_stack_records_paths.append(records_path)
                     all_records.extend(records)
@@ -460,11 +485,15 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
             return 1
 
         # Offer to post findings as inline PR review comments.
-        from daydream.pr_review import post_review_to_pr_from_report
+        # `post_review_to_pr_from_report` is a non-idempotent GitHub write, so
+        # `--start-at fix` (resume after the merged report) must skip it to
+        # avoid duplicate inline reviews on reruns.
+        if config.start_at != "fix":
+            from daydream.pr_review import post_review_to_pr_from_report
 
-        await post_review_to_pr_from_report(
-            target_dir, merged_report, console=console
-        )
+            await post_review_to_pr_from_report(
+                target_dir, merged_report, console=console
+            )
 
         answer = prompt_user(console, "Apply fixes now? [y/N]", "n")
         if answer.strip().lower() not in ("y", "yes"):
