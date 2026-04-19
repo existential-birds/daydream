@@ -69,8 +69,11 @@ def _auto_detect_pr_number() -> int | None:
     return None
 
 
-def _parse_args() -> RunConfig:
+def _parse_args(argv: list[str] | None = None) -> RunConfig:
     """Parse command line arguments and return a RunConfig.
+
+    Args:
+        argv: Optional list of arguments. Defaults to ``sys.argv[1:]`` when None.
 
     Returns:
         RunConfig: Configuration object populated from command line arguments.
@@ -170,10 +173,14 @@ def _parse_args() -> RunConfig:
 
     parser.add_argument(
         "--start-at",
-        choices=["review", "parse", "fix", "test"],
+        choices=["review", "parse", "fix", "test", "ttt", "per-stack", "merge"],
         default="review",
         dest="start_at",
-        help="Start at a specific phase (default: review)",
+        help=(
+            "Start at a specific phase (default: review). "
+            "Choices: review | parse | fix | test | ttt (deep-only) | "
+            "per-stack (deep-only) | merge (deep-only). Deep-only stages require --deep."
+        ),
     )
 
     parser.add_argument(
@@ -257,7 +264,15 @@ def _parse_args() -> RunConfig:
         help="Technology-agnostic review: understand intent, evaluate alternatives, generate plan",
     )
 
-    args = parser.parse_args()
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        default=False,
+        dest="deep",
+        help="Deep review pipeline: TTT + parallel per-stack + cross-stack merge",
+    )
+
+    args = parser.parse_args(argv)
 
     # Validate --trust-the-technology mutual exclusions
     if args.trust_the_technology:
@@ -269,6 +284,41 @@ def _parse_args() -> RunConfig:
             parser.error("--trust-the-technology and --loop are mutually exclusive")
         if args.pr is not None:
             parser.error("--trust-the-technology and --pr are mutually exclusive")
+
+    # Validate --deep mutual exclusions (D-06) and --start-at parse rejection (D-04)
+    if args.deep:
+        if args.pr is not None:
+            parser.error("--deep and --pr are mutually exclusive")
+        if args.loop:
+            parser.error("--deep and --loop are mutually exclusive")
+        if args.trust_the_technology:
+            parser.error(
+                "--deep and --trust-the-technology are mutually exclusive "
+                "(deep runs TTT internally)"
+            )
+        if args.review_only:
+            parser.error("--deep and --review-only are mutually exclusive")
+        if args.skill:
+            parser.error(
+                "--deep and skill flags are mutually exclusive "
+                "(deep mode detects stacks and invokes per-stack skills internally)"
+            )
+        if args.start_at == "parse":
+            parser.error(
+                "--start-at parse is ambiguous under --deep "
+                "(two parse points in the deep pipeline); "
+                "use --start-at fix to resume after the merged report"
+            )
+        if args.start_at == "test":
+            parser.error(
+                "--start-at test is not supported under --deep "
+                "(deep resume stages are ttt|per-stack|merge|fix); "
+                "use --start-at fix to resume after the merged report"
+            )
+
+    # D-05: deep-only stages require --deep
+    if args.start_at in ("ttt", "per-stack", "merge") and not args.deep:
+        parser.error(f"--start-at {args.start_at} requires --deep")
 
     # Validate mutual exclusion: --start-at and --review-only
     if args.start_at != "review" and args.review_only:
@@ -328,6 +378,7 @@ def _parse_args() -> RunConfig:
         loop=args.loop,
         max_iterations=args.max_iterations,
         trust_the_technology=args.trust_the_technology,
+        deep=args.deep,
     )
 
 

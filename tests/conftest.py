@@ -1,5 +1,6 @@
 """Shared pytest fixtures for the daydream test suite."""
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -51,3 +52,71 @@ def exploration_dir_fixture(tmp_path: Path, exploration_context_fixture: Explora
     exploration_dir = tmp_path / "exploration"
     exploration_context_fixture.write_to_dir(exploration_dir)
     return exploration_dir
+
+
+@pytest.fixture
+def multi_stack_target(tmp_path: Path) -> Path:
+    """Git repo with a Python + React + Markdown diff on a feature branch.
+
+    Used by deep-mode orchestrator and integration tests (plan 05-09 / 05-10)
+    to exercise the multi-stack routing path. The repo has an ``init`` commit
+    on ``main`` and a ``change`` commit on a ``feature`` branch that modifies
+    one file per stack (``api.py``, ``App.tsx``, ``README.md``).
+    """
+    project = tmp_path / "multi_stack"
+    project.mkdir()
+    (project / "api.py").write_text("def hello():\n    return 'world'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
+    (project / "README.md").write_text("# Project\n")
+    subprocess.run(  # noqa: S603
+        ["git", "init", "-b", "main"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "config", "user.email", "test@test.com"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "config", "user.name", "Test"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "add", "."],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "commit", "-m", "init"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "checkout", "-b", "feature"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
+    (project / "README.md").write_text("# Project\n\nUpdated.\n")
+    subprocess.run(  # noqa: S603
+        ["git", "add", "."],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "commit", "-m", "change"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    return project

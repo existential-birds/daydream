@@ -3,7 +3,7 @@
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
@@ -11,9 +11,13 @@ from daydream.agent import (
     _log_debug,
     console,
     detect_test_success,
+    get_debug_log,
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
+
+if TYPE_CHECKING:
+    from daydream.deep.detection import StackAssignment
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.ui import (
     ParallelFixPanel,
@@ -713,12 +717,24 @@ async def phase_review(
         print_warning(console, "Review output file was not created")
 
 
-async def phase_parse_feedback(backend: Backend, cwd: Path) -> list[dict[str, Any]]:
+async def phase_parse_feedback(
+    backend: Backend,
+    cwd: Path,
+    *,
+    input_path: Path | None = None,
+) -> list[dict[str, Any]]:
     """Phase 2: Parse feedback from review output and return validated items.
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory containing the review output
+        cwd: Working directory containing the review output (also used as the
+            agent's cwd).
+        input_path: Optional explicit path to the review markdown to parse.
+            When None (default), reads ``cwd / REVIEW_OUTPUT_FILE``, preserving
+            behavior for single-skill, PR feedback, and TTT flows. When
+            provided, reads that path instead — used by deep-mode's pre-merge
+            parse stage to iterate per-stack outputs without overwriting each
+            other at the shared REVIEW_OUTPUT_FILE location.
 
     Returns:
         List of validated feedback items with id, description, file, line
@@ -730,7 +746,7 @@ async def phase_parse_feedback(backend: Backend, cwd: Path) -> list[dict[str, An
     print_phase_hero(console, "REFLECT", phase_subtitle("REFLECT"))
 
     # Use absolute path to prevent model hallucination of paths from training data
-    review_output_path = cwd / REVIEW_OUTPUT_FILE
+    review_output_path = input_path if input_path is not None else cwd / REVIEW_OUTPUT_FILE
     prompt = f"""Read the review output file at {review_output_path}.
 
 Extract ONLY actionable issues that need fixing. Skip these sections entirely:
@@ -1348,3 +1364,161 @@ async def phase_generate_plan(
 
     print_success(console, f"Plan written to {plan_path}")
     return plan_path
+
+
+# -------------------------
+# Deep-mode: per-stack fan-out
+# -------------------------
+
+
+async def phase_per_stack_reviews(
+    backend: Backend,
+    cwd: Path,
+    stacks: list["StackAssignment"],
+    *,
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    exploration_dir: Path | None = None,
+) -> tuple[dict[str, Path], dict[str, str]]:
+    """Run one review agent per detected stack concurrently (D-17).
+
+    Mirrors phase_fix_parallel's capacity-limiter + task-group + default-arg closure
+    capture pattern. Per D-38, uses orchestrator-level parallelism -- never passes
+    the ``agents`` kwarg (Codex does not support SDK-level sub-agent spawning).
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Target directory (repo root).
+        stacks: Routed stack assignments (see daydream.deep.detection.detect_stacks).
+        diff_path: Path to the full diff on disk.
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        exploration_dir: Optional pre-scan exploration directory.
+
+    Returns:
+        Tuple of ``(successes, failures)``:
+          - ``successes``: stack_name -> per-stack review output Path for stacks
+            that produced a review.
+          - ``failures``: stack_name -> "<ExceptionType>: <message>" for stacks
+            whose agent raised. Callers MUST surface this to the user and to the
+            merge agent so that missing coverage is visible instead of silently
+            dropped.
+
+    """
+    from daydream.deep.artifacts import deep_dir as _deep_dir
+    from daydream.deep.artifacts import per_stack_review_path
+    from daydream.deep.prompts import (
+        build_generic_fallback_prompt,
+        build_per_stack_prompt,
+    )
+
+    deep_dir_path = _deep_dir(cwd)
+    results: dict[str, Path] = {}
+    failures: dict[str, str] = {}
+    limiter = anyio.CapacityLimiter(4)
+
+    async with anyio.create_task_group() as tg:
+        for stack in stacks:
+            output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
+            if stack.skill_invocation is None:
+                prompt = build_generic_fallback_prompt(
+                    files=stack.files,
+                    diff_path=diff_path,
+                    intent_path=intent_path,
+                    alternatives_path=alternatives_path,
+                    output_path=output_path,
+                    exploration_dir=exploration_dir,
+                    is_docs_only=stack.is_docs_only,
+                )
+            else:
+                prompt = build_per_stack_prompt(
+                    skill_invocation=stack.skill_invocation,
+                    stack_name=stack.stack_name,
+                    files=stack.files,
+                    diff_path=diff_path,
+                    intent_path=intent_path,
+                    alternatives_path=alternatives_path,
+                    output_path=output_path,
+                    exploration_dir=exploration_dir,
+                )
+
+            # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
+            async def _task(
+                stack_name: str = stack.stack_name,
+                task_prompt: str = prompt,
+                task_output: Path = output_path,
+            ) -> None:
+                try:
+                    async with limiter:
+                        await run_agent(backend, cwd, task_prompt)
+                    results[stack_name] = task_output
+                except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                    reason = f"{type(e).__name__}: {e}"
+                    failures[stack_name] = reason
+                    debug = get_debug_log()
+                    if debug is not None:
+                        debug.write(
+                            f"[STAGE] per-stack {stack_name} failed: {reason}\n"
+                        )
+                        debug.flush()
+                    # Surface to the user so a dropped stack isn't invisible
+                    # outside the debug log.
+                    print_warning(
+                        console,
+                        f"Per-stack review for '{stack_name}' failed ({reason}); "
+                        "merge report will note this stack as uncovered.",
+                    )
+
+            tg.start_soon(_task)
+
+    return results, failures
+
+
+async def phase_cross_stack_merge(
+    backend: Backend,
+    cwd: Path,
+    *,
+    per_stack_records_paths: list[Path],
+    intent_path: Path,
+    alternatives_path: Path,
+    dedup_candidates_path: Path,
+    exploration_dir: Path | None = None,
+    failed_stacks: dict[str, str] | None = None,
+) -> Path:
+    """Run the cross-stack merge agent and return the output-report path (D-23..D-27).
+
+    Writes the merged markdown report to ``cwd / REVIEW_OUTPUT_FILE`` (D-24/D-42).
+    Per D-38, never passes the ``agents`` kwarg (Codex parity).
+
+    Args:
+        backend: The Backend to execute against.
+        cwd: Target directory (repo root). The report is written here.
+        per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
+        exploration_dir: Optional pre-scan exploration directory.
+        failed_stacks: Optional stack_name -> reason dict for per-stack agents
+            that failed. Passed through to the merge prompt so the merged
+            report can call out uncovered stacks explicitly.
+
+    Returns:
+        Path to the merged report at ``cwd / REVIEW_OUTPUT_FILE``.
+
+    """
+    from daydream.deep.prompts import build_merge_prompt
+
+    output_path = cwd / REVIEW_OUTPUT_FILE
+    prompt = build_merge_prompt(
+        per_stack_records_paths=per_stack_records_paths,
+        intent_path=intent_path,
+        alternatives_path=alternatives_path,
+        dedup_candidates_path=dedup_candidates_path,
+        output_path=output_path,
+        exploration_dir=exploration_dir,
+        failed_stacks=failed_stacks,
+    )
+    print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
+    await run_agent(backend, cwd, prompt)
+    return output_path

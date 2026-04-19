@@ -45,6 +45,14 @@ cd daydream
 uv sync
 ```
 
+## Updating
+
+```bash
+cd daydream
+git pull
+uv sync
+```
+
 ## Usage
 
 ```bash
