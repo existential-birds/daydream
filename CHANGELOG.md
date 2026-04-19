@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **cli:** Add `--deep` mode for multi-stack code review with inline PR comments ([#45](https://github.com/existential-birds/daydream/pull/45))
 
-  A 5-stage pipeline (exploration → TTT intent → TTT alternatives → per-stack fan-out → cross-stack merge → optional fix gate) that auto-detects the stacks touched by the diff, fans out per-stack reviews in parallel via the matching Beagle skills, merges findings with dedup, and posts the result as a single atomic inline GitHub PR review. Handles mixed-stack PRs (e.g. Python + React) that existing single-stack modes can't review cleanly. Falls back to generic review when a per-stack skill is unavailable.
+  A 5-stage pipeline (exploration → TTT intent → TTT alternatives → per-stack fan-out → cross-stack merge) with an optional fix gate that auto-detects the stacks touched by the diff, fans out per-stack reviews in parallel via the matching Beagle skills, merges findings with dedup, and posts the result as a single atomic inline GitHub PR review. Handles mixed-stack PRs (e.g. Python + React) that existing single-stack modes can't review cleanly. Falls back to generic review when a per-stack skill is unavailable.
 
 - **cli:** Add `--start-at {ttt,per-stack,merge,fix}` for stage-granular resume of `--deep` runs ([#45](https://github.com/existential-birds/daydream/pull/45))
 
@@ -300,7 +300,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.12.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/existential-birds/daydream/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/existential-birds/daydream/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/existential-birds/daydream/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/existential-birds/daydream/compare/v0.10.0...v0.11.0
