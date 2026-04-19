@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-04-19
+
+### Added
+
+- **cli:** Add `--deep` mode for multi-stack code review with inline PR comments ([#45](https://github.com/existential-birds/daydream/pull/45))
+
+  A 5-stage pipeline (exploration → TTT intent → TTT alternatives → per-stack fan-out → cross-stack merge) with an optional fix gate that auto-detects the stacks touched by the diff, fans out per-stack reviews in parallel via the matching Beagle skills, merges findings with dedup, and posts the result as a single atomic inline GitHub PR review. Handles mixed-stack PRs (e.g. Python + React) that existing single-stack modes can't review cleanly. Falls back to generic review when a per-stack skill is unavailable.
+
+- **cli:** Add `--start-at {ttt,per-stack,merge,fix}` for stage-granular resume of `--deep` runs ([#45](https://github.com/existential-birds/daydream/pull/45))
+
+  `.daydream/deep/` artifacts are preserved across runs so an interrupted pipeline can resume from a later stage without re-running earlier work. Each resume target enforces an artifact precondition and fails with an actionable error naming the missing file.
+
+- **pr-review:** Post inline GitHub PR comments from `--ttt` and `--deep` ([#45](https://github.com/existential-birds/daydream/pull/45))
+
+  Anchor-greps each finding to a real head-SHA line, classifies against diff hunks, and posts a single atomic review via the GitHub API. Cross-stack and off-hunk findings fold into the review body with severity (high/medium/low) and confidence (HIGH/MEDIUM/LOW) breakdowns. y/n gated; non-fatal on failure; payload preserved for retry.
+
+### Changed
+
+- **phases:** `phase_parse_feedback` accepts a keyword-only `input_path: Path | None` parameter ([#45](https://github.com/existential-birds/daydream/pull/45))
+
+  Default `None` preserves the existing cwd/`REVIEW_OUTPUT_FILE` behavior for all existing callers. Explicit paths let the per-stack deep-review fan-out parse multiple review files in parallel without colliding.
+
+- **runner:** Derive skill availability from the Claude Code plugin registry at runtime ([#45](https://github.com/existential-birds/daydream/pull/45))
+
+  Reads `$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json` to check whether a `beagle-<stack>` plugin is installed. When absent, deep mode routes that stack to the generic fallback review instead of letting the call silently fail with a swallowed `MissingSkillError`.
+
 ## [0.12.0] - 2026-04-17
 
 ### Added
@@ -274,7 +300,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.12.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/existential-birds/daydream/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/existential-birds/daydream/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/existential-birds/daydream/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/existential-birds/daydream/compare/v0.10.0...v0.11.0
