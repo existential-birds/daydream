@@ -4,6 +4,7 @@ from pathlib import Path
 from daydream.deep.prompts import (
     DOC_REVIEW_NOTICE,
     build_generic_fallback_prompt,
+    build_merge_prompt,
     build_per_stack_prompt,
 )
 
@@ -139,3 +140,34 @@ def test_generic_fallback_prompt_omits_bare_git_diff_command(tmp_path: Path) -> 
     assert "git diff -- config.yaml" not in out
     # diff_path must still be referenced.
     assert str(p["diff_path"]) in out
+
+
+def _merge_paths(tmp_path: Path) -> dict[str, Path | list[Path] | None]:
+    return {
+        "per_stack_records_paths": [tmp_path / "python.json", tmp_path / "react.json"],
+        "intent_path": tmp_path / "intent.md",
+        "alternatives_path": tmp_path / "alternatives.json",
+        "dedup_candidates_path": tmp_path / "dedup.json",
+        "output_path": tmp_path / "review.md",
+        "exploration_dir": None,
+        "failed_stacks": None,
+    }
+
+
+def test_merge_prompt_forbids_bold_wrapper_on_numbered_head(tmp_path: Path) -> None:
+    """The prompt must tell the merge agent not to bold-wrap `N. [FILE] TITLE`.
+
+    This is the contract the pr_review parser relies on. A drifted output like
+    `1. **[foo.py:1] Title**` was bypassing the old regex, producing zero
+    parseable issues.
+    """
+    out = build_merge_prompt(**_merge_paths(tmp_path))  # type: ignore[arg-type]
+    assert "do NOT wrap it in `**...**`" in out
+    assert "unbolded" in out
+
+
+def test_merge_prompt_requires_one_path_per_bracket(tmp_path: Path) -> None:
+    """Multi-file issues must become multiple numbered entries, not a comma list."""
+    out = build_merge_prompt(**_merge_paths(tmp_path))  # type: ignore[arg-type]
+    assert "EXACTLY ONE file path" in out
+    assert "separate numbered entry per file" in out

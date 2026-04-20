@@ -144,15 +144,46 @@ _SEVERITY_LINE = re.compile(
 DAYDREAM_REPO_URL = "https://github.com/existential-birds/daydream"
 DAYDREAM_FOOTER = f"<sub>🧙 Posted by [daydream]({DAYDREAM_REPO_URL})</sub>"
 _NEXT_SECTION = re.compile(r"^## ", re.MULTILINE)
-# Matches "N. [path:line] Title" or "N. [path] Title" with optional
-# leading `[cross-stack]` marker.
+# Matches "N. [path:line] Title" or "N. [path] Title" with optional leading
+# `[cross-stack]` marker. Tolerates Markdown bold/italic wrapping the whole
+# head (`N. **[path] title**`) and multiple comma-separated paths in the
+# bracket. The closing `**`/`__` is only stripped when an opening marker was
+# matched (conditional backref on `bold`), so bold inside the title is
+# preserved when the head itself isn't wrapped.
 _ISSUE_HEAD = re.compile(
     r"^(?P<num>\d+)\.\s+"
+    r"(?P<bold>\*\*|__)?"
     r"(?:\[cross-stack\]\s+)?"
-    r"\[(?P<path>[^\]:]+)(?::(?P<line>\d+))?\]\s+"
-    r"(?P<title>.+?)\s*$",
+    r"\[(?P<paths>[^\]]+)\]\s+"
+    r"(?P<title>.+?)"
+    r"(?(bold)(?P=bold)|)"
+    r"\s*$",
     re.MULTILINE,
 )
+
+
+def _split_paths(paths: str) -> list[tuple[str, int | None]]:
+    """Parse the bracket contents into (path, line) pairs.
+
+    Accepts either a single `path[:line]` or a comma-separated list, so
+    `a.ts:1, b.go:41, c.py:48` fans out into three pairs.
+    """
+    out: list[tuple[str, int | None]] = []
+    for chunk in paths.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        path, sep, line_str = chunk.partition(":")
+        path = path.strip()
+        line: int | None = None
+        if sep:
+            try:
+                line = int(line_str.strip())
+            except ValueError:
+                # Malformed line hint -- keep the raw chunk as the path.
+                path = chunk
+        out.append((path, line))
+    return out
 
 
 def parse_report(text: str) -> list[ParsedIssue]:
@@ -181,18 +212,23 @@ def parse_report(text: str) -> list[ParsedIssue]:
             body_end = matches[i + 1].start() if i + 1 < len(matches) else len(section_text)
             body = section_text[body_start:body_end].strip()
             title = m.group("title").strip()
-            line_str = m.group("line")
-            issues.append(
-                ParsedIssue(
-                    path=m.group("path").strip(),
-                    line=int(line_str) if line_str else None,
-                    title=title,
-                    body=body,
-                    is_cross_stack=section_is_xstack or title.lower().startswith("[cross-stack]"),
-                    confidence=_extract_confidence(body),
-                    severity=_extract_severity(body),
+            is_xstack = section_is_xstack or title.lower().startswith("[cross-stack]")
+            confidence = _extract_confidence(body)
+            severity = _extract_severity(body)
+            # Fan out multi-path brackets into one ParsedIssue per file, mirroring
+            # alt_issues_to_parsed. Single-path entries produce a single issue.
+            for path, line in _split_paths(m.group("paths")):
+                issues.append(
+                    ParsedIssue(
+                        path=path,
+                        line=line,
+                        title=title,
+                        body=body,
+                        is_cross_stack=is_xstack,
+                        confidence=confidence,
+                        severity=severity,
+                    )
                 )
-            )
 
     return issues
 
