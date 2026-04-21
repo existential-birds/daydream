@@ -19,6 +19,7 @@ from daydream.pr_review import (
     classify,
     extract_anchors,
     parse_report,
+    snap_to_hunk,
     within_hunk,
 )
 
@@ -207,6 +208,44 @@ def test_within_hunk_tolerance() -> None:
     assert not within_hunk(20, hunks, tolerance=3)
 
 
+def test_snap_to_hunk_inside_returns_unchanged() -> None:
+    hunks = [(10, 20), (30, 40)]
+    assert snap_to_hunk(15, hunks) == 15
+    assert snap_to_hunk(10, hunks) == 10
+    assert snap_to_hunk(40, hunks) == 40
+
+
+def test_snap_to_hunk_within_tolerance_snaps_to_boundary() -> None:
+    hunks = [(90, 105)]
+    # Line 89 is 1 below hunk start -> snap to 90
+    assert snap_to_hunk(89, hunks) == 90
+    # Line 87 is 3 below hunk start -> snap to 90
+    assert snap_to_hunk(87, hunks) == 90
+    # Line 108 is 3 above hunk end -> snap to 105
+    assert snap_to_hunk(108, hunks) == 105
+
+
+def test_snap_to_hunk_beyond_tolerance_returns_none() -> None:
+    hunks = [(90, 105)]
+    assert snap_to_hunk(86, hunks) is None
+    assert snap_to_hunk(109, hunks) is None
+
+
+def test_snap_to_hunk_between_two_hunks() -> None:
+    """Line between hunks snaps to the nearest boundary."""
+    hunks = [(80, 98), (106, 120)]
+    # Line 105 is 7 past first hunk end (too far) but 1 before second start
+    assert snap_to_hunk(105, hunks) == 106
+    # Line 100 is 2 past first hunk end -> snap to 98
+    assert snap_to_hunk(100, hunks) == 98
+    # Line 102 is 4 past first hunk end (too far) and 4 before second (too far)
+    assert snap_to_hunk(102, hunks) is None
+
+
+def test_snap_to_hunk_empty_hunks() -> None:
+    assert snap_to_hunk(10, []) is None
+
+
 @pytest.fixture
 def pr() -> PRInfo:
     return PRInfo(
@@ -256,6 +295,45 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
     assert result.inline_issues[0].path == "a.py"
     body_paths = [i.path for i in result.body_only]
     assert set(body_paths) == {"b.py", "c.py"}
+
+
+def test_classify_snaps_tolerance_line_to_hunk_boundary(
+    monkeypatch: pytest.MonkeyPatch, pr: PRInfo
+) -> None:
+    """Line 89 near hunk (90, 105) should become inline at line 90, not 89."""
+    issues = [
+        ParsedIssue(path="conftest.py", line=89, title="t1", body="anchor_one"),
+        ParsedIssue(path="scripts/modernize-app.py", line=105, title="t2", body="anchor_two"),
+    ]
+
+    def fake_resolve(_td: Path, _sha: str, issue: ParsedIssue) -> int | None:
+        return issue.line
+
+    def fake_hunks(
+        _td: Path,
+        _base: str,
+        _head: str,
+        path: str,
+        *,
+        pr_number: int | None = None,
+    ) -> list[tuple[int, int]]:
+        if path == "conftest.py":
+            return [(90, 105)]  # 89 is 1 below start
+        if path == "scripts/modernize-app.py":
+            return [(80, 98), (106, 120)]  # 105 is 1 before second hunk
+        return []
+
+    monkeypatch.setattr(pr_review, "resolve_line", fake_resolve)
+    monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
+
+    result = classify(Path("."), pr, issues)
+    assert len(result.inline) == 2
+    # conftest.py:89 snapped to hunk start 90
+    assert result.inline[0]["path"] == "conftest.py"
+    assert result.inline[0]["line"] == 90
+    # modernize-app.py:105 snapped to second hunk start 106
+    assert result.inline[1]["path"] == "scripts/modernize-app.py"
+    assert result.inline[1]["line"] == 106
 
 
 def test_build_payload_shape(pr: PRInfo) -> None:

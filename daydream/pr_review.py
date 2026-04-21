@@ -540,6 +540,39 @@ def within_hunk(line: int, hunks: list[tuple[int, int]], tolerance: int = 3) -> 
     return any(start - tolerance <= line <= end + tolerance for start, end in hunks)
 
 
+def snap_to_hunk(line: int, hunks: list[tuple[int, int]], tolerance: int = 3) -> int | None:
+    """Return a valid in-hunk line for a PR comment, or None if too far.
+
+    If ``line`` falls inside a hunk, return it unchanged. If it is within
+    ``tolerance`` lines of a hunk boundary, snap to the nearest boundary
+    so the GitHub API receives a line that actually appears in the diff.
+    Returns ``None`` when the line is beyond tolerance of every hunk.
+
+    Args:
+        line: Candidate line number on the head side.
+        hunks: (start, end) inclusive ranges from ``_parse_hunks``.
+        tolerance: Max distance from a hunk boundary to still snap.
+
+    Returns:
+        A line number guaranteed to be inside a hunk, or None.
+    """
+    best: int | None = None
+    best_dist = tolerance + 1
+    for start, end in hunks:
+        if start <= line <= end:
+            return line
+        if line < start:
+            dist = start - line
+            candidate = start
+        else:
+            dist = line - end
+            candidate = end
+        if dist <= tolerance and dist < best_dist:
+            best = candidate
+            best_dist = dist
+    return best
+
+
 # --- Classification + payload build ---------------------------------------
 
 
@@ -565,13 +598,14 @@ def classify(
                 issue.path,
                 pr_number=pr.number,
             )
-        if not within_hunk(line, hunks_cache[issue.path]):
+        snapped = snap_to_hunk(line, hunks_cache[issue.path])
+        if snapped is None:
             out.body_only.append(issue)
             continue
         out.inline.append(
             {
                 "path": issue.path,
-                "line": line,
+                "line": snapped,
                 "side": "RIGHT",
                 "body": _format_inline_body(issue),
             }
