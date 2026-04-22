@@ -38,6 +38,7 @@ class _StubBackend:
         output_schema: Any = None,
         continuation: Any = None,
         agents: Any = None,
+        max_turns: Any = None,
     ):
         self.calls.append(
             {
@@ -763,14 +764,14 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     # else (TTT, parse, merge, other stacks) keeps the stub's normal behavior.
     original_execute = stub.execute
 
-    def _maybe_fail(cwd, prompt, output_schema=None, continuation=None, agents=None):
+    def _maybe_fail(cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
         pl = prompt.lower()
         if "you are reviewing the react stack" in pl:
             async def _fail():
                 raise RuntimeError("simulated react failure")
                 yield  # pragma: no cover -- unreachable; satisfies async-gen typing
             return _fail()
-        return original_execute(cwd, prompt, output_schema, continuation, agents)
+        return original_execute(cwd, prompt, output_schema, continuation, agents, max_turns=max_turns)
 
     stub.execute = _maybe_fail  # type: ignore[method-assign]
 

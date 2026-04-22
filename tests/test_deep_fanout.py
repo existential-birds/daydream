@@ -23,6 +23,7 @@ class _RecordingBackend:
         output_schema: Any = None,
         continuation: Any = None,
         agents: Any = None,
+        max_turns: Any = None,
     ):
         self.prompts.append(prompt)
         self.agents_seen.append(agents)
@@ -157,6 +158,7 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path) -> None:
             output_schema: Any = None,
             continuation: Any = None,
             agents: Any = None,
+            max_turns: Any = None,
         ):
             self.prompts.append(prompt)
             self.agents_seen.append(agents)

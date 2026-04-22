@@ -122,6 +122,7 @@ class _SpecialistMockBackend:
         output_schema=None,
         continuation=None,
         agents=None,
+        max_turns=None,
     ) -> AsyncIterator[AgentEvent]:
         self.execute_calls.append({"prompt": prompt, "schema": output_schema, "agents": agents})
         result: dict[str, Any] = {}
@@ -249,7 +250,7 @@ def test_specialist_failure_doesnt_cancel_others(tmp_path):
     call_count = 0
 
     class _FailingPatternScanner:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             nonlocal call_count
             call_count += 1
             if output_schema == PATTERN_SCANNER_SCHEMA:
