@@ -85,6 +85,7 @@ class CodexBackend:
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
         agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Execute a prompt via Codex CLI and yield unified events.
 

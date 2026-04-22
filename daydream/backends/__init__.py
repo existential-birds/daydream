@@ -91,6 +91,7 @@ class Backend(Protocol):
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
         agents: dict[str, AgentDefinition] | None = None,
+        max_turns: int | None = None,
     ) -> AsyncIterator[AgentEvent]: ...
 
     async def cancel(self) -> None: ...

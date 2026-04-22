@@ -288,6 +288,7 @@ async def run_agent(
     progress_callback: Callable[[str], None] | None = None,
     continuation: ContinuationToken | None = None,
     agents: dict[str, AgentDefinition] | None = None,
+    max_turns: int | None = None,
 ) -> tuple[str | Any, ContinuationToken | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -330,7 +331,7 @@ async def run_agent(
             tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
 
         try:
-            event_iter = backend.execute(cwd, prompt, output_schema, continuation, agents=agents)
+            event_iter = backend.execute(cwd, prompt, output_schema, continuation, agents=agents, max_turns=max_turns)
         except Exception as exc:
             _log_debug(f"[EXECUTE_INIT_ERROR] {type(exc).__name__}: {exc}\n")
             raise

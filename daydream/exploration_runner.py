@@ -235,9 +235,16 @@ async def pre_scan(
 
     results: dict[str, Any] = {}
 
+    # Cap exploration subagents at 15 turns to prevent context blowup.
+    # Without this, agents on large repos exhaust their context window,
+    # hit compression, and lose track of their task (D-06 graceful degradation).
+    specialist_max_turns = 15
+
     async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
         try:
-            structured, _ = await run_agent(backend, repo_root, prompt, output_schema=schema)
+            structured, _ = await run_agent(
+                backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
+            )
             if isinstance(structured, dict):
                 results[name] = structured
         except Exception as exc:

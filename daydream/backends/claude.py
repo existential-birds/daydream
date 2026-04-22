@@ -48,6 +48,7 @@ class ClaudeBackend:
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
         agents: dict[str, AgentDefinition] | None = None,
+        max_turns: int | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Execute a prompt and yield unified events.
 
@@ -77,6 +78,7 @@ class ClaudeBackend:
             model=self.model,
             output_format=output_format,
             max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
+            max_turns=max_turns,
         )
 
         if agents:

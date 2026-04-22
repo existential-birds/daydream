@@ -32,7 +32,7 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch)
     captured_continuations: list[ContinuationToken | None] = []
 
     class FreshContextBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             nonlocal call_count
             call_count += 1
             captured_prompts.append(prompt)
@@ -102,7 +102,7 @@ async def test_phase_parse_feedback_empty_response_returns_empty_list(tmp_path, 
     class EmptyResponseBackend:
         """Simulates a schema miss: no structured output, no text."""
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             # Only yield a result with no structured output (schema miss)
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -131,7 +131,7 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch):
     class JsonTextBackend:
         """Simulates a schema miss where the model outputs JSON as plain text."""
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text='{"issues": [{"id": 1, "description": "Bug", "file": "foo.py", "line": 10}]}')
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -351,7 +351,7 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
 
     class IntentBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text="This PR adds a login page with email/password authentication.")
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -389,7 +389,7 @@ async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeyp
     call_count = 0
 
     class IntentBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -493,7 +493,7 @@ async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch):
     }
 
     class ReviewBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text="Found 2 issues.")
             yield ResultEvent(structured_output=structured_issues, continuation=None)
 
@@ -528,7 +528,7 @@ async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch):
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
 
     class NoIssuesBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text="Implementation looks good.")
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
 
@@ -576,7 +576,7 @@ async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch):
     }
 
     class PlanBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text="Here's the plan.")
             yield ResultEvent(structured_output=structured_plan, continuation=None)
 
@@ -625,7 +625,7 @@ async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch):
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
 
     class NeverCalledBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None):
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             raise AssertionError("Should not be called when user selects 'none'")
             yield  # make it an async generator
 
