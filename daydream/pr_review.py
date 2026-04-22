@@ -445,6 +445,10 @@ _HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILI
 # block for a single file from a full-PR diff.
 _DIFF_BLOCK_SPLIT = re.compile(r"(?m)^(?=diff --git )")
 
+# Max distance (in lines) from a diff-hunk boundary that still counts as
+# "within" the hunk for PR-comment placement.
+HUNK_TOLERANCE: int = 3
+
 
 def file_hunks(
     target_dir: Path,
@@ -536,11 +540,7 @@ def _parse_hunks(diff_text: str) -> list[tuple[int, int]]:
     return hunks
 
 
-def within_hunk(line: int, hunks: list[tuple[int, int]], tolerance: int = 3) -> bool:
-    return any(start - tolerance <= line <= end + tolerance for start, end in hunks)
-
-
-def snap_to_hunk(line: int, hunks: list[tuple[int, int]], tolerance: int = 3) -> int | None:
+def snap_to_hunk(line: int, hunks: list[tuple[int, int]], tolerance: int = HUNK_TOLERANCE) -> int | None:
     """Return a valid in-hunk line for a PR comment, or None if too far.
 
     If ``line`` falls inside a hunk, return it unchanged. If it is within

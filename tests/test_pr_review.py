@@ -20,7 +20,6 @@ from daydream.pr_review import (
     extract_anchors,
     parse_report,
     snap_to_hunk,
-    within_hunk,
 )
 
 REPORT_FIXTURE = """\
@@ -199,13 +198,6 @@ def test_parse_hunks() -> None:
         "+new3\n"
     )
     assert _parse_hunks(diff) == [(10, 14), (30, 31)]
-
-
-def test_within_hunk_tolerance() -> None:
-    hunks = [(10, 14)]
-    assert within_hunk(13, hunks)
-    assert within_hunk(16, hunks, tolerance=3)  # 14 + 2
-    assert not within_hunk(20, hunks, tolerance=3)
 
 
 def test_snap_to_hunk_inside_returns_unchanged() -> None:
