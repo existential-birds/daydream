@@ -476,6 +476,17 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
         # ------ Stage 5: optional fix gate (D-28, D-29) ------
         print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
         merged_report = target_dir / REVIEW_OUTPUT_FILE
+
+        # Recover from deep-dir artifact when the canonical file is absent
+        # (e.g. agent wrote to .daydream/deep/ but Python copy didn't run
+        # during a --start-at fix resume).
+        if not merged_report.exists():
+            from daydream.deep.artifacts import merged_report_path
+
+            deep_copy = merged_report_path(dd)
+            if deep_copy.exists():
+                merged_report.write_text(deep_copy.read_text())
+
         if not merged_report.exists():
             print_error(
                 console,

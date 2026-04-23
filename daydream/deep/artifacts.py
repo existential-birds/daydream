@@ -71,6 +71,16 @@ def dedup_candidates_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "dedup-candidates.json"
 
 
+def merged_report_path(deep_dir_path: Path) -> Path:
+    """Merged review report inside the deep artifact directory.
+
+    The merge agent writes here first (same directory as per-stack artifacts,
+    which avoids sandbox write restrictions). The orchestrator then copies the
+    result to ``target / REVIEW_OUTPUT_FILE`` for downstream consumers.
+    """
+    return deep_dir_path / "review-output.md"
+
+
 def per_stack_failures_path(deep_dir_path: Path) -> Path:
     """Per-stack agent failure summary ({stack_name: reason} JSON).
 
@@ -112,12 +122,16 @@ def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
         if not records:
             missing.append(deep_dir_path / "stack-*-records.json")
 
-    # Fix stage needs the merged report in target_dir (parent of .daydream, not deep_dir).
+    # Fix stage needs the merged report. Check both the canonical location
+    # (target_dir / .review-output.md) and the deep artifact copy
+    # (deep_dir / review-output.md) so resume works even when the agent
+    # could only write to the deep directory.
     if stage == "fix":
         target_dir = deep_dir_path.parent.parent
-        merged = target_dir / REVIEW_OUTPUT_FILE
-        if not merged.is_file():
-            missing.append(merged)
+        canonical = target_dir / REVIEW_OUTPUT_FILE
+        deep_copy = merged_report_path(deep_dir_path)
+        if not canonical.is_file() and not deep_copy.is_file():
+            missing.append(canonical)
 
     if missing:
         expected_block = "\n".join(f"  - {p}" for p in missing)

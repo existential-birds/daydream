@@ -1488,7 +1488,11 @@ async def phase_cross_stack_merge(
 ) -> Path:
     """Run the cross-stack merge agent and return the output-report path (D-23..D-27).
 
-    Writes the merged markdown report to ``cwd / REVIEW_OUTPUT_FILE`` (D-24/D-42).
+    The agent writes the report to ``.daydream/deep/review-output.md`` (same
+    directory as per-stack artifacts, which avoids sandbox write restrictions
+    that block dotfiles at the repo root). This function then copies the result
+    to ``cwd / REVIEW_OUTPUT_FILE`` for downstream consumers.
+
     Per D-38, never passes the ``agents`` kwarg (Codex parity).
 
     Args:
@@ -1507,18 +1511,26 @@ async def phase_cross_stack_merge(
         Path to the merged report at ``cwd / REVIEW_OUTPUT_FILE``.
 
     """
+    from daydream.deep.artifacts import deep_dir, merged_report_path
     from daydream.deep.prompts import build_merge_prompt
 
-    output_path = cwd / REVIEW_OUTPUT_FILE
+    canonical_path = cwd / REVIEW_OUTPUT_FILE
+    agent_output_path = merged_report_path(deep_dir(cwd))
     prompt = build_merge_prompt(
         per_stack_records_paths=per_stack_records_paths,
         intent_path=intent_path,
         alternatives_path=alternatives_path,
         dedup_candidates_path=dedup_candidates_path,
-        output_path=output_path,
+        output_path=agent_output_path,
         exploration_dir=exploration_dir,
         failed_stacks=failed_stacks,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     await run_agent(backend, cwd, prompt)
-    return output_path
+
+    # Copy from deep artifact dir to canonical location. The agent writes
+    # inside .daydream/deep/ where sandbox restrictions don't apply; Python
+    # handles the copy to cwd/.review-output.md.
+    if agent_output_path.exists():
+        canonical_path.write_text(agent_output_path.read_text())
+    return canonical_path
