@@ -84,10 +84,12 @@ def test_record_dedup_identical_descriptions() -> None:
         {"id": "1", "file": "cli/audit.ts", "line": 133, "description": desc},
         {"id": "2", "file": "cli/audit-storybook.ts", "line": 260, "description": desc},
     ]
-    pairs = build_record_dedup_candidates(records)
+    pairs = build_record_dedup_candidates(records, sources=["typescript", "typescript"])
     assert len(pairs) == 1
     assert pairs[0].record_a_id == "1"
     assert pairs[0].record_b_id == "2"
+    assert pairs[0].record_a_source == "typescript"
+    assert pairs[0].record_b_source == "typescript"
     assert pairs[0].similarity >= 0.5
 
 
@@ -97,7 +99,7 @@ def test_record_dedup_no_pair_for_different_descriptions() -> None:
         {"id": "1", "file": "api.py", "line": 10, "description": "SQL injection in login query"},
         {"id": "2", "file": "ui.tsx", "line": 50, "description": "Missing alt text on images"},
     ]
-    pairs = build_record_dedup_candidates(records)
+    pairs = build_record_dedup_candidates(records, sources=["python", "react"])
     assert pairs == []
 
 
@@ -107,16 +109,47 @@ def test_record_dedup_same_file_similar_description() -> None:
         {"id": "1", "file": "api.py", "line": 10, "description": "Report files overwritten on each viewport"},
         {"id": "2", "file": "api.py", "line": 80, "description": "Report files overwritten on each viewport iteration"},
     ]
-    pairs = build_record_dedup_candidates(records)
+    pairs = build_record_dedup_candidates(records, sources=["python", "python"])
     assert len(pairs) == 1
+    assert pairs[0].record_a_source == "python"
+    assert pairs[0].record_b_source == "python"
 
 
 def test_record_dedup_empty_records() -> None:
     """Empty input produces no pairs."""
-    assert build_record_dedup_candidates([]) == []
+    assert build_record_dedup_candidates([], sources=[]) == []
 
 
 def test_record_dedup_single_record() -> None:
     """A single record cannot form a pair."""
     records = [{"id": "1", "file": "api.py", "line": 1, "description": "Some issue"}]
-    assert build_record_dedup_candidates(records) == []
+    assert build_record_dedup_candidates(records, sources=["python"]) == []
+
+
+def test_record_dedup_source_defaults_to_empty_when_omitted() -> None:
+    """When sources is None, source fields default to empty string."""
+    desc = "CLI audit entry points share duplicated logic"
+    records = [
+        {"id": "1", "file": "cli/audit.ts", "line": 133, "description": desc},
+        {"id": "2", "file": "cli/audit-storybook.ts", "line": 260, "description": desc},
+    ]
+    pairs = build_record_dedup_candidates(records)
+    assert len(pairs) == 1
+    assert pairs[0].record_a_source == ""
+    assert pairs[0].record_b_source == ""
+
+
+def test_record_dedup_cross_stack_source_disambiguation() -> None:
+    """Records with the same ID from different stacks get distinct source fields."""
+    desc = "Missing input validation on user endpoint"
+    records = [
+        {"id": "1", "file": "api.py", "line": 10, "description": desc},
+        {"id": "1", "file": "routes.py", "line": 42, "description": desc},
+    ]
+    pairs = build_record_dedup_candidates(records, sources=["python", "react"])
+    assert len(pairs) == 1
+    assert pairs[0].record_a_id == "1"
+    assert pairs[0].record_b_id == "1"
+    assert pairs[0].record_a_source == "python"
+    assert pairs[0].record_b_source == "react"
+    assert pairs[0].similarity >= 0.5

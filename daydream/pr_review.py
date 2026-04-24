@@ -754,9 +754,11 @@ def _build_consolidated_prompt(classified: _ClassifiedIssues, pr: PRInfo) -> str
         f"1. gh api repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments\n"
         f"2. gh api repos/{pr.owner}/{pr.repo}/issues/{pr.number}/comments\n"
         "\n"
-        "For each comment: read the referenced file, verify the finding\n"
-        "against the current code, and fix it if valid. Skip false positives.\n"
-        "Commit all fixes when done."
+        "These endpoints return all comments on the PR. Focus on the most\n"
+        "recent review — ignore older review threads that have already been\n"
+        "addressed. For each comment: read the referenced file, verify the\n"
+        "finding against the current code, and fix it if valid. Skip false\n"
+        "positives. Commit all fixes when done."
     )
     return (
         "<details>\n"
