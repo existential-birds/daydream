@@ -363,10 +363,11 @@ def test_build_payload_shape(pr: PRInfo) -> None:
     assert payload["comments"] == classified.inline
 
     body = payload["body"]
-    # Template header with wizard emoji + daydream repo link.
+    # Title header.
+    assert "Code Review Summary" in body
+    # Footer has wizard emoji + daydream repo link.
     assert "🧙" in body
     assert pr_review.DAYDREAM_REPO_URL in body
-    assert "Review" in body
     # Mode label lives in collapsible review info now.
     assert "deep review" in body
     # Actionable count header.

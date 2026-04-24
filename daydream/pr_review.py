@@ -202,14 +202,18 @@ def parse_report(text: str) -> list[ParsedIssue]:
         # Find where this section ends (next "## " or EOF).
         rest = text[section_start:]
         next_section = _NEXT_SECTION.search(rest)
-        section_end = section_start + next_section.start() if next_section else len(text)
+        section_end = (
+            section_start + next_section.start() if next_section else len(text)
+        )
         section_text = text[section_start:section_end]
         section_is_xstack = header_match.start() == xstack_start
 
         matches = list(_ISSUE_HEAD.finditer(section_text))
         for i, m in enumerate(matches):
             body_start = m.end()
-            body_end = matches[i + 1].start() if i + 1 < len(matches) else len(section_text)
+            body_end = (
+                matches[i + 1].start() if i + 1 < len(matches) else len(section_text)
+            )
             body = section_text[body_start:body_end].strip()
             title = m.group("title").strip()
             is_xstack = section_is_xstack or title.lower().startswith("[cross-stack]")
@@ -291,13 +295,15 @@ def _run(
     cmd: list[str], cwd: Path, *, timeout: int = 15, input_bytes: bytes | None = None
 ) -> subprocess.CompletedProcess[bytes]:
     """Run a subprocess with bytes IO; all args hardcoded or derived from JSON."""
-    return subprocess.run(  # noqa: S603 - args are hardcoded or from parsed gh/git output
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        input=input_bytes,
-        timeout=timeout,
-        shell=False,
+    return (
+        subprocess.run(  # noqa: S603 - args are hardcoded or from parsed gh/git output
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            input=input_bytes,
+            timeout=timeout,
+            shell=False,
+        )
     )
 
 
@@ -399,9 +405,7 @@ def extract_anchors(issue: ParsedIssue) -> list[str]:
     return seen[:8]
 
 
-def resolve_line(
-    target_dir: Path, head_sha: str, issue: ParsedIssue
-) -> int | None:
+def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | None:
     """Resolve the true line in the head commit for an issue.
 
     Tries (in order):
@@ -524,7 +528,11 @@ def _gh_pr_diff_for_path(target_dir: Path, pr_number: int, path: str) -> str:
         if not block.startswith("diff --git "):
             continue
         header_line = block.split("\n", 1)[0]
-        if needle_a in header_line or header_line.endswith(f"b/{path}") or needle_b in header_line:
+        if (
+            needle_a in header_line
+            or header_line.endswith(f"b/{path}")
+            or needle_b in header_line
+        ):
             return block
     return ""
 
@@ -540,7 +548,9 @@ def _parse_hunks(diff_text: str) -> list[tuple[int, int]]:
     return hunks
 
 
-def snap_to_hunk(line: int, hunks: list[tuple[int, int]], tolerance: int = HUNK_TOLERANCE) -> int | None:
+def snap_to_hunk(
+    line: int, hunks: list[tuple[int, int]], tolerance: int = HUNK_TOLERANCE
+) -> int | None:
     """Return a valid in-hunk line for a PR comment, or None if too far.
 
     If ``line`` falls inside a hunk, return it unchanged. If it is within
@@ -693,7 +703,9 @@ def _format_body_section(body_only: list[ParsedIssue]) -> str:
     ]
     for filepath, file_issues in grouped.items():
         parts.append("<details>")
-        parts.append(f"<summary>{filepath} ({len(file_issues)})</summary><blockquote>\n")
+        parts.append(
+            f"<summary>{filepath} ({len(file_issues)})</summary><blockquote>\n"
+        )
         for i, issue in enumerate(file_issues):
             prefix = "[cross-stack] " if issue.is_cross_stack else ""
             emoji = _severity_emoji(issue.severity)
@@ -784,9 +796,11 @@ def build_payload(
     body_count = len(classified.body_only)
 
     body_chunks: list[str] = []
-    body_chunks.append(f"🧙 [Daydream]({DAYDREAM_REPO_URL}) Review")
+    body_chunks.append(f"Code Review Summary")
     body_chunks.append(f"**Actionable comments posted: {inline_count}**")
-    body_chunks.append(f"{inline_count} inline comment(s), {body_count} non-inline finding(s).")
+    body_chunks.append(
+        f"{inline_count} inline comment(s), {body_count} non-inline finding(s)."
+    )
 
     body_section = _format_body_section(classified.body_only)
     if body_section:
@@ -848,7 +862,9 @@ async def _post(
 
     classified = classify(target_dir, pr, issues)
     if not classified.inline and not classified.body_only:
-        print_info(console, "No postable issues after classification; skipping PR post.")
+        print_info(
+            console, "No postable issues after classification; skipping PR post."
+        )
         return
 
     inline_files = sorted({c["path"] for c in classified.inline})
@@ -888,9 +904,7 @@ async def _post(
     print_success(console, f"Posted review: {review_url}")
 
 
-def _submit_review(
-    target_dir: Path, pr: PRInfo, payload_path: Path
-) -> str | None:
+def _submit_review(target_dir: Path, pr: PRInfo, payload_path: Path) -> str | None:
     """POST the review payload via `gh api`. Returns html_url or None on failure."""
     try:
         r = _run(
