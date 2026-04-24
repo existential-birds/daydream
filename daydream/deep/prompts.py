@@ -211,7 +211,11 @@ def build_merge_prompt(
         "abbreviated paths will fail to post as inline comments.\n"
         "  - Per-stack human-readable context may appear above ## Issues under "
         "## Per-Stack Context, but all actionable issues live in the two lists above.\n"
-        "  - Do not invent issues not supported by the source records."
+        "  - Do not invent issues not supported by the source records.\n"
+        "  - When citing source records in rationale text, write "
+        "`(Sources: python-records item 6, alternatives item 4)` — "
+        "NEVER use the `#N` notation (e.g. `#6`). GitHub auto-links "
+        "`#N` to repository issues/PRs, which creates misleading links."
     )
     parts.append(f"Write the complete report to {output_path}.")
     return "\n\n".join(parts)
