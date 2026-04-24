@@ -1516,6 +1516,12 @@ async def phase_cross_stack_merge(
 
     canonical_path = cwd / REVIEW_OUTPUT_FILE
     agent_output_path = merged_report_path(deep_dir(cwd))
+
+    # Clear stale outputs so a failed merge agent can't leave behind
+    # outdated content that downstream stages would silently consume.
+    canonical_path.unlink(missing_ok=True)
+    agent_output_path.unlink(missing_ok=True)
+
     prompt = build_merge_prompt(
         per_stack_records_paths=per_stack_records_paths,
         intent_path=intent_path,
@@ -1531,6 +1537,7 @@ async def phase_cross_stack_merge(
     # Copy from deep artifact dir to canonical location. The agent writes
     # inside .daydream/deep/ where sandbox restrictions don't apply; Python
     # handles the copy to cwd/.review-output.md.
-    if agent_output_path.exists():
-        canonical_path.write_text(agent_output_path.read_text())
+    if not agent_output_path.is_file():
+        raise FileNotFoundError(f"Expected merged report at {agent_output_path}")
+    canonical_path.write_text(agent_output_path.read_text())
     return canonical_path

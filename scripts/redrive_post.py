@@ -30,23 +30,29 @@ def _load_artifacts(deep_dir: Path) -> tuple[list[dict], list[dict], list[dict]]
     return alts, records, dedup
 
 
+def _record_key(record: dict) -> tuple[str, int]:
+    """Composite key for a per-stack record (file + id)."""
+    return str(record["file"]), int(record["id"])
+
+
 def _find_overlaps(
     alts: list[dict], records: list[dict]
-) -> tuple[dict[int, list[dict]], set[int]]:
+) -> tuple[dict[int, list[dict]], set[tuple[str, int]]]:
     """Match alternatives to generic records by shared file paths."""
     by_file: dict[str, list[dict]] = {}
     for r in records:
         by_file.setdefault(r["file"], []).append(r)
 
     alt_matches: dict[int, list[dict]] = {}
-    consumed: set[int] = set()
+    consumed: set[tuple[str, int]] = set()
     for alt in alts:
         matches: list[dict] = []
         for f in alt.get("files", []):
             for r in by_file.get(f, []):
-                if r["id"] not in consumed:
+                key = _record_key(r)
+                if key not in consumed:
                     matches.append(r)
-                    consumed.add(r["id"])
+                    consumed.add(key)
         if matches:
             alt_matches[alt["id"]] = matches
 
@@ -119,7 +125,7 @@ def build_report(
             lines.append(f"{num}. [{loc}] {title}\n{body}\n")
 
     for r in records:
-        if r["id"] in consumed_ids:
+        if _record_key(r) in consumed_ids:
             continue
         num += 1
         loc = f"{r['file']}:{r['line']}" if r.get("line") else r["file"]
