@@ -86,6 +86,11 @@ def test_inline_body_has_footer_and_tags() -> None:
     assert "confidence: `HIGH`" in body
     assert body.rstrip().endswith("</sub>")
     assert pr_review.DAYDREAM_REPO_URL in body
+    # Severity emoji prefix.
+    assert "⚠️" in body
+    # Collapsible AI agent prompt.
+    assert "🔮 Prompt for AI Agents" in body
+    assert "<details>" in body
 
 
 def test_parse_report_handles_no_issues_section() -> None:
@@ -361,13 +366,24 @@ def test_build_payload_shape(pr: PRInfo) -> None:
     # Template header with wizard emoji + daydream repo link.
     assert "🧙" in body
     assert pr_review.DAYDREAM_REPO_URL in body
+    assert "Review" in body
+    # Mode label lives in collapsible review info now.
     assert "deep review" in body
-    # Counts and breakdowns.
+    # Actionable count header.
+    assert "Actionable comments posted: 1" in body
+    # Counts line.
     assert "1 inline comment(s), 1 non-inline finding(s)" in body
+    # Severity/confidence in collapsible review info section.
     assert "**Severity:**" in body and "1 high" in body and "1 low" in body
     assert "**Confidence:**" in body and "1 HIGH" in body and "1 MEDIUM" in body
-    # Non-inline section + footer.
+    # Non-inline section grouped by file in <details>.
     assert "Non-inline findings" in body
+    assert "b.py" in body
+    # Consolidated AI agent prompt.
+    assert "🔮 Prompt for all review comments" in body
+    # Review info collapsible.
+    assert "ℹ️ Review info" in body
+    # Footer.
     assert body.rstrip().endswith("</sub>")
 
 

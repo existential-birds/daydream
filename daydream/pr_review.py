@@ -614,11 +614,31 @@ def classify(
     return out
 
 
+_SEVERITY_EMOJI: dict[str, str] = {
+    "high": "⚠️",
+    "medium": "🔵",
+    "low": "💡",
+}
+
+
+def _severity_emoji(severity: str | None) -> str:
+    """Map a severity level to an emoji prefix."""
+    if not severity:
+        return ""
+    return _SEVERITY_EMOJI.get(severity.lower(), "")
+
+
 def _format_inline_body(issue: ParsedIssue) -> str:
-    header = f"**{issue.title}**" if issue.title else ""
+    emoji = _severity_emoji(issue.severity)
+    title_prefix = f"{emoji} " if emoji else ""
+    header = f"{title_prefix}**{issue.title}**" if issue.title else ""
     tags = _format_tag_line(issue)
-    parts = [p for p in (header, tags, issue.body) if p]
-    return "\n\n".join(parts + [DAYDREAM_FOOTER]).strip()
+    header_line = f"{header} | {tags}" if header and tags else header or tags
+    parts = [p for p in (header_line, issue.body) if p]
+    agent_prompt = _build_agent_prompt(issue)
+    parts.append(agent_prompt)
+    parts.append(DAYDREAM_FOOTER)
+    return "\n\n".join(parts).strip()
 
 
 def _format_tag_line(issue: ParsedIssue) -> str:
@@ -631,17 +651,65 @@ def _format_tag_line(issue: ParsedIssue) -> str:
     return " · ".join(bits)
 
 
+def _build_agent_prompt(issue: ParsedIssue) -> str:
+    """Build a collapsible AI-agent-friendly prompt for a single issue."""
+    loc = f"`{issue.path}`"
+    if issue.line:
+        loc += f" around line {issue.line}"
+    # Combine title and body into a condensed instruction.
+    instruction = issue.title
+    if issue.body:
+        # Take the first meaningful line of the body as additional context.
+        first_line = issue.body.strip().split("\n")[0].strip()
+        if first_line and first_line != issue.title:
+            instruction = f"{instruction}: {first_line}" if instruction else first_line
+    return (
+        "<details>\n"
+        "<summary>🔮 Prompt for AI Agents</summary>\n\n"
+        "```\n"
+        "Verify each finding against the current code and only fix it if needed.\n\n"
+        f"In {loc}, {instruction}\n"
+        "```\n\n"
+        "</details>"
+    )
+
+
+def _group_by_file(issues: list[ParsedIssue]) -> dict[str, list[ParsedIssue]]:
+    """Group issues by file path, preserving insertion order."""
+    groups: dict[str, list[ParsedIssue]] = {}
+    for issue in issues:
+        groups.setdefault(issue.path, []).append(issue)
+    return groups
+
+
 def _format_body_section(body_only: list[ParsedIssue]) -> str:
     if not body_only:
         return ""
-    lines = ["## Non-inline findings\n"]
-    for issue in body_only:
-        prefix = "[cross-stack] " if issue.is_cross_stack else ""
-        loc = f"`{issue.path}`" + (f":{issue.line}" if issue.line else "")
-        tags = _format_tag_line(issue)
-        tag_block = f"\n{tags}\n" if tags else ""
-        lines.append(f"### {prefix}{issue.title} ({loc})\n{tag_block}\n{issue.body}\n")
-    return "\n".join(lines)
+    grouped = _group_by_file(body_only)
+    total = len(body_only)
+    parts: list[str] = [
+        "<details>",
+        f"<summary>📋 Non-inline findings ({total})</summary><blockquote>\n",
+    ]
+    for filepath, file_issues in grouped.items():
+        parts.append("<details>")
+        parts.append(f"<summary>{filepath} ({len(file_issues)})</summary><blockquote>\n")
+        for i, issue in enumerate(file_issues):
+            prefix = "[cross-stack] " if issue.is_cross_stack else ""
+            emoji = _severity_emoji(issue.severity)
+            title_prefix = f"{emoji} " if emoji else ""
+            tags = _format_tag_line(issue)
+            header = f"{title_prefix}**{prefix}{issue.title}**"
+            header_line = f"{header} | {tags}" if tags else header
+            parts.append(header_line)
+            if issue.body:
+                parts.append(f"\n{issue.body}\n")
+            parts.append(_build_agent_prompt(issue))
+            if i < len(file_issues) - 1:
+                parts.append("\n---\n")
+        parts.append("\n</blockquote></details>")
+    parts.append("\n</blockquote></details>")
+    return "\n".join(parts)
 
 
 def _count_labels(
@@ -661,49 +729,93 @@ def _count_labels(
     return out
 
 
+def _build_consolidated_prompt(classified: _ClassifiedIssues) -> str:
+    """Build a single collapsible prompt block summarising all review comments."""
+    lines: list[str] = [
+        "Verify each finding against the current code and only fix it if needed.",
+        "",
+    ]
+    # Inline comments.
+    if classified.inline_issues:
+        lines.append("Inline comments:")
+        grouped = _group_by_file(classified.inline_issues)
+        for filepath, issues in grouped.items():
+            lines.append(f"In `{filepath}`:")
+            for issue in issues:
+                loc = f"Around line {issue.line}: " if issue.line else ""
+                lines.append(f"- {loc}{issue.title}")
+            lines.append("")
+    # Non-inline findings.
+    if classified.body_only:
+        lines.append("Non-inline findings:")
+        grouped = _group_by_file(classified.body_only)
+        for filepath, issues in grouped.items():
+            lines.append(f"In `{filepath}`:")
+            for issue in issues:
+                lines.append(f"- {issue.title}")
+            lines.append("")
+    prompt_body = "\n".join(lines).strip()
+    return (
+        "<details>\n"
+        "<summary>🔮 Prompt for all review comments with AI agents</summary>\n\n"
+        f"```\n{prompt_body}\n```\n\n"
+        "</details>"
+    )
+
+
 def build_payload(
     pr: PRInfo, mode_label: str, classified: _ClassifiedIssues
 ) -> dict[str, Any]:
     """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
 
-    The review body follows a fixed template so every run looks the same:
-        🧙 Daydream <mode_label> review
-        N inline, M non-inline
-        Severity / Confidence breakdowns (when known)
-        Non-inline findings (when any)
-        Repo link footer
+    The review body uses collapsible sections so large reviews stay readable:
+        🧙 Daydream Review
+        Actionable comments posted: N
+        Counts summary line
+        <details> Non-inline findings grouped by file
+        <details> Consolidated AI agent prompt
+        <details> Review info (severity/confidence breakdown)
+        Footer
     """
     all_issues_with_inline_meta = [*classified.body_only]
-    # Inline comments live as dicts in classified.inline; we still want
-    # their confidence/severity in the summary counts, so peek at the
-    # original ParsedIssue list by cross-referencing path+line is brittle.
-    # Instead, carry counts we already have from body_only plus inline
-    # metadata we stamp at classify time via the ParsedIssue objects.
-    # (See classify: we store the original issue on _ClassifiedIssues.)
     all_issues_with_inline_meta.extend(classified.inline_issues)
 
     inline_count = len(classified.inline)
     body_count = len(classified.body_only)
 
     body_chunks: list[str] = []
-    body_chunks.append(f"🧙 [Daydream]({DAYDREAM_REPO_URL}) {mode_label} review")
+    body_chunks.append(f"🧙 [Daydream]({DAYDREAM_REPO_URL}) Review")
+    body_chunks.append(f"**Actionable comments posted: {inline_count}**")
     body_chunks.append(f"{inline_count} inline comment(s), {body_count} non-inline finding(s).")
-
-    severity_parts = _count_labels(
-        all_issues_with_inline_meta, "severity", ("high", "medium", "low")
-    )
-    if severity_parts:
-        body_chunks.append("**Severity:** " + ", ".join(severity_parts))
-
-    confidence_parts = _count_labels(
-        all_issues_with_inline_meta, "confidence", ("HIGH", "MEDIUM", "LOW")
-    )
-    if confidence_parts:
-        body_chunks.append("**Confidence:** " + ", ".join(confidence_parts))
 
     body_section = _format_body_section(classified.body_only)
     if body_section:
         body_chunks.append(body_section)
+
+    # Consolidated AI agent prompt.
+    if classified.inline_issues or classified.body_only:
+        body_chunks.append(_build_consolidated_prompt(classified))
+
+    # Collapsible review info with severity/confidence breakdown.
+    info_lines: list[str] = []
+    info_lines.append(f"- **Mode:** {mode_label}")
+    severity_parts = _count_labels(
+        all_issues_with_inline_meta, "severity", ("high", "medium", "low")
+    )
+    if severity_parts:
+        info_lines.append("- **Severity:** " + ", ".join(severity_parts))
+    confidence_parts = _count_labels(
+        all_issues_with_inline_meta, "confidence", ("HIGH", "MEDIUM", "LOW")
+    )
+    if confidence_parts:
+        info_lines.append("- **Confidence:** " + ", ".join(confidence_parts))
+    review_info = "\n".join(info_lines)
+    body_chunks.append(
+        "<details>\n"
+        "<summary>ℹ️ Review info</summary>\n\n"
+        f"{review_info}\n\n"
+        "</details>"
+    )
 
     body_chunks.append(DAYDREAM_FOOTER)
 
