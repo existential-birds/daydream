@@ -787,7 +787,7 @@ def build_payload(
     body_count = len(classified.body_only)
 
     body_chunks: list[str] = []
-    body_chunks.append(f"Code Review Summary")
+    body_chunks.append("Code Review Summary")
     body_chunks.append(f"**Actionable comments posted: {inline_count}**")
     body_chunks.append(
         f"{inline_count} inline comment(s), {body_count} non-inline finding(s)."
