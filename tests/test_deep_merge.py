@@ -93,6 +93,10 @@ class _RecordingBackend:
     ):
         self.prompts.append(prompt)
         self.agents_seen.append(agents)
+        # Write the deep artifact so phase_cross_stack_merge can copy it.
+        deep_out = cwd / ".daydream" / "deep" / "review-output.md"
+        deep_out.parent.mkdir(parents=True, exist_ok=True)
+        deep_out.write_text("merged")
         yield TextEvent(text="merged")
         yield ResultEvent(structured_output=None, continuation=None)
 

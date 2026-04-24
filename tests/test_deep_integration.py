@@ -84,7 +84,11 @@ class _DeepMockBackend:
         # Cross-stack merge prompt contains "cross-stack merge agent".
         if "cross-stack merge agent" in pl:
             self.calls.append("merge")
-            (self.target_dir / REVIEW_OUTPUT_FILE).write_text(
+            # Write to the deep artifact path (matching real agent behavior);
+            # the caller (phase_cross_stack_merge) copies to canonical.
+            deep = self.target_dir / ".daydream" / "deep" / "review-output.md"
+            deep.parent.mkdir(parents=True, exist_ok=True)
+            deep.write_text(
                 "# Review\n\n## Issues\n\n## Cross-Stack Issues\n"
             )
             yield TextEvent(text="")
