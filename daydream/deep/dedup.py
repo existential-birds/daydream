@@ -163,7 +163,7 @@ def build_dedup_candidates(
 
 def build_record_dedup_candidates(
     records: list[dict[str, Any]],
-    sources: list[str] | None = None,
+    sources: list[str],
 ) -> list[RecordDuplicatePair]:
     """Find per-stack records that likely describe the same concern.
 
@@ -175,14 +175,12 @@ def build_record_dedup_candidates(
 
     Args:
         records: Parsed per-stack records matching FEEDBACK_SCHEMA.
-        sources: Optional parallel list where ``sources[i]`` is the
-            originating stack name (or records filename) for ``records[i]``.
-            When ``None``, all sources default to ``""``.
+        sources: Parallel list where ``sources[i]`` is the originating
+            stack name (or records filename) for ``records[i]``.
 
     Returns:
         Deterministically-ordered list of ``RecordDuplicatePair`` instances.
     """
-    resolved_sources = sources if sources is not None else [""] * len(records)
     pairs: list[RecordDuplicatePair] = []
     n = len(records)
     for i in range(n):
@@ -190,7 +188,7 @@ def build_record_dedup_candidates(
         a_id = str(r_a.get("id", ""))
         a_file = str(r_a.get("file", ""))
         a_desc = str(r_a.get("description", ""))
-        a_source = resolved_sources[i]
+        a_source = sources[i]
         a_bigrams = _bigrams(_normalize_title(a_desc))
         if not a_desc or not a_bigrams:
             continue
@@ -212,7 +210,7 @@ def build_record_dedup_candidates(
                         record_b_id=b_id,
                         record_b_file=str(r_b.get("file", "")),
                         record_b_description=b_desc,
-                        record_b_source=resolved_sources[j],
+                        record_b_source=sources[j],
                         similarity=sim,
                     )
                 )

@@ -126,18 +126,6 @@ def test_record_dedup_single_record() -> None:
     assert build_record_dedup_candidates(records, sources=["python"]) == []
 
 
-def test_record_dedup_source_defaults_to_empty_when_omitted() -> None:
-    """When sources is None, source fields default to empty string."""
-    desc = "CLI audit entry points share duplicated logic"
-    records = [
-        {"id": "1", "file": "cli/audit.ts", "line": 133, "description": desc},
-        {"id": "2", "file": "cli/audit-storybook.ts", "line": 260, "description": desc},
-    ]
-    pairs = build_record_dedup_candidates(records)
-    assert len(pairs) == 1
-    assert pairs[0].record_a_source == ""
-    assert pairs[0].record_b_source == ""
-
 
 def test_record_dedup_cross_stack_source_disambiguation() -> None:
     """Records with the same ID from different stacks get distinct source fields."""
