@@ -37,7 +37,7 @@ from daydream.deep.artifacts import (
 from daydream.deep.artifacts import (
     intent_path as _intent_path,
 )
-from daydream.deep.dedup import build_dedup_candidates
+from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.phases import (
     phase_alternative_review,
@@ -456,9 +456,16 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                 json.loads(alts_p.read_text()) if alts_p.exists() else []
             )
             pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
+            record_pairs = build_record_dedup_candidates(all_records)
             dedup_p = dedup_candidates_path(dd)
             dedup_p.write_text(
-                json.dumps([_candidate_pair_to_json(p) for p in pairs], indent=2)
+                json.dumps(
+                    {
+                        "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
+                        "record_duplicate_pairs": [_candidate_pair_to_json(p) for p in record_pairs],
+                    },
+                    indent=2,
+                )
             )
 
             # Cross-stack merge (D-23..D-26).

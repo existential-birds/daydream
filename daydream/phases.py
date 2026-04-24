@@ -261,7 +261,16 @@ def _confidence_and_convention_instructions() -> str:
         "- State whether the operation is critical-path or best-effort\n"
         "- If best-effort, explain why propagation would be better than logging\n"
         "- If you cannot articulate why the caller benefits from receiving the error,\n"
-        "  DROP the finding"
+        "  DROP the finding\n\n"
+        "## Refactoring Recommendations\n\n"
+        "Before recommending extraction or deduplication (e.g. 'extract a shared\n"
+        "helper', 'consolidate duplicated logic'), check the same directory for\n"
+        "existing shared modules (shared.ts, utils.ts, helpers.py, common.go, etc.).\n"
+        "If shared utilities already exist, the author likely made a deliberate\n"
+        "factoring choice. Refactoring recommendations without evidence that shared\n"
+        "code doesn't already exist should be MEDIUM confidence at most. Focus on\n"
+        "concrete sub-findings (bugs, correctness issues) rather than structural\n"
+        "opinions about code organization."
     )
 
 
