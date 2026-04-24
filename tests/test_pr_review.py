@@ -380,8 +380,10 @@ def test_build_payload_shape(pr: PRInfo) -> None:
     # Non-inline section grouped by file in <details>.
     assert "Non-inline findings" in body
     assert "b.py" in body
-    # Consolidated AI agent prompt.
+    # Consolidated AI agent prompt references fetch commands with PR details.
     assert "🔮 Prompt for all review comments" in body
+    assert "/beagle-core:fetch-pr-feedback --pr 42" in body
+    assert "repos/acme/widgets/pulls/42/comments" in body
     # Review info collapsible.
     assert "ℹ️ Review info" in body
     # Footer.

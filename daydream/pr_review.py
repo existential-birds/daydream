@@ -741,32 +741,23 @@ def _count_labels(
     return out
 
 
-def _build_consolidated_prompt(classified: _ClassifiedIssues) -> str:
-    """Build a single collapsible prompt block summarising all review comments."""
-    lines: list[str] = [
-        "Verify each finding against the current code and only fix it if needed.",
-        "",
-    ]
-    # Inline comments.
-    if classified.inline_issues:
-        lines.append("Inline comments:")
-        grouped = _group_by_file(classified.inline_issues)
-        for filepath, issues in grouped.items():
-            lines.append(f"In `{filepath}`:")
-            for issue in issues:
-                loc = f"Around line {issue.line}: " if issue.line else ""
-                lines.append(f"- {loc}{issue.title}")
-            lines.append("")
-    # Non-inline findings.
-    if classified.body_only:
-        lines.append("Non-inline findings:")
-        grouped = _group_by_file(classified.body_only)
-        for filepath, issues in grouped.items():
-            lines.append(f"In `{filepath}`:")
-            for issue in issues:
-                lines.append(f"- {issue.title}")
-            lines.append("")
-    prompt_body = "\n".join(lines).strip()
+def _build_consolidated_prompt(classified: _ClassifiedIssues, pr: PRInfo) -> str:
+    """Build a single collapsible prompt block that tells AI agents to fetch and fix review comments."""
+    total = len(classified.inline_issues) + len(classified.body_only)
+    prompt_body = (
+        f"Fix the {total} review comment(s) posted on this PR.\n"
+        "\n"
+        "If the /beagle-core:fetch-pr-feedback skill is available, run:\n"
+        f"/beagle-core:fetch-pr-feedback --pr {pr.number}\n"
+        "\n"
+        "Otherwise, fetch the comments manually:\n"
+        f"1. gh api repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments\n"
+        f"2. gh api repos/{pr.owner}/{pr.repo}/issues/{pr.number}/comments\n"
+        "\n"
+        "For each comment: read the referenced file, verify the finding\n"
+        "against the current code, and fix it if valid. Skip false positives.\n"
+        "Commit all fixes when done."
+    )
     return (
         "<details>\n"
         "<summary>🔮 Prompt for all review comments with AI agents</summary>\n\n"
@@ -808,7 +799,7 @@ def build_payload(
 
     # Consolidated AI agent prompt.
     if classified.inline_issues or classified.body_only:
-        body_chunks.append(_build_consolidated_prompt(classified))
+        body_chunks.append(_build_consolidated_prompt(classified, pr))
 
     # Collapsible review info with severity/confidence breakdown.
     info_lines: list[str] = []
