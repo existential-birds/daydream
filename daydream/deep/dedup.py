@@ -180,7 +180,12 @@ def build_record_dedup_candidates(
 
     Returns:
         Deterministically-ordered list of ``RecordDuplicatePair`` instances.
+
+    Raises:
+        ValueError: If ``sources`` is not parallel to ``records``.
     """
+    if len(sources) != len(records):
+        raise ValueError("sources must contain exactly one entry per record")
     pairs: list[RecordDuplicatePair] = []
     n = len(records)
     for i in range(n):

@@ -6,6 +6,8 @@ finding share at least one file AND have normalized-title bigram Jaccard
 similarity >= 0.5.
 """
 
+import pytest
+
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 
 
@@ -125,6 +127,16 @@ def test_record_dedup_single_record() -> None:
     records = [{"id": "1", "file": "api.py", "line": 1, "description": "Some issue"}]
     assert build_record_dedup_candidates(records, sources=["python"]) == []
 
+
+
+def test_record_dedup_mismatched_sources_raises() -> None:
+    """Mismatched sources/records lengths raise ValueError."""
+    records = [
+        {"id": "1", "file": "api.py", "line": 1, "description": "Issue one"},
+        {"id": "2", "file": "api.py", "line": 2, "description": "Issue two"},
+    ]
+    with pytest.raises(ValueError, match="sources must contain exactly one entry per record"):
+        build_record_dedup_candidates(records, sources=["python"])
 
 
 def test_record_dedup_cross_stack_source_disambiguation() -> None:
