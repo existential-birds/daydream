@@ -7,7 +7,7 @@
 
 ## Phases
 
-- [ ] **Phase 1: Vendor ATIF Foundation** - Vendor Harbor's trajectory models + validator + golden fixtures so the rest of the migration has a typed, validated substrate without the supply-chain risk of a runtime Harbor dep
+- [x] **Phase 1: Vendor ATIF Foundation** - Vendor Harbor's trajectory models + validator + golden fixtures so the rest of the migration has a typed, validated substrate without the supply-chain risk of a runtime Harbor dep _(completed 2026-04-26)_
 - [ ] **Phase 2: Recorder Core + Event Enrichment + Mapping** - Greenfield `daydream/trajectory.py` recorder with ContextVar propagation, plus `AgentEvent` enrichment (timestamp, MetricsEvent, Claude token extraction) and event-to-ATIF mapping wired into `run_agent()`
 - [ ] **Phase 3: Subagent Wiring (Parallel + Continuation)** - Parallel `anyio` task groups (`phase_fix_parallel`, deep mode, exploration pre-scan) emit sibling trajectory files linked via `subagent_trajectory_ref`; continuations append to the same trajectory
 - [ ] **Phase 4: Cutover + Redaction + CLI Surface** - Hard removal of `_log_debug` and all 15+ call sites (AST-verified, including the lazy-import gotcha in `codex.py:37`), redaction policy implemented and applied to all trajectory content surfaces, `--debug` removed and `--trajectory <path>` added
@@ -83,7 +83,7 @@
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Vendor ATIF Foundation | 0/4 | Planned | - |
+| 1. Vendor ATIF Foundation | 4/4 | Complete | 2026-04-26 |
 | 2. Recorder Core + Event Enrichment + Mapping | 0/0 | Not started | - |
 | 3. Subagent Wiring (Parallel + Continuation) | 0/0 | Not started | - |
 | 4. Cutover + Redaction + CLI Surface | 0/0 | Not started | - |
