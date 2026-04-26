@@ -62,8 +62,5 @@ logs/
 .DS_Store
 Thumbs.db
 
-# GSD planning artifacts
-.planning/
-
 # Daydream output
 .review-output.md
