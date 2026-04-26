@@ -1,0 +1,21 @@
+{
+  "schema_version": "ATIF-v1.6",
+  "session_id": "test-non-sequential-step-id",
+  "agent": {
+    "name": "test-agent",
+    "version": "0.0.0",
+    "model_name": "test-model"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "First user message."
+    },
+    {
+      "step_id": 3,
+      "source": "agent",
+      "message": "Skipped step_id=2 deliberately to exercise the validator's sequentiality check."
+    }
+  ]
+}
