@@ -141,17 +141,93 @@ Deferred to a future milestone. Tracked but not in current roadmap.
 
 ## Traceability
 
-Empty initially — populated by the roadmapper.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (TBD) | (TBD) | Pending |
+| VEND-01 | Phase 1 | Pending |
+| VEND-02 | Phase 1 | Pending |
+| VEND-03 | Phase 1 | Pending |
+| VEND-04 | Phase 1 | Pending |
+| VEND-05 | Phase 1 | Pending |
+| CORE-01 | Phase 2 | Pending |
+| CORE-02 | Phase 2 | Pending |
+| CORE-03 | Phase 2 | Pending |
+| CORE-04 | Phase 2 | Pending |
+| CORE-05 | Phase 2 | Pending |
+| CORE-06 | Phase 2 | Pending |
+| CORE-07 | Phase 2 | Pending |
+| CORE-08 | Phase 2 | Pending |
+| CORE-09 | Phase 2 | Pending |
+| CORE-10 | Phase 2 | Pending |
+| EVNT-01 | Phase 2 | Pending |
+| EVNT-02 | Phase 2 | Pending |
+| EVNT-03 | Phase 2 | Pending |
+| EVNT-04 | Phase 2 | Pending |
+| EVNT-05 | Phase 2 | Pending |
+| EVNT-06 | Phase 2 | Pending |
+| EVNT-07 | Phase 2 | Pending |
+| MAP-01 | Phase 2 | Pending |
+| MAP-02 | Phase 2 | Pending |
+| MAP-03 | Phase 2 | Pending |
+| MAP-04 | Phase 2 | Pending |
+| MAP-05 | Phase 2 | Pending |
+| MAP-06 | Phase 2 | Pending |
+| MAP-07 | Phase 2 | Pending |
+| MAP-08 | Phase 2 | Pending |
+| MAP-09 | Phase 2 | Pending |
+| SUBA-01 | Phase 3 | Pending |
+| SUBA-02 | Phase 3 | Pending |
+| SUBA-03 | Phase 3 | Pending |
+| SUBA-04 | Phase 3 | Pending |
+| SUBA-05 | Phase 3 | Pending |
+| SUBA-06 | Phase 3 | Pending |
+| SUBA-07 | Phase 3 | Pending |
+| SUBA-08 | Phase 3 | Pending |
+| SUBA-09 | Phase 3 | Pending |
+| REDA-01 | Phase 4 | Pending |
+| REDA-02 | Phase 4 | Pending |
+| REDA-03 | Phase 4 | Pending |
+| REDA-04 | Phase 4 | Pending |
+| REDA-05 | Phase 4 | Pending |
+| REDA-06 | Phase 4 | Pending |
+| CUT-01 | Phase 4 | Pending |
+| CUT-02 | Phase 4 | Pending |
+| CUT-03 | Phase 4 | Pending |
+| CUT-04 | Phase 4 | Pending |
+| CUT-05 | Phase 4 | Pending |
+| CUT-06 | Phase 4 | Pending |
+| CUT-07 | Phase 4 | Pending |
+| CUT-08 | Phase 4 | Pending |
+| CLI-01 | Phase 4 | Pending |
+| CLI-02 | Phase 4 | Pending |
+| CLI-03 | Phase 4 | Pending |
+| CLI-04 | Phase 4 | Pending |
+| CLI-05 | Phase 4 | Pending |
+| TEST-01 | Phase 5 | Pending |
+| TEST-02 | Phase 5 | Pending |
+| TEST-03 | Phase 5 | Pending |
+| TEST-04 | Phase 5 | Pending |
+| TEST-05 | Phase 5 | Pending |
+| TEST-06 | Phase 5 | Pending |
+| TEST-07 | Phase 5 | Pending |
+| DOCS-01 | Phase 5 | Pending |
+| DOCS-02 | Phase 5 | Pending |
+| DOCS-03 | Phase 5 | Pending |
+| DOCS-04 | Phase 5 | Pending |
+| DOCS-05 | Phase 5 | Pending |
+| DOCS-06 | Phase 5 | Pending |
 
 **Coverage:**
 - v1 requirements: 72 total (5 VEND + 10 CORE + 7 EVNT + 9 MAP + 9 SUBA + 6 REDA + 8 CUT + 5 CLI + 7 TEST + 6 DOCS)
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 72 ⚠️ — to be resolved by roadmapper
+- Mapped to phases: 72 (100%) ✓
+- Unmapped: 0
+
+**Phase distribution:**
+- Phase 1 (Vendor ATIF Foundation): 5 reqs (VEND)
+- Phase 2 (Recorder Core + Event Enrichment + Mapping): 26 reqs (CORE + EVNT + MAP)
+- Phase 3 (Subagent Wiring): 9 reqs (SUBA)
+- Phase 4 (Cutover + Redaction + CLI Surface): 19 reqs (REDA + CUT + CLI)
+- Phase 5 (Test Hardening + Documentation): 13 reqs (TEST + DOCS)
 
 ---
 *Requirements defined: 2026-04-26*
-*Last updated: 2026-04-26 after research synthesis*
+*Traceability mapped: 2026-04-26 by roadmapper agent*
