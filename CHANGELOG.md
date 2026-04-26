@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-04-26
+
+### Changed
+
+- **pr-review:** Restyle inline GitHub PR reviews with severity emoji prefixes, per-file collapsible `<details>` sections, and 🔮 AI agent prompts under a "Code Review Summary" header ([#52](https://github.com/existential-birds/daydream/pull/52))
+
+  Aligns the posted review with CodeRabbit-style formatting so findings are easier to skim and the consolidated agent prompt is more actionable.
+
+- **pr-review:** Replace the static "here are all findings" AI agent prompt with a fetch-and-fix workflow ([#52](https://github.com/existential-birds/daydream/pull/52))
+
+  The consolidated prompt now instructs the PR author's agent to fetch the latest review comments via `/beagle-core:fetch-pr-feedback` (or `gh api`), verify each against the current code, and only fix valid ones — narrowing to the most recent review instead of all historical comments.
+
+- **deep:** Cap deep-review exploration specialists at 15 turns ([#50](https://github.com/existential-birds/daydream/pull/50))
+
+  Threads a new `max_turns` parameter through the `Backend` protocol, `ClaudeBackend`, `CodexBackend`, and `run_agent()` so callers can bound agent turn count. Prevents context blowup on large repos during the pre-scan stage.
+
+### Fixed
+
+- **deep:** Stop target-repo `.claude/settings.json` from blocking agent file writes ([#52](https://github.com/existential-birds/daydream/pull/52))
+
+  Daydream agents no longer inherit `setting_sources=["project", "local"]` from the target repo, so restrictive permission rules in the project under review can't deny `Write`/`Edit` calls. An explicit `allowed_tools` whitelist is added as a belt-and-suspenders measure. `CLAUDE.md` is still loaded from cwd, so reviews retain project context.
+
+- **deep:** Write the merge report to `.daydream/deep/` to dodge sandbox dotfile blocks ([#51](https://github.com/existential-birds/daydream/pull/51))
+
+  The merge agent now writes `.daydream/deep/review-output.md` (the same directory where per-stack agents already write successfully), and Python copies the result to the canonical `cwd/.review-output.md`. Fix-gate recovery and `--start-at fix` resume both honor the new path. Stale outputs at both locations are cleared before invoking the merge agent, and the run fails with `FileNotFoundError` if the expected report is missing.
+
+- **pr-review:** Snap out-of-hunk inline comment lines to the nearest diff boundary ([#50](https://github.com/existential-birds/daydream/pull/50))
+
+  GitHub was rejecting reviews with `422 "line could not be resolved"` when a finding sat 1–3 lines outside any diff hunk. `classify()` now calls `snap_to_hunk()` (with a centralized `HUNK_TOLERANCE = 3` constant) which returns the original line when inside a hunk, snaps to the nearest boundary when within tolerance, or demotes the comment to the review body. Removes dead `within_hunk` helper.
+
+- **pr-review:** Tolerate bold-wrapped heads and multi-path brackets in the merge agent's review output ([#48](https://github.com/existential-birds/daydream/pull/48))
+
+  When the merge agent drifted to `N. **[FILE:LINE] TITLE**` or stuffed multiple paths into one bracket (`[a.ts:1, b.go:41, c.py:48]`), the parser matched zero issues and the deep run silently skipped the PR post. The head regex now accepts an optional `**`/`__` wrapper via a conditional backref, and multi-path brackets are split on `,` and emitted as one `ParsedIssue` per file. The merge prompt was also tightened to require plain heads and one path per bracket.
+
+- **deep:** Reduce duplicate findings and overconfident refactor recommendations ([#52](https://github.com/existential-birds/daydream/pull/52))
+
+  Adds a record↔record dedup pre-filter so the merge agent consolidates near-identical findings across files into a single entry instead of repeating them per file. Caps refactor/extract-shared-code recommendations at MEDIUM confidence unless the reviewer verified no shared module already exists in the directory. Driven by author feedback on a recent multi-stack review where 12/14 findings were accepted but one was a verbatim duplicate and one an overconfident refactor.
+
+- **deep:** Carry source-stack with cross-stack record dedup pairs ([#52](https://github.com/existential-birds/daydream/pull/52))
+
+  `RecordDuplicatePair` now tracks `source_stack` so per-stack records with the same integer id (assigned independently per stack) don't collide ambiguously when combined. `build_record_dedup_candidates()` requires the `sources` list and validates its length against `records`, raising `ValueError` up front instead of crashing later with `IndexError`.
+
+- **deep:** Stop merge citations from auto-linking to repo issues on GitHub ([#52](https://github.com/existential-birds/daydream/pull/52))
+
+  Source-record citations like `#6` were being parsed by GitHub as links to repo issues/PRs. The merge prompt now instructs the agent to use `item N` notation instead.
+
+- **redrive:** Use composite `(file, id)` keys when tracking consumed records in the redrive script ([#51](https://github.com/existential-birds/daydream/pull/51))
+
+  Per-stack ids are assigned independently, so two stacks can share the same integer id. The previous bare-id key let one finding silently suppress an unrelated finding from a different stack.
+
+### Added
+
+- **scripts:** Add `scripts/redrive_post.py` for re-driving PR comment posts from existing `.daydream/deep/` artifacts ([#51](https://github.com/existential-birds/daydream/pull/51))
+
+  Lets you reattempt the inline-PR-review post step against a prior deep run's artifacts when the original post failed (e.g. transient GitHub API error) without re-running the full pipeline.
+
 ## [0.13.0] - 2026-04-19
 
 ### Added
@@ -300,7 +356,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.13.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/existential-birds/daydream/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/existential-birds/daydream/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/existential-birds/daydream/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/existential-birds/daydream/compare/v0.11.0...v0.11.1
