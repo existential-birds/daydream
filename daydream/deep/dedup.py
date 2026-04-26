@@ -87,6 +87,33 @@ def _files_overlap(record_file: str, alt_files: Iterable[str]) -> bool:
     return bool(record_file) and record_file in set(alt_files)
 
 
+@dataclass(frozen=True)
+class RecordDuplicatePair:
+    """Two per-stack records that likely describe the same concern.
+
+    Attributes:
+        record_a_id: First record's id.
+        record_a_file: First record's file field.
+        record_a_description: First record's description.
+        record_a_source: Originating stack name or records filename for record A.
+        record_b_id: Second record's id.
+        record_b_file: Second record's file field.
+        record_b_description: Second record's description.
+        record_b_source: Originating stack name or records filename for record B.
+        similarity: Jaccard bigram similarity between normalized descriptions.
+    """
+
+    record_a_id: str
+    record_a_file: str
+    record_a_description: str
+    record_a_source: str
+    record_b_id: str
+    record_b_file: str
+    record_b_description: str
+    record_b_source: str
+    similarity: float
+
+
 def build_dedup_candidates(
     records: list[dict[str, Any]],
     alt_issues: list[dict[str, Any]],
@@ -131,4 +158,66 @@ def build_dedup_candidates(
                     )
                 )
     pairs.sort(key=lambda p: (p.record_id, p.alt_title))
+    return pairs
+
+
+def build_record_dedup_candidates(
+    records: list[dict[str, Any]],
+    sources: list[str],
+) -> list[RecordDuplicatePair]:
+    """Find per-stack records that likely describe the same concern.
+
+    Compares every record pair (i < j) and surfaces those with normalized
+    description bigram Jaccard similarity >= threshold. Unlike
+    ``build_dedup_candidates`` this does NOT require file overlap -- the same
+    architectural finding (e.g. code duplication) often gets reported against
+    different files with near-identical descriptions.
+
+    Args:
+        records: Parsed per-stack records matching FEEDBACK_SCHEMA.
+        sources: Parallel list where ``sources[i]`` is the originating
+            stack name (or records filename) for ``records[i]``.
+
+    Returns:
+        Deterministically-ordered list of ``RecordDuplicatePair`` instances.
+
+    Raises:
+        ValueError: If ``sources`` is not parallel to ``records``.
+    """
+    if len(sources) != len(records):
+        raise ValueError("sources must contain exactly one entry per record")
+    pairs: list[RecordDuplicatePair] = []
+    n = len(records)
+    for i in range(n):
+        r_a = records[i]
+        a_id = str(r_a.get("id", ""))
+        a_file = str(r_a.get("file", ""))
+        a_desc = str(r_a.get("description", ""))
+        a_source = sources[i]
+        a_bigrams = _bigrams(_normalize_title(a_desc))
+        if not a_desc or not a_bigrams:
+            continue
+        for j in range(i + 1, n):
+            r_b = records[j]
+            b_id = str(r_b.get("id", ""))
+            b_desc = str(r_b.get("description", ""))
+            b_bigrams = _bigrams(_normalize_title(b_desc))
+            if not b_desc or not b_bigrams:
+                continue
+            sim = _jaccard(a_bigrams, b_bigrams)
+            if sim >= _SIM_THRESHOLD:
+                pairs.append(
+                    RecordDuplicatePair(
+                        record_a_id=a_id,
+                        record_a_file=a_file,
+                        record_a_description=a_desc,
+                        record_a_source=a_source,
+                        record_b_id=b_id,
+                        record_b_file=str(r_b.get("file", "")),
+                        record_b_description=b_desc,
+                        record_b_source=sources[j],
+                        similarity=sim,
+                    )
+                )
+    pairs.sort(key=lambda p: (p.record_a_id, p.record_b_id))
     return pairs

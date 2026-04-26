@@ -37,7 +37,7 @@ from daydream.deep.artifacts import (
 from daydream.deep.artifacts import (
     intent_path as _intent_path,
 )
-from daydream.deep.dedup import build_dedup_candidates
+from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.phases import (
     phase_alternative_review,
@@ -410,6 +410,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
 
             per_stack_records_paths: list[Path] = []
             all_records: list[dict[str, Any]] = []
+            record_sources: list[str] = []
             if config.start_at == "merge":
                 # Resume: validate a records file exists for every detected
                 # stack (except ones explicitly in `failed_stacks`). A bare
@@ -435,7 +436,11 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                 for records_path in sorted(expected_paths):
                     records = json.loads(records_path.read_text())
                     per_stack_records_paths.append(records_path)
+                    # Derive stack name from the records filename
+                    # (e.g. "stack-python-records.json" -> "stack-python-records.json").
+                    source_name = records_path.name
                     all_records.extend(records)
+                    record_sources.extend(source_name for _ in records)
             else:
                 # Pre-merge parse pass (D-21).
                 # Sort by stack_name so merge input order doesn't depend on the
@@ -450,15 +455,23 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                     records_path.write_text(json.dumps(records, indent=2))
                     per_stack_records_paths.append(records_path)
                     all_records.extend(records)
+                    record_sources.extend(stack_name for _ in records)
 
             # Dedup pre-filter (D-27).
             alt_issues_for_dedup: list[dict[str, Any]] = (
                 json.loads(alts_p.read_text()) if alts_p.exists() else []
             )
             pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
+            record_pairs = build_record_dedup_candidates(all_records, sources=record_sources)
             dedup_p = dedup_candidates_path(dd)
             dedup_p.write_text(
-                json.dumps([_candidate_pair_to_json(p) for p in pairs], indent=2)
+                json.dumps(
+                    {
+                        "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
+                        "record_duplicate_pairs": [_candidate_pair_to_json(p) for p in record_pairs],
+                    },
+                    indent=2,
+                )
             )
 
             # Cross-stack merge (D-23..D-26).

@@ -74,7 +74,8 @@ class ClaudeBackend:
         options = ClaudeAgentOptions(
             cwd=str(cwd),
             permission_mode="bypassPermissions",
-            setting_sources=["user", "project", "local"],
+            allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+            setting_sources=["user"],
             model=self.model,
             output_format=output_format,
             max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs

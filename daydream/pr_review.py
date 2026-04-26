@@ -202,14 +202,18 @@ def parse_report(text: str) -> list[ParsedIssue]:
         # Find where this section ends (next "## " or EOF).
         rest = text[section_start:]
         next_section = _NEXT_SECTION.search(rest)
-        section_end = section_start + next_section.start() if next_section else len(text)
+        section_end = (
+            section_start + next_section.start() if next_section else len(text)
+        )
         section_text = text[section_start:section_end]
         section_is_xstack = header_match.start() == xstack_start
 
         matches = list(_ISSUE_HEAD.finditer(section_text))
         for i, m in enumerate(matches):
             body_start = m.end()
-            body_end = matches[i + 1].start() if i + 1 < len(matches) else len(section_text)
+            body_end = (
+                matches[i + 1].start() if i + 1 < len(matches) else len(section_text)
+            )
             body = section_text[body_start:body_end].strip()
             title = m.group("title").strip()
             is_xstack = section_is_xstack or title.lower().startswith("[cross-stack]")
@@ -291,13 +295,15 @@ def _run(
     cmd: list[str], cwd: Path, *, timeout: int = 15, input_bytes: bytes | None = None
 ) -> subprocess.CompletedProcess[bytes]:
     """Run a subprocess with bytes IO; all args hardcoded or derived from JSON."""
-    return subprocess.run(  # noqa: S603 - args are hardcoded or from parsed gh/git output
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        input=input_bytes,
-        timeout=timeout,
-        shell=False,
+    return (
+        subprocess.run(  # noqa: S603 - args are hardcoded or from parsed gh/git output
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            input=input_bytes,
+            timeout=timeout,
+            shell=False,
+        )
     )
 
 
@@ -399,9 +405,7 @@ def extract_anchors(issue: ParsedIssue) -> list[str]:
     return seen[:8]
 
 
-def resolve_line(
-    target_dir: Path, head_sha: str, issue: ParsedIssue
-) -> int | None:
+def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | None:
     """Resolve the true line in the head commit for an issue.
 
     Tries (in order):
@@ -524,7 +528,11 @@ def _gh_pr_diff_for_path(target_dir: Path, pr_number: int, path: str) -> str:
         if not block.startswith("diff --git "):
             continue
         header_line = block.split("\n", 1)[0]
-        if needle_a in header_line or header_line.endswith(f"b/{path}") or needle_b in header_line:
+        if (
+            needle_a in header_line
+            or header_line.endswith(f"b/{path}")
+            or needle_b in header_line
+        ):
             return block
     return ""
 
@@ -540,7 +548,9 @@ def _parse_hunks(diff_text: str) -> list[tuple[int, int]]:
     return hunks
 
 
-def snap_to_hunk(line: int, hunks: list[tuple[int, int]], tolerance: int = HUNK_TOLERANCE) -> int | None:
+def snap_to_hunk(
+    line: int, hunks: list[tuple[int, int]], tolerance: int = HUNK_TOLERANCE
+) -> int | None:
     """Return a valid in-hunk line for a PR comment, or None if too far.
 
     If ``line`` falls inside a hunk, return it unchanged. If it is within
@@ -614,11 +624,31 @@ def classify(
     return out
 
 
+_SEVERITY_EMOJI: dict[str, str] = {
+    "high": "⚠️",
+    "medium": "🔵",
+    "low": "💡",
+}
+
+
+def _severity_emoji(severity: str | None) -> str:
+    """Map a severity level to an emoji prefix."""
+    if not severity:
+        return ""
+    return _SEVERITY_EMOJI.get(severity.lower(), "")
+
+
 def _format_inline_body(issue: ParsedIssue) -> str:
-    header = f"**{issue.title}**" if issue.title else ""
+    emoji = _severity_emoji(issue.severity)
+    title_prefix = f"{emoji} " if emoji else ""
+    header = f"{title_prefix}**{issue.title}**" if issue.title else ""
     tags = _format_tag_line(issue)
-    parts = [p for p in (header, tags, issue.body) if p]
-    return "\n\n".join(parts + [DAYDREAM_FOOTER]).strip()
+    header_line = f"{header} | {tags}" if header and tags else header or tags
+    parts = [p for p in (header_line, issue.body) if p]
+    agent_prompt = _build_agent_prompt(issue)
+    parts.append(agent_prompt)
+    parts.append(DAYDREAM_FOOTER)
+    return "\n\n".join(parts).strip()
 
 
 def _format_tag_line(issue: ParsedIssue) -> str:
@@ -631,17 +661,67 @@ def _format_tag_line(issue: ParsedIssue) -> str:
     return " · ".join(bits)
 
 
+def _build_agent_prompt(issue: ParsedIssue) -> str:
+    """Build a collapsible AI-agent-friendly prompt for a single issue."""
+    loc = f"`{issue.path}`"
+    if issue.line:
+        loc += f" around line {issue.line}"
+    # Combine title and body into a condensed instruction.
+    instruction = issue.title
+    if issue.body:
+        # Take the first meaningful line of the body as additional context.
+        first_line = issue.body.strip().split("\n")[0].strip()
+        if first_line and first_line != issue.title:
+            instruction = f"{instruction}: {first_line}" if instruction else first_line
+    return (
+        "<details>\n"
+        "<summary>🔮 Prompt for AI Agents</summary>\n\n"
+        "```\n"
+        "Verify each finding against the current code and only fix it if needed.\n\n"
+        f"In {loc}, {instruction}\n"
+        "```\n\n"
+        "</details>"
+    )
+
+
+def _group_by_file(issues: list[ParsedIssue]) -> dict[str, list[ParsedIssue]]:
+    """Group issues by file path, preserving insertion order."""
+    groups: dict[str, list[ParsedIssue]] = {}
+    for issue in issues:
+        groups.setdefault(issue.path, []).append(issue)
+    return groups
+
+
 def _format_body_section(body_only: list[ParsedIssue]) -> str:
     if not body_only:
         return ""
-    lines = ["## Non-inline findings\n"]
-    for issue in body_only:
-        prefix = "[cross-stack] " if issue.is_cross_stack else ""
-        loc = f"`{issue.path}`" + (f":{issue.line}" if issue.line else "")
-        tags = _format_tag_line(issue)
-        tag_block = f"\n{tags}\n" if tags else ""
-        lines.append(f"### {prefix}{issue.title} ({loc})\n{tag_block}\n{issue.body}\n")
-    return "\n".join(lines)
+    grouped = _group_by_file(body_only)
+    total = len(body_only)
+    parts: list[str] = [
+        "<details>",
+        f"<summary>📋 Non-inline findings ({total})</summary><blockquote>\n",
+    ]
+    for filepath, file_issues in grouped.items():
+        parts.append("<details>")
+        parts.append(
+            f"<summary>{filepath} ({len(file_issues)})</summary><blockquote>\n"
+        )
+        for i, issue in enumerate(file_issues):
+            prefix = "[cross-stack] " if issue.is_cross_stack else ""
+            emoji = _severity_emoji(issue.severity)
+            title_prefix = f"{emoji} " if emoji else ""
+            tags = _format_tag_line(issue)
+            header = f"{title_prefix}**{prefix}{issue.title}**"
+            header_line = f"{header} | {tags}" if tags else header
+            parts.append(header_line)
+            if issue.body:
+                parts.append(f"\n{issue.body}\n")
+            parts.append(_build_agent_prompt(issue))
+            if i < len(file_issues) - 1:
+                parts.append("\n---\n")
+        parts.append("\n</blockquote></details>")
+    parts.append("\n</blockquote></details>")
+    return "\n".join(parts)
 
 
 def _count_labels(
@@ -661,49 +741,88 @@ def _count_labels(
     return out
 
 
+def _build_consolidated_prompt(classified: _ClassifiedIssues, pr: PRInfo) -> str:
+    """Build a single collapsible prompt block that tells AI agents to fetch and fix review comments."""
+    total = len(classified.inline_issues) + len(classified.body_only)
+    prompt_body = (
+        f"Fix the {total} review comment(s) posted on this PR.\n"
+        "\n"
+        "If the /beagle-core:fetch-pr-feedback skill is available, run:\n"
+        f"/beagle-core:fetch-pr-feedback --pr {pr.number}\n"
+        "\n"
+        "Otherwise, fetch the comments manually:\n"
+        f"1. gh api repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments\n"
+        f"2. gh api repos/{pr.owner}/{pr.repo}/issues/{pr.number}/comments\n"
+        "\n"
+        "These endpoints return all comments on the PR. Focus on the most\n"
+        "recent review — ignore older review threads that have already been\n"
+        "addressed. For each comment: read the referenced file, verify the\n"
+        "finding against the current code, and fix it if valid. Skip false\n"
+        "positives. Commit all fixes when done."
+    )
+    return (
+        "<details>\n"
+        "<summary>🔮 Prompt for all review comments with AI agents</summary>\n\n"
+        f"```\n{prompt_body}\n```\n\n"
+        "</details>"
+    )
+
+
 def build_payload(
     pr: PRInfo, mode_label: str, classified: _ClassifiedIssues
 ) -> dict[str, Any]:
     """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
 
-    The review body follows a fixed template so every run looks the same:
-        🧙 Daydream <mode_label> review
-        N inline, M non-inline
-        Severity / Confidence breakdowns (when known)
-        Non-inline findings (when any)
-        Repo link footer
+    The review body uses collapsible sections so large reviews stay readable:
+        🧙 Daydream Review
+        Actionable comments posted: N
+        Counts summary line
+        <details> Non-inline findings grouped by file
+        <details> Consolidated AI agent prompt
+        <details> Review info (severity/confidence breakdown)
+        Footer
     """
     all_issues_with_inline_meta = [*classified.body_only]
-    # Inline comments live as dicts in classified.inline; we still want
-    # their confidence/severity in the summary counts, so peek at the
-    # original ParsedIssue list by cross-referencing path+line is brittle.
-    # Instead, carry counts we already have from body_only plus inline
-    # metadata we stamp at classify time via the ParsedIssue objects.
-    # (See classify: we store the original issue on _ClassifiedIssues.)
     all_issues_with_inline_meta.extend(classified.inline_issues)
 
     inline_count = len(classified.inline)
     body_count = len(classified.body_only)
 
     body_chunks: list[str] = []
-    body_chunks.append(f"🧙 [Daydream]({DAYDREAM_REPO_URL}) {mode_label} review")
-    body_chunks.append(f"{inline_count} inline comment(s), {body_count} non-inline finding(s).")
-
-    severity_parts = _count_labels(
-        all_issues_with_inline_meta, "severity", ("high", "medium", "low")
+    body_chunks.append("Code Review Summary")
+    body_chunks.append(f"**Actionable comments posted: {inline_count}**")
+    body_chunks.append(
+        f"{inline_count} inline comment(s), {body_count} non-inline finding(s)."
     )
-    if severity_parts:
-        body_chunks.append("**Severity:** " + ", ".join(severity_parts))
-
-    confidence_parts = _count_labels(
-        all_issues_with_inline_meta, "confidence", ("HIGH", "MEDIUM", "LOW")
-    )
-    if confidence_parts:
-        body_chunks.append("**Confidence:** " + ", ".join(confidence_parts))
 
     body_section = _format_body_section(classified.body_only)
     if body_section:
         body_chunks.append(body_section)
+
+    # Consolidated AI agent prompt.
+    if classified.inline_issues or classified.body_only:
+        body_chunks.append(_build_consolidated_prompt(classified, pr))
+
+    # Collapsible review info with severity/confidence breakdown.
+    info_lines: list[str] = []
+    info_lines.append(f"- **Mode:** {mode_label}")
+    severity_parts = _count_labels(
+        all_issues_with_inline_meta, "severity", ("high", "medium", "low")
+    )
+    if severity_parts:
+        info_lines.append("- **Severity:** " + ", ".join(severity_parts))
+    confidence_parts = _count_labels(
+        all_issues_with_inline_meta, "confidence", ("HIGH", "MEDIUM", "LOW")
+    )
+    if confidence_parts:
+        info_lines.append("- **Confidence:** " + ", ".join(confidence_parts))
+    review_info = "\n".join(info_lines)
+    body_chunks.append(
+        "<details>\n"
+        "<summary>ℹ️ Review info</summary>\n\n"
+        f"{review_info}\n\n"
+        "</details>"
+    )
 
     body_chunks.append(DAYDREAM_FOOTER)
 
@@ -736,7 +855,9 @@ async def _post(
 
     classified = classify(target_dir, pr, issues)
     if not classified.inline and not classified.body_only:
-        print_info(console, "No postable issues after classification; skipping PR post.")
+        print_info(
+            console, "No postable issues after classification; skipping PR post."
+        )
         return
 
     inline_files = sorted({c["path"] for c in classified.inline})
@@ -776,9 +897,7 @@ async def _post(
     print_success(console, f"Posted review: {review_url}")
 
 
-def _submit_review(
-    target_dir: Path, pr: PRInfo, payload_path: Path
-) -> str | None:
+def _submit_review(target_dir: Path, pr: PRInfo, payload_path: Path) -> str | None:
     """POST the review payload via `gh api`. Returns html_url or None on failure."""
     try:
         r = _run(
