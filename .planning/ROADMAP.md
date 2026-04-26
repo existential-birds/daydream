@@ -28,7 +28,7 @@
 **Plans**: 4 plans
 - [x] 01-01-PLAN.md — Vendor Harbor v0.5.0 source tree (models + validator) + LICENSE + NOTICE + golden fixtures (mechanical-only edits per D-03)
 - [x] 01-02-PLAN.md — Add explicit pydantic>=2.11.7 dependency and ruff per-file-ignores stanza for daydream/atif/** to pyproject.toml
-- [ ] 01-03-PLAN.md — Author daydream/atif/__init__.py public re-export shim, hand-authored negative fixture, and smoke test (VEND-01, VEND-02, VEND-05)
+- [x] 01-03-PLAN.md — Author daydream/atif/__init__.py public re-export shim, hand-authored negative fixture, and smoke test (VEND-01, VEND-02, VEND-05)
 - [ ] 01-04-PLAN.md — Phase-gate verification: zero Harbor imports, ruff/mypy clean, 348 pytest passes (VEND-04)
 
 ### Phase 2: Recorder Core + Event Enrichment + Mapping
