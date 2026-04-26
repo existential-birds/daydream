@@ -29,7 +29,7 @@
 - [x] 01-01-PLAN.md — Vendor Harbor v0.5.0 source tree (models + validator) + LICENSE + NOTICE + golden fixtures (mechanical-only edits per D-03)
 - [x] 01-02-PLAN.md — Add explicit pydantic>=2.11.7 dependency and ruff per-file-ignores stanza for daydream/atif/** to pyproject.toml
 - [x] 01-03-PLAN.md — Author daydream/atif/__init__.py public re-export shim, hand-authored negative fixture, and smoke test (VEND-01, VEND-02, VEND-05)
-- [ ] 01-04-PLAN.md — Phase-gate verification: zero Harbor imports, ruff/mypy clean, 348 pytest passes (VEND-04)
+- [x] 01-04-PLAN.md — Phase-gate verification: zero Harbor imports, ruff/mypy clean, 348 pytest passes (VEND-04)
 
 ### Phase 2: Recorder Core + Event Enrichment + Mapping
 **Goal**: A normal sequential daydream run (review → parse → fix → test) produces a single valid ATIF v1.6 trajectory file with non-empty `Metrics` blocks, correct timestamps, and proper user/agent step segmentation. This phase fixes the dropped-token bug in `backends/claude.py:120-128` in the same patch as the recorder lands so downstream tests can validate against goldens.
