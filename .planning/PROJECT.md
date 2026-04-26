@@ -61,11 +61,11 @@ Reviews and recommendations must be grounded in actual codebase understanding �
 
 **Schema validation (vendored, not Harbor as runtime dep):**
 
-- [ ] `harbor.models.trajectories.*` and `harbor.utils.trajectory_validator` vendored into `daydream/atif/` (Apache-2.0; ~700 LOC pure Pydantic + stdlib; LICENSE + NOTICE included)
-- [ ] `pydantic>=2.11.7` promoted from transitive (via claude-agent-sdk) to explicit dep in `pyproject.toml`
+- [x] `harbor.models.trajectories.*` and `harbor.utils.trajectory_validator` vendored into `daydream/atif/` (Apache-2.0; ~700 LOC pure Pydantic + stdlib; LICENSE + NOTICE included) — Validated in Phase 1: vendor-atif-foundation
+- [x] `pydantic>=2.11.7` promoted from transitive (via claude-agent-sdk) to explicit dep in `pyproject.toml` — Validated in Phase 1: vendor-atif-foundation
 - [ ] Trajectories built using vendored Pydantic models; schema validation automatic at construction time
 - [ ] Test suite validates produced trajectories against the ATIF v1.6 schema
-- [ ] Harbor's golden trajectory fixtures (Terminus-2 + OpenHands) vendored into `tests/fixtures/atif_golden/` and parametrized round-trip test confirms our validator accepts them
+- [x] Harbor's golden trajectory fixtures (Terminus-2 + OpenHands) vendored into `tests/fixtures/atif_golden/` and parametrized round-trip test confirms our validator accepts them — Validated in Phase 1: vendor-atif-foundation (smoke test in `tests/test_atif_vendor_smoke.py`)
 
 **Privacy / redaction (must land with cutover, not deferred):**
 
@@ -164,4 +164,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-26 after research synthesis (4 decisions revised based on research findings)*
+*Last updated: 2026-04-26 after Phase 1 completion (vendor-atif-foundation: 4/4 plans, 5/5 success criteria verified)*
