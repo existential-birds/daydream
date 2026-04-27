@@ -15,7 +15,7 @@ from daydream.agent import (
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
-from daydream.trajectory import DaydreamPhase, _maybe_fork, get_current_recorder
+from daydream.trajectory import DaydreamPhase, maybe_fork, get_current_recorder
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
@@ -1010,7 +1010,7 @@ handling strategy is wrong for that code path.
                 def callback(message: str, i: int = task_index) -> None:
                     panel.update_row(i, message)
 
-                async with _maybe_fork(recorder, f"fix-{task_index}"):
+                async with maybe_fork(recorder, f"fix-{task_index}"):
                     try:
                         async with limiter:
                             await run_agent(
@@ -1471,7 +1471,7 @@ async def phase_per_stack_reviews(
                 task_prompt: str = prompt,
                 task_output: Path = output_path,
             ) -> None:
-                async with _maybe_fork(recorder, f"deep-{stack_name}"):
+                async with maybe_fork(recorder, f"deep-{stack_name}"):
                     try:
                         async with limiter:
                             await run_agent(backend, cwd, task_prompt, phase=DaydreamPhase.DEEP)

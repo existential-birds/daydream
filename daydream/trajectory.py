@@ -65,7 +65,7 @@ def _safe_descriptor(raw: str) -> str:
     return slug
 
 
-def _maybe_fork(recorder: "TrajectoryRecorder | None", descriptor: str) -> Any:
+def maybe_fork(recorder: "TrajectoryRecorder | None", descriptor: str) -> Any:
     """Return a fork CM if *recorder* is set, otherwise a no-op context manager."""
     if recorder is not None:
         return recorder.fork(descriptor)
