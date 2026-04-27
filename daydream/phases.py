@@ -15,7 +15,7 @@ from daydream.agent import (
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
-from daydream.trajectory import DaydreamPhase, maybe_fork, get_current_recorder
+from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment

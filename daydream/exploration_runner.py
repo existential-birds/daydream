@@ -30,7 +30,7 @@ from daydream.prompts.exploration_subagents import (
     build_pattern_scanner_prompt,
     build_test_mapper_prompt,
 )
-from daydream.trajectory import DaydreamPhase, maybe_fork, get_current_recorder
+from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
 from daydream.tree_sitter_index import detect_affected_files
 
 if TYPE_CHECKING:
