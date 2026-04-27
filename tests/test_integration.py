@@ -17,6 +17,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.runner import RunConfig, run
+from daydream.trajectory import DaydreamPhase
 from daydream.ui import NEON_THEME
 
 # ANSI escape code pattern for stripping terminal colors
@@ -202,7 +203,7 @@ async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch):
 
     set_quiet_mode(False)
 
-    await run_agent(backend, Path("/tmp"), "Test prompt for Glob tool")
+    await run_agent(backend, Path("/tmp"), "Test prompt for Glob tool", phase=DaydreamPhase.REVIEW)
 
     # Verify the console output contains expected elements
     output_text = output.getvalue()
@@ -255,7 +256,7 @@ async def test_glob_tool_panel_singular_file_count(monkeypatch):
     # Normal mode to see output section
     set_quiet_mode(False)
 
-    await run_agent(backend, Path("/tmp"), "Test prompt")
+    await run_agent(backend, Path("/tmp"), "Test prompt", phase=DaydreamPhase.REVIEW)
 
     output_text = output.getvalue()
 
@@ -296,7 +297,7 @@ async def test_glob_tool_panel_truncates_long_results(monkeypatch):
     # Normal mode to see output section
     set_quiet_mode(False)
 
-    await run_agent(backend, Path("/tmp"), "Test prompt")
+    await run_agent(backend, Path("/tmp"), "Test prompt", phase=DaydreamPhase.REVIEW)
 
     output_text = output.getvalue()
 
@@ -333,7 +334,7 @@ async def test_quiet_mode_shows_header_only(monkeypatch):
 
     set_quiet_mode(True)
 
-    await run_agent(backend, Path("/tmp"), "Test prompt")
+    await run_agent(backend, Path("/tmp"), "Test prompt", phase=DaydreamPhase.REVIEW)
 
     output_text = output.getvalue()
     plain_text = strip_ansi(output_text)
@@ -378,7 +379,7 @@ async def test_quiet_mode_empty_result_shows_header_only(monkeypatch):
 
     set_quiet_mode(True)
 
-    await run_agent(backend, Path("/tmp"), "Test prompt")
+    await run_agent(backend, Path("/tmp"), "Test prompt", phase=DaydreamPhase.REVIEW)
 
     output_text = output.getvalue()
 
@@ -420,7 +421,7 @@ async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch):
 
     set_quiet_mode(True)
 
-    await run_agent(backend, Path("/tmp"), "Test prompt")
+    await run_agent(backend, Path("/tmp"), "Test prompt", phase=DaydreamPhase.REVIEW)
 
     output_text = output.getvalue()
 
@@ -467,7 +468,7 @@ async def test_skill_tool_panel_collapses_output(monkeypatch):
 
     set_quiet_mode(True)
 
-    await run_agent(backend, Path("/tmp"), "Test prompt")
+    await run_agent(backend, Path("/tmp"), "Test prompt", phase=DaydreamPhase.REVIEW)
 
     output_text = output.getvalue()
     plain_text = strip_ansi(output_text)
@@ -516,7 +517,7 @@ async def test_concurrent_tool_panels_display_results(monkeypatch):
 
     set_quiet_mode(False)
 
-    await run_agent(backend, Path("/tmp"), "Test prompt")
+    await run_agent(backend, Path("/tmp"), "Test prompt", phase=DaydreamPhase.REVIEW)
 
     output_text = output.getvalue()
     plain_text = strip_ansi(output_text)

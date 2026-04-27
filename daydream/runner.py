@@ -41,6 +41,7 @@ from daydream.phases import (
     phase_understand_intent,
     revert_uncommitted_changes,
 )
+from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
 from daydream.ui import (
     SummaryData,
     phase_subtitle,
@@ -82,6 +83,9 @@ class RunConfig:
         deep: Run the deep-review pipeline (TTT + per-stack + cross-stack merge). D-01.
         ignore_paths: Paths to exclude from diffs (passed to `git :(exclude)` pathspecs
             and surfaced in review prompts). Default is an empty list.
+        trajectory_path: Path to write the ATIF v1.6 trajectory JSON. Default-resolved
+            by run flows to ``<target>/.daydream/trajectory.json`` when None. Phase 4
+            wires the ``--trajectory <path>`` CLI flag.
 
     """
 
@@ -106,6 +110,7 @@ class RunConfig:
     exploration_context: ExplorationContext | None = None
     exploration_depth: int = 1
     ignore_paths: list[str] = field(default_factory=list)
+    trajectory_path: Path | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -214,75 +219,82 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     review_backend = _resolve_backend(config, "review", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
 
-    print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
+    trajectory_path = config.trajectory_path or (target_dir / ".daydream" / "trajectory.json")
+    async with TrajectoryRecorder(
+        path=trajectory_path,
+        run_flow=DaydreamRunFlow.PR,
+        target_dir=target_dir,
+        agent_model_name=config.model or "opus",
+    ):
+        print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
-    console.print()
-    print_info(console, f"PR feedback mode: PR #{pr_number}")
-    print_info(console, f"Bot: {bot}")
-    print_info(console, f"Target directory: {target_dir}")
-    print_info(console, f"Model: {config.model or 'opus'}")
-    console.print()
+        console.print()
+        print_info(console, f"PR feedback mode: PR #{pr_number}")
+        print_info(console, f"Bot: {bot}")
+        print_info(console, f"Target directory: {target_dir}")
+        print_info(console, f"Model: {config.model or 'opus'}")
+        console.print()
 
-    # Phase 1: Fetch PR feedback
-    await phase_fetch_pr_feedback(review_backend, target_dir, pr_number, bot)
+        # Phase 1: Fetch PR feedback
+        await phase_fetch_pr_feedback(review_backend, target_dir, pr_number, bot)
 
-    # Phase 2: Parse feedback (reused from normal flow)
-    try:
-        feedback_items = await phase_parse_feedback(review_backend, target_dir)
-    except ValueError:
-        print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
-        return 1
-
-    if not feedback_items:
-        print_info(console, "No actionable feedback found in PR comments.")
-        return 0
-
-    # Phase 3: Fix issues sequentially to avoid concurrent access to a
-    # single mutable backend instance.
-    results: list[FixResult] = []
-    total_items = len(feedback_items)
-    for idx, item in enumerate(feedback_items, start=1):
+        # Phase 2: Parse feedback (reused from normal flow)
         try:
-            await phase_fix(fix_backend, target_dir, item, idx, total_items)
-            results.append((item, True, None))
+            feedback_items = await phase_parse_feedback(review_backend, target_dir)
+        except ValueError:
+            print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
+            return 1
+
+        if not feedback_items:
+            print_info(console, "No actionable feedback found in PR comments.")
+            return 0
+
+        # Phase 3: Fix issues sequentially to avoid concurrent access to a
+        # single mutable backend instance.
+        results: list[FixResult] = []
+        total_items = len(feedback_items)
+        for idx, item in enumerate(feedback_items, start=1):
+            try:
+                await phase_fix(fix_backend, target_dir, item, idx, total_items)
+                results.append((item, True, None))
+            except Exception as e:
+                results.append((item, False, f"{type(e).__name__}: {e}"))
+
+        # If all fixes failed, abort
+        successful = [r for r in results if r[1]]
+        failed = [r for r in results if not r[1]]
+
+        if not successful:
+            print_error(
+                console,
+                "All Fixes Failed",
+                f"All {len(failed)} fix(es) failed. Aborting before commit.",
+            )
+            return 1
+
+        # Phase 4: Commit and push (no user prompt)
+        try:
+            await phase_commit_push_auto(review_backend, target_dir)
         except Exception as e:
-            results.append((item, False, f"{type(e).__name__}: {e}"))
+            print_error(console, "Commit/Push Failed", str(e))
+            return 1
 
-    # If all fixes failed, abort
-    successful = [r for r in results if r[1]]
-    failed = [r for r in results if not r[1]]
+        # Phase 5: Respond to PR comments
+        try:
+            await phase_respond_pr_feedback(review_backend, target_dir, pr_number, bot, results)
+        except Exception as e:
+            print_warning(console, f"Failed to respond to PR comments: {e}")
+            print_info(console, "Fixes were already pushed successfully.")
 
-    if not successful:
-        print_error(
+        # Summary
+        console.print()
+        print_success(
             console,
-            "All Fixes Failed",
-            f"All {len(failed)} fix(es) failed. Aborting before commit.",
+            f"PR #{pr_number}: {len(successful)} fix(es) applied"
+            + (f", {len(failed)} failed" if failed else ""),
         )
-        return 1
 
-    # Phase 4: Commit and push (no user prompt)
-    try:
-        await phase_commit_push_auto(review_backend, target_dir)
-    except Exception as e:
-        print_error(console, "Commit/Push Failed", str(e))
-        return 1
-
-    # Phase 5: Respond to PR comments
-    try:
-        await phase_respond_pr_feedback(review_backend, target_dir, pr_number, bot, results)
-    except Exception as e:
-        print_warning(console, f"Failed to respond to PR comments: {e}")
-        print_info(console, "Fixes were already pushed successfully.")
-
-    # Summary
-    console.print()
-    print_success(
-        console,
-        f"PR #{pr_number}: {len(successful)} fix(es) applied"
-        + (f", {len(failed)} failed" if failed else ""),
-    )
-
-    return 0
+        return 0
 
 
 async def run_trust(config: RunConfig, target_dir: Path) -> int:
@@ -316,70 +328,77 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
 
-    console.print()
-    print_info(console, f"Target directory: {target_dir}")
-    print_info(console, f"Branch: {branch}")
-    print_info(console, f"Model: {config.model or '<backend-default>'}")
-    console.print()
+    trajectory_path = config.trajectory_path or (target_dir / ".daydream" / "trajectory.json")
+    async with TrajectoryRecorder(
+        path=trajectory_path,
+        run_flow=DaydreamRunFlow.TTT,
+        target_dir=target_dir,
+        agent_model_name=config.model or "opus",
+    ):
+        console.print()
+        print_info(console, f"Target directory: {target_dir}")
+        print_info(console, f"Branch: {branch}")
+        print_info(console, f"Model: {config.model or '<backend-default>'}")
+        console.print()
 
-    # Pre-scan exploration: populate config.exploration_context before phase 1.
-    # Skip when already pre-populated (e.g. injected by caller or tests).
-    if config.exploration_context is None:
-        tier = select_tier(count_changed_files(diff or ""))
-        if tier == "skip":
-            print_dim(console, "Skipping exploration -- trivial diff")
-            config.exploration_context = ExplorationContext()
-        else:
-            print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-            config.exploration_context = await safe_explore(
-                pre_scan,
-                backend,
-                target_dir,
-                diff,
-                config.exploration_depth,
-                diff_ref=_compute_diff_ref(target_dir),
-            )
+        # Pre-scan exploration: populate config.exploration_context before phase 1.
+        # Skip when already pre-populated (e.g. injected by caller or tests).
+        if config.exploration_context is None:
+            tier = select_tier(count_changed_files(diff or ""))
+            if tier == "skip":
+                print_dim(console, "Skipping exploration -- trivial diff")
+                config.exploration_context = ExplorationContext()
+            else:
+                print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+                config.exploration_context = await safe_explore(
+                    pre_scan,
+                    backend,
+                    target_dir,
+                    diff,
+                    config.exploration_depth,
+                    diff_ref=_compute_diff_ref(target_dir),
+                )
 
-    # Materialise exploration to disk so phase prompts can reference files.
-    exploration_dir: Path | None = None
-    if config.exploration_context is not None:
-        exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
+        # Materialise exploration to disk so phase prompts can reference files.
+        exploration_dir: Path | None = None
+        if config.exploration_context is not None:
+            exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
 
-    # Phase 1: Understand intent
-    intent_summary = await phase_understand_intent(
-        backend, target_dir, diff_path, log, branch,
-        exploration_dir=exploration_dir,
-    )
-
-    # Phase 2: Alternative review
-    issues = await phase_alternative_review(
-        backend, target_dir, diff_path, intent_summary,
-        exploration_dir=exploration_dir,
-    )
-
-    if not issues:
-        print_success(console, "No issues found — the implementation looks good!")
-        return 0
-
-    # Phase 3: Generate plan
-    try:
-        await phase_generate_plan(
-            backend, target_dir, diff_path, intent_summary, issues,
+        # Phase 1: Understand intent
+        intent_summary = await phase_understand_intent(
+            backend, target_dir, diff_path, log, branch,
             exploration_dir=exploration_dir,
         )
-    finally:
-        exploration_cleanup = target_dir / ".daydream" / "exploration"
-        if exploration_cleanup.is_dir():
-            shutil.rmtree(exploration_cleanup)
 
-    # Offer to post findings as inline PR review comments.
-    from daydream.pr_review import post_review_to_pr_from_alt_issues
+        # Phase 2: Alternative review
+        issues = await phase_alternative_review(
+            backend, target_dir, diff_path, intent_summary,
+            exploration_dir=exploration_dir,
+        )
 
-    await post_review_to_pr_from_alt_issues(
-        target_dir, issues, console=console
-    )
+        if not issues:
+            print_success(console, "No issues found — the implementation looks good!")
+            return 0
 
-    return 0
+        # Phase 3: Generate plan
+        try:
+            await phase_generate_plan(
+                backend, target_dir, diff_path, intent_summary, issues,
+                exploration_dir=exploration_dir,
+            )
+        finally:
+            exploration_cleanup = target_dir / ".daydream" / "exploration"
+            if exploration_cleanup.is_dir():
+                shutil.rmtree(exploration_cleanup)
+
+        # Offer to post findings as inline PR review comments.
+        from daydream.pr_review import post_review_to_pr_from_alt_issues
+
+        await post_review_to_pr_from_alt_issues(
+            target_dir, issues, console=console
+        )
+
+        return 0
 
 
 async def run(config: RunConfig | None = None) -> int:
@@ -514,268 +533,276 @@ async def run(config: RunConfig | None = None) -> int:
             from daydream.deep.orchestrator import run_deep
             return await run_deep(config, target_dir)
 
-        console.print()
-        print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {config.model or '<backend-default>'}")
-        if skill:
-            print_info(console, f"Review skill: {skill}")
-        if config.review_only:
-            print_info(console, "Mode: review-only (skipping fixes)")
-        if config.start_at != "review":
-            print_skipped_phases(console, config.start_at)
-        console.print()
-
-        # Pre-scan exploration: populate config.exploration_context before
-        # the first phase_review() call. Only runs when starting at "review"
-        # (later start phases skip review, so exploration would be wasted).
-        if config.start_at == "review" and config.exploration_context is None:
-            diff_text = _git_diff(target_dir, exclude=config.ignore_paths) or ""
-            tier = select_tier(count_changed_files(diff_text))
-            if tier == "skip":
-                print_dim(console, "Skipping exploration -- trivial diff")
-                config.exploration_context = ExplorationContext()
-            else:
-                print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                config.exploration_context = await safe_explore(
-                    pre_scan,
-                    review_backend,
-                    target_dir,
-                    diff_text,
-                    config.exploration_depth,
-                    diff_ref=_compute_diff_ref(target_dir),
-                )
-
-        feedback_items: list[dict[str, Any]] = []
-        fixes_applied = 0
-        test_retries = 0
-        tests_passed = True
-        iteration = 0
-        diff_base: str | None = None
-        exploration_dir: Path | None = None
-
-        async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
-            """Execute one iteration of the review-parse-fix-test loop.
-
-            This nested function intentionally captures outer scope variables
-            (target_dir, skill, backends, config, console, iteration) to avoid
-            an unwieldy parameter list for a helper used only within run().
-
-            Returns:
-                Tuple of (items, fixes_count, retries, tests_passed, should_continue).
-                should_continue is False if the loop should break (clean review or test failure).
-
-            Raises:
-                MissingSkillError: If the review skill is not available.
-                ValueError: If feedback parsing fails.
-
-            """
-            nonlocal diff_base
-
-            if iteration > 1:
-                (target_dir / REVIEW_OUTPUT_FILE).unlink(missing_ok=True)
-                print_iteration_divider(console, iteration, config.max_iterations)
-
-            # Phase 1: Review
-            assert skill is not None, "skill must be set when starting at review phase"
-            await phase_review(
-                review_backend, target_dir, skill, diff_base=diff_base,
-                exploration_dir=exploration_dir,
-                exclude=config.ignore_paths,
-            )
-
-            # Phase 2: Parse feedback
-            items = await phase_parse_feedback(review_backend, target_dir)
-
-            if not items:
-                print_info(console, f"Clean review on iteration {iteration}")
-                return [], 0, 0, True, False  # should_continue=False (clean)
-
-            # Phase 3: Fix
-            print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
-            fixes_count = 0
-            for i, item in enumerate(items, 1):
-                await phase_fix(fix_backend, target_dir, item, i, len(items))
-                fixes_count += 1
-
-            # Phase 4: Test
-            passed, retries = await phase_test_and_heal(test_backend, target_dir, feedback_items=items)
-
-            if not passed:
-                print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
-                if revert_uncommitted_changes(target_dir):
-                    print_info(console, "Reverted to last committed state")
-                else:
-                    print_warning(console, "Failed to revert changes")
-                return items, fixes_count, retries, False, False  # should_continue=False (failed)
-
-            # Record the pre-commit SHA so the next iteration reviews
-            # the changes introduced by this iteration's commit
-            # (diff from pre-commit HEAD to post-commit HEAD).
-            diff_base = _get_head_sha(target_dir)
-
-            # Commit iteration changes so the next review sees a clean tree
-            await phase_commit_iteration(fix_backend, target_dir, iteration)
-
-            return items, fixes_count, retries, True, True  # should_continue=True
-
-        if config.loop:
-            # Guard: loop mode reverts uncommitted changes on failure,
-            # so refuse to start if the working tree is dirty.
-            status = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-                ["git", "status", "--porcelain"],
-                capture_output=True,
-                text=True,
-                cwd=target_dir,
-                timeout=10,
-                shell=False,
-            )
-            if status.returncode != 0 or status.stdout.strip():
-                print_error(
-                    console,
-                    "Dirty Working Tree",
-                    "Loop mode requires a clean repo because failed iterations"
-                    " discard uncommitted changes.",
-                )
-                return 1
-
-            # Materialise exploration to disk so phase prompts can reference files.
-            if config.exploration_context is not None:
-                exp_parent = target_dir / ".daydream"
-                exp_parent.mkdir(exist_ok=True)
-                exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
-
-            # --- Loop mode: repeat review-parse-fix-test ---
-            while iteration < config.max_iterations:
-                iteration += 1
-
-                try:
-                    items, fixes_count, retries, passed, should_continue = await _run_loop_iteration()
-                except MissingSkillError as e:
-                    _print_missing_skill_error(e.skill_name)
-                    return 1
-                except ValueError as exc:
-                    _log_debug(f"[PHASE2_ERROR] {exc}\n")
-                    print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
-                    return 1
-
-                feedback_items.extend(items)
-                test_retries += retries
-                tests_passed = passed
-                if passed:
-                    fixes_applied += fixes_count
-
-                if not should_continue:
-                    break
-
-            else:
-                # while loop exhausted without break — max iterations reached
-                if feedback_items:
-                    # Deduplicate by (file, line, description) to avoid inflated counts
-                    unique_issues = {
-                        (item.get("file"), item.get("line"), item.get("description"))
-                        for item in feedback_items
-                    }
-                    print_warning(
-                        console,
-                        f"Reached max iterations ({config.max_iterations}), "
-                        f"{len(unique_issues)} unique issues found across all iterations",
-                    )
-                    # Mark as failed when max iterations reached with unresolved issues
-                    tests_passed = False
-
-        else:
-            # --- Single-pass mode (existing behavior) ---
-
-            # Materialise exploration to disk so phase prompts can reference files.
-            if config.exploration_context is not None:
-                exp_parent = target_dir / ".daydream"
-                exp_parent.mkdir(exist_ok=True)
-                exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
-
-            # Phase 1: Review
-            if config.start_at == "review":
-                assert skill is not None, "skill must be set when starting at review phase"
-                try:
-                    await phase_review(
-                        review_backend, target_dir, skill,
-                        exploration_dir=exploration_dir,
-                        exclude=config.ignore_paths,
-                    )
-                except MissingSkillError as e:
-                    _print_missing_skill_error(e.skill_name)
-                    return 1
-
-            # Phase 2: Parse feedback
-            if config.start_at in ("review", "parse", "fix"):
-                try:
-                    feedback_items = await phase_parse_feedback(review_backend, target_dir)
-                except ValueError as exc:
-                    _log_debug(f"[PHASE2_ERROR] {exc}\n")
-                    print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
-                    return 1
-
-            # Review-only exit
+        # Normal flow: open the trajectory recorder for the rest of run().
+        trajectory_path = config.trajectory_path or (target_dir / ".daydream" / "trajectory.json")
+        async with TrajectoryRecorder(
+            path=trajectory_path,
+            run_flow=DaydreamRunFlow.NORMAL,
+            target_dir=target_dir,
+            agent_model_name=config.model or "opus",
+        ):
+            console.print()
+            print_info(console, f"Target directory: {target_dir}")
+            print_info(console, f"Model: {config.model or '<backend-default>'}")
+            if skill:
+                print_info(console, f"Review skill: {skill}")
             if config.review_only:
-                print_summary(
-                    console,
-                    SummaryData(
-                        skill=skill or "N/A",
-                        target=str(target_dir),
-                        feedback_count=len(feedback_items),
-                        fixes_applied=0,
-                        test_retries=0,
-                        tests_passed=True,
-                        review_only=True,
-                    ),
-                )
-                return 0
+                print_info(console, "Mode: review-only (skipping fixes)")
+            if config.start_at != "review":
+                print_skipped_phases(console, config.start_at)
+            console.print()
 
-            # Phase 3: Fix
-            if config.start_at in ("review", "parse", "fix"):
-                if feedback_items:
-                    print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
-                    for i, item in enumerate(feedback_items, 1):
-                        await phase_fix(fix_backend, target_dir, item, i, len(feedback_items))
-                        fixes_applied += 1
+            # Pre-scan exploration: populate config.exploration_context before
+            # the first phase_review() call. Only runs when starting at "review"
+            # (later start phases skip review, so exploration would be wasted).
+            if config.start_at == "review" and config.exploration_context is None:
+                diff_text = _git_diff(target_dir, exclude=config.ignore_paths) or ""
+                tier = select_tier(count_changed_files(diff_text))
+                if tier == "skip":
+                    print_dim(console, "Skipping exploration -- trivial diff")
+                    config.exploration_context = ExplorationContext()
                 else:
-                    print_info(console, "No feedback items found, skipping fix phase")
+                    print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+                    config.exploration_context = await safe_explore(
+                        pre_scan,
+                        review_backend,
+                        target_dir,
+                        diff_text,
+                        config.exploration_depth,
+                        diff_ref=_compute_diff_ref(target_dir),
+                    )
 
-            # Phase 4: Test
-            tests_passed, test_retries = await phase_test_and_heal(
-                test_backend, target_dir, feedback_items=feedback_items
+            feedback_items: list[dict[str, Any]] = []
+            fixes_applied = 0
+            test_retries = 0
+            tests_passed = True
+            iteration = 0
+            diff_base: str | None = None
+            exploration_dir: Path | None = None
+
+            async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
+                """Execute one iteration of the review-parse-fix-test loop.
+
+                This nested function intentionally captures outer scope variables
+                (target_dir, skill, backends, config, console, iteration) to avoid
+                an unwieldy parameter list for a helper used only within run().
+
+                Returns:
+                    Tuple of (items, fixes_count, retries, tests_passed, should_continue).
+                    should_continue is False if the loop should break (clean review or test failure).
+
+                Raises:
+                    MissingSkillError: If the review skill is not available.
+                    ValueError: If feedback parsing fails.
+
+                """
+                nonlocal diff_base
+
+                if iteration > 1:
+                    (target_dir / REVIEW_OUTPUT_FILE).unlink(missing_ok=True)
+                    print_iteration_divider(console, iteration, config.max_iterations)
+
+                # Phase 1: Review
+                assert skill is not None, "skill must be set when starting at review phase"
+                await phase_review(
+                    review_backend, target_dir, skill, diff_base=diff_base,
+                    exploration_dir=exploration_dir,
+                    exclude=config.ignore_paths,
+                )
+
+                # Phase 2: Parse feedback
+                items = await phase_parse_feedback(review_backend, target_dir)
+
+                if not items:
+                    print_info(console, f"Clean review on iteration {iteration}")
+                    return [], 0, 0, True, False  # should_continue=False (clean)
+
+                # Phase 3: Fix
+                print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+                fixes_count = 0
+                for i, item in enumerate(items, 1):
+                    await phase_fix(fix_backend, target_dir, item, i, len(items))
+                    fixes_count += 1
+
+                # Phase 4: Test
+                passed, retries = await phase_test_and_heal(test_backend, target_dir, feedback_items=items)
+
+                if not passed:
+                    print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
+                    if revert_uncommitted_changes(target_dir):
+                        print_info(console, "Reverted to last committed state")
+                    else:
+                        print_warning(console, "Failed to revert changes")
+                    return items, fixes_count, retries, False, False  # should_continue=False (failed)
+
+                # Record the pre-commit SHA so the next iteration reviews
+                # the changes introduced by this iteration's commit
+                # (diff from pre-commit HEAD to post-commit HEAD).
+                diff_base = _get_head_sha(target_dir)
+
+                # Commit iteration changes so the next review sees a clean tree
+                await phase_commit_iteration(fix_backend, target_dir, iteration)
+
+                return items, fixes_count, retries, True, True  # should_continue=True
+
+            if config.loop:
+                # Guard: loop mode reverts uncommitted changes on failure,
+                # so refuse to start if the working tree is dirty.
+                status = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+                    ["git", "status", "--porcelain"],
+                    capture_output=True,
+                    text=True,
+                    cwd=target_dir,
+                    timeout=10,
+                    shell=False,
+                )
+                if status.returncode != 0 or status.stdout.strip():
+                    print_error(
+                        console,
+                        "Dirty Working Tree",
+                        "Loop mode requires a clean repo because failed iterations"
+                        " discard uncommitted changes.",
+                    )
+                    return 1
+
+                # Materialise exploration to disk so phase prompts can reference files.
+                if config.exploration_context is not None:
+                    exp_parent = target_dir / ".daydream"
+                    exp_parent.mkdir(exist_ok=True)
+                    exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
+
+                # --- Loop mode: repeat review-parse-fix-test ---
+                while iteration < config.max_iterations:
+                    iteration += 1
+
+                    try:
+                        items, fixes_count, retries, passed, should_continue = await _run_loop_iteration()
+                    except MissingSkillError as e:
+                        _print_missing_skill_error(e.skill_name)
+                        return 1
+                    except ValueError as exc:
+                        _log_debug(f"[PHASE2_ERROR] {exc}\n")
+                        print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
+                        return 1
+
+                    feedback_items.extend(items)
+                    test_retries += retries
+                    tests_passed = passed
+                    if passed:
+                        fixes_applied += fixes_count
+
+                    if not should_continue:
+                        break
+
+                else:
+                    # while loop exhausted without break — max iterations reached
+                    if feedback_items:
+                        # Deduplicate by (file, line, description) to avoid inflated counts
+                        unique_issues = {
+                            (item.get("file"), item.get("line"), item.get("description"))
+                            for item in feedback_items
+                        }
+                        print_warning(
+                            console,
+                            f"Reached max iterations ({config.max_iterations}), "
+                            f"{len(unique_issues)} unique issues found across all iterations",
+                        )
+                        # Mark as failed when max iterations reached with unresolved issues
+                        tests_passed = False
+
+            else:
+                # --- Single-pass mode (existing behavior) ---
+
+                # Materialise exploration to disk so phase prompts can reference files.
+                if config.exploration_context is not None:
+                    exp_parent = target_dir / ".daydream"
+                    exp_parent.mkdir(exist_ok=True)
+                    exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
+
+                # Phase 1: Review
+                if config.start_at == "review":
+                    assert skill is not None, "skill must be set when starting at review phase"
+                    try:
+                        await phase_review(
+                            review_backend, target_dir, skill,
+                            exploration_dir=exploration_dir,
+                            exclude=config.ignore_paths,
+                        )
+                    except MissingSkillError as e:
+                        _print_missing_skill_error(e.skill_name)
+                        return 1
+
+                # Phase 2: Parse feedback
+                if config.start_at in ("review", "parse", "fix"):
+                    try:
+                        feedback_items = await phase_parse_feedback(review_backend, target_dir)
+                    except ValueError as exc:
+                        _log_debug(f"[PHASE2_ERROR] {exc}\n")
+                        print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
+                        return 1
+
+                # Review-only exit
+                if config.review_only:
+                    print_summary(
+                        console,
+                        SummaryData(
+                            skill=skill or "N/A",
+                            target=str(target_dir),
+                            feedback_count=len(feedback_items),
+                            fixes_applied=0,
+                            test_retries=0,
+                            tests_passed=True,
+                            review_only=True,
+                        ),
+                    )
+                    return 0
+
+                # Phase 3: Fix
+                if config.start_at in ("review", "parse", "fix"):
+                    if feedback_items:
+                        print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+                        for i, item in enumerate(feedback_items, 1):
+                            await phase_fix(fix_backend, target_dir, item, i, len(feedback_items))
+                            fixes_applied += 1
+                    else:
+                        print_info(console, "No feedback items found, skipping fix phase")
+
+                # Phase 4: Test
+                tests_passed, test_retries = await phase_test_and_heal(
+                    test_backend, target_dir, feedback_items=feedback_items
+                )
+                iteration = 1
+
+            # Print summary
+            print_summary(
+                console,
+                SummaryData(
+                    skill=skill or "N/A",
+                    target=str(target_dir),
+                    feedback_count=len(feedback_items),
+                    fixes_applied=fixes_applied,
+                    test_retries=test_retries,
+                    tests_passed=tests_passed,
+                    loop_mode=config.loop,
+                    iterations_used=iteration if config.loop else 1,
+                ),
             )
-            iteration = 1
 
-        # Print summary
-        print_summary(
-            console,
-            SummaryData(
-                skill=skill or "N/A",
-                target=str(target_dir),
-                feedback_count=len(feedback_items),
-                fixes_applied=fixes_applied,
-                test_retries=test_retries,
-                tests_passed=tests_passed,
-                loop_mode=config.loop,
-                iterations_used=iteration if config.loop else 1,
-            ),
-        )
+            # Clean up exploration files before exit
+            exploration_cleanup = target_dir / ".daydream" / "exploration"
+            if exploration_cleanup.is_dir():
+                shutil.rmtree(exploration_cleanup)
 
-        # Clean up exploration files before exit
-        exploration_cleanup = target_dir / ".daydream" / "exploration"
-        if exploration_cleanup.is_dir():
-            shutil.rmtree(exploration_cleanup)
+            # Commit if tests passed
+            if tests_passed:
+                await phase_commit_push(review_backend, target_dir)
 
-        # Commit if tests passed
-        if tests_passed:
-            await phase_commit_push(review_backend, target_dir)
+                if cleanup_enabled:
+                    review_output_path = target_dir / REVIEW_OUTPUT_FILE
+                    if review_output_path.exists():
+                        review_output_path.unlink()
+                        print_success(console, f"Cleaned up {REVIEW_OUTPUT_FILE}")
 
-            if cleanup_enabled:
-                review_output_path = target_dir / REVIEW_OUTPUT_FILE
-                if review_output_path.exists():
-                    review_output_path.unlink()
-                    print_success(console, f"Cleaned up {REVIEW_OUTPUT_FILE}")
-
-            return 0
-        else:
-            return 1
+                return 0
+            else:
+                return 1
