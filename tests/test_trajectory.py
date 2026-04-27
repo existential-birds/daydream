@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -30,6 +31,7 @@ from daydream.trajectory import (
     Redactor,
     TrajectoryRecorder,
     _reset_recorder_for_tests,
+    _safe_descriptor,
     get_current_recorder,
     now_iso,
 )
@@ -448,7 +450,7 @@ def test_redactor_is_passthrough() -> None:
 
 
 def test_invocation_has_no_parent_field() -> None:
-    """D-08: Invocation MUST NOT have a `parent` field in Phase 2."""
+    """D-08: Invocation does not carry parent; parent linkage is on TrajectoryRecorder."""
     fields = {f.name for f in Invocation.__dataclass_fields__.values()}  # type: ignore[attr-defined]
     assert "parent" not in fields, (
         f"Invocation must not carry a parent field in Phase 2 (D-08); got {fields}"
@@ -463,3 +465,368 @@ def test_invocation_has_no_parent_field() -> None:
 def test_no_recorder_no_op_get_current_returns_none() -> None:
     """CORE-09: outside any recorder context, get_current_recorder is None."""
     assert get_current_recorder() is None
+
+
+# ===========================================================================
+# Fork / Sibling / Continuation tests (Phase 3, SUBA-01..09)
+# ===========================================================================
+
+
+def _observe_text_and_result(inv: Any, text: str = "output") -> None:
+    """Helper: observe a TextEvent + ResultEvent to produce a minimal agent step."""
+    inv.observe(TextEvent(text=text))
+    inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+
+# ---------------------------------------------------------------------------
+# SUBA-07: ContextVar isolation inside fork
+# ---------------------------------------------------------------------------
+
+
+async def test_fork_contextvar_isolation(tmp_path: Path) -> None:
+    """SUBA-07: Inside fork scope get_current_recorder() returns child; outside returns parent."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        assert get_current_recorder() is recorder
+        async with recorder.fork("fix-0") as child:
+            assert get_current_recorder() is child
+            assert get_current_recorder() is not recorder
+            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                _observe_text_and_result(inv)
+        assert get_current_recorder() is recorder
+
+
+# ---------------------------------------------------------------------------
+# SUBA-06: Sibling inherits session_id
+# ---------------------------------------------------------------------------
+
+
+async def test_sibling_inherits_session_id(tmp_path: Path) -> None:
+    """SUBA-06: Child trajectory file has same session_id as parent."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.fork("fix-0") as child:
+            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                _observe_text_and_result(inv)
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv)
+
+    parent_traj = _read_trajectory(recorder.path)
+    sibling_path = child.path
+    sibling_traj = _read_trajectory(sibling_path)
+    assert parent_traj["session_id"] == sibling_traj["session_id"]
+    assert parent_traj["session_id"] == recorder.session_id
+
+
+# ---------------------------------------------------------------------------
+# SUBA-06: Sibling file path format
+# ---------------------------------------------------------------------------
+
+
+async def test_sibling_file_path_format(tmp_path: Path) -> None:
+    """SUBA-06: Sibling path matches <target>/.daydream/trajectories/<hex8>.<descriptor>.json."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.fork("deep-python") as child:
+            async with child.invocation(phase=DaydreamPhase.DEEP) as inv:
+                _observe_text_and_result(inv)
+
+    expected = tmp_path / ".daydream" / "trajectories" / f"{recorder.session_id[:8]}.deep-python.json"
+    assert child.path == expected
+    assert expected.exists()
+
+
+# ---------------------------------------------------------------------------
+# SUBA-08: Step ID isolation across siblings
+# ---------------------------------------------------------------------------
+
+
+async def test_step_id_isolation_across_siblings(tmp_path: Path) -> None:
+    """SUBA-08: Parent and child step_ids both start from 1 independently."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv, "parent-step")
+        async with recorder.fork("fix-0") as child:
+            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                _observe_text_and_result(inv, "child-step")
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+
+    parent_traj = _read_trajectory(recorder.path)
+    child_traj = _read_trajectory(child.path)
+
+    parent_ids = [s["step_id"] for s in parent_traj["steps"]]
+    child_ids = [s["step_id"] for s in child_traj["steps"]]
+
+    assert parent_ids == list(range(1, len(parent_ids) + 1))
+    assert child_ids == list(range(1, len(child_ids) + 1))
+    assert child_ids[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# SUBA-09: Parent FinalMetrics exclude children
+# ---------------------------------------------------------------------------
+
+
+async def test_parent_metrics_exclude_children(tmp_path: Path) -> None:
+    """SUBA-09: Parent FinalMetrics totals do NOT include child step metrics."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="parent-text"))
+            inv.observe(_StubMetricsEvent(
+                message_id="m-parent", prompt_tokens=100, completion_tokens=10,
+                cached_tokens=5, cost_usd=0.001,
+            ))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        async with recorder.fork("fix-0") as child:
+            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                inv.observe(TextEvent(text="child-text"))
+                inv.observe(_StubMetricsEvent(
+                    message_id="m-child", prompt_tokens=200, completion_tokens=20,
+                    cached_tokens=10, cost_usd=0.002,
+                ))
+                inv.observe(ResultEvent(structured_output=None, continuation=None))
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+
+    parent_traj = _read_trajectory(recorder.path)
+    child_traj = _read_trajectory(child.path)
+
+    assert parent_traj["final_metrics"]["total_prompt_tokens"] == 100
+    assert child_traj["final_metrics"]["total_prompt_tokens"] == 200
+
+
+# ---------------------------------------------------------------------------
+# SUBA-02: Dispatch step has subagent_trajectory_ref
+# ---------------------------------------------------------------------------
+
+
+async def test_dispatch_step_has_subagent_trajectory_ref(tmp_path: Path) -> None:
+    """SUBA-02: Dispatch step carries subagent_trajectory_ref entries."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.fork("fix-0") as child:
+            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                _observe_text_and_result(inv)
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv)
+
+    parent_traj = _read_trajectory(recorder.path)
+    assert atif_validate(parent_traj, validate_images=False) is True
+
+    dispatch_steps = [
+        s for s in parent_traj["steps"]
+        if s["source"] == "agent" and "Dispatching" in s.get("message", "")
+    ]
+    assert len(dispatch_steps) == 1
+    dispatch = dispatch_steps[0]
+    ref = dispatch["observation"]["results"][0]["subagent_trajectory_ref"][0]
+    assert ref["session_id"] == recorder.session_id
+
+
+# ---------------------------------------------------------------------------
+# Dispatch step uses relative path (starts with "trajectories/")
+# ---------------------------------------------------------------------------
+
+
+async def test_dispatch_step_uses_relative_path(tmp_path: Path) -> None:
+    """Dispatch step subagent_trajectory_ref.trajectory_path is relative to .daydream."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.fork("fix-0") as child:
+            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                _observe_text_and_result(inv)
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv)
+
+    parent_traj = _read_trajectory(recorder.path)
+    dispatch_steps = [
+        s for s in parent_traj["steps"]
+        if s["source"] == "agent" and "Dispatching" in s.get("message", "")
+    ]
+    ref = dispatch_steps[0]["observation"]["results"][0]["subagent_trajectory_ref"][0]
+    assert ref["trajectory_path"].startswith("trajectories/")
+
+
+# ---------------------------------------------------------------------------
+# Dispatch step no-op when no siblings
+# ---------------------------------------------------------------------------
+
+
+async def test_dispatch_step_noop_when_no_siblings(tmp_path: Path) -> None:
+    """create_dispatch_step with empty _registered_siblings adds no steps."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv)
+        steps_before = len(recorder.steps)
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+        assert len(recorder.steps) == steps_before
+
+
+# ---------------------------------------------------------------------------
+# _safe_descriptor slugification
+# ---------------------------------------------------------------------------
+
+
+def test_safe_descriptor_slugification() -> None:
+    """Various inputs correctly slugified by _safe_descriptor."""
+    assert _safe_descriptor("fix-0") == "fix-0"
+    assert _safe_descriptor("deep-python") == "deep-python"
+    assert _safe_descriptor("explore-pattern-scanner") == "explore-pattern-scanner"
+    assert _safe_descriptor("Fix_Issue (3)") == "fix-issue-3"
+    assert _safe_descriptor("UPPER--CASE") == "upper-case"
+    assert _safe_descriptor("-leading-trailing-") == "leading-trailing"
+    assert _safe_descriptor("../etc/passwd") == "etc-passwd"
+
+
+# ---------------------------------------------------------------------------
+# SUBA-01: Sequential phases produce single file
+# ---------------------------------------------------------------------------
+
+
+async def test_sequential_phases_single_file(tmp_path: Path) -> None:
+    """SUBA-01: Three sequential invocations produce one file with continuous step_ids."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        for phase in (DaydreamPhase.REVIEW, DaydreamPhase.PARSE, DaydreamPhase.FIX):
+            async with recorder.invocation(phase=phase) as inv:
+                _observe_text_and_result(inv, f"{phase.value}-output")
+
+    assert recorder.path.exists()
+    traj = _read_trajectory(recorder.path)
+    assert atif_validate(traj, validate_images=False) is True
+
+    step_ids = [s["step_id"] for s in traj["steps"]]
+    assert step_ids == list(range(1, len(step_ids) + 1))
+
+    traj_dir = tmp_path / ".daydream" / "trajectories"
+    assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
+
+
+# ---------------------------------------------------------------------------
+# SUBA-05: Continuation appends no sibling
+# ---------------------------------------------------------------------------
+
+
+async def test_continuation_appends_no_sibling(tmp_path: Path) -> None:
+    """SUBA-05: Two invocations simulating continuation produce one file."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.FIX) as inv:
+            _observe_text_and_result(inv, "first")
+        async with recorder.invocation(phase=DaydreamPhase.FIX) as inv:
+            _observe_text_and_result(inv, "second")
+
+    assert recorder.path.exists()
+    traj = _read_trajectory(recorder.path)
+    step_ids = [s["step_id"] for s in traj["steps"]]
+    assert step_ids == [1, 2]
+
+    traj_dir = tmp_path / ".daydream" / "trajectories"
+    assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
+
+
+# ---------------------------------------------------------------------------
+# Fork write failure degrades gracefully
+# ---------------------------------------------------------------------------
+
+
+async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
+    """If child _write() raises, parent ContextVar is restored, no crash."""
+    recorder = _make_recorder(tmp_path)
+    warnings_emitted: list[str] = []
+
+    def fake_print_warning(_console: Any, message: str) -> None:
+        warnings_emitted.append(message)
+
+    async with recorder:
+        with patch("daydream.trajectory.print_warning", fake_print_warning):
+            async with recorder.fork("fail-child") as child:
+                async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                    _observe_text_and_result(inv)
+                # Sabotage the write path to be an unwritable directory
+                child.path = Path("/nonexistent-dir-xyz/child.json")
+
+        assert get_current_recorder() is recorder
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv)
+
+    assert any("Sibling trajectory write failed" in m for m in warnings_emitted)
+    assert recorder.path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Pitfall 6: Fork child with no steps produces no file
+# ---------------------------------------------------------------------------
+
+
+async def test_fork_child_no_steps_no_file(tmp_path: Path) -> None:
+    """Pitfall 6: Child with 0 steps writes no sibling file; parent has no registration."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.fork("empty-child"):
+            pass
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv)
+
+    traj_dir = tmp_path / ".daydream" / "trajectories"
+    assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
+    assert len(recorder._registered_siblings) == 0
+
+
+# ---------------------------------------------------------------------------
+# Multiple forks all registered
+# ---------------------------------------------------------------------------
+
+
+async def test_multiple_forks_all_registered(tmp_path: Path) -> None:
+    """Three sequential forks all register with parent; dispatch step has 3 refs."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        for i in range(3):
+            async with recorder.fork(f"fix-{i}") as child:
+                async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                    _observe_text_and_result(inv, f"child-{i}")
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv)
+
+    parent_traj = _read_trajectory(recorder.path)
+    assert atif_validate(parent_traj, validate_images=False) is True
+
+    dispatch_steps = [
+        s for s in parent_traj["steps"]
+        if s["source"] == "agent" and "Dispatching" in s.get("message", "")
+    ]
+    assert len(dispatch_steps) == 1
+    results = dispatch_steps[0]["observation"]["results"]
+    assert len(results) == 3
+    for r in results:
+        assert len(r["subagent_trajectory_ref"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Fork validator accepts both parent and child
+# ---------------------------------------------------------------------------
+
+
+async def test_fork_validator_accepts_both(tmp_path: Path) -> None:
+    """Both parent and child trajectories pass atif_validate."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.fork("fix-0") as child:
+            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                _observe_text_and_result(inv)
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv)
+
+    parent_traj = _read_trajectory(recorder.path)
+    child_traj = _read_trajectory(child.path)
+
+    assert atif_validate(parent_traj, validate_images=False) is True
+    assert atif_validate(child_traj, validate_images=False) is True

@@ -11,15 +11,16 @@ call against the recorder via ``get_current_recorder()``. Backends emit
 flushes to the parent Trajectory at scope exit. The Recorder writes the
 Trajectory JSON on clean ``__aexit__``.
 
-Phase 2 ships the minimum surface: ONE ``ContextVar`` (``_RECORDER_VAR``),
-no parent linkage on ``Invocation``, and a no-op ``Redactor``. Phase 3 adds
-the second ContextVar and parent linkage; Phase 4 fills in the Redactor
-rule list.
+Phase 2 shipped the minimum surface: ONE ``ContextVar`` (``_RECORDER_VAR``),
+and a no-op ``Redactor``. Phase 3 adds ``fork()`` for parallel task groups
+(sibling trajectory files) reusing the single ``_RECORDER_VAR`` (D-04). Phase 4 fills
+in the Redactor rule list.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ from daydream.atif import (
     Observation,
     ObservationResult,
     Step,
+    SubagentTrajectoryRef,
     ToolCall,
     Trajectory,
 )
@@ -46,6 +48,13 @@ if TYPE_CHECKING:
 
 _console = create_console()
 _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "cost": 0.0, "any_cost_seen": False}  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
+
+
+def _safe_descriptor(raw: str) -> str:
+    """Slugify a descriptor to filesystem-safe characters (D-06)."""
+    slug = re.sub(r"[^a-z0-9-]", "-", raw.lower())
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug.strip("-")
 
 
 def now_iso() -> str:
@@ -165,8 +174,8 @@ class Invocation:
     """Per-``run_agent()`` recording scope.
 
     Owns the Step buffer for one model conversation and the in-flight
-    ``tool_call_id -> open-step`` map (CORE-06). Phase 2 has NO ``parent``
-    field (D-08); Phase 3 adds parent linkage as one coherent unit.
+    ``tool_call_id -> open-step`` map (CORE-06). ``parent`` linkage lives on
+    ``TrajectoryRecorder`` (Phase 3, D-02), not on ``Invocation``.
 
     Attributes:
         recorder: Owning TrajectoryRecorder (shares step_id counter, Redactor).
@@ -389,9 +398,12 @@ class TrajectoryRecorder:
     redactor: Redactor = field(default_factory=Redactor)
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     steps: list[Step] = field(default_factory=list)
+    parent: TrajectoryRecorder | None = None
+    descriptor: str = ""
     _step_id_counter: int = 0
     _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
     _previous_token: Any = None
+    _registered_siblings: list[tuple[Path, str]] = field(default_factory=list)
 
     async def __aenter__(self) -> "TrajectoryRecorder":
         self._previous_token = _RECORDER_VAR.set(self)
@@ -446,6 +458,60 @@ class TrajectoryRecorder:
             self._final_totals["cost"] = (self._final_totals["cost"] or 0.0) + cost_usd
             self._final_totals["any_cost_seen"] = True
 
+    def _sibling_path_for(self, descriptor: str) -> Path:
+        """Return the sibling trajectory file path for *descriptor*."""
+        slug = _safe_descriptor(descriptor)
+        return self.target_dir / ".daydream" / "trajectories" / f"{self.session_id[:8]}.{slug}.json"
+
+    def fork(self, descriptor: str) -> "_ForkCM":
+        """Create a child recorder for a parallel task group.
+
+        Args:
+            descriptor: Semantic label for the sibling (e.g. ``"fix-0"``).
+
+        Returns:
+            An async context manager yielding a child ``TrajectoryRecorder``.
+        """
+        return _ForkCM(parent=self, descriptor=descriptor)
+
+    def _register_sibling(self, path: Path, descriptor: str) -> None:
+        """Register a completed sibling trajectory (synchronous, no await)."""
+        self._registered_siblings.append((path, descriptor))
+
+    def create_dispatch_step(self, *, phase: DaydreamPhase) -> None:
+        """Create an agent Step referencing all registered sibling trajectories.
+
+        No-op when ``_registered_siblings`` is empty.
+        """
+        if not self._registered_siblings:
+            return
+        results: list[ObservationResult] = []
+        for sibling_path, desc in self._registered_siblings:
+            rel = str(sibling_path.relative_to(self.target_dir / ".daydream"))
+            results.append(
+                ObservationResult(
+                    content=f"Dispatched to {desc}",
+                    subagent_trajectory_ref=[
+                        SubagentTrajectoryRef(session_id=self.session_id, trajectory_path=rel),
+                    ],
+                )
+            )
+        count = len(self._registered_siblings)
+        step = Step(
+            step_id=self._next_step_id(),
+            timestamp=now_iso(),
+            source="agent",
+            model_name=self.agent_model_name,
+            message=f"Dispatching {count} parallel {phase.value} tasks",
+            observation=Observation(results=results),
+            extra={
+                "daydream_phase": phase.value,
+                "daydream_run_flow": self.run_flow.value,
+            },
+        )
+        self.steps.append(self.redactor.redact_step(step))
+        self._registered_siblings.clear()
+
     def _build_trajectory(self) -> Trajectory:
         try:
             version = metadata.version("daydream")
@@ -478,6 +544,45 @@ class TrajectoryRecorder:
         trajectory = self._build_trajectory()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(trajectory.to_json_dict(), indent=2), encoding="utf-8")
+
+
+class _ForkCM:
+    """Async context manager for forking a child recorder (D-01, D-02, D-03)."""
+
+    def __init__(self, parent: TrajectoryRecorder, descriptor: str) -> None:
+        self._parent = parent
+        self._descriptor = descriptor
+        self._child: TrajectoryRecorder | None = None
+
+    async def __aenter__(self) -> TrajectoryRecorder:
+        child = TrajectoryRecorder(
+            path=self._parent._sibling_path_for(self._descriptor),
+            run_flow=self._parent.run_flow,
+            target_dir=self._parent.target_dir,
+            agent_model_name=self._parent.agent_model_name,
+            redactor=self._parent.redactor,
+            session_id=self._parent.session_id,
+        )
+        child.parent = self._parent
+        child.descriptor = self._descriptor
+        child._previous_token = _RECORDER_VAR.set(child)
+        self._child = child
+        return child
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        child = self._child
+        if child is None:
+            return
+        try:
+            child._write()
+        except Exception as exc:  # noqa: BLE001 - recording must never crash a run
+            print_warning(_console, f"Sibling trajectory write failed: {type(exc).__name__}: {exc}")
+        finally:
+            if child._previous_token is not None:
+                _RECORDER_VAR.reset(child._previous_token)
+                child._previous_token = None
+        if child.parent is not None and child.path.exists():
+            child.parent._register_sibling(child.path, self._descriptor)
 
 
 class _InvocationCM:
