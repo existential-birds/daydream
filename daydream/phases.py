@@ -15,7 +15,7 @@ from daydream.agent import (
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
-from daydream.trajectory import DaydreamPhase
+from daydream.trajectory import DaydreamPhase, get_current_recorder
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
@@ -976,6 +976,7 @@ async def phase_fix_parallel(
         List of (item, success, error) tuples for each feedback item
 
     """
+    recorder = get_current_recorder()
     results: list[FixResult] = []
     limiter = anyio.CapacityLimiter(4)
     panel = ParallelFixPanel(console, feedback_items)
@@ -1009,17 +1010,36 @@ handling strategy is wrong for that code path.
                 def callback(message: str, i: int = task_index) -> None:
                     panel.update_row(i, message)
 
-                try:
-                    async with limiter:
-                        await run_agent(backend, cwd, task_prompt, progress_callback=callback, phase=DaydreamPhase.FIX)
-                    panel.complete_row(task_index)
-                    results.append((task_item, True, None))
-                except Exception as e:
-                    error_msg = f"{type(e).__name__}: {e}"
-                    panel.fail_row(task_index, error_msg)
-                    results.append((task_item, False, error_msg))
+                if recorder is not None:
+                    async with recorder.fork(f"fix-{task_index}"):
+                        try:
+                            async with limiter:
+                                await run_agent(
+                                    backend, cwd, task_prompt, progress_callback=callback, phase=DaydreamPhase.FIX,
+                                )
+                            panel.complete_row(task_index)
+                            results.append((task_item, True, None))
+                        except Exception as e:
+                            error_msg = f"{type(e).__name__}: {e}"
+                            panel.fail_row(task_index, error_msg)
+                            results.append((task_item, False, error_msg))
+                else:
+                    try:
+                        async with limiter:
+                            await run_agent(
+                                backend, cwd, task_prompt, progress_callback=callback, phase=DaydreamPhase.FIX,
+                            )
+                        panel.complete_row(task_index)
+                        results.append((task_item, True, None))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {e}"
+                        panel.fail_row(task_index, error_msg)
+                        results.append((task_item, False, error_msg))
 
             tg.start_soon(_fix_task)
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
 
     panel.finish()
 
@@ -1428,6 +1448,7 @@ async def phase_per_stack_reviews(
     )
 
     deep_dir_path = _deep_dir(cwd)
+    recorder = get_current_recorder()
     results: dict[str, Path] = {}
     failures: dict[str, str] = {}
     limiter = anyio.CapacityLimiter(4)
@@ -1463,28 +1484,48 @@ async def phase_per_stack_reviews(
                 task_prompt: str = prompt,
                 task_output: Path = output_path,
             ) -> None:
-                try:
-                    async with limiter:
-                        await run_agent(backend, cwd, task_prompt, phase=DaydreamPhase.DEEP)
-                    results[stack_name] = task_output
-                except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                    reason = f"{type(e).__name__}: {e}"
-                    failures[stack_name] = reason
-                    debug = get_debug_log()
-                    if debug is not None:
-                        debug.write(
-                            f"[STAGE] per-stack {stack_name} failed: {reason}\n"
+                if recorder is not None:
+                    async with recorder.fork(f"deep-{stack_name}"):
+                        try:
+                            async with limiter:
+                                await run_agent(backend, cwd, task_prompt, phase=DaydreamPhase.DEEP)
+                            results[stack_name] = task_output
+                        except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                            reason = f"{type(e).__name__}: {e}"
+                            failures[stack_name] = reason
+                            debug = get_debug_log()
+                            if debug is not None:
+                                debug.write(f"[STAGE] per-stack {stack_name} failed: {reason}\n")
+                                debug.flush()
+                            print_warning(
+                                console,
+                                f"Per-stack review for '{stack_name}' failed ({reason}); "
+                                "merge report will note this stack as uncovered.",
+                            )
+                else:
+                    try:
+                        async with limiter:
+                            await run_agent(backend, cwd, task_prompt, phase=DaydreamPhase.DEEP)
+                        results[stack_name] = task_output
+                    except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                        reason = f"{type(e).__name__}: {e}"
+                        failures[stack_name] = reason
+                        debug = get_debug_log()
+                        if debug is not None:
+                            debug.write(
+                                f"[STAGE] per-stack {stack_name} failed: {reason}\n"
+                            )
+                            debug.flush()
+                        print_warning(
+                            console,
+                            f"Per-stack review for '{stack_name}' failed ({reason}); "
+                            "merge report will note this stack as uncovered.",
                         )
-                        debug.flush()
-                    # Surface to the user so a dropped stack isn't invisible
-                    # outside the debug log.
-                    print_warning(
-                        console,
-                        f"Per-stack review for '{stack_name}' failed ({reason}); "
-                        "merge report will note this stack as uncovered.",
-                    )
 
             tg.start_soon(_task)
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
 
     return results, failures
 
