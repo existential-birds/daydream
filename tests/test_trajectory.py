@@ -30,20 +30,11 @@ from daydream.trajectory import (
     Invocation,
     Redactor,
     TrajectoryRecorder,
-    _reset_recorder_for_tests,
     _safe_descriptor,
     get_current_recorder,
     now_iso,
 )
 
-
-
-@pytest.fixture(autouse=True)
-def _reset_recorder() -> Any:
-    """Reset _RECORDER_VAR before and after every test (mirrors D-17)."""
-    _reset_recorder_for_tests()
-    yield
-    _reset_recorder_for_tests()
 
 
 def _make_recorder(tmp_path: Path, *, agent_model_name: str = "opus") -> TrajectoryRecorder:
