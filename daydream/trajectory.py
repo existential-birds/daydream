@@ -591,15 +591,17 @@ class _ForkCM:
         child = self._child
         if child is None:
             return
+        write_ok = False
         try:
             child._write()
+            write_ok = bool(child.steps)
         except Exception as exc:  # noqa: BLE001 - recording must never crash a run
             print_warning(_console, f"Sibling trajectory write failed: {type(exc).__name__}: {exc}")
         finally:
             if child._previous_token is not None:
                 _RECORDER_VAR.reset(child._previous_token)
                 child._previous_token = None
-        if child.parent is not None and child.path.exists():
+        if write_ok and child.parent is not None:
             child.parent._register_sibling(child.path, self._descriptor)
 
 
