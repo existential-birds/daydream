@@ -94,7 +94,7 @@
 |-------|----------------|--------|-----------|
 | 1. Vendor ATIF Foundation | 4/4 | Complete | 2026-04-26 |
 | 2. Recorder Core + Event Enrichment + Mapping | 7/7 | Complete | 2026-04-27 |
-| 3. Subagent Wiring (Parallel + Continuation) | 0/2 | Planning | - |
+| 3. Subagent Wiring (Parallel + Continuation) | 0/2 | Ready to execute | - |
 | 4. Cutover + Redaction + CLI Surface | 0/0 | Not started | - |
 | 5. Test Hardening + Documentation | 0/0 | Not started | - |
 
