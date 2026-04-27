@@ -683,6 +683,16 @@ def test_safe_descriptor_slugification() -> None:
     assert _safe_descriptor("../etc/passwd") == "etc-passwd"
 
 
+def test_safe_descriptor_rejects_degenerate_inputs() -> None:
+    """Degenerate inputs that produce empty slugs raise ValueError (CR-01)."""
+    with pytest.raises(ValueError, match="empty slug"):
+        _safe_descriptor("")
+    with pytest.raises(ValueError, match="empty slug"):
+        _safe_descriptor("...")
+    with pytest.raises(ValueError, match="empty slug"):
+        _safe_descriptor("   ")
+
+
 # ---------------------------------------------------------------------------
 # SUBA-01: Sequential phases produce single file
 # ---------------------------------------------------------------------------
