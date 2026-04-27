@@ -16,3 +16,26 @@ Discovered while running the full test suite during plan 02-01 execution
 These do not block Plan 02-01 (which is purely additive — new module +
 new tests). Existing 343-test gate is honored if these are excluded as
 pre-existing flakes; a separate plan should investigate.
+
+## gpg-agent flake on `tests/test_deep_integration.py` (out of scope, env-dependent)
+
+Discovered while running the full test suite during plan 02-04 execution
+(2026-04-26). The conftest fixture `multi_stack_target` at
+`tests/conftest.py:71-100` runs `git init` + `git commit -m 'init'` in a
+tempdir. If the user's global `~/.gitconfig` has `commit.gpgsign = true`
+(default for some developer setups), the fixture commit fails with:
+
+```
+error: gpg failed to sign the data
+gpg: signing failed: No agent running
+```
+
+— non-deterministically, depending on whether gpg-agent has been
+recently exercised in the shell. Workaround: run pytest with
+`GIT_CONFIG_GLOBAL=/dev/null`. Permanent fix would be a one-line
+`git config commit.gpgsign false` inside the fixture's setup block —
+out of scope for Plan 02-04 (which only touches Codex backend code).
+
+Suggested follow-up: a tiny conftest hardening plan adds
+`commit.gpgsign=false` and `tag.gpgsign=false` to all fixture-created
+git repos for deterministic CI behavior.

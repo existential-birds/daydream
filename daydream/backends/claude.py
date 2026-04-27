@@ -23,6 +23,7 @@ from daydream.backends import (
     AgentEvent,
     ContinuationToken,
     CostEvent,
+    MetricsEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -106,6 +107,31 @@ class ClaudeBackend:
                                     name=block.name,
                                     input=block.input or {},
                                 )
+                        # Phase 2 (EVNT-06): emit MetricsEvent per AssistantMessage
+                        # keyed by message_id (D-04 maps MetricsEvent -> open Step).
+                        # cost_usd is unavailable per-message (only on ResultMessage)
+                        # — leave None per Claude's Discretion in CONTEXT.md.
+                        # EVNT-02 field names: MetricsEvent uses `prompt_tokens` /
+                        # `completion_tokens` (the ATIF/Metrics-side names). The SDK
+                        # boundary keys are `input_tokens` / `output_tokens`; rename
+                        # at this boundary. Skip emission when either is missing —
+                        # EVNT-02 types both as int (not Optional) so a partial
+                        # usage dict would yield a malformed event. `getattr` keeps
+                        # us defensive against older test mocks that pre-date the
+                        # SDK's `usage` field on AssistantMessage.
+                        msg_usage = getattr(msg, "usage", None)
+                        if (
+                            msg_usage is not None
+                            and msg_usage.get("input_tokens") is not None
+                            and msg_usage.get("output_tokens") is not None
+                        ):
+                            yield MetricsEvent(
+                                message_id=getattr(msg, "message_id", "") or "",
+                                prompt_tokens=msg_usage["input_tokens"],
+                                completion_tokens=msg_usage["output_tokens"],
+                                cached_tokens=msg_usage.get("cache_read_input_tokens"),
+                                cost_usd=None,
+                            )
 
                     elif isinstance(msg, UserMessage):
                         for user_block in msg.content:
@@ -120,11 +146,24 @@ class ClaudeBackend:
                     elif isinstance(msg, ResultMessage):
                         if msg.structured_output is not None:
                             structured_result = msg.structured_output
-                        if msg.total_cost_usd is not None:
+                        # Phase 2 (EVNT-04, EVNT-05): emit CostEvent whenever cost OR
+                        # usage data is available. Previously this branch dropped
+                        # input_tokens / output_tokens / cached_tokens (always None).
+                        # Trust per-call semantics for SDK 0.1.52 (D-14); if Phase 5
+                        # TEST-06 finds the SDK reports cumulative, the fix lands
+                        # there. cached_tokens is a SUBSET of input_tokens, NOT
+                        # additive (D-15) — pass cache_read_input_tokens through
+                        # directly. `getattr` keeps us defensive against older test
+                        # mocks that pre-date the SDK's `usage` field on
+                        # ResultMessage.
+                        result_usage = getattr(msg, "usage", None)
+                        if msg.total_cost_usd is not None or result_usage is not None:
+                            usage = result_usage or {}
                             yield CostEvent(
                                 cost_usd=msg.total_cost_usd,
-                                input_tokens=None,
-                                output_tokens=None,
+                                input_tokens=usage.get("input_tokens"),
+                                output_tokens=usage.get("output_tokens"),
+                                cached_tokens=usage.get("cache_read_input_tokens"),
                             )
 
                 yield ResultEvent(
