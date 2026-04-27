@@ -51,10 +51,17 @@ _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "c
 
 
 def _safe_descriptor(raw: str) -> str:
-    """Slugify a descriptor to filesystem-safe characters (D-06)."""
+    """Slugify a descriptor to filesystem-safe characters (D-06).
+
+    Raises:
+        ValueError: If *raw* produces an empty slug after sanitization.
+    """
     slug = re.sub(r"[^a-z0-9-]", "-", raw.lower())
     slug = re.sub(r"-{2,}", "-", slug)
-    return slug.strip("-")
+    slug = slug.strip("-")
+    if not slug:
+        raise ValueError(f"Descriptor {raw!r} produces empty slug after sanitization")
+    return slug
 
 
 def now_iso() -> str:
