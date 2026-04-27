@@ -48,7 +48,7 @@
 - [x] 02-04-PLAN.md — Codex backend MetricsEvent emission at turn.completed with documented parity gap (EVNT-07)
 - [x] 02-05-PLAN.md — Wire recorder into run_agent: phase kwarg + Invocation lifecycle + event-loop dispatch (MAP-01..07)
 - [x] 02-06-PLAN.md — Update all run_agent call sites with phase=DaydreamPhase.X + 4 run flows construct TrajectoryRecorder (MAP-08, MAP-09)
-- [ ] 02-07-PLAN.md — autouse _reset_trajectory_recorder fixture + tighten phase signature + Phase 2 integration test (CORE-10)
+- [x] 02-07-PLAN.md — autouse _reset_trajectory_recorder fixture + tighten phase signature + Phase 2 integration test (CORE-10)
 
 ### Phase 3: Subagent Wiring (Parallel + Continuation)
 **Goal**: Daydream's three parallel-fan-out flows (`phase_fix_parallel`, `daydream/deep/orchestrator.run_deep`, `exploration_runner.pre_scan`) emit one sibling trajectory file per parallel invocation, linked from the parent via `ObservationResult.subagent_trajectory_ref`. Continuations stay in the same trajectory.
