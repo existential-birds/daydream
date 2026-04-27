@@ -60,7 +60,9 @@
   3. `phase_fix_parallel` with N parallel fixes produces N sibling trajectories (one per fix), and `exploration_runner.pre_scan` produces one sibling per specialist (pattern_scanner, dependency_tracer, test_mapper)
   4. `step_id` counters are isolated per trajectory file — no collisions across siblings — and parent `FinalMetrics` aggregates ONLY parent steps (sibling totals stay in their own file with no double-counting)
   5. A `run_agent_with_continuation` continuation call appends to the existing trajectory's step list (preserves agent identity) and does NOT spawn a sibling; the sequential phase chain (`phase_review` → `phase_parse_feedback` → `phase_fix` → `phase_test_and_heal`) emits as continuous steps in one root file
-**Plans**: TBD
+**Plans**: 2 plans
+- [ ] 03-01-PLAN.md — Fork infrastructure on TrajectoryRecorder (fork, _ForkCM, _register_sibling, create_dispatch_step, _safe_descriptor) + 15 unit tests covering all SUBA requirements
+- [ ] 03-02-PLAN.md — Wire fork into 3 parallel fan-out sites (phase_fix_parallel, phase_per_stack_reviews, pre_scan._run_specialist) + create_dispatch_step calls
 
 ### Phase 4: Cutover + Redaction + CLI Surface
 **Goal**: The legacy `_log_debug` system is gone — all 15+ call sites in `agent.py`, all `[REVERT]/[PARSE_FAIL]/[STAGE]/[TTT_*]` lines in `phases.py`, all `[CODEX_*]` lines in `backends/codex.py`, the `[PRE_SCAN]` lines in `exploration_runner.py`, the `--debug` flag, the `AgentState.debug_log` field, and the `.review-debug-{ts}.log` initialization in `runner.py`. Redaction lands in the same release so always-on trajectories never ship raw secrets. The lazy-import `from daydream.agent import _log_debug` inside `daydream/backends/codex.py:37` is verified-removed via AST sweep, not just grep. `--trajectory <path>` replaces `--debug` and SIGINT flushes a partial trajectory.
@@ -91,8 +93,8 @@
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Vendor ATIF Foundation | 4/4 | Complete | 2026-04-26 |
-| 2. Recorder Core + Event Enrichment + Mapping | 0/0 | Not started | - |
-| 3. Subagent Wiring (Parallel + Continuation) | 0/0 | Not started | - |
+| 2. Recorder Core + Event Enrichment + Mapping | 7/7 | Complete | 2026-04-27 |
+| 3. Subagent Wiring (Parallel + Continuation) | 0/2 | Planning | - |
 | 4. Cutover + Redaction + CLI Surface | 0/0 | Not started | - |
 | 5. Test Hardening + Documentation | 0/0 | Not started | - |
 
