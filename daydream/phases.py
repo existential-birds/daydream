@@ -15,7 +15,7 @@ from daydream.agent import (
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
-from daydream.trajectory import DaydreamPhase, get_current_recorder
+from daydream.trajectory import DaydreamPhase, _maybe_fork, get_current_recorder
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
@@ -1010,20 +1010,7 @@ handling strategy is wrong for that code path.
                 def callback(message: str, i: int = task_index) -> None:
                     panel.update_row(i, message)
 
-                if recorder is not None:
-                    async with recorder.fork(f"fix-{task_index}"):
-                        try:
-                            async with limiter:
-                                await run_agent(
-                                    backend, cwd, task_prompt, progress_callback=callback, phase=DaydreamPhase.FIX,
-                                )
-                            panel.complete_row(task_index)
-                            results.append((task_item, True, None))
-                        except Exception as e:
-                            error_msg = f"{type(e).__name__}: {e}"
-                            panel.fail_row(task_index, error_msg)
-                            results.append((task_item, False, error_msg))
-                else:
+                async with _maybe_fork(recorder, f"fix-{task_index}"):
                     try:
                         async with limiter:
                             await run_agent(
@@ -1484,25 +1471,7 @@ async def phase_per_stack_reviews(
                 task_prompt: str = prompt,
                 task_output: Path = output_path,
             ) -> None:
-                if recorder is not None:
-                    async with recorder.fork(f"deep-{stack_name}"):
-                        try:
-                            async with limiter:
-                                await run_agent(backend, cwd, task_prompt, phase=DaydreamPhase.DEEP)
-                            results[stack_name] = task_output
-                        except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                            reason = f"{type(e).__name__}: {e}"
-                            failures[stack_name] = reason
-                            debug = get_debug_log()
-                            if debug is not None:
-                                debug.write(f"[STAGE] per-stack {stack_name} failed: {reason}\n")
-                                debug.flush()
-                            print_warning(
-                                console,
-                                f"Per-stack review for '{stack_name}' failed ({reason}); "
-                                "merge report will note this stack as uncovered.",
-                            )
-                else:
+                async with _maybe_fork(recorder, f"deep-{stack_name}"):
                     try:
                         async with limiter:
                             await run_agent(backend, cwd, task_prompt, phase=DaydreamPhase.DEEP)
@@ -1512,9 +1481,7 @@ async def phase_per_stack_reviews(
                         failures[stack_name] = reason
                         debug = get_debug_log()
                         if debug is not None:
-                            debug.write(
-                                f"[STAGE] per-stack {stack_name} failed: {reason}\n"
-                            )
+                            debug.write(f"[STAGE] per-stack {stack_name} failed: {reason}\n")
                             debug.flush()
                         print_warning(
                             console,

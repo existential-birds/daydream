@@ -30,7 +30,7 @@ from daydream.prompts.exploration_subagents import (
     build_pattern_scanner_prompt,
     build_test_mapper_prompt,
 )
-from daydream.trajectory import DaydreamPhase, get_current_recorder
+from daydream.trajectory import DaydreamPhase, _maybe_fork, get_current_recorder
 from daydream.tree_sitter_index import detect_affected_files
 
 if TYPE_CHECKING:
@@ -243,18 +243,7 @@ async def pre_scan(
     recorder = get_current_recorder()
 
     async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
-        if recorder is not None:
-            async with recorder.fork(f"explore-{name}"):
-                try:
-                    structured, _ = await run_agent(
-                        backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
-                        phase=DaydreamPhase.EXPLORATION,
-                    )
-                    if isinstance(structured, dict):
-                        results[name] = structured
-                except Exception as exc:
-                    _log_debug(f"[PRE_SCAN] specialist {name} failed: {type(exc).__name__}: {exc}\n")
-        else:
+        async with _maybe_fork(recorder, f"explore-{name}"):
             try:
                 structured, _ = await run_agent(
                     backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -62,6 +63,13 @@ def _safe_descriptor(raw: str) -> str:
     if not slug:
         raise ValueError(f"Descriptor {raw!r} produces empty slug after sanitization")
     return slug
+
+
+def _maybe_fork(recorder: "TrajectoryRecorder | None", descriptor: str) -> Any:
+    """Return a fork CM if *recorder* is set, otherwise a no-op context manager."""
+    if recorder is not None:
+        return recorder.fork(descriptor)
+    return nullcontext()
 
 
 def now_iso() -> str:
