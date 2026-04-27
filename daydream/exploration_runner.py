@@ -30,7 +30,7 @@ from daydream.prompts.exploration_subagents import (
     build_pattern_scanner_prompt,
     build_test_mapper_prompt,
 )
-from daydream.trajectory import DaydreamPhase
+from daydream.trajectory import DaydreamPhase, get_current_recorder
 from daydream.tree_sitter_index import detect_affected_files
 
 if TYPE_CHECKING:
@@ -240,17 +240,30 @@ async def pre_scan(
     # Without this, agents on large repos exhaust their context window,
     # hit compression, and lose track of their task (D-06 graceful degradation).
     specialist_max_turns = 15
+    recorder = get_current_recorder()
 
     async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
-        try:
-            structured, _ = await run_agent(
-                backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
-                phase=DaydreamPhase.EXPLORATION,
-            )
-            if isinstance(structured, dict):
-                results[name] = structured
-        except Exception as exc:
-            _log_debug(f"[PRE_SCAN] specialist {name} failed: {type(exc).__name__}: {exc}\n")
+        if recorder is not None:
+            async with recorder.fork(f"explore-{name}"):
+                try:
+                    structured, _ = await run_agent(
+                        backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
+                        phase=DaydreamPhase.EXPLORATION,
+                    )
+                    if isinstance(structured, dict):
+                        results[name] = structured
+                except Exception as exc:
+                    _log_debug(f"[PRE_SCAN] specialist {name} failed: {type(exc).__name__}: {exc}\n")
+        else:
+            try:
+                structured, _ = await run_agent(
+                    backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
+                    phase=DaydreamPhase.EXPLORATION,
+                )
+                if isinstance(structured, dict):
+                    results[name] = structured
+            except Exception as exc:
+                _log_debug(f"[PRE_SCAN] specialist {name} failed: {type(exc).__name__}: {exc}\n")
 
     file_paths = [f.path for f in static_files]
 
@@ -271,6 +284,9 @@ async def pre_scan(
                 _run_specialist, "test_mapper",
                 build_test_mapper_prompt(file_paths, diff_ref), TEST_MAPPER_SCHEMA,
             )
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
 
     if not results:
         _log_debug("[PRE_SCAN] no specialist results collected\n")
