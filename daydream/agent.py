@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
@@ -16,6 +17,7 @@ from daydream.backends import (
     Backend,
     ContinuationToken,
     CostEvent,
+    MetricsEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -23,6 +25,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.config import UNKNOWN_SKILL_PATTERN
+from daydream.trajectory import DaydreamPhase, get_current_recorder
 from daydream.ui import (
     AgentTextRenderer,
     LiveToolPanelRegistry,
@@ -30,6 +33,14 @@ from daydream.ui import (
     print_cost,
     print_thinking,
 )
+
+# Sentinel for the transitional Plan 05 -> Plan 06 contract change.
+# Plan 05 introduces the keyword-only `phase` argument required by D-05.
+# Plan 06 updates every call site to pass `phase=DaydreamPhase.X`. To keep
+# the suite recoverable mid-wave, the default is a sentinel that raises a
+# clear TypeError at runtime when Plan 06 hasn't updated a call site yet.
+# Plan 07 re-tightens this back to a hard required-no-default signature.
+_PHASE_REQUIRED: Any = object()
 
 
 class MissingSkillError(Exception):
@@ -284,6 +295,8 @@ async def run_agent(
     backend: Backend,
     cwd: Path,
     prompt: str,
+    *,
+    phase: DaydreamPhase = _PHASE_REQUIRED,  # type: ignore[assignment]
     output_schema: dict[str, Any] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     continuation: ContinuationToken | None = None,
@@ -296,22 +309,42 @@ async def run_agent(
     is provided, runs in quiet mode and routes status updates through the
     callback instead of printing to the console.
 
+    All keyword arguments after ``prompt`` are keyword-only (the ``*``
+    separator was added in Phase 2). Existing call sites pass them by name,
+    so this is non-breaking — but the new ``phase`` argument is REQUIRED.
+    A transitional sentinel default lets Plan 06 update each call site
+    incrementally; Plan 07 will tighten this back to a strict required-no-
+    default signature.
+
     Args:
         backend: The Backend to execute against.
         cwd: Working directory for the agent.
         prompt: The prompt to send to the agent.
+        phase: Required DaydreamPhase label for ATIF Step.extra (MAP-08, D-05).
+            Must be a literal DaydreamPhase enum member. The transitional
+            sentinel default raises TypeError at runtime if omitted; Plan 07
+            will replace it with no default at all.
         output_schema: Optional JSON schema for structured output.
         progress_callback: Optional callback for status updates (quiet mode).
         continuation: Optional continuation token for multi-turn.
         agents: Optional mapping of specialist name -> AgentDefinition.
+        max_turns: Optional cap on the number of model turns.
 
     Returns:
         Tuple of (output, continuation_token). Output is text or structured data.
 
     Raises:
         MissingSkillError: If a required skill is not available.
+        TypeError: If the keyword-only ``phase`` argument is not provided.
 
     """
+    if phase is _PHASE_REQUIRED:
+        raise TypeError(
+            "run_agent() requires keyword-only argument 'phase' "
+            "(use DaydreamPhase.X). Plan 06 updates the call sites; "
+            "Plan 07 will tighten this back to a hard signature requirement."
+        )
+
     _log_debug(f"\n{'='*80}\n")
     _log_debug(f"[PROMPT] cwd={cwd}\n{prompt}\n")
     _log_debug(f"{'='*80}\n\n")
@@ -336,104 +369,142 @@ async def run_agent(
             _log_debug(f"[EXECUTE_INIT_ERROR] {type(exc).__name__}: {exc}\n")
             raise
 
-        async for event in event_iter:
-            if isinstance(event, TextEvent):
-                output_parts.append(event.text)
-                _log_debug(f"[TEXT] {event.text}\n")
+        # Open Invocation scope when a recorder is active. nullcontext keeps
+        # the with-shape uniform when no recorder is present (CORE-09 no-op).
+        # D-19: ZERO ATIF model construction in this module — only inv.observe()
+        # and inv.observe_user_step() are called against the recorder surface.
+        recorder = get_current_recorder()
+        invocation_cm: Any = (
+            recorder.invocation(phase=phase) if recorder is not None else nullcontext(None)
+        )
 
-                # Check for missing skill error
-                skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
-                if skill_match:
-                    if not use_callback:
-                        agent_renderer.finish()
-                        tool_registry.finish_all()
-                    raise MissingSkillError(skill_match.group(1))
+        async with invocation_cm as inv:
+            if inv is not None:
+                inv.observe_user_step(prompt=prompt)
 
-                if use_callback and progress_callback is not None:
-                    last_line = event.text.strip().split("\n")[-1]
-                    if last_line:
-                        progress_callback(last_line)
-                else:
-                    agent_renderer.append(event.text)
+            async for event in event_iter:
+                if isinstance(event, TextEvent):
+                    output_parts.append(event.text)
+                    _log_debug(f"[TEXT] {event.text}\n")
 
-            elif isinstance(event, ThinkingEvent):
-                _log_debug(f"[THINKING] {event.text}\n")
-                if not use_callback:
-                    if agent_renderer.has_content:
-                        agent_renderer.finish()
-                    print_thinking(console, event.text)
+                    # Check for missing skill error
+                    skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
+                    if skill_match:
+                        if not use_callback:
+                            agent_renderer.finish()
+                            tool_registry.finish_all()
+                        raise MissingSkillError(skill_match.group(1))
 
-            elif isinstance(event, ToolStartEvent):
-                _log_debug(
-                    f"[TOOL_USE] {event.name}({event.input}) "
-                    f"id={event.id} use_callback={use_callback}\n"
-                )
-                if progress_callback is not None:
-                    first_arg = next(iter(event.input.values()), "") if event.input else ""
-                    progress_callback(f"{event.name} {first_arg}"[:80])
-                else:
-                    if agent_renderer.has_content:
-                        agent_renderer.finish()
-                    tool_registry.create(event.id, event.name, event.input)
-
-            elif isinstance(event, ToolResultEvent):
-                _log_debug(
-                    f"[TOOL_RESULT{' [ERROR]' if event.is_error else ''}] "
-                    f"id={event.id} output_len={len(event.output)} "
-                    f"output_preview={event.output[:200]!r} "
-                    f"use_callback={use_callback}\n"
-                )
-                if not use_callback:
-                    panel = tool_registry.get(event.id)
-                    _log_debug(
-                        f"[TOOL_RESULT_PANEL] id={event.id} "
-                        f"panel_found={panel is not None} "
-                        f"panel_name={panel.name if panel else 'N/A'}\n"
-                    )
-                    if panel:
-                        panel.set_result(event.output, event.is_error)
-                        panel.finish()
-                        tool_registry.remove(event.id)
+                    if use_callback and progress_callback is not None:
+                        last_line = event.text.strip().split("\n")[-1]
+                        if last_line:
+                            progress_callback(last_line)
                     else:
-                        _log_debug(f"[WARN] No panel for tool_use_id={event.id}\n")
+                        agent_renderer.append(event.text)
 
-            elif isinstance(event, CostEvent):
-                if event.cost_usd:
-                    _log_debug(f"[COST] ${event.cost_usd:.4f}\n")
+                    if inv is not None:
+                        inv.observe(event)
+
+                elif isinstance(event, ThinkingEvent):
+                    _log_debug(f"[THINKING] {event.text}\n")
                     if not use_callback:
                         if agent_renderer.has_content:
                             agent_renderer.finish()
-                        console.print()
-                        print_cost(console, event.cost_usd)
-                elif event.input_tokens is not None:
-                    _log_debug(f"[TOKENS] in={event.input_tokens} out={event.output_tokens}\n")
+                        print_thinking(console, event.text)
 
-            elif isinstance(event, ResultEvent):
-                if event.structured_output is not None:
-                    structured_result = event.structured_output
-                    _log_debug(f"[STRUCTURED_OUTPUT] {structured_result}\n")
+                    if inv is not None:
+                        inv.observe(event)
+
+                elif isinstance(event, ToolStartEvent):
+                    _log_debug(
+                        f"[TOOL_USE] {event.name}({event.input}) "
+                        f"id={event.id} use_callback={use_callback}\n"
+                    )
+                    if progress_callback is not None:
+                        first_arg = next(iter(event.input.values()), "") if event.input else ""
+                        progress_callback(f"{event.name} {first_arg}"[:80])
+                    else:
+                        if agent_renderer.has_content:
+                            agent_renderer.finish()
+                        tool_registry.create(event.id, event.name, event.input)
+
+                    if inv is not None:
+                        inv.observe(event)
+
+                elif isinstance(event, ToolResultEvent):
+                    _log_debug(
+                        f"[TOOL_RESULT{' [ERROR]' if event.is_error else ''}] "
+                        f"id={event.id} output_len={len(event.output)} "
+                        f"output_preview={event.output[:200]!r} "
+                        f"use_callback={use_callback}\n"
+                    )
                     if not use_callback:
-                        issues = structured_result.get("issues", []) if isinstance(structured_result, dict) else []
-                        if issues:
-                            formatted = []
-                            for i in issues:
-                                if "file" in i and "line" in i:
-                                    desc = i.get("description", "")
-                                    issue_id = i.get("id", "?")
-                                    formatted.append(
-                                        f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
-                                    )
-                                else:
-                                    label = i.get("title", i.get("description", ""))
-                                    formatted.append(f"[{i.get('id', '?')}] {label}")
-                            agent_renderer.append("\n".join(formatted))
-                result_continuation = event.continuation
+                        panel = tool_registry.get(event.id)
+                        _log_debug(
+                            f"[TOOL_RESULT_PANEL] id={event.id} "
+                            f"panel_found={panel is not None} "
+                            f"panel_name={panel.name if panel else 'N/A'}\n"
+                        )
+                        if panel:
+                            panel.set_result(event.output, event.is_error)
+                            panel.finish()
+                            tool_registry.remove(event.id)
+                        else:
+                            _log_debug(f"[WARN] No panel for tool_use_id={event.id}\n")
 
-        if not use_callback:
-            if agent_renderer.has_content:
-                agent_renderer.finish()
-            tool_registry.finish_all()
-            console.print()
+                    if inv is not None:
+                        inv.observe(event)
+
+                elif isinstance(event, MetricsEvent):
+                    # Phase 2 EVNT-02 / MAP-06. MetricsEvent has no UI
+                    # rendering — recorder-only. Inserted BEFORE the
+                    # CostEvent branch so isinstance order is correct.
+                    if inv is not None:
+                        inv.observe(event)
+
+                elif isinstance(event, CostEvent):
+                    if event.cost_usd:
+                        _log_debug(f"[COST] ${event.cost_usd:.4f}\n")
+                        if not use_callback:
+                            if agent_renderer.has_content:
+                                agent_renderer.finish()
+                            console.print()
+                            print_cost(console, event.cost_usd)
+                    elif event.input_tokens is not None:
+                        _log_debug(f"[TOKENS] in={event.input_tokens} out={event.output_tokens}\n")
+
+                    if inv is not None:
+                        inv.observe(event)
+
+                elif isinstance(event, ResultEvent):
+                    if event.structured_output is not None:
+                        structured_result = event.structured_output
+                        _log_debug(f"[STRUCTURED_OUTPUT] {structured_result}\n")
+                        if not use_callback:
+                            issues = structured_result.get("issues", []) if isinstance(structured_result, dict) else []
+                            if issues:
+                                formatted = []
+                                for i in issues:
+                                    if "file" in i and "line" in i:
+                                        desc = i.get("description", "")
+                                        issue_id = i.get("id", "?")
+                                        formatted.append(
+                                            f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
+                                        )
+                                    else:
+                                        label = i.get("title", i.get("description", ""))
+                                        formatted.append(f"[{i.get('id', '?')}] {label}")
+                                agent_renderer.append("\n".join(formatted))
+                    result_continuation = event.continuation
+
+                    if inv is not None:
+                        inv.observe(event)
+
+            if not use_callback:
+                if agent_renderer.has_content:
+                    agent_renderer.finish()
+                tool_registry.finish_all()
+                console.print()
     except Exception as exc:
         _log_debug(f"[EXECUTE_ERROR] {type(exc).__name__}: {exc}\n")
         raise
