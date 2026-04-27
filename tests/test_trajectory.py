@@ -448,7 +448,7 @@ def test_redactor_is_passthrough() -> None:
 
 
 def test_invocation_has_no_parent_field() -> None:
-    """D-08: Invocation MUST NOT have a `parent` field in Phase 2."""
+    """D-08: Invocation does not carry parent; parent linkage is on TrajectoryRecorder."""
     fields = {f.name for f in Invocation.__dataclass_fields__.values()}  # type: ignore[attr-defined]
     assert "parent" not in fields, (
         f"Invocation must not carry a parent field in Phase 2 (D-08); got {fields}"
