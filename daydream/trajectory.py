@@ -248,21 +248,16 @@ class Invocation:
             print_warning(_console, f"Trajectory recording: {type(exc).__name__}: {exc}")
 
     def _dispatch(self, event: Any) -> None:
-        # Function-local imports avoid load-order cycles with daydream.backends
-        # AND defensively handle MetricsEvent's absence in Plan 02-01 (it lands
-        # in Plan 02-02). Class-name fallback supports either path.
+        # Function-local imports avoid load-order cycles with daydream.backends.
         from daydream.backends import (
             CostEvent,
+            MetricsEvent,
             ResultEvent,
             TextEvent,
             ThinkingEvent,
             ToolResultEvent,
             ToolStartEvent,
         )
-        try:
-            from daydream.backends import MetricsEvent  # type: ignore[attr-defined]
-        except ImportError:
-            MetricsEvent = None  # type: ignore[assignment]
 
         if isinstance(event, TextEvent):
             self._ensure_open_step()
@@ -294,12 +289,9 @@ class Invocation:
             host["_observation_results"].append(
                 ObservationResult(source_call_id=event.id, content=event.output)
             )
-        elif (MetricsEvent is not None and isinstance(event, MetricsEvent)) or (
-            type(event).__name__ == "MetricsEvent"
-        ):
-            # Class-name match supports the test stub before Plan 02-02's real
-            # MetricsEvent lands. EVNT-02 attribute names verbatim (D-15:
-            # cached_tokens is a SUBSET of prompt_tokens, not added).
+        elif isinstance(event, MetricsEvent):
+            # EVNT-02 attribute names verbatim (D-15: cached_tokens is a
+            # SUBSET of prompt_tokens, not added).
             target = self._open_step_dict
             if target is None:
                 self._ensure_open_step()
