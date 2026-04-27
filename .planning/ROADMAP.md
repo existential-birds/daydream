@@ -43,7 +43,7 @@
   5. The recorder is propagated via a `ContextVar` defined in `daydream/trajectory.py` (NOT on `AgentState`); `tests/conftest.py` has an autouse `_reset_trajectory_recorder` fixture mirroring `reset_state()`, and direct test invocation of `run_agent()` without an active recorder is a clean no-op
 **Plans**: 7 plans
 - [x] 02-01-PLAN.md — Greenfield daydream/trajectory.py: TrajectoryRecorder + Invocation + Redactor + ContextVar + DaydreamPhase/RunFlow enums + now_iso() (CORE-01..10)
-- [ ] 02-02-PLAN.md — Enrich AgentEvent dataclasses with timestamp + add MetricsEvent + extend CostEvent.cached_tokens (EVNT-01..03)
+- [x] 02-02-PLAN.md — Enrich AgentEvent dataclasses with timestamp + add MetricsEvent + extend CostEvent.cached_tokens (EVNT-01..03)
 - [ ] 02-03-PLAN.md — Fix Claude backend dropped-token bug at lines 120-128 + emit MetricsEvent per AssistantMessage (EVNT-04..06)
 - [ ] 02-04-PLAN.md — Codex backend MetricsEvent emission at turn.completed with documented parity gap (EVNT-07)
 - [ ] 02-05-PLAN.md — Wire recorder into run_agent: phase kwarg + Invocation lifecycle + event-loop dispatch (MAP-01..07)
