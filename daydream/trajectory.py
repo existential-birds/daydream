@@ -494,7 +494,10 @@ class TrajectoryRecorder:
             return
         results: list[ObservationResult] = []
         for sibling_path, desc in self._registered_siblings:
-            rel = str(sibling_path.relative_to(self.target_dir / ".daydream"))
+            try:
+                rel = str(sibling_path.relative_to(self.target_dir / ".daydream"))
+            except ValueError:
+                rel = sibling_path.name
             results.append(
                 ObservationResult(
                     content=f"Dispatched to {desc}",
