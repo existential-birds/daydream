@@ -8,9 +8,11 @@ knowing which backend produced them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
+
+from daydream.trajectory import now_iso
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -20,43 +22,127 @@ if TYPE_CHECKING:
 
 @dataclass
 class TextEvent:
-    """Agent text output."""
+    """Agent text output.
+
+    Attributes:
+        text: The text emitted by the agent.
+        timestamp: ISO 8601 UTC timestamp populated at backend yield time
+            via ``now_iso()`` (Pitfall 2 single-source-of-truth).
+    """
 
     text: str
+    timestamp: str = field(default_factory=now_iso)
 
 
 @dataclass
 class ThinkingEvent:
-    """Extended thinking / reasoning."""
+    """Extended thinking / reasoning.
+
+    Attributes:
+        text: Reasoning content emitted by the agent.
+        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
+    """
 
     text: str
+    timestamp: str = field(default_factory=now_iso)
 
 
 @dataclass
 class ToolStartEvent:
-    """Tool invocation started."""
+    """Tool invocation started.
+
+    Attributes:
+        id: Tool call identifier (Claude block.id or Codex item.id /
+            synthesized UUID).
+        name: Tool function name.
+        input: Tool arguments dict; may be empty but is never None.
+        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
+    """
 
     id: str
     name: str
     input: dict[str, Any]
+    timestamp: str = field(default_factory=now_iso)
 
 
 @dataclass
 class ToolResultEvent:
-    """Tool invocation completed."""
+    """Tool invocation completed.
+
+    Attributes:
+        id: Tool call identifier matching the prior ToolStartEvent.id.
+        output: Tool output as a string.
+        is_error: True if the tool reported an error.
+        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
+    """
 
     id: str
     output: str
     is_error: bool
+    timestamp: str = field(default_factory=now_iso)
 
 
 @dataclass
 class CostEvent:
-    """Cost and usage information."""
+    """Cost and usage information (end-of-call signal feeding FinalMetrics).
+
+    Attributes:
+        cost_usd: Total cost in USD; None when unavailable (Codex always
+            None per D-16).
+        input_tokens: Prompt tokens (None when unavailable).
+        output_tokens: Completion tokens (None when unavailable).
+        cached_tokens: Cached portion of input_tokens (subset, NOT added
+            to input_tokens per D-15). None when unavailable. Default
+            ``None`` keeps existing 3-positional-arg call sites in
+            ``backends/claude.py`` and ``backends/codex.py`` valid until
+            Plans 03/04 update them.
+        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
+    """
 
     cost_usd: float | None
     input_tokens: int | None
     output_tokens: int | None
+    cached_tokens: int | None = None
+    timestamp: str = field(default_factory=now_iso)
+
+
+@dataclass
+class MetricsEvent:
+    """Per-step LLM token/cost usage.
+
+    Emitted once per AssistantMessage by the Claude backend (keyed via
+    ``AssistantMessage.message_id``), and once per ``turn.completed`` by
+    the Codex backend (with empty ``message_id`` since Codex has no
+    per-message id). The recorder uses ``message_id`` to attach Metrics
+    to the correct agent Step (D-04, MAP-06).
+
+    Attributes:
+        message_id: Identifier matching the AssistantMessage that owns
+            this metric. Empty string for Codex (D-16).
+        prompt_tokens: Prompt tokens for this turn. REQUIRED per EVNT-02
+            (int, not Optional) — every AssistantMessage / turn.completed
+            carries it. Backends read the SDK key (Claude
+            ``usage["input_tokens"]``, Codex ``usage["input_tokens"]``)
+            and rename at the boundary.
+        completion_tokens: Completion tokens for this turn. REQUIRED per
+            EVNT-02 (int, not Optional). Backends read the SDK key
+            (Claude ``usage["output_tokens"]``, Codex
+            ``usage["output_tokens"]``) and rename at the boundary.
+        cached_tokens: Subset of ``prompt_tokens`` served from cache
+            (None when unavailable; Codex always None per D-16). NOT
+            additive to ``prompt_tokens`` (D-15).
+        cost_usd: Per-turn cost in USD (None when unavailable; Codex
+            always None per D-16 — DO NOT synthesize from a token-price
+            table).
+        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
+    """
+
+    message_id: str
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int | None
+    cost_usd: float | None
+    timestamp: str = field(default_factory=now_iso)
 
 
 @dataclass
@@ -69,13 +155,28 @@ class ContinuationToken:
 
 @dataclass
 class ResultEvent:
-    """Final event in the stream. Carries structured output and continuation token."""
+    """Final event in the stream. Carries structured output and continuation token.
+
+    Attributes:
+        structured_output: Schema-validated structured result, or None.
+        continuation: Optional continuation token for multi-turn flows.
+        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
+    """
 
     structured_output: Any | None
     continuation: ContinuationToken | None
+    timestamp: str = field(default_factory=now_iso)
 
 
-AgentEvent = TextEvent | ThinkingEvent | ToolStartEvent | ToolResultEvent | CostEvent | ResultEvent
+AgentEvent = (
+    TextEvent
+    | ThinkingEvent
+    | ToolStartEvent
+    | ToolResultEvent
+    | CostEvent
+    | MetricsEvent
+    | ResultEvent
+)
 
 
 class Backend(Protocol):
@@ -131,6 +232,7 @@ __all__ = [
     "ClaudeBackend",
     "ContinuationToken",
     "CostEvent",
+    "MetricsEvent",
     "ResultEvent",
     "TextEvent",
     "ThinkingEvent",
