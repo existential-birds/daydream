@@ -8,7 +8,6 @@ snapshot equality is banned (Pitfall 11). Most assertions go through
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -18,6 +17,7 @@ import pytest
 from daydream.atif import validate as atif_validate
 from daydream.backends import (
     CostEvent,
+    MetricsEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -36,30 +36,6 @@ from daydream.trajectory import (
     now_iso,
 )
 
-
-# Stub MetricsEvent for tests until Plan 02-02 lands the real one in
-# daydream/backends/__init__.py. The recorder's _dispatch matches by class
-# name to stay compatible with both forms.
-@dataclass
-class _StubMetricsEvent:
-    """Stand-in for the future daydream.backends.MetricsEvent dataclass.
-
-    Attributes match EVNT-02 verbatim (D-15 names: prompt_tokens /
-    completion_tokens / cached_tokens / cost_usd, not input_tokens /
-    output_tokens). Class name is `MetricsEvent` so type(event).__name__
-    matches the production class once Plan 02-02 lands.
-    """
-
-    message_id: str
-    prompt_tokens: int | None
-    completion_tokens: int | None
-    cached_tokens: int | None
-    cost_usd: float | None
-
-
-# Use the production class name so duck-type dispatch works regardless of
-# whether daydream.backends.MetricsEvent exists yet.
-_StubMetricsEvent.__name__ = "MetricsEvent"
 
 
 @pytest.fixture(autouse=True)
@@ -187,7 +163,7 @@ async def test_user_step_omits_agent_only_fields(tmp_path: Path) -> None:
 async def test_metrics_event_cached_tokens_is_subset_not_added(tmp_path: Path) -> None:
     """Behavior 5: MetricsEvent.cached_tokens is a SUBSET of prompt_tokens (D-15)."""
     recorder = _make_recorder(tmp_path)
-    metrics_event = _StubMetricsEvent(
+    metrics_event = MetricsEvent(
         message_id="msg-1",
         prompt_tokens=500,
         completion_tokens=80,
@@ -341,14 +317,14 @@ async def test_final_metrics_totals_match_per_step_sum(tmp_path: Path) -> None:
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="step-one-text"))
-            inv.observe(_StubMetricsEvent(
+            inv.observe(MetricsEvent(
                 message_id="m-1", prompt_tokens=100, completion_tokens=20,
                 cached_tokens=10, cost_usd=0.001,
             ))
             inv.observe(ResultEvent(structured_output=None, continuation=None))
         async with recorder.invocation(phase=DaydreamPhase.FIX) as inv2:
             inv2.observe(TextEvent(text="step-two-text"))
-            inv2.observe(_StubMetricsEvent(
+            inv2.observe(MetricsEvent(
                 message_id="m-2", prompt_tokens=200, completion_tokens=40,
                 cached_tokens=20, cost_usd=0.002,
             ))
@@ -575,7 +551,7 @@ async def test_parent_metrics_exclude_children(tmp_path: Path) -> None:
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="parent-text"))
-            inv.observe(_StubMetricsEvent(
+            inv.observe(MetricsEvent(
                 message_id="m-parent", prompt_tokens=100, completion_tokens=10,
                 cached_tokens=5, cost_usd=0.001,
             ))
@@ -583,7 +559,7 @@ async def test_parent_metrics_exclude_children(tmp_path: Path) -> None:
         async with recorder.fork("fix-0") as child:
             async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                 inv.observe(TextEvent(text="child-text"))
-                inv.observe(_StubMetricsEvent(
+                inv.observe(MetricsEvent(
                     message_id="m-child", prompt_tokens=200, completion_tokens=20,
                     cached_tokens=10, cost_usd=0.002,
                 ))
