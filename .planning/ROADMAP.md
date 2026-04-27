@@ -61,7 +61,7 @@
   4. `step_id` counters are isolated per trajectory file — no collisions across siblings — and parent `FinalMetrics` aggregates ONLY parent steps (sibling totals stay in their own file with no double-counting)
   5. A `run_agent_with_continuation` continuation call appends to the existing trajectory's step list (preserves agent identity) and does NOT spawn a sibling; the sequential phase chain (`phase_review` → `phase_parse_feedback` → `phase_fix` → `phase_test_and_heal`) emits as continuous steps in one root file
 **Plans**: 2 plans
-- [ ] 03-01-PLAN.md — Fork infrastructure on TrajectoryRecorder (fork, _ForkCM, _register_sibling, create_dispatch_step, _safe_descriptor) + 15 unit tests covering all SUBA requirements
+- [x] 03-01-PLAN.md — Fork infrastructure on TrajectoryRecorder (fork, _ForkCM, _register_sibling, create_dispatch_step, _safe_descriptor) + 15 unit tests covering all SUBA requirements
 - [ ] 03-02-PLAN.md — Wire fork into 3 parallel fan-out sites (phase_fix_parallel, phase_per_stack_reviews, pre_scan._run_specialist) + create_dispatch_step calls
 
 ### Phase 4: Cutover + Redaction + CLI Surface
