@@ -199,16 +199,16 @@ class Invocation:
         _open_step_dict: In-progress agent-step state before flush.
         _in_flight_tools: tool_call_id -> open-step-state, so a ToolResultEvent
             always lands on the SAME step as its ToolStartEvent (Pitfall 3).
-        _message_id_to_step: AssistantMessage.message_id -> open-step (D-04).
     """
+    # TODO: message-id correlation (D-04) — wire _current_message_id from
+    # backend event stream (Claude AssistantMessage.message_id) so MetricsEvent
+    # attaches to the correct step in multi-turn invocations.
 
     recorder: "TrajectoryRecorder"
     phase: DaydreamPhase
     steps: list[Step] = field(default_factory=list)
     _open_step_dict: dict[str, Any] | None = None
     _in_flight_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
-    _message_id_to_step: dict[str, dict[str, Any]] = field(default_factory=dict)
-    _current_message_id: str = ""
 
     def observe_user_step(self, prompt: str) -> None:
         """Append a user Step at invocation start (MAP-01, Pitfall 4).
@@ -300,7 +300,7 @@ class Invocation:
             # Class-name match supports the test stub before Plan 02-02's real
             # MetricsEvent lands. EVNT-02 attribute names verbatim (D-15:
             # cached_tokens is a SUBSET of prompt_tokens, not added).
-            target = self._message_id_to_step.get(event.message_id, self._open_step_dict)
+            target = self._open_step_dict
             if target is None:
                 self._ensure_open_step()
                 target = self._open_step_dict
@@ -338,9 +338,6 @@ class Invocation:
             "_model_name": self.recorder.agent_model_name,
             "_unmatched_tool_results": [],
         }
-        if self._current_message_id:
-            self._message_id_to_step[self._current_message_id] = self._open_step_dict
-
     def _close_open_step(self) -> None:
         """Finalize the current open step into a Pydantic Step + redact + append."""
         if self._open_step_dict is None:
