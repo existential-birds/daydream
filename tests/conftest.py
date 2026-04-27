@@ -120,3 +120,22 @@ def multi_stack_target(tmp_path: Path) -> Path:
         check=True,
     )
     return project
+
+
+@pytest.fixture(autouse=True)
+def _reset_trajectory_recorder():
+    """Clear the trajectory ContextVar before AND after every test.
+
+    Mirrors ``daydream.agent.reset_state()`` for ``AgentState`` (CORE-10 / D-17).
+    Prevents cross-test bleed when a test forgets to wrap recorder usage in
+    ``async with TrajectoryRecorder(...)``.
+
+    Lazy-imports ``_reset_recorder_for_tests`` to avoid eagerly loading
+    ``daydream.trajectory`` (and its Pydantic-heavy ATIF imports) at
+    pytest-collect time.
+    """
+    from daydream.trajectory import _reset_recorder_for_tests
+
+    _reset_recorder_for_tests()
+    yield
+    _reset_recorder_for_tests()
