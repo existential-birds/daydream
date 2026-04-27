@@ -34,14 +34,6 @@ from daydream.ui import (
     print_thinking,
 )
 
-# Sentinel for the transitional Plan 05 -> Plan 06 contract change.
-# Plan 05 introduces the keyword-only `phase` argument required by D-05.
-# Plan 06 updates every call site to pass `phase=DaydreamPhase.X`. To keep
-# the suite recoverable mid-wave, the default is a sentinel that raises a
-# clear TypeError at runtime when Plan 06 hasn't updated a call site yet.
-# Plan 07 re-tightens this back to a hard required-no-default signature.
-_PHASE_REQUIRED: Any = object()
-
 
 class MissingSkillError(Exception):
     """Raised when a required skill is not available.
@@ -296,7 +288,7 @@ async def run_agent(
     cwd: Path,
     prompt: str,
     *,
-    phase: DaydreamPhase = _PHASE_REQUIRED,  # type: ignore[assignment]
+    phase: DaydreamPhase,
     output_schema: dict[str, Any] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     continuation: ContinuationToken | None = None,
@@ -311,19 +303,17 @@ async def run_agent(
 
     All keyword arguments after ``prompt`` are keyword-only (the ``*``
     separator was added in Phase 2). Existing call sites pass them by name,
-    so this is non-breaking — but the new ``phase`` argument is REQUIRED.
-    A transitional sentinel default lets Plan 06 update each call site
-    incrementally; Plan 07 will tighten this back to a strict required-no-
-    default signature.
+    so this is non-breaking — but the new ``phase`` argument is REQUIRED
+    with no default (D-05). Calls that omit it raise ``TypeError`` from the
+    Python interpreter at call time.
 
     Args:
         backend: The Backend to execute against.
         cwd: Working directory for the agent.
         prompt: The prompt to send to the agent.
         phase: Required DaydreamPhase label for ATIF Step.extra (MAP-08, D-05).
-            Must be a literal DaydreamPhase enum member. The transitional
-            sentinel default raises TypeError at runtime if omitted; Plan 07
-            will replace it with no default at all.
+            Must be a literal DaydreamPhase enum member. Required keyword-only
+            with no default — Python raises TypeError if omitted.
         output_schema: Optional JSON schema for structured output.
         progress_callback: Optional callback for status updates (quiet mode).
         continuation: Optional continuation token for multi-turn.
@@ -335,16 +325,10 @@ async def run_agent(
 
     Raises:
         MissingSkillError: If a required skill is not available.
-        TypeError: If the keyword-only ``phase`` argument is not provided.
+        TypeError: If the keyword-only ``phase`` argument is not provided
+            (raised by the Python interpreter at call time).
 
     """
-    if phase is _PHASE_REQUIRED:
-        raise TypeError(
-            "run_agent() requires keyword-only argument 'phase' "
-            "(use DaydreamPhase.X). Plan 06 updates the call sites; "
-            "Plan 07 will tighten this back to a hard signature requirement."
-        )
-
     _log_debug(f"\n{'='*80}\n")
     _log_debug(f"[PROMPT] cwd={cwd}\n{prompt}\n")
     _log_debug(f"{'='*80}\n\n")
