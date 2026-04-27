@@ -164,4 +164,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-26 after Phase 1 completion (vendor-atif-foundation: 4/4 plans, 5/5 success criteria verified)*
+*Last updated: 2026-04-27 after Phase 2 completion (recorder-core-event-enrichment-mapping: 7/7 plans, 26/26 must-haves verified). Recorder, event enrichment, and event-to-ATIF mapping all shipped; the broader Active list remains because trajectory output, sibling files, redaction, legacy removal, and docs land in Phases 3–5.*
