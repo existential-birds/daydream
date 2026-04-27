@@ -44,8 +44,8 @@
 **Plans**: 7 plans
 - [x] 02-01-PLAN.md — Greenfield daydream/trajectory.py: TrajectoryRecorder + Invocation + Redactor + ContextVar + DaydreamPhase/RunFlow enums + now_iso() (CORE-01..10)
 - [x] 02-02-PLAN.md — Enrich AgentEvent dataclasses with timestamp + add MetricsEvent + extend CostEvent.cached_tokens (EVNT-01..03)
-- [ ] 02-03-PLAN.md — Fix Claude backend dropped-token bug at lines 120-128 + emit MetricsEvent per AssistantMessage (EVNT-04..06)
-- [ ] 02-04-PLAN.md — Codex backend MetricsEvent emission at turn.completed with documented parity gap (EVNT-07)
+- [x] 02-03-PLAN.md — Fix Claude backend dropped-token bug at lines 120-128 + emit MetricsEvent per AssistantMessage (EVNT-04..06)
+- [x] 02-04-PLAN.md — Codex backend MetricsEvent emission at turn.completed with documented parity gap (EVNT-07)
 - [ ] 02-05-PLAN.md — Wire recorder into run_agent: phase kwarg + Invocation lifecycle + event-loop dispatch (MAP-01..07)
 - [ ] 02-06-PLAN.md — Update all run_agent call sites with phase=DaydreamPhase.X + 4 run flows construct TrajectoryRecorder (MAP-08, MAP-09)
 - [ ] 02-07-PLAN.md — autouse _reset_trajectory_recorder fixture + tighten phase signature + Phase 2 integration test (CORE-10)
