@@ -9,7 +9,7 @@
 
 - [x] **Phase 1: Vendor ATIF Foundation** - Vendor Harbor's trajectory models + validator + golden fixtures so the rest of the migration has a typed, validated substrate without the supply-chain risk of a runtime Harbor dep _(completed 2026-04-26)_
 - [ ] **Phase 2: Recorder Core + Event Enrichment + Mapping** - Greenfield `daydream/trajectory.py` recorder with ContextVar propagation, plus `AgentEvent` enrichment (timestamp, MetricsEvent, Claude token extraction) and event-to-ATIF mapping wired into `run_agent()`
-- [ ] **Phase 3: Subagent Wiring (Parallel + Continuation)** - Parallel `anyio` task groups (`phase_fix_parallel`, deep mode, exploration pre-scan) emit sibling trajectory files linked via `subagent_trajectory_ref`; continuations append to the same trajectory
+- [x] **Phase 3: Subagent Wiring (Parallel + Continuation)** - Parallel `anyio` task groups (`phase_fix_parallel`, deep mode, exploration pre-scan) emit sibling trajectory files linked via `subagent_trajectory_ref`; continuations append to the same trajectory _(completed 2026-04-27)_
 - [ ] **Phase 4: Cutover + Redaction + CLI Surface** - Hard removal of `_log_debug` and all 15+ call sites (AST-verified, including the lazy-import gotcha in `codex.py:37`), redaction policy implemented and applied to all trajectory content surfaces, `--debug` removed and `--trajectory <path>` added
 - [ ] **Phase 5: Test Hardening + Documentation** - All 343 existing tests verified passing post-migration, new trajectory/redaction/golden-fixture/subagent test suites land, README/CHANGELOG/CLAUDE.md/NOTICE document the new format and breaking CLI change
 
