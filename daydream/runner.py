@@ -1,18 +1,14 @@
 """Main orchestration logic for the review and fix loop."""
 
-import contextlib
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from daydream.agent import (
     MissingSkillError,
-    _log_debug,
     console,
-    set_debug_log,
     set_model,
     set_quiet_mode,
 )
@@ -67,7 +63,6 @@ class RunConfig:
         target: Target directory path for the review. If None, prompts user.
         skill: Review skill to use ("python", "react", or "elixir"). If None, prompts user.
         model: Claude model to use ("opus", "sonnet", or "haiku"). Default is "opus".
-        debug: Enable debug logging to a timestamped file in the target directory.
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
         review_only: Run review phase only without applying fixes.
@@ -92,7 +87,6 @@ class RunConfig:
     target: str | None = None
     skill: str | None = None  # "python", "react", or "elixir"
     model: str | None = None
-    debug: bool = False
     cleanup: bool | None = None
     quiet: bool = True
     review_only: bool = False
@@ -476,333 +470,319 @@ async def run(config: RunConfig | None = None) -> int:
             print_error(console, "Missing Review File", str(e))
             return 1
 
-    # Set up debug logging if enabled
-    debug_log_path: Path | None = None
-    if config.debug:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        debug_log_path = target_dir / f".review-debug-{timestamp}.log"
+    # Get cleanup setting (from config or prompt)
+    # Trust-the-technology mode doesn't produce review files, so skip cleanup prompt.
+    if config.trust_the_technology:
+        cleanup_enabled = False
+    elif config.cleanup is not None:
+        cleanup_enabled = config.cleanup
+    else:
+        cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
+        cleanup_enabled = cleanup_response.lower() in ("y", "yes")
 
-    with contextlib.ExitStack() as stack:
-        if debug_log_path is not None:
-            debug_log_file = stack.enter_context(open(debug_log_path, "w", encoding="utf-8"))
-            set_debug_log(debug_log_file)
-            stack.callback(set_debug_log, None)
-            stack.callback(print_info, console, f"Debug log saved: {debug_log_path}")
-            print_info(console, f"Debug log: {debug_log_path}")
+    # Create backends (may differ per-phase if overrides are set)
+    backend_cache: dict[str, Backend] = {}
+    review_backend = _resolve_backend(config, "review", backend_cache)
+    fix_backend = _resolve_backend(config, "fix", backend_cache)
+    test_backend = _resolve_backend(config, "test", backend_cache)
 
-        # Get cleanup setting (from config or prompt)
-        # Trust-the-technology mode doesn't produce review files, so skip cleanup prompt.
-        if config.trust_the_technology:
-            cleanup_enabled = False
-        elif config.cleanup is not None:
-            cleanup_enabled = config.cleanup
-        else:
-            cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
-            cleanup_enabled = cleanup_response.lower() in ("y", "yes")
+    # Set quiet mode: force off for Codex backends since their shell
+    # commands are the primary output the user needs to see.
+    quiet = config.quiet
+    if quiet:
+        codex_in_use = config.backend == "codex" or any(
+            b == "codex"
+            for b in (config.review_backend, config.fix_backend, config.test_backend)
+            if b is not None
+        )
+        if codex_in_use:
+            quiet = False
+    set_quiet_mode(quiet)
+    set_model(config.model or "opus")
 
-        # Create backends (may differ per-phase if overrides are set)
-        backend_cache: dict[str, Backend] = {}
-        review_backend = _resolve_backend(config, "review", backend_cache)
-        fix_backend = _resolve_backend(config, "fix", backend_cache)
-        test_backend = _resolve_backend(config, "test", backend_cache)
+    # PR feedback mode: separate flow
+    if config.pr_number is not None:
+        return await run_pr_feedback(config, target_dir)
 
-        # Set quiet mode: force off for Codex backends since their shell
-        # commands are the primary output the user needs to see.
-        quiet = config.quiet
-        if quiet:
-            codex_in_use = config.backend == "codex" or any(
-                b == "codex"
-                for b in (config.review_backend, config.fix_backend, config.test_backend)
-                if b is not None
+    # Trust-the-technology mode: separate flow
+    if config.trust_the_technology:
+        return await run_trust(config, target_dir)
+
+    # Deep-review mode: separate flow (D-01, D-07).
+    if config.deep:
+        from daydream.deep.orchestrator import run_deep
+        return await run_deep(config, target_dir)
+
+    # Normal flow: open the trajectory recorder for the rest of run().
+    trajectory_path = config.trajectory_path or (target_dir / ".daydream" / "trajectory.json")
+    async with TrajectoryRecorder(
+        path=trajectory_path,
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=target_dir,
+        agent_model_name=config.model or "opus",
+    ):
+        console.print()
+        print_info(console, f"Target directory: {target_dir}")
+        print_info(console, f"Model: {config.model or '<backend-default>'}")
+        if skill:
+            print_info(console, f"Review skill: {skill}")
+        if config.review_only:
+            print_info(console, "Mode: review-only (skipping fixes)")
+        if config.start_at != "review":
+            print_skipped_phases(console, config.start_at)
+        console.print()
+
+        # Pre-scan exploration: populate config.exploration_context before
+        # the first phase_review() call. Only runs when starting at "review"
+        # (later start phases skip review, so exploration would be wasted).
+        if config.start_at == "review" and config.exploration_context is None:
+            diff_text = _git_diff(target_dir, exclude=config.ignore_paths) or ""
+            tier = select_tier(count_changed_files(diff_text))
+            if tier == "skip":
+                print_dim(console, "Skipping exploration -- trivial diff")
+                config.exploration_context = ExplorationContext()
+            else:
+                print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+                config.exploration_context = await safe_explore(
+                    pre_scan,
+                    review_backend,
+                    target_dir,
+                    diff_text,
+                    config.exploration_depth,
+                    diff_ref=_compute_diff_ref(target_dir),
+                )
+
+        feedback_items: list[dict[str, Any]] = []
+        fixes_applied = 0
+        test_retries = 0
+        tests_passed = True
+        iteration = 0
+        diff_base: str | None = None
+        exploration_dir: Path | None = None
+
+        async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
+            """Execute one iteration of the review-parse-fix-test loop.
+
+            This nested function intentionally captures outer scope variables
+            (target_dir, skill, backends, config, console, iteration) to avoid
+            an unwieldy parameter list for a helper used only within run().
+
+            Returns:
+                Tuple of (items, fixes_count, retries, tests_passed, should_continue).
+                should_continue is False if the loop should break (clean review or test failure).
+
+            Raises:
+                MissingSkillError: If the review skill is not available.
+                ValueError: If feedback parsing fails.
+
+            """
+            nonlocal diff_base
+
+            if iteration > 1:
+                (target_dir / REVIEW_OUTPUT_FILE).unlink(missing_ok=True)
+                print_iteration_divider(console, iteration, config.max_iterations)
+
+            # Phase 1: Review
+            assert skill is not None, "skill must be set when starting at review phase"
+            await phase_review(
+                review_backend, target_dir, skill, diff_base=diff_base,
+                exploration_dir=exploration_dir,
+                exclude=config.ignore_paths,
             )
-            if codex_in_use:
-                quiet = False
-        set_quiet_mode(quiet)
-        set_model(config.model or "opus")
 
-        # PR feedback mode: separate flow
-        if config.pr_number is not None:
-            return await run_pr_feedback(config, target_dir)
+            # Phase 2: Parse feedback
+            items = await phase_parse_feedback(review_backend, target_dir)
 
-        # Trust-the-technology mode: separate flow
-        if config.trust_the_technology:
-            return await run_trust(config, target_dir)
+            if not items:
+                print_info(console, f"Clean review on iteration {iteration}")
+                return [], 0, 0, True, False  # should_continue=False (clean)
 
-        # Deep-review mode: separate flow (D-01, D-07).
-        if config.deep:
-            from daydream.deep.orchestrator import run_deep
-            return await run_deep(config, target_dir)
+            # Phase 3: Fix
+            print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+            fixes_count = 0
+            for i, item in enumerate(items, 1):
+                await phase_fix(fix_backend, target_dir, item, i, len(items))
+                fixes_count += 1
 
-        # Normal flow: open the trajectory recorder for the rest of run().
-        trajectory_path = config.trajectory_path or (target_dir / ".daydream" / "trajectory.json")
-        async with TrajectoryRecorder(
-            path=trajectory_path,
-            run_flow=DaydreamRunFlow.NORMAL,
-            target_dir=target_dir,
-            agent_model_name=config.model or "opus",
-        ):
-            console.print()
-            print_info(console, f"Target directory: {target_dir}")
-            print_info(console, f"Model: {config.model or '<backend-default>'}")
-            if skill:
-                print_info(console, f"Review skill: {skill}")
-            if config.review_only:
-                print_info(console, "Mode: review-only (skipping fixes)")
-            if config.start_at != "review":
-                print_skipped_phases(console, config.start_at)
-            console.print()
+            # Phase 4: Test
+            passed, retries = await phase_test_and_heal(test_backend, target_dir, feedback_items=items)
 
-            # Pre-scan exploration: populate config.exploration_context before
-            # the first phase_review() call. Only runs when starting at "review"
-            # (later start phases skip review, so exploration would be wasted).
-            if config.start_at == "review" and config.exploration_context is None:
-                diff_text = _git_diff(target_dir, exclude=config.ignore_paths) or ""
-                tier = select_tier(count_changed_files(diff_text))
-                if tier == "skip":
-                    print_dim(console, "Skipping exploration -- trivial diff")
-                    config.exploration_context = ExplorationContext()
+            if not passed:
+                print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
+                if revert_uncommitted_changes(target_dir):
+                    print_info(console, "Reverted to last committed state")
                 else:
-                    print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                    config.exploration_context = await safe_explore(
-                        pre_scan,
-                        review_backend,
-                        target_dir,
-                        diff_text,
-                        config.exploration_depth,
-                        diff_ref=_compute_diff_ref(target_dir),
-                    )
+                    print_warning(console, "Failed to revert changes")
+                return items, fixes_count, retries, False, False  # should_continue=False (failed)
 
-            feedback_items: list[dict[str, Any]] = []
-            fixes_applied = 0
-            test_retries = 0
-            tests_passed = True
-            iteration = 0
-            diff_base: str | None = None
-            exploration_dir: Path | None = None
+            # Record the pre-commit SHA so the next iteration reviews
+            # the changes introduced by this iteration's commit
+            # (diff from pre-commit HEAD to post-commit HEAD).
+            diff_base = _get_head_sha(target_dir)
 
-            async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
-                """Execute one iteration of the review-parse-fix-test loop.
+            # Commit iteration changes so the next review sees a clean tree
+            await phase_commit_iteration(fix_backend, target_dir, iteration)
 
-                This nested function intentionally captures outer scope variables
-                (target_dir, skill, backends, config, console, iteration) to avoid
-                an unwieldy parameter list for a helper used only within run().
+            return items, fixes_count, retries, True, True  # should_continue=True
 
-                Returns:
-                    Tuple of (items, fixes_count, retries, tests_passed, should_continue).
-                    should_continue is False if the loop should break (clean review or test failure).
-
-                Raises:
-                    MissingSkillError: If the review skill is not available.
-                    ValueError: If feedback parsing fails.
-
-                """
-                nonlocal diff_base
-
-                if iteration > 1:
-                    (target_dir / REVIEW_OUTPUT_FILE).unlink(missing_ok=True)
-                    print_iteration_divider(console, iteration, config.max_iterations)
-
-                # Phase 1: Review
-                assert skill is not None, "skill must be set when starting at review phase"
-                await phase_review(
-                    review_backend, target_dir, skill, diff_base=diff_base,
-                    exploration_dir=exploration_dir,
-                    exclude=config.ignore_paths,
+        if config.loop:
+            # Guard: loop mode reverts uncommitted changes on failure,
+            # so refuse to start if the working tree is dirty.
+            status = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                cwd=target_dir,
+                timeout=10,
+                shell=False,
+            )
+            if status.returncode != 0 or status.stdout.strip():
+                print_error(
+                    console,
+                    "Dirty Working Tree",
+                    "Loop mode requires a clean repo because failed iterations"
+                    " discard uncommitted changes.",
                 )
+                return 1
 
-                # Phase 2: Parse feedback
-                items = await phase_parse_feedback(review_backend, target_dir)
+            # Materialise exploration to disk so phase prompts can reference files.
+            if config.exploration_context is not None:
+                exp_parent = target_dir / ".daydream"
+                exp_parent.mkdir(exist_ok=True)
+                exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
 
-                if not items:
-                    print_info(console, f"Clean review on iteration {iteration}")
-                    return [], 0, 0, True, False  # should_continue=False (clean)
+            # --- Loop mode: repeat review-parse-fix-test ---
+            while iteration < config.max_iterations:
+                iteration += 1
 
-                # Phase 3: Fix
-                print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
-                fixes_count = 0
-                for i, item in enumerate(items, 1):
-                    await phase_fix(fix_backend, target_dir, item, i, len(items))
-                    fixes_count += 1
-
-                # Phase 4: Test
-                passed, retries = await phase_test_and_heal(test_backend, target_dir, feedback_items=items)
-
-                if not passed:
-                    print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
-                    if revert_uncommitted_changes(target_dir):
-                        print_info(console, "Reverted to last committed state")
-                    else:
-                        print_warning(console, "Failed to revert changes")
-                    return items, fixes_count, retries, False, False  # should_continue=False (failed)
-
-                # Record the pre-commit SHA so the next iteration reviews
-                # the changes introduced by this iteration's commit
-                # (diff from pre-commit HEAD to post-commit HEAD).
-                diff_base = _get_head_sha(target_dir)
-
-                # Commit iteration changes so the next review sees a clean tree
-                await phase_commit_iteration(fix_backend, target_dir, iteration)
-
-                return items, fixes_count, retries, True, True  # should_continue=True
-
-            if config.loop:
-                # Guard: loop mode reverts uncommitted changes on failure,
-                # so refuse to start if the working tree is dirty.
-                status = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-                    ["git", "status", "--porcelain"],
-                    capture_output=True,
-                    text=True,
-                    cwd=target_dir,
-                    timeout=10,
-                    shell=False,
-                )
-                if status.returncode != 0 or status.stdout.strip():
-                    print_error(
-                        console,
-                        "Dirty Working Tree",
-                        "Loop mode requires a clean repo because failed iterations"
-                        " discard uncommitted changes.",
-                    )
+                try:
+                    items, fixes_count, retries, passed, should_continue = await _run_loop_iteration()
+                except MissingSkillError as e:
+                    _print_missing_skill_error(e.skill_name)
+                    return 1
+                except ValueError as exc:
+                    print_error(console, "Phase 2 Error", str(exc))
+                    print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                     return 1
 
-                # Materialise exploration to disk so phase prompts can reference files.
-                if config.exploration_context is not None:
-                    exp_parent = target_dir / ".daydream"
-                    exp_parent.mkdir(exist_ok=True)
-                    exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
+                feedback_items.extend(items)
+                test_retries += retries
+                tests_passed = passed
+                if passed:
+                    fixes_applied += fixes_count
 
-                # --- Loop mode: repeat review-parse-fix-test ---
-                while iteration < config.max_iterations:
-                    iteration += 1
-
-                    try:
-                        items, fixes_count, retries, passed, should_continue = await _run_loop_iteration()
-                    except MissingSkillError as e:
-                        _print_missing_skill_error(e.skill_name)
-                        return 1
-                    except ValueError as exc:
-                        _log_debug(f"[PHASE2_ERROR] {exc}\n")
-                        print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
-                        return 1
-
-                    feedback_items.extend(items)
-                    test_retries += retries
-                    tests_passed = passed
-                    if passed:
-                        fixes_applied += fixes_count
-
-                    if not should_continue:
-                        break
-
-                else:
-                    # while loop exhausted without break — max iterations reached
-                    if feedback_items:
-                        # Deduplicate by (file, line, description) to avoid inflated counts
-                        unique_issues = {
-                            (item.get("file"), item.get("line"), item.get("description"))
-                            for item in feedback_items
-                        }
-                        print_warning(
-                            console,
-                            f"Reached max iterations ({config.max_iterations}), "
-                            f"{len(unique_issues)} unique issues found across all iterations",
-                        )
-                        # Mark as failed when max iterations reached with unresolved issues
-                        tests_passed = False
+                if not should_continue:
+                    break
 
             else:
-                # --- Single-pass mode (existing behavior) ---
-
-                # Materialise exploration to disk so phase prompts can reference files.
-                if config.exploration_context is not None:
-                    exp_parent = target_dir / ".daydream"
-                    exp_parent.mkdir(exist_ok=True)
-                    exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
-
-                # Phase 1: Review
-                if config.start_at == "review":
-                    assert skill is not None, "skill must be set when starting at review phase"
-                    try:
-                        await phase_review(
-                            review_backend, target_dir, skill,
-                            exploration_dir=exploration_dir,
-                            exclude=config.ignore_paths,
-                        )
-                    except MissingSkillError as e:
-                        _print_missing_skill_error(e.skill_name)
-                        return 1
-
-                # Phase 2: Parse feedback
-                if config.start_at in ("review", "parse", "fix"):
-                    try:
-                        feedback_items = await phase_parse_feedback(review_backend, target_dir)
-                    except ValueError as exc:
-                        _log_debug(f"[PHASE2_ERROR] {exc}\n")
-                        print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
-                        return 1
-
-                # Review-only exit
-                if config.review_only:
-                    print_summary(
+                # while loop exhausted without break — max iterations reached
+                if feedback_items:
+                    # Deduplicate by (file, line, description) to avoid inflated counts
+                    unique_issues = {
+                        (item.get("file"), item.get("line"), item.get("description"))
+                        for item in feedback_items
+                    }
+                    print_warning(
                         console,
-                        SummaryData(
-                            skill=skill or "N/A",
-                            target=str(target_dir),
-                            feedback_count=len(feedback_items),
-                            fixes_applied=0,
-                            test_retries=0,
-                            tests_passed=True,
-                            review_only=True,
-                        ),
+                        f"Reached max iterations ({config.max_iterations}), "
+                        f"{len(unique_issues)} unique issues found across all iterations",
                     )
-                    return 0
+                    # Mark as failed when max iterations reached with unresolved issues
+                    tests_passed = False
 
-                # Phase 3: Fix
-                if config.start_at in ("review", "parse", "fix"):
-                    if feedback_items:
-                        print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
-                        for i, item in enumerate(feedback_items, 1):
-                            await phase_fix(fix_backend, target_dir, item, i, len(feedback_items))
-                            fixes_applied += 1
-                    else:
-                        print_info(console, "No feedback items found, skipping fix phase")
+        else:
+            # --- Single-pass mode (existing behavior) ---
 
-                # Phase 4: Test
-                tests_passed, test_retries = await phase_test_and_heal(
-                    test_backend, target_dir, feedback_items=feedback_items
+            # Materialise exploration to disk so phase prompts can reference files.
+            if config.exploration_context is not None:
+                exp_parent = target_dir / ".daydream"
+                exp_parent.mkdir(exist_ok=True)
+                exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
+
+            # Phase 1: Review
+            if config.start_at == "review":
+                assert skill is not None, "skill must be set when starting at review phase"
+                try:
+                    await phase_review(
+                        review_backend, target_dir, skill,
+                        exploration_dir=exploration_dir,
+                        exclude=config.ignore_paths,
+                    )
+                except MissingSkillError as e:
+                    _print_missing_skill_error(e.skill_name)
+                    return 1
+
+            # Phase 2: Parse feedback
+            if config.start_at in ("review", "parse", "fix"):
+                try:
+                    feedback_items = await phase_parse_feedback(review_backend, target_dir)
+                except ValueError as exc:
+                    print_error(console, "Phase 2 Error", str(exc))
+                    print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
+                    return 1
+
+            # Review-only exit
+            if config.review_only:
+                print_summary(
+                    console,
+                    SummaryData(
+                        skill=skill or "N/A",
+                        target=str(target_dir),
+                        feedback_count=len(feedback_items),
+                        fixes_applied=0,
+                        test_retries=0,
+                        tests_passed=True,
+                        review_only=True,
+                    ),
                 )
-                iteration = 1
-
-            # Print summary
-            print_summary(
-                console,
-                SummaryData(
-                    skill=skill or "N/A",
-                    target=str(target_dir),
-                    feedback_count=len(feedback_items),
-                    fixes_applied=fixes_applied,
-                    test_retries=test_retries,
-                    tests_passed=tests_passed,
-                    loop_mode=config.loop,
-                    iterations_used=iteration if config.loop else 1,
-                ),
-            )
-
-            # Clean up exploration files before exit
-            exploration_cleanup = target_dir / ".daydream" / "exploration"
-            if exploration_cleanup.is_dir():
-                shutil.rmtree(exploration_cleanup)
-
-            # Commit if tests passed
-            if tests_passed:
-                await phase_commit_push(review_backend, target_dir)
-
-                if cleanup_enabled:
-                    review_output_path = target_dir / REVIEW_OUTPUT_FILE
-                    if review_output_path.exists():
-                        review_output_path.unlink()
-                        print_success(console, f"Cleaned up {REVIEW_OUTPUT_FILE}")
-
                 return 0
-            else:
-                return 1
+
+            # Phase 3: Fix
+            if config.start_at in ("review", "parse", "fix"):
+                if feedback_items:
+                    print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+                    for i, item in enumerate(feedback_items, 1):
+                        await phase_fix(fix_backend, target_dir, item, i, len(feedback_items))
+                        fixes_applied += 1
+                else:
+                    print_info(console, "No feedback items found, skipping fix phase")
+
+            # Phase 4: Test
+            tests_passed, test_retries = await phase_test_and_heal(
+                test_backend, target_dir, feedback_items=feedback_items
+            )
+            iteration = 1
+
+        # Print summary
+        print_summary(
+            console,
+            SummaryData(
+                skill=skill or "N/A",
+                target=str(target_dir),
+                feedback_count=len(feedback_items),
+                fixes_applied=fixes_applied,
+                test_retries=test_retries,
+                tests_passed=tests_passed,
+                loop_mode=config.loop,
+                iterations_used=iteration if config.loop else 1,
+            ),
+        )
+
+        # Clean up exploration files before exit
+        exploration_cleanup = target_dir / ".daydream" / "exploration"
+        if exploration_cleanup.is_dir():
+            shutil.rmtree(exploration_cleanup)
+
+        # Commit if tests passed
+        if tests_passed:
+            await phase_commit_push(review_backend, target_dir)
+
+            if cleanup_enabled:
+                review_output_path = target_dir / REVIEW_OUTPUT_FILE
+                if review_output_path.exists():
+                    review_output_path.unlink()
+                    print_success(console, f"Cleaned up {REVIEW_OUTPUT_FILE}")
+
+            return 0
+        else:
+            return 1
