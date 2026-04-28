@@ -24,13 +24,6 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
-
-def _ui_debug(message: str) -> None:
-    """Log a debug message via the agent debug log (lazy import to avoid cycles)."""
-    from daydream.agent import _log_debug
-
-    _log_debug(message)
-
 # =============================================================================
 # Color Theme (Dracula-based)
 # =============================================================================
@@ -608,12 +601,6 @@ def _build_tool_header(
 
     # Special handling for Bash tool calls
     if name in ("Bash", "shell"):
-        _ui_debug(
-            f"[UI_HEADER] Bash/shell: quiet_mode={quiet_mode}, "
-            f"args_keys={list(args.keys())}, "
-            f"command={str(args.get('command', ''))[:120]!r}, "
-            f"description={str(args.get('description', ''))[:80]!r}\n"
-        )
         header_line = Text()
         header_line.append("\U0001f528 ", style=STYLE_ORANGE)  # 🔨
         header_line.append("Bash", style=STYLE_BOLD_PINK)
@@ -633,7 +620,6 @@ def _build_tool_header(
                 content.append("$ ", style=STYLE_DIM)
                 content.append(command, style=STYLE_DIM)
 
-        _ui_debug(f"[UI_HEADER] Bash/shell result: plain={content.plain!r}\n")
         return content
 
     # Special handling for Write tool (header only, content preview handled separately)
@@ -2650,14 +2636,6 @@ class LiveToolPanel:
         # Build header
         header = self._build_tool_header_content()
 
-        _ui_debug(
-            f"[UI_RENDER] id={self._tool_use_id} name={self._name} "
-            f"has_result={self._result is not None} "
-            f"result_len={len(self._result) if self._result else 0} "
-            f"is_error={self._is_error} quiet={self._quiet_mode} "
-            f"header_plain={header.plain!r}\n"
-        )
-
         # Determine border color based on tool type and error state
         if self._name == "Skill":
             border_color = NEON_COLORS["cyan"]
@@ -2751,12 +2729,6 @@ class LiveToolPanel:
             is_error: Whether this is an error result.
 
         """
-        _ui_debug(
-            f"[PANEL_SET_RESULT] id={self._tool_use_id} name={self._name} "
-            f"is_error={is_error} content_len={len(content)} "
-            f"content_preview={content[:200]!r} "
-            f"has_own_live={self._live is not None}\n"
-        )
         self._result = content
         self._is_error = is_error
 
@@ -2765,10 +2737,6 @@ class LiveToolPanel:
 
     def finish(self) -> None:
         """Stop Live context. Final panel state persists on screen."""
-        _ui_debug(
-            f"[PANEL_FINISH] id={self._tool_use_id} name={self._name} "
-            f"has_own_live={self._live is not None}\n"
-        )
         if self._live is not None:
             self._live.stop()
             self._live = None
@@ -2861,12 +2829,6 @@ class LiveToolPanelRegistry:
             The created LiveToolPanel.
 
         """
-        _ui_debug(
-            f"[REGISTRY_CREATE] id={tool_use_id} name={name} "
-            f"args_keys={list(args.keys())} quiet={self._quiet_mode} "
-            f"active_before={self._active_order} live_active={self._live is not None}\n"
-        )
-
         # Finalize existing panel if duplicate tool_use_id
         if tool_use_id in self._panels:
             self._finalize_panel(tool_use_id)
@@ -2992,23 +2954,11 @@ class LiveToolPanelRegistry:
             return
 
         if tool_use_id not in self._active_order:
-            _ui_debug(
-                f"[REGISTRY_FINALIZE] id={tool_use_id} NOT in active_order "
-                f"(active={self._active_order}), popping from panels\n"
-            )
             self._panels.pop(tool_use_id, None)
             return
 
         panel = self._panels.pop(tool_use_id, None)
         self._active_order.remove(tool_use_id)
-
-        _ui_debug(
-            f"[REGISTRY_FINALIZE] id={tool_use_id} "
-            f"has_panel={panel is not None} "
-            f"panel_has_result={panel._result is not None if panel else 'N/A'} "
-            f"panel_result_len={len(panel._result) if panel and panel._result else 0} "
-            f"remaining_active={self._active_order}\n"
-        )
 
         # Stop Live so we can print the finalized panel statically
         self._stop_live()
