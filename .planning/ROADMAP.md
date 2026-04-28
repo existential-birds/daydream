@@ -77,7 +77,7 @@
 **Plans**: 5 plans
 - [x] 04-01-PLAN.md — Redactor regex dispatch + TrajectoryRecorder.write_partial in daydream/trajectory.py + tests/test_redaction.py (REDA-01..06, CLI-03 method)
 - [x] 04-02-PLAN.md — Promote/silently-remove _log_debug sites in daydream/phases.py and daydream/exploration_runner.py (CUT-04, CUT-07)
-- [ ] 04-03-PLAN.md — Swap --debug for --trajectory + SIGINT partial flush + remove RunConfig.debug + debug-init block + promote [PHASE2_ERROR] (CLI-01..05, CUT-03)
+- [x] 04-03-PLAN.md — Swap --debug for --trajectory + SIGINT partial flush + remove RunConfig.debug + debug-init block + promote [PHASE2_ERROR] (CLI-01..05, CUT-03)
 - [ ] 04-04-PLAN.md — Hard cutover: remove _log_debug/_ui_debug/_raw_log + AgentState.debug_log + lazy import in codex.py + promote EXECUTE_* errors (CUT-01, CUT-02, CUT-05, CUT-06)
 - [ ] 04-05-PLAN.md — AST sweep test verifying zero forbidden Name/Attribute/ImportFrom/string-literal-prefix references across daydream/ and tests/ (CUT-08)
 
