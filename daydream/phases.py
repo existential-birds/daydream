@@ -8,10 +8,9 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from daydream.agent import (
-    _log_debug,
     console,
     detect_test_success,
-    get_debug_log,
+    get_quiet_mode,
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
@@ -484,19 +483,17 @@ def revert_uncommitted_changes(cwd: Path) -> bool:
             shell=False,
             check=True,
         )
-        clean_result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        subprocess.run(  # noqa: S603 - arguments are not user-controlled
             ["git", "clean", "-fd"],
             capture_output=True,
-            text=True,
             cwd=cwd,
             timeout=10,
             shell=False,
             check=True,
         )
-        if clean_result.stdout.strip():
-            _log_debug(f"[REVERT] git clean removed:\n{clean_result.stdout}")
     except (subprocess.SubprocessError, OSError) as e:
-        _log_debug(f"[REVERT] failed: {type(e).__name__}: {e}")
+        if not get_quiet_mode():
+            print_warning(console, f"Revert failed: {type(e).__name__}: {e}")
         return False
     return True
 
@@ -775,14 +772,9 @@ If there are no actionable issues, return: {{"issues": []}}
     result, _ = await run_agent(backend, cwd, prompt, output_schema=FEEDBACK_SCHEMA, phase=DaydreamPhase.PARSE)
 
     if not isinstance(result, dict) or "issues" not in result:
-        _log_debug(
-            f"[PARSE_FAIL] expected dict with 'issues', "
-            f"got {type(result).__name__}: {result!r:.500}\n"
-        )
         # When structured output and JSON fallback both fail (e.g. empty
         # response), treat as "no issues" rather than crashing.
         if isinstance(result, str) and not result.strip():
-            _log_debug("[PARSE_FALLBACK] empty result, treating as no issues\n")
             print_warning(console, "Agent returned empty response; treating as no actionable issues")
             return []
         raise ValueError(f"Expected dict with 'issues' key, got {type(result)}")
@@ -1235,7 +1227,8 @@ async def phase_alternative_review(
     if isinstance(result, dict) and "issues" in result:
         issues = result["issues"]
     else:
-        _log_debug(f"[TTT_REVIEW] unexpected result type: {type(result).__name__}: {result!r:.500}\n")
+        if not get_quiet_mode():
+            print_warning(console, f"TTT review returned unexpected result type: {type(result).__name__}")
         issues = []
 
     if issues:
@@ -1369,8 +1362,11 @@ async def phase_generate_plan(
     result, _ = await run_agent(backend, cwd, prompt, output_schema=PLAN_SCHEMA, phase=DaydreamPhase.PLAN)
 
     if not isinstance(result, dict):
-        _log_debug(f"[TTT_PLAN] unexpected result type: {type(result).__name__}\n")
-        print_warning(console, "Failed to generate structured plan")
+        if not get_quiet_mode():
+            print_warning(
+                console,
+                f"Failed to generate structured plan; agent returned {type(result).__name__}",
+            )
         return None
 
     # Ensure .daydream/ directory exists
@@ -1479,10 +1475,6 @@ async def phase_per_stack_reviews(
                     except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                         reason = f"{type(e).__name__}: {e}"
                         failures[stack_name] = reason
-                        debug = get_debug_log()
-                        if debug is not None:
-                            debug.write(f"[STAGE] per-stack {stack_name} failed: {reason}\n")
-                            debug.flush()
                         print_warning(
                             console,
                             f"Per-stack review for '{stack_name}' failed ({reason}); "
