@@ -403,7 +403,13 @@ def test_now_iso_ends_with_z() -> None:
 
 
 def test_redactor_is_passthrough() -> None:
-    """Redactor.redact_step returns the input unchanged (D-12 no-op)."""
+    """Redactor.redact_step preserves semantic equality on clean inputs.
+
+    Phase 4: Redactor returns a fresh model_copy whenever ANY scannable text
+    field is present. Identity (`out is step`) is NO LONGER guaranteed; the
+    contract is field-by-field semantic equality on inputs containing no
+    secret patterns.
+    """
     from daydream.atif import Step as AtifStep
 
     step = AtifStep(
@@ -413,7 +419,27 @@ def test_redactor_is_passthrough() -> None:
         message="hello",
     )
     out = Redactor().redact_step(step)
-    assert out is step
+    assert out.message == step.message
+    assert out.reasoning_content == step.reasoning_content
+    assert out.tool_calls == step.tool_calls
+    assert out.observation == step.observation
+    assert out.extra == step.extra
+
+
+def test_redactor_scrubs_api_key_in_message() -> None:
+    """Phase 4 RED: Redactor.redact_step replaces sk-* tokens in Step.message."""
+    from daydream.atif import Step as AtifStep
+
+    step = AtifStep(
+        step_id=1,
+        timestamp=now_iso(),
+        source="user",
+        message="token=sk-test-12345abcdef done",
+    )
+    out = Redactor().redact_step(step)
+    assert isinstance(out.message, str)
+    assert "sk-test-12345abcdef" not in out.message
+    assert "[REDACTED_API_KEY]" in out.message
 
 
 def test_invocation_has_no_parent_field() -> None:
@@ -807,3 +833,79 @@ async def test_fork_validator_accepts_both(tmp_path: Path) -> None:
 
     assert atif_validate(parent_traj, validate_images=False) is True
     assert atif_validate(child_traj, validate_images=False) is True
+
+
+# ===========================================================================
+# write_partial tests (CLI-03, D-07 SIGINT partial flush)
+# ===========================================================================
+
+
+async def test_write_partial_writes_partial_file_with_partial_flag(tmp_path: Path) -> None:
+    """CLI-03: write_partial writes <path>.partial with extra.partial=true."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="in-flight"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        recorder.write_partial()
+
+        partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
+        assert partial_path.exists()
+        partial = json.loads(partial_path.read_text(encoding="utf-8"))
+        assert partial.get("extra", {}).get("partial") is True
+        assert atif_validate(partial, validate_images=False) is True
+
+
+def test_write_partial_no_op_when_steps_empty(tmp_path: Path) -> None:
+    """write_partial skips disk write when steps list is empty (matches _write)."""
+    recorder = TrajectoryRecorder(
+        path=tmp_path / ".daydream" / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="opus",
+    )
+    recorder.write_partial()
+    partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
+    assert not partial_path.exists()
+
+
+async def test_write_partial_is_idempotent(tmp_path: Path) -> None:
+    """Calling write_partial twice yields a single .partial file with latest contents."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="first"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        recorder.write_partial()
+        partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
+        first = partial_path.read_text(encoding="utf-8")
+        recorder.write_partial()
+        second = partial_path.read_text(encoding="utf-8")
+        assert first == second
+
+
+async def test_write_partial_failure_emits_warning_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disk-write failure during partial flush degrades with warning, never raises."""
+    recorder = _make_recorder(tmp_path)
+    warnings_emitted: list[str] = []
+
+    def fake_print_warning(_console: Any, message: str) -> None:
+        warnings_emitted.append(message)
+
+    monkeypatch.setattr("daydream.trajectory.print_warning", fake_print_warning)
+
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="hi"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+        monkeypatch.setattr(
+            Path,
+            "write_text",
+            lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("denied")),
+        )
+        recorder.write_partial()
+
+    assert any("Partial trajectory write failed" in m for m in warnings_emitted)

@@ -50,6 +50,36 @@ if TYPE_CHECKING:
 _console = create_console()
 _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "cost": 0.0, "any_cost_seen": False}  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
 
+# Redaction patterns (REDA-01..04)
+# =================================
+# Compiled-regex module constants matching the daydream/ui.py style. Order
+# inside _REDACTION_RULES matters: URL-credential rule MUST run before the
+# bare API-key rule so the captured credential isn't re-matched by it; the
+# env-var rule runs before bare API-key so `OPENAI_API_KEY=sk-1234` becomes
+# `OPENAI_API_KEY=[REDACTED_ENV_VAR]` (key name preserved per D-03) rather
+# than leaking the `OPENAI_API_KEY=` prefix.
+_URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)([^:@/\s]+):([^@/\s]+)@")
+_API_KEY_PATTERN = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_\-]{6,}|ghp_[A-Za-z0-9]{6,}|xoxb-[A-Za-z0-9\-]{6,}|AKIA[A-Z0-9]{16})\b"
+)
+_JWT_PATTERN = re.compile(
+    r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\b"
+)
+_USERNAME_PATH_PATTERN = re.compile(r"(/Users/|/home/|[A-Z]:\\Users\\)([^/\\\s]+)")
+_ENV_VAR_PATTERN = re.compile(
+    r"\b([A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|API_?KEY|AUTH)[A-Z0-9_]*)\s*=\s*([^\s\n\r;]+)"  # noqa: E501 - secret-key suffix list
+)
+_REDACTION_RULES: tuple[tuple[Any, str], ...] = (
+    # 1) URL-credential rule first — captures user:token before bare API-key rule sees the token.
+    (_URL_CREDENTIAL_PATTERN, r"\1[REDACTED_USER]:[REDACTED_API_KEY]@"),
+    # 2) Env-var rule — preserves the key name, replaces only the value.
+    (_ENV_VAR_PATTERN, r"\1=[REDACTED_ENV_VAR]"),
+    # 3) Bare API keys / JWT / username paths — order between these does not conflict.
+    (_API_KEY_PATTERN, "[REDACTED_API_KEY]"),
+    (_JWT_PATTERN, "[REDACTED_JWT]"),
+    (_USERNAME_PATH_PATTERN, r"\1[REDACTED_USER]"),
+)
+
 
 def _safe_descriptor(raw: str) -> str:
     """Slugify a descriptor to filesystem-safe characters (D-06).
@@ -124,24 +154,104 @@ class DaydreamRunFlow(str, Enum):
 
 
 class Redactor:
-    """No-op pass-through redactor (Phase 2 stub).
+    """Regex-driven redactor (REDA-01..06).
 
-    Phase 2 ships the FINAL public API surface; Phase 4 (REDA-01..06) fills
-    in regex pattern lists internally without changing the recorder call
-    site. ``redact_step`` is invoked at per-Step flush time per D-13 so
-    Phase 4's partial-write paths inherit the same redaction posture.
+    Applies ``_REDACTION_RULES`` uniformly to all four ATIF text surfaces:
+    ``Step.message``, ``Step.reasoning_content``, every
+    ``ToolCall.arguments`` value, and every ``ObservationResult.content``
+    string. Per D-04 the dispatch is flat regex on serialized text — no
+    JSON-aware deep walk. Per REDA-05 the failure mode is "redact-or-omit":
+    any internal exception replaces the offending value with
+    ``"[REDACTION_FAILED]"`` rather than letting the raw value through.
     """
 
+    def _redact_text(self, s: str) -> str:
+        """Apply every redaction rule to *s* and return the result."""
+        for pattern, replacement in _REDACTION_RULES:
+            s = pattern.sub(replacement, s)
+        return s
+
+    def _redact_optional_text(self, value: str | None) -> str | None:
+        """Redact a possibly-None text field; degrade to [REDACTION_FAILED] on error."""
+        if value is None:
+            return None
+        try:
+            return self._redact_text(value)
+        except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
+            return "[REDACTION_FAILED]"
+
+    def _redact_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Redact every value inside a ToolCall.arguments dict.
+
+        Per D-04 the dispatch is flat regex on the serialized form of each
+        value. String values are redacted directly. Non-string values are
+        ``json.dumps``'d, redacted, then re-parsed; if re-parse fails the
+        value is replaced with ``"[REDACTION_FAILED]"``.
+        """
+        out: dict[str, Any] = {}
+        for key, val in arguments.items():
+            try:
+                if isinstance(val, str):
+                    out[key] = self._redact_text(val)
+                else:
+                    serialized = json.dumps(val)
+                    redacted = self._redact_text(serialized)
+                    out[key] = json.loads(redacted) if redacted == serialized else redacted
+            except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
+                out[key] = "[REDACTION_FAILED]"
+        return out
+
+    def _redact_observation(self, observation: Observation | None) -> Observation | None:
+        """Redact every string-valued ObservationResult.content in *observation*."""
+        if observation is None:
+            return None
+        new_results: list[ObservationResult] = []
+        for r in observation.results:
+            new_content: Any = r.content
+            if isinstance(r.content, str):
+                try:
+                    new_content = self._redact_text(r.content)
+                except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
+                    new_content = "[REDACTION_FAILED]"
+            new_results.append(r.model_copy(update={"content": new_content}))
+        return observation.model_copy(update={"results": new_results})
+
     def redact_step(self, step: Step) -> Step:
-        """Return the step unchanged (Phase 2). Phase 4 fills this in.
+        """Return a redacted copy of *step* (REDA-04, REDA-05).
+
+        Applies the redaction rules uniformly to ``message``,
+        ``reasoning_content``, every ``ToolCall.arguments`` value, and
+        every ``ObservationResult.content`` string. Internal exceptions
+        degrade to ``"[REDACTION_FAILED]"`` for the offending field — never
+        raw pass-through.
 
         Args:
             step: ATIF Step about to be appended to the Trajectory.
 
         Returns:
-            The same Step instance — Phase 2 is a strict pass-through.
+            A new Step instance whose text-bearing fields have been run
+            through the redaction rules.
         """
-        return step
+        try:
+            updates: dict[str, Any] = {}
+            if isinstance(step.message, str):
+                updates["message"] = self._redact_optional_text(step.message)
+            if step.reasoning_content is not None:
+                updates["reasoning_content"] = self._redact_optional_text(step.reasoning_content)
+            if step.tool_calls is not None:
+                redacted_calls = [
+                    tc.model_copy(update={"arguments": self._redact_arguments(tc.arguments)})
+                    for tc in step.tool_calls
+                ]
+                updates["tool_calls"] = redacted_calls
+            if step.observation is not None:
+                updates["observation"] = self._redact_observation(step.observation)
+            if not updates:
+                return step
+            return step.model_copy(update=updates)
+        except Exception as exc:  # noqa: BLE001 - REDA-05 redact-or-omit (top-level fallback)
+            print_warning(_console, f"Redactor failure: {type(exc).__name__}: {exc}")
+            return step.model_copy(update={"message": "[REDACTION_FAILED]"})
 
 
 # Module-level Singletons
@@ -551,6 +661,35 @@ class TrajectoryRecorder:
         trajectory = self._build_trajectory()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(trajectory.to_json_dict(), indent=2), encoding="utf-8")
+
+    def write_partial(self) -> None:
+        """SIGINT/SIGTERM flush path — write in-flight steps to ``<path>.partial``.
+
+        Per D-07 the partial trajectory lives at a sibling path with the
+        ``.partial`` suffix appended to the full filename (e.g.
+        ``trajectory.json.partial``). The Trajectory's ``extra`` dict carries
+        ``partial=true`` so consumers can detect incomplete runs without
+        path-string parsing. Empty trajectories are skipped (matches ``_write``).
+
+        Idempotent: callable from a signal handler synchronously without
+        awaiting ``__aexit__``; safe to invoke from outside the async context.
+        Disk-write failures degrade with a warning per D-11 — partial flush
+        must never crash shutdown.
+        """
+        if not self.steps:
+            return
+        try:
+            trajectory = self._build_trajectory()
+            partial_path = self.path.with_suffix(self.path.suffix + ".partial")
+            partial_path.parent.mkdir(parents=True, exist_ok=True)
+            json_dict = trajectory.to_json_dict()
+            extra = json_dict.setdefault("extra", {})
+            extra["partial"] = True
+            partial_path.write_text(json.dumps(json_dict, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001 - partial flush must never crash shutdown
+            print_warning(
+                _console, f"Partial trajectory write failed: {type(exc).__name__}: {exc}"
+            )
 
 
 class _ForkCM:
