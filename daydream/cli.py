@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import warnings
+from pathlib import Path
 
 import anyio
 
@@ -143,10 +144,12 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     )
 
     parser.add_argument(
-        "--debug",
-        action="store_true",
-        default=False,
-        help="Save debug log",
+        "--trajectory",
+        default=None,
+        metavar="PATH",
+        type=Path,
+        dest="trajectory_path",
+        help="Write ATIF v1.6 trajectory JSON to this path (default: <target>/.daydream/trajectory.json)",
     )
 
     cleanup_group = parser.add_mutually_exclusive_group()
@@ -363,7 +366,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         target=args.target,
         skill=args.skill,
         model=args.model,
-        debug=args.debug,
         cleanup=args.cleanup,
         quiet=True,
         review_only=args.review_only,
@@ -379,6 +381,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         max_iterations=args.max_iterations,
         trust_the_technology=args.trust_the_technology,
         deep=args.deep,
+        trajectory_path=args.trajectory_path,
     )
 
 
