@@ -662,6 +662,35 @@ class TrajectoryRecorder:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(trajectory.to_json_dict(), indent=2), encoding="utf-8")
 
+    def write_partial(self) -> None:
+        """SIGINT/SIGTERM flush path — write in-flight steps to ``<path>.partial``.
+
+        Per D-07 the partial trajectory lives at a sibling path with the
+        ``.partial`` suffix appended to the full filename (e.g.
+        ``trajectory.json.partial``). The Trajectory's ``extra`` dict carries
+        ``partial=true`` so consumers can detect incomplete runs without
+        path-string parsing. Empty trajectories are skipped (matches ``_write``).
+
+        Idempotent: callable from a signal handler synchronously without
+        awaiting ``__aexit__``; safe to invoke from outside the async context.
+        Disk-write failures degrade with a warning per D-11 — partial flush
+        must never crash shutdown.
+        """
+        if not self.steps:
+            return
+        try:
+            trajectory = self._build_trajectory()
+            partial_path = self.path.with_suffix(self.path.suffix + ".partial")
+            partial_path.parent.mkdir(parents=True, exist_ok=True)
+            json_dict = trajectory.to_json_dict()
+            extra = json_dict.setdefault("extra", {})
+            extra["partial"] = True
+            partial_path.write_text(json.dumps(json_dict, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001 - partial flush must never crash shutdown
+            print_warning(
+                _console, f"Partial trajectory write failed: {type(exc).__name__}: {exc}"
+            )
+
 
 class _ForkCM:
     """Async context manager for forking a child recorder (D-01, D-02, D-03)."""
