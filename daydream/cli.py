@@ -16,7 +16,7 @@ from daydream.agent import (
     set_shutdown_requested,
 )
 from daydream.runner import RunConfig, run
-from daydream.trajectory import get_current_recorder
+from daydream.trajectory import get_signal_recorder
 from daydream.ui import (
     ShutdownPanel,
     get_shutdown_panel,
@@ -29,9 +29,12 @@ def _signal_handler(signum: int, frame: object) -> None:
     """Handle termination signals: flush partial trajectory then request shutdown.
 
     D-07: SIGINT/SIGTERM flushes a ``<path>.partial`` trajectory with
-    ``extra.partial=true`` so consumers know the run was interrupted. Reads the
-    recorder via the ContextVar (signal handlers are not in the async context,
-    but ContextVar.get() works synchronously from any thread/context).
+    ``extra.partial=true`` so consumers know the run was interrupted.
+
+    Uses :func:`get_signal_recorder` (a module-level stack) rather than the
+    ContextVar. Signal handlers fire in the main thread at bytecode boundaries
+    and are not synced with the asyncio task context where the ContextVar was
+    set, so ContextVar reads from here are non-deterministic.
     """
     signal_name = signal.Signals(signum).name
     set_shutdown_requested(True)
@@ -39,7 +42,7 @@ def _signal_handler(signum: int, frame: object) -> None:
     # Flush partial trajectory before tearing down (D-07). write_partial is
     # synchronous and exception-safe — it cannot crash the shutdown path even
     # if the disk is full or path is unwritable.
-    recorder = get_current_recorder()
+    recorder = get_signal_recorder()
     if recorder is not None:
         recorder.write_partial()
 

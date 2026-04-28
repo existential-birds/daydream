@@ -248,3 +248,171 @@ def test_redactor_failure_mode_replaces_with_redaction_failed(
     assert isinstance(out.message, str)
     assert "sk-leakthis123" not in out.message
     assert "[REDACTION_FAILED]" in out.message
+
+
+# ---- Regression: CR-01 (inverted ternary preserved JSON-string instead of dict) ----
+
+
+def test_redact_arguments_preserves_dict_structure_for_nested_values() -> None:
+    """CR-01 regression: non-string nested values must round-trip through json, not stay as JSON string.
+
+    The Edit tool's `arguments` is `{"old_string": "...", "new_string": "..."}`,
+    which is a dict whose values are strings — the string branch handles those.
+    But MultiEdit's `arguments` is `{"edits": [{...}, {...}]}` where the value
+    is a list of dicts, and MCP tool envelopes can have arbitrary nested
+    structure. Those must round-trip through json.dumps + redact + json.loads
+    so ToolCall.arguments keeps its declared dict[str, Any] shape.
+
+    Pre-fix bug: the inverted ternary stored the redacted JSON-encoded string
+    (rather than the parsed Python structure) whenever redaction changed any
+    text — corrupting every MultiEdit / nested MCP arguments value.
+    """
+    # Use a redaction-triggering API key (a Bearer token in a path) so we
+    # exercise the redaction-changed-the-text branch — the original bug only
+    # fires when redaction modifies the serialized form.
+    nested_value = [
+        {"path": "/Users/alice/repo/file.py", "edit_type": "replace"},
+        {"path": "/Users/alice/repo/other.py", "edit_type": "delete"},
+    ]
+    arguments = {"edits": nested_value}
+    out = Redactor()._redact_arguments(arguments)
+
+    # Crucially: out["edits"] must be a list of dicts (the Python structure),
+    # NOT a JSON-encoded string. CR-01 was that the inverted ternary stored
+    # the redacted-string into the dict whenever redaction changed anything.
+    assert isinstance(out["edits"], list), (
+        f"Expected list, got {type(out['edits']).__name__}: {out['edits']!r}"
+    )
+    assert len(out["edits"]) == 2
+    assert all(isinstance(item, dict) for item in out["edits"])
+    # The username was redacted (USERNAME_PATH rule fires) — alice must not appear.
+    serialized_back = str(out["edits"])
+    assert "alice" not in serialized_back
+    assert "[REDACTED_USER]" in serialized_back
+
+
+def test_redact_arguments_passthrough_when_no_secret() -> None:
+    """Non-string values without secrets must round-trip cleanly to the same Python structure."""
+    arguments = {"count": 42, "flags": ["a", "b"], "config": {"x": 1, "y": [1, 2, 3]}}
+    out = Redactor()._redact_arguments(arguments)
+    assert out["count"] == 42
+    assert out["flags"] == ["a", "b"]
+    assert out["config"] == {"x": 1, "y": [1, 2, 3]}
+
+
+def test_redact_arguments_invalid_json_falls_back_to_redaction_failed() -> None:
+    """When regex breaks JSON syntax, value falls back to [REDACTION_FAILED]."""
+
+    class _PoisonPattern:
+        def sub(self, _repl: object, s: str) -> str:
+            return "{not valid json"
+
+    from daydream import trajectory as traj_mod
+
+    original_rules = traj_mod._REDACTION_RULES
+    poison_rules = ((_PoisonPattern(), "ignored"), *original_rules[:0])
+    try:
+        traj_mod._REDACTION_RULES = poison_rules
+        out = Redactor()._redact_arguments({"edits": [{"x": 1}]})
+        assert out["edits"] == "[REDACTION_FAILED]"
+    finally:
+        traj_mod._REDACTION_RULES = original_rules
+
+
+# ---- Regression: WR-03 (env-var pattern over-redacted via substring match) ----
+
+
+@pytest.mark.parametrize(
+    "non_secret",
+    [
+        "MONKEY_PATCH=enabled",
+        "KEYBOARD_LAYOUT=qwerty",
+        "AUTHOR=alice",
+        "TOKENIZED=foo",
+        "KEYSTORE=path/to/store",
+    ],
+)
+def test_env_var_pattern_does_not_match_substring_lookalikes(non_secret: str) -> None:
+    """WR-03 regression: env-var redaction is segment-aware, not substring-based.
+
+    The original pattern matched any var name containing KEY/SECRET/TOKEN/AUTH
+    as a substring. The fix requires the secret keyword to appear as a full
+    underscore-separated segment.
+    """
+    out = Redactor().redact_step(_user_step(non_secret))
+    assert isinstance(out.message, str)
+    assert "[REDACTED_ENV_VAR]" not in out.message
+    # The original value must be present (not redacted)
+    name, _, value = non_secret.partition("=")
+    assert value in out.message, f"Expected {value!r} preserved in {out.message!r}"
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        ("OPENAI_API_KEY=sk-leakthis", "sk-leakthis"),
+        ("MY_API_KEY=value", "value"),
+        ("JWT_TOKEN=abc.def.ghi", "abc.def.ghi"),
+        ("DB_PASSWORD=hunter2", "hunter2"),
+        ("AUTH_TOKEN=t-foo", "t-foo"),
+        ("CACHE_KEY=k-bar", "k-bar"),
+        ("DB_CREDENTIAL=admin:pw", "admin:pw"),
+    ],
+)
+def test_env_var_pattern_redacts_legitimate_secret_segments(
+    secret: tuple[str, str],
+) -> None:
+    """WR-03 regression: real secret env vars still redact correctly."""
+    line, raw_value = secret
+    out = Redactor().redact_step(_user_step(line))
+    assert isinstance(out.message, str)
+    assert raw_value not in out.message
+    assert "[REDACTED_ENV_VAR]" in out.message
+
+
+# ---- Regression: WR-04 (top-level fallback wiped only message, leaked others) ----
+
+
+def test_redactor_failure_mode_wipes_all_text_bearing_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-04 regression: top-level fallback wipes message, reasoning_content, tool_calls, observation.
+
+    Triggers the outer ``except`` by patching ``Redactor._redact_optional_text``
+    to raise. Without the fix, only ``message`` is wiped and the remaining
+    text-bearing fields pass through unredacted — secrets in
+    ``reasoning_content`` / ``tool_calls.arguments`` / ``observation.results``
+    leak.
+    """
+    def _boom(self: object, value: object) -> str:
+        raise RuntimeError("simulated regex failure deep in pipeline")
+
+    monkeypatch.setattr(Redactor, "_redact_optional_text", _boom, raising=True)
+
+    step = _agent_step(
+        message="OPENAI_API_KEY=sk-leak1",
+        reasoning_content="thinking about sk-leak2",
+        tool_calls=[
+            ToolCall(
+                tool_call_id="tc1",
+                function_name="Edit",
+                arguments={"old_string": "sk-leak3", "new_string": "x"},
+            ),
+        ],
+        observation=Observation(
+            results=[ObservationResult(content="result with sk-leak4")],
+        ),
+    )
+
+    out = Redactor().redact_step(step)
+
+    serialized = str(out.model_dump())
+    for leak in ("sk-leak1", "sk-leak2", "sk-leak3", "sk-leak4"):
+        assert leak not in serialized, f"{leak} leaked through fallback: {serialized!r}"
+    # Each text-bearing field must contain the failure marker
+    assert out.message == "[REDACTION_FAILED]"
+    assert out.reasoning_content == "[REDACTION_FAILED]"
+    assert out.tool_calls is not None
+    assert out.tool_calls[0].arguments == {"_redaction": "[REDACTION_FAILED]"}
+    assert out.observation is not None
+    assert out.observation.results[0].content == "[REDACTION_FAILED]"

@@ -66,8 +66,12 @@ _JWT_PATTERN = re.compile(
     r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\b"
 )
 _USERNAME_PATH_PATTERN = re.compile(r"(/Users/|/home/|[A-Z]:\\Users\\)([^/\\\s]+)")
+# Match env-var assignment where one of the underscore-separated SEGMENTS of
+# the var name is a secret keyword. Substring matching (the original) over-
+# redacted MONKEY_PATCH/KEYBOARD_LAYOUT/AUTHOR/TOKENIZED — segment-aware
+# matching keeps the secret list precise without false positives.
 _ENV_VAR_PATTERN = re.compile(
-    r"\b([A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|API_?KEY|AUTH)[A-Z0-9_]*)\s*=\s*([^\s\n\r;]+)"  # noqa: E501 - secret-key suffix list
+    r"\b((?:[A-Z][A-Z0-9]*_)*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|API_?KEY|APIKEY|AUTH)(?:_[A-Z0-9]+)*)\s*=\s*([^\s\n\r;]+)"  # noqa: E501 - secret-segment alternation
 )
 _REDACTION_RULES: tuple[tuple[Any, str], ...] = (
     # 1) URL-credential rule first — captures user:token before bare API-key rule sees the token.
@@ -185,8 +189,10 @@ class Redactor:
 
         Per D-04 the dispatch is flat regex on the serialized form of each
         value. String values are redacted directly. Non-string values are
-        ``json.dumps``'d, redacted, then re-parsed; if re-parse fails the
-        value is replaced with ``"[REDACTION_FAILED]"``.
+        ``json.dumps``'d, redacted, then re-parsed back to their Python
+        structure so ``ToolCall.arguments`` keeps its declared shape. If
+        re-parse fails (regex broke JSON syntax) the value is replaced with
+        ``"[REDACTION_FAILED]"`` per REDA-05.
         """
         out: dict[str, Any] = {}
         for key, val in arguments.items():
@@ -196,7 +202,7 @@ class Redactor:
                 else:
                     serialized = json.dumps(val)
                     redacted = self._redact_text(serialized)
-                    out[key] = json.loads(redacted) if redacted == serialized else redacted
+                    out[key] = json.loads(redacted)
             except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
                 out[key] = "[REDACTION_FAILED]"
         return out
@@ -251,7 +257,26 @@ class Redactor:
             return step.model_copy(update=updates)
         except Exception as exc:  # noqa: BLE001 - REDA-05 redact-or-omit (top-level fallback)
             print_warning(_console, f"Redactor failure: {type(exc).__name__}: {exc}")
-            return step.model_copy(update={"message": "[REDACTION_FAILED]"})
+            # Wipe every text-bearing surface — partial wipes leak secrets
+            # if redaction failed mid-arguments / mid-observation.
+            safe_updates: dict[str, Any] = {"message": "[REDACTION_FAILED]"}
+            if step.reasoning_content is not None:
+                safe_updates["reasoning_content"] = "[REDACTION_FAILED]"
+            if step.tool_calls is not None:
+                safe_updates["tool_calls"] = [
+                    tc.model_copy(update={"arguments": {"_redaction": "[REDACTION_FAILED]"}})
+                    for tc in step.tool_calls
+                ]
+            if step.observation is not None:
+                safe_updates["observation"] = step.observation.model_copy(
+                    update={
+                        "results": [
+                            r.model_copy(update={"content": "[REDACTION_FAILED]"})
+                            for r in step.observation.results
+                        ]
+                    }
+                )
+            return step.model_copy(update=safe_updates)
 
 
 # Module-level Singletons
@@ -268,6 +293,13 @@ _RECORDER_VAR: ContextVar["TrajectoryRecorder | None"] = ContextVar(
     "_RECORDER_VAR", default=None,
 )
 
+# Signal-handler-safe stack of active recorders (root + forks). Python signal
+# handlers fire in the main thread at bytecode boundaries — ContextVar.get()
+# from that handler returns whatever context the interpreter happened to be
+# in, which is non-deterministic relative to async tasks. The signal-handler
+# path reads the top of this stack instead so SIGINT-flush is reliable.
+_ACTIVE_RECORDERS: list["TrajectoryRecorder"] = []
+
 
 def get_current_recorder() -> "TrajectoryRecorder | None":
     """Return the recorder for the current async context, or None if none active.
@@ -277,6 +309,10 @@ def get_current_recorder() -> "TrajectoryRecorder | None":
     when None — direct test invocation of ``run_agent()`` without an active
     recorder is therefore a clean no-op (CORE-09).
 
+    Signal handlers MUST use :func:`get_signal_recorder` instead — ContextVar
+    reads inside a signal handler are not deterministic with respect to the
+    async context where the recorder was set.
+
     Returns:
         The active ``TrajectoryRecorder`` instance, or ``None`` if no
         ``async with TrajectoryRecorder(...)`` block is on the stack.
@@ -284,14 +320,33 @@ def get_current_recorder() -> "TrajectoryRecorder | None":
     return _RECORDER_VAR.get()
 
 
+def get_signal_recorder() -> "TrajectoryRecorder | None":
+    """Return the most recently entered recorder for signal-handler use.
+
+    Signal handlers run in the main thread outside the asyncio task context,
+    so ``ContextVar.get()`` returns non-deterministic values depending on
+    where the interpreter was when the signal fired. This accessor reads
+    from a module-level stack populated by ``TrajectoryRecorder.__aenter__``,
+    which is set synchronously and remains valid across the entire run.
+
+    Returns:
+        The most recently entered (top-of-stack) ``TrajectoryRecorder``, or
+        ``None`` if no recorder is active. For nested forks, the innermost
+        recorder is returned — partial flushes cascade to ancestors via
+        each recorder's own ``write_partial``.
+    """
+    return _ACTIVE_RECORDERS[-1] if _ACTIVE_RECORDERS else None
+
+
 def _reset_recorder_for_tests() -> None:
-    """Test-only: clear the recorder ContextVar.
+    """Test-only: clear the recorder ContextVar and signal-handler stack.
 
     Use exclusively from the autouse ``_reset_trajectory_recorder`` fixture
     in ``tests/conftest.py`` (CORE-10, D-17). Production code MUST go through
     ``TrajectoryRecorder.__aenter__`` / ``__aexit__``.
     """
     _RECORDER_VAR.set(None)
+    _ACTIVE_RECORDERS.clear()
 
 
 @dataclass
@@ -519,9 +574,14 @@ class TrajectoryRecorder:
     _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
     _previous_token: Any = None
     _registered_siblings: list[tuple[Path, str]] = field(default_factory=list)
+    # Active invocations whose in-flight steps haven't been flushed yet.
+    # write_partial reads this so SIGINT mid-run_agent() captures partial
+    # work rather than dropping it.
+    _active_invocations: list[Invocation] = field(default_factory=list)
 
     async def __aenter__(self) -> "TrajectoryRecorder":
         self._previous_token = _RECORDER_VAR.set(self)
+        _ACTIVE_RECORDERS.append(self)
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -545,6 +605,10 @@ class TrajectoryRecorder:
             if self._previous_token is not None:
                 _RECORDER_VAR.reset(self._previous_token)
                 self._previous_token = None
+            try:
+                _ACTIVE_RECORDERS.remove(self)
+            except ValueError:
+                pass  # already removed by reset_recorder_for_tests or never registered
 
     def invocation(self, *, phase: DaydreamPhase) -> "_InvocationCM":
         """Open an Invocation scope for one ``run_agent()`` call.
@@ -672,6 +736,22 @@ class TrajectoryRecorder:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(trajectory.to_json_dict(), indent=2), encoding="utf-8")
 
+    def _snapshot_in_flight_steps(self) -> list[Step]:
+        """Concatenate flushed steps with steps from any active invocations.
+
+        Mid-``run_agent()``, an Invocation has accumulated steps that haven't
+        been flushed back to ``self.steps`` (the flush happens in
+        ``_InvocationCM.__aexit__`` via ``Invocation.finish``). For a partial
+        flush we want those in-flight steps too; this helper concatenates
+        them in registration order without mutating either buffer.
+        """
+        if not self._active_invocations:
+            return list(self.steps)
+        snapshot = list(self.steps)
+        for inv in self._active_invocations:
+            snapshot.extend(inv.steps)
+        return snapshot
+
     def write_partial(self) -> None:
         """SIGINT/SIGTERM flush path — write in-flight steps to ``<path>.partial``.
 
@@ -679,17 +759,28 @@ class TrajectoryRecorder:
         ``.partial`` suffix appended to the full filename (e.g.
         ``trajectory.json.partial``). The Trajectory's ``extra`` dict carries
         ``partial=true`` so consumers can detect incomplete runs without
-        path-string parsing. Empty trajectories are skipped (matches ``_write``).
+        path-string parsing. Steps from any in-flight Invocation are
+        included so SIGINT mid-``run_agent()`` does not lose work; empty
+        trajectories are skipped (matches ``_write``).
 
         Idempotent: callable from a signal handler synchronously without
         awaiting ``__aexit__``; safe to invoke from outside the async context.
         Disk-write failures degrade with a warning per D-11 — partial flush
         must never crash shutdown.
         """
-        if not self.steps:
+        snapshot_steps = self._snapshot_in_flight_steps()
+        if not snapshot_steps:
             return
         try:
-            trajectory = self._build_trajectory()
+            # Build a one-shot Trajectory from the snapshot — _build_trajectory
+            # reads self.steps, so temporarily swap in the snapshot for the
+            # build and restore on the way out.
+            saved = self.steps
+            self.steps = snapshot_steps
+            try:
+                trajectory = self._build_trajectory()
+            finally:
+                self.steps = saved
             partial_path = self.path.with_suffix(self.path.suffix + ".partial")
             partial_path.parent.mkdir(parents=True, exist_ok=True)
             json_dict = trajectory.to_json_dict()
@@ -753,9 +844,16 @@ class _InvocationCM:
 
     async def __aenter__(self) -> Invocation:
         self._invocation = Invocation(recorder=self._recorder, phase=self._phase)
+        # Register with recorder so write_partial can capture in-flight steps
+        # if SIGINT fires mid-invocation.
+        self._recorder._active_invocations.append(self._invocation)
         return self._invocation
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self._invocation is not None:
+            try:
+                self._recorder._active_invocations.remove(self._invocation)
+            except ValueError:
+                pass
             self._invocation.finish()
             self._invocation = None

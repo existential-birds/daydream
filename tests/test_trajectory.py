@@ -16,11 +16,9 @@ import pytest
 
 from daydream.atif import validate as atif_validate
 from daydream.backends import (
-    CostEvent,
     MetricsEvent,
     ResultEvent,
     TextEvent,
-    ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
 )
@@ -34,7 +32,6 @@ from daydream.trajectory import (
     get_current_recorder,
     now_iso,
 )
-
 
 
 def _make_recorder(tmp_path: Path, *, agent_model_name: str = "opus") -> TrajectoryRecorder:
@@ -909,3 +906,114 @@ async def test_write_partial_failure_emits_warning_does_not_raise(
         recorder.write_partial()
 
     assert any("Partial trajectory write failed" in m for m in warnings_emitted)
+
+
+# ---------------------------------------------------------------------------
+# Regression: WR-01 — write_partial must capture Invocation in-flight steps
+# ---------------------------------------------------------------------------
+
+
+async def test_write_partial_captures_in_flight_invocation_steps(tmp_path: Path) -> None:
+    """WR-01 regression: SIGINT mid-run_agent() must include in-flight Invocation steps.
+
+    Pre-fix bug: write_partial read recorder.steps directly, but Invocation
+    accumulates steps in its own list and only flushes to recorder.steps on
+    __aexit__. A partial flush mid-invocation lost every step from the
+    in-flight invocation.
+    """
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            # Steps observed inside the invocation but BEFORE __aexit__
+            inv.observe_user_step(prompt="hello")
+            inv.observe(TextEvent(text="response"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+            assert recorder.steps == [], "recorder.steps should be empty mid-invocation"
+            assert len(inv.steps) >= 2, "Invocation should have accumulated steps"
+
+            recorder.write_partial()
+
+    partial_path = tmp_path / ".daydream" / "trajectory.json.partial"
+    assert partial_path.exists(), "Partial trajectory file should be written"
+
+    data = json.loads(partial_path.read_text(encoding="utf-8"))
+    assert data.get("extra", {}).get("partial") is True
+    # Steps from the in-flight invocation must be included
+    assert len(data["steps"]) >= 2, (
+        f"Partial trajectory missing in-flight steps: {data['steps']!r}"
+    )
+    messages = [s.get("message") for s in data["steps"] if isinstance(s, dict)]
+    assert any("hello" in (m or "") for m in messages), (
+        f"User step prompt not in partial: {messages!r}"
+    )
+
+
+async def test_write_partial_no_double_count_after_invocation_exit(tmp_path: Path) -> None:
+    """After Invocation.__aexit__, write_partial should NOT double-count steps.
+
+    Steps moved from invocation.steps to recorder.steps; write_partial reads
+    recorder.steps + active_invocations. After the invocation exits,
+    active_invocations is empty so we read only recorder.steps.
+    """
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe_user_step(prompt="hi")
+            inv.observe(TextEvent(text="ok"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+        # Now invocation has exited, steps flushed
+        assert recorder._active_invocations == []
+        flushed_count = len(recorder.steps)
+        assert flushed_count >= 2
+
+        recorder.write_partial()
+
+    partial_path = tmp_path / ".daydream" / "trajectory.json.partial"
+    data = json.loads(partial_path.read_text(encoding="utf-8"))
+    assert len(data["steps"]) == flushed_count, (
+        f"Expected {flushed_count} steps post-exit, got {len(data['steps'])}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Regression: WR-02 — get_signal_recorder reads module-level stack, not ContextVar
+# ---------------------------------------------------------------------------
+
+
+async def test_get_signal_recorder_returns_active_recorder(tmp_path: Path) -> None:
+    """WR-02 regression: signal-handler-safe accessor returns the active recorder.
+
+    Signal handlers fire in the main thread outside the asyncio task context,
+    so ``ContextVar.get()`` is non-deterministic. ``get_signal_recorder`` reads
+    a module-level stack populated synchronously in __aenter__, which is
+    reliable regardless of where the signal interleaves.
+    """
+    from daydream.trajectory import get_signal_recorder
+
+    assert get_signal_recorder() is None, "Stack should be empty before __aenter__"
+
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        assert get_signal_recorder() is recorder, "Signal recorder should be set inside async with"
+
+    assert get_signal_recorder() is None, "Stack should be empty after __aexit__"
+
+
+async def test_get_signal_recorder_returns_innermost_for_nested_recorders(
+    tmp_path: Path,
+) -> None:
+    """Nested recorders push onto the stack; signal-handler reads the top (innermost)."""
+    from daydream.trajectory import get_signal_recorder
+
+    outer = _make_recorder(tmp_path / "outer")
+    inner = _make_recorder(tmp_path / "inner")
+
+    async with outer:
+        assert get_signal_recorder() is outer
+        async with inner:
+            assert get_signal_recorder() is inner
+        assert get_signal_recorder() is outer
+
+    assert get_signal_recorder() is None
