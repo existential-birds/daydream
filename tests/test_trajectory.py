@@ -403,7 +403,13 @@ def test_now_iso_ends_with_z() -> None:
 
 
 def test_redactor_is_passthrough() -> None:
-    """Redactor.redact_step returns the input unchanged (D-12 no-op)."""
+    """Redactor.redact_step preserves semantic equality on clean inputs.
+
+    Phase 4: Redactor returns a fresh model_copy whenever ANY scannable text
+    field is present. Identity (`out is step`) is NO LONGER guaranteed; the
+    contract is field-by-field semantic equality on inputs containing no
+    secret patterns.
+    """
     from daydream.atif import Step as AtifStep
 
     step = AtifStep(
@@ -413,7 +419,27 @@ def test_redactor_is_passthrough() -> None:
         message="hello",
     )
     out = Redactor().redact_step(step)
-    assert out is step
+    assert out.message == step.message
+    assert out.reasoning_content == step.reasoning_content
+    assert out.tool_calls == step.tool_calls
+    assert out.observation == step.observation
+    assert out.extra == step.extra
+
+
+def test_redactor_scrubs_api_key_in_message() -> None:
+    """Phase 4 RED: Redactor.redact_step replaces sk-* tokens in Step.message."""
+    from daydream.atif import Step as AtifStep
+
+    step = AtifStep(
+        step_id=1,
+        timestamp=now_iso(),
+        source="user",
+        message="token=sk-test-12345abcdef done",
+    )
+    out = Redactor().redact_step(step)
+    assert isinstance(out.message, str)
+    assert "sk-test-12345abcdef" not in out.message
+    assert "[REDACTED_API_KEY]" in out.message
 
 
 def test_invocation_has_no_parent_field() -> None:
