@@ -74,7 +74,12 @@
   3. A trajectory generated with seeded inputs containing `sk-test-12345`, `ghp_test123`, `xoxb-test456`, `AKIA0000TESTKEY00000`, a JWT (`eyJ…`), `/Users/ka/foo`, `/home/alice/bar`, and a `.env`-style `OPENAI_API_KEY=sk-real-key` line produces output where none of those literals appear in `ToolCall.arguments`, `ObservationResult.content`, `Step.message`, or `Step.reasoning_content` — redaction is redact-or-omit, never raw-pass-through
   4. Sending SIGINT (Ctrl-C) or SIGTERM mid-run flushes the in-progress trajectory to `<path>.partial` with `extra.partial=true`; the file passes the vendored validator (partial trajectories with no `final_metrics` are valid per ATIF v1.6)
   5. Help text (`daydream --help`) describes the trajectory output, the `--trajectory` flag semantics, and that the redactor is on by default; `make lint` and `make typecheck` pass cleanly with the legacy code removed
-**Plans**: TBD
+**Plans**: 5 plans
+- [ ] 04-01-PLAN.md — Redactor regex dispatch + TrajectoryRecorder.write_partial in daydream/trajectory.py + tests/test_redaction.py (REDA-01..06, CLI-03 method)
+- [ ] 04-02-PLAN.md — Promote/silently-remove _log_debug sites in daydream/phases.py and daydream/exploration_runner.py (CUT-04, CUT-07)
+- [ ] 04-03-PLAN.md — Swap --debug for --trajectory + SIGINT partial flush + remove RunConfig.debug + debug-init block + promote [PHASE2_ERROR] (CLI-01..05, CUT-03)
+- [ ] 04-04-PLAN.md — Hard cutover: remove _log_debug/_ui_debug/_raw_log + AgentState.debug_log + lazy import in codex.py + promote EXECUTE_* errors (CUT-01, CUT-02, CUT-05, CUT-06)
+- [ ] 04-05-PLAN.md — AST sweep test verifying zero forbidden Name/Attribute/ImportFrom/string-literal-prefix references across daydream/ and tests/ (CUT-08)
 
 ### Phase 5: Test Hardening + Documentation
 **Goal**: Migration-complete signal — all 343 existing tests pass, new test suites cover the recorder, redaction, golden-fixture round-trip, and subagent file shapes (using schema-validity + behavior-predicate patterns, not full-tree snapshot equality). README, CHANGELOG, CLAUDE.md, and `daydream/atif/NOTICE` document the new format, the breaking CLI change, and consumer integration paths.
@@ -95,7 +100,7 @@
 | 1. Vendor ATIF Foundation | 4/4 | Complete | 2026-04-26 |
 | 2. Recorder Core + Event Enrichment + Mapping | 7/7 | Complete | 2026-04-27 |
 | 3. Subagent Wiring (Parallel + Continuation) | 0/2 | Ready to execute | - |
-| 4. Cutover + Redaction + CLI Surface | 0/0 | Not started | - |
+| 4. Cutover + Redaction + CLI Surface | 0/5 | Ready to execute | - |
 | 5. Test Hardening + Documentation | 0/0 | Not started | - |
 
 ## Coverage Summary
