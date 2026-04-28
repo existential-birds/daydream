@@ -218,13 +218,13 @@ async def pre_scan(
     """
     import anyio
 
-    from daydream.agent import _log_debug, run_agent
+    from daydream.agent import run_agent
 
     static_files: list[FileInfo] = []
     try:
         static_files = detect_affected_files(diff_text, repo_root, depth)
-    except Exception as exc:  # pragma: no cover - defensive
-        _log_debug(f"[PRE_SCAN] detect_affected_files failed: {exc}\n")
+    except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+        pass
 
     static_context = ExplorationContext(affected_files=static_files)
 
@@ -251,8 +251,8 @@ async def pre_scan(
                 )
                 if isinstance(structured, dict):
                     results[name] = structured
-            except Exception as exc:
-                _log_debug(f"[PRE_SCAN] specialist {name} failed: {type(exc).__name__}: {exc}\n")
+            except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+                pass
 
     file_paths = [f.path for f in static_files]
 
@@ -278,7 +278,6 @@ async def pre_scan(
         recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
 
     if not results:
-        _log_debug("[PRE_SCAN] no specialist results collected\n")
         return static_context
 
     subagent_context = _parse_envelope(results)
