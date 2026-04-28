@@ -17,6 +17,7 @@ Daydream launches review agents equipped with [Beagle](https://github.com/existe
 - **Parallel execution**: Up to 4 concurrent fix agents with live progress tracking
 - **Test validation**: Runs your test suite and offers interactive retry/fix options on failure
 - **Commit integration**: Optionally commits and pushes changes when complete
+- **ATIF v1.6 trajectory recording**: Every run produces a machine-parseable trajectory with automatic secret redaction
 
 ## Prerequisites
 
@@ -117,7 +118,7 @@ daydream --pr --bot "coderabbitai[bot]" /path/to/project
 | `--bot BOT_NAME` | Bot username to filter PR comments (required with `--pr`) | |
 | `--loop` | Repeat review-fix-test cycle until zero issues or max iterations | |
 | `--max-iterations N` | Maximum loop iterations (only meaningful with `--loop`) | `5` |
-| `--debug` | Save debug log to `.review-debug-{timestamp}.log` | |
+| `--trajectory <path>` | Write trajectory to custom path | `<target>/.daydream/trajectory.json` |
 | `--cleanup` | Remove `.review-output.md` after completion | |
 | `--no-cleanup` | Keep `.review-output.md` after completion | |
 
@@ -189,8 +190,19 @@ PR feedback mode is mutually exclusive with `--review-only`, `--start-at`, and s
 | File | Description |
 |------|-------------|
 | `.review-output.md` | Review results (removed with `--cleanup`, required for `--start-at parse/fix`) |
-| `.review-debug-{timestamp}.log` | Debug log (created when `--debug` is enabled) |
+| `.daydream/trajectory.json` | ATIF v1.6 trajectory recording (always written; customize path with `--trajectory`) |
 | `.daydream/plan-{timestamp}.md` | Implementation plan (created by `--ttt` mode) |
+
+## Trajectory Output
+
+Every daydream run produces an [ATIF v1.6](docs/reference/atif_format.md) trajectory file at `<target>/.daydream/trajectory.json`. The trajectory captures the full agent interaction history — prompts, responses, tool calls, observations, and per-step token/cost metrics. Use `--trajectory <path>` to write to a custom location.
+
+Sensitive content is automatically redacted before writing: API keys (`sk-*`, `ghp_*`, `xoxb-*`, `AKIA*`), JWT tokens, username segments in file paths, and `.env`-style secret values are replaced with type-specific `[REDACTED_*]` tokens.
+
+**Consumer integration:**
+- Validate trajectories with [Harbor](https://github.com/laude-institute/harbor)'s trajectory validator
+- Replay in any ATIF-compatible viewer
+- Use as training data for SFT/RL pipelines (trajectories are machine-parseable by design)
 
 ## Architecture
 
