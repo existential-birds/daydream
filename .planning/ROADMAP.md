@@ -75,8 +75,8 @@
   4. Sending SIGINT (Ctrl-C) or SIGTERM mid-run flushes the in-progress trajectory to `<path>.partial` with `extra.partial=true`; the file passes the vendored validator (partial trajectories with no `final_metrics` are valid per ATIF v1.6)
   5. Help text (`daydream --help`) describes the trajectory output, the `--trajectory` flag semantics, and that the redactor is on by default; `make lint` and `make typecheck` pass cleanly with the legacy code removed
 **Plans**: 5 plans
-- [ ] 04-01-PLAN.md — Redactor regex dispatch + TrajectoryRecorder.write_partial in daydream/trajectory.py + tests/test_redaction.py (REDA-01..06, CLI-03 method)
-- [ ] 04-02-PLAN.md — Promote/silently-remove _log_debug sites in daydream/phases.py and daydream/exploration_runner.py (CUT-04, CUT-07)
+- [x] 04-01-PLAN.md — Redactor regex dispatch + TrajectoryRecorder.write_partial in daydream/trajectory.py + tests/test_redaction.py (REDA-01..06, CLI-03 method)
+- [x] 04-02-PLAN.md — Promote/silently-remove _log_debug sites in daydream/phases.py and daydream/exploration_runner.py (CUT-04, CUT-07)
 - [ ] 04-03-PLAN.md — Swap --debug for --trajectory + SIGINT partial flush + remove RunConfig.debug + debug-init block + promote [PHASE2_ERROR] (CLI-01..05, CUT-03)
 - [ ] 04-04-PLAN.md — Hard cutover: remove _log_debug/_ui_debug/_raw_log + AgentState.debug_log + lazy import in codex.py + promote EXECUTE_* errors (CUT-01, CUT-02, CUT-05, CUT-06)
 - [ ] 04-05-PLAN.md — AST sweep test verifying zero forbidden Name/Attribute/ImportFrom/string-literal-prefix references across daydream/ and tests/ (CUT-08)
