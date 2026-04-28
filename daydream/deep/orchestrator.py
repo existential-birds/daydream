@@ -280,6 +280,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
         run_flow=DaydreamRunFlow.DEEP,
         target_dir=target_dir,
         agent_model_name=config.model or "opus",
+        explicit_path=config.trajectory_path is not None,
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")

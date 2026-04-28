@@ -219,6 +219,7 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         run_flow=DaydreamRunFlow.PR,
         target_dir=target_dir,
         agent_model_name=config.model or "opus",
+        explicit_path=config.trajectory_path is not None,
     ):
         print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
@@ -328,6 +329,7 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
         run_flow=DaydreamRunFlow.TTT,
         target_dir=target_dir,
         agent_model_name=config.model or "opus",
+        explicit_path=config.trajectory_path is not None,
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")
@@ -520,6 +522,7 @@ async def run(config: RunConfig | None = None) -> int:
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=target_dir,
         agent_model_name=config.model or "opus",
+        explicit_path=config.trajectory_path is not None,
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")

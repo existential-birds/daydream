@@ -42,7 +42,7 @@ from daydream.atif import (
     ToolCall,
     Trajectory,
 )
-from daydream.ui import create_console, print_warning
+from daydream.ui import create_console, print_error, print_warning
 
 if TYPE_CHECKING:
     from daydream.backends import AgentEvent
@@ -514,6 +514,7 @@ class TrajectoryRecorder:
     steps: list[Step] = field(default_factory=list)
     parent: TrajectoryRecorder | None = None
     descriptor: str = ""
+    explicit_path: bool = False
     _step_id_counter: int = 0
     _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
     _previous_token: Any = None
@@ -526,7 +527,16 @@ class TrajectoryRecorder:
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         try:
             self._write()
-        except Exception as exc:  # noqa: BLE001 - implicit write degrade-with-warning per D-11
+        except Exception as exc:  # noqa: BLE001 - branch on explicit_path per D-06
+            if self.explicit_path:
+                # D-06: user asked for it, deliver or fail loud
+                print_error(
+                    _console,
+                    "Trajectory write failed",
+                    f"{type(exc).__name__}: {exc}",
+                )
+                raise SystemExit(2) from exc
+            # Implicit/default path — degrade with warning per CORE-09 / D-11
             print_warning(
                 _console,
                 f"Trajectory write failed: {type(exc).__name__}: {exc}",
