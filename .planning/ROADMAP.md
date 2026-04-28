@@ -79,7 +79,7 @@
 - [x] 04-02-PLAN.md — Promote/silently-remove _log_debug sites in daydream/phases.py and daydream/exploration_runner.py (CUT-04, CUT-07)
 - [x] 04-03-PLAN.md — Swap --debug for --trajectory + SIGINT partial flush + remove RunConfig.debug + debug-init block + promote [PHASE2_ERROR] (CLI-01..05, CUT-03)
 - [x] 04-04-PLAN.md — Hard cutover: remove _log_debug/_ui_debug/_raw_log + AgentState.debug_log + lazy import in codex.py + promote EXECUTE_* errors (CUT-01, CUT-02, CUT-05, CUT-06)
-- [ ] 04-05-PLAN.md — AST sweep test verifying zero forbidden Name/Attribute/ImportFrom/string-literal-prefix references across daydream/ and tests/ (CUT-08)
+- [x] 04-05-PLAN.md — AST sweep test verifying zero forbidden Name/Attribute/ImportFrom/string-literal-prefix references across daydream/ and tests/ (CUT-08)
 
 ### Phase 5: Test Hardening + Documentation
 **Goal**: Migration-complete signal — all 343 existing tests pass, new test suites cover the recorder, redaction, golden-fixture round-trip, and subagent file shapes (using schema-validity + behavior-predicate patterns, not full-tree snapshot equality). README, CHANGELOG, CLAUDE.md, and `daydream/atif/NOTICE` document the new format, the breaking CLI change, and consumer integration paths.
