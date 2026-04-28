@@ -8,7 +8,7 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TextIO
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
@@ -31,6 +31,7 @@ from daydream.ui import (
     LiveToolPanelRegistry,
     create_console,
     print_cost,
+    print_error,
     print_thinking,
 )
 
@@ -53,7 +54,6 @@ class AgentState:
     """Consolidated state for agent module.
 
     Attributes:
-        debug_log: File handle for debug logging, or None to disable.
         quiet_mode: True to hide tool calls and results, False to show them.
         model: Model name to use for agent interactions.
         shutdown_requested: True if shutdown has been requested.
@@ -61,7 +61,6 @@ class AgentState:
 
     """
 
-    debug_log: TextIO | None = None
     quiet_mode: bool = False
     model: str = "opus"
     shutdown_requested: bool = False
@@ -73,7 +72,7 @@ class AgentState:
 # This module uses a singleton pattern for global state management. The module
 # is imported once, creating these instances which persist for the process lifetime.
 # Access and modify state through the getter/setter functions below (get_state,
-# set_debug_log, set_quiet_mode, etc.) rather than accessing _state directly.
+# set_quiet_mode, etc.) rather than accessing _state directly.
 # Use reset_state() to restore defaults between test runs or CLI invocations.
 
 _state = AgentState()
@@ -101,29 +100,6 @@ def reset_state() -> None:
     """
     global _state
     _state = AgentState()
-
-
-def set_debug_log(log_file: TextIO | None) -> None:
-    """Set the debug log file handle.
-
-    Args:
-        log_file: File handle for debug logging, or None to disable.
-
-    Returns:
-        None
-
-    """
-    _state.debug_log = log_file
-
-
-def get_debug_log() -> TextIO | None:
-    """Get the current debug log file handle.
-
-    Returns:
-        The current debug log file handle, or None if not set.
-
-    """
-    return _state.debug_log
 
 
 def set_quiet_mode(quiet: bool) -> None:
@@ -203,13 +179,6 @@ def get_current_backends() -> list[Backend]:
 
     """
     return list(_state.current_backends)
-
-
-def _log_debug(message: str) -> None:
-    """Write a message to the debug log if enabled."""
-    if _state.debug_log is not None:
-        _state.debug_log.write(message)
-        _state.debug_log.flush()
 
 
 def detect_test_success(output: str) -> bool:
@@ -329,17 +298,10 @@ async def run_agent(
             (raised by the Python interpreter at call time).
 
     """
-    _log_debug(f"\n{'='*80}\n")
-    _log_debug(f"[PROMPT] cwd={cwd}\n{prompt}\n")
-    _log_debug(f"{'='*80}\n\n")
-
     output_parts: list[str] = []
     structured_result: Any = None
     result_continuation: ContinuationToken | None = None
     use_callback = progress_callback is not None
-
-    if output_schema is not None:
-        _log_debug(f"[SCHEMA] {output_schema}\n")
 
     _state.current_backends.append(backend)
     try:
@@ -350,7 +312,7 @@ async def run_agent(
         try:
             event_iter = backend.execute(cwd, prompt, output_schema, continuation, agents=agents, max_turns=max_turns)
         except Exception as exc:
-            _log_debug(f"[EXECUTE_INIT_ERROR] {type(exc).__name__}: {exc}\n")
+            print_error(console, "Backend Init Error", f"{type(exc).__name__}: {exc}")
             raise
 
         # Open Invocation scope when a recorder is active. nullcontext keeps
@@ -369,7 +331,6 @@ async def run_agent(
             async for event in event_iter:
                 if isinstance(event, TextEvent):
                     output_parts.append(event.text)
-                    _log_debug(f"[TEXT] {event.text}\n")
 
                     # Check for missing skill error
                     skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
@@ -390,7 +351,6 @@ async def run_agent(
                         inv.observe(event)
 
                 elif isinstance(event, ThinkingEvent):
-                    _log_debug(f"[THINKING] {event.text}\n")
                     if not use_callback:
                         if agent_renderer.has_content:
                             agent_renderer.finish()
@@ -400,10 +360,6 @@ async def run_agent(
                         inv.observe(event)
 
                 elif isinstance(event, ToolStartEvent):
-                    _log_debug(
-                        f"[TOOL_USE] {event.name}({event.input}) "
-                        f"id={event.id} use_callback={use_callback}\n"
-                    )
                     if progress_callback is not None:
                         first_arg = next(iter(event.input.values()), "") if event.input else ""
                         progress_callback(f"{event.name} {first_arg}"[:80])
@@ -416,25 +372,12 @@ async def run_agent(
                         inv.observe(event)
 
                 elif isinstance(event, ToolResultEvent):
-                    _log_debug(
-                        f"[TOOL_RESULT{' [ERROR]' if event.is_error else ''}] "
-                        f"id={event.id} output_len={len(event.output)} "
-                        f"output_preview={event.output[:200]!r} "
-                        f"use_callback={use_callback}\n"
-                    )
                     if not use_callback:
                         panel = tool_registry.get(event.id)
-                        _log_debug(
-                            f"[TOOL_RESULT_PANEL] id={event.id} "
-                            f"panel_found={panel is not None} "
-                            f"panel_name={panel.name if panel else 'N/A'}\n"
-                        )
                         if panel:
                             panel.set_result(event.output, event.is_error)
                             panel.finish()
                             tool_registry.remove(event.id)
-                        else:
-                            _log_debug(f"[WARN] No panel for tool_use_id={event.id}\n")
 
                     if inv is not None:
                         inv.observe(event)
@@ -448,14 +391,11 @@ async def run_agent(
 
                 elif isinstance(event, CostEvent):
                     if event.cost_usd:
-                        _log_debug(f"[COST] ${event.cost_usd:.4f}\n")
                         if not use_callback:
                             if agent_renderer.has_content:
                                 agent_renderer.finish()
                             console.print()
                             print_cost(console, event.cost_usd)
-                    elif event.input_tokens is not None:
-                        _log_debug(f"[TOKENS] in={event.input_tokens} out={event.output_tokens}\n")
 
                     if inv is not None:
                         inv.observe(event)
@@ -463,7 +403,6 @@ async def run_agent(
                 elif isinstance(event, ResultEvent):
                     if event.structured_output is not None:
                         structured_result = event.structured_output
-                        _log_debug(f"[STRUCTURED_OUTPUT] {structured_result}\n")
                         if not use_callback:
                             issues = structured_result.get("issues", []) if isinstance(structured_result, dict) else []
                             if issues:
@@ -490,26 +429,20 @@ async def run_agent(
                 tool_registry.finish_all()
                 console.print()
     except Exception as exc:
-        _log_debug(f"[EXECUTE_ERROR] {type(exc).__name__}: {exc}\n")
+        print_error(console, "Backend Execution Error", f"{type(exc).__name__}: {exc}")
         raise
     finally:
         _state.current_backends.remove(backend)
 
     if output_schema is not None and structured_result is not None:
-        _log_debug(f"[SCHEMA_OK] structured_result={structured_result!r}\n")
         return structured_result, result_continuation
     if output_schema is not None:
         raw = "".join(output_parts)
-        _log_debug(
-            f"[SCHEMA_MISS] output_schema set but structured_result is None; "
-            f"raw text ({len(raw)} chars): {raw[:500]!r}\n"
-        )
         # Fallback: try to JSON-parse the raw text when structured output failed
         if raw.strip():
             try:
                 parsed = json.loads(raw)
-                _log_debug(f"[SCHEMA_FALLBACK] parsed raw text as JSON: {parsed!r}\n")
                 return parsed, result_continuation
             except (json.JSONDecodeError, ValueError):
-                _log_debug("[SCHEMA_FALLBACK] raw text is not valid JSON\n")
+                pass
     return "".join(output_parts), result_continuation
