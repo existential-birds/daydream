@@ -23,7 +23,7 @@ python -m daydream
 daydream /path/to/project --python      # Python/FastAPI review
 daydream /path/to/project --typescript  # React/TypeScript review
 daydream --review-only /path/to/project # Review only, skip fixes
-daydream --debug /path/to/project       # Enable debug logging
+daydream --trajectory /tmp/out.json /path/to/project  # Custom trajectory path
 
 # Development
 make lint       # Run ruff linter
@@ -51,6 +51,7 @@ cli.py → runner.py → phases.py → agent.py
   3. `phase_fix()` - Apply fixes one-by-one
   4. `phase_test_and_heal()` - Run tests, interactive retry/fix loop
 - **agent.py**: Claude SDK client wrapper, `run_agent()` streams responses, `AgentState` dataclass for consolidated state, `MissingSkillError` exception
+- **trajectory.py**: ATIF v1.6 trajectory recorder, `TrajectoryRecorder` with `ContextVar` propagation, `Invocation` per-`run_agent` scope, `Redactor` for secret scrubbing, `DaydreamPhase`/`DaydreamRunFlow` enums
 - **ui.py**: Rich-based terminal UI with Dracula theme, live-updating panels
 - **config.py**: Skill mappings, constants
 
@@ -59,7 +60,8 @@ cli.py → runner.py → phases.py → agent.py
 - All agent interactions use `ClaudeSDKClient` from `claude-agent-sdk` with `bypassPermissions` mode
 - Streaming responses are processed via async iterator over message types (AssistantMessage, UserMessage, ResultMessage)
 - Tool call panels use Rich's `Live` for animated throbbers during execution
-- Global state consolidated in `AgentState` dataclass (debug_log, quiet_mode, model, shutdown_requested) with `_current_client` for SDK instance
+- Global state consolidated in `AgentState` dataclass (quiet_mode, model, shutdown_requested) with `_current_client` for SDK instance
+- Trajectory recording via `TrajectoryRecorder` propagated through `ContextVar`; parallel fan-outs use `recorder.fork()` for sibling trajectory files
 
 ## Dependencies
 
@@ -154,10 +156,10 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Test files prefixed with `test_`: `test_cli.py`, `test_phases.py`, `test_backend_claude.py`
 - Sub-packages as directories with `__init__.py`: `daydream/backends/`, `daydream/deep/`, `daydream/prompts/`
 - `snake_case` throughout: `run_agent`, `phase_review`, `detect_test_success`, `_git_diff`
-- Private helpers prefixed with underscore: `_signal_handler`, `_build_fix_prompt`, `_parse_args`, `_log_debug`
+- Private helpers prefixed with underscore: `_signal_handler`, `_build_fix_prompt`, `_parse_args`
 - Phase functions follow `phase_<name>` convention: `phase_review`, `phase_fix`, `phase_parse_feedback`, `phase_test_and_heal`, `phase_understand_intent`, `phase_generate_plan`
 - Prompt builder functions follow `build_<thing>_prompt`: `build_review_prompt`, `build_intent_prompt`, `build_plan_prompt`
-- Setter/getter pairs for module-level state: `set_debug_log`/`get_debug_log`, `set_quiet_mode`/`get_quiet_mode`, `set_model`/`get_model`
+- Setter/getter pairs for module-level state: `set_quiet_mode`/`get_quiet_mode`, `set_model`/`get_model`
 - `snake_case` throughout
 - Boolean flags use descriptive names: `cleanup_enabled`, `shutdown_requested`, `trust_the_technology`, `review_only`
 - Type-annotated at declaration where possible
@@ -202,17 +204,16 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - `except Exception as e:` only at the top-level CLI boundary in `daydream/cli.py`
 - No silent swallowing — always log or re-raise
 ## Logging
-- Debug log entries prefixed: `[PROMPT]`, `[TEXT]`, `[TOOL_USE]`, `[TOOL_RESULT]`, `[COST]`, `[SCHEMA_OK]`, `[WARN]`
 - No `print()` statements in library code; all user-facing output via `daydream.ui` functions: `print_info`, `print_error`, `print_success`, `print_warning`, `print_dim`
 - Rich `Console` object (`console = create_console()`) is module-level singleton in `daydream/agent.py`
-- `_log_debug()` private helper in `daydream/agent.py` writes structured entries to the debug log file
+- Observability via ATIF v1.6 trajectory files written by `TrajectoryRecorder` in `daydream/trajectory.py`; trajectory recorder propagated via `ContextVar` (separate from `AgentState` singleton)
 ## Comments
 - Long comment blocks at module level explaining architectural decisions (e.g., singleton pattern explanation in `daydream/agent.py`)
 - Inline `# noqa:` always followed by a reason comment (e.g., `# noqa: S603 - arguments are not user-controlled`)
 - Algorithm phases labeled inline (e.g., `# Phase 1: Review`, `# Phase 2: Parse feedback`)
 - No obvious or redundant comments
 - All public functions have Google-style docstrings with `Args:`, `Returns:`, `Raises:` sections where applicable
-- Private helpers (`_log_debug`, `_signal_handler`) have single-line docstrings
+- Private helpers (`_signal_handler`, `_build_fix_prompt`) have single-line docstrings
 - Dataclass docstrings include `Attributes:` section listing all fields
 - Module-level docstring in every file; `daydream/config.py` includes an `Exports:` section listing what the module provides
 ## Function Design
@@ -246,6 +247,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 | Runner | Flow selection, backend creation, phase sequencing | `daydream/runner.py` |
 | Phases | Stateless async workflow steps | `daydream/phases.py` |
 | Agent | Backend wrapper, event stream → UI, global state | `daydream/agent.py` |
+| Trajectory | ATIF v1.6 recorder, redaction, ContextVar propagation | `daydream/trajectory.py` |
 | ClaudeBackend | Translates claude-agent-sdk messages to AgentEvents | `daydream/backends/claude.py` |
 | CodexBackend | Translates codex CLI JSONL output to AgentEvents | `daydream/backends/codex.py` |
 | UI | All terminal output — Rich panels, tables, prompts | `daydream/ui.py` |
@@ -311,7 +313,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 ### Deep Review Flow (`--deep`)
 ### PR Feedback Flow (`--pr`)
 ### Trust-the-Technology Flow (`--ttt`)
-- `AgentState` singleton in `daydream/agent.py` holds: `debug_log`, `quiet_mode`, `model`, `shutdown_requested`, `current_backends`
+- `AgentState` singleton in `daydream/agent.py` holds: `quiet_mode`, `model`, `shutdown_requested`, `current_backends`
 - Modified only through named setters; reset via `reset_state()` in tests
 - `RunConfig` dataclass in `daydream/runner.py` carries per-run configuration
 - `ExplorationContext` populated by `pre_scan()` and stored on `RunConfig.exploration_context`
