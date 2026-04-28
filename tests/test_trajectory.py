@@ -91,6 +91,31 @@ async def test_text_event_chunks_coalesce_into_one_step(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Behavior 2b: ResultEvent flushes accumulated text; new text starts a new step
+# (TEST-02 gap fill: explicit flush-on-result-boundary)
+# ---------------------------------------------------------------------------
+
+
+async def test_result_event_flushes_text_and_starts_new_step(tmp_path: Path) -> None:
+    """TEST-02: ResultEvent terminates the current step; subsequent text starts a new one."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="first chunk"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        async with recorder.invocation(phase=DaydreamPhase.FIX) as inv:
+            inv.observe(TextEvent(text="second chunk"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+    traj = _read_trajectory(recorder.path)
+    assert atif_validate(traj, validate_images=False) is True
+    agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 2
+    assert agent_steps[0]["message"] == "first chunk"
+    assert agent_steps[1]["message"] == "second chunk"
+
+
+# ---------------------------------------------------------------------------
 # Behavior 3: ToolStart + ToolResult → tool_call & observation in SAME step
 # (CORE-06, Pitfall 3)
 # ---------------------------------------------------------------------------

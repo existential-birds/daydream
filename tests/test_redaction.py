@@ -92,6 +92,29 @@ def test_redactor_scrubs_jwt_token() -> None:
     assert "[REDACTED_JWT]" in out.message
 
 
+# ---- JWT negative case (TEST-03 gap fill) ----
+
+
+def test_redactor_preserves_short_eyj_non_jwt() -> None:
+    """TEST-03 negative: short eyJ-prefixed strings without JWT dot structure pass through."""
+    out = Redactor().redact_step(_user_step("eyJhbG is a prefix"))
+    assert isinstance(out.message, str)
+    assert "[REDACTED_JWT]" not in out.message
+    assert "eyJhbG" in out.message
+
+
+# ---- Message surface (TEST-03 gap fill: explicit Step.message redaction) ----
+
+
+def test_redactor_applies_to_step_message_surface() -> None:
+    """TEST-03 surface: secrets in Step.message are redacted (explicit surface test)."""
+    step = _agent_step(message="key is ghp_ABCDEF1234567890abcdef1234567890abcdef")
+    out = Redactor().redact_step(step)
+    assert isinstance(out.message, str)
+    assert "ghp_ABCDEF1234567890abcdef1234567890abcdef" not in out.message
+    assert "[REDACTED_API_KEY]" in out.message
+
+
 # ---- Git URL credentials (REDA-01: explicit "git remote URLs with embedded credentials") ----
 
 
