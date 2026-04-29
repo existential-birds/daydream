@@ -6,7 +6,7 @@
 
 The **Agent Trajectory Interchange Format (ATIF)** is a standardized, JSON-based specification for logging the complete interaction history of autonomous LLM agents. ATIF unifies the data requirements of conversational logs, action sequences, and replayable data structures, ensuring collected data is immediately usable across debugging, visualization, Supervised Fine-Tuning (SFT), and Reinforcement Learning (RL) pipelines.
 
-For the complete specification, see the [ATIF RFC](https://github.com/laude-institute/harbor/blob/main/docs/rfcs/0001-trajectory-format.md).
+For the complete specification, see the [ATIF RFC](https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md).
 
 ## Key Features
 
@@ -85,7 +85,7 @@ Harbor provides Pydantic models for all ATIF schema components in `harbor.models
 from harbor.models.trajectories import Trajectory, Agent, Step
 
 trajectory = Trajectory(
-    schema_version="ATIF-v1.4",
+    schema_version="ATIF-v1.6",
     session_id="session-123",
     agent=Agent(
         name="my-agent",
@@ -276,7 +276,7 @@ trajectory_dict = {...}
 is_valid = validator.validate(trajectory_dict)
 
 # Validate from JSON string
-trajectory_json = '{"schema_version": "ATIF-v1.4", ...}'
+trajectory_json = '{"schema_version": "ATIF-v1.6", ...}'
 is_valid = validator.validate(trajectory_json)
 
 # Check errors
@@ -314,7 +314,7 @@ import json
 
 # Build the trajectory
 trajectory = Trajectory(
-    schema_version="ATIF-v1.4",
+    schema_version="ATIF-v1.6",
     session_id="025B810F-B3A2-4C67-93C0-FE7A142A947A",
     agent=Agent(
         name="my-agent",
@@ -393,9 +393,11 @@ print(f"Trajectory is valid: {is_valid}")
 
 ## Schema Versions
 
-ATIF follows semantic versioning. The current version is **v1.4**. Supported versions:
+ATIF follows semantic versioning. The current version is **v1.6**. Supported versions:
 
-* **ATIF-v1.4** (current) - Added optional `prompt_token_ids` field for storing prompt token IDs
+* **ATIF-v1.6** (current)
+* **ATIF-v1.5**
+* **ATIF-v1.4** - Added optional `prompt_token_ids` field for storing prompt token IDs
 * **ATIF-v1.3** - Added optional `completion_token_ids` field for RL training
 * **ATIF-v1.2** - Extended observation field to support system steps
 * **ATIF-v1.1** - Added optional `extra` field at root level

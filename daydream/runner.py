@@ -37,7 +37,7 @@ from daydream.phases import (
     phase_understand_intent,
     revert_uncommitted_changes,
 )
-from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
 from daydream.ui import (
     SummaryData,
     phase_subtitle,
@@ -79,8 +79,8 @@ class RunConfig:
         ignore_paths: Paths to exclude from diffs (passed to `git :(exclude)` pathspecs
             and surfaced in review prompts). Default is an empty list.
         trajectory_path: Path to write the ATIF v1.6 trajectory JSON. Default-resolved
-            by run flows to ``<target>/.daydream/trajectory.json`` when None. Phase 4
-            wires the ``--trajectory <path>`` CLI flag.
+            by run flows to ``<target>/.daydream/trajectory-<ts>-<id>.json`` (unique per
+            run) when None. Phase 4 wires the ``--trajectory <path>`` CLI flag.
 
     """
 
@@ -213,7 +213,7 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     review_backend = _resolve_backend(config, "review", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
 
-    trajectory_path = config.trajectory_path or (target_dir / ".daydream" / "trajectory.json")
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
     async with TrajectoryRecorder(
         path=trajectory_path,
         run_flow=DaydreamRunFlow.PR,
@@ -323,7 +323,7 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
 
-    trajectory_path = config.trajectory_path or (target_dir / ".daydream" / "trajectory.json")
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
     async with TrajectoryRecorder(
         path=trajectory_path,
         run_flow=DaydreamRunFlow.TTT,
@@ -516,7 +516,7 @@ async def run(config: RunConfig | None = None) -> int:
         return await run_deep(config, target_dir)
 
     # Normal flow: open the trajectory recorder for the rest of run().
-    trajectory_path = config.trajectory_path or (target_dir / ".daydream" / "trajectory.json")
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
     async with TrajectoryRecorder(
         path=trajectory_path,
         run_flow=DaydreamRunFlow.NORMAL,

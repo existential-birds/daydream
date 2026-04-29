@@ -165,7 +165,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         metavar="PATH",
         type=Path,
         dest="trajectory_path",
-        help="Write ATIF v1.6 trajectory JSON to this path (default: <target>/.daydream/trajectory.json)",
+        help="Write ATIF v1.6 trajectory JSON to this path (default: <target>/.daydream/trajectory-<ts>-<id>.json)",
     )
 
     cleanup_group = parser.add_mutually_exclusive_group()

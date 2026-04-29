@@ -33,62 +33,62 @@ Reviews and recommendations must be grounded in actual codebase understanding �
 
 **Trajectory recording (root + sibling files):**
 
-- [ ] Every daydream run produces a root `.trajectory.json` capturing sequential phases (review → parse → fix → test) as continuous steps in one trajectory
-- [ ] Parallel `anyio` task groups emit **sibling trajectory files** linked from the parent via `ObservationResult.subagent_trajectory_ref`. Patterns covered: `phase_fix_parallel`, `daydream/deep/orchestrator.run_deep`, `exploration_runner.pre_scan`
-- [ ] Continuation flows (`run_agent_with_continuation`) stay in the same trajectory as continuous steps (preserves agent identity across continuation tokens)
-- [ ] Trajectory is always written (no `--debug` opt-in); root output path controllable via `--trajectory <path>`; sibling files land beside it under `.daydream/trajectories/<id>.json`
+- [x] Every daydream run produces a root `.trajectory.json` capturing sequential phases (review → parse → fix → test) as continuous steps in one trajectory
+- [x] Parallel `anyio` task groups emit **sibling trajectory files** linked from the parent via `ObservationResult.subagent_trajectory_ref`. Patterns covered: `phase_fix_parallel`, `daydream/deep/orchestrator.run_deep`, `exploration_runner.pre_scan`
+- [x] Continuation flows (`run_agent_with_continuation`) stay in the same trajectory as continuous steps (preserves agent identity across continuation tokens)
+- [x] Trajectory is always written (no `--debug` opt-in); root output path controllable via `--trajectory <path>`; sibling files land beside it under `.daydream/trajectories/<id>.json`
 
 **Event-to-ATIF mapping:**
 
-- [ ] `[PROMPT]` log → first user step per `run_agent()` invocation (Beagle skill prompt has `source="user"`, not `"system"` — ATIF reserves `"system"` for system-prompt preambles)
-- [ ] `TextEvent` → agent step `message`; consecutive chunks accumulate into one step (flush on tool call, thinking, or result)
-- [ ] `ThinkingEvent` → agent step `reasoning_content`
-- [ ] `ToolStartEvent` → `ToolCall(tool_call_id, function_name, arguments)` attached to parent agent step
-- [ ] `ToolResultEvent` → `ObservationResult(source_call_id, content)` correlated via tool ID — must land in the **same step** as its `ToolCall` (validator scopes `tool_call_id` intra-step)
-- [ ] New `MetricsEvent(message_id, prompt_tokens, completion_tokens, cached_tokens, cost_usd)` → per-step `Metrics`, fired per `AssistantMessage.message_id`
-- [ ] `CostEvent` extended with `cached_tokens: int | None`; remains end-of-call signal for trajectory-level `FinalMetrics`
-- [ ] `ResultEvent` → final agent step + trajectory-level `FinalMetrics(total_prompt_tokens, total_completion_tokens, total_cached_tokens, total_cost_usd, total_steps)`
-- [ ] Each daydream phase labelled in `Step.extra.daydream_phase` (`"review"`, `"parse"`, `"fix"`, `"test"`, `"intent"`, `"alternatives"`, `"plan"`, `"pr_feedback"`, `"deep"`, `"exploration"`)
+- [x] `[PROMPT]` log → first user step per `run_agent()` invocation (Beagle skill prompt has `source="user"`, not `"system"` — ATIF reserves `"system"` for system-prompt preambles)
+- [x] `TextEvent` → agent step `message`; consecutive chunks accumulate into one step (flush on tool call, thinking, or result)
+- [x] `ThinkingEvent` → agent step `reasoning_content`
+- [x] `ToolStartEvent` → `ToolCall(tool_call_id, function_name, arguments)` attached to parent agent step
+- [x] `ToolResultEvent` → `ObservationResult(source_call_id, content)` correlated via tool ID — must land in the **same step** as its `ToolCall` (validator scopes `tool_call_id` intra-step)
+- [x] New `MetricsEvent(message_id, prompt_tokens, completion_tokens, cached_tokens, cost_usd)` → per-step `Metrics`, fired per `AssistantMessage.message_id`
+- [x] `CostEvent` extended with `cached_tokens: int | None`; remains end-of-call signal for trajectory-level `FinalMetrics`
+- [x] `ResultEvent` → final agent step + trajectory-level `FinalMetrics(total_prompt_tokens, total_completion_tokens, total_cached_tokens, total_cost_usd, total_steps)`
+- [x] Each daydream phase labelled in `Step.extra.daydream_phase` (`"review"`, `"parse"`, `"fix"`, `"test"`, `"intent"`, `"alternatives"`, `"plan"`, `"pr_feedback"`, `"deep"`, `"exploration"`)
 
 **Event enrichment:**
 
-- [ ] All event dataclasses in `daydream/backends/__init__.py` carry an ISO 8601 UTC `timestamp` field (`datetime.now(timezone.utc).isoformat()`)
-- [ ] Claude backend (`backends/claude.py:120-128`) populates `input_tokens` / `output_tokens` / `cached_tokens` from `ResultMessage.usage` (data is already on `msg.usage` dict; currently dropped on the floor)
-- [ ] Claude backend emits `MetricsEvent` per `AssistantMessage.message_id` from `AssistantMessage.usage`
-- [ ] Codex backend emits `MetricsEvent` from `turn.completed.usage` (`input_tokens` and `output_tokens` only; `cost_usd` and `cached_tokens` set to `None` — acceptable, ATIF Metrics fields are optional)
-- [ ] Per-run `session_id` (UUID4) generated at run start; propagated through all `run_agent()` calls and inherited by sibling trajectories
-- [ ] Agent identity captured: `Agent(name="daydream", version=<package version>, model_name=<per-backend>)`
+- [x] All event dataclasses in `daydream/backends/__init__.py` carry an ISO 8601 UTC `timestamp` field (`datetime.now(timezone.utc).isoformat()`)
+- [x] Claude backend (`backends/claude.py:120-128`) populates `input_tokens` / `output_tokens` / `cached_tokens` from `ResultMessage.usage` (data is already on `msg.usage` dict; currently dropped on the floor)
+- [x] Claude backend emits `MetricsEvent` per `AssistantMessage.message_id` from `AssistantMessage.usage`
+- [x] Codex backend emits `MetricsEvent` from `turn.completed.usage` (`input_tokens` and `output_tokens` only; `cost_usd` and `cached_tokens` set to `None` — acceptable, ATIF Metrics fields are optional)
+- [x] Per-run `session_id` (UUID4) generated at run start; propagated through all `run_agent()` calls and inherited by sibling trajectories
+- [x] Agent identity captured: `Agent(name="daydream", version=<package version>, model_name=<per-backend>)`
 
 **Schema validation (vendored, not Harbor as runtime dep):**
 
 - [x] `harbor.models.trajectories.*` and `harbor.utils.trajectory_validator` vendored into `daydream/atif/` (Apache-2.0; ~700 LOC pure Pydantic + stdlib; LICENSE + NOTICE included) — Validated in Phase 1: vendor-atif-foundation
 - [x] `pydantic>=2.11.7` promoted from transitive (via claude-agent-sdk) to explicit dep in `pyproject.toml` — Validated in Phase 1: vendor-atif-foundation
-- [ ] Trajectories built using vendored Pydantic models; schema validation automatic at construction time
-- [ ] Test suite validates produced trajectories against the ATIF v1.6 schema
+- [x] Trajectories built using vendored Pydantic models; schema validation automatic at construction time
+- [x] Test suite validates produced trajectories against the ATIF v1.6 schema
 - [x] Harbor's golden trajectory fixtures (Terminus-2 + OpenHands) vendored into `tests/fixtures/atif_golden/` and parametrized round-trip test confirms our validator accepts them — Validated in Phase 1: vendor-atif-foundation (smoke test in `tests/test_atif_vendor_smoke.py`)
 
 **Privacy / redaction (must land with cutover, not deferred):**
 
-- [ ] `Redactor` policy implemented in `daydream/trajectory.py` covering: API key patterns (`sk-*`, `ghp_*`, `xoxb-*`, `AKIA*`), JWT tokens, git remote URLs with credentials, file paths containing usernames (`/Users/<name>/`, `/home/<name>/`), and `.env`-style key=value lines
-- [ ] Redaction applied to `ToolCall.arguments`, `ObservationResult.content`, `Step.message`, and `Step.reasoning_content`
-- [ ] Redaction failure mode: redact-or-omit, never raw-pass-through
+- [x] `Redactor` policy implemented in `daydream/trajectory.py` covering: API key patterns (`sk-*`, `ghp_*`, `xoxb-*`, `AKIA*`), JWT tokens, git remote URLs with credentials, file paths containing usernames (`/Users/<name>/`, `/home/<name>/`), and `.env`-style key=value lines
+- [x] Redaction applied to `ToolCall.arguments`, `ObservationResult.content`, `Step.message`, and `Step.reasoning_content`
+- [x] Redaction failure mode: redact-or-omit, never raw-pass-through
 
 **Legacy removal (hard cutover, no dual-write):**
 
-- [ ] `_log_debug()` and all 15+ call sites in `agent.py` removed
-- [ ] `AgentState.debug_log` field, `set_debug_log()`, `get_debug_log()` removed
-- [ ] Debug file initialization in `runner.py` (`.review-debug-{ts}.log`) removed
-- [ ] All phase-level `[REVERT]`, `[PARSE_FAIL]`, `[STAGE]`, `[TTT_*]` log lines removed from `phases.py`
-- [ ] All Codex-specific `[CODEX_RAW]`, `[CODEX_WARN]`, `[CODEX_UNHANDLED]` log lines removed from `backends/codex.py`
-- [ ] **Sneaky lazy-import**: `from daydream.agent import _log_debug` *inside a function* in `daydream/backends/codex.py:37` removed (grep would miss this; AST sweep required)
-- [ ] `[PRE_SCAN]` exploration logging removed from `exploration_runner.py`
-- [ ] `--debug` CLI flag removed; SIGINT handler flushes partial trajectory to `.trajectory.partial.json`
-- [ ] All existing 343 tests pass post-migration
+- [x] `_log_debug()` and all 15+ call sites in `agent.py` removed
+- [x] `AgentState.debug_log` field, `set_debug_log()`, `get_debug_log()` removed
+- [x] Debug file initialization in `runner.py` (`.review-debug-{ts}.log`) removed
+- [x] All phase-level `[REVERT]`, `[PARSE_FAIL]`, `[STAGE]`, `[TTT_*]` log lines removed from `phases.py`
+- [x] All Codex-specific `[CODEX_RAW]`, `[CODEX_WARN]`, `[CODEX_UNHANDLED]` log lines removed from `backends/codex.py`
+- [x] **Sneaky lazy-import**: `from daydream.agent import _log_debug` *inside a function* in `daydream/backends/codex.py:37` removed (grep would miss this; AST sweep required)
+- [x] `[PRE_SCAN]` exploration logging removed from `exploration_runner.py`
+- [x] `--debug` CLI flag removed; SIGINT handler flushes partial trajectory to `.trajectory.partial.json`
+- [x] All existing 343 tests pass post-migration
 
 **Documentation:**
 
-- [ ] README documents trajectory format, output path, redaction policy, and consumer integration (Harbor, viewers, training pipelines)
-- [ ] CHANGELOG entry covers the breaking CLI change (`--debug` removed, `--trajectory <path>` added)
+- [x] README documents trajectory format, output path, redaction policy, and consumer integration (Harbor, viewers, training pipelines)
+- [x] CHANGELOG entry covers the breaking CLI change (`--debug` removed, `--trajectory <path>` added)
 
 ### Out of Scope
 
@@ -164,4 +164,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-27 after Phase 2 completion (recorder-core-event-enrichment-mapping: 7/7 plans, 26/26 must-haves verified). Recorder, event enrichment, and event-to-ATIF mapping all shipped; the broader Active list remains because trajectory output, sibling files, redaction, legacy removal, and docs land in Phases 3–5.*
+*Last updated: 2026-04-29 after milestone completion (all 5 phases complete, 72/72 requirements verified). All Active requirements checked off.*

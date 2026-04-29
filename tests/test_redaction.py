@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from daydream.atif import Observation, ObservationResult, Step, ToolCall
+from daydream.atif import ContentPart, Observation, ObservationResult, Step, ToolCall
 from daydream.trajectory import Redactor, now_iso
 
 
@@ -439,3 +439,40 @@ def test_redactor_failure_mode_wipes_all_text_bearing_fields(
     assert out.tool_calls[0].arguments == {"_redaction": "[REDACTION_FAILED]"}
     assert out.observation is not None
     assert out.observation.results[0].content == "[REDACTION_FAILED]"
+
+
+# ---- Multimodal message (list[ContentPart]) ----
+
+
+def test_redactor_scrubs_text_content_parts() -> None:
+    """Text parts in a multimodal message must be redacted; image parts left intact."""
+    from daydream.atif.models.content import ImageSource
+
+    parts = [
+        ContentPart(type="text", text="key=sk-test-secret123abc"),
+        ContentPart(
+            type="image",
+            source=ImageSource(media_type="image/png", path="screenshot.png"),
+        ),
+        ContentPart(type="text", text="clean text"),
+    ]
+    step = Step(
+        step_id=1,
+        timestamp=now_iso(),
+        source="user",
+        message=parts,
+        extra={"daydream_phase": "review", "daydream_run_flow": "normal"},
+    )
+    out = Redactor().redact_step(step)
+    assert isinstance(out.message, list)
+    assert len(out.message) == 3
+    # First text part: secret redacted
+    assert out.message[0].type == "text"
+    assert "sk-test-secret123abc" not in out.message[0].text
+    assert "[REDACTED_API_KEY]" in out.message[0].text
+    # Image part: unchanged
+    assert out.message[1].type == "image"
+    assert out.message[1].source.path == "screenshot.png"
+    # Second text part: clean, no redaction tokens injected
+    assert out.message[2].type == "text"
+    assert out.message[2].text == "clean text"

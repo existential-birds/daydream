@@ -20,9 +20,11 @@ in the Redactor rule list.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import uuid
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -99,6 +101,17 @@ def _safe_descriptor(raw: str) -> str:
     return slug
 
 
+def default_trajectory_path(target_dir: Path) -> Path:
+    """Return a unique default trajectory path under ``<target>/.daydream/``.
+
+    Embeds a compact UTC timestamp and short UUID suffix so sequential and
+    concurrent runs never collide.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    short_id = uuid.uuid4().hex[:8]
+    return target_dir / ".daydream" / f"trajectory-{ts}-{short_id}.json"
+
+
 def maybe_fork(recorder: "TrajectoryRecorder | None", descriptor: str) -> Any:
     """Return a fork CM if *recorder* is set, otherwise a no-op context manager."""
     if recorder is not None:
@@ -122,7 +135,7 @@ def now_iso() -> str:
     Returns:
         Timestamp string parseable by ``Step.validate_timestamp``.
     """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").removesuffix("+00:00") + "Z"
 
 
 class DaydreamPhase(str, Enum):
@@ -242,6 +255,13 @@ class Redactor:
             updates: dict[str, Any] = {}
             if isinstance(step.message, str):
                 updates["message"] = self._redact_optional_text(step.message)
+            elif isinstance(step.message, list):
+                updates["message"] = [
+                    part.model_copy(update={"text": self._redact_text(part.text)})
+                    if part.type == "text"
+                    else part
+                    for part in step.message
+                ]
             if step.reasoning_content is not None:
                 updates["reasoning_content"] = self._redact_optional_text(step.reasoning_content)
             if step.tool_calls is not None:
@@ -476,9 +496,14 @@ class Invocation:
                 cost_usd=event.cost_usd,
             )
         elif isinstance(event, CostEvent):
-            # End-of-call signal. Phase 2 prefers MetricsEvent for per-step
-            # Metrics (D-14); CostEvent path lights up in later phases.
-            pass
+            # End-of-call signal — accumulate into recorder-level totals so
+            # FinalMetrics reflects per-step cost_usd from the backend.
+            self.recorder._accumulate_metrics(
+                prompt_tokens=event.input_tokens,
+                completion_tokens=event.output_tokens,
+                cached_tokens=event.cached_tokens,
+                cost_usd=event.cost_usd,
+            )
         elif isinstance(event, ResultEvent):
             self._close_open_step()
 
@@ -495,6 +520,7 @@ class Invocation:
             "_model_name": self.recorder.agent_model_name,
             "_unmatched_tool_results": [],
         }
+
     def _close_open_step(self) -> None:
         """Finalize the current open step into a Pydantic Step + redact + append."""
         if self._open_step_dict is None:
@@ -547,7 +573,7 @@ class TrajectoryRecorder:
     ``print_warning`` per D-11 (Phase 4 adds the explicit fail-loud branch).
 
     Attributes:
-        path: Output JSON path; default ``<target>/.daydream/trajectory.json``.
+        path: Output JSON path; default ``<target>/.daydream/trajectory-<ts>-<id>.json``.
         run_flow: Per-trajectory invariant (D-07) stamped on every Step.
         target_dir: Repo/target directory; recorded into Trajectory.extra.
         agent_model_name: Active model name; stamped into Agent and every
@@ -635,15 +661,13 @@ class TrajectoryRecorder:
         cost_usd: float | None,
     ) -> None:
         if prompt_tokens is not None:
-            self._final_totals["prompt"] = (self._final_totals["prompt"] or 0) + prompt_tokens
+            self._final_totals["prompt"] += prompt_tokens
         if completion_tokens is not None:
-            self._final_totals["completion"] = (
-                (self._final_totals["completion"] or 0) + completion_tokens
-            )
+            self._final_totals["completion"] += completion_tokens
         if cached_tokens is not None:
-            self._final_totals["cached"] = (self._final_totals["cached"] or 0) + cached_tokens
+            self._final_totals["cached"] += cached_tokens
         if cost_usd is not None:
-            self._final_totals["cost"] = (self._final_totals["cost"] or 0.0) + cost_usd
+            self._final_totals["cost"] += cost_usd
             self._final_totals["any_cost_seen"] = True
 
     def _sibling_path_for(self, descriptor: str) -> Path:
@@ -703,7 +727,9 @@ class TrajectoryRecorder:
         self.steps.append(self.redactor.redact_step(step))
         self._registered_siblings.clear()
 
-    def _build_trajectory(self) -> Trajectory:
+    def _build_trajectory(self, steps: list[Step] | None = None) -> Trajectory:
+        if steps is None:
+            steps = self.steps
         try:
             version = metadata.version("daydream")
         except metadata.PackageNotFoundError:
@@ -716,13 +742,13 @@ class TrajectoryRecorder:
             total_cost_usd=(
                 self._final_totals["cost"] if self._final_totals["any_cost_seen"] else None
             ),
-            total_steps=len(self.steps),
+            total_steps=len(steps),
         )
         return Trajectory(
             schema_version="ATIF-v1.6",
             session_id=self.session_id,
             agent=Agent(name="daydream", version=version, model_name=self.agent_model_name),
-            steps=list(self.steps),
+            steps=list(steps),
             final_metrics=final_metrics,
             extra={"target_dir": str(self.target_dir)},
         )
@@ -734,7 +760,18 @@ class TrajectoryRecorder:
             return
         trajectory = self._build_trajectory()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(trajectory.to_json_dict(), indent=2), encoding="utf-8")
+        data = json.dumps(trajectory.to_json_dict(), indent=2)
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            with suppress(OSError):
+                os.unlink(tmp)
+            raise
 
     def _snapshot_in_flight_steps(self) -> list[Step]:
         """Concatenate flushed steps with steps from any active invocations.
@@ -772,15 +809,7 @@ class TrajectoryRecorder:
         if not snapshot_steps:
             return
         try:
-            # Build a one-shot Trajectory from the snapshot — _build_trajectory
-            # reads self.steps, so temporarily swap in the snapshot for the
-            # build and restore on the way out.
-            saved = self.steps
-            self.steps = snapshot_steps
-            try:
-                trajectory = self._build_trajectory()
-            finally:
-                self.steps = saved
+            trajectory = self._build_trajectory(steps=snapshot_steps)
             partial_path = self.path.with_suffix(self.path.suffix + ".partial")
             partial_path.parent.mkdir(parents=True, exist_ok=True)
             json_dict = trajectory.to_json_dict()
@@ -813,6 +842,7 @@ class _ForkCM:
         child.parent = self._parent
         child.descriptor = self._descriptor
         child._previous_token = _RECORDER_VAR.set(child)
+        _ACTIVE_RECORDERS.append(child)
         self._child = child
         return child
 
@@ -830,6 +860,10 @@ class _ForkCM:
             if child._previous_token is not None:
                 _RECORDER_VAR.reset(child._previous_token)
                 child._previous_token = None
+        try:
+            _ACTIVE_RECORDERS.remove(child)
+        except ValueError:
+            pass
         if write_ok and child.parent is not None:
             child.parent._register_sibling(child.path, self._descriptor)
 

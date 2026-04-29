@@ -193,7 +193,7 @@
 3. Optionally posts findings via `daydream/pr_review.py`
 
 **State Management:**
-- `AgentState` singleton in `daydream/agent.py` holds: `debug_log`, `quiet_mode`, `model`, `shutdown_requested`, `current_backends`
+- `AgentState` singleton in `daydream/agent.py` holds: `quiet_mode`, `model`, `shutdown_requested`, `current_backends`
 - Modified only through named setters; reset via `reset_state()` in tests
 - `RunConfig` dataclass in `daydream/runner.py` carries per-run configuration
 - `ExplorationContext` populated by `pre_scan()` and stored on `RunConfig.exploration_context`
@@ -304,7 +304,6 @@
 
 ## Cross-Cutting Concerns
 
-**Logging:** Prefixed log entries written to debug file when `--debug` is set: `[PROMPT]`, `[TEXT]`, `[TOOL_USE]`, `[TOOL_RESULT]`, `[COST]`; accessed via `_log_debug()` in `daydream/agent.py`
 **Validation:** JSON Schema validation of structured agent output in `phase_parse_feedback()` and `_validate_issue()`; schema defined inline in `daydream/phases.py`
 **Authentication:** No custom auth — reads Claude API keys from `~/.claude/settings.json` via `setting_sources=["user"]` in `ClaudeAgentOptions`
 **Artifact persistence:** Review artifacts written under `target/.daydream/` for deep mode and `target/.review-output.md` for normal/TTT mode

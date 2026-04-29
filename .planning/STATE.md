@@ -36,22 +36,22 @@ Plan: 4 of 4
 
 | Phase | Status |
 |-------|--------|
-| 1. Vendor ATIF Foundation | ⏳ Not started (current) |
-| 2. Recorder Core + Event Enrichment + Mapping | ⏳ Not started |
-| 3. Subagent Wiring (Parallel + Continuation) | ⏳ Not started |
-| 4. Cutover + Redaction + CLI Surface | ⏳ Not started |
-| 5. Test Hardening + Documentation | ⏳ Not started |
+| 1. Vendor ATIF Foundation | ✅ Complete |
+| 2. Recorder Core + Event Enrichment + Mapping | ✅ Complete |
+| 3. Subagent Wiring (Parallel + Continuation) | ✅ Complete |
+| 4. Cutover + Redaction + CLI Surface | ✅ Complete |
+| 5. Test Hardening + Documentation | ✅ Complete |
 
 ## Performance Metrics
 
 | Metric | Baseline | Current | Target |
 |--------|----------|---------|--------|
-| Existing tests passing | 343/343 | 343/343 | 343/343 (zero regressions) |
-| `_log_debug` call sites | 15+ across `agent.py`, `phases.py`, `runner.py`, `exploration_runner.py`, `backends/codex.py` (incl. lazy import) | 15+ (unchanged) | 0 (verified by AST sweep, Phase 4) |
-| Trajectories per run | 0 (only `.review-debug-{ts}.log` produced) | 0 | 1 root + N siblings (parallel flows) |
-| Module sizes — `phases.py` | 1552 lines | 1552 lines | ≤ 1602 lines (no trajectory `Step()` construction inside; module-bloat ban) |
-| Module sizes — `ui.py` | 3470 lines | 3470 lines | ≤ 3520 lines (no trajectory rendering inside; module-bloat ban) |
-| Pydantic dep | Transitive via `claude-agent-sdk` | Transitive | Explicit `pydantic>=2.11.7` (Phase 1) |
+| Existing tests passing | 343/343 | 581/581 | 343/343 (zero regressions) |
+| `_log_debug` call sites | 15+ across `agent.py`, `phases.py`, `runner.py`, `exploration_runner.py`, `backends/codex.py` (incl. lazy import) | 0 | 0 (verified by AST sweep, Phase 4) |
+| Trajectories per run | 0 (only `.review-debug-{ts}.log` produced) | 1 root + N siblings | 1 root + N siblings (parallel flows) |
+| Module sizes — `phases.py` | 1552 lines | 1557 lines | ≤ 1602 lines (no trajectory `Step()` construction inside; module-bloat ban) |
+| Module sizes — `ui.py` | 3470 lines | 3420 lines | ≤ 3520 lines (no trajectory rendering inside; module-bloat ban) |
+| Pydantic dep | Transitive via `claude-agent-sdk` | Explicit `pydantic>=2.11.7` | Explicit `pydantic>=2.11.7` (Phase 1) |
 
 ## Accumulated Context
 

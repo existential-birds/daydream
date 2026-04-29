@@ -49,7 +49,7 @@ from daydream.phases import (
     phase_test_and_heal,
     phase_understand_intent,
 )
-from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
 from daydream.ui import (
     print_error,
     print_info,
@@ -274,7 +274,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
     diff_path.write_text(diff)
     dd = deep_dir(target_dir)
 
-    trajectory_path = config.trajectory_path or (target_dir / ".daydream" / "trajectory.json")
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
     async with TrajectoryRecorder(
         path=trajectory_path,
         run_flow=DaydreamRunFlow.DEEP,

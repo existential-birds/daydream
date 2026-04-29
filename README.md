@@ -208,14 +208,18 @@ Sensitive content is automatically redacted before writing: API keys (`sk-*`, `g
 
 ```text
 daydream/
-├── cli.py       # Entry point, argument parsing, signal handling
-├── runner.py    # Main orchestration (standard + PR feedback flows)
-├── phases.py    # Core phases (review, parse, fix, test) + PR feedback helpers
-├── agent.py     # Agent event consumer and helper functions
-├── ui.py        # Neon terminal UI components (Rich-based)
-├── config.py    # Configuration constants
-├── prompts/     # Review system prompt templates
-└── backends/    # Backend abstraction layer
+├── cli.py          # Entry point, argument parsing, signal handling
+├── runner.py       # Main orchestration (standard + PR feedback flows)
+├── phases.py       # Core phases (review, parse, fix, test) + PR feedback helpers
+├── agent.py        # Agent event consumer and helper functions
+├── trajectory.py   # ATIF v1.6 trajectory recorder
+├── ui.py           # Neon terminal UI components (Rich-based)
+├── config.py       # Configuration constants
+├── prompts/        # Review system prompt templates
+├── atif/           # ATIF v1.6 trajectory models and validator (vendored from Harbor)
+│   ├── models/     # Pydantic models (Trajectory, Step, ToolCall, etc.)
+│   └── validator.py
+└── backends/       # Backend abstraction layer
     ├── __init__.py  # Backend protocol, event types, create_backend() factory
     ├── claude.py    # Claude SDK backend
     └── codex.py     # OpenAI Codex CLI backend (JSONL event stream)

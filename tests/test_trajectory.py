@@ -305,8 +305,7 @@ async def test_write_failure_degrades_with_warning(
 
     monkeypatch.setattr("daydream.trajectory.print_warning", fake_print_warning)
     monkeypatch.setattr(
-        Path,
-        "write_text",
+        "os.replace",
         lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("denied")),
     )
 
@@ -1042,3 +1041,55 @@ async def test_get_signal_recorder_returns_innermost_for_nested_recorders(
         assert get_signal_recorder() is outer
 
     assert get_signal_recorder() is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: forked child recorders must be visible to signal handler
+# ---------------------------------------------------------------------------
+
+
+async def test_forked_child_visible_to_signal_handler(tmp_path: Path) -> None:
+    """Forked child recorder must appear on _ACTIVE_RECORDERS so SIGINT can flush it.
+
+    Pre-fix bug: _ForkCM.__aenter__ set the ContextVar but never appended
+    the child to _ACTIVE_RECORDERS, so get_signal_recorder() could not see
+    it and write_partial() on the child was never called during SIGINT.
+    """
+    from daydream.trajectory import get_signal_recorder
+
+    parent = _make_recorder(tmp_path)
+    async with parent:
+        assert get_signal_recorder() is parent
+        async with parent.fork("child-branch") as child:
+            assert get_signal_recorder() is child, (
+                "Forked child should be top of signal-handler stack"
+            )
+        assert get_signal_recorder() is parent, (
+            "Parent should be restored after child fork exits"
+        )
+
+
+async def test_forked_child_write_partial_captures_in_flight_steps(tmp_path: Path) -> None:
+    """SIGINT mid-fork must flush child's in-flight steps via write_partial."""
+    from daydream.trajectory import get_signal_recorder
+
+    parent = _make_recorder(tmp_path)
+    async with parent:
+        async with parent.fork("child-branch") as child:
+            async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                inv.observe_user_step(prompt="forked-prompt")
+                inv.observe(TextEvent(text="forked-response"))
+                inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+                sig_recorder = get_signal_recorder()
+                assert sig_recorder is child
+                sig_recorder.write_partial()
+
+    partial_path = child.path.with_suffix(child.path.suffix + ".partial")
+    assert partial_path.exists(), "Child partial trajectory should be written"
+
+    data = json.loads(partial_path.read_text(encoding="utf-8"))
+    assert data.get("extra", {}).get("partial") is True
+    assert len(data["steps"]) >= 2, (
+        f"Child partial missing in-flight steps: {data['steps']!r}"
+    )
