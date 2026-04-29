@@ -281,6 +281,8 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
         target_dir=target_dir,
         agent_model_name=config.model or "opus",
         explicit_path=config.trajectory_path is not None,
+        pr_number=config.pr_number,
+        pr_repo=config.pr_repo,
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")

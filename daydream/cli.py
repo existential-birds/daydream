@@ -86,6 +86,28 @@ def _auto_detect_pr_number() -> int | None:
     return None
 
 
+def _detect_repo_slug() -> str | None:
+    """Detect the GitHub owner/repo slug for the current repository via gh CLI.
+
+    Returns:
+        String like ``"owner/repo"``, or None if detection fails.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603, S607
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            slug = result.stdout.strip()
+            if "/" in slug:
+                return slug
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    return None
+
+
 def _parse_args(argv: list[str] | None = None) -> RunConfig:
     """Parse command line arguments and return a RunConfig.
 
@@ -378,6 +400,11 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.max_iterations != 5 and not args.loop:
         warnings.warn("--max-iterations has no effect without --loop", stacklevel=2)
 
+    # Detect repo slug for trajectory metadata when reviewing a PR
+    pr_repo: str | None = None
+    if pr_number is not None or args.deep:
+        pr_repo = _detect_repo_slug()
+
     return RunConfig(
         target=args.target,
         skill=args.skill,
@@ -398,6 +425,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         trust_the_technology=args.trust_the_technology,
         deep=args.deep,
         trajectory_path=args.trajectory_path,
+        pr_repo=pr_repo,
     )
 
 

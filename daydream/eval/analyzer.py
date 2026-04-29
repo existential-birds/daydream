@@ -21,27 +21,86 @@ from pathlib import Path
 # Trajectory loading
 # ---------------------------------------------------------------------------
 
-def load_trajectories(daydream_dir: Path) -> dict:
-    """Load all trajectory files from a .daydream directory.
+def _latest_main_trajectory(daydream_dir: Path) -> Path | None:
+    """Return the most recent ``trajectory-*.json`` file by mtime, or None."""
+    candidates = list(daydream_dir.glob("trajectory-*.json"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _session_prefix(trajectory: dict) -> str:
+    """Extract the 8-char session prefix used for forked filenames."""
+    return trajectory.get("session_id", "")[:8]
+
+
+def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict:
+    """Load trajectory files for a single session from a .daydream directory.
+
+    Args:
+        daydream_dir: Path to the ``.daydream`` directory.
+        session_id: Optional session ID (or prefix) to filter to. When None,
+            the most recent main trajectory is used.
 
     Returns:
         Dict with ``main`` (root trajectory or None) and ``forked`` (list of
-        subagent trajectories).
+        subagent trajectories belonging to the same session).
     """
     main = None
     forked: list[dict] = []
-
-    for f in daydream_dir.glob("trajectory-*.json"):
-        main = json.loads(f.read_text())
-        main["_source_file"] = f.name
-        break
-
     traj_dir = daydream_dir / "trajectories"
-    if traj_dir.is_dir():
-        for f in sorted(traj_dir.glob("*.json")):
+
+    # --- Resolve the main trajectory ----------------------------------------
+    if session_id:
+        # Match by full session_id or prefix in the filename
+        for f in daydream_dir.glob("trajectory-*.json"):
             data = json.loads(f.read_text())
-            data["_source_file"] = f.name
-            forked.append(data)
+            sid = data.get("session_id", "")
+            if sid == session_id or sid.startswith(session_id):
+                main = data
+                main["_source_file"] = f.name
+                break
+    else:
+        latest = _latest_main_trajectory(daydream_dir)
+        if latest:
+            main = json.loads(latest.read_text())
+            main["_source_file"] = latest.name
+
+    # --- Resolve forked trajectories ----------------------------------------
+    if main:
+        prefix = _session_prefix(main)
+        if traj_dir.is_dir() and prefix:
+            for f in sorted(traj_dir.glob(f"{prefix}.*.json")):
+                data = json.loads(f.read_text())
+                data["_source_file"] = f.name
+                forked.append(data)
+    elif traj_dir.is_dir():
+        # No main trajectory found — group forked files by prefix, use latest
+        prefix_groups: dict[str, list[Path]] = {}
+        for f in sorted(traj_dir.glob("*.json")):
+            pfx = f.name.split(".")[0]
+            prefix_groups.setdefault(pfx, []).append(f)
+
+        if prefix_groups:
+            if session_id:
+                # Filter to matching prefix
+                matching = {
+                    k: v for k, v in prefix_groups.items()
+                    if k.startswith(session_id[:8])
+                }
+                best_prefix = next(iter(matching), None) if matching else None
+            else:
+                # Pick the group with the most recently modified file
+                best_prefix = max(
+                    prefix_groups,
+                    key=lambda k: max(f.stat().st_mtime for f in prefix_groups[k]),
+                )
+
+            if best_prefix:
+                for f in sorted(prefix_groups[best_prefix]):
+                    data = json.loads(f.read_text())
+                    data["_source_file"] = f.name
+                    forked.append(data)
 
     return {"main": main, "forked": forked}
 
@@ -484,17 +543,19 @@ def analyze_training_signals(
 # Top-level entry point
 # ---------------------------------------------------------------------------
 
-def analyze_session(daydream_dir: str | Path) -> dict:
+def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> dict:
     """Run full quantitative analysis on a .daydream directory.
 
     Args:
         daydream_dir: Path to the ``.daydream`` directory from a completed run.
+        session_id: Optional session ID (or prefix) to analyze. Defaults to the
+            most recent session.
 
     Returns:
         Complete analysis as a JSON-serializable dict.
     """
     daydream_dir = Path(daydream_dir)
-    trajectories = load_trajectories(daydream_dir)
+    trajectories = load_trajectories(daydream_dir, session_id=session_id)
 
     if not trajectories["main"] and not trajectories["forked"]:
         return {"error": f"No trajectory files found in {daydream_dir}"}
@@ -502,6 +563,11 @@ def analyze_session(daydream_dir: str | Path) -> dict:
     main = trajectories["main"] or trajectories["forked"][0]
     session_id = main.get("session_id", "unknown")
     agent_info = main.get("agent", {})
+
+    # Extract PR metadata from trajectory extra (set by TrajectoryRecorder)
+    traj_extra = main.get("extra") or {}
+    pr_number = traj_extra.get("pr_number")
+    pr_repo = traj_extra.get("pr_repo")
 
     costs = analyze_costs(trajectories)
     tools = analyze_tools(trajectories)
@@ -521,7 +587,7 @@ def analyze_session(daydream_dir: str | Path) -> dict:
         else None
     )
 
-    return {
+    result: dict = {
         "session_id": session_id,
         "agent": agent_info,
         "daydream_dir": str(daydream_dir),
@@ -546,3 +612,8 @@ def analyze_session(daydream_dir: str | Path) -> dict:
             "cost_per_finding_usd": cost_per_finding,
         },
     }
+
+    if pr_number is not None or pr_repo is not None:
+        result["pr"] = {"pr_number": pr_number, "pr_repo": pr_repo}
+
+    return result

@@ -81,6 +81,8 @@ class RunConfig:
         trajectory_path: Path to write the ATIF v1.6 trajectory JSON. Default-resolved
             by run flows to ``<target>/.daydream/trajectory-<ts>-<id>.json`` (unique per
             run) when None. Phase 4 wires the ``--trajectory <path>`` CLI flag.
+        pr_repo: GitHub repository in ``owner/repo`` format. Auto-detected from ``gh``
+            when ``--pr`` is used. Stored in trajectory metadata for eval linkage.
 
     """
 
@@ -105,6 +107,7 @@ class RunConfig:
     exploration_depth: int = 1
     ignore_paths: list[str] = field(default_factory=list)
     trajectory_path: Path | None = None
+    pr_repo: str | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -220,6 +223,8 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         target_dir=target_dir,
         agent_model_name=config.model or "opus",
         explicit_path=config.trajectory_path is not None,
+        pr_number=config.pr_number,
+        pr_repo=config.pr_repo,
     ):
         print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
@@ -330,6 +335,8 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
         target_dir=target_dir,
         agent_model_name=config.model or "opus",
         explicit_path=config.trajectory_path is not None,
+        pr_number=config.pr_number,
+        pr_repo=config.pr_repo,
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")
@@ -523,6 +530,8 @@ async def run(config: RunConfig | None = None) -> int:
         target_dir=target_dir,
         agent_model_name=config.model or "opus",
         explicit_path=config.trajectory_path is not None,
+        pr_number=config.pr_number,
+        pr_repo=config.pr_repo,
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")

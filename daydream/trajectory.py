@@ -581,6 +581,8 @@ class TrajectoryRecorder:
         redactor: No-op in Phase 2 (D-12); Phase 4 fills in rule list.
         session_id: UUID4 generated at recorder init (CORE-07).
         steps: Sequential Steps from every Invocation, step_id 1..N.
+        pr_number: GitHub PR number if reviewing a PR. Stored in trajectory extra.
+        pr_repo: GitHub repo (``owner/repo``) if reviewing a PR. Stored in trajectory extra.
         _step_id_counter: Monotonic; never decreases (Pitfall 1).
         _final_totals: Running tally for FinalMetrics aggregation (MAP-07).
         _previous_token: ContextVar reset token; used by __aexit__ to restore.
@@ -596,6 +598,8 @@ class TrajectoryRecorder:
     parent: TrajectoryRecorder | None = None
     descriptor: str = ""
     explicit_path: bool = False
+    pr_number: int | None = None
+    pr_repo: str | None = None
     _step_id_counter: int = 0
     _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
     _previous_token: Any = None
@@ -744,13 +748,18 @@ class TrajectoryRecorder:
             ),
             total_steps=len(steps),
         )
+        extra: dict[str, Any] = {"target_dir": str(self.target_dir)}
+        if self.pr_number is not None:
+            extra["pr_number"] = self.pr_number
+        if self.pr_repo is not None:
+            extra["pr_repo"] = self.pr_repo
         return Trajectory(
             schema_version="ATIF-v1.6",
             session_id=self.session_id,
             agent=Agent(name="daydream", version=version, model_name=self.agent_model_name),
             steps=list(steps),
             final_metrics=final_metrics,
-            extra={"target_dir": str(self.target_dir)},
+            extra=extra,
         )
 
     def _write(self) -> None:
