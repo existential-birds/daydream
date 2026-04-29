@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **trajectory:** Parallel fan-out flows (fix-parallel, deep-mode per-stack, exploration specialists) produce sibling trajectory files linked from the root via `subagent_trajectory_ref`.
 - **trajectory:** SIGINT/SIGTERM mid-run flushes a partial trajectory to `<path>.partial`.
 
+### Archive & Evaluation
+
+- **archive:** Every run is automatically archived to `~/.daydream/archive/runs/{session_id}/` with `manifest.json` metadata, trajectory copy, and review artifacts. SQLite index at `~/.daydream/archive/index.db` enables cross-project querying.
+- **cli:** Add `--no-archive` flag to disable automatic archival.
+- **eval:** Add `--eval` flag to run deterministic trajectory analysis (cost efficiency, grounding rate, file coverage, finding quality) and store results in the archive.
+- **cli:** Add `daydream label <session_id> --accepted|--rejected|--mixed` subcommand to set outcome labels on archived runs.
+
 ### Removed
 
 - **agent:** Remove `_log_debug()` debug logging system and all prefix-tagged log lines (`[TEXT]`, `[TOOL_USE]`, `[COST]`, etc.). Trajectory recording replaces all debug observability.

@@ -469,6 +469,10 @@ def _handle_label_command(argv: list[str]) -> None:
 
     console = create_console()
     archive_dir = get_archive_dir()
+
+    # Update manifest.json first (recoverable) before committing to SQLite.
+    manifest_updated = _update_manifest_labels(archive_dir, args.session_id, args.label)
+
     try:
         success = update_labels(archive_dir, args.session_id, [args.label])
     except ValueError as exc:
@@ -479,10 +483,10 @@ def _handle_label_command(argv: list[str]) -> None:
         console.print(f"[red]Session {args.session_id} not found in archive[/red]", highlight=False)
         sys.exit(1)
 
-    manifest_updated = _update_manifest_labels(archive_dir, args.session_id, args.label)
     if not manifest_updated:
         print_warning(console, f"Index updated but manifest.json not found for {args.session_id}")
-    print_info(console, f"Labeled {args.session_id} as {args.label}")
+    else:
+        print_info(console, f"Labeled {args.session_id} as {args.label}")
 
 
 def _update_manifest_labels(archive_dir: Path, session_id: str, label: str) -> bool:
@@ -511,9 +515,12 @@ def _update_manifest_labels(archive_dir: Path, session_id: str, label: str) -> b
         return False
 
     manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    now = datetime.now(timezone.utc).isoformat()
     if "outcome" in manifest:
         manifest["outcome"]["labels"] = [label]
-        manifest["outcome"]["labeled_at"] = datetime.now(timezone.utc).isoformat()
+        manifest["outcome"]["labeled_at"] = now
+    else:
+        manifest["outcome"] = {"labels": [label], "labeled_at": now}
     manifest_path.write_text(_json.dumps(manifest, indent=2), encoding="utf-8")
     return True
 
