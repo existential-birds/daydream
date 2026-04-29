@@ -465,30 +465,38 @@ def _handle_label_command(argv: list[str]) -> None:
 
     from daydream.archive import get_archive_dir
     from daydream.archive.index import update_labels
+    from daydream.ui import create_console, print_info, print_warning
 
+    console = create_console()
     archive_dir = get_archive_dir()
     try:
         success = update_labels(archive_dir, args.session_id, [args.label])
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        console.print(f"[red]{exc}[/red]", highlight=False)
         sys.exit(1)
 
     if not success:
-        print(f"Session {args.session_id} not found in archive", file=sys.stderr)
+        console.print(f"[red]Session {args.session_id} not found in archive[/red]", highlight=False)
         sys.exit(1)
 
-    _update_manifest_labels(archive_dir, args.session_id, args.label)
-    print(f"Labeled {args.session_id} as {args.label}")
+    manifest_updated = _update_manifest_labels(archive_dir, args.session_id, args.label)
+    if not manifest_updated:
+        print_warning(console, f"Index updated but manifest.json not found for {args.session_id}")
+    print_info(console, f"Labeled {args.session_id} as {args.label}")
 
 
-def _update_manifest_labels(archive_dir: Path, session_id: str, label: str) -> None:
-    """Update manifest.json on disk with the new label."""
+def _update_manifest_labels(archive_dir: Path, session_id: str, label: str) -> bool:
+    """Update manifest.json on disk with the new label.
+
+    Returns:
+        True if the manifest was found and updated, False otherwise.
+    """
     import json as _json
     from datetime import datetime, timezone
 
     runs_dir = archive_dir / "runs"
     if not runs_dir.is_dir():
-        return
+        return False
 
     run_dir = runs_dir / session_id
     if not run_dir.is_dir():
@@ -496,17 +504,18 @@ def _update_manifest_labels(archive_dir: Path, session_id: str, label: str) -> N
         if len(candidates) == 1:
             run_dir = candidates[0]
         else:
-            return
+            return False
 
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.is_file():
-        return
+        return False
 
     manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
     if "outcome" in manifest:
         manifest["outcome"]["labels"] = [label]
         manifest["outcome"]["labeled_at"] = datetime.now(timezone.utc).isoformat()
     manifest_path.write_text(_json.dumps(manifest, indent=2), encoding="utf-8")
+    return True
 
 
 def main() -> None:

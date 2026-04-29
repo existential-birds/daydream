@@ -163,7 +163,10 @@ def _copy_bundle(target_dir: Path, run_dir: Path, recorder: TrajectoryRecorder) 
     if trajectories_dir.is_dir():
         dest_traj = run_dir / "trajectories"
         # Copy only files matching this session's prefix
-        matched = list(trajectories_dir.glob(f"{prefix}.*.json"))
+        matched = [
+            *trajectories_dir.glob(f"{prefix}.*.json"),
+            *trajectories_dir.glob(f"{prefix}.*.json.partial"),
+        ]
         if matched:
             dest_traj.mkdir(exist_ok=True)
             for f in matched:
@@ -196,4 +199,9 @@ def _run_eval(target_dir: Path, session_id: str, run_dir: Path) -> dict[str, Any
         eval_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         return result
     except Exception:  # noqa: BLE001 - eval failure should not block archive
+        from daydream.ui import create_console, print_warning
+
+        print_warning(
+            create_console(), f"Evaluation failed for session {session_id}; archive missing evaluation.json"
+        )
         return None

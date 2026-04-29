@@ -575,8 +575,10 @@ class Invocation:
             "daydream_run_flow": self.recorder.run_flow.value,
             "partial_step": True,
         }
+        if d["_unmatched_tool_results"]:
+            extra["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
         partial_step = Step(
-            step_id=self.recorder._next_step_id(),
+            step_id=self.recorder._step_id_counter + 1,
             timestamp=now_iso(),
             source="agent",
             message=message_text,
@@ -584,9 +586,10 @@ class Invocation:
             reasoning_content=reasoning,
             tool_calls=tool_calls,
             observation=observation,
+            metrics=d["_metrics"],
             extra=extra,
         )
-        return [*self.steps, partial_step]
+        return [*self.steps, self.recorder.redactor.redact_step(partial_step)]
 
     def finish(self) -> None:
         """Close any open step and flush all steps to the parent recorder."""
