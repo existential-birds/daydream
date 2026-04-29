@@ -257,7 +257,7 @@ class Redactor:
                 updates["message"] = self._redact_optional_text(step.message)
             elif isinstance(step.message, list):
                 updates["message"] = [
-                    part.model_copy(update={"text": self._redact_text(part.text)})
+                    part.model_copy(update={"text": self._redact_optional_text(part.text)})
                     if part.type == "text"
                     else part
                     for part in step.message
