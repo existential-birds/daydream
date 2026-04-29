@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **trajectory:** Every run now produces an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory file at `<target>/.daydream/trajectory.json` capturing the full agent interaction history, tool I/O, and per-step token/cost metrics.
+- **trajectory:** Every run now produces an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory file at `<target>/.daydream/trajectory-<ts>-<id>.json` capturing the full agent interaction history, tool I/O, and per-step token/cost metrics.
 - **cli:** Add `--trajectory <path>` flag to write trajectories to a custom location. Trajectories are always written; the flag only controls the output path.
 - **redaction:** Automatic secret redaction applied to all trajectory content — API keys, JWT tokens, file paths with usernames, and `.env`-style secret values are replaced with `[REDACTED_*]` tokens before writing.
 - **trajectory:** Parallel fan-out flows (fix-parallel, deep-mode per-stack, exploration specialists) produce sibling trajectory files linked from the root via `subagent_trajectory_ref`.

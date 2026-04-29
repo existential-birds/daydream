@@ -470,27 +470,55 @@ def _handle_label_command(argv: list[str]) -> None:
     console = create_console()
     archive_dir = get_archive_dir()
 
-    # Update manifest.json first (recoverable) before committing to SQLite.
-    manifest_updated = _update_manifest_labels(archive_dir, args.session_id, args.label)
+    # Resolve session ID once so both stores target the same run.
+    resolved_id = _resolve_session_id(archive_dir, args.session_id)
+    if resolved_id is None:
+        console.print(f"[red]Session {args.session_id} not found in archive[/red]", highlight=False)
+        sys.exit(1)
+
+    manifest_updated = _update_manifest_labels(archive_dir, resolved_id, args.label)
 
     try:
-        success = update_labels(archive_dir, args.session_id, [args.label])
+        success = update_labels(archive_dir, resolved_id, [args.label])
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]", highlight=False)
         sys.exit(1)
 
     if not success:
-        console.print(f"[red]Session {args.session_id} not found in archive[/red]", highlight=False)
+        console.print(f"[red]Session {resolved_id} not found in index[/red]", highlight=False)
         sys.exit(1)
 
     if not manifest_updated:
-        print_warning(console, f"Index updated but manifest.json not found for {args.session_id}")
+        print_warning(console, f"Index updated but manifest.json not found for {resolved_id}")
     else:
-        print_info(console, f"Labeled {args.session_id} as {args.label}")
+        print_info(console, f"Labeled {resolved_id} as {args.label}")
+
+
+def _resolve_session_id(archive_dir: Path, session_id: str) -> str | None:
+    """Resolve a full or prefix session ID against the archive runs directory.
+
+    Returns:
+        The full session ID if exactly one match is found, None otherwise.
+    """
+    runs_dir = archive_dir / "runs"
+    if not runs_dir.is_dir():
+        return None
+
+    exact = runs_dir / session_id
+    if exact.is_dir():
+        return session_id
+
+    candidates = [d.name for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith(session_id)]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
 
 
 def _update_manifest_labels(archive_dir: Path, session_id: str, label: str) -> bool:
     """Update manifest.json on disk with the new label.
+
+    Args:
+        session_id: Already-resolved full session ID.
 
     Returns:
         True if the manifest was found and updated, False otherwise.
@@ -498,19 +526,7 @@ def _update_manifest_labels(archive_dir: Path, session_id: str, label: str) -> b
     import json as _json
     from datetime import datetime, timezone
 
-    runs_dir = archive_dir / "runs"
-    if not runs_dir.is_dir():
-        return False
-
-    run_dir = runs_dir / session_id
-    if not run_dir.is_dir():
-        candidates = [d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith(session_id)]
-        if len(candidates) == 1:
-            run_dir = candidates[0]
-        else:
-            return False
-
-    manifest_path = run_dir / "manifest.json"
+    manifest_path = archive_dir / "runs" / session_id / "manifest.json"
     if not manifest_path.is_file():
         return False
 
