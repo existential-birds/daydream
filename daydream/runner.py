@@ -1,18 +1,15 @@
 """Main orchestration logic for the review and fix loop."""
 
-import contextlib
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from daydream.agent import (
     MissingSkillError,
-    _log_debug,
     console,
-    set_debug_log,
     set_model,
     set_quiet_mode,
 )
@@ -41,6 +38,7 @@ from daydream.phases import (
     phase_understand_intent,
     revert_uncommitted_changes,
 )
+from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
 from daydream.ui import (
     SummaryData,
     phase_subtitle,
@@ -66,7 +64,6 @@ class RunConfig:
         target: Target directory path for the review. If None, prompts user.
         skill: Review skill to use ("python", "react", or "elixir"). If None, prompts user.
         model: Claude model to use ("opus", "sonnet", or "haiku"). Default is "opus".
-        debug: Enable debug logging to a timestamped file in the target directory.
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
         review_only: Run review phase only without applying fixes.
@@ -82,13 +79,19 @@ class RunConfig:
         deep: Run the deep-review pipeline (TTT + per-stack + cross-stack merge). D-01.
         ignore_paths: Paths to exclude from diffs (passed to `git :(exclude)` pathspecs
             and surfaced in review prompts). Default is an empty list.
+        trajectory_path: Path to write the ATIF v1.6 trajectory JSON. Default-resolved
+            by run flows to ``<target>/.daydream/trajectory-<ts>-<id>.json`` (unique per
+            run) when None. Phase 4 wires the ``--trajectory <path>`` CLI flag.
+        pr_repo: GitHub repository in ``owner/repo`` format. Auto-detected from ``gh``
+            when ``--pr`` is used. Stored in trajectory metadata for eval linkage.
+        archive: Archive run artifacts to centralized store. Default True.
+        run_eval: Run deterministic evaluation on archived artifacts. Default False.
 
     """
 
     target: str | None = None
     skill: str | None = None  # "python", "react", or "elixir"
     model: str | None = None
-    debug: bool = False
     cleanup: bool | None = None
     quiet: bool = True
     review_only: bool = False
@@ -106,6 +109,10 @@ class RunConfig:
     exploration_context: ExplorationContext | None = None
     exploration_depth: int = 1
     ignore_paths: list[str] = field(default_factory=list)
+    trajectory_path: Path | None = None
+    pr_repo: str | None = None
+    archive: bool = True
+    run_eval: bool = False
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -129,6 +136,27 @@ def _print_missing_skill_error(skill_name: str) -> None:
         print_dim(console, "Check your ~/.claude/settings.json for enabled plugins.")
 
     console.print()
+
+
+def _make_archive_callback(
+    config: RunConfig, target_dir: Path,
+) -> Callable[[TrajectoryRecorder, str], None] | None:
+    """Build the on_write archive callback, or None if archiving is disabled."""
+    if not config.archive:
+        return None
+
+    def _cb(recorder: TrajectoryRecorder, status: str) -> None:
+        from daydream.archive import archive_run
+
+        archive_run(
+            recorder=recorder,
+            target_dir=target_dir,
+            config=config,
+            status=status,
+            run_eval=config.run_eval,
+        )
+
+    return _cb
 
 
 def _resolve_backend(
@@ -214,75 +242,86 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     review_backend = _resolve_backend(config, "review", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
 
-    print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
+    async with TrajectoryRecorder(
+        path=trajectory_path,
+        run_flow=DaydreamRunFlow.PR,
+        target_dir=target_dir,
+        agent_model_name=config.model or config.backend or "claude",
+        explicit_path=config.trajectory_path is not None,
+        pr_number=config.pr_number,
+        pr_repo=config.pr_repo,
+        on_write=_make_archive_callback(config, target_dir),
+    ):
+        print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
-    console.print()
-    print_info(console, f"PR feedback mode: PR #{pr_number}")
-    print_info(console, f"Bot: {bot}")
-    print_info(console, f"Target directory: {target_dir}")
-    print_info(console, f"Model: {config.model or 'opus'}")
-    console.print()
+        console.print()
+        print_info(console, f"PR feedback mode: PR #{pr_number}")
+        print_info(console, f"Bot: {bot}")
+        print_info(console, f"Target directory: {target_dir}")
+        print_info(console, f"Model: {config.model or 'opus'}")
+        console.print()
 
-    # Phase 1: Fetch PR feedback
-    await phase_fetch_pr_feedback(review_backend, target_dir, pr_number, bot)
+        # Phase 1: Fetch PR feedback
+        await phase_fetch_pr_feedback(review_backend, target_dir, pr_number, bot)
 
-    # Phase 2: Parse feedback (reused from normal flow)
-    try:
-        feedback_items = await phase_parse_feedback(review_backend, target_dir)
-    except ValueError:
-        print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
-        return 1
-
-    if not feedback_items:
-        print_info(console, "No actionable feedback found in PR comments.")
-        return 0
-
-    # Phase 3: Fix issues sequentially to avoid concurrent access to a
-    # single mutable backend instance.
-    results: list[FixResult] = []
-    total_items = len(feedback_items)
-    for idx, item in enumerate(feedback_items, start=1):
+        # Phase 2: Parse feedback (reused from normal flow)
         try:
-            await phase_fix(fix_backend, target_dir, item, idx, total_items)
-            results.append((item, True, None))
+            feedback_items = await phase_parse_feedback(review_backend, target_dir)
+        except ValueError:
+            print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
+            return 1
+
+        if not feedback_items:
+            print_info(console, "No actionable feedback found in PR comments.")
+            return 0
+
+        # Phase 3: Fix issues sequentially to avoid concurrent access to a
+        # single mutable backend instance.
+        results: list[FixResult] = []
+        total_items = len(feedback_items)
+        for idx, item in enumerate(feedback_items, start=1):
+            try:
+                await phase_fix(fix_backend, target_dir, item, idx, total_items)
+                results.append((item, True, None))
+            except Exception as e:
+                results.append((item, False, f"{type(e).__name__}: {e}"))
+
+        # If all fixes failed, abort
+        successful = [r for r in results if r[1]]
+        failed = [r for r in results if not r[1]]
+
+        if not successful:
+            print_error(
+                console,
+                "All Fixes Failed",
+                f"All {len(failed)} fix(es) failed. Aborting before commit.",
+            )
+            return 1
+
+        # Phase 4: Commit and push (no user prompt)
+        try:
+            await phase_commit_push_auto(review_backend, target_dir)
         except Exception as e:
-            results.append((item, False, f"{type(e).__name__}: {e}"))
+            print_error(console, "Commit/Push Failed", str(e))
+            return 1
 
-    # If all fixes failed, abort
-    successful = [r for r in results if r[1]]
-    failed = [r for r in results if not r[1]]
+        # Phase 5: Respond to PR comments
+        try:
+            await phase_respond_pr_feedback(review_backend, target_dir, pr_number, bot, results)
+        except Exception as e:
+            print_warning(console, f"Failed to respond to PR comments: {e}")
+            print_info(console, "Fixes were already pushed successfully.")
 
-    if not successful:
-        print_error(
+        # Summary
+        console.print()
+        print_success(
             console,
-            "All Fixes Failed",
-            f"All {len(failed)} fix(es) failed. Aborting before commit.",
+            f"PR #{pr_number}: {len(successful)} fix(es) applied"
+            + (f", {len(failed)} failed" if failed else ""),
         )
-        return 1
 
-    # Phase 4: Commit and push (no user prompt)
-    try:
-        await phase_commit_push_auto(review_backend, target_dir)
-    except Exception as e:
-        print_error(console, "Commit/Push Failed", str(e))
-        return 1
-
-    # Phase 5: Respond to PR comments
-    try:
-        await phase_respond_pr_feedback(review_backend, target_dir, pr_number, bot, results)
-    except Exception as e:
-        print_warning(console, f"Failed to respond to PR comments: {e}")
-        print_info(console, "Fixes were already pushed successfully.")
-
-    # Summary
-    console.print()
-    print_success(
-        console,
-        f"PR #{pr_number}: {len(successful)} fix(es) applied"
-        + (f", {len(failed)} failed" if failed else ""),
-    )
-
-    return 0
+        return 0
 
 
 async def run_trust(config: RunConfig, target_dir: Path) -> int:
@@ -316,70 +355,81 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
 
-    console.print()
-    print_info(console, f"Target directory: {target_dir}")
-    print_info(console, f"Branch: {branch}")
-    print_info(console, f"Model: {config.model or '<backend-default>'}")
-    console.print()
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
+    async with TrajectoryRecorder(
+        path=trajectory_path,
+        run_flow=DaydreamRunFlow.TTT,
+        target_dir=target_dir,
+        agent_model_name=config.model or config.backend or "claude",
+        explicit_path=config.trajectory_path is not None,
+        pr_number=config.pr_number,
+        pr_repo=config.pr_repo,
+        on_write=_make_archive_callback(config, target_dir),
+    ):
+        console.print()
+        print_info(console, f"Target directory: {target_dir}")
+        print_info(console, f"Branch: {branch}")
+        print_info(console, f"Model: {config.model or '<backend-default>'}")
+        console.print()
 
-    # Pre-scan exploration: populate config.exploration_context before phase 1.
-    # Skip when already pre-populated (e.g. injected by caller or tests).
-    if config.exploration_context is None:
-        tier = select_tier(count_changed_files(diff or ""))
-        if tier == "skip":
-            print_dim(console, "Skipping exploration -- trivial diff")
-            config.exploration_context = ExplorationContext()
-        else:
-            print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-            config.exploration_context = await safe_explore(
-                pre_scan,
-                backend,
-                target_dir,
-                diff,
-                config.exploration_depth,
-                diff_ref=_compute_diff_ref(target_dir),
-            )
+        # Pre-scan exploration: populate config.exploration_context before phase 1.
+        # Skip when already pre-populated (e.g. injected by caller or tests).
+        if config.exploration_context is None:
+            tier = select_tier(count_changed_files(diff or ""))
+            if tier == "skip":
+                print_dim(console, "Skipping exploration -- trivial diff")
+                config.exploration_context = ExplorationContext()
+            else:
+                print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+                config.exploration_context = await safe_explore(
+                    pre_scan,
+                    backend,
+                    target_dir,
+                    diff,
+                    config.exploration_depth,
+                    diff_ref=_compute_diff_ref(target_dir),
+                )
 
-    # Materialise exploration to disk so phase prompts can reference files.
-    exploration_dir: Path | None = None
-    if config.exploration_context is not None:
-        exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
+        # Materialise exploration to disk so phase prompts can reference files.
+        exploration_dir: Path | None = None
+        if config.exploration_context is not None:
+            exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
 
-    # Phase 1: Understand intent
-    intent_summary = await phase_understand_intent(
-        backend, target_dir, diff_path, log, branch,
-        exploration_dir=exploration_dir,
-    )
-
-    # Phase 2: Alternative review
-    issues = await phase_alternative_review(
-        backend, target_dir, diff_path, intent_summary,
-        exploration_dir=exploration_dir,
-    )
-
-    if not issues:
-        print_success(console, "No issues found — the implementation looks good!")
-        return 0
-
-    # Phase 3: Generate plan
-    try:
-        await phase_generate_plan(
-            backend, target_dir, diff_path, intent_summary, issues,
+        # Phase 1: Understand intent
+        intent_summary = await phase_understand_intent(
+            backend, target_dir, diff_path, log, branch,
             exploration_dir=exploration_dir,
         )
-    finally:
-        exploration_cleanup = target_dir / ".daydream" / "exploration"
-        if exploration_cleanup.is_dir():
-            shutil.rmtree(exploration_cleanup)
 
-    # Offer to post findings as inline PR review comments.
-    from daydream.pr_review import post_review_to_pr_from_alt_issues
+        # Phase 2: Alternative review
+        issues = await phase_alternative_review(
+            backend, target_dir, diff_path, intent_summary,
+            exploration_dir=exploration_dir,
+        )
 
-    await post_review_to_pr_from_alt_issues(
-        target_dir, issues, console=console
-    )
+        if not issues:
+            print_success(console, "No issues found — the implementation looks good!")
+            return 0
 
-    return 0
+        # Phase 3: Generate plan
+        try:
+            await phase_generate_plan(
+                backend, target_dir, diff_path, intent_summary, issues,
+                exploration_dir=exploration_dir,
+            )
+        finally:
+            exploration_cleanup = target_dir / ".daydream" / "exploration"
+            if exploration_cleanup.is_dir():
+                shutil.rmtree(exploration_cleanup)
+
+        # Offer to post findings as inline PR review comments.
+        from daydream.pr_review import post_review_to_pr_from_alt_issues
+
+        await post_review_to_pr_from_alt_issues(
+            target_dir, issues, console=console
+        )
+
+        return 0
 
 
 async def run(config: RunConfig | None = None) -> int:
@@ -457,63 +507,62 @@ async def run(config: RunConfig | None = None) -> int:
             print_error(console, "Missing Review File", str(e))
             return 1
 
-    # Set up debug logging if enabled
-    debug_log_path: Path | None = None
-    if config.debug:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        debug_log_path = target_dir / f".review-debug-{timestamp}.log"
+    # Get cleanup setting (from config or prompt)
+    # Trust-the-technology and deep modes don't produce review files in the
+    # normal flow (deep returns before cleanup runs), so skip the prompt.
+    if config.trust_the_technology or config.deep:
+        cleanup_enabled = False
+    elif config.cleanup is not None:
+        cleanup_enabled = config.cleanup
+    else:
+        cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
+        cleanup_enabled = cleanup_response.lower() in ("y", "yes")
 
-    with contextlib.ExitStack() as stack:
-        if debug_log_path is not None:
-            debug_log_file = stack.enter_context(open(debug_log_path, "w", encoding="utf-8"))
-            set_debug_log(debug_log_file)
-            stack.callback(set_debug_log, None)
-            stack.callback(print_info, console, f"Debug log saved: {debug_log_path}")
-            print_info(console, f"Debug log: {debug_log_path}")
+    # Create backends (may differ per-phase if overrides are set)
+    backend_cache: dict[str, Backend] = {}
+    review_backend = _resolve_backend(config, "review", backend_cache)
+    fix_backend = _resolve_backend(config, "fix", backend_cache)
+    test_backend = _resolve_backend(config, "test", backend_cache)
 
-        # Get cleanup setting (from config or prompt)
-        # Trust-the-technology mode doesn't produce review files, so skip cleanup prompt.
-        if config.trust_the_technology:
-            cleanup_enabled = False
-        elif config.cleanup is not None:
-            cleanup_enabled = config.cleanup
-        else:
-            cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
-            cleanup_enabled = cleanup_response.lower() in ("y", "yes")
+    # Set quiet mode: force off for Codex backends since their shell
+    # commands are the primary output the user needs to see.
+    quiet = config.quiet
+    if quiet:
+        codex_in_use = config.backend == "codex" or any(
+            b == "codex"
+            for b in (config.review_backend, config.fix_backend, config.test_backend)
+            if b is not None
+        )
+        if codex_in_use:
+            quiet = False
+    set_quiet_mode(quiet)
+    set_model(config.model or "opus")
 
-        # Create backends (may differ per-phase if overrides are set)
-        backend_cache: dict[str, Backend] = {}
-        review_backend = _resolve_backend(config, "review", backend_cache)
-        fix_backend = _resolve_backend(config, "fix", backend_cache)
-        test_backend = _resolve_backend(config, "test", backend_cache)
+    # PR feedback mode: separate flow
+    if config.pr_number is not None:
+        return await run_pr_feedback(config, target_dir)
 
-        # Set quiet mode: force off for Codex backends since their shell
-        # commands are the primary output the user needs to see.
-        quiet = config.quiet
-        if quiet:
-            codex_in_use = config.backend == "codex" or any(
-                b == "codex"
-                for b in (config.review_backend, config.fix_backend, config.test_backend)
-                if b is not None
-            )
-            if codex_in_use:
-                quiet = False
-        set_quiet_mode(quiet)
-        set_model(config.model or "opus")
+    # Trust-the-technology mode: separate flow
+    if config.trust_the_technology:
+        return await run_trust(config, target_dir)
 
-        # PR feedback mode: separate flow
-        if config.pr_number is not None:
-            return await run_pr_feedback(config, target_dir)
+    # Deep-review mode: separate flow (D-01, D-07).
+    if config.deep:
+        from daydream.deep.orchestrator import run_deep
+        return await run_deep(config, target_dir)
 
-        # Trust-the-technology mode: separate flow
-        if config.trust_the_technology:
-            return await run_trust(config, target_dir)
-
-        # Deep-review mode: separate flow (D-01, D-07).
-        if config.deep:
-            from daydream.deep.orchestrator import run_deep
-            return await run_deep(config, target_dir)
-
+    # Normal flow: open the trajectory recorder for the rest of run().
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
+    async with TrajectoryRecorder(
+        path=trajectory_path,
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=target_dir,
+        agent_model_name=config.model or config.backend or "claude",
+        explicit_path=config.trajectory_path is not None,
+        pr_number=config.pr_number,
+        pr_repo=config.pr_repo,
+        on_write=_make_archive_callback(config, target_dir),
+    ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Model: {config.model or '<backend-default>'}")
@@ -654,7 +703,7 @@ async def run(config: RunConfig | None = None) -> int:
                     _print_missing_skill_error(e.skill_name)
                     return 1
                 except ValueError as exc:
-                    _log_debug(f"[PHASE2_ERROR] {exc}\n")
+                    print_error(console, "Phase 2 Error", str(exc))
                     print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                     return 1
 
@@ -710,7 +759,7 @@ async def run(config: RunConfig | None = None) -> int:
                 try:
                     feedback_items = await phase_parse_feedback(review_backend, target_dir)
                 except ValueError as exc:
-                    _log_debug(f"[PHASE2_ERROR] {exc}\n")
+                    print_error(console, "Phase 2 Error", str(exc))
                     print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                     return 1
 

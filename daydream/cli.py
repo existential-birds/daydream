@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import warnings
+from pathlib import Path
 
 import anyio
 
@@ -15,6 +16,7 @@ from daydream.agent import (
     set_shutdown_requested,
 )
 from daydream.runner import RunConfig, run
+from daydream.trajectory import get_signal_recorder
 from daydream.ui import (
     ShutdownPanel,
     get_shutdown_panel,
@@ -24,11 +26,26 @@ from daydream.ui import (
 
 
 def _signal_handler(signum: int, frame: object) -> None:
-    """Handle termination signals by requesting shutdown."""
+    """Handle termination signals: flush partial trajectory then request shutdown.
+
+    D-07: SIGINT/SIGTERM flushes a ``<path>.partial`` trajectory with
+    ``extra.partial=true`` so consumers know the run was interrupted.
+
+    Uses :func:`get_signal_recorder` (a module-level stack) rather than the
+    ContextVar. Signal handlers fire in the main thread at bytecode boundaries
+    and are not synced with the asyncio task context where the ContextVar was
+    set, so ContextVar reads from here are non-deterministic.
+    """
     signal_name = signal.Signals(signum).name
     set_shutdown_requested(True)
 
-    # Create and start the shutdown panel
+    # Flush partial trajectory before tearing down (D-07). write_partial is
+    # synchronous and exception-safe — it cannot crash the shutdown path even
+    # if the disk is full or path is unwritable.
+    recorder = get_signal_recorder()
+    if recorder is not None:
+        recorder.write_partial()
+
     panel = ShutdownPanel(console)
     set_shutdown_panel(panel)
     panel.start(f"Received {signal_name}, shutting down")
@@ -54,7 +71,7 @@ def _auto_detect_pr_number() -> int | None:
     """
     try:
         # Safe: hardcoded command with no user input
-        result = subprocess.run(  # noqa: S603, S607
+        result = subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled; gh is a trusted CLI
             ["gh", "pr", "view", "--json", "number"],
             capture_output=True,
             text=True,
@@ -65,6 +82,28 @@ def _auto_detect_pr_number() -> int | None:
             return data.get("number")
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
         # FileNotFoundError occurs when gh CLI is not installed
+        pass
+    return None
+
+
+def _detect_repo_slug() -> str | None:
+    """Detect the GitHub owner/repo slug for the current repository via gh CLI.
+
+    Returns:
+        String like ``"owner/repo"``, or None if detection fails.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603, S607
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            slug = result.stdout.strip()
+            if "/" in slug:
+                return slug
+    except (subprocess.SubprocessError, FileNotFoundError):
         pass
     return None
 
@@ -143,10 +182,28 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     )
 
     parser.add_argument(
-        "--debug",
+        "--trajectory",
+        default=None,
+        metavar="PATH",
+        type=Path,
+        dest="trajectory_path",
+        help="Write ATIF v1.6 trajectory JSON to this path (default: <target>/.daydream/trajectory-<ts>-<id>.json)",
+    )
+
+    parser.add_argument(
+        "--no-archive",
         action="store_true",
         default=False,
-        help="Save debug log",
+        dest="no_archive",
+        help="Disable automatic archival to ~/.daydream/archive/",
+    )
+
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        default=False,
+        dest="run_eval",
+        help="Run deterministic evaluation analysis and store evaluation.json in archive",
     )
 
     cleanup_group = parser.add_mutually_exclusive_group()
@@ -359,11 +416,15 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.max_iterations != 5 and not args.loop:
         warnings.warn("--max-iterations has no effect without --loop", stacklevel=2)
 
+    # Detect repo slug for trajectory metadata when reviewing a PR
+    pr_repo: str | None = None
+    if pr_number is not None or args.deep:
+        pr_repo = _detect_repo_slug()
+
     return RunConfig(
         target=args.target,
         skill=args.skill,
         model=args.model,
-        debug=args.debug,
         cleanup=args.cleanup,
         quiet=True,
         review_only=args.review_only,
@@ -379,7 +440,105 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         max_iterations=args.max_iterations,
         trust_the_technology=args.trust_the_technology,
         deep=args.deep,
+        trajectory_path=args.trajectory_path,
+        pr_repo=pr_repo,
+        archive=not args.no_archive,
+        run_eval=args.run_eval,
     )
+
+
+def _handle_label_command(argv: list[str]) -> None:
+    """Handle ``daydream label <session_id> --accepted|--rejected|--mixed``."""
+    import argparse as _argparse
+
+    parser = _argparse.ArgumentParser(
+        prog="daydream label",
+        description="Label a run outcome for RL/fine-tuning",
+    )
+    parser.add_argument("session_id", help="Session ID (full or prefix) to label")
+    label_group = parser.add_mutually_exclusive_group(required=True)
+    label_group.add_argument("--accepted", action="store_const", const="accepted", dest="label")
+    label_group.add_argument("--rejected", action="store_const", const="rejected", dest="label")
+    label_group.add_argument("--mixed", action="store_const", const="mixed", dest="label")
+
+    args = parser.parse_args(argv)
+
+    from daydream.archive import get_archive_dir
+    from daydream.archive.index import update_labels
+    from daydream.ui import create_console, print_info, print_warning
+
+    console = create_console()
+    archive_dir = get_archive_dir()
+
+    # Resolve session ID once so both stores target the same run.
+    resolved_id = _resolve_session_id(archive_dir, args.session_id)
+    if resolved_id is None:
+        console.print(f"[red]Session {args.session_id} not found in archive[/red]", highlight=False)
+        sys.exit(1)
+
+    manifest_updated = _update_manifest_labels(archive_dir, resolved_id, args.label)
+
+    try:
+        success = update_labels(archive_dir, resolved_id, [args.label])
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]", highlight=False)
+        sys.exit(1)
+
+    if not success:
+        console.print(f"[red]Session {resolved_id} not found in index[/red]", highlight=False)
+        sys.exit(1)
+
+    if not manifest_updated:
+        print_warning(console, f"Index updated but manifest.json not found for {resolved_id}")
+    else:
+        print_info(console, f"Labeled {resolved_id} as {args.label}")
+
+
+def _resolve_session_id(archive_dir: Path, session_id: str) -> str | None:
+    """Resolve a full or prefix session ID against the archive runs directory.
+
+    Returns:
+        The full session ID if exactly one match is found, None otherwise.
+    """
+    runs_dir = archive_dir / "runs"
+    if not runs_dir.is_dir():
+        return None
+
+    exact = runs_dir / session_id
+    if exact.is_dir():
+        return session_id
+
+    candidates = [d.name for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith(session_id)]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _update_manifest_labels(archive_dir: Path, session_id: str, label: str) -> bool:
+    """Update manifest.json on disk with the new label.
+
+    Args:
+        session_id: Already-resolved full session ID.
+
+    Returns:
+        True if the manifest was found and updated, False otherwise.
+    """
+    import json as _json
+    from datetime import datetime, timezone
+
+    manifest_path = archive_dir / "runs" / session_id / "manifest.json"
+    if not manifest_path.is_file():
+        return False
+
+    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    now = datetime.now(timezone.utc).isoformat()
+    if "outcome" in manifest:
+        manifest["outcome"]["labels"] = [label]
+        manifest["outcome"]["labeled_at"] = now
+    else:
+        manifest["outcome"] = {"labels": [label], "labeled_at": now}
+    manifest_path.write_text(_json.dumps(manifest, indent=2), encoding="utf-8")
+    return True
 
 
 def main() -> None:
@@ -394,8 +553,15 @@ def main() -> None:
 
     """
     _install_signal_handlers()
-    config = _parse_args()
+
+    # Route subcommands before main arg parse
+    argv = sys.argv[1:]
     try:
+        if argv and argv[0] == "label":
+            _handle_label_command(argv[1:])
+            return
+
+        config = _parse_args()
         exit_code = anyio.run(run, config)
         sys.exit(exit_code)
     except KeyboardInterrupt:

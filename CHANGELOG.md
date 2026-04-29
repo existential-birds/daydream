@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-04-28
+
+### Breaking
+
+- **cli:** Remove `--debug` flag; use `--trajectory <path>` to control trajectory output location. Daydream no longer produces `.review-debug-{timestamp}.log` files.
+
+### Added
+
+- **trajectory:** Every run now produces an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory file at `<target>/.daydream/trajectory-<ts>-<id>.json` capturing the full agent interaction history, tool I/O, and per-step token/cost metrics.
+- **cli:** Add `--trajectory <path>` flag to write trajectories to a custom location. Trajectories are always written; the flag only controls the output path.
+- **redaction:** Automatic secret redaction applied to all trajectory content — API keys, JWT tokens, file paths with usernames, and `.env`-style secret values are replaced with `[REDACTED_*]` tokens before writing.
+- **trajectory:** Parallel fan-out flows (fix-parallel, deep-mode per-stack, exploration specialists) produce sibling trajectory files linked from the root via `subagent_trajectory_ref`.
+- **trajectory:** SIGINT/SIGTERM mid-run flushes a partial trajectory to `<path>.partial`.
+
+### Archive & Evaluation
+
+- **archive:** Every run is automatically archived to `~/.daydream/archive/runs/{session_id}/` with `manifest.json` metadata, trajectory copy, and review artifacts. SQLite index at `~/.daydream/archive/index.db` enables cross-project querying.
+- **cli:** Add `--no-archive` flag to disable automatic archival.
+- **eval:** Add `--eval` flag to run deterministic trajectory analysis (cost efficiency, grounding rate, file coverage, finding quality) and store results in the archive.
+- **cli:** Add `daydream label <session_id> --accepted|--rejected|--mixed` subcommand to set outcome labels on archived runs.
+
+### Removed
+
+- **agent:** Remove `_log_debug()` debug logging system and all prefix-tagged log lines (`[TEXT]`, `[TOOL_USE]`, `[COST]`, etc.). Trajectory recording replaces all debug observability.
+- **agent:** Remove `AgentState.debug_log` field and `set_debug_log()`/`get_debug_log()` accessors.
+- **runner:** Remove `.review-debug-{timestamp}.log` file initialization.
+
 ## [0.13.1] - 2026-04-26
 
 ### Changed
@@ -356,7 +383,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.13.1...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/existential-birds/daydream/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/existential-birds/daydream/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/existential-birds/daydream/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/existential-birds/daydream/compare/v0.11.1...v0.12.0

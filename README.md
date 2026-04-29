@@ -9,7 +9,9 @@ Daydream launches review agents equipped with [Beagle](https://github.com/existe
 ## Features
 
 - **Trust the technology**: Stack-agnostic review mode (`--ttt`) that understands your PR intent, evaluates alternatives, and generates an implementation plan
+- **Deep review**: Multi-stack parallel pipeline (`--deep`) combining TTT intent analysis with per-stack Beagle reviews and cross-stack merge
 - **Stack-aware reviews**: Beagle skills load framework-specific knowledge (FastAPI patterns, React hooks, Phoenix lifecycle, etc.) as the reviewer encounters relevant code
+- **Codebase exploration**: Tree-sitter-powered pre-scan resolves imports and detects conventions to ground reviews in actual codebase context
 - **Intelligent parsing**: Extracts actionable issues from review output, skipping positive observations
 - **Automated fixes**: Applies fixes one-by-one with minimal changes
 - **PR feedback mode**: Fetches bot review comments from a PR, fixes in parallel, and responds automatically
@@ -17,6 +19,10 @@ Daydream launches review agents equipped with [Beagle](https://github.com/existe
 - **Parallel execution**: Up to 4 concurrent fix agents with live progress tracking
 - **Test validation**: Runs your test suite and offers interactive retry/fix options on failure
 - **Commit integration**: Optionally commits and pushes changes when complete
+- **ATIF v1.6 trajectory recording**: Every run produces a machine-parseable trajectory with automatic secret redaction
+- **Run archive**: Automatic archival to `~/.daydream/archive/` with SQLite index for cross-project querying
+- **Post-run evaluation**: Deterministic analysis of cost, grounding rate, file coverage, and finding quality
+- **Outcome labeling**: Tag archived runs as accepted/rejected/mixed for SFT/RL training datasets
 
 ## Prerequisites
 
@@ -73,8 +79,14 @@ daydream --backend codex /path/to/project
 # Technology-agnostic review with plan generation
 daydream --ttt /path/to/project
 
+# Deep review: TTT + parallel per-stack + cross-stack merge
+daydream --deep /path/to/project
+
 # Fix bot review comments on a PR
 daydream --pr 42 --bot "coderabbitai[bot]" /path/to/project
+
+# Label an archived run for training datasets
+daydream label abc12345 --accepted
 ```
 
 ### More Examples
@@ -91,6 +103,18 @@ daydream --model sonnet /path/to/project
 
 # Auto-detect PR number from current branch
 daydream --pr --bot "coderabbitai[bot]" /path/to/project
+
+# Resume deep review from per-stack stage
+daydream --deep --start-at per-stack /path/to/project
+
+# Exclude paths from the diff
+daydream --python --ignore-path .planning --ignore-path vendor /path/to/project
+
+# Run with evaluation analysis, skip archival
+daydream --python --eval --no-archive /path/to/project
+
+# Write trajectory to a custom path
+daydream --trajectory /tmp/run.json /path/to/project
 ```
 
 ### Command Line Options
@@ -111,15 +135,38 @@ daydream --pr --bot "coderabbitai[bot]" /path/to/project
 | `--test-backend` | Override backend for the test phase | `--backend` value |
 | `--model` | Model name (`opus` for Claude, `gpt-5.3-codex` for Codex) | Backend-specific |
 | `--trust-the-technology, --ttt` | Technology-agnostic review: understand intent, evaluate alternatives, generate plan | |
+| `--deep` | Deep review pipeline: TTT + parallel per-stack reviews + cross-stack merge | |
 | `--review-only` | Skip fixes, only review and parse feedback | |
-| `--start-at` | Start at phase: `review`, `parse`, `fix`, or `test` | `review` |
+| `--start-at` | Start at phase: `review`, `parse`, `fix`, `test`, `ttt`\*, `per-stack`\*, `merge`\* | `review` |
 | `--pr [NUMBER]` | PR feedback mode (auto-detects PR number if omitted) | |
 | `--bot BOT_NAME` | Bot username to filter PR comments (required with `--pr`) | |
 | `--loop` | Repeat review-fix-test cycle until zero issues or max iterations | |
 | `--max-iterations N` | Maximum loop iterations (only meaningful with `--loop`) | `5` |
-| `--debug` | Save debug log to `.review-debug-{timestamp}.log` | |
+| `--trajectory <path>` | Write trajectory to custom path | `<target>/.daydream/trajectory-<ts>-<id>.json` |
+| `--no-archive` | Disable automatic archival to `~/.daydream/archive/` | |
+| `--eval` | Run deterministic evaluation analysis and store in archive | |
+| `--ignore-path PATH` | Exclude path from diff (repeatable) | |
 | `--cleanup` | Remove `.review-output.md` after completion | |
 | `--no-cleanup` | Keep `.review-output.md` after completion | |
+
+\* Deep-only phases require `--deep`.
+
+### Subcommands
+
+#### `daydream label`
+
+Update outcome labels on an archived run for SFT/RL training datasets.
+
+```bash
+daydream label <session_id> --accepted|--rejected|--mixed
+```
+
+| Argument | Description |
+|----------|-------------|
+| `session_id` | Session ID (full UUID or prefix) |
+| `--accepted` | Label run as accepted |
+| `--rejected` | Label run as rejected |
+| `--mixed` | Label run as mixed |
 
 ## How It Works
 
@@ -172,6 +219,20 @@ Activated with `--ttt`. A three-phase conversational review that works with any 
 
 Trust-the-technology mode is mutually exclusive with `-s/--skill` and skill shorthands (`--python`, `--typescript`, `--elixir`, `--go`, `--rust`, `--ios`), `--review-only`, `--loop`, and `--pr`. The `--start-at` flag is ignored in this mode.
 
+### Deep Review Mode
+
+Activated with `--deep`. A five-stage pipeline that combines TTT intent analysis with parallel per-stack Beagle reviews and a cross-stack merge. Use `--start-at` to resume from a specific stage.
+
+1. **Exploration pre-scan**: Tree-sitter import resolution and convention detection (auto-skipped for trivial diffs)
+2. **TTT intent**: Understands the git diff and commit history to build context
+3. **TTT alternative review**: Identifies potential improvements as numbered issues
+4. **Per-stack reviews**: Parallel Beagle skill invocations, one per detected stack (Python, TypeScript, Go, etc.)
+5. **Cross-stack merge**: Synthesizes per-stack findings into a unified review with deduplication
+
+After the merge, an optional fix gate offers test/commit/push phases.
+
+Deep review mode is mutually exclusive with `-s/--skill` and skill shorthands, `--trust-the-technology`, `--pr`, `--loop`, and `--review-only`.
+
 ### PR Feedback Mode
 
 Activated with `--pr` and `--bot`. Fetches bot review comments from a GitHub PR and resolves them automatically.
@@ -189,32 +250,40 @@ PR feedback mode is mutually exclusive with `--review-only`, `--start-at`, and s
 | File | Description |
 |------|-------------|
 | `.review-output.md` | Review results (removed with `--cleanup`, required for `--start-at parse/fix`) |
-| `.review-debug-{timestamp}.log` | Debug log (created when `--debug` is enabled) |
+| `.daydream/trajectory-<ts>-<id>.json` | ATIF v1.6 trajectory (customize path with `--trajectory`) |
+| `.daydream/trajectories/` | Forked sub-trajectories from parallel fan-outs (fix-parallel, deep, exploration) |
+| `.daydream/diff.patch` | Unified git diff captured at run start |
 | `.daydream/plan-{timestamp}.md` | Implementation plan (created by `--ttt` mode) |
+| `.daydream/deep/` | Deep pipeline artifacts: intent, per-stack reviews, merged report (created by `--deep`) |
 
-## Architecture
+### Archive
 
-```text
-daydream/
-├── cli.py       # Entry point, argument parsing, signal handling
-├── runner.py    # Main orchestration (standard + PR feedback flows)
-├── phases.py    # Core phases (review, parse, fix, test) + PR feedback helpers
-├── agent.py     # Agent event consumer and helper functions
-├── ui.py        # Neon terminal UI components (Rich-based)
-├── config.py    # Configuration constants
-├── prompts/     # Review system prompt templates
-└── backends/    # Backend abstraction layer
-    ├── __init__.py  # Backend protocol, event types, create_backend() factory
-    ├── claude.py    # Claude SDK backend
-    └── codex.py     # OpenAI Codex CLI backend (JSONL event stream)
-```
+Unless `--no-archive` is passed, each run is automatically archived to `~/.daydream/archive/runs/{session_id}/` with:
 
-## Dependencies
+| File | Description |
+|------|-------------|
+| `manifest.json` | Run metadata, git context, backend config, token/cost metrics |
+| `trajectory.json` | Copy of the run trajectory |
+| `review-output.md` | Copy of review findings |
+| `evaluation.json` | Deterministic evaluation results (only with `--eval`) |
+| `deep/` | Deep artifacts copy (only with `--deep`) |
+| `diff.patch` | Diff copy |
 
-- [claude-agent-sdk](https://pypi.org/project/claude-agent-sdk/) - Claude Code SDK for agent interactions
-- [anyio](https://anyio.readthedocs.io/) - Async I/O abstraction
-- [rich](https://rich.readthedocs.io/) - Terminal formatting and UI components
-- [pyfiglet](https://github.com/pwaller/pyfiglet) - ASCII art generation
+A SQLite index at `~/.daydream/archive/index.db` enables cross-project querying by repo, backend, cost, grounding rate, and outcome labels.
+
+## Trajectory Output
+
+Every daydream run produces an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory file at `<target>/.daydream/trajectory-<ts>-<id>.json`. The trajectory captures the full agent interaction history — prompts, responses, tool calls, observations, and per-step token/cost metrics. Use `--trajectory <path>` to write to a custom location.
+
+Sensitive content is automatically redacted before writing: API keys (`sk-*`, `ghp_*`, `xoxb-*`, `AKIA*`), JWT tokens, URL credentials, username segments in file paths, and `.env`-style secret values are replaced with type-specific `[REDACTED_*]` tokens. Interrupted runs (SIGINT/SIGTERM) flush a `<path>.partial` file with `extra.partial=true` so consumers can detect incomplete trajectories.
+
+**Consumer integration:**
+- Validate trajectories with [Harbor](https://github.com/laude-institute/harbor)'s trajectory validator
+- Replay in any ATIF-compatible viewer
+- Use as training data for SFT/RL pipelines (trajectories are machine-parseable by design)
+- Label outcomes with `daydream label` for supervised fine-tuning datasets
+
+
 
 ## License
 

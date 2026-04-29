@@ -30,6 +30,7 @@ from daydream.prompts.exploration_subagents import (
     build_pattern_scanner_prompt,
     build_test_mapper_prompt,
 )
+from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
 from daydream.tree_sitter_index import detect_affected_files
 
 if TYPE_CHECKING:
@@ -217,13 +218,13 @@ async def pre_scan(
     """
     import anyio
 
-    from daydream.agent import _log_debug, run_agent
+    from daydream.agent import run_agent
 
     static_files: list[FileInfo] = []
     try:
         static_files = detect_affected_files(diff_text, repo_root, depth)
-    except Exception as exc:  # pragma: no cover - defensive
-        _log_debug(f"[PRE_SCAN] detect_affected_files failed: {exc}\n")
+    except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+        pass
 
     static_context = ExplorationContext(affected_files=static_files)
 
@@ -239,16 +240,19 @@ async def pre_scan(
     # Without this, agents on large repos exhaust their context window,
     # hit compression, and lose track of their task (D-06 graceful degradation).
     specialist_max_turns = 15
+    recorder = get_current_recorder()
 
     async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
-        try:
-            structured, _ = await run_agent(
-                backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
-            )
-            if isinstance(structured, dict):
-                results[name] = structured
-        except Exception as exc:
-            _log_debug(f"[PRE_SCAN] specialist {name} failed: {type(exc).__name__}: {exc}\n")
+        async with maybe_fork(recorder, f"explore-{name}"):
+            try:
+                structured, _ = await run_agent(
+                    backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
+                    phase=DaydreamPhase.EXPLORATION,
+                )
+                if isinstance(structured, dict):
+                    results[name] = structured
+            except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+                pass
 
     file_paths = [f.path for f in static_files]
 
@@ -270,8 +274,10 @@ async def pre_scan(
                 build_test_mapper_prompt(file_paths, diff_ref), TEST_MAPPER_SCHEMA,
             )
 
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
+
     if not results:
-        _log_debug("[PRE_SCAN] no specialist results collected\n")
         return static_context
 
     subagent_context = _parse_envelope(results)

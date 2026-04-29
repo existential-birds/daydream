@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from daydream.agent import (
-    _log_debug,
     console,
     detect_test_success,
-    get_debug_log,
+    get_quiet_mode,
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
+from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
@@ -483,19 +483,17 @@ def revert_uncommitted_changes(cwd: Path) -> bool:
             shell=False,
             check=True,
         )
-        clean_result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        subprocess.run(  # noqa: S603 - arguments are not user-controlled
             ["git", "clean", "-fd"],
             capture_output=True,
-            text=True,
             cwd=cwd,
             timeout=10,
             shell=False,
             check=True,
         )
-        if clean_result.stdout.strip():
-            _log_debug(f"[REVERT] git clean removed:\n{clean_result.stdout}")
     except (subprocess.SubprocessError, OSError) as e:
-        _log_debug(f"[REVERT] failed: {type(e).__name__}: {e}")
+        if not get_quiet_mode():
+            print_warning(console, f"Revert failed: {type(e).__name__}: {e}")
         return False
     return True
 
@@ -717,7 +715,7 @@ async def phase_review(
         exploration_dir=exploration_dir,
     )
 
-    await run_agent(backend, cwd, prompt)
+    await run_agent(backend, cwd, prompt, phase=DaydreamPhase.REVIEW)
 
     output_path = cwd / REVIEW_OUTPUT_FILE
     if output_path.exists():
@@ -771,17 +769,12 @@ For each issue found, return a JSON object with this structure:
 If there are no actionable issues, return: {{"issues": []}}
 """
 
-    result, _ = await run_agent(backend, cwd, prompt, output_schema=FEEDBACK_SCHEMA)
+    result, _ = await run_agent(backend, cwd, prompt, output_schema=FEEDBACK_SCHEMA, phase=DaydreamPhase.PARSE)
 
     if not isinstance(result, dict) or "issues" not in result:
-        _log_debug(
-            f"[PARSE_FAIL] expected dict with 'issues', "
-            f"got {type(result).__name__}: {result!r:.500}\n"
-        )
         # When structured output and JSON fallback both fail (e.g. empty
         # response), treat as "no issues" rather than crashing.
         if isinstance(result, str) and not result.strip():
-            _log_debug("[PARSE_FALLBACK] empty result, treating as no issues\n")
             print_warning(console, "Agent returned empty response; treating as no actionable issues")
             return []
         raise ValueError(f"Expected dict with 'issues' key, got {type(result)}")
@@ -824,7 +817,7 @@ unless the issue description specifically explains why the current error
 handling strategy is wrong for that code path.
 """
 
-    await run_agent(backend, cwd, prompt)
+    await run_agent(backend, cwd, prompt, phase=DaydreamPhase.FIX)
     print_fix_complete(console, item_num, total)
 
 
@@ -858,7 +851,9 @@ async def phase_test_and_heal(
             print_info(console, "Running test suite...")
 
         prompt = "Run the project's test suite. Report if tests pass or fail."
-        output, continuation = await run_agent(backend, cwd, prompt, continuation=continuation)
+        output, continuation = await run_agent(
+            backend, cwd, prompt, continuation=continuation, phase=DaydreamPhase.TEST,
+        )
 
         test_passed = detect_test_success(output)
 
@@ -884,7 +879,7 @@ async def phase_test_and_heal(
             console.print()
             print_info(console, "Launching agent to fix test failures...")
             fix_prompt = _build_fix_prompt(output, feedback_items)
-            _, _ = await run_agent(backend, cwd, fix_prompt)
+            _, _ = await run_agent(backend, cwd, fix_prompt, phase=DaydreamPhase.FIX)
             retries_used += 1
             continuation = None
             continue
@@ -919,7 +914,7 @@ async def phase_commit_push(backend: Backend, cwd: Path) -> None:
         console.print()
         print_info(console, "Running commit-push skill...")
         skill_invocation = backend.format_skill_invocation("beagle-core:commit-push")
-        await run_agent(backend, cwd, skill_invocation)
+        await run_agent(backend, cwd, skill_invocation, phase=DaydreamPhase.FIX)
         print_success(console, "Commit and push complete")
     else:
         print_dim(console, "Skipping commit and push")
@@ -947,7 +942,7 @@ async def phase_fetch_pr_feedback(backend: Backend, cwd: Path, pr_number: int, b
         "beagle-core:fetch-pr-feedback", f"--pr {pr_number} --bot {bot}"
     )
 
-    await run_agent(backend, cwd, skill_invocation)
+    await run_agent(backend, cwd, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
 
     output_path = cwd / REVIEW_OUTPUT_FILE
     if output_path.exists():
@@ -973,6 +968,7 @@ async def phase_fix_parallel(
         List of (item, success, error) tuples for each feedback item
 
     """
+    recorder = get_current_recorder()
     results: list[FixResult] = []
     limiter = anyio.CapacityLimiter(4)
     panel = ParallelFixPanel(console, feedback_items)
@@ -1006,17 +1002,23 @@ handling strategy is wrong for that code path.
                 def callback(message: str, i: int = task_index) -> None:
                     panel.update_row(i, message)
 
-                try:
-                    async with limiter:
-                        await run_agent(backend, cwd, task_prompt, progress_callback=callback)
-                    panel.complete_row(task_index)
-                    results.append((task_item, True, None))
-                except Exception as e:
-                    error_msg = f"{type(e).__name__}: {e}"
-                    panel.fail_row(task_index, error_msg)
-                    results.append((task_item, False, error_msg))
+                async with maybe_fork(recorder, f"fix-{task_index}"):
+                    try:
+                        async with limiter:
+                            await run_agent(
+                                backend, cwd, task_prompt, progress_callback=callback, phase=DaydreamPhase.FIX,
+                            )
+                        panel.complete_row(task_index)
+                        results.append((task_item, True, None))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {e}"
+                        panel.fail_row(task_index, error_msg)
+                        results.append((task_item, False, error_msg))
 
             tg.start_soon(_fix_task)
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
 
     panel.finish()
 
@@ -1057,7 +1059,7 @@ async def phase_commit_iteration(backend: Backend, cwd: Path, iteration: int) ->
         "Do NOT push. Only commit."
     )
     print_info(console, f"Committing iteration {iteration} changes...")
-    await run_agent(backend, cwd, prompt)
+    await run_agent(backend, cwd, prompt, phase=DaydreamPhase.FIX)
     print_success(console, f"Iteration {iteration} changes committed")
 
 
@@ -1075,7 +1077,7 @@ async def phase_commit_push_auto(backend: Backend, cwd: Path) -> None:
     console.print()
     print_info(console, "Running commit-push skill...")
     skill_invocation = backend.format_skill_invocation("beagle-core:commit-push")
-    await run_agent(backend, cwd, skill_invocation)
+    await run_agent(backend, cwd, skill_invocation, phase=DaydreamPhase.FIX)
     print_success(console, "Commit and push complete")
 
 
@@ -1110,7 +1112,7 @@ async def phase_respond_pr_feedback(
         "beagle-core:respond-pr-feedback", f"--pr {pr_number} --bot {bot}"
     )
 
-    await run_agent(backend, cwd, skill_invocation)
+    await run_agent(backend, cwd, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
     print_success(console, f"Responded to PR #{pr_number} feedback")
 
 
@@ -1153,7 +1155,7 @@ async def phase_understand_intent(
         console.print()
         print_info(console, "Agent is analyzing the changes...")
 
-        output, _ = await run_agent(backend, cwd, prompt)
+        output, _ = await run_agent(backend, cwd, prompt, phase=DaydreamPhase.INTENT)
         intent_text = output if isinstance(output, str) else str(output)
 
         console.print()
@@ -1218,12 +1220,15 @@ async def phase_alternative_review(
     console.print()
     print_info(console, "Agent is evaluating the implementation...")
 
-    result, _ = await run_agent(backend, cwd, prompt, output_schema=ALTERNATIVE_REVIEW_SCHEMA)
+    result, _ = await run_agent(
+        backend, cwd, prompt, output_schema=ALTERNATIVE_REVIEW_SCHEMA, phase=DaydreamPhase.ALTERNATIVES,
+    )
 
     if isinstance(result, dict) and "issues" in result:
         issues = result["issues"]
     else:
-        _log_debug(f"[TTT_REVIEW] unexpected result type: {type(result).__name__}: {result!r:.500}\n")
+        if not get_quiet_mode():
+            print_warning(console, f"TTT review returned unexpected result type: {type(result).__name__}")
         issues = []
 
     if issues:
@@ -1354,11 +1359,14 @@ async def phase_generate_plan(
     console.print()
     print_info(console, f"Generating plan for {len(selected_issues)} issue(s)...")
 
-    result, _ = await run_agent(backend, cwd, prompt, output_schema=PLAN_SCHEMA)
+    result, _ = await run_agent(backend, cwd, prompt, output_schema=PLAN_SCHEMA, phase=DaydreamPhase.PLAN)
 
     if not isinstance(result, dict):
-        _log_debug(f"[TTT_PLAN] unexpected result type: {type(result).__name__}\n")
-        print_warning(console, "Failed to generate structured plan")
+        if not get_quiet_mode():
+            print_warning(
+                console,
+                f"Failed to generate structured plan; agent returned {type(result).__name__}",
+            )
         return None
 
     # Ensure .daydream/ directory exists
@@ -1423,6 +1431,7 @@ async def phase_per_stack_reviews(
     )
 
     deep_dir_path = _deep_dir(cwd)
+    recorder = get_current_recorder()
     results: dict[str, Path] = {}
     failures: dict[str, str] = {}
     limiter = anyio.CapacityLimiter(4)
@@ -1458,28 +1467,24 @@ async def phase_per_stack_reviews(
                 task_prompt: str = prompt,
                 task_output: Path = output_path,
             ) -> None:
-                try:
-                    async with limiter:
-                        await run_agent(backend, cwd, task_prompt)
-                    results[stack_name] = task_output
-                except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                    reason = f"{type(e).__name__}: {e}"
-                    failures[stack_name] = reason
-                    debug = get_debug_log()
-                    if debug is not None:
-                        debug.write(
-                            f"[STAGE] per-stack {stack_name} failed: {reason}\n"
+                async with maybe_fork(recorder, f"deep-{stack_name}"):
+                    try:
+                        async with limiter:
+                            await run_agent(backend, cwd, task_prompt, phase=DaydreamPhase.DEEP)
+                        results[stack_name] = task_output
+                    except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                        reason = f"{type(e).__name__}: {e}"
+                        failures[stack_name] = reason
+                        print_warning(
+                            console,
+                            f"Per-stack review for '{stack_name}' failed ({reason}); "
+                            "merge report will note this stack as uncovered.",
                         )
-                        debug.flush()
-                    # Surface to the user so a dropped stack isn't invisible
-                    # outside the debug log.
-                    print_warning(
-                        console,
-                        f"Per-stack review for '{stack_name}' failed ({reason}); "
-                        "merge report will note this stack as uncovered.",
-                    )
 
             tg.start_soon(_task)
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
 
     return results, failures
 
@@ -1541,7 +1546,7 @@ async def phase_cross_stack_merge(
         failed_stacks=failed_stacks,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
-    await run_agent(backend, cwd, prompt)
+    await run_agent(backend, cwd, prompt, phase=DaydreamPhase.DEEP)
 
     # Copy from deep artifact dir to canonical location. The agent writes
     # inside .daydream/deep/ where sandbox restrictions don't apply; Python

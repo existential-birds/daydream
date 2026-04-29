@@ -20,6 +20,7 @@ from daydream.backends import (
     AgentEvent,
     ContinuationToken,
     CostEvent,
+    MetricsEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -29,14 +30,6 @@ from daydream.backends import (
 
 _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
 _CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
-
-
-def _raw_log(message: str) -> None:
-    """Log raw event to the agent debug log if available."""
-    # Lazy import to avoid circular dependency at module load time
-    from daydream.agent import _log_debug
-
-    _log_debug(message)
 
 
 def _unwrap_shell_command(command: str) -> str:
@@ -175,11 +168,9 @@ class CodexBackend:
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
-                    _raw_log(f"[CODEX_RAW] unparseable: {raw_line[:500]}\n")
                     continue
 
                 event_type = event.get("type", "")
-                _raw_log(f"[CODEX_RAW] {raw_line[:1000]}\n")
 
                 if event_type == "thread.started":
                     thread_id = event.get("thread_id")
@@ -253,7 +244,6 @@ class CodexBackend:
                             item_id = pending_item_ids.pop(lookup_key, None)
                             if item_id is None:
                                 item_id = str(uuid.uuid4())
-                                _raw_log(f"[CODEX_WARN] pending ID lookup miss for {lookup_key}, generated {item_id}\n")
                         exit_code = item.get("exit_code", -1)
                         output = item.get("aggregated_output", "")
                         status = item.get("status", "")
@@ -294,7 +284,6 @@ class CodexBackend:
                             item_id = pending_item_ids.pop(lookup_key, None)
                             if item_id is None:
                                 item_id = str(uuid.uuid4())
-                                _raw_log(f"[CODEX_WARN] pending ID lookup miss for {lookup_key}, generated {item_id}\n")
                         result_content = ""
                         if "result" in item:
                             result_content = str(item["result"].get("content", ""))
@@ -307,10 +296,32 @@ class CodexBackend:
 
                 elif event_type == "turn.completed":
                     usage = event.get("usage", {})
+                    # Phase 2 (EVNT-07): emit MetricsEvent for the turn. Codex
+                    # has no per-message id surface so the message id is the
+                    # empty string. Codex does not report cost_usd nor cached
+                    # tokens — D-16 says
+                    # leave them as None and DO NOT synthesize cost from a
+                    # token-price table (Pitfall 6, ATIF Metrics fields all
+                    # optional).
+                    # EVNT-02 field names: MetricsEvent uses prompt_tokens /
+                    # completion_tokens (ATIF/Metrics-side names). Codex's SDK
+                    # boundary keys are input_tokens / output_tokens; rename
+                    # here. Skip emission when either is missing — EVNT-02 types
+                    # both as int (required, not Optional). CostEvent below
+                    # carries the partial-data signal.
+                    if usage.get("input_tokens") is not None and usage.get("output_tokens") is not None:
+                        yield MetricsEvent(
+                            message_id="",
+                            prompt_tokens=usage["input_tokens"],
+                            completion_tokens=usage["output_tokens"],
+                            cached_tokens=None,
+                            cost_usd=None,
+                        )
                     yield CostEvent(
                         cost_usd=None,
                         input_tokens=usage.get("input_tokens"),
                         output_tokens=usage.get("output_tokens"),
+                        cached_tokens=None,
                     )
 
                     # Parse structured output from last agent message if schema was provided
@@ -352,7 +363,7 @@ class CodexBackend:
                     raise CodexError(error.get("message", "Unknown Codex error"))
 
                 elif event_type not in ("turn.started",):
-                    _raw_log(f"[CODEX_UNHANDLED] {event_type}: {json.dumps(event)[:500]}\n")
+                    pass
 
             await self._process.wait()
 

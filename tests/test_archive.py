@@ -1,0 +1,500 @@
+# tests/test_archive.py
+"""Unit tests for the daydream.archive package.
+
+Covers git_context, manifest, index, and the top-level archive_run flow.
+"""
+
+import json
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from daydream.archive import _copy_bundle, archive_run, get_archive_dir
+from daydream.archive.git_context import GitContext, _parse_repo_slug, capture_git_context
+from daydream.archive.index import query_runs, update_labels, upsert_run
+from daydream.archive.manifest import Manifest, build_manifest
+
+# ---------------------------------------------------------------------------
+# Mock helpers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _MockRecorder:
+    session_id: str = "abcd1234-0000-0000-0000-000000000000"
+    path: Path = field(default_factory=lambda: Path("/nonexistent/trajectory.json"))
+    run_flow: MagicMock = field(default_factory=lambda: MagicMock(value="normal"))
+    pr_number: int | None = None
+    pr_repo: str | None = None
+    _final_totals: dict = field(
+        default_factory=lambda: {
+            "prompt": 100,
+            "completion": 50,
+            "cached": 20,
+            "cost": 0.05,
+            "any_cost_seen": True,
+        },
+    )
+
+
+@dataclass
+class _MockConfig:
+    skill: str | None = "python"
+    model: str | None = "opus"
+    backend: str = "claude"
+    review_backend: str | None = None
+    fix_backend: str | None = None
+    test_backend: str | None = None
+    review_only: bool = False
+    deep: bool = False
+    loop: bool = False
+    archive: bool = True
+    run_eval: bool = False
+
+
+# ---------------------------------------------------------------------------
+# git_context: _parse_repo_slug
+# ---------------------------------------------------------------------------
+
+
+def test_parse_repo_slug_ssh():
+    assert _parse_repo_slug("git@github.com:org/repo.git") == "org/repo"
+
+
+def test_parse_repo_slug_https():
+    assert _parse_repo_slug("https://github.com/org/repo.git") == "org/repo"
+
+
+def test_parse_repo_slug_https_no_dot_git():
+    assert _parse_repo_slug("https://github.com/org/repo") == "org/repo"
+
+
+def test_parse_repo_slug_invalid():
+    assert _parse_repo_slug("not-a-url") is None
+
+
+# ---------------------------------------------------------------------------
+# git_context: capture_git_context
+# ---------------------------------------------------------------------------
+
+
+def test_capture_git_context_real_repo(tmp_path: Path):
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607
+    subprocess.run(  # noqa: S603, S607
+        ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True,
+    )
+    subprocess.run(  # noqa: S603, S607
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True,
+    )
+    subprocess.run(  # noqa: S603, S607
+        ["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=True,
+    )
+
+    ctx = capture_git_context(tmp_path)
+    assert isinstance(ctx, GitContext)
+    assert ctx.head_sha is not None and len(ctx.head_sha) == 40
+    assert ctx.branch is not None
+
+
+def test_capture_git_context_no_repo(tmp_path: Path):
+    ctx = capture_git_context(tmp_path)
+    assert ctx.head_sha is None
+    assert ctx.remote_url is None
+    assert ctx.branch is None
+
+
+# ---------------------------------------------------------------------------
+# manifest: build_manifest
+# ---------------------------------------------------------------------------
+
+
+def test_build_manifest_basic(tmp_path: Path):
+    recorder = _MockRecorder()
+    config = _MockConfig()
+    git_ctx = GitContext(
+        remote_url="git@github.com:org/repo.git",
+        repo_slug="org/repo",
+        branch="main",
+        base_branch="main",
+        head_sha="a" * 40,
+    )
+
+    m = build_manifest(
+        recorder=recorder,
+        config=config,
+        git_ctx=git_ctx,
+        status="complete",
+        archive_path=tmp_path,
+    )
+
+    assert m.session_id == recorder.session_id
+    assert m.run_flow == "normal"
+    assert m.skill == "python"
+    assert m.model == "opus"
+    assert m.backend == "claude"
+    assert m.total_cost_usd == 0.05
+    assert m.total_prompt_tokens == 100
+    assert m.total_completion_tokens == 50
+    assert m.total_cached_tokens == 20
+    assert m.repo_slug == "org/repo"
+    assert m.head_sha == "a" * 40
+
+
+def test_manifest_to_dict_structure(tmp_path: Path):
+    recorder = _MockRecorder()
+    config = _MockConfig()
+    git_ctx = GitContext()
+
+    m = build_manifest(
+        recorder=recorder,
+        config=config,
+        git_ctx=git_ctx,
+        status="complete",
+        archive_path=tmp_path,
+    )
+
+    d = m.to_dict()
+    assert d["schema_version"] == "1.0"
+    assert d["session_id"] == recorder.session_id
+    assert "run" in d and d["run"]["flow"] == "normal"
+    assert "git" in d
+    assert "pr" in d
+    assert "metrics" in d
+    assert "outcome" in d
+    assert d["outcome"]["labels"] == []
+
+
+def test_build_manifest_with_evaluation(tmp_path: Path):
+    recorder = _MockRecorder()
+    config = _MockConfig()
+    git_ctx = GitContext()
+    evaluation = {
+        "timing": {"total_wall_clock_seconds": 42.5},
+        "findings": {"total": 7},
+        "grounding": {"grounding_rate": 0.85},
+        "coverage": {"coverage_ratio": 0.6},
+        "derived": {"cost_per_finding_usd": 0.007},
+    }
+
+    m = build_manifest(
+        recorder=recorder,
+        config=config,
+        git_ctx=git_ctx,
+        status="complete",
+        archive_path=tmp_path,
+        evaluation=evaluation,
+    )
+
+    assert m.wall_clock_seconds == 42.5
+    assert m.total_findings == 7
+    assert m.grounding_rate == 0.85
+    assert m.coverage_ratio == 0.6
+    assert m.cost_per_finding_usd == 0.007
+
+
+def test_build_manifest_without_evaluation(tmp_path: Path):
+    recorder = _MockRecorder()
+    config = _MockConfig()
+    git_ctx = GitContext()
+
+    m = build_manifest(
+        recorder=recorder,
+        config=config,
+        git_ctx=git_ctx,
+        status="complete",
+        archive_path=tmp_path,
+    )
+
+    assert m.wall_clock_seconds is None
+    assert m.total_findings is None
+    assert m.grounding_rate is None
+    assert m.coverage_ratio is None
+    assert m.cost_per_finding_usd is None
+
+
+# ---------------------------------------------------------------------------
+# index: upsert_run / query_runs
+# ---------------------------------------------------------------------------
+
+
+def _make_manifest(session_id: str = "sess-0001", **overrides) -> Manifest:
+    defaults = {
+        "session_id": session_id,
+        "archived_at": "2026-04-29T00:00:00+00:00",
+        "status": "complete",
+        "run_flow": "normal",
+        "skill": "python",
+        "model": "opus",
+        "backend": "claude",
+        "archive_path": "/tmp/archive/runs/sess-0001",
+    }
+    defaults.update(overrides)
+    return Manifest(**defaults)
+
+
+def test_upsert_run_creates_db(tmp_path: Path):
+    m = _make_manifest()
+    upsert_run(tmp_path, m)
+    assert (tmp_path / "index.db").exists()
+
+
+def test_upsert_and_query_round_trip(tmp_path: Path):
+    m = _make_manifest()
+    upsert_run(tmp_path, m)
+
+    rows = query_runs(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == "sess-0001"
+    assert rows[0]["skill"] == "python"
+    assert rows[0]["status"] == "complete"
+
+
+def test_update_labels_exact(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest())
+
+    ok = update_labels(tmp_path, "sess-0001", ["good", "fast"])
+    assert ok is True
+
+    rows = query_runs(tmp_path)
+    assert json.loads(rows[0]["outcome_labels"]) == ["good", "fast"]
+    assert rows[0]["labeled_at"] is not None
+
+
+def test_update_labels_prefix(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="abcd1234-full-uuid"))
+
+    ok = update_labels(tmp_path, "abcd1234", ["label-a"])
+    assert ok is True
+
+    rows = query_runs(tmp_path)
+    assert json.loads(rows[0]["outcome_labels"]) == ["label-a"]
+
+
+def test_update_labels_nonexistent(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest())
+
+    ok = update_labels(tmp_path, "no-such-session", [])
+    assert ok is False
+
+
+def test_update_labels_ambiguous_prefix(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="abc-001"))
+    upsert_run(tmp_path, _make_manifest(session_id="abc-002", archive_path="/tmp/x"))
+
+    with pytest.raises(ValueError, match="matches 2 sessions"):
+        update_labels(tmp_path, "abc", ["x"])
+
+
+def test_query_runs_with_where(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s1", repo_slug="org/a"))
+    upsert_run(tmp_path, _make_manifest(session_id="s2", repo_slug="org/b", archive_path="/tmp/s2"))
+    upsert_run(tmp_path, _make_manifest(session_id="s3", repo_slug="org/a", archive_path="/tmp/s3"))
+
+    rows = query_runs(tmp_path, where="repo_slug = ?", params=("org/a",))
+    assert len(rows) == 2
+    ids = {r["session_id"] for r in rows}
+    assert ids == {"s1", "s3"}
+
+
+# ---------------------------------------------------------------------------
+# __init__: get_archive_dir
+# ---------------------------------------------------------------------------
+
+
+def test_get_archive_dir_creates_structure(monkeypatch, tmp_path: Path):
+    target = tmp_path / "custom_archive"
+    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(target))
+
+    result = get_archive_dir()
+    assert result == target
+    assert target.is_dir()
+    assert (target / "runs").is_dir()
+
+
+def test_get_archive_dir_default(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("DAYDREAM_ARCHIVE_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+
+    result = get_archive_dir()
+    expected = tmp_path / ".daydream" / "archive"
+    assert result == expected
+    assert expected.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# __init__: _copy_bundle
+# ---------------------------------------------------------------------------
+
+
+def _make_recorder_mock(session_id: str, path: Path) -> MagicMock:
+    """Build a mock TrajectoryRecorder with session_id and path attributes."""
+    recorder = MagicMock()
+    recorder.session_id = session_id
+    recorder.path = path
+    return recorder
+
+
+def _setup_bundle(
+    tmp_path: Path, session_id: str = "abcd1234-0000-0000-0000-000000000000"
+) -> tuple[Path, Path, MagicMock]:
+    """Create a realistic target directory with artifacts and an empty run dir.
+
+    Returns (target_dir, run_dir, mock_recorder) where the recorder's path
+    points to a non-existent file so the glob fallback is exercised.
+    """
+    prefix = session_id[:8]
+    target = tmp_path / "target"
+    daydream = target / ".daydream"
+    daydream.mkdir(parents=True)
+
+    # Main trajectory
+    traj = daydream / f"trajectory-20260429-120000-{prefix}.json"
+    traj.write_text('{"session_id": "test"}')
+
+    # Sub-trajectories
+    sub_dir = daydream / "trajectories"
+    sub_dir.mkdir()
+    (sub_dir / f"{prefix}.deep-python.json").write_text('{"fork": true}')
+    (sub_dir / "other-prefix.json").write_text('{"should": "skip"}')
+
+    # Deep artifacts
+    deep = daydream / "deep"
+    deep.mkdir()
+    (deep / "intent.md").write_text("intent")
+
+    # Diff patch
+    (daydream / "diff.patch").write_text("diff content")
+
+    # Review output (lives in target root, not .daydream/)
+    (target / ".review-output.md").write_text("review findings")
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    # Recorder with non-existent path to exercise glob fallback
+    recorder = _make_recorder_mock(session_id, tmp_path / "nonexistent-trajectory.json")
+
+    return target, run_dir, recorder
+
+
+def test_copy_bundle_trajectory(tmp_path: Path):
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder)
+
+    assert (run_dir / "trajectory.json").exists()
+    assert json.loads((run_dir / "trajectory.json").read_text())["session_id"] == "test"
+
+
+def test_copy_bundle_trajectory_from_recorder_path(tmp_path: Path):
+    """When the recorder path exists (e.g. --trajectory /custom/path), copy from there directly."""
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+
+    # Place the trajectory at a custom location and point recorder.path to it
+    custom_path = tmp_path / "custom" / "my-trajectory.json"
+    custom_path.parent.mkdir(parents=True)
+    custom_path.write_text('{"session_id": "custom"}')
+    recorder.path = custom_path
+
+    _copy_bundle(target, run_dir, recorder)
+
+    assert (run_dir / "trajectory.json").exists()
+    assert json.loads((run_dir / "trajectory.json").read_text())["session_id"] == "custom"
+
+
+def test_copy_bundle_partial_from_recorder_path(tmp_path: Path):
+    """Partial file adjacent to recorder.path is also copied."""
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+
+    custom_path = tmp_path / "custom" / "out.json"
+    custom_path.parent.mkdir(parents=True)
+    custom_path.write_text('{"done": true}')
+    partial = custom_path.with_suffix(".json.partial")
+    partial.write_text('{"partial": true}')
+    recorder.path = custom_path
+
+    _copy_bundle(target, run_dir, recorder)
+
+    assert json.loads((run_dir / "trajectory.json.partial").read_text())["partial"] is True
+
+
+def test_copy_bundle_review_output(tmp_path: Path):
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder)
+
+    assert (run_dir / "review-output.md").read_text() == "review findings"
+
+
+def test_copy_bundle_deep_directory(tmp_path: Path):
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder)
+
+    assert (run_dir / "deep" / "intent.md").read_text() == "intent"
+
+
+def test_copy_bundle_diff_patch(tmp_path: Path):
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder)
+
+    assert (run_dir / "diff.patch").read_text() == "diff content"
+
+
+def test_copy_bundle_sub_trajectories_filtered(tmp_path: Path):
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder)
+
+    sub = run_dir / "trajectories"
+    assert sub.is_dir()
+    copied = list(sub.iterdir())
+    assert len(copied) == 1
+    assert copied[0].name == "abcd1234.deep-python.json"
+
+
+def test_copy_bundle_skips_missing(tmp_path: Path):
+    target = tmp_path / "empty_target"
+    target.mkdir()
+    (target / ".daydream").mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    recorder = _make_recorder_mock("no-match-session-id-here", tmp_path / "nonexistent.json")
+    _copy_bundle(target, run_dir, recorder)
+
+    assert not (run_dir / "trajectory.json").exists()
+    assert not (run_dir / "review-output.md").exists()
+    assert not (run_dir / "deep").exists()
+    assert not (run_dir / "diff.patch").exists()
+
+
+# ---------------------------------------------------------------------------
+# __init__: archive_run full round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_archive_run_round_trip(monkeypatch, tmp_path: Path):
+    archive_root = tmp_path / "archive"
+    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(archive_root))
+
+    session_id = "abcd1234-0000-0000-0000-000000000000"
+    config = _MockConfig()
+
+    target, _, _ = _setup_bundle(tmp_path, session_id)
+    recorder = _MockRecorder(session_id=session_id)
+
+    archive_run(recorder=recorder, target_dir=target, config=config, status="complete")
+
+    run_dir = archive_root / "runs" / session_id
+    assert run_dir.is_dir()
+    assert (run_dir / "manifest.json").is_file()
+    assert (run_dir / "trajectory.json").is_file()
+
+    manifest_data = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest_data["session_id"] == session_id
+    assert manifest_data["run"]["flow"] == "normal"
+    assert manifest_data["run"]["skill"] == "python"
+
+    rows = query_runs(archive_root)
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == session_id

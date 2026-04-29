@@ -154,9 +154,23 @@ def _silence(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _install_stub_backend(
-    monkeypatch: pytest.MonkeyPatch, target: Path, *, is_codex: bool = False
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    *,
+    is_codex: bool = False,
+    pin_skill_availability: bool = True,
 ) -> _StubBackend:
-    """Patch create_backend to return a single stub backend instance."""
+    """Patch create_backend to return a single stub backend instance.
+
+    Args:
+        pin_skill_availability: When True (default), patches
+            ``get_installed_skills`` to return ``None`` (optimistic fallback
+            giving all SKILL_MAP stacks) and disables the exploration
+            pre-scan. This isolates tests from the local machine's Beagle
+            plugin registry and prevents exploration from adding unexpected
+            backend calls. Pass False when a test explicitly controls skill
+            availability (e.g. via ``CLAUDE_CONFIG_DIR``).
+    """
     stub = _StubBackend(target, is_codex=is_codex)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: stub)
     # When is_codex=True, the orchestrator's isinstance(backend, CodexBackend)
@@ -164,6 +178,11 @@ def _install_stub_backend(
     # isinstance check fires without needing a real Codex dependency.
     if is_codex:
         monkeypatch.setattr("daydream.deep.orchestrator.CodexBackend", _StubBackend, raising=False)
+    if pin_skill_availability:
+        # Return None -> orchestrator falls back to set(SKILL_MAP.keys())
+        monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+        # Disable exploration pre-scan so it doesn't add extra backend calls
+        monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     return stub
 
 
@@ -637,7 +656,7 @@ def test_run_deep_routes_missing_skill_to_generic(
     from daydream.deep import detection as _detection
 
     _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
+    _install_stub_backend(monkeypatch, multi_stack_target, pin_skill_availability=False)
     # Registry with only python installed -- react and markdown should route to generic.
     _write_plugin_registry(tmp_path, ["beagle-python"])
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))

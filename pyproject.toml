@@ -8,6 +8,7 @@ dependencies = [
     "anyio>=4.0",
     "rich>=13.0",
     "pyfiglet>=1.0",
+    "pydantic>=2.11.7",
     "tree-sitter==0.25.2",
     "tree-sitter-python==0.25.0",
     "tree-sitter-typescript==0.23.2",
@@ -40,6 +41,11 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# Vendored from Harbor v0.5.0; see daydream/atif/NOTICE.
+# Mechanical-only edit policy (D-03): no reformatting allowed.
+"daydream/atif/**" = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

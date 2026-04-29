@@ -1,0 +1,40 @@
+daydream/atif/
+==============
+
+This directory contains source code vendored from the Harbor framework
+(https://github.com/harbor-framework/harbor), Apache License 2.0.
+
+Vendored from harbor-framework/harbor@v0.5.0, commit 5795e7638fbe0ee5d7923b6311df2c9f3747dcf0, on 2026-04-26
+
+Vendored to avoid Harbor's transitive dependency surface. The trajectory
+models and validator are pure-Pydantic + stdlib (~700 LOC) and benefit
+from being decoupled from Harbor's runtime install graph.
+
+Re-vendor wholesale on Harbor updates; do not carry local patches.
+The only allowed transformation is import-path renames:
+
+    harbor.models.trajectories  -> daydream.atif.models
+    harbor.utils.trajectory_validator -> daydream.atif.validator
+
+Plus removal of the validator's `python -m harbor.utils.trajectory_validator`
+CLI entry point (programmatic use only).
+
+----
+
+Original Harbor LICENSE (Apache-2.0) is preserved at daydream/atif/LICENSE.
+
+Harbor copyright (Apache-2.0):
+    Copyright (c) 2026 Harbor Framework Team and contributors
+    (see https://github.com/harbor-framework/harbor and Harbor's pyproject.toml
+    authors field for the canonical contributor list).
+
+    Note: Harbor v0.5.0's LICENSE file is the unmodified Apache-2.0 template —
+    it does not populate the `Copyright [yyyy] [name of copyright owner]`
+    placeholder. The attribution above is reconstructed from Harbor's README
+    BibTeX citation (`author = {{Harbor Framework Team}}, year = {2026}`) and
+    pyproject.toml `authors` field.
+
+Daydream attribution:
+    Daydream incorporates this vendored code under the terms of the
+    Apache License, Version 2.0. See daydream/atif/LICENSE for the
+    full license text.
