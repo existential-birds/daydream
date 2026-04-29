@@ -533,12 +533,12 @@ def main() -> None:
 
     # Route subcommands before main arg parse
     argv = sys.argv[1:]
-    if argv and argv[0] == "label":
-        _handle_label_command(argv[1:])
-        return
-
-    config = _parse_args()
     try:
+        if argv and argv[0] == "label":
+            _handle_label_command(argv[1:])
+            return
+
+        config = _parse_args()
         exit_code = anyio.run(run, config)
         sys.exit(exit_code)
     except KeyboardInterrupt:

@@ -232,6 +232,13 @@ class Redactor:
                     new_content = self._redact_text(r.content)
                 except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
                     new_content = "[REDACTION_FAILED]"
+            elif isinstance(r.content, list):
+                new_content = [
+                    part.model_copy(update={"text": self._redact_optional_text(part.text)})
+                    if part.type == "text"
+                    else part
+                    for part in r.content
+                ]
             new_results.append(r.model_copy(update={"content": new_content}))
         return observation.model_copy(update={"results": new_results})
 
@@ -557,8 +564,13 @@ class Invocation:
         )
         self.steps.append(self.recorder.redactor.redact_step(agent_step))
 
-    def snapshot_steps(self) -> list[Step]:
-        """Return steps including a materialized copy of any open step (signal-safe, non-mutating)."""
+    def snapshot_steps(self, *, snapshot_step_id: int | None = None) -> list[Step]:
+        """Return steps including a materialized copy of any open step (signal-safe, non-mutating).
+
+        Args:
+            snapshot_step_id: Pre-allocated step ID for the partial step. When multiple
+                invocations are active, the caller allocates unique IDs to avoid duplicates.
+        """
         if self._open_step_dict is None:
             return list(self.steps)
         d = self._open_step_dict
@@ -577,8 +589,9 @@ class Invocation:
         }
         if d["_unmatched_tool_results"]:
             extra["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
+        step_id = snapshot_step_id if snapshot_step_id is not None else self.recorder._step_id_counter + 1
         partial_step = Step(
-            step_id=self.recorder._step_id_counter + 1,
+            step_id=step_id,
             timestamp=now_iso(),
             source="agent",
             message=message_text,
@@ -834,8 +847,11 @@ class TrajectoryRecorder:
         if not self._active_invocations:
             return list(self.steps)
         snapshot = list(self.steps)
+        next_id = self._step_id_counter + 1
         for inv in self._active_invocations:
-            snapshot.extend(inv.snapshot_steps())
+            snapshot.extend(inv.snapshot_steps(snapshot_step_id=next_id))
+            if inv._open_step_dict is not None:
+                next_id += 1
         return snapshot
 
     def write_partial(self) -> None:
@@ -894,6 +910,8 @@ class _ForkCM:
             agent_model_name=self._parent.agent_model_name,
             redactor=self._parent.redactor,
             session_id=self._parent.session_id,
+            pr_number=self._parent.pr_number,
+            pr_repo=self._parent.pr_repo,
         )
         child.parent = self._parent
         child.descriptor = self._descriptor
