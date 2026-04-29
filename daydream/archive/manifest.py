@@ -41,6 +41,9 @@ class Manifest:
         skill: Review skill used (python, react, etc.).
         model: Model name (opus, sonnet, haiku).
         backend: Backend used (claude, codex).
+        review_backend: Per-phase backend override for review, if set.
+        fix_backend: Per-phase backend override for fix, if set.
+        test_backend: Per-phase backend override for test, if set.
         review_only: Whether the run was review-only.
         deep: Whether deep review mode was used.
         loop: Whether loop mode was enabled.
@@ -75,6 +78,9 @@ class Manifest:
     skill: str | None = None
     model: str | None = None
     backend: str = "claude"
+    review_backend: str | None = None
+    fix_backend: str | None = None
+    test_backend: str | None = None
     review_only: bool = False
     deep: bool = False
     loop: bool = False
@@ -122,6 +128,9 @@ class Manifest:
                 "skill": self.skill,
                 "model": self.model,
                 "backend": self.backend,
+                **({"review_backend": self.review_backend} if self.review_backend else {}),
+                **({"fix_backend": self.fix_backend} if self.fix_backend else {}),
+                **({"test_backend": self.test_backend} if self.test_backend else {}),
                 "review_only": self.review_only,
                 "deep": self.deep,
                 "loop": self.loop,
@@ -188,6 +197,9 @@ def build_manifest(
         skill=config.skill,
         model=config.model,
         backend=config.backend,
+        review_backend=config.review_backend,
+        fix_backend=config.fix_backend,
+        test_backend=config.test_backend,
         review_only=config.review_only,
         deep=config.deep,
         loop=config.loop,

@@ -25,6 +25,7 @@ from daydream.archive.manifest import Manifest, build_manifest
 @dataclass
 class _MockRecorder:
     session_id: str = "abcd1234-0000-0000-0000-000000000000"
+    path: Path = field(default_factory=lambda: Path("/nonexistent/trajectory.json"))
     run_flow: MagicMock = field(default_factory=lambda: MagicMock(value="normal"))
     pr_number: int | None = None
     pr_repo: str | None = None
@@ -44,6 +45,9 @@ class _MockConfig:
     skill: str | None = "python"
     model: str | None = "opus"
     backend: str = "claude"
+    review_backend: str | None = None
+    fix_backend: str | None = None
+    test_backend: str | None = None
     review_only: bool = False
     deep: bool = False
     loop: bool = False
@@ -325,8 +329,22 @@ def test_get_archive_dir_default(monkeypatch, tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def _setup_bundle(tmp_path: Path, session_id: str = "abcd1234-0000-0000-0000-000000000000") -> tuple[Path, Path]:
-    """Create a realistic target directory with artifacts and an empty run dir."""
+def _make_recorder_mock(session_id: str, path: Path) -> MagicMock:
+    """Build a mock TrajectoryRecorder with session_id and path attributes."""
+    recorder = MagicMock()
+    recorder.session_id = session_id
+    recorder.path = path
+    return recorder
+
+
+def _setup_bundle(
+    tmp_path: Path, session_id: str = "abcd1234-0000-0000-0000-000000000000"
+) -> tuple[Path, Path, MagicMock]:
+    """Create a realistic target directory with artifacts and an empty run dir.
+
+    Returns (target_dir, run_dir, mock_recorder) where the recorder's path
+    points to a non-existent file so the glob fallback is exercised.
+    """
     prefix = session_id[:8]
     target = tmp_path / "target"
     daydream = target / ".daydream"
@@ -355,41 +373,77 @@ def _setup_bundle(tmp_path: Path, session_id: str = "abcd1234-0000-0000-0000-000
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    return target, run_dir
+
+    # Recorder with non-existent path to exercise glob fallback
+    recorder = _make_recorder_mock(session_id, tmp_path / "nonexistent-trajectory.json")
+
+    return target, run_dir, recorder
 
 
 def test_copy_bundle_trajectory(tmp_path: Path):
-    target, run_dir = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, "abcd1234-0000-0000-0000-000000000000")
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder)
 
     assert (run_dir / "trajectory.json").exists()
     assert json.loads((run_dir / "trajectory.json").read_text())["session_id"] == "test"
 
 
+def test_copy_bundle_trajectory_from_recorder_path(tmp_path: Path):
+    """When the recorder path exists (e.g. --trajectory /custom/path), copy from there directly."""
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+
+    # Place the trajectory at a custom location and point recorder.path to it
+    custom_path = tmp_path / "custom" / "my-trajectory.json"
+    custom_path.parent.mkdir(parents=True)
+    custom_path.write_text('{"session_id": "custom"}')
+    recorder.path = custom_path
+
+    _copy_bundle(target, run_dir, recorder)
+
+    assert (run_dir / "trajectory.json").exists()
+    assert json.loads((run_dir / "trajectory.json").read_text())["session_id"] == "custom"
+
+
+def test_copy_bundle_partial_from_recorder_path(tmp_path: Path):
+    """Partial file adjacent to recorder.path is also copied."""
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+
+    custom_path = tmp_path / "custom" / "out.json"
+    custom_path.parent.mkdir(parents=True)
+    custom_path.write_text('{"done": true}')
+    partial = custom_path.with_suffix(".json.partial")
+    partial.write_text('{"partial": true}')
+    recorder.path = custom_path
+
+    _copy_bundle(target, run_dir, recorder)
+
+    assert json.loads((run_dir / "trajectory.json.partial").read_text())["partial"] is True
+
+
 def test_copy_bundle_review_output(tmp_path: Path):
-    target, run_dir = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, "abcd1234-0000-0000-0000-000000000000")
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder)
 
     assert (run_dir / "review-output.md").read_text() == "review findings"
 
 
 def test_copy_bundle_deep_directory(tmp_path: Path):
-    target, run_dir = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, "abcd1234-0000-0000-0000-000000000000")
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder)
 
     assert (run_dir / "deep" / "intent.md").read_text() == "intent"
 
 
 def test_copy_bundle_diff_patch(tmp_path: Path):
-    target, run_dir = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, "abcd1234-0000-0000-0000-000000000000")
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder)
 
     assert (run_dir / "diff.patch").read_text() == "diff content"
 
 
 def test_copy_bundle_sub_trajectories_filtered(tmp_path: Path):
-    target, run_dir = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, "abcd1234-0000-0000-0000-000000000000")
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder)
 
     sub = run_dir / "trajectories"
     assert sub.is_dir()
@@ -405,7 +459,8 @@ def test_copy_bundle_skips_missing(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    _copy_bundle(target, run_dir, "no-match-session-id-here")
+    recorder = _make_recorder_mock("no-match-session-id-here", tmp_path / "nonexistent.json")
+    _copy_bundle(target, run_dir, recorder)
 
     assert not (run_dir / "trajectory.json").exists()
     assert not (run_dir / "review-output.md").exists()
@@ -423,10 +478,10 @@ def test_archive_run_round_trip(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(archive_root))
 
     session_id = "abcd1234-0000-0000-0000-000000000000"
-    recorder = _MockRecorder(session_id=session_id)
     config = _MockConfig()
 
-    target, _ = _setup_bundle(tmp_path, session_id)
+    target, _, _ = _setup_bundle(tmp_path, session_id)
+    recorder = _MockRecorder(session_id=session_id)
 
     archive_run(recorder=recorder, target_dir=target, config=config, status="complete")
 

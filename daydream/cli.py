@@ -71,7 +71,7 @@ def _auto_detect_pr_number() -> int | None:
     """
     try:
         # Safe: hardcoded command with no user input
-        result = subprocess.run(  # noqa: S603, S607
+        result = subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled; gh is a trusted CLI
             ["gh", "pr", "view", "--json", "number"],
             capture_output=True,
             text=True,

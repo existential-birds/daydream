@@ -557,6 +557,37 @@ class Invocation:
         )
         self.steps.append(self.recorder.redactor.redact_step(agent_step))
 
+    def snapshot_steps(self) -> list[Step]:
+        """Return steps including a materialized copy of any open step (signal-safe, non-mutating)."""
+        if self._open_step_dict is None:
+            return list(self.steps)
+        d = self._open_step_dict
+        message_text = "".join(d["_text_chunks"])
+        reasoning = "\n".join(d["_thinking_chunks"]) if d["_thinking_chunks"] else None
+        tool_calls = list(d["_tool_calls"]) or None
+        observation = (
+            Observation(results=list(d["_observation_results"]))
+            if d["_observation_results"]
+            else None
+        )
+        extra: dict[str, Any] = {
+            "daydream_phase": self.phase.value,
+            "daydream_run_flow": self.recorder.run_flow.value,
+            "partial_step": True,
+        }
+        partial_step = Step(
+            step_id=self.recorder._next_step_id(),
+            timestamp=now_iso(),
+            source="agent",
+            message=message_text,
+            model_name=d["_model_name"],
+            reasoning_content=reasoning,
+            tool_calls=tool_calls,
+            observation=observation,
+            extra=extra,
+        )
+        return [*self.steps, partial_step]
+
     def finish(self) -> None:
         """Close any open step and flush all steps to the parent recorder."""
         self._close_open_step()
@@ -801,7 +832,7 @@ class TrajectoryRecorder:
             return list(self.steps)
         snapshot = list(self.steps)
         for inv in self._active_invocations:
-            snapshot.extend(inv.steps)
+            snapshot.extend(inv.snapshot_steps())
         return snapshot
 
     def write_partial(self) -> None:
@@ -836,6 +867,8 @@ class TrajectoryRecorder:
                     self.on_write(self, "partial")
                 except Exception:  # noqa: BLE001 - archive failure must never crash shutdown
                     pass
+            if self.parent is not None:
+                self.parent.write_partial()
         except Exception as exc:  # noqa: BLE001 - partial flush must never crash shutdown
             print_warning(
                 _console, f"Partial trajectory write failed: {type(exc).__name__}: {exc}"
@@ -906,8 +939,8 @@ class _InvocationCM:
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self._invocation is not None:
             try:
-                self._recorder._active_invocations.remove(self._invocation)
-            except ValueError:
-                pass
-            self._invocation.finish()
-            self._invocation = None
+                self._invocation.finish()
+            finally:
+                with suppress(ValueError):
+                    self._recorder._active_invocations.remove(self._invocation)
+                self._invocation = None

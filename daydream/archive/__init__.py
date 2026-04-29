@@ -101,7 +101,7 @@ def _archive_run_inner(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Copy artifact bundle
-    _copy_bundle(target_dir, run_dir, recorder.session_id)
+    _copy_bundle(target_dir, run_dir, recorder)
 
     # 2. Capture git context
     git_ctx = capture_git_context(target_dir)
@@ -127,25 +127,36 @@ def _archive_run_inner(
     upsert_run(archive_dir, manifest)
 
 
-def _copy_bundle(target_dir: Path, run_dir: Path, session_id: str) -> None:
+def _copy_bundle(target_dir: Path, run_dir: Path, recorder: TrajectoryRecorder) -> None:
     """Copy ``.daydream/`` artifacts to the archive run directory.
 
-    Copies trajectory files matching the session_id prefix, the
-    ``trajectories/`` subdirectory, ``review-output.md``, ``deep/``
-    artifacts, and ``diff.patch``. Missing files are silently skipped.
+    Copies the recorder's actual trajectory output (works for both default
+    and ``--trajectory /custom/path`` runs), the ``trajectories/``
+    subdirectory, ``review-output.md``, ``deep/`` artifacts, and
+    ``diff.patch``. Falls back to glob pattern for legacy naming when the
+    recorder path doesn't exist. Missing files are silently skipped.
     """
     daydream_dir = target_dir / ".daydream"
-    prefix = session_id[:8]
+    prefix = recorder.session_id[:8]
 
-    # Main trajectory file(s) matching this session
-    for traj_file in daydream_dir.glob(f"trajectory-*-{prefix}.json"):
-        shutil.copy2(traj_file, run_dir / "trajectory.json")
-        break  # Only one main trajectory per session
+    # Primary: copy the recorder's actual output path
+    if recorder.path.is_file():
+        shutil.copy2(recorder.path, run_dir / "trajectory.json")
 
-    # Also try the partial file
-    for partial_file in daydream_dir.glob(f"trajectory-*-{prefix}.json.partial"):
-        shutil.copy2(partial_file, run_dir / "trajectory.json.partial")
-        break
+    partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
+    if partial_path.is_file():
+        shutil.copy2(partial_path, run_dir / "trajectory.json.partial")
+
+    # Fallback: glob for default naming pattern (legacy compat)
+    if not (run_dir / "trajectory.json").exists():
+        for traj_file in daydream_dir.glob(f"trajectory-*-{prefix}.json"):
+            shutil.copy2(traj_file, run_dir / "trajectory.json")
+            break
+
+    if not (run_dir / "trajectory.json.partial").exists():
+        for partial_file in daydream_dir.glob(f"trajectory-*-{prefix}.json.partial"):
+            shutil.copy2(partial_file, run_dir / "trajectory.json.partial")
+            break
 
     # Forked sub-trajectories
     trajectories_dir = daydream_dir / "trajectories"

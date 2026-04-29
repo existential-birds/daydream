@@ -247,7 +247,7 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.PR,
         target_dir=target_dir,
-        agent_model_name=config.model or "opus",
+        agent_model_name=config.model or config.backend or "claude",
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
@@ -360,7 +360,7 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.TTT,
         target_dir=target_dir,
-        agent_model_name=config.model or "opus",
+        agent_model_name=config.model or config.backend or "claude",
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
@@ -508,8 +508,9 @@ async def run(config: RunConfig | None = None) -> int:
             return 1
 
     # Get cleanup setting (from config or prompt)
-    # Trust-the-technology mode doesn't produce review files, so skip cleanup prompt.
-    if config.trust_the_technology:
+    # Trust-the-technology and deep modes don't produce review files in the
+    # normal flow (deep returns before cleanup runs), so skip the prompt.
+    if config.trust_the_technology or config.deep:
         cleanup_enabled = False
     elif config.cleanup is not None:
         cleanup_enabled = config.cleanup
@@ -556,7 +557,7 @@ async def run(config: RunConfig | None = None) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=target_dir,
-        agent_model_name=config.model or "opus",
+        agent_model_name=config.model or config.backend or "claude",
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
