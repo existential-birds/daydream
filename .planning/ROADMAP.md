@@ -11,7 +11,7 @@
 - [ ] **Phase 2: Recorder Core + Event Enrichment + Mapping** - Greenfield `daydream/trajectory.py` recorder with ContextVar propagation, plus `AgentEvent` enrichment (timestamp, MetricsEvent, Claude token extraction) and event-to-ATIF mapping wired into `run_agent()`
 - [x] **Phase 3: Subagent Wiring (Parallel + Continuation)** - Parallel `anyio` task groups (`phase_fix_parallel`, deep mode, exploration pre-scan) emit sibling trajectory files linked via `subagent_trajectory_ref`; continuations append to the same trajectory _(completed 2026-04-27)_
 - [ ] **Phase 4: Cutover + Redaction + CLI Surface** - Hard removal of `_log_debug` and all 15+ call sites (AST-verified, including the lazy-import gotcha in `codex.py:37`), redaction policy implemented and applied to all trajectory content surfaces, `--debug` removed and `--trajectory <path>` added
-- [ ] **Phase 5: Test Hardening + Documentation** - All 343 existing tests verified passing post-migration, new trajectory/redaction/golden-fixture/subagent test suites land, README/CHANGELOG/CLAUDE.md/NOTICE document the new format and breaking CLI change
+- [x] **Phase 5: Test Hardening + Documentation** - All 343 existing tests verified passing post-migration, new trajectory/redaction/golden-fixture/subagent test suites land, README/CHANGELOG/CLAUDE.md/NOTICE document the new format and breaking CLI change _(completed 2026-04-28)_
 
 ## Phase Details
 
@@ -96,7 +96,7 @@ Plans:
 - [x] 05-01-PLAN.md — Audit existing test files (test_trajectory.py, test_redaction.py, test_atif_vendor_smoke.py, test_trajectory_fixture.py) against TEST-01..05 and fill gaps
 - [x] 05-02-PLAN.md — Create test_multi_turn_tokens.py (TEST-06 SDK #112 gate) and test_subagent_shapes.py (TEST-07 fork/sibling shapes)
 - [x] 05-03-PLAN.md — Update README.md (DOCS-01..03), CHANGELOG.md (DOCS-04), CLAUDE.md (DOCS-06), verify daydream/atif/NOTICE (DOCS-05)
-- [ ] 05-04-PLAN.md — Final verification: full CI suite + 13-requirement coverage check + human sign-off
+- [x] 05-04-PLAN.md — Final verification: full CI suite + 13-requirement coverage check + human sign-off
 
 ## Progress
 
@@ -106,7 +106,7 @@ Plans:
 | 2. Recorder Core + Event Enrichment + Mapping | 7/7 | Complete | 2026-04-27 |
 | 3. Subagent Wiring (Parallel + Continuation) | 0/2 | Ready to execute | - |
 | 4. Cutover + Redaction + CLI Surface | 0/5 | Ready to execute | - |
-| 5. Test Hardening + Documentation | 3/4 | In progress | - |
+| 5. Test Hardening + Documentation | 4/4 | Complete | 2026-04-28 |
 
 ## Coverage Summary
 
