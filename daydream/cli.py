@@ -190,6 +190,22 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         help="Write ATIF v1.6 trajectory JSON to this path (default: <target>/.daydream/trajectory-<ts>-<id>.json)",
     )
 
+    parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        default=False,
+        dest="no_archive",
+        help="Disable automatic archival to ~/.daydream/archive/",
+    )
+
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        default=False,
+        dest="run_eval",
+        help="Run deterministic evaluation analysis and store evaluation.json in archive",
+    )
+
     cleanup_group = parser.add_mutually_exclusive_group()
     cleanup_group.add_argument(
         "--cleanup",
@@ -426,7 +442,71 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         deep=args.deep,
         trajectory_path=args.trajectory_path,
         pr_repo=pr_repo,
+        archive=not args.no_archive,
+        run_eval=args.run_eval,
     )
+
+
+def _handle_label_command(argv: list[str]) -> None:
+    """Handle ``daydream label <session_id> --accepted|--rejected|--mixed``."""
+    import argparse as _argparse
+
+    parser = _argparse.ArgumentParser(
+        prog="daydream label",
+        description="Label a run outcome for RL/fine-tuning",
+    )
+    parser.add_argument("session_id", help="Session ID (full or prefix) to label")
+    label_group = parser.add_mutually_exclusive_group(required=True)
+    label_group.add_argument("--accepted", action="store_const", const="accepted", dest="label")
+    label_group.add_argument("--rejected", action="store_const", const="rejected", dest="label")
+    label_group.add_argument("--mixed", action="store_const", const="mixed", dest="label")
+
+    args = parser.parse_args(argv)
+
+    from daydream.archive import get_archive_dir
+    from daydream.archive.index import update_labels
+
+    archive_dir = get_archive_dir()
+    try:
+        success = update_labels(archive_dir, args.session_id, [args.label])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    if not success:
+        print(f"Session {args.session_id} not found in archive", file=sys.stderr)
+        sys.exit(1)
+
+    _update_manifest_labels(archive_dir, args.session_id, args.label)
+    print(f"Labeled {args.session_id} as {args.label}")
+
+
+def _update_manifest_labels(archive_dir: Path, session_id: str, label: str) -> None:
+    """Update manifest.json on disk with the new label."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    runs_dir = archive_dir / "runs"
+    if not runs_dir.is_dir():
+        return
+
+    run_dir = runs_dir / session_id
+    if not run_dir.is_dir():
+        candidates = [d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith(session_id)]
+        if len(candidates) == 1:
+            run_dir = candidates[0]
+        else:
+            return
+
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return
+
+    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    if "outcome" in manifest:
+        manifest["outcome"]["labels"] = [label]
+        manifest["outcome"]["labeled_at"] = datetime.now(timezone.utc).isoformat()
+    manifest_path.write_text(_json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 def main() -> None:
@@ -441,6 +521,13 @@ def main() -> None:
 
     """
     _install_signal_handlers()
+
+    # Route subcommands before main arg parse
+    argv = sys.argv[1:]
+    if argv and argv[0] == "label":
+        _handle_label_command(argv[1:])
+        return
+
     config = _parse_args()
     try:
         exit_code = anyio.run(run, config)

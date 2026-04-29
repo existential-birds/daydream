@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from daydream.atif import (
     Agent,
@@ -608,6 +608,7 @@ class TrajectoryRecorder:
     # write_partial reads this so SIGINT mid-run_agent() captures partial
     # work rather than dropping it.
     _active_invocations: list[Invocation] = field(default_factory=list)
+    on_write: Callable[[TrajectoryRecorder, str], None] | None = None
 
     async def __aenter__(self) -> "TrajectoryRecorder":
         self._previous_token = _RECORDER_VAR.set(self)
@@ -777,6 +778,11 @@ class TrajectoryRecorder:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.path)
+            if self.on_write is not None:
+                try:
+                    self.on_write(self, "complete")
+                except Exception:  # noqa: BLE001 - archive failure must never affect the run
+                    pass
         except BaseException:
             with suppress(OSError):
                 os.unlink(tmp)
@@ -825,6 +831,11 @@ class TrajectoryRecorder:
             extra = json_dict.setdefault("extra", {})
             extra["partial"] = True
             partial_path.write_text(json.dumps(json_dict, indent=2), encoding="utf-8")
+            if self.on_write is not None:
+                try:
+                    self.on_write(self, "partial")
+                except Exception:  # noqa: BLE001 - archive failure must never crash shutdown
+                    pass
         except Exception as exc:  # noqa: BLE001 - partial flush must never crash shutdown
             print_warning(
                 _console, f"Partial trajectory write failed: {type(exc).__name__}: {exc}"

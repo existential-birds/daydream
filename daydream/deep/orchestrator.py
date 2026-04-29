@@ -251,7 +251,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
     """
     # Late imports to avoid circular dependency with runner.
     from daydream.phases import _git_branch, _git_diff, _git_log
-    from daydream.runner import _compute_diff_ref, _resolve_backend
+    from daydream.runner import _compute_diff_ref, _make_archive_callback, _resolve_backend
     from daydream.ui import phase_subtitle, print_dim, print_phase_hero
 
     backend = _resolve_backend(config, "review")
@@ -283,6 +283,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
+        on_write=_make_archive_callback(config, target_dir),
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")

@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -83,6 +84,8 @@ class RunConfig:
             run) when None. Phase 4 wires the ``--trajectory <path>`` CLI flag.
         pr_repo: GitHub repository in ``owner/repo`` format. Auto-detected from ``gh``
             when ``--pr`` is used. Stored in trajectory metadata for eval linkage.
+        archive: Archive run artifacts to centralized store. Default True.
+        run_eval: Run deterministic evaluation on archived artifacts. Default False.
 
     """
 
@@ -108,6 +111,8 @@ class RunConfig:
     ignore_paths: list[str] = field(default_factory=list)
     trajectory_path: Path | None = None
     pr_repo: str | None = None
+    archive: bool = True
+    run_eval: bool = False
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -131,6 +136,27 @@ def _print_missing_skill_error(skill_name: str) -> None:
         print_dim(console, "Check your ~/.claude/settings.json for enabled plugins.")
 
     console.print()
+
+
+def _make_archive_callback(
+    config: RunConfig, target_dir: Path,
+) -> Callable[[TrajectoryRecorder, str], None] | None:
+    """Build the on_write archive callback, or None if archiving is disabled."""
+    if not config.archive:
+        return None
+
+    def _cb(recorder: TrajectoryRecorder, status: str) -> None:
+        from daydream.archive import archive_run
+
+        archive_run(
+            recorder=recorder,
+            target_dir=target_dir,
+            config=config,
+            status=status,
+            run_eval=config.run_eval,
+        )
+
+    return _cb
 
 
 def _resolve_backend(
@@ -225,6 +251,7 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
+        on_write=_make_archive_callback(config, target_dir),
     ):
         print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
@@ -337,6 +364,7 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
+        on_write=_make_archive_callback(config, target_dir),
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")
@@ -532,6 +560,7 @@ async def run(config: RunConfig | None = None) -> int:
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
+        on_write=_make_archive_callback(config, target_dir),
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")
