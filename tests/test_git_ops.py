@@ -8,9 +8,11 @@ unavailable.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -178,6 +180,25 @@ def test_default_branch_raises_when_none_present(tmp_path: Path) -> None:
     _commit(repo, "first")
     with pytest.raises(BranchNotFoundError):
         git_ops.default_branch(repo)
+
+
+def test_remote_url_returns_url_when_remote_configured(tmp_path: Path) -> None:
+    bare = _bare_remote(tmp_path / "remote.git")
+    repo = _make_repo_with_main(tmp_path, name="repo")
+    _git(repo, "remote", "add", "origin", str(bare))
+    assert git_ops.remote_url(repo) == str(bare)
+
+
+def test_remote_url_returns_none_when_remote_missing(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.remote_url(repo) is None
+
+
+def test_remote_url_returns_none_for_unknown_remote_name(tmp_path: Path) -> None:
+    bare = _bare_remote(tmp_path / "remote.git")
+    repo = _make_repo_with_main(tmp_path, name="repo")
+    _git(repo, "remote", "add", "origin", str(bare))
+    assert git_ops.remote_url(repo, "upstream") is None
 
 
 def test_branch_exists_local(tmp_path: Path) -> None:
@@ -477,3 +498,206 @@ def test_gh_api_raises_without_auth(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     with pytest.raises(GitError):
         git_ops.gh_api(repo, "repos/{owner}/{repo}")
+
+
+# --- diff_paths -------------------------------------------------------------
+
+
+def _make_divergent_history(tmp_path: Path) -> tuple[Path, str, str]:
+    """Build a repo where main has advanced after `feat` branched off.
+
+    Returns the repo path plus the names of the two branches (`main`, `feat`).
+    The same file (`shared.txt`) is modified on both branches so two-dot vs
+    three-dot diffs differ in content.
+    """
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "shared.txt").write_text("line one\nline two\nline three\n")
+    _git(repo, "add", "shared.txt")
+    _commit(repo, "shared baseline")
+
+    _git(repo, "checkout", "-b", "feat")
+    (repo / "shared.txt").write_text("line one\nline two FEAT\nline three\n")
+    _git(repo, "add", "shared.txt")
+    _commit(repo, "feat edit")
+
+    _git(repo, "checkout", "main")
+    (repo / "shared.txt").write_text("line one\nline two MAIN\nline three\n")
+    _git(repo, "add", "shared.txt")
+    _commit(repo, "main edit after branch")
+
+    _git(repo, "checkout", "feat")
+    return repo, "main", "feat"
+
+
+def test_diff_paths_two_dot_vs_three_dot_differ_on_divergent_history(
+    tmp_path: Path,
+) -> None:
+    """Two-dot includes main's later commit; three-dot does not. Pin the diff."""
+    repo, base, head = _make_divergent_history(tmp_path)
+    two_dot = git_ops.diff_paths(repo, base, head, ["shared.txt"], two_dot=True)
+    three_dot = git_ops.diff_paths(repo, base, head, ["shared.txt"], two_dot=False)
+    assert two_dot != three_dot
+    # Two-dot shows main's "MAIN" line as the - side; three-dot doesn't.
+    assert "MAIN" in two_dot
+    assert "MAIN" not in three_dot
+
+
+def test_diff_paths_restricts_to_paths(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "feat")
+    (repo / "keep.txt").write_text("keep\n")
+    (repo / "drop.txt").write_text("drop\n")
+    _git(repo, "add", "keep.txt", "drop.txt")
+    _commit(repo, "two files")
+    out = git_ops.diff_paths(repo, "main", "feat", ["keep.txt"])
+    assert "keep.txt" in out
+    assert "drop.txt" not in out
+
+
+def test_diff_paths_unified_context_lines(tmp_path: Path) -> None:
+    """Larger --unified yields a longer diff for the same change."""
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "ctx.txt").write_text("\n".join(f"line {i}" for i in range(1, 31)) + "\n")
+    _git(repo, "add", "ctx.txt")
+    _commit(repo, "ctx baseline")
+
+    _git(repo, "checkout", "-b", "feat")
+    lines = [f"line {i}" for i in range(1, 31)]
+    lines[14] = "line 15 CHANGED"
+    (repo / "ctx.txt").write_text("\n".join(lines) + "\n")
+    _git(repo, "add", "ctx.txt")
+    _commit(repo, "ctx edit")
+
+    small = git_ops.diff_paths(repo, "main", "feat", ["ctx.txt"], unified=1)
+    big = git_ops.diff_paths(repo, "main", "feat", ["ctx.txt"], unified=10)
+    assert len(big) > len(small)
+
+
+def test_diff_paths_raises_on_invalid_ref(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    with pytest.raises(GitError):
+        git_ops.diff_paths(repo, "definitely-not-a-ref", "HEAD", ["base.txt"])
+
+
+# --- gh_api(input_data=...) and gh_pr_view(pr=None) -------------------------
+#
+# These tests exercise wrapper logic, not gh itself: they monkeypatch the
+# subprocess call to capture argv shape and to drive success/failure paths
+# deterministically. Real gh would require network and GitHub auth.
+
+
+@gh_required
+def test_gh_api_input_data_passes_tempfile_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        # The --input arg is the path right after `--input` in the argv.
+        idx = cmd.index("--input")
+        captured["input_path"] = cmd[idx + 1]
+        # Confirm the tempfile exists at call time and contains our payload.
+        captured["payload"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout='{"ok": true}', stderr=""
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    result = git_ops.gh_api(
+        repo,
+        "repos/owner/repo/pulls/1/reviews",
+        method="POST",
+        input_data={"event": "COMMENT", "body": "hi"},
+    )
+
+    assert result == {"ok": True}
+    cmd = captured["cmd"]
+    assert cmd[:2] == ["gh", "api"]
+    assert "--input" in cmd
+    assert "--method" in cmd
+    method_idx = cmd.index("--method")
+    assert cmd[method_idx + 1] == "POST"
+    assert json.loads(captured["payload"]) == {"event": "COMMENT", "body": "hi"}
+    # Success path: tempfile must have been deleted.
+    assert not Path(captured["input_path"]).exists()
+
+
+@gh_required
+def test_gh_api_input_data_preserves_tempfile_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        idx = cmd.index("--input")
+        captured["input_path"] = cmd[idx + 1]
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="HTTP 422: Validation failed"
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    with pytest.raises(GitError) as excinfo:
+        git_ops.gh_api(
+            repo,
+            "repos/owner/repo/pulls/1/reviews",
+            method="POST",
+            input_data={"bad": "payload"},
+        )
+
+    msg = str(excinfo.value)
+    assert "payload preserved at" in msg
+    # The tempfile path mentioned in the error must still exist on disk.
+    preserved = Path(captured["input_path"])
+    assert str(preserved) in msg
+    assert preserved.exists()
+    # Cleanup so the test doesn't leave debris behind.
+    preserved.unlink(missing_ok=True)
+
+
+@gh_required
+def test_gh_pr_view_omits_pr_arg_when_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout='{"number": 7}', stderr=""
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    result = git_ops.gh_pr_view(repo)
+    assert result == {"number": 7}
+    cmd = captured["cmd"]
+    assert cmd[:3] == ["gh", "pr", "view"]
+    # No PR number anywhere in the argv.
+    assert all(not part.isdigit() for part in cmd)
+
+
+@gh_required
+def test_gh_pr_view_includes_pr_arg_when_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout='{"number": 42}', stderr=""
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    result = git_ops.gh_pr_view(repo, 42)
+    assert result == {"number": 42}
+    cmd = captured["cmd"]
+    assert cmd[:4] == ["gh", "pr", "view", "42"]

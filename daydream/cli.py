@@ -1,15 +1,14 @@
 """CLI entry point for daydream."""
 
 import argparse
-import json
 import signal
-import subprocess
 import sys
 import warnings
 from pathlib import Path
 
 import anyio
 
+from daydream import git_ops
 from daydream.agent import (
     console,
     get_current_backends,
@@ -70,20 +69,13 @@ def _auto_detect_pr_number() -> int | None:
 
     """
     try:
-        # Safe: hardcoded command with no user input
-        result = subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled; gh is a trusted CLI
-            ["gh", "pr", "view", "--json", "number"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            return data.get("number")
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
-        # FileNotFoundError occurs when gh CLI is not installed
-        pass
-    return None
+        data = git_ops.gh_pr_view(Path.cwd(), None)
+    except git_ops.GitError:
+        return None
+    if not data:
+        return None
+    number = data.get("number")
+    return int(number) if isinstance(number, int) else None
 
 
 def _detect_repo_slug() -> str | None:
@@ -93,19 +85,13 @@ def _detect_repo_slug() -> str | None:
         String like ``"owner/repo"``, or None if detection fails.
     """
     try:
-        result = subprocess.run(  # noqa: S603, S607
-            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            slug = result.stdout.strip()
-            if "/" in slug:
-                return slug
-    except (subprocess.SubprocessError, FileNotFoundError):
-        pass
-    return None
+        slug = git_ops.gh_repo_view(Path.cwd())
+    except git_ops.GitError:
+        return None
+    if slug is None:
+        return None
+    owner, name = slug
+    return f"{owner}/{name}"
 
 
 def _parse_args(argv: list[str] | None = None) -> RunConfig:

@@ -13,14 +13,15 @@ Adding a new language requires only:
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from tree_sitter import Language, Parser, Query, QueryCursor
 
+from daydream import git_ops
 from daydream.exploration import FileInfo
+from daydream.git_ops import GitError
 
 if TYPE_CHECKING:
     pass
@@ -307,20 +308,10 @@ def _find_importers(repo_root: Path, modified_path: str) -> list[str]:
     if not stem or stem in {"__init__", "mod", "index"}:
         return []
     try:
-        # `git -C REPO grep -l -- STEM` -- args fully controlled, not user input.
-        result = subprocess.run(  # noqa: S603 # hardcoded args, no shell, repo_root from caller
-            ["git", "-C", str(repo_root), "grep", "-l", "--", stem],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            shell=False,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
+        matches = git_ops.grep(repo_root, stem)
+    except GitError:
         return []
-    if result.returncode not in (0, 1):
-        return []
-    return [line.strip() for line in result.stdout.splitlines() if line.strip() and line.strip() != modified_path]
+    return [line for line in matches if line and line != modified_path]
 
 
 # --- Public API --------------------------------------------------------------

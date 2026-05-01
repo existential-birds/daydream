@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -186,6 +187,38 @@ def head_sha(repo: Path) -> str:
     if proc.returncode != 0:
         raise GitError(f"cannot resolve HEAD in {repo}: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def remote_url(repo: Path, remote: str = "origin") -> str | None:
+    """Return the URL configured for *remote*, or ``None`` when unset/missing.
+
+    Soft-failure semantics: returns ``None`` on any non-zero ``git`` exit
+    (mirrors :func:`default_branch` / :func:`merge_base` / :func:`current_branch`
+    behavior for "the data isn't there" cases) and on subprocess machinery
+    failures (timeout, missing binary).
+
+    Args:
+        repo: Repository working directory.
+        remote: Remote name. Defaults to ``"origin"``.
+
+    Returns:
+        The configured URL, or ``None`` when the remote is not set.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            ["git", "config", "--get", f"remote.{remote}.url"],  # noqa: S607 - git is a trusted command
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            shell=False,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
 
 
 def current_branch(repo: Path) -> str | None:
@@ -358,6 +391,48 @@ def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None
     proc = _run_git(repo, args, timeout=30)
     if proc.returncode != 0:
         raise GitError(f"git diff {base}...{head} failed: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def diff_paths(
+    repo: Path,
+    base: str,
+    head: str,
+    paths: list[str],
+    *,
+    unified: int = 3,
+    two_dot: bool = True,
+) -> str:
+    """Diff a specific set of paths between *base* and *head*.
+
+    Distinct from :func:`diff` because:
+      * This uses two-dot range syntax (``base..head``) by default; :func:`diff`
+        uses three-dot. Two-dot shows the working diff between the two refs;
+        three-dot shows what *head* introduced relative to the merge-base. PR
+        comment line resolution needs two-dot.
+      * Always passes ``--unified=<unified>`` for explicit context.
+      * Restricts output to *paths*.
+
+    Args:
+        repo: Repository root.
+        base: Base ref.
+        head: Head ref.
+        paths: Pathspec list (relative to repo root).
+        unified: Lines of context.
+        two_dot: When True, use ``base..head``; when False, ``base...head``.
+
+    Returns:
+        The diff text. Empty string when there are no changes for *paths*.
+
+    Raises:
+        GitError: If ``git diff`` fails.
+    """
+    sep = ".." if two_dot else "..."
+    range_arg = f"{base}{sep}{head}"
+    args = ["diff", f"--unified={unified}", range_arg, "--", *paths]
+    proc = _run_git(repo, args, timeout=30)
+    if proc.returncode != 0:
+        raise GitError(f"git diff {range_arg} failed: {proc.stderr.strip()}")
     return proc.stdout
 
 
@@ -571,27 +646,31 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
 # --- gh wrappers -------------------------------------------------------------
 
 
-def gh_pr_view(repo: Path, pr: int) -> dict | None:
-    """Return ``gh pr view <pr>`` output as a dict, or ``None`` on failure.
+def gh_pr_view(repo: Path, pr: int | None = None) -> dict | None:
+    """Return ``gh pr view`` output as a dict, or ``None`` on failure.
+
+    When *pr* is ``None``, ``gh pr view`` infers the PR from the currently
+    checked-out branch. This mirrors the auto-detection flow used by the CLI
+    when the user does not pass an explicit PR number.
 
     Args:
         repo: Repository working directory.
-        pr: Pull request number.
+        pr: Pull request number, or ``None`` to let ``gh`` infer from the
+            current branch.
 
     Returns:
-        Parsed JSON dict, or ``None`` when the PR is not found / the call fails.
+        Parsed JSON dict, or ``None`` when no PR is found / the call fails.
     """
-    proc = _run_gh(
-        repo,
+    args = ["pr", "view"]
+    if pr is not None:
+        args.append(str(pr))
+    args.extend(
         [
-            "pr",
-            "view",
-            str(pr),
             "--json",
             "number,title,body,state,headRefName,baseRefName,headRefOid,baseRefOid,url",
-        ],
-        timeout=60,
+        ]
     )
+    proc = _run_gh(repo, args, timeout=60)
     if proc.returncode != 0:
         return None
     try:
@@ -679,7 +758,14 @@ def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     return owner, name
 
 
-def gh_api(repo: Path, endpoint: str, *, method: str = "GET", paginate: bool = False) -> Any:
+def gh_api(
+    repo: Path,
+    endpoint: str,
+    *,
+    method: str = "GET",
+    paginate: bool = False,
+    input_data: Any | None = None,
+) -> Any:
     """Call ``gh api <endpoint>`` and return parsed JSON.
 
     Args:
@@ -687,6 +773,12 @@ def gh_api(repo: Path, endpoint: str, *, method: str = "GET", paginate: bool = F
         endpoint: API path (e.g. ``"repos/owner/repo/pulls/1/comments"``).
         method: HTTP method. Defaults to ``"GET"``.
         paginate: When True, pass ``--paginate`` to walk all result pages.
+        input_data: Optional JSON-serialisable payload. When provided, it is
+            written to a temporary file and passed via ``--input <path>`` and
+            the call uses ``--method <method>`` (gh's preferred form). On
+            success the tempfile is removed; on failure it is preserved and
+            its path is included in the raised :class:`GitError` so callers
+            can inspect the exact request body that was sent.
 
     Returns:
         The parsed JSON value (object, list, or scalar).
@@ -694,16 +786,50 @@ def gh_api(repo: Path, endpoint: str, *, method: str = "GET", paginate: bool = F
     Raises:
         GitError: If the call fails or returns invalid JSON.
     """
-    args = ["api"]
-    if method.upper() != "GET":
-        args.extend(["-X", method.upper()])
-    if paginate:
-        args.append("--paginate")
-    args.append(endpoint)
-    proc = _run_gh(repo, args, timeout=60)
-    if proc.returncode != 0:
-        raise GitError(f"gh api {endpoint} failed: {proc.stderr.strip()}")
+    if input_data is None:
+        args = ["api"]
+        if method.upper() != "GET":
+            args.extend(["-X", method.upper()])
+        if paginate:
+            args.append("--paginate")
+        args.append(endpoint)
+        proc = _run_gh(repo, args, timeout=60)
+        if proc.returncode != 0:
+            raise GitError(f"gh api {endpoint} failed: {proc.stderr.strip()}")
+        try:
+            return json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise GitError(f"gh api {endpoint} returned invalid JSON: {exc}") from exc
+
+    # input_data path: serialise to a tempfile and shell out via `--input`.
+    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 - lifecycle managed below
+        suffix=".json", mode="w", delete=False, encoding="utf-8"
+    )
+    tmp_path = Path(tmp.name)
+    succeeded = False
     try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise GitError(f"gh api {endpoint} returned invalid JSON: {exc}") from exc
+        try:
+            json.dump(input_data, tmp)
+        finally:
+            tmp.close()
+        args = ["api", endpoint, "--method", method.upper(), "--input", str(tmp_path)]
+        if paginate:
+            args.append("--paginate")
+        proc = _run_gh(repo, args, timeout=60)
+        if proc.returncode != 0:
+            raise GitError(
+                f"gh api {endpoint} failed: {proc.stderr.strip()} "
+                f"(payload preserved at {tmp_path})"
+            )
+        try:
+            result = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise GitError(
+                f"gh api {endpoint} returned invalid JSON: {exc} "
+                f"(payload preserved at {tmp_path})"
+            ) from exc
+        succeeded = True
+        return result
+    finally:
+        if succeeded:
+            tmp_path.unlink(missing_ok=True)

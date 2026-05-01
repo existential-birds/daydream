@@ -1,12 +1,12 @@
 """Main orchestration logic for the review and fix loop."""
 
 import shutil
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from daydream import git_ops
 from daydream.agent import (
     MissingSkillError,
     console,
@@ -17,6 +17,7 @@ from daydream.backends import Backend, create_backend
 from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
 from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
+from daydream.git_ops import GitError
 from daydream.phases import (
     FixResult,
     _detect_default_branch,
@@ -205,19 +206,9 @@ def _get_head_sha(cwd: Path) -> str | None:
 
     """
     try:
-        result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            timeout=5,
-            shell=False,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (subprocess.SubprocessError, OSError):
-        pass
-    return None
+        return git_ops.head_sha(cwd)
+    except GitError:
+        return None
 
 
 async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
@@ -670,15 +661,11 @@ async def run(config: RunConfig | None = None) -> int:
         if config.loop:
             # Guard: loop mode reverts uncommitted changes on failure,
             # so refuse to start if the working tree is dirty.
-            status = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-                ["git", "status", "--porcelain"],
-                capture_output=True,
-                text=True,
-                cwd=target_dir,
-                timeout=10,
-                shell=False,
-            )
-            if status.returncode != 0 or status.stdout.strip():
+            try:
+                porcelain = git_ops.status_porcelain(target_dir)
+            except GitError:
+                porcelain = None
+            if porcelain is None or porcelain.strip():
                 print_error(
                     console,
                     "Dirty Working Tree",

@@ -1,7 +1,7 @@
 """Git metadata capture for archived runs.
 
 Captures branch, commit SHA, remote URL, and repo slug from the target
-directory at archive time. Each subprocess call is independent with a
+directory at archive time. Each ``git_ops`` call is independent with a
 5-second timeout so a single git failure doesn't block the others.
 
 Exports:
@@ -10,9 +10,11 @@ Exports:
 """
 
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from daydream import git_ops
+from daydream.git_ops import BranchNotFoundError, GitError
 
 
 @dataclass
@@ -53,23 +55,6 @@ def _parse_repo_slug(remote_url: str) -> str | None:
     return None
 
 
-def _run_git(cwd: Path, *args: str) -> str | None:
-    """Run a git command and return stripped stdout, or None on failure."""
-    try:
-        result = subprocess.run(  # noqa: S603 - args are not user-controlled
-            ["git", *args],  # noqa: S607 - git is a trusted command
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (subprocess.SubprocessError, OSError):
-        pass
-    return None
-
-
 def capture_git_context(target_dir: Path) -> GitContext:
     """Capture current git state from *target_dir*.
 
@@ -78,23 +63,23 @@ def capture_git_context(target_dir: Path) -> GitContext:
     """
     ctx = GitContext()
 
-    ctx.remote_url = _run_git(target_dir, "config", "--get", "remote.origin.url")
+    ctx.remote_url = git_ops.remote_url(target_dir)
     if ctx.remote_url:
         ctx.repo_slug = _parse_repo_slug(ctx.remote_url)
 
-    ctx.branch = _run_git(target_dir, "branch", "--show-current")
-    ctx.head_sha = _run_git(target_dir, "rev-parse", "HEAD")
+    try:
+        ctx.branch = git_ops.current_branch(target_dir)
+    except GitError:
+        ctx.branch = None
 
-    # Detect default branch
-    symbolic = _run_git(target_dir, "symbolic-ref", "refs/remotes/origin/HEAD")
-    if symbolic:
-        ctx.base_branch = symbolic.rsplit("/", 1)[-1]
-    else:
-        # Fallback: check for main or master
-        for candidate in ("main", "master"):
-            check = _run_git(target_dir, "rev-parse", "--verify", f"refs/heads/{candidate}")
-            if check:
-                ctx.base_branch = candidate
-                break
+    try:
+        ctx.head_sha = git_ops.head_sha(target_dir)
+    except GitError:
+        ctx.head_sha = None
+
+    try:
+        ctx.base_branch = git_ops.default_branch(target_dir)
+    except (BranchNotFoundError, GitError):
+        ctx.base_branch = None
 
     return ctx

@@ -12,6 +12,80 @@ from daydream.exploration import (
     FileInfo,
 )
 
+# --- Real-git fixtures ------------------------------------------------------
+#
+# Mirrors the helpers that previously lived only in tests/test_git_ops.py.
+# Lifted here so other test modules (notably tests/test_pr_review.py) can
+# build real repos instead of mocking subprocess. tests/test_workspace.py
+# still has its own helpers (it needs additional plumbing for bare-origin
+# push semantics) — left untouched on purpose.
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> str:
+    """Run a git command in *repo* and return stripped stdout (test helper)."""
+    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", *args],  # noqa: S607 - git is a trusted command
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=check,
+    )
+    return proc.stdout.strip()
+
+
+def _configure_identity(repo: Path) -> None:
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Tester")
+
+
+def _commit(repo: Path, message: str) -> str:
+    _git(repo, "commit", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-b", "main")
+    _configure_identity(repo)
+
+
+def _bare_remote(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "--bare", "-b", "main")
+    return path
+
+
+def _make_repo_with_main(tmp_path: Path, name: str = "repo") -> Path:
+    repo = tmp_path / name
+    _init_repo(repo)
+    (repo / "base.txt").write_text("base\n")
+    _git(repo, "add", "base.txt")
+    _commit(repo, "initial")
+    return repo
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path) -> Path:
+    """Initialize a fresh git repo at tmp_path with one initial commit on `main`."""
+    return _make_repo_with_main(tmp_path)
+
+
+@pytest.fixture
+def bare_origin(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A bare repo suitable for use as `origin`."""
+    path = tmp_path_factory.mktemp("origin") / "remote.git"
+    return _bare_remote(path)
+
+
+@pytest.fixture
+def repo_with_origin(tmp_path: Path, bare_origin: Path) -> Path:
+    """A working repo cloned from bare_origin, ready for push/fetch."""
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "remote", "add", "origin", str(bare_origin))
+    _git(repo, "push", "-u", "origin", "main")
+    _git(repo, "remote", "set-head", "origin", "main")
+    return repo
+
 
 @pytest.fixture
 def exploration_context_fixture() -> ExplorationContext:

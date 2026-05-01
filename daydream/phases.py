@@ -1,12 +1,12 @@
 """Phase functions for the review and fix loop."""
 
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from daydream import git_ops
 from daydream.agent import (
     console,
     detect_test_success,
@@ -14,6 +14,7 @@ from daydream.agent import (
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
+from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
 
 if TYPE_CHECKING:
@@ -475,23 +476,9 @@ def revert_uncommitted_changes(cwd: Path) -> bool:
 
     """
     try:
-        subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", "checkout", "."],
-            capture_output=True,
-            cwd=cwd,
-            timeout=10,
-            shell=False,
-            check=True,
-        )
-        subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", "clean", "-fd"],
-            capture_output=True,
-            cwd=cwd,
-            timeout=10,
-            shell=False,
-            check=True,
-        )
-    except (subprocess.SubprocessError, OSError) as e:
+        git_ops.checkout_paths(cwd, [Path(".")])
+        git_ops.clean_untracked(cwd)
+    except GitError as e:
         if not get_quiet_mode():
             print_warning(console, f"Revert failed: {type(e).__name__}: {e}")
         return False
@@ -505,39 +492,10 @@ def _detect_default_branch(cwd: Path) -> str | None:
         The default branch name, or None if detection fails.
 
     """
-    # Try the remote HEAD symbolic ref first (most reliable)
     try:
-        result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            timeout=5,
-            shell=False,
-        )
-        if result.returncode == 0:
-            # Output is like "refs/remotes/origin/main"
-            return result.stdout.strip().rsplit("/", 1)[-1]
-    except (subprocess.SubprocessError, OSError):
-        pass
-
-    # Fallback: check if main or master exists locally
-    for branch in ("main", "master"):
-        try:
-            result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-                ["git", "rev-parse", "--verify", branch],
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                timeout=5,
-                shell=False,
-            )
-            if result.returncode == 0:
-                return branch
-        except (subprocess.SubprocessError, OSError):
-            pass
-
-    return None
+        return git_ops.default_branch(cwd)
+    except (BranchNotFoundError, GitError):
+        return None
 
 
 def _git_diff(cwd: Path, exclude: list[str] | None = None) -> str | None:
@@ -555,22 +513,9 @@ def _git_diff(cwd: Path, exclude: list[str] | None = None) -> str | None:
     base_branch = _detect_default_branch(cwd)
     if not base_branch:
         return None
-    args = ["git", "diff", f"{base_branch}...HEAD"]
-    if exclude:
-        args.append("--")
-        args.append(".")
-        args.extend(f":(exclude){p.rstrip('/')}" for p in exclude)
     try:
-        result = subprocess.run(  # noqa: S603
-            args,
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            timeout=30,
-            shell=False,
-        )
-        return result.stdout if result.returncode == 0 else None
-    except (subprocess.SubprocessError, OSError):
+        return git_ops.diff(cwd, base_branch, exclude=exclude)
+    except GitError:
         return None
 
 
@@ -585,16 +530,8 @@ def _git_log(cwd: Path) -> str:
     if not base_branch:
         return ""
     try:
-        result = subprocess.run(  # noqa: S603
-            ["git", "log", f"{base_branch}..HEAD", "--oneline"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            timeout=10,
-            shell=False,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.SubprocessError, OSError):
+        return git_ops.log(cwd, base_branch)
+    except GitError:
         return ""
 
 
@@ -606,17 +543,10 @@ def _git_branch(cwd: Path) -> str:
 
     """
     try:
-        result = subprocess.run(  # noqa: S603
-            ["git", "branch", "--show-current"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            timeout=5,
-            shell=False,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.SubprocessError, OSError):
+        name = git_ops.current_branch(cwd)
+    except GitError:
         return ""
+    return name or ""
 
 
 def check_review_file_exists(target_dir: Path) -> None:
