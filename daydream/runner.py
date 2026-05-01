@@ -4,7 +4,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from daydream import git_ops
 from daydream.agent import (
@@ -56,6 +56,11 @@ from daydream.ui import (
     prompt_user,
 )
 from daydream.workspace import make_in_place_workcontext
+
+# Stage 4 — output mode for the consolidated CLI surface. ``loop`` runs the
+# full review→fix→test cycle, ``comment`` posts inline PR comments and exits,
+# ``review`` writes a report to terminal/markdown and exits.
+OutputMode = Literal["loop", "comment", "review"]
 
 
 @dataclass
@@ -115,6 +120,17 @@ class RunConfig:
     pr_repo: str | None = None
     archive: bool = True
     run_eval: bool = False
+
+    # Stage 4 — new consolidated CLI surface. Wired into argparse in cli.py;
+    # runner-side dispatch lands in Stage 4.1b. Defaults preserve current
+    # behavior so partial RunConfig construction in tests stays valid.
+    branch: str | None = None
+    base: str | None = None
+    output_mode: OutputMode = "loop"
+    force_worktree: bool = False
+    shallow: bool = False
+    extra_copy: list[Path] = field(default_factory=list)
+    forced_skill: str | None = None  # set by deprecated language flags
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
