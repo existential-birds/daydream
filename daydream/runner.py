@@ -1,4 +1,23 @@
-"""Main orchestration logic for the review and fix loop."""
+"""Main orchestration logic for the review and fix loop.
+
+Stage 4.1b unified the runner around a single :func:`run` entry point. ``run``
+opens the workspace via :func:`daydream.workspace.open_workspace` and then
+dispatches to a private helper based on ``config.pr_number`` /
+``config.output_mode`` / ``config.shallow`` / ``config.deep``::
+
+    pr_number set            -> _run_pr_feedback (today's PR feedback flow)
+    output_mode == "comment" -> _run_comment    (review + post inline PR comments)
+    output_mode == "review"  -> _run_review     (review report only, no posting)
+    output_mode == "loop":
+        config.shallow       -> _run_loop_shallow (single-stack review-fix-test)
+        else                 -> _run_loop_deep    (deep multi-stack pipeline)
+
+The deprecated ``--ttt`` / ``--pr`` / ``--deep`` flags continue to work for
+one release: they populate the legacy fields on :class:`RunConfig` and the
+dispatch interprets them. ``run_feedback`` is the entry point used by the
+``daydream feedback <pr#>`` subcommand and is a thin wrapper that sets
+``pr_number`` and re-enters :func:`run`.
+"""
 
 import shutil
 from collections.abc import Callable
@@ -55,7 +74,7 @@ from daydream.ui import (
     print_warning,
     prompt_user,
 )
-from daydream.workspace import make_in_place_workcontext
+from daydream.workspace import WorkContext, open_workspace
 
 # Stage 4 — output mode for the consolidated CLI surface. ``loop`` runs the
 # full review→fix→test cycle, ``comment`` posts inline PR comments and exits,
@@ -228,16 +247,152 @@ def _get_head_sha(cwd: Path) -> str | None:
         return None
 
 
-async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
-    """Execute the PR feedback flow: fetch, parse, fix, commit, respond.
+# --- Public entry points ----------------------------------------------------
+
+
+async def run(config: RunConfig | None = None) -> int:
+    """Execute a daydream run end-to-end.
+
+    Opens the workspace via :func:`open_workspace` and dispatches to the
+    appropriate flow helper based on ``config.pr_number`` / ``config.output_mode``
+    / ``config.shallow`` / ``config.deep``. Centralising workspace lifecycle
+    means every flow gets a real :class:`WorkContext` (in-place or ephemeral)
+    with consistent base/branch resolution.
 
     Args:
-        config: Run configuration with pr_number and bot set.
-        target_dir: Resolved target directory path.
+        config: Optional configuration. Defaults to a fresh :class:`RunConfig`
+            (interactive prompts for target dir, skill, cleanup).
 
     Returns:
-        Exit code (0 for success, 1 for failure)
+        Exit code (0 for success, 1 for failure).
+    """
+    if config is None:
+        config = RunConfig()
 
+    print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
+
+    # Resolve target directory (from config or prompt). Done outside the
+    # workspace context manager so that path-validation errors short-circuit
+    # before we incur any git work.
+    if config.target is not None:
+        target_dir = Path(config.target).resolve()
+    else:
+        target_input = prompt_user(console, "Enter target directory", ".")
+        target_dir = Path(target_input).resolve()
+
+    if not target_dir.is_dir():
+        print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
+        return 1
+
+    # Translate legacy fields into the new dispatch surface. ``--ttt`` was
+    # mapped to ``--comment`` by Stage 4.1a in the CLI layer, but tests still
+    # construct ``RunConfig(trust_the_technology=True)`` directly. Honour both
+    # spellings until the legacy field is deleted.
+    if config.trust_the_technology and config.output_mode == "loop":
+        config.output_mode = "comment"
+
+    # Quiet mode tweak: Codex backends need their shell output visible because
+    # those commands ARE the user-facing signal. Done before any backend is
+    # constructed so per-phase backends inherit the right setting.
+    quiet = config.quiet
+    if quiet:
+        codex_in_use = config.backend == "codex" or any(
+            b == "codex"
+            for b in (config.review_backend, config.fix_backend, config.test_backend)
+            if b is not None
+        )
+        if codex_in_use:
+            quiet = False
+    set_quiet_mode(quiet)
+    set_model(config.model or "opus")
+
+    # ``--comment`` and ``--review`` skip the test phase, so they also skip
+    # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).
+    skip_tests = config.output_mode != "loop"
+
+    # In-place mode only: fall back to ``make_in_place_workcontext`` when the
+    # target isn't a real git worktree. Preserves existing test ergonomics
+    # (many tests run against a synthetic project dir without ``git init``).
+    # Stage 4.2 wires the loud failure on top of ``open_workspace``.
+    is_in_place = config.branch is None and not config.force_worktree
+    if is_in_place and not git_ops.is_inside_worktree(target_dir):
+        from daydream.workspace import make_in_place_workcontext
+
+        work = make_in_place_workcontext(target_dir)
+        return await _dispatch(work, config)
+
+    try:
+        async with open_workspace(
+            source=target_dir,
+            branch=config.branch,
+            base=config.base,
+            force_ephemeral=config.force_worktree,
+            extra_copy=config.extra_copy,
+            skip_tests=skip_tests,
+        ) as work:
+            return await _dispatch(work, config)
+    except git_ops.GitError as exc:
+        print_error(console, "Workspace Error", str(exc))
+        return 1
+
+
+async def run_feedback(config: RunConfig, pr: int) -> int:
+    """Entry point for the ``daydream feedback <pr#>`` subcommand.
+
+    Sets ``config.pr_number`` and re-enters :func:`run` so the dispatch
+    routes to :func:`_run_pr_feedback`. Kept as a thin wrapper so cli.py
+    has a single named entry point per invocation shape.
+
+    Args:
+        config: Run configuration populated by the feedback subparser.
+        pr: PR number to ingest.
+
+    Returns:
+        Exit code (0 for success, 1 for failure).
+    """
+    config.pr_number = pr
+    return await run(config)
+
+
+# --- Dispatch ---------------------------------------------------------------
+
+
+async def _dispatch(work: WorkContext, config: RunConfig) -> int:
+    """Pick the flow helper for the resolved workspace + config.
+
+    Order matters: ``pr_number`` overrides everything (it's only set by the
+    deprecated ``--pr``/``feedback`` paths). Then output_mode picks comment vs
+    review vs loop. Inside loop, ``config.shallow`` / ``config.deep`` pick
+    between the single-stack and multi-stack pipelines.
+    """
+    if config.pr_number is not None:
+        return await _run_pr_feedback(work, config)
+
+    if config.output_mode == "comment":
+        return await _run_comment(work, config)
+
+    if config.output_mode == "review":
+        return await _run_review(work, config)
+
+    # output_mode == "loop"
+    if config.shallow:
+        return await _run_loop_shallow(work, config)
+    if config.deep:
+        return await _run_loop_deep(work, config)
+    # Default: legacy single-stack flow when neither shallow nor deep is set.
+    # Stage 4.x will flip the default to deep once the deprecated ``--deep``
+    # flag is removed.
+    return await _run_loop_shallow(work, config)
+
+
+# --- Helper: PR feedback flow ----------------------------------------------
+
+
+async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
+    """Today's PR feedback body, refactored to receive ``work`` from the dispatch.
+
+    Fetches bot review comments, parses them, applies fixes one-by-one,
+    commits/pushes, and posts a "fixed" reply on each addressed comment.
     """
     if config.pr_number is None or config.bot is None:
         print_error(console, "Invalid PR config", "--pr and --bot are required for PR feedback mode.")
@@ -245,12 +400,11 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
 
     pr_number = config.pr_number
     bot = config.bot
+    target_dir = work.repo
 
     backend_cache: dict[str, Backend] = {}
     review_backend = _resolve_backend(config, "review", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
-
-    work = make_in_place_workcontext(target_dir)
 
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
     async with TrajectoryRecorder(
@@ -263,8 +417,6 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         pr_repo=config.pr_repo,
         on_write=_make_archive_callback(config, target_dir),
     ):
-        print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
-
         console.print()
         print_info(console, f"PR feedback mode: PR #{pr_number}")
         print_info(console, f"Bot: {bot}")
@@ -336,20 +488,51 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         return 0
 
 
-async def run_trust(config: RunConfig, target_dir: Path) -> int:
-    """Execute the trust-the-technology flow: understand, evaluate, plan.
+# --- Helper: comment mode (--comment) --------------------------------------
 
-    Args:
-        config: Run configuration.
-        target_dir: Resolved target directory path.
 
-    Returns:
-        Exit code (0 for success, 1 for failure)
+async def _run_comment(work: WorkContext, config: RunConfig) -> int:
+    """Review + post inline PR comments + exit.
 
+    Pre-flight: when a branch is explicitly requested but no open PR exists
+    for it, refuse early with an actionable error rather than running a
+    review that has nowhere to land.
+    """
+    if config.branch is not None:
+        try:
+            prs = git_ops.gh_pr_list_for_branch(work.source, config.branch)
+        except GitError:
+            prs = []
+        if not prs:
+            print_error(
+                console,
+                "No Open PR",
+                f"no open PR for branch {config.branch} — push first or use --review",
+            )
+            return 1
+
+    return await _run_review_or_comment(work, config, post_to_pr=True)
+
+
+# --- Helper: review mode (--review) ----------------------------------------
+
+
+async def _run_review(work: WorkContext, config: RunConfig) -> int:
+    """Review + write a report and exit. No PR posting, no fix, no test."""
+    return await _run_review_or_comment(work, config, post_to_pr=False)
+
+
+async def _run_review_or_comment(
+    work: WorkContext, config: RunConfig, *, post_to_pr: bool,
+) -> int:
+    """Shared body for ``--comment`` and ``--review``.
+
+    Lifted from today's ``run_trust`` body. The only difference between the
+    two modes is whether the alternative-review issues are posted to the PR
+    via :func:`daydream.pr_review.post_review_to_pr_from_alt_issues`.
     """
     backend = _resolve_backend(config, "review")
-
-    work = make_in_place_workcontext(target_dir)
+    target_dir = work.repo
 
     # Gather git context using the resolved base branch from work (no
     # double-detection — base resolution is locked at workspace open time).
@@ -373,10 +556,11 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
 
+    flow = DaydreamRunFlow.TTT
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
     async with TrajectoryRecorder(
         path=trajectory_path,
-        run_flow=DaydreamRunFlow.TTT,
+        run_flow=flow,
         target_dir=target_dir,
         agent_model_name=config.model or config.backend or "claude",
         explicit_path=config.trajectory_path is not None,
@@ -440,54 +624,43 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
             if exploration_cleanup.is_dir():
                 shutil.rmtree(exploration_cleanup)
 
-        # Offer to post findings as inline PR review comments.
-        from daydream.pr_review import post_review_to_pr_from_alt_issues
+        # Optionally post findings as inline PR review comments. Only the
+        # ``--comment`` path enters this branch; ``--review`` exits with the
+        # plan written to disk.
+        if post_to_pr:
+            from daydream.pr_review import post_review_to_pr_from_alt_issues
 
-        await post_review_to_pr_from_alt_issues(
-            target_dir, issues, console=console
-        )
+            await post_review_to_pr_from_alt_issues(
+                target_dir, issues, console=console
+            )
 
         return 0
 
 
-async def run(config: RunConfig | None = None) -> int:
-    """Execute the review and fix loop.
+# --- Helper: shallow loop (single-stack review-fix-test) -------------------
 
-    Args:
-        config: Optional configuration. If provided, values skip prompts.
 
-    Returns:
-        Exit code (0 for success, 1 for failure)
+async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
+    """Single-stack review → fix → test → loop body.
 
+    This is today's ``run`` body lifted into a helper. The workspace
+    bootstrapping and target-dir resolution have moved up to :func:`run`;
+    everything else is unchanged.
     """
-    if config is None:
-        config = RunConfig()
+    target_dir = work.repo
 
-    print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
-
-    # Get target directory (from config or prompt)
-    if config.target is not None:
-        target_dir = Path(config.target).resolve()
-    else:
-        target_input = prompt_user(console, "Enter target directory", ".")
-        target_dir = Path(target_input).resolve()
-
-    if not target_dir.is_dir():
-        print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
-        return 1
-
-    # Get review skill (from config or prompt) - not required when starting at "test"
-    # or when using trust-the-technology / deep modes (which have their own flows)
+    # Resolve skill (forced via deprecated language flag, explicit ``--skill``,
+    # or interactive menu).
     skill: str | None = None
-    if config.start_at != "test" and not config.trust_the_technology and not config.deep:
-        if config.skill is not None:
-            # Map skill name to full skill path
-            if config.skill in SKILL_MAP:
-                skill = SKILL_MAP[config.skill]
-            elif config.skill in REVIEW_SKILLS.values():
-                skill = config.skill
+    forced = config.forced_skill or config.skill
+    if config.start_at != "test":
+        if forced is not None:
+            if forced in SKILL_MAP:
+                skill = SKILL_MAP[forced]
+            elif forced in REVIEW_SKILLS.values():
+                skill = forced
             else:
-                print_error(console, "Invalid Skill", f"'{config.skill}' is not a valid skill")
+                print_error(console, "Invalid Skill", f"'{forced}' is not a valid skill")
                 return 1
         else:
             console.print()
@@ -502,7 +675,6 @@ async def run(config: RunConfig | None = None) -> int:
 
             skill_choice = prompt_user(console, "Choice", "1")
 
-            # Convert string input to enum for REVIEW_SKILLS lookup
             try:
                 skill_enum = ReviewSkillChoice(skill_choice)
             except ValueError:
@@ -511,66 +683,27 @@ async def run(config: RunConfig | None = None) -> int:
 
             skill = REVIEW_SKILLS[skill_enum]
 
-    # Early validation: check review file exists when starting at parse or fix
-    # (not needed for trust-the-technology or deep modes -- both have their
-    # own resume-gate validation).
-    if (
-        config.start_at in ("parse", "fix")
-        and not config.trust_the_technology
-        and not config.deep
-    ):
+    # Early validation: check review file exists when starting at parse or fix.
+    if config.start_at in ("parse", "fix"):
         try:
             check_review_file_exists(target_dir)
         except FileNotFoundError as e:
             print_error(console, "Missing Review File", str(e))
             return 1
 
-    # Get cleanup setting (from config or prompt)
-    # Trust-the-technology and deep modes don't produce review files in the
-    # normal flow (deep returns before cleanup runs), so skip the prompt.
-    if config.trust_the_technology or config.deep:
-        cleanup_enabled = False
-    elif config.cleanup is not None:
+    # Cleanup setting (from config or prompt).
+    if config.cleanup is not None:
         cleanup_enabled = config.cleanup
     else:
         cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
         cleanup_enabled = cleanup_response.lower() in ("y", "yes")
 
-    # Create backends (may differ per-phase if overrides are set)
+    # Backends (per-phase overrides).
     backend_cache: dict[str, Backend] = {}
     review_backend = _resolve_backend(config, "review", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
     test_backend = _resolve_backend(config, "test", backend_cache)
 
-    # Set quiet mode: force off for Codex backends since their shell
-    # commands are the primary output the user needs to see.
-    quiet = config.quiet
-    if quiet:
-        codex_in_use = config.backend == "codex" or any(
-            b == "codex"
-            for b in (config.review_backend, config.fix_backend, config.test_backend)
-            if b is not None
-        )
-        if codex_in_use:
-            quiet = False
-    set_quiet_mode(quiet)
-    set_model(config.model or "opus")
-
-    # PR feedback mode: separate flow
-    if config.pr_number is not None:
-        return await run_pr_feedback(config, target_dir)
-
-    # Trust-the-technology mode: separate flow
-    if config.trust_the_technology:
-        return await run_trust(config, target_dir)
-
-    # Deep-review mode: separate flow (D-01, D-07).
-    if config.deep:
-        from daydream.deep.orchestrator import run_deep
-        return await run_deep(config, target_dir)
-
-    # Normal flow: open the trajectory recorder for the rest of run().
-    work = make_in_place_workcontext(target_dir)
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
     async with TrajectoryRecorder(
         path=trajectory_path,
@@ -624,18 +757,9 @@ async def run(config: RunConfig | None = None) -> int:
         async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
             """Execute one iteration of the review-parse-fix-test loop.
 
-            This nested function intentionally captures outer scope variables
-            (target_dir, skill, backends, config, console, iteration) to avoid
-            an unwieldy parameter list for a helper used only within run().
-
             Returns:
                 Tuple of (items, fixes_count, retries, tests_passed, should_continue).
                 should_continue is False if the loop should break (clean review or test failure).
-
-            Raises:
-                MissingSkillError: If the review skill is not available.
-                ValueError: If feedback parsing fails.
-
             """
             nonlocal diff_base
 
@@ -677,8 +801,7 @@ async def run(config: RunConfig | None = None) -> int:
                 return items, fixes_count, retries, False, False  # should_continue=False (failed)
 
             # Record the pre-commit SHA so the next iteration reviews
-            # the changes introduced by this iteration's commit
-            # (diff from pre-commit HEAD to post-commit HEAD).
+            # the changes introduced by this iteration's commit.
             diff_base = _get_head_sha(target_dir)
 
             # Commit iteration changes so the next review sees a clean tree
@@ -843,3 +966,18 @@ async def run(config: RunConfig | None = None) -> int:
             return 0
         else:
             return 1
+
+
+# --- Helper: deep loop (multi-stack pipeline) ------------------------------
+
+
+async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:
+    """Delegate to the deep-mode orchestrator.
+
+    The orchestrator currently bootstraps its own ``WorkContext`` from
+    ``target_dir``; once Stage 4.2 lands, it can take ``work`` directly.
+    For now, pass ``work.repo`` as the target so existing tests stay green.
+    """
+    from daydream.deep.orchestrator import run_deep
+
+    return await run_deep(config, work.repo)

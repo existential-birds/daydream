@@ -14,7 +14,7 @@ from daydream.agent import (
     get_current_backends,
     set_shutdown_requested,
 )
-from daydream.runner import RunConfig, run
+from daydream.runner import RunConfig, run, run_feedback
 from daydream.trajectory import get_signal_recorder
 from daydream.ui import (
     ShutdownPanel,
@@ -784,8 +784,13 @@ def main() -> None:
             _handle_label_command(argv[1:])
             return
 
+        is_feedback_subcommand = bool(argv) and argv[0] == "feedback"
         config = _parse_args()
-        exit_code = anyio.run(run, config)
+        if is_feedback_subcommand:
+            assert config.pr_number is not None  # _build_feedback_config guarantees
+            exit_code = anyio.run(run_feedback, config, config.pr_number)
+        else:
+            exit_code = anyio.run(run, config)
         sys.exit(exit_code)
     except KeyboardInterrupt:
         panel = get_shutdown_panel()

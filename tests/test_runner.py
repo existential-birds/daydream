@@ -1,9 +1,18 @@
-"""Tests for daydream.runner.RunConfig."""
+"""Tests for daydream.runner.RunConfig and the unified ``run`` dispatch."""
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from daydream import runner
 from daydream.exploration import ExplorationContext
 from daydream.runner import RunConfig
+from daydream.workspace import WorkContext
 
 
 def test_run_config_exploration_depth():
@@ -18,3 +27,208 @@ def test_run_config_exploration_context_defaults_to_none():
     explicit = ExplorationContext()
     cfg2 = RunConfig(exploration_context=explicit)
     assert cfg2.exploration_context is explicit
+
+
+# --- Stage 4.1b dispatch tests ---------------------------------------------
+
+
+def _fake_work(repo: Path) -> WorkContext:
+    """Build a synthetic ``WorkContext`` for dispatch unit tests."""
+    return WorkContext(
+        repo=repo,
+        source=repo,
+        base_branch="main",
+        base_sha="DEADBEEF",
+        head_branch="feat/x",
+        head_sha="CAFEBABE",
+        is_ephemeral=False,
+        run_id="20260101000000-deadbeef",
+    )
+
+
+@pytest.fixture
+def patch_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Stub ``open_workspace`` and the in-place fallback so dispatch tests
+    don't touch git. Yields the synthetic ``WorkContext`` callers will see.
+    """
+    work = _fake_work(tmp_path)
+
+    @asynccontextmanager
+    async def _fake_open_workspace(*_args: Any, **_kwargs: Any) -> AsyncIterator[WorkContext]:
+        yield work
+
+    monkeypatch.setattr("daydream.runner.open_workspace", _fake_open_workspace)
+    # Force the in-place fallback path off — every call goes through the fake
+    # context manager. Avoids ambiguity about which code path was exercised.
+    monkeypatch.setattr("daydream.runner.git_ops.is_inside_worktree", lambda _p: True)
+    return work
+
+
+@pytest.fixture
+def silence_runner_ui(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the noisy ``print_phase_hero`` banner during dispatch tests."""
+    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_to_pr_feedback_when_pr_number_set(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    called: dict[str, Any] = {}
+
+    async def stub(work, config):
+        called["work"] = work
+        called["pr"] = config.pr_number
+        return 0
+
+    monkeypatch.setattr("daydream.runner._run_pr_feedback", stub)
+    config = RunConfig(target=str(tmp_path), pr_number=42, bot="botname")
+
+    exit_code = await runner.run(config)
+    assert exit_code == 0
+    assert called["pr"] == 42
+    assert called["work"] is patch_workspace
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_to_comment_mode(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    called: dict[str, Any] = {}
+
+    async def stub(work, config):
+        called["mode"] = config.output_mode
+        return 0
+
+    monkeypatch.setattr("daydream.runner._run_comment", stub)
+    config = RunConfig(target=str(tmp_path), output_mode="comment")
+
+    exit_code = await runner.run(config)
+    assert exit_code == 0
+    assert called["mode"] == "comment"
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_to_review_mode(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    called: dict[str, Any] = {}
+
+    async def stub(work, config):
+        called["mode"] = config.output_mode
+        return 0
+
+    monkeypatch.setattr("daydream.runner._run_review", stub)
+    config = RunConfig(target=str(tmp_path), output_mode="review")
+
+    exit_code = await runner.run(config)
+    assert exit_code == 0
+    assert called["mode"] == "review"
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_to_shallow_loop(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    called: dict[str, bool] = {}
+
+    async def stub(work, config):
+        called["shallow"] = config.shallow
+        return 0
+
+    monkeypatch.setattr("daydream.runner._run_loop_shallow", stub)
+    config = RunConfig(target=str(tmp_path), output_mode="loop", shallow=True)
+
+    exit_code = await runner.run(config)
+    assert exit_code == 0
+    assert called["shallow"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_to_deep_loop(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    called: dict[str, bool] = {}
+
+    async def stub(work, config):
+        called["deep"] = config.deep
+        return 0
+
+    monkeypatch.setattr("daydream.runner._run_loop_deep", stub)
+    # ``shallow=False`` + ``deep=True`` is the deep-loop selector. The legacy
+    # ``deep`` field is the explicit opt-in until Stage 4.x flips the default.
+    config = RunConfig(target=str(tmp_path), output_mode="loop", shallow=False, deep=True)
+
+    exit_code = await runner.run(config)
+    assert exit_code == 0
+    assert called["deep"] is True
+
+
+@pytest.mark.asyncio
+async def test_comment_mode_errors_when_no_open_pr_for_branch(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    """``--comment --branch X`` with no open PR for X exits 1 with a clear error."""
+    monkeypatch.setattr(
+        "daydream.runner.git_ops.gh_pr_list_for_branch", lambda _repo, _branch: []
+    )
+    captured: dict[str, str] = {}
+
+    def fake_print_error(_console, title, body):
+        captured["title"] = title
+        captured["body"] = body
+
+    monkeypatch.setattr("daydream.runner.print_error", fake_print_error)
+
+    config = RunConfig(
+        target=str(tmp_path),
+        output_mode="comment",
+        branch="feat/missing",
+    )
+    exit_code = await runner.run(config)
+
+    assert exit_code == 1
+    assert "No Open PR" == captured["title"]
+    assert "no open PR for branch feat/missing" in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_run_feedback_routes_through_pr_feedback(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    """``run_feedback`` sets ``pr_number`` and re-enters dispatch."""
+    called: dict[str, Any] = {}
+
+    async def stub(work, config):
+        called["pr"] = config.pr_number
+        return 0
+
+    monkeypatch.setattr("daydream.runner._run_pr_feedback", stub)
+    config = RunConfig(target=str(tmp_path), bot="botname")
+
+    exit_code = await runner.run_feedback(config, 99)
+    assert exit_code == 0
+    assert called["pr"] == 99
+    # The wrapper should have populated ``pr_number`` on the shared config.
+    assert config.pr_number == 99
+
+
+@pytest.mark.asyncio
+async def test_legacy_trust_the_technology_maps_to_comment(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    """``trust_the_technology=True`` is the deprecated alias for ``--comment``."""
+    called: dict[str, str] = {}
+
+    async def stub(work, config):
+        called["mode"] = config.output_mode
+        return 0
+
+    # Stub gh_pr_list_for_branch so the comment pre-flight (only fires when
+    # branch is set) doesn't matter — branch is None here, so it's skipped.
+    monkeypatch.setattr("daydream.runner._run_comment", stub)
+    config = RunConfig(target=str(tmp_path), trust_the_technology=True)
+
+    exit_code = await runner.run(config)
+    assert exit_code == 0
+    assert called["mode"] == "comment"
