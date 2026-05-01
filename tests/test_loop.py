@@ -168,6 +168,7 @@ async def test_loop_exits_on_zero_issues(loop_target, mock_ui_loop, monkeypatch)
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=5,
+        shallow=True,
     )
     exit_code = await run(config)
 
@@ -187,6 +188,7 @@ async def test_loop_respects_max_iterations(loop_target, mock_ui_loop, monkeypat
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=3,
+        shallow=True,
     )
     exit_code = await run(config)
 
@@ -210,6 +212,7 @@ async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=5,
+        shallow=True,
     )
     exit_code = await run(config)
 
@@ -246,6 +249,7 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=5,
+        shallow=True,
     )
     exit_code = await run(config)
 
@@ -267,6 +271,7 @@ async def test_loop_false_single_pass(loop_target, mock_ui_loop, monkeypatch):
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=False,
+        shallow=True,
     )
     exit_code = await run(config)
 
@@ -287,6 +292,7 @@ async def test_loop_commits_between_iterations(loop_target, mock_ui_loop, monkey
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=5,
+        shallow=True,
     )
     exit_code = await run(config)
 
@@ -309,6 +315,7 @@ async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeyp
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=5,
+        shallow=True,
     )
     exit_code = await run(config)
 
@@ -339,6 +346,7 @@ async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkey
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=5,
+        shallow=True,
     )
     exit_code = await run(config)
 
@@ -356,6 +364,7 @@ async def test_loop_no_commit_on_clean_first_iteration(loop_target, mock_ui_loop
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=5,
+        shallow=True,
     )
     exit_code = await run(config)
 
@@ -376,6 +385,7 @@ async def test_loop_rejects_dirty_working_tree(loop_target, mock_ui_loop, monkey
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=5,
+        shallow=True,
     )
     exit_code = await run(config)
 
@@ -438,6 +448,7 @@ async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_lo
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=5,
+        shallow=True,
     )
     exit_code = await run(config)
     assert exit_code == 0
@@ -492,6 +503,7 @@ async def test_loop_diff_base_unchanged_on_test_failure(loop_target, mock_ui_loo
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
         cleanup=False, loop=True, max_iterations=5,
+        shallow=True,
     )
     exit_code = await run(config)
 

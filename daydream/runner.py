@@ -310,17 +310,12 @@ async def run(config: RunConfig | None = None) -> int:
     # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).
     skip_tests = config.output_mode != "loop"
 
-    # In-place mode only: fall back to ``make_in_place_workcontext`` when the
-    # target isn't a real git worktree. Preserves existing test ergonomics
-    # (many tests run against a synthetic project dir without ``git init``).
-    # Stage 4.2 wires the loud failure on top of ``open_workspace``.
-    is_in_place = config.branch is None and not config.force_worktree
-    if is_in_place and not git_ops.is_inside_worktree(target_dir):
-        from daydream.workspace import make_in_place_workcontext
-
-        work = make_in_place_workcontext(target_dir)
-        return await _dispatch(work, config)
-
+    # Stage 4.2: removed the silent fallback to ``make_in_place_workcontext``.
+    # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
+    # ``NotAWorktreeError`` (a ``GitError``) caught below, so the user sees a
+    # loud error instead of a confusing "no diff found" downstream. The
+    # ``WrongBranchError`` check lives in ``_dispatch`` (loop modes only) and
+    # propagates up to :func:`daydream.cli.main` for the user-facing message.
     try:
         async with open_workspace(
             source=target_dir,
@@ -331,6 +326,9 @@ async def run(config: RunConfig | None = None) -> int:
             skip_tests=skip_tests,
         ) as work:
             return await _dispatch(work, config)
+    except git_ops.WrongBranchError:
+        # Propagate to ``cli.main`` for the actionable error panel.
+        raise
     except git_ops.GitError as exc:
         print_error(console, "Workspace Error", str(exc))
         return 1
@@ -362,8 +360,8 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
 
     Order matters: ``pr_number`` overrides everything (it's only set by the
     deprecated ``--pr``/``feedback`` paths). Then output_mode picks comment vs
-    review vs loop. Inside loop, ``config.shallow`` / ``config.deep`` pick
-    between the single-stack and multi-stack pipelines.
+    review vs loop. Inside loop, ``config.shallow`` selects the single-stack
+    pipeline; otherwise the deep multi-stack pipeline runs (the new default).
     """
     if config.pr_number is not None:
         return await _run_pr_feedback(work, config)
@@ -375,14 +373,32 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
         return await _run_review(work, config)
 
     # output_mode == "loop"
+    # Stage 4.2 — guard against the silent-failure case where the user runs
+    # ``daydream`` from a worktree that's checked out to the base branch with
+    # no ``--branch`` and no ``--worktree``. There's nothing to review against
+    # itself; raise loudly so cli.main() (and ``run()``'s except clause) can
+    # render the actionable message.
+    if (
+        config.branch is None
+        and not config.force_worktree
+        and work.head_branch is not None
+        and work.head_branch == work.base_branch
+    ):
+        raise git_ops.WrongBranchError(
+            f"cwd is on the base branch {work.base_branch!r} -- "
+            "there's nothing to review against itself.\n"
+            "Either:\n"
+            f"  - check out a feature branch in this worktree and re-run, or\n"
+            f"  - run with --branch <feature-branch> to review the server's version, or\n"
+            f"  - run with --worktree to force ephemeral isolation."
+        )
+
     if config.shallow:
         return await _run_loop_shallow(work, config)
-    if config.deep:
-        return await _run_loop_deep(work, config)
-    # Default: legacy single-stack flow when neither shallow nor deep is set.
-    # Stage 4.x will flip the default to deep once the deprecated ``--deep``
-    # flag is removed.
-    return await _run_loop_shallow(work, config)
+    # Default (Stage 4.2): deep multi-stack pipeline. Pass ``--shallow`` to opt
+    # into the single-stack flow. The deprecated ``--deep`` flag is now a
+    # no-op since deep IS the default.
+    return await _run_loop_deep(work, config)
 
 
 # --- Helper: PR feedback flow ----------------------------------------------

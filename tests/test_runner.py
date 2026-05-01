@@ -148,20 +148,46 @@ async def test_run_dispatches_to_shallow_loop(
 async def test_run_dispatches_to_deep_loop(
     monkeypatch, patch_workspace, silence_runner_ui, tmp_path
 ):
+    """Stage 4.2: deep is the default. No flags required to route here."""
     called: dict[str, bool] = {}
 
     async def stub(work, config):
-        called["deep"] = config.deep
+        called["routed"] = True
+        called["shallow"] = config.shallow
         return 0
 
     monkeypatch.setattr("daydream.runner._run_loop_deep", stub)
-    # ``shallow=False`` + ``deep=True`` is the deep-loop selector. The legacy
-    # ``deep`` field is the explicit opt-in until Stage 4.x flips the default.
-    config = RunConfig(target=str(tmp_path), output_mode="loop", shallow=False, deep=True)
+    # Default RunConfig (no shallow, no deep) goes deep — that's the new default.
+    config = RunConfig(target=str(tmp_path), output_mode="loop")
 
     exit_code = await runner.run(config)
     assert exit_code == 0
-    assert called["deep"] is True
+    assert called["routed"] is True
+    assert called["shallow"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_to_shallow_loop_when_explicit(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    """Shallow runs only when ``--shallow`` is explicitly set (paired w/ deep default)."""
+    called: dict[str, bool] = {}
+
+    async def shallow_stub(work, config):
+        called["shallow"] = True
+        return 0
+
+    async def deep_stub(work, config):
+        called["deep"] = True
+        return 0
+
+    monkeypatch.setattr("daydream.runner._run_loop_shallow", shallow_stub)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", deep_stub)
+    config = RunConfig(target=str(tmp_path), output_mode="loop", shallow=True)
+
+    exit_code = await runner.run(config)
+    assert exit_code == 0
+    assert called == {"shallow": True}
 
 
 @pytest.mark.asyncio

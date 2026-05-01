@@ -124,7 +124,14 @@ def mock_ui(monkeypatch):
 
 @pytest.fixture
 def target_project(tmp_path: Path) -> Path:
-    """Create a minimal project structure for testing."""
+    """Create a minimal project structure for testing.
+
+    Stage 4.2: ``open_workspace`` requires a real worktree. Initialise a
+    fresh repo with one initial commit on ``main`` and a ``feature`` branch
+    so the WrongBranchError guard does not fire for default-branch runs.
+    """
+    import subprocess
+
     project = tmp_path / "test_project"
     project.mkdir()
 
@@ -146,6 +153,31 @@ Found 1 issue to address.
 """
     (project / ".review-output.md").write_text(review_content)
 
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=project, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=project, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=project, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "add", "main.py"], cwd=project, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=project, capture_output=True, check=True,
+    )
+    # Move off main so the WrongBranchError guard doesn't fire when
+    # tests run with default (no --branch) configuration.
+    subprocess.run(
+        ["git", "checkout", "-b", "feature"],
+        cwd=project, capture_output=True, check=True,
+    )
+
     return project
 
 
@@ -157,6 +189,7 @@ async def test_full_fix_flow(mock_backend, mock_ui, target_project: Path):
         skill="python",
         quiet=True,
         cleanup=False,
+        shallow=True,
     )
 
     exit_code = await run(config)
@@ -733,7 +766,10 @@ async def test_run_populates_exploration_context(monkeypatch, target_project: Pa
         lambda name, model=None: _AgentsRecordingMockBackend(),
     )
 
-    config = RunConfig(target=str(target_project), skill="python", quiet=True, cleanup=False)
+    config = RunConfig(
+        target=str(target_project), skill="python", quiet=True, cleanup=False,
+        shallow=True,
+    )
     exit_code = await run(config)
 
     assert exit_code == 0

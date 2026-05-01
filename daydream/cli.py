@@ -802,6 +802,13 @@ def main() -> None:
             panel.finish()
             set_shutdown_panel(None)
         sys.exit(130)
+    except git_ops.WrongBranchError as exc:
+        # Stage 4.2 — loud branch validation. ``runner.run`` re-raises this
+        # so ``cli.main`` owns the user-facing rendering for the
+        # silent-failure case where cwd is on the base branch.
+        console.print()
+        print_error(console, "Wrong Branch", str(exc))
+        sys.exit(1)
     except Exception as e:
         # Clean up any active shutdown panel
         panel = get_shutdown_panel()
