@@ -59,7 +59,7 @@ from daydream.ui import (
     print_warning,
     prompt_user,
 )
-from daydream.workspace import make_in_place_workcontext
+from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
@@ -234,7 +234,7 @@ def _candidate_pair_to_json(pair: Any) -> dict[str, Any]:
     return data
 
 
-async def run_deep(config: RunConfig, target_dir: Path) -> int:
+async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """Execute the deep-review pipeline (D-07).
 
     Composes exploration pre-scan, TTT, per-stack fan-out, per-stack parse,
@@ -245,7 +245,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
     Args:
         config: Run configuration. ``config.deep`` must be True;
             ``config.start_at`` drives resume behavior.
-        target_dir: Resolved target directory path (repo root).
+        work: Resolved working environment for the run.
 
     Returns:
         Exit code (0 on success, 1 on failure).
@@ -259,7 +259,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
 
     backend = _resolve_backend(config, "review")
 
-    work = make_in_place_workcontext(target_dir)
+    target_dir = work.repo
 
     # ------ Preamble (mirrors run_trust) ------
     try:

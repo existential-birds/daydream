@@ -10,8 +10,21 @@ Conventions:
     * Every command receives ``cwd=repo`` (no ``git -C`` shenanigans).
     * Read-only queries time out at 5 seconds, IO-bound at 30 seconds, and
       ``gh`` operations at 60 seconds.
-    * Subprocess failures bubble up as :class:`GitError` (or one of its
-      subclasses) with helpful context.
+
+Error-handling patterns:
+    Functions in this module follow one of two documented patterns:
+
+    **Hard failure (raise GitError)**: Used when the caller cannot proceed
+    without the result. Examples: :func:`head_sha`, :func:`diff`, :func:`fetch`.
+    These raise :class:`GitError` (or a subclass) on any non-zero exit.
+
+    **Soft failure (return sentinel)**: Used when "data not available" is a
+    valid, expected outcome the caller can handle inline. These return
+    ``None``, ``False``, ``0``, or ``[]`` on non-zero exit instead of raising.
+    Examples: :func:`remote_url`, :func:`merge_base`, :func:`gh_pr_view`.
+
+    Each function's docstring specifies which pattern it follows under its
+    **Raises** or **Returns** section.
 
 The module is intentionally dependency-free: stdlib only.
 """
@@ -205,16 +218,8 @@ def remote_url(repo: Path, remote: str = "origin") -> str | None:
         The configured URL, or ``None`` when the remote is not set.
     """
     try:
-        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", "config", "--get", f"remote.{remote}.url"],  # noqa: S607 - git is a trusted command
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            shell=False,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
+        proc = _run_git(repo, ["config", "--get", f"remote.{remote}.url"], timeout=5)
+    except GitError:
         return None
     if proc.returncode != 0:
         return None
@@ -401,7 +406,7 @@ def diff_paths(
     paths: list[str],
     *,
     unified: int = 3,
-    two_dot: bool = True,
+    merge_base_diff: bool = False,
 ) -> str:
     """Diff a specific set of paths between *base* and *head*.
 
@@ -419,7 +424,8 @@ def diff_paths(
         head: Head ref.
         paths: Pathspec list (relative to repo root).
         unified: Lines of context.
-        two_dot: When True, use ``base..head``; when False, ``base...head``.
+        merge_base_diff: When False (default), use ``base..head`` (direct diff);
+            when True, use ``base...head`` (diff since merge-base).
 
     Returns:
         The diff text. Empty string when there are no changes for *paths*.
@@ -427,7 +433,7 @@ def diff_paths(
     Raises:
         GitError: If ``git diff`` fails.
     """
-    sep = ".." if two_dot else "..."
+    sep = "..." if merge_base_diff else ".."
     range_arg = f"{base}{sep}{head}"
     args = ["diff", f"--unified={unified}", range_arg, "--", *paths]
     proc = _run_git(repo, args, timeout=30)
@@ -549,6 +555,27 @@ def upstream_ahead_count(repo: Path, branch: str) -> int:
         return int(parts[1]) if len(parts) >= 2 else 0
     except ValueError:
         return 0
+
+
+def check_ignore(repo: Path, path: str) -> bool:
+    """Return True iff ``git check-ignore`` says *path* is ignored.
+
+    Soft-failure semantics: returns ``False`` on any subprocess error (timeout,
+    missing binary, OS-level failure) to avoid blocking callers that use this
+    for optional file-copy filtering.
+
+    Args:
+        repo: Repository working directory.
+        path: Path (relative to *repo*) to check.
+
+    Returns:
+        True when *path* is gitignored, False otherwise or on error.
+    """
+    try:
+        proc = _run_git(repo, ["check-ignore", "--quiet", path], timeout=5)
+    except GitError:
+        return False
+    return proc.returncode == 0
 
 
 # --- Mutating ----------------------------------------------------------------
@@ -819,14 +846,14 @@ def gh_api(
         if proc.returncode != 0:
             raise GitError(
                 f"gh api {endpoint} failed: {proc.stderr.strip()} "
-                f"(payload preserved at {tmp_path})"
+                f"(request payload preserved at {tmp_path})"
             )
         try:
             result = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise GitError(
                 f"gh api {endpoint} returned invalid JSON: {exc} "
-                f"(payload preserved at {tmp_path})"
+                f"(request payload preserved at {tmp_path})"
             ) from exc
         succeeded = True
         return result

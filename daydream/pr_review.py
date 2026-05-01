@@ -421,7 +421,7 @@ def file_hunks(
     diff_text = ""
     try:
         diff_text = git_ops.diff_paths(
-            target_dir, base_sha, head_sha, [path], unified=3, two_dot=True
+            target_dir, base_sha, head_sha, [path], unified=3, merge_base_diff=False
         )
     except GitError:
         git_failed = True

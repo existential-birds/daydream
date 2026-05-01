@@ -3,7 +3,7 @@
 **Status:** Locked. Ready for execution in a fresh session.
 **Date:** 2026-04-30
 **Branch to create:** `feat/worktree-isolation` off `main`
-**Closes:** GitHub issue #44 + multi-worktree silent-failure bug
+**Closes:** GitHub issue #44 ("Unify and harden git operations across daydream", OPEN) + multi-worktree silent-failure bug
 
 ---
 

@@ -11,17 +11,15 @@ The resolution rules and ordering live in :func:`open_workspace` and are
 deliberately fixed (matching the design captured in
 ``docs/plans/2026-04-30-worktree-isolation-and-mode-consolidation.md``).
 
-The module shells out via :mod:`daydream.git_ops` only.  The single
-exception is the local ``_is_gitignored`` helper used during file copy
-to honour ``git check-ignore`` semantics; it is module-private.
+The module shells out via :mod:`daydream.git_ops` only.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import shutil
-import subprocess
 import tomllib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -31,6 +29,8 @@ from typing import Any, AsyncIterator
 
 from daydream import git_ops
 from daydream.git_ops import BranchNotFoundError, GitError
+
+_logger = logging.getLogger(__name__)
 
 # Default copy list for ephemeral worktrees when ``pyproject.toml`` does not
 # specify ``[tool.daydream.workspace] copy``.  Files are only copied when
@@ -123,6 +123,14 @@ async def open_workspace(
             located locally or on ``origin``.
         GitError: For other unexpected git failures.
 
+    Note:
+        The design doc (``2026-04-30-worktree-isolation-and-mode-consolidation.md``)
+        specifies a ``WrongBranchError`` check here when ``branch is None`` and
+        ``current_branch == base_branch``. That check lives in
+        :func:`daydream.runner._dispatch` instead because it must fire only for
+        ``output_mode="loop"`` (not ``--comment`` or ``--review``), and this
+        function is deliberately mode-agnostic.
+
     """
     git_ops.assert_is_worktree(source)
 
@@ -188,10 +196,11 @@ async def open_workspace(
             except GitError as exc:
                 # Best-effort cleanup -- never let removal failure mask the
                 # primary outcome of the run.
-                from daydream.ui import create_console, print_warning
+                from daydream.agent import console
+                from daydream.ui import print_warning
 
                 print_warning(
-                    create_console(),
+                    console,
                     f"Failed to remove ephemeral worktree {worktree_path}: {exc}",
                 )
 
@@ -280,10 +289,11 @@ def _resolve_ref(source: Path, branch: str | None) -> str:
     current = git_ops.current_branch(source)
     if current == branch:
         ahead = git_ops.upstream_ahead_count(source, branch)
-        from daydream.ui import create_console, print_warning
+        from daydream.agent import console
+        from daydream.ui import print_warning
 
         print_warning(
-            create_console(),
+            console,
             f"{branch} is checked out in cwd and is {ahead} commits behind "
             f"origin/{branch} — reviewing origin/{branch}.",
         )
@@ -298,6 +308,8 @@ def _resolve_base(source: Path, branch: str | None, base: str | None) -> str:
 
     if branch is not None and shutil.which("gh") is not None:
         prs = git_ops.gh_pr_list_for_branch(source, branch)
+        if not prs:
+            _logger.debug("gh_pr_list_for_branch returned empty for branch %r", branch)
         for pr in prs:
             base_ref = pr.get("baseRefName") if isinstance(pr, dict) else None
             if isinstance(base_ref, str) and base_ref:
@@ -342,19 +354,7 @@ def _resolve_copy_entries(source: Path) -> list[Path]:
 
 def _is_gitignored(repo: Path, relative_path: str) -> bool:
     """Return True iff ``git check-ignore`` says *relative_path* is ignored."""
-    try:
-        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", "check-ignore", "--quiet", relative_path],  # noqa: S607 - git is trusted
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            shell=False,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return False
-    return proc.returncode == 0
+    return git_ops.check_ignore(repo, relative_path)
 
 
 # --- Stage 3 helpers --------------------------------------------------------

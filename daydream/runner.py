@@ -988,12 +988,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
 
 
 async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:
-    """Delegate to the deep-mode orchestrator.
-
-    The orchestrator currently bootstraps its own ``WorkContext`` from
-    ``target_dir``; once Stage 4.2 lands, it can take ``work`` directly.
-    For now, pass ``work.repo`` as the target so existing tests stay green.
-    """
+    """Delegate to the deep-mode orchestrator."""
     from daydream.deep.orchestrator import run_deep
 
-    return await run_deep(config, work.repo)
+    return await run_deep(config, work)

@@ -24,53 +24,14 @@ from daydream.git_ops import (
     WrongBranchError,
 )
 
-# --- Helpers ----------------------------------------------------------------
-
-
-def _git(repo: Path, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
-    """Run a git command in *repo* and return stripped stdout (test helper)."""
-    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", *args],  # noqa: S607 - git is a trusted command
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=check,
-        env=env,
-    )
-    return proc.stdout.strip()
-
-
-def _configure_identity(repo: Path) -> None:
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Tester")
-
-
-def _commit(repo: Path, message: str) -> str:
-    """Create a commit and return its SHA."""
-    _git(repo, "commit", "-m", message)
-    return _git(repo, "rev-parse", "HEAD")
-
-
-def _init_repo(repo: Path) -> None:
-    repo.mkdir(parents=True, exist_ok=True)
-    _git(repo, "init", "-b", "main")
-    _configure_identity(repo)
-
-
-def _bare_remote(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init", "--bare", "-b", "main")
-    return path
-
-
-def _make_repo_with_main(tmp_path: Path, name: str = "repo") -> Path:
-    repo = tmp_path / name
-    _init_repo(repo)
-    (repo / "base.txt").write_text("base\n")
-    _git(repo, "add", "base.txt")
-    _commit(repo, "initial")
-    return repo
-
+from conftest import (
+    _bare_remote,
+    _commit,
+    _configure_identity,
+    _git,
+    _init_repo,
+    _make_repo_with_main,
+)
 
 # --- assert_is_worktree / is_inside_worktree --------------------------------
 
@@ -529,17 +490,17 @@ def _make_divergent_history(tmp_path: Path) -> tuple[Path, str, str]:
     return repo, "main", "feat"
 
 
-def test_diff_paths_two_dot_vs_three_dot_differ_on_divergent_history(
+def test_diff_paths_direct_vs_merge_base_differ_on_divergent_history(
     tmp_path: Path,
 ) -> None:
-    """Two-dot includes main's later commit; three-dot does not. Pin the diff."""
+    """Direct diff includes main's later commit; merge-base diff does not. Pin the diff."""
     repo, base, head = _make_divergent_history(tmp_path)
-    two_dot = git_ops.diff_paths(repo, base, head, ["shared.txt"], two_dot=True)
-    three_dot = git_ops.diff_paths(repo, base, head, ["shared.txt"], two_dot=False)
-    assert two_dot != three_dot
-    # Two-dot shows main's "MAIN" line as the - side; three-dot doesn't.
-    assert "MAIN" in two_dot
-    assert "MAIN" not in three_dot
+    direct = git_ops.diff_paths(repo, base, head, ["shared.txt"], merge_base_diff=False)
+    since_merge_base = git_ops.diff_paths(repo, base, head, ["shared.txt"], merge_base_diff=True)
+    assert direct != since_merge_base
+    # Direct diff shows main's "MAIN" line as the - side; merge-base diff doesn't.
+    assert "MAIN" in direct
+    assert "MAIN" not in since_merge_base
 
 
 def test_diff_paths_restricts_to_paths(tmp_path: Path) -> None:

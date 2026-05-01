@@ -824,7 +824,9 @@ async def phase_test_and_heal(
 
 def _commit_push_args(work: WorkContext, intent_path: Path) -> str:
     """Format the refs-not-diffs arg string for commit-push skills."""
-    return f"--repo {work.repo} --base {work.base_sha} --intent {intent_path}"
+    # Use relative path to avoid exposing filesystem structure if logged
+    relative_intent = intent_path.relative_to(work.repo)
+    return f"--repo {work.repo} --base {work.base_sha} --intent {relative_intent}"
 
 
 async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
