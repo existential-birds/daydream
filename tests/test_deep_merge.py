@@ -107,14 +107,14 @@ class _RecordingBackend:
         return f"/{skill_key}"
 
 
-async def test_phase_cross_stack_merge_returns_output_path(tmp_path: Path) -> None:
-    """D-24: merged report path is cwd / REVIEW_OUTPUT_FILE."""
+async def test_phase_cross_stack_merge_returns_output_path(tmp_path: Path, make_work) -> None:
+    """D-24: merged report path is work.repo / REVIEW_OUTPUT_FILE."""
     from daydream.config import REVIEW_OUTPUT_FILE
 
     backend = _RecordingBackend()
     result = await phase_cross_stack_merge(
         backend,
-        tmp_path,
+        make_work(tmp_path),
         per_stack_records_paths=[tmp_path / "r.json"],
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
@@ -123,12 +123,12 @@ async def test_phase_cross_stack_merge_returns_output_path(tmp_path: Path) -> No
     assert result == tmp_path / REVIEW_OUTPUT_FILE
 
 
-async def test_phase_cross_stack_merge_no_agents_kwarg(tmp_path: Path) -> None:
+async def test_phase_cross_stack_merge_no_agents_kwarg(tmp_path: Path, make_work) -> None:
     """D-38: no agents= kwarg (Codex compatibility)."""
     backend = _RecordingBackend()
     await phase_cross_stack_merge(
         backend,
-        tmp_path,
+        make_work(tmp_path),
         per_stack_records_paths=[tmp_path / "r.json"],
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",

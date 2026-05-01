@@ -55,6 +55,7 @@ from daydream.ui import (
     print_warning,
     prompt_user,
 )
+from daydream.workspace import make_in_place_workcontext
 
 
 @dataclass
@@ -233,6 +234,8 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
     review_backend = _resolve_backend(config, "review", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
 
+    work = make_in_place_workcontext(target_dir)
+
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
     async with TrajectoryRecorder(
         path=trajectory_path,
@@ -254,11 +257,11 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         console.print()
 
         # Phase 1: Fetch PR feedback
-        await phase_fetch_pr_feedback(review_backend, target_dir, pr_number, bot)
+        await phase_fetch_pr_feedback(review_backend, work, pr_number, bot)
 
         # Phase 2: Parse feedback (reused from normal flow)
         try:
-            feedback_items = await phase_parse_feedback(review_backend, target_dir)
+            feedback_items = await phase_parse_feedback(review_backend, work)
         except ValueError:
             print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
             return 1
@@ -273,7 +276,7 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
         total_items = len(feedback_items)
         for idx, item in enumerate(feedback_items, start=1):
             try:
-                await phase_fix(fix_backend, target_dir, item, idx, total_items)
+                await phase_fix(fix_backend, work, item, idx, total_items)
                 results.append((item, True, None))
             except Exception as e:
                 results.append((item, False, f"{type(e).__name__}: {e}"))
@@ -292,14 +295,16 @@ async def run_pr_feedback(config: RunConfig, target_dir: Path) -> int:
 
         # Phase 4: Commit and push (no user prompt)
         try:
-            await phase_commit_push_auto(review_backend, target_dir)
+            await phase_commit_push_auto(
+                review_backend, work, items=[item for item, _ok, _err in results if _ok],
+            )
         except Exception as e:
             print_error(console, "Commit/Push Failed", str(e))
             return 1
 
         # Phase 5: Respond to PR comments
         try:
-            await phase_respond_pr_feedback(review_backend, target_dir, pr_number, bot, results)
+            await phase_respond_pr_feedback(review_backend, work, pr_number, bot, results)
         except Exception as e:
             print_warning(console, f"Failed to respond to PR comments: {e}")
             print_info(console, "Fixes were already pushed successfully.")
@@ -328,10 +333,16 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
     """
     backend = _resolve_backend(config, "review")
 
-    # Gather git context
-    diff = _git_diff(target_dir, exclude=config.ignore_paths)
+    work = make_in_place_workcontext(target_dir)
+
+    # Gather git context using the resolved base branch from work (no
+    # double-detection — base resolution is locked at workspace open time).
+    try:
+        diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
+    except GitError:
+        diff = None
     log = _git_log(target_dir)
-    branch = _git_branch(target_dir)
+    branch = work.head_branch or _git_branch(target_dir)
 
     if diff is None:
         print_error(console, "Git Error", "Unable to determine base branch for diff")
@@ -388,13 +399,13 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
 
         # Phase 1: Understand intent
         intent_summary = await phase_understand_intent(
-            backend, target_dir, diff_path, log, branch,
+            backend, work, diff_path, log, branch,
             exploration_dir=exploration_dir,
         )
 
         # Phase 2: Alternative review
         issues = await phase_alternative_review(
-            backend, target_dir, diff_path, intent_summary,
+            backend, work, diff_path, intent_summary,
             exploration_dir=exploration_dir,
         )
 
@@ -405,7 +416,7 @@ async def run_trust(config: RunConfig, target_dir: Path) -> int:
         # Phase 3: Generate plan
         try:
             await phase_generate_plan(
-                backend, target_dir, diff_path, intent_summary, issues,
+                backend, work, diff_path, intent_summary, issues,
                 exploration_dir=exploration_dir,
             )
         finally:
@@ -543,6 +554,7 @@ async def run(config: RunConfig | None = None) -> int:
         return await run_deep(config, target_dir)
 
     # Normal flow: open the trajectory recorder for the rest of run().
+    work = make_in_place_workcontext(target_dir)
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
     async with TrajectoryRecorder(
         path=trajectory_path,
@@ -618,13 +630,13 @@ async def run(config: RunConfig | None = None) -> int:
             # Phase 1: Review
             assert skill is not None, "skill must be set when starting at review phase"
             await phase_review(
-                review_backend, target_dir, skill, diff_base=diff_base,
+                review_backend, work, skill, diff_base=diff_base,
                 exploration_dir=exploration_dir,
                 exclude=config.ignore_paths,
             )
 
             # Phase 2: Parse feedback
-            items = await phase_parse_feedback(review_backend, target_dir)
+            items = await phase_parse_feedback(review_backend, work)
 
             if not items:
                 print_info(console, f"Clean review on iteration {iteration}")
@@ -634,11 +646,11 @@ async def run(config: RunConfig | None = None) -> int:
             print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
             fixes_count = 0
             for i, item in enumerate(items, 1):
-                await phase_fix(fix_backend, target_dir, item, i, len(items))
+                await phase_fix(fix_backend, work, item, i, len(items))
                 fixes_count += 1
 
             # Phase 4: Test
-            passed, retries = await phase_test_and_heal(test_backend, target_dir, feedback_items=items)
+            passed, retries = await phase_test_and_heal(test_backend, work, feedback_items=items)
 
             if not passed:
                 print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
@@ -654,7 +666,7 @@ async def run(config: RunConfig | None = None) -> int:
             diff_base = _get_head_sha(target_dir)
 
             # Commit iteration changes so the next review sees a clean tree
-            await phase_commit_iteration(fix_backend, target_dir, iteration)
+            await phase_commit_iteration(fix_backend, work, iteration)
 
             return items, fixes_count, retries, True, True  # should_continue=True
 
@@ -733,7 +745,7 @@ async def run(config: RunConfig | None = None) -> int:
                 assert skill is not None, "skill must be set when starting at review phase"
                 try:
                     await phase_review(
-                        review_backend, target_dir, skill,
+                        review_backend, work, skill,
                         exploration_dir=exploration_dir,
                         exclude=config.ignore_paths,
                     )
@@ -744,7 +756,7 @@ async def run(config: RunConfig | None = None) -> int:
             # Phase 2: Parse feedback
             if config.start_at in ("review", "parse", "fix"):
                 try:
-                    feedback_items = await phase_parse_feedback(review_backend, target_dir)
+                    feedback_items = await phase_parse_feedback(review_backend, work)
                 except ValueError as exc:
                     print_error(console, "Phase 2 Error", str(exc))
                     print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
@@ -771,14 +783,14 @@ async def run(config: RunConfig | None = None) -> int:
                 if feedback_items:
                     print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
                     for i, item in enumerate(feedback_items, 1):
-                        await phase_fix(fix_backend, target_dir, item, i, len(feedback_items))
+                        await phase_fix(fix_backend, work, item, i, len(feedback_items))
                         fixes_applied += 1
                 else:
                     print_info(console, "No feedback items found, skipping fix phase")
 
             # Phase 4: Test
             tests_passed, test_retries = await phase_test_and_heal(
-                test_backend, target_dir, feedback_items=feedback_items
+                test_backend, work, feedback_items=feedback_items
             )
             iteration = 1
 
@@ -804,7 +816,7 @@ async def run(config: RunConfig | None = None) -> int:
 
         # Commit if tests passed
         if tests_passed:
-            await phase_commit_push(review_backend, target_dir)
+            await phase_commit_push(review_backend, work)
 
             if cleanup_enabled:
                 review_output_path = target_dir / REVIEW_OUTPUT_FILE

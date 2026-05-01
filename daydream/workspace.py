@@ -18,6 +18,7 @@ to honour ``git check-ignore`` semantics; it is module-private.
 
 from __future__ import annotations
 
+import json
 import secrets
 import shutil
 import subprocess
@@ -26,7 +27,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from daydream import git_ops
 from daydream.git_ops import BranchNotFoundError, GitError
@@ -354,3 +355,80 @@ def _is_gitignored(repo: Path, relative_path: str) -> bool:
     except (subprocess.SubprocessError, OSError):
         return False
     return proc.returncode == 0
+
+
+# --- Stage 3 helpers --------------------------------------------------------
+#
+# These two helpers are kept tightly scoped on purpose: Stage 3 needs them
+# threaded through phases.py without growing this module. Stage 4 will hook
+# ``open_workspace`` into the CLI and may rework the in-place builder.
+
+
+def make_in_place_workcontext(target: Path) -> WorkContext:
+    """Construct a :class:`WorkContext` for an in-place run.
+
+    Resolves base branch, base SHA (merge-base), HEAD SHA, and current
+    branch directly from *target*. Used by ``runner.run`` /
+    ``run_pr_feedback`` / ``run_trust`` and ``deep.orchestrator.run_deep``
+    until Stage 4 wires the CLI through :func:`open_workspace`.
+
+    Args:
+        target: Repository working directory the user invoked daydream on.
+
+    Returns:
+        WorkContext with ``is_ephemeral=False`` and ``source == repo == target``.
+        ``base_branch`` falls back to ``"main"`` when detection fails so the
+        existing thin-wrapper behavior is preserved (legacy ``_git_diff`` /
+        ``_detect_default_branch`` returned ``None`` and silently fell back).
+    """
+    try:
+        base_branch = git_ops.default_branch(target)
+    except (BranchNotFoundError, GitError):
+        base_branch = "main"
+
+    try:
+        head_sha = git_ops.head_sha(target)
+    except GitError:
+        head_sha = ""
+
+    base_sha = git_ops.merge_base(target, base_branch) or head_sha
+
+    try:
+        head_branch = git_ops.current_branch(target)
+    except GitError:
+        head_branch = None
+
+    return WorkContext(
+        repo=target,
+        source=target,
+        base_branch=base_branch,
+        base_sha=base_sha,
+        head_branch=head_branch,
+        head_sha=head_sha,
+        is_ephemeral=False,
+        run_id=_make_run_id(),
+    )
+
+
+def write_intent_json(work: WorkContext, payload: dict[str, Any]) -> Path:
+    """Write *payload* as JSON under ``<repo>/.daydream/intents/<run_id>.json``.
+
+    The intents directory is gitignored (``.daydream/`` is excluded by the
+    project's ``.gitignore``). The file is rewritten on each call -- callers
+    that need historical snapshots should include their own discriminator in
+    the payload.
+
+    Args:
+        work: Active workspace context (provides ``repo`` and ``run_id``).
+        payload: JSON-serializable mapping describing the upcoming commit
+            (fix items, phase name, head SHA, etc.). Path / dataclass values
+            should be converted to ``str`` / ``dict`` by the caller.
+
+    Returns:
+        Absolute path to the written intent file.
+    """
+    intents_dir = work.repo / ".daydream" / "intents"
+    intents_dir.mkdir(parents=True, exist_ok=True)
+    intent_path = intents_dir / f"{work.run_id}.json"
+    intent_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    return intent_path

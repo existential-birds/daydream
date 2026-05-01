@@ -16,6 +16,7 @@ from daydream.agent import (
 from daydream.backends import Backend, ContinuationToken
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
+from daydream.workspace import WorkContext, write_intent_json
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
@@ -572,7 +573,7 @@ Run a full review first:
 
 async def phase_review(
     backend: Backend,
-    cwd: Path,
+    work: WorkContext,
     skill: str,
     *,
     diff_base: str | None = None,
@@ -583,11 +584,13 @@ async def phase_review(
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for the review
+        work: Workspace context for the run; ``work.repo`` is the agent cwd
+            and ``work.base_branch`` / ``work.base_sha`` drive the diff
+            instruction. Base resolution happens once in ``open_workspace``.
         skill: The review skill to invoke (e.g., beagle:review-python)
         diff_base: Optional commit SHA to diff against. When provided, the review
             covers only changes since that commit (used for incremental reviews
-            in loop mode). When None, diffs against the base branch.
+            in loop mode). When None, diffs against the resolved base branch.
         exclude: Optional list of paths the agent should exclude when it runs
             `git diff` itself. Applied via git's `:(exclude)` magic pathspec.
 
@@ -601,7 +604,7 @@ async def phase_review(
     print_phase_hero(console, "BREATHE", "\"Be guided by beauty\" —Jim Simons")
 
     # Use absolute path to prevent model hallucination of paths from training data
-    review_output_path = cwd / REVIEW_OUTPUT_FILE
+    review_output_path = work.repo / REVIEW_OUTPUT_FILE
     skill_invocation = backend.format_skill_invocation(skill)
 
     if diff_base:
@@ -611,27 +614,17 @@ async def phase_review(
             f"Use `git diff {diff_base}...HEAD` to get the diff.\n"
         )
     else:
-        # Full branch review: detect the base branch so the agent knows what
-        # to diff against.  Without this, agents (especially Codex) may run
-        # `git diff` with no base ref, which only shows uncommitted changes
-        # and misses all committed work on the branch.
-        base_branch = _detect_default_branch(cwd)
-        if base_branch:
-            diff_instruction = (
-                f"\nReview the changes on the current branch compared to `{base_branch}`. "
-                f"Use `git diff {base_branch}...HEAD` to get the diff.\n"
-            )
-        else:
-            diff_instruction = (
-                "\nReview the changes on the current branch compared to the default branch. "
-                "Use `git diff main...HEAD` or `git diff master...HEAD` to get the diff.\n"
-            )
+        # Full branch review: hand the agent the workspace's resolved base
+        # branch so Codex / Claude don't re-detect (and possibly disagree).
+        diff_instruction = (
+            f"\nReview the changes on the current branch compared to `{work.base_branch}`. "
+            f"Use `git diff {work.base_branch}...HEAD` to get the diff.\n"
+        )
 
     if exclude:
         excluded_paths = ", ".join(exclude)
         pathspec_args = " ".join(f"':(exclude){p.rstrip('/')}'" for p in exclude)
-        # Use the detected base_branch when we have one; otherwise fall back to main.
-        base_for_example = diff_base or _detect_default_branch(cwd) or "main"
+        base_for_example = diff_base or work.base_branch
         ref = f"{base_for_example}...HEAD" if not diff_base else f"{diff_base}...HEAD"
         diff_instruction += (
             f"\nExclude these paths from the diff: {excluded_paths}. "
@@ -645,9 +638,9 @@ async def phase_review(
         exploration_dir=exploration_dir,
     )
 
-    await run_agent(backend, cwd, prompt, phase=DaydreamPhase.REVIEW)
+    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.REVIEW)
 
-    output_path = cwd / REVIEW_OUTPUT_FILE
+    output_path = work.repo / REVIEW_OUTPUT_FILE
     if output_path.exists():
         print_success(console, f"Review output written to: {output_path}")
     else:
@@ -656,7 +649,7 @@ async def phase_review(
 
 async def phase_parse_feedback(
     backend: Backend,
-    cwd: Path,
+    work: WorkContext,
     *,
     input_path: Path | None = None,
 ) -> list[dict[str, Any]]:
@@ -664,14 +657,14 @@ async def phase_parse_feedback(
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory containing the review output (also used as the
-            agent's cwd).
+        work: Workspace context. ``work.repo`` doubles as the agent's cwd
+            and the source of the default review path.
         input_path: Optional explicit path to the review markdown to parse.
-            When None (default), reads ``cwd / REVIEW_OUTPUT_FILE``, preserving
-            behavior for single-skill, PR feedback, and TTT flows. When
-            provided, reads that path instead — used by deep-mode's pre-merge
-            parse stage to iterate per-stack outputs without overwriting each
-            other at the shared REVIEW_OUTPUT_FILE location.
+            When None (default), reads ``work.repo / REVIEW_OUTPUT_FILE``,
+            preserving behavior for single-skill, PR feedback, and TTT flows.
+            When provided, reads that path instead — used by deep-mode's
+            pre-merge parse stage to iterate per-stack outputs without
+            overwriting each other at the shared REVIEW_OUTPUT_FILE location.
 
     Returns:
         List of validated feedback items with id, description, file, line
@@ -683,7 +676,7 @@ async def phase_parse_feedback(
     print_phase_hero(console, "REFLECT", phase_subtitle("REFLECT"))
 
     # Use absolute path to prevent model hallucination of paths from training data
-    review_output_path = input_path if input_path is not None else cwd / REVIEW_OUTPUT_FILE
+    review_output_path = input_path if input_path is not None else work.repo / REVIEW_OUTPUT_FILE
     prompt = f"""Read the review output file at {review_output_path}.
 
 Extract ONLY actionable issues that need fixing. Skip these sections entirely:
@@ -699,7 +692,7 @@ For each issue found, return a JSON object with this structure:
 If there are no actionable issues, return: {{"issues": []}}
 """
 
-    result, _ = await run_agent(backend, cwd, prompt, output_schema=FEEDBACK_SCHEMA, phase=DaydreamPhase.PARSE)
+    result, _ = await run_agent(backend, work.repo, prompt, output_schema=FEEDBACK_SCHEMA, phase=DaydreamPhase.PARSE)
 
     if not isinstance(result, dict) or "issues" not in result:
         # When structured output and JSON fallback both fail (e.g. empty
@@ -714,12 +707,14 @@ If there are no actionable issues, return: {{"issues": []}}
     return feedback_items
 
 
-async def phase_fix(backend: Backend, cwd: Path, item: dict[str, Any], item_num: int, total: int) -> None:
+async def phase_fix(
+    backend: Backend, work: WorkContext, item: dict[str, Any], item_num: int, total: int,
+) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for the fix
+        work: Workspace context for the fix; ``work.repo`` is the agent cwd.
         item: Feedback item containing description, file, and line
         item_num: Current item number (1-indexed)
         total: Total number of items
@@ -747,20 +742,20 @@ unless the issue description specifically explains why the current error
 handling strategy is wrong for that code path.
 """
 
-    await run_agent(backend, cwd, prompt, phase=DaydreamPhase.FIX)
+    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
     print_fix_complete(console, item_num, total)
 
 
 async def phase_test_and_heal(
     backend: Backend,
-    cwd: Path,
+    work: WorkContext,
     feedback_items: list[dict[str, Any]] | None = None,
 ) -> tuple[bool, int]:
     """Phase 4: Run tests and prompt user on failure for action.
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for running tests
+        work: Workspace context for running tests; ``work.repo`` is the cwd.
         feedback_items: Optional list of feedback items from the fix phase,
             used to enrich the fix prompt with file context.
 
@@ -782,7 +777,7 @@ async def phase_test_and_heal(
 
         prompt = "Run the project's test suite. Report if tests pass or fail."
         output, continuation = await run_agent(
-            backend, cwd, prompt, continuation=continuation, phase=DaydreamPhase.TEST,
+            backend, work.repo, prompt, continuation=continuation, phase=DaydreamPhase.TEST,
         )
 
         test_passed = detect_test_success(output)
@@ -809,7 +804,7 @@ async def phase_test_and_heal(
             console.print()
             print_info(console, "Launching agent to fix test failures...")
             fix_prompt = _build_fix_prompt(output, feedback_items)
-            _, _ = await run_agent(backend, cwd, fix_prompt, phase=DaydreamPhase.FIX)
+            _, _ = await run_agent(backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX)
             retries_used += 1
             continuation = None
             continue
@@ -827,12 +822,19 @@ async def phase_test_and_heal(
             return False, retries_used
 
 
-async def phase_commit_push(backend: Backend, cwd: Path) -> None:
+def _commit_push_args(work: WorkContext, intent_path: Path) -> str:
+    """Format the refs-not-diffs arg string for commit-push skills."""
+    return f"--repo {work.repo} --base {work.base_sha} --intent {intent_path}"
+
+
+async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
     """Prompt user to commit and push changes.
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for the commit
+        work: Workspace context for the commit; passed through as
+            ``--repo`` / ``--base`` / ``--intent`` refs to the skill so the
+            agent fetches the diff itself instead of receiving it inline.
 
     Returns:
         None
@@ -843,19 +845,32 @@ async def phase_commit_push(backend: Backend, cwd: Path) -> None:
     if response.lower() in ("y", "yes"):
         console.print()
         print_info(console, "Running commit-push skill...")
-        skill_invocation = backend.format_skill_invocation("beagle-core:commit-push")
-        await run_agent(backend, cwd, skill_invocation, phase=DaydreamPhase.FIX)
+        intent_path = write_intent_json(
+            work,
+            {
+                "phase": "commit_push",
+                "head_sha": work.head_sha,
+                "base_branch": work.base_branch,
+                "base_sha": work.base_sha,
+            },
+        )
+        skill_invocation = backend.format_skill_invocation(
+            "beagle-core:commit-push", _commit_push_args(work, intent_path),
+        )
+        await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.FIX)
         print_success(console, "Commit and push complete")
     else:
         print_dim(console, "Skipping commit and push")
 
 
-async def phase_fetch_pr_feedback(backend: Backend, cwd: Path, pr_number: int, bot: str) -> None:
+async def phase_fetch_pr_feedback(
+    backend: Backend, work: WorkContext, pr_number: int, bot: str,
+) -> None:
     """Fetch PR feedback by invoking the fetch-pr-feedback skill.
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for the agent
+        work: Workspace context; ``work.repo`` is the agent cwd.
         pr_number: Pull request number to fetch feedback from
         bot: Bot username whose comments to fetch
 
@@ -872,9 +887,9 @@ async def phase_fetch_pr_feedback(backend: Backend, cwd: Path, pr_number: int, b
         "beagle-core:fetch-pr-feedback", f"--pr {pr_number} --bot {bot}"
     )
 
-    await run_agent(backend, cwd, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
+    await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
 
-    output_path = cwd / REVIEW_OUTPUT_FILE
+    output_path = work.repo / REVIEW_OUTPUT_FILE
     if output_path.exists():
         print_success(console, f"PR feedback written to: {output_path}")
     else:
@@ -882,7 +897,7 @@ async def phase_fetch_pr_feedback(backend: Backend, cwd: Path, pr_number: int, b
 
 
 async def phase_fix_parallel(
-    backend: Backend, cwd: Path, feedback_items: list[dict[str, Any]]
+    backend: Backend, work: WorkContext, feedback_items: list[dict[str, Any]]
 ) -> list[FixResult]:
     """Apply fixes for all feedback items concurrently using parallel agents.
 
@@ -891,7 +906,7 @@ async def phase_fix_parallel(
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for the fixes
+        work: Workspace context for the fixes; ``work.repo`` is the agent cwd.
         feedback_items: List of feedback items, each with description, file, line
 
     Returns:
@@ -936,7 +951,7 @@ handling strategy is wrong for that code path.
                     try:
                         async with limiter:
                             await run_agent(
-                                backend, cwd, task_prompt, progress_callback=callback, phase=DaydreamPhase.FIX,
+                                backend, work.repo, task_prompt, progress_callback=callback, phase=DaydreamPhase.FIX,
                             )
                         panel.complete_row(task_index)
                         results.append((task_item, True, None))
@@ -965,7 +980,7 @@ handling strategy is wrong for that code path.
     return results
 
 
-async def phase_commit_iteration(backend: Backend, cwd: Path, iteration: int) -> None:
+async def phase_commit_iteration(backend: Backend, work: WorkContext, iteration: int) -> None:
     """Commit all changes from the current loop iteration.
 
     Ensures a clean working tree before the next review iteration starts.
@@ -973,7 +988,7 @@ async def phase_commit_iteration(backend: Backend, cwd: Path, iteration: int) ->
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for the commit
+        work: Workspace context for the commit; ``work.repo`` is the cwd.
         iteration: Current iteration number (used in commit message)
 
     """
@@ -989,16 +1004,21 @@ async def phase_commit_iteration(backend: Backend, cwd: Path, iteration: int) ->
         "Do NOT push. Only commit."
     )
     print_info(console, f"Committing iteration {iteration} changes...")
-    await run_agent(backend, cwd, prompt, phase=DaydreamPhase.FIX)
+    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
     print_success(console, f"Iteration {iteration} changes committed")
 
 
-async def phase_commit_push_auto(backend: Backend, cwd: Path) -> None:
+async def phase_commit_push_auto(
+    backend: Backend, work: WorkContext, *, items: list[dict[str, Any]] | None = None,
+) -> None:
     """Automatically commit and push changes without user prompt.
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for the commit
+        work: Workspace context for the commit; refs are forwarded to the
+            commit-push skill so it can fetch the diff itself.
+        items: Optional fix items applied this run; embedded into the intent
+            JSON so the receiving skill can craft a more informed commit.
 
     Returns:
         None
@@ -1006,13 +1026,25 @@ async def phase_commit_push_auto(backend: Backend, cwd: Path) -> None:
     """
     console.print()
     print_info(console, "Running commit-push skill...")
-    skill_invocation = backend.format_skill_invocation("beagle-core:commit-push")
-    await run_agent(backend, cwd, skill_invocation, phase=DaydreamPhase.FIX)
+    intent_path = write_intent_json(
+        work,
+        {
+            "phase": "commit_push_auto",
+            "head_sha": work.head_sha,
+            "base_branch": work.base_branch,
+            "base_sha": work.base_sha,
+            "items": items or [],
+        },
+    )
+    skill_invocation = backend.format_skill_invocation(
+        "beagle-core:commit-push", _commit_push_args(work, intent_path),
+    )
+    await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.FIX)
     print_success(console, "Commit and push complete")
 
 
 async def phase_respond_pr_feedback(
-    backend: Backend, cwd: Path, pr_number: int, bot: str, results: list[FixResult]
+    backend: Backend, work: WorkContext, pr_number: int, bot: str, results: list[FixResult]
 ) -> None:
     """Respond to PR feedback with results of applied fixes.
 
@@ -1021,7 +1053,7 @@ async def phase_respond_pr_feedback(
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for the agent
+        work: Workspace context; ``work.repo`` is the agent cwd.
         pr_number: Pull request number to respond to
         bot: Bot username to respond as
         results: List of (item, success, error) tuples from phase_fix_parallel
@@ -1042,13 +1074,13 @@ async def phase_respond_pr_feedback(
         "beagle-core:respond-pr-feedback", f"--pr {pr_number} --bot {bot}"
     )
 
-    await run_agent(backend, cwd, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
+    await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
     print_success(console, f"Responded to PR #{pr_number} feedback")
 
 
 async def phase_understand_intent(
     backend: Backend,
-    cwd: Path,
+    work: WorkContext,
     diff_path: Path,
     log: str,
     branch: str,
@@ -1063,7 +1095,7 @@ async def phase_understand_intent(
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for exploration.
+        work: Workspace context; ``work.repo`` is the agent cwd.
         diff_path: Path to the diff file on disk.
         log: Git log output (main..HEAD --oneline).
         branch: Current branch name.
@@ -1085,7 +1117,7 @@ async def phase_understand_intent(
         console.print()
         print_info(console, "Agent is analyzing the changes...")
 
-        output, _ = await run_agent(backend, cwd, prompt, phase=DaydreamPhase.INTENT)
+        output, _ = await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.INTENT)
         intent_text = output if isinstance(output, str) else str(output)
 
         console.print()
@@ -1116,7 +1148,7 @@ Commit log:
 
 async def phase_alternative_review(
     backend: Backend,
-    cwd: Path,
+    work: WorkContext,
     diff_path: Path,
     intent_summary: str,
     *,
@@ -1130,7 +1162,7 @@ async def phase_alternative_review(
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory for exploration.
+        work: Workspace context; ``work.repo`` is the agent cwd.
         diff_path: Path to the diff file on disk.
         intent_summary: Confirmed intent summary from phase_understand_intent.
 
@@ -1151,7 +1183,7 @@ async def phase_alternative_review(
     print_info(console, "Agent is evaluating the implementation...")
 
     result, _ = await run_agent(
-        backend, cwd, prompt, output_schema=ALTERNATIVE_REVIEW_SCHEMA, phase=DaydreamPhase.ALTERNATIVES,
+        backend, work.repo, prompt, output_schema=ALTERNATIVE_REVIEW_SCHEMA, phase=DaydreamPhase.ALTERNATIVES,
     )
 
     if isinstance(result, dict) and "issues" in result:
@@ -1231,7 +1263,7 @@ def _write_plan_markdown(
 
 async def phase_generate_plan(
     backend: Backend,
-    cwd: Path,
+    work: WorkContext,
     diff_path: Path,
     intent_summary: str,
     issues: list[dict[str, Any]],
@@ -1246,7 +1278,7 @@ async def phase_generate_plan(
 
     Args:
         backend: The Backend to execute against.
-        cwd: Working directory (plan written relative to this).
+        work: Workspace context (plan written under ``work.repo``).
         diff_path: Path to the diff file on disk.
         intent_summary: Confirmed intent summary.
         issues: Full list of issues from phase_alternative_review.
@@ -1289,7 +1321,7 @@ async def phase_generate_plan(
     console.print()
     print_info(console, f"Generating plan for {len(selected_issues)} issue(s)...")
 
-    result, _ = await run_agent(backend, cwd, prompt, output_schema=PLAN_SCHEMA, phase=DaydreamPhase.PLAN)
+    result, _ = await run_agent(backend, work.repo, prompt, output_schema=PLAN_SCHEMA, phase=DaydreamPhase.PLAN)
 
     if not isinstance(result, dict):
         if not get_quiet_mode():
@@ -1300,14 +1332,15 @@ async def phase_generate_plan(
         return None
 
     # Ensure .daydream/ directory exists
-    daydream_dir = cwd / ".daydream"
+    daydream_dir = work.repo / ".daydream"
     daydream_dir.mkdir(exist_ok=True)
 
     # Write plan file
     timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     plan_path = daydream_dir / f"plan-{timestamp}.md"
 
-    _write_plan_markdown(plan_path, result, intent_summary, _git_branch(cwd), selected_issues)
+    branch_name = work.head_branch or _git_branch(work.repo)
+    _write_plan_markdown(plan_path, result, intent_summary, branch_name, selected_issues)
 
     print_success(console, f"Plan written to {plan_path}")
     return plan_path
@@ -1320,7 +1353,7 @@ async def phase_generate_plan(
 
 async def phase_per_stack_reviews(
     backend: Backend,
-    cwd: Path,
+    work: WorkContext,
     stacks: list["StackAssignment"],
     *,
     diff_path: Path,
@@ -1336,7 +1369,7 @@ async def phase_per_stack_reviews(
 
     Args:
         backend: The Backend to execute against.
-        cwd: Target directory (repo root).
+        work: Workspace context; ``work.repo`` is the agent cwd / repo root.
         stacks: Routed stack assignments (see daydream.deep.detection.detect_stacks).
         diff_path: Path to the full diff on disk.
         intent_path: Path to TTT intent.md.
@@ -1360,7 +1393,7 @@ async def phase_per_stack_reviews(
         build_per_stack_prompt,
     )
 
-    deep_dir_path = _deep_dir(cwd)
+    deep_dir_path = _deep_dir(work.repo)
     recorder = get_current_recorder()
     results: dict[str, Path] = {}
     failures: dict[str, str] = {}
@@ -1400,7 +1433,7 @@ async def phase_per_stack_reviews(
                 async with maybe_fork(recorder, f"deep-{stack_name}"):
                     try:
                         async with limiter:
-                            await run_agent(backend, cwd, task_prompt, phase=DaydreamPhase.DEEP)
+                            await run_agent(backend, work.repo, task_prompt, phase=DaydreamPhase.DEEP)
                         results[stack_name] = task_output
                     except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                         reason = f"{type(e).__name__}: {e}"
@@ -1421,7 +1454,7 @@ async def phase_per_stack_reviews(
 
 async def phase_cross_stack_merge(
     backend: Backend,
-    cwd: Path,
+    work: WorkContext,
     *,
     per_stack_records_paths: list[Path],
     intent_path: Path,
@@ -1435,13 +1468,13 @@ async def phase_cross_stack_merge(
     The agent writes the report to ``.daydream/deep/review-output.md`` (same
     directory as per-stack artifacts, which avoids sandbox write restrictions
     that block dotfiles at the repo root). This function then copies the result
-    to ``cwd / REVIEW_OUTPUT_FILE`` for downstream consumers.
+    to ``work.repo / REVIEW_OUTPUT_FILE`` for downstream consumers.
 
     Per D-38, never passes the ``agents`` kwarg (Codex parity).
 
     Args:
         backend: The Backend to execute against.
-        cwd: Target directory (repo root). The report is written here.
+        work: Workspace context; report is written under ``work.repo``.
         per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
@@ -1452,14 +1485,14 @@ async def phase_cross_stack_merge(
             report can call out uncovered stacks explicitly.
 
     Returns:
-        Path to the merged report at ``cwd / REVIEW_OUTPUT_FILE``.
+        Path to the merged report at ``work.repo / REVIEW_OUTPUT_FILE``.
 
     """
     from daydream.deep.artifacts import deep_dir, merged_report_path
     from daydream.deep.prompts import build_merge_prompt
 
-    canonical_path = cwd / REVIEW_OUTPUT_FILE
-    agent_output_path = merged_report_path(deep_dir(cwd))
+    canonical_path = work.repo / REVIEW_OUTPUT_FILE
+    agent_output_path = merged_report_path(deep_dir(work.repo))
 
     # Clear stale outputs so a failed merge agent can't leave behind
     # outdated content that downstream stages would silently consume.
@@ -1476,11 +1509,11 @@ async def phase_cross_stack_merge(
         failed_stacks=failed_stacks,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
-    await run_agent(backend, cwd, prompt, phase=DaydreamPhase.DEEP)
+    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.DEEP)
 
     # Copy from deep artifact dir to canonical location. The agent writes
     # inside .daydream/deep/ where sandbox restrictions don't apply; Python
-    # handles the copy to cwd/.review-output.md.
+    # handles the copy to work.repo/.review-output.md.
     if not agent_output_path.is_file():
         raise FileNotFoundError(f"Expected merged report at {agent_output_path}")
     canonical_path.write_text(agent_output_path.read_text())

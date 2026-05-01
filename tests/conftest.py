@@ -1,6 +1,7 @@
 """Shared pytest fixtures for the daydream test suite."""
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from daydream.exploration import (
     ExplorationContext,
     FileInfo,
 )
+from daydream.workspace import WorkContext
 
 # --- Real-git fixtures ------------------------------------------------------
 #
@@ -194,6 +196,40 @@ def multi_stack_target(tmp_path: Path) -> Path:
         check=True,
     )
     return project
+
+
+@pytest.fixture
+def make_work() -> Callable[..., WorkContext]:
+    """Builder for synthetic ``WorkContext`` instances.
+
+    Stage 3 threads ``WorkContext`` through every ``phase_*`` function. Tests
+    that previously passed a raw ``Path`` as the second positional argument
+    use this fixture to construct a context anchored on *repo* with stable
+    fake SHAs. The builder mirrors the production fields so tests don't need
+    to spin up a real git repo just to call a phase.
+    """
+
+    def _make(
+        repo: Path,
+        *,
+        base_branch: str = "main",
+        base_sha: str = "DEADBEEF",
+        head_sha: str = "CAFEBABE",
+        head_branch: str | None = "feat/x",
+        is_ephemeral: bool = False,
+    ) -> WorkContext:
+        return WorkContext(
+            repo=repo,
+            source=repo,
+            base_branch=base_branch,
+            base_sha=base_sha,
+            head_branch=head_branch,
+            head_sha=head_sha,
+            is_ephemeral=is_ephemeral,
+            run_id="20260101000000-deadbeef",
+        )
+
+    return _make
 
 
 @pytest.fixture(autouse=True)
