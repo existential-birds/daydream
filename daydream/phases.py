@@ -1,5 +1,6 @@
 """Phase functions for the review and fix loop."""
 
+import shlex
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -826,7 +827,11 @@ def _commit_push_args(work: WorkContext, intent_path: Path) -> str:
     """Format the refs-not-diffs arg string for commit-push skills."""
     # Use relative path to avoid exposing filesystem structure if logged
     relative_intent = intent_path.relative_to(work.repo)
-    return f"--repo {work.repo} --base {work.base_sha} --intent {relative_intent}"
+    return (
+        f"--repo {shlex.quote(str(work.repo))} "
+        f"--base {shlex.quote(work.base_sha)} "
+        f"--intent {shlex.quote(str(relative_intent))}"
+    )
 
 
 async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
