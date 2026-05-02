@@ -89,7 +89,7 @@ class RunConfig:
     Attributes:
         target: Target directory path for the review. If None, prompts user.
         skill: Review skill to use ("python", "react", or "elixir"). If None, prompts user.
-        model: Claude model to use ("opus", "sonnet", or "haiku"). Default is "opus".
+        model: Claude model to use ("opus", "sonnet", or "haiku", or a dated id). Default is "claude-opus-4-7".
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
         review_only: Run review phase only without applying fixes.
@@ -304,7 +304,7 @@ async def run(config: RunConfig | None = None) -> int:
         if codex_in_use:
             quiet = False
     set_quiet_mode(quiet)
-    set_model(config.model or "opus")
+    set_model(config.model or "claude-opus-4-7")
 
     # ``--comment`` and ``--review`` skip the test phase, so they also skip
     # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).

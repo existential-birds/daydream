@@ -226,7 +226,7 @@ def create_backend(name: str, model: str | None = None) -> Backend:
     """
     if name == "claude":
         from daydream.backends.claude import ClaudeBackend
-        return ClaudeBackend(model=model or "opus")
+        return ClaudeBackend(model=model or "claude-opus-4-7")
     if name == "codex":
         from daydream.backends.codex import CodexBackend
         return CodexBackend(model=model or "gpt-5.3-codex")

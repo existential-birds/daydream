@@ -62,7 +62,7 @@ class AgentState:
     """
 
     quiet_mode: bool = False
-    model: str = "opus"
+    model: str = "claude-opus-4-7"
     shutdown_requested: bool = False
     current_backends: list[Backend] = field(default_factory=list)
 
