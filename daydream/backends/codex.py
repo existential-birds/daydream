@@ -298,30 +298,33 @@ class CodexBackend:
                     usage = event.get("usage", {})
                     # Phase 2 (EVNT-07): emit MetricsEvent for the turn. Codex
                     # has no per-message id surface so the message id is the
-                    # empty string. Codex does not report cost_usd nor cached
-                    # tokens — D-16 says
-                    # leave them as None and DO NOT synthesize cost from a
+                    # empty string. Codex does not report cost_usd — D-16 says
+                    # leave it as None and DO NOT synthesize cost from a
                     # token-price table (Pitfall 6, ATIF Metrics fields all
-                    # optional).
+                    # optional). Codex DOES emit cached_input_tokens on
+                    # turn.completed.usage (codex-rs/protocol/src/protocol.rs
+                    # TokenUsage.cached_input_tokens) — surface it so cache-hit
+                    # ratios work for the Codex backend (refs #65, K4).
                     # EVNT-02 field names: MetricsEvent uses prompt_tokens /
                     # completion_tokens (ATIF/Metrics-side names). Codex's SDK
                     # boundary keys are input_tokens / output_tokens; rename
                     # here. Skip emission when either is missing — EVNT-02 types
                     # both as int (required, not Optional). CostEvent below
                     # carries the partial-data signal.
+                    cached_tokens = usage.get("cached_input_tokens")
                     if usage.get("input_tokens") is not None and usage.get("output_tokens") is not None:
                         yield MetricsEvent(
                             message_id="",
                             prompt_tokens=usage["input_tokens"],
                             completion_tokens=usage["output_tokens"],
-                            cached_tokens=None,
+                            cached_tokens=cached_tokens,
                             cost_usd=None,
                         )
                     yield CostEvent(
                         cost_usd=None,
                         input_tokens=usage.get("input_tokens"),
                         output_tokens=usage.get("output_tokens"),
-                        cached_tokens=None,
+                        cached_tokens=cached_tokens,
                     )
 
                     # Parse structured output from last agent message if schema was provided

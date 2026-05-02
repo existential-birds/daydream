@@ -8,6 +8,7 @@ import pytest
 
 from daydream.backends import (
     CostEvent,
+    MetricsEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -249,6 +250,34 @@ async def test_turn_completed_result_field():
     assert result_events[0].structured_output == {
         "issues": [{"id": 1, "description": "Unused variable", "file": "utils.py", "line": 22}]
     }
+
+
+@pytest.mark.asyncio
+async def test_turn_completed_cached_input_tokens():
+    """Codex emits cached_input_tokens on turn.completed.usage; surface it on
+    MetricsEvent and CostEvent so cache-hit ratios work for the Codex backend
+    (refs #65, K4 — fix for the historical hardcoded cached_tokens=None)."""
+    backend = CodexBackend()
+    mock_proc = _make_mock_process("turn_completed_cached_tokens.jsonl")
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Cached"):
+            events.append(event)
+
+    metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
+    cost_events = [e for e in events if isinstance(e, CostEvent)]
+
+    assert len(metrics_events) == 1
+    assert metrics_events[0].prompt_tokens == 300
+    assert metrics_events[0].completion_tokens == 150
+    assert metrics_events[0].cached_tokens == 200
+    assert metrics_events[0].cost_usd is None
+
+    assert len(cost_events) == 1
+    assert cost_events[0].input_tokens == 300
+    assert cost_events[0].output_tokens == 150
+    assert cost_events[0].cached_tokens == 200
 
 
 def test_format_skill_invocation():
