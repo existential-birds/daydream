@@ -11,7 +11,7 @@ Daydream's GitHub PR summary comment shows enough detail at a glance — model, 
 
 ## Problem Statement
 
-Daydream posts a summary comment to GitHub PRs in three flows (`--ttt`, `--pr`, `--deep`). Today the comment's `<details>ℹ️ Review info</details>` block contains a single line: `- **Mode:** {mode_label}`. That fact is too thin to answer the questions the actual readers ask.
+Daydream posts a summary comment to GitHub PRs in three flows (`--comment`, `daydream feedback <pr#>`, and the default deep-mode fix loop). Today the comment's `<details>ℹ️ Review info</details>` block contains a single line: `- **Mode:** {mode_label}`. That fact is too thin to answer the questions the actual readers ask.
 
 **Who reads these comments and what they want to know:**
 
@@ -28,7 +28,7 @@ None of those questions are answerable from "Mode: trust-the-technology" alone. 
 - **M1.** The PR summary comment includes a visible rollup with: Mode, Model (or "mixed — see breakdown"), Cost, Tokens (input / cached / output + cache hit %), Steps, Tool calls.
 - **M2.** The PR summary comment includes a per-phase breakdown inside a collapsed `<details><summary>Per-phase breakdown</summary>` block, presented as a markdown table with columns: Phase, Model, Steps, Tools, Input, Cached, Output, Cost.
 - **M3.** The PR summary comment includes a small-text footer naming the daydream version that produced the comment.
-- **M4.** All three summary-posting flows (`--ttt`, `--pr`, `--deep`) produce comments with the identical field set and layout.
+- **M4.** All three summary-posting flows (`--comment`, `daydream feedback <pr#>`, and the default deep-mode fix loop) produce comments with the identical field set and layout.
 - **M5.** Cost is computed from a fixed price table covering: `gpt-5.5`, `gpt-5.5-pro`, `gpt-5-codex`, `gpt-5.3-codex`. Anthropic-backed runs use cost values already supplied by the Claude SDK; no synthesis needed.
 - **M6.** When any phase ran on a model not in the price table, the rollup Cost cell renders `—` and a footnote names the unknown model. The per-phase row's Cost cell also renders `—`.
 - **M7.** When phases used different models, the rollup Model cell renders `mixed — see breakdown`.
@@ -53,7 +53,7 @@ None of those questions are answerable from "Mode: trust-the-technology" alone. 
 
 ## Constraints
 
-- **C1.** Comment generator runs after the daydream phases finish. Trajectory data is the source of truth — the comment renderer reads finalized data, not live in-memory recorder state. *Rationale:* uniform behavior across `--ttt`, `--pr`, and `--deep`. Deep mode produces sibling fork trajectory files; the renderer aggregates across all of them without changing the deep orchestrator.
+- **C1.** Comment generator runs after the daydream phases finish. Trajectory data is the source of truth — the comment renderer reads finalized data, not live in-memory recorder state. *Rationale:* uniform behavior across `--comment`, `daydream feedback <pr#>`, and the default deep-mode fix loop. Deep mode produces sibling fork trajectory files; the renderer aggregates across all of them without changing the deep orchestrator.
 - **C2.** ATIF v1.6 schema is fixed for this project. No new ATIF fields. *Rationale:* schema version is pinned per the upstream daydream/ATIF milestone.
 - **C3.** No external network calls during comment rendering (no live price API, no version API). *Rationale:* PR comment posting must be reliable and deterministic.
 - **C4.** Comment must remain valid GitHub-flavored markdown and respect the existing `gh api ... pulls/{n}/reviews` posting mechanism. *Rationale:* don't break the integration that already works.
