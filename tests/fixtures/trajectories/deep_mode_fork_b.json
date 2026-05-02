@@ -1,0 +1,45 @@
+{
+  "schema_version": "ATIF-v1.6",
+  "session_id": "fixture-deep-fork-b",
+  "agent": {
+    "name": "daydream",
+    "version": "0.14.0",
+    "model_name": "claude-sonnet-4-5"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp": "2026-05-02T00:02:00.000000Z",
+      "source": "user",
+      "message": "fix item 1",
+      "extra": {"daydream_phase": "fix", "daydream_run_flow": "deep"}
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-05-02T00:02:01.000000Z",
+      "source": "agent",
+      "model_name": "claude-sonnet-4-5",
+      "message": "fixed",
+      "tool_calls": [
+        {"tool_call_id": "fb1", "function_name": "Edit", "arguments": {}}
+      ],
+      "observation": {
+        "results": [{"source_call_id": "fb1", "content": "ok"}]
+      },
+      "metrics": {
+        "prompt_tokens": 2000,
+        "completion_tokens": 500,
+        "cached_tokens": 1000,
+        "cost_usd": 0.03
+      },
+      "extra": {"daydream_phase": "fix", "daydream_run_flow": "deep"}
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 2000,
+    "total_completion_tokens": 500,
+    "total_cached_tokens": 1000,
+    "total_cost_usd": 0.03,
+    "total_steps": 2
+  }
+}

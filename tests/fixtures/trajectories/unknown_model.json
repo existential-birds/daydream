@@ -1,0 +1,71 @@
+{
+  "schema_version": "ATIF-v1.6",
+  "session_id": "fixture-unknown-model",
+  "agent": {
+    "name": "daydream",
+    "version": "0.14.0",
+    "model_name": "gpt-6.0-experimental"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp": "2026-05-02T00:00:00.000000Z",
+      "source": "user",
+      "message": "review",
+      "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"}
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-05-02T00:00:01.000000Z",
+      "source": "agent",
+      "model_name": "gpt-6.0-experimental",
+      "message": "Reviewed.",
+      "tool_calls": [
+        {"tool_call_id": "r1", "function_name": "Read", "arguments": {}}
+      ],
+      "observation": {
+        "results": [{"source_call_id": "r1", "content": "ok"}]
+      },
+      "metrics": {
+        "prompt_tokens": 4000,
+        "completion_tokens": 500,
+        "cached_tokens": 1000,
+        "cost_usd": null
+      },
+      "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"}
+    },
+    {
+      "step_id": 3,
+      "timestamp": "2026-05-02T00:00:02.000000Z",
+      "source": "user",
+      "message": "fix",
+      "extra": {"daydream_phase": "fix", "daydream_run_flow": "normal"}
+    },
+    {
+      "step_id": 4,
+      "timestamp": "2026-05-02T00:00:03.000000Z",
+      "source": "agent",
+      "model_name": "gpt-6.0-experimental",
+      "message": "fixed",
+      "tool_calls": [
+        {"tool_call_id": "f1", "function_name": "Edit", "arguments": {}}
+      ],
+      "observation": {
+        "results": [{"source_call_id": "f1", "content": "ok"}]
+      },
+      "metrics": {
+        "prompt_tokens": 3000,
+        "completion_tokens": 800,
+        "cached_tokens": 800,
+        "cost_usd": null
+      },
+      "extra": {"daydream_phase": "fix", "daydream_run_flow": "normal"}
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 7000,
+    "total_completion_tokens": 1300,
+    "total_cached_tokens": 1800,
+    "total_steps": 4
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "schema_version": "ATIF-v1.6",
+  "session_id": "fixture-deep-parent",
+  "agent": {
+    "name": "daydream",
+    "version": "0.14.0",
+    "model_name": "claude-sonnet-4-5"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp": "2026-05-02T00:00:00.000000Z",
+      "source": "user",
+      "message": "deep review",
+      "extra": {"daydream_phase": "review", "daydream_run_flow": "deep"}
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-05-02T00:00:01.000000Z",
+      "source": "agent",
+      "model_name": "claude-sonnet-4-5",
+      "message": "Reviewed.",
+      "tool_calls": [
+        {"tool_call_id": "r1", "function_name": "Read", "arguments": {}},
+        {"tool_call_id": "r2", "function_name": "Grep", "arguments": {}}
+      ],
+      "observation": {
+        "results": [
+          {"source_call_id": "r1", "content": "ok"},
+          {"source_call_id": "r2", "content": "ok"}
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 8000,
+        "completion_tokens": 1500,
+        "cached_tokens": 4000,
+        "cost_usd": 0.10
+      },
+      "extra": {"daydream_phase": "review", "daydream_run_flow": "deep"}
+    },
+    {
+      "step_id": 3,
+      "timestamp": "2026-05-02T00:00:02.000000Z",
+      "source": "user",
+      "message": "parse feedback",
+      "extra": {"daydream_phase": "parse", "daydream_run_flow": "deep"}
+    },
+    {
+      "step_id": 4,
+      "timestamp": "2026-05-02T00:00:03.000000Z",
+      "source": "agent",
+      "model_name": "claude-sonnet-4-5",
+      "message": "{\"issues\": []}",
+      "metrics": {
+        "prompt_tokens": 1000,
+        "completion_tokens": 200,
+        "cached_tokens": 800,
+        "cost_usd": 0.02
+      },
+      "extra": {"daydream_phase": "parse", "daydream_run_flow": "deep"}
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 9000,
+    "total_completion_tokens": 1700,
+    "total_cached_tokens": 4800,
+    "total_cost_usd": 0.12,
+    "total_steps": 4
+  }
+}
