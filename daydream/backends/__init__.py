@@ -96,6 +96,10 @@ class CostEvent:
             ``None`` keeps existing 3-positional-arg call sites in
             ``backends/claude.py`` and ``backends/codex.py`` valid until
             Plans 03/04 update them.
+        model_name: Real SDK model id observed during this call (e.g.
+            ``claude-opus-4-5-20250901``). ``None`` when unavailable; the
+            recorder uses it to upgrade a generic backend label
+            (``"claude"``, ``"codex"``) to the actual model id.
         timestamp: ISO 8601 UTC timestamp populated at backend yield time.
     """
 
@@ -103,6 +107,7 @@ class CostEvent:
     input_tokens: int | None
     output_tokens: int | None
     cached_tokens: int | None = None
+    model_name: str | None = None
     timestamp: str = field(default_factory=now_iso)
 
 
@@ -134,6 +139,10 @@ class MetricsEvent:
         cost_usd: Per-turn cost in USD (None when unavailable; Codex
             always None per D-16 — DO NOT synthesize from a token-price
             table).
+        model_name: Real SDK model id observed for this turn (e.g.
+            ``claude-opus-4-5-20250901``). ``None`` when unavailable;
+            recorder uses it to upgrade a generic backend label
+            (``"claude"``, ``"codex"``) to the actual model id.
         timestamp: ISO 8601 UTC timestamp populated at backend yield time.
     """
 
@@ -142,6 +151,7 @@ class MetricsEvent:
     completion_tokens: int
     cached_tokens: int | None
     cost_usd: float | None
+    model_name: str | None = None
     timestamp: str = field(default_factory=now_iso)
 
 

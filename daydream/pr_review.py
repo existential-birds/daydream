@@ -147,7 +147,9 @@ _SEVERITY_LINE = re.compile(
 )
 
 DAYDREAM_REPO_URL = "https://github.com/existential-birds/daydream"
-DAYDREAM_FOOTER = f"<sub>🧙 Posted by [daydream]({DAYDREAM_REPO_URL})</sub>"
+DAYDREAM_FOOTER = (
+    f"<sub>🧙 Posted by [daydream v{daydream.__version__}]({DAYDREAM_REPO_URL})</sub>"
+)
 _NEXT_SECTION = re.compile(r"^## ", re.MULTILINE)
 # Matches "N. [path:line] Title" or "N. [path] Title" with optional leading
 # `[cross-stack]` marker. Tolerates Markdown bold/italic wrapping the whole
@@ -756,7 +758,7 @@ def _render_review_info_block(mode_label: str) -> str:
         recorder = get_current_recorder()
         paths, tmpdir = _resolve_trajectory_paths(recorder)
         try:
-            return render_run_info_block(paths, mode_label, daydream.__version__)
+            return render_run_info_block(paths, mode_label)
         finally:
             if tmpdir is not None:
                 with contextlib.suppress(Exception):
@@ -774,26 +776,17 @@ def build_payload(
     """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
 
     The review body uses collapsible sections so large reviews stay readable:
-        🧙 Daydream Review
-        Actionable comments posted: N
-        Counts summary line
+        **Code Review Summary**
         <details> Non-inline findings grouped by file
         <details> Consolidated AI agent prompt
-        <details> Review info (enriched run-info: rollup + per-phase + footer)
-        Footer
+        <details> Review info (enriched run-info: rollup + per-phase)
+        Footer (🧙 Posted by daydream vX.Y.Z)
     """
     all_issues_with_inline_meta = [*classified.body_only]
     all_issues_with_inline_meta.extend(classified.inline_issues)
 
-    inline_count = len(classified.inline)
-    body_count = len(classified.body_only)
-
     body_chunks: list[str] = []
-    body_chunks.append("Code Review Summary")
-    body_chunks.append(f"**Actionable comments posted: {inline_count}**")
-    body_chunks.append(
-        f"{inline_count} inline comment(s), {body_count} non-inline finding(s)."
-    )
+    body_chunks.append("**Code Review Summary**")
 
     body_section = _format_body_section(classified.body_only)
     if body_section:

@@ -319,12 +319,14 @@ class CodexBackend:
                             completion_tokens=usage["output_tokens"],
                             cached_tokens=cached_tokens,
                             cost_usd=None,
+                            model_name=self.model,
                         )
                     yield CostEvent(
                         cost_usd=None,
                         input_tokens=usage.get("input_tokens"),
                         output_tokens=usage.get("output_tokens"),
                         cached_tokens=cached_tokens,
+                        model_name=self.model,
                     )
 
                     # Parse structured output from last agent message if schema was provided
