@@ -517,8 +517,9 @@ async def _run_comment(work: WorkContext, config: RunConfig) -> int:
     if config.branch is not None:
         try:
             prs = git_ops.gh_pr_list_for_branch(work.source, config.branch)
-        except GitError:
-            prs = []
+        except GitError as exc:
+            print_error(console, "GitHub Error", str(exc))
+            return 1
         if not prs:
             print_error(
                 console,
