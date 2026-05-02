@@ -10,20 +10,9 @@ Usage::
     feedback = fetch_pr_feedback("HealthByRo/mono", 37979)
 """
 
-import json
-import subprocess
-from typing import Any
+from pathlib import Path
 
-
-def _gh_api(endpoint: str) -> Any:
-    """Call ``gh api`` with pagination and return parsed JSON."""
-    result = subprocess.run(  # noqa: S603 - endpoint is not user-controlled
-        ["gh", "api", "--paginate", endpoint],  # noqa: S607
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
+from daydream import git_ops
 
 
 def _is_daydream_comment(comment: dict) -> bool:
@@ -123,9 +112,10 @@ def fetch_pr_feedback(owner_repo: str, pr_number: int, findings: list[dict] | No
         and finding correlations.
     """
     findings = findings or []
+    repo = Path.cwd()
 
     # Fetch PR metadata
-    pr = _gh_api(f"/repos/{owner_repo}/pulls/{pr_number}")
+    pr = git_ops.gh_api(repo, f"/repos/{owner_repo}/pulls/{pr_number}", paginate=True)
     pr_meta = {
         "number": pr_number,
         "repo": owner_repo,
@@ -137,14 +127,14 @@ def fetch_pr_feedback(owner_repo: str, pr_number: int, findings: list[dict] | No
     }
 
     # Fetch review objects (approve / request changes)
-    reviews = _gh_api(f"/repos/{owner_repo}/pulls/{pr_number}/reviews")
+    reviews = git_ops.gh_api(repo, f"/repos/{owner_repo}/pulls/{pr_number}/reviews", paginate=True)
     review_dispositions = [
         {"user": r.get("user", {}).get("login"), "state": r.get("state")}
         for r in reviews
     ]
 
     # Fetch inline review comments (includes reply threads)
-    comments = _gh_api(f"/repos/{owner_repo}/pulls/{pr_number}/comments")
+    comments = git_ops.gh_api(repo, f"/repos/{owner_repo}/pulls/{pr_number}/comments", paginate=True)
 
     # Separate daydream comments from replies
     daydream_comments: list[dict] = []
@@ -194,7 +184,7 @@ def fetch_pr_feedback(owner_repo: str, pr_number: int, findings: list[dict] | No
     )
 
     # Check for commits after review (proxy for "changes applied")
-    commits = _gh_api(f"/repos/{owner_repo}/pulls/{pr_number}/commits")
+    commits = git_ops.gh_api(repo, f"/repos/{owner_repo}/pulls/{pr_number}/commits", paginate=True)
     review_timestamps = [
         dc.get("created_at", "")
         for dc in daydream_comments

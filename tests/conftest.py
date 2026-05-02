@@ -1,6 +1,7 @@
 """Shared pytest fixtures for the daydream test suite."""
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,81 @@ from daydream.exploration import (
     ExplorationContext,
     FileInfo,
 )
+from daydream.workspace import WorkContext
+
+# --- Real-git fixtures ------------------------------------------------------
+#
+# Mirrors the helpers that previously lived only in tests/test_git_ops.py.
+# Lifted here so other test modules (notably tests/test_pr_review.py) can
+# build real repos instead of mocking subprocess. tests/test_workspace.py
+# still has its own helpers (it needs additional plumbing for bare-origin
+# push semantics) — left untouched on purpose.
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> str:
+    """Run a git command in *repo* and return stripped stdout (test helper)."""
+    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", *args],  # noqa: S607 - git is a trusted command
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=check,
+    )
+    return proc.stdout.strip()
+
+
+def _configure_identity(repo: Path) -> None:
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Tester")
+
+
+def _commit(repo: Path, message: str) -> str:
+    _git(repo, "commit", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-b", "main")
+    _configure_identity(repo)
+
+
+def _bare_remote(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "--bare", "-b", "main")
+    return path
+
+
+def _make_repo_with_main(tmp_path: Path, name: str = "repo") -> Path:
+    repo = tmp_path / name
+    _init_repo(repo)
+    (repo / "base.txt").write_text("base\n")
+    _git(repo, "add", "base.txt")
+    _commit(repo, "initial")
+    return repo
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path) -> Path:
+    """Initialize a fresh git repo at tmp_path with one initial commit on `main`."""
+    return _make_repo_with_main(tmp_path)
+
+
+@pytest.fixture
+def bare_origin(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A bare repo suitable for use as `origin`."""
+    path = tmp_path_factory.mktemp("origin") / "remote.git"
+    return _bare_remote(path)
+
+
+@pytest.fixture
+def repo_with_origin(tmp_path: Path, bare_origin: Path) -> Path:
+    """A working repo cloned from bare_origin, ready for push/fetch."""
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "remote", "add", "origin", str(bare_origin))
+    _git(repo, "push", "-u", "origin", "main")
+    _git(repo, "remote", "set-head", "origin", "main")
+    return repo
 
 
 @pytest.fixture
@@ -120,6 +196,40 @@ def multi_stack_target(tmp_path: Path) -> Path:
         check=True,
     )
     return project
+
+
+@pytest.fixture
+def make_work() -> Callable[..., WorkContext]:
+    """Builder for synthetic ``WorkContext`` instances.
+
+    Stage 3 threads ``WorkContext`` through every ``phase_*`` function. Tests
+    that previously passed a raw ``Path`` as the second positional argument
+    use this fixture to construct a context anchored on *repo* with stable
+    fake SHAs. The builder mirrors the production fields so tests don't need
+    to spin up a real git repo just to call a phase.
+    """
+
+    def _make(
+        repo: Path,
+        *,
+        base_branch: str = "main",
+        base_sha: str = "DEADBEEF",
+        head_sha: str = "CAFEBABE",
+        head_branch: str | None = "feat/x",
+        is_ephemeral: bool = False,
+    ) -> WorkContext:
+        return WorkContext(
+            repo=repo,
+            source=repo,
+            base_branch=base_branch,
+            base_sha=base_sha,
+            head_branch=head_branch,
+            head_sha=head_sha,
+            is_ephemeral=is_ephemeral,
+            run_id="20260101000000-deadbeef",
+        )
+
+    return _make
 
 
 @pytest.fixture(autouse=True)

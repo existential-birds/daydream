@@ -224,7 +224,13 @@ async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch) -> Non
 
 
 def test_phase_primitives_unmodified() -> None:
-    """D-39: existing phase primitives imported unchanged by run_deep."""
+    """D-39: existing phase primitives imported unchanged by run_deep.
+
+    Stage 3 renames the second positional parameter from ``cwd`` to ``work``
+    (a :class:`WorkContext`). The contract this test enforces is now:
+    ``backend`` first, ``work`` second — base resolution happens once at
+    workspace open time and is threaded through every phase.
+    """
     from daydream.phases import (
         phase_alternative_review,
         phase_commit_push,
@@ -235,14 +241,12 @@ def test_phase_primitives_unmodified() -> None:
     )
 
     # phase_parse_feedback gained an OPTIONAL keyword-only kwarg per plan 05-06.
-    # Positional callers (runner.py:231, 580, 704) still work because
-    # `input_path` is keyword-only with default None.
     sig = inspect.signature(phase_parse_feedback)
     params = list(sig.parameters.values())
     assert params[0].name == "backend", (
         f"phase_parse_feedback first param: {params[0].name}"
     )
-    assert params[1].name == "cwd", (
+    assert params[1].name == "work", (
         f"phase_parse_feedback second param: {params[1].name}"
     )
     input_path = sig.parameters.get("input_path")
@@ -254,9 +258,7 @@ def test_phase_primitives_unmodified() -> None:
         f"input_path default: {input_path.default!r}"
     )
 
-    # Other primitives: first two params are (backend, cwd).
-    # Don't over-specify beyond that -- the tail may grow with kwargs in future
-    # phases without violating the D-39 contract.
+    # Other primitives: first two params are (backend, work).
     for fn in (
         phase_understand_intent,
         phase_alternative_review,
@@ -268,7 +270,7 @@ def test_phase_primitives_unmodified() -> None:
         assert params[0].name == "backend", (
             f"{fn.__name__} first param: {params[0].name}"
         )
-        assert params[1].name in ("cwd", "target_dir"), (
+        assert params[1].name == "work", (
             f"{fn.__name__} second param: {params[1].name}"
         )
 

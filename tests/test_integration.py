@@ -124,7 +124,14 @@ def mock_ui(monkeypatch):
 
 @pytest.fixture
 def target_project(tmp_path: Path) -> Path:
-    """Create a minimal project structure for testing."""
+    """Create a minimal project structure for testing.
+
+    Stage 4.2: ``open_workspace`` requires a real worktree. Initialise a
+    fresh repo with one initial commit on ``main`` and a ``feature`` branch
+    so the WrongBranchError guard does not fire for default-branch runs.
+    """
+    import subprocess
+
     project = tmp_path / "test_project"
     project.mkdir()
 
@@ -146,6 +153,31 @@ Found 1 issue to address.
 """
     (project / ".review-output.md").write_text(review_content)
 
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=project, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=project, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=project, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "add", "main.py"], cwd=project, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=project, capture_output=True, check=True,
+    )
+    # Move off main so the WrongBranchError guard doesn't fire when
+    # tests run with default (no --branch) configuration.
+    subprocess.run(
+        ["git", "checkout", "-b", "feature"],
+        cwd=project, capture_output=True, check=True,
+    )
+
     return project
 
 
@@ -157,6 +189,7 @@ async def test_full_fix_flow(mock_backend, mock_ui, target_project: Path):
         skill="python",
         quiet=True,
         cleanup=False,
+        shallow=True,
     )
 
     exit_code = await run(config)
@@ -711,17 +744,17 @@ async def test_run_populates_exploration_context(monkeypatch, target_project: Pa
     captured: dict[str, Any] = {}
 
     async def fake_phase_review(
-        backend, cwd, skill, *, diff_base=None, exploration_dir=None, exclude=None,
+        backend, work, skill, *, diff_base=None, exploration_dir=None, exclude=None,
     ):
         captured["exploration_dir"] = exploration_dir
 
-    async def fake_phase_parse_feedback(backend, cwd):
+    async def fake_phase_parse_feedback(backend, work, *, input_path=None):
         return []
 
-    async def fake_phase_test_and_heal(backend, cwd, feedback_items=None):
+    async def fake_phase_test_and_heal(backend, work, feedback_items=None):
         return True, 0
 
-    async def fake_phase_commit_push(backend, cwd):
+    async def fake_phase_commit_push(backend, work):
         return None
 
     monkeypatch.setattr("daydream.runner.phase_review", fake_phase_review)
@@ -733,7 +766,10 @@ async def test_run_populates_exploration_context(monkeypatch, target_project: Pa
         lambda name, model=None: _AgentsRecordingMockBackend(),
     )
 
-    config = RunConfig(target=str(target_project), skill="python", quiet=True, cleanup=False)
+    config = RunConfig(
+        target=str(target_project), skill="python", quiet=True, cleanup=False,
+        shallow=True,
+    )
     exit_code = await run(config)
 
     assert exit_code == 0
@@ -753,7 +789,7 @@ async def test_codex_backend_raises_on_agents(tmp_path: Path):
             pass
 
 
-async def test_exploration_enriched_output_both_flows(tmp_path):
+async def test_exploration_enriched_output_both_flows(tmp_path, make_work):
     """Both normal and TTT flows surface confidence + rationale on parsed issues.
 
     Exercises `phase_parse_feedback` (normal flow) and `phase_alternative_review`
@@ -795,10 +831,11 @@ async def test_exploration_enriched_output_both_flows(tmp_path):
         def format_skill_invocation(self, key, args=None):
             return f"/{key}"
 
+    work = make_work(tmp_path)
     # Normal flow: phase_parse_feedback returns list of validated issues
     (tmp_path / ".review-output.md").write_text("# Review\n")
     normal_backend = _MB({"issues": [enriched_normal_issue]})
-    normal_issues = await phase_parse_feedback(normal_backend, tmp_path)
+    normal_issues = await phase_parse_feedback(normal_backend, work)
 
     # TTT flow: phase_alternative_review returns list of issues
     diff_path = tmp_path / "diff.txt"
@@ -806,7 +843,7 @@ async def test_exploration_enriched_output_both_flows(tmp_path):
     trust_backend = _MB({"issues": [enriched_trust_issue]})
     trust_issues = await phase_alternative_review(
         trust_backend,
-        tmp_path,
+        work,
         diff_path,
         "intent summary",
         exploration_dir=tmp_path,

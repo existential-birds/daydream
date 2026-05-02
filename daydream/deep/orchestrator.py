@@ -59,6 +59,7 @@ from daydream.ui import (
     print_warning,
     prompt_user,
 )
+from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
@@ -233,7 +234,7 @@ def _candidate_pair_to_json(pair: Any) -> dict[str, Any]:
     return data
 
 
-async def run_deep(config: RunConfig, target_dir: Path) -> int:
+async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """Execute the deep-review pipeline (D-07).
 
     Composes exploration pre-scan, TTT, per-stack fan-out, per-stack parse,
@@ -244,22 +245,29 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
     Args:
         config: Run configuration. ``config.deep`` must be True;
             ``config.start_at`` drives resume behavior.
-        target_dir: Resolved target directory path (repo root).
+        work: Resolved working environment for the run.
 
     Returns:
         Exit code (0 on success, 1 on failure).
     """
     # Late imports to avoid circular dependency with runner.
-    from daydream.phases import _git_branch, _git_diff, _git_log
+    from daydream import git_ops
+    from daydream.git_ops import GitError
+    from daydream.phases import _git_branch, _git_log
     from daydream.runner import _compute_diff_ref, _make_archive_callback, _resolve_backend
     from daydream.ui import phase_subtitle, print_dim, print_phase_hero
 
     backend = _resolve_backend(config, "review")
 
+    target_dir = work.repo
+
     # ------ Preamble (mirrors run_trust) ------
-    diff = _git_diff(target_dir, exclude=config.ignore_paths)
+    try:
+        diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
+    except GitError:
+        diff = None
     log = _git_log(target_dir)
-    branch = _git_branch(target_dir)
+    branch = work.head_branch or _git_branch(target_dir)
 
     if diff is None:
         print_error(console, "Git Error", "Unable to determine base branch for diff")
@@ -356,7 +364,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                 print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
                 intent_summary = await phase_understand_intent(
                     backend,
-                    target_dir,
+                    work,
                     diff_path,
                     log,
                     branch,
@@ -366,7 +374,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                 print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
                 alt_issues = await phase_alternative_review(
                     backend,
-                    target_dir,
+                    work,
                     diff_path,
                     intent_summary,
                     exploration_dir=exploration_dir,
@@ -382,7 +390,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                 print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
                 per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
                     backend,
-                    target_dir,
+                    work,
                     stacks,
                     diff_path=diff_path,
                     intent_path=intent_p,
@@ -461,7 +469,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                     # global issue numbering reproducible across runs.
                     for stack_name, output_path in sorted(per_stack_outputs.items()):
                         records = await phase_parse_feedback(
-                            backend, target_dir, input_path=output_path
+                            backend, work, input_path=output_path
                         )
                         records_path = per_stack_records_path(dd, stack_name)
                         records_path.write_text(json.dumps(records, indent=2))
@@ -489,7 +497,7 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                 # Cross-stack merge (D-23..D-26).
                 await phase_cross_stack_merge(
                     backend,
-                    target_dir,
+                    work,
                     per_stack_records_paths=per_stack_records_paths,
                     intent_path=intent_p,
                     alternatives_path=alts_p,
@@ -536,20 +544,20 @@ async def run_deep(config: RunConfig, target_dir: Path) -> int:
                 print_success(console, f"Report written to {merged_report}. Exiting.")
                 return 0
 
-            items = await phase_parse_feedback(backend, target_dir)
+            items = await phase_parse_feedback(backend, work)
             if not items:
                 print_success(console, "No actionable items after parse -- done.")
                 return 0
 
             for idx, item in enumerate(items, start=1):
-                await phase_fix(backend, target_dir, item, idx, len(items))
+                await phase_fix(backend, work, item, idx, len(items))
 
-            passed, _retries = await phase_test_and_heal(backend, target_dir)
+            passed, _retries = await phase_test_and_heal(backend, work)
             if not passed:
                 print_warning(console, "Tests failed after fix attempt.")
                 return 1
 
-            await phase_commit_push(backend, target_dir)
+            await phase_commit_push(backend, work)
             return 0
 
         finally:

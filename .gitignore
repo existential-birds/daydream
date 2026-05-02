@@ -67,3 +67,7 @@ Thumbs.db
 
 # Daydream output
 .review-output.md
+
+# daydream ephemeral workspaces
+.daydream/worktrees/
+.daydream/intents/

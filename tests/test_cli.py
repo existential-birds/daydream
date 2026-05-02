@@ -2,6 +2,8 @@
 """Tests for CLI argument parsing."""
 
 import sys
+import warnings
+from pathlib import Path
 
 import pytest
 
@@ -246,6 +248,150 @@ def test_ignore_paths_repeatable(monkeypatch):
     ])
     config = _parse_args()
     assert config.ignore_paths == [".planning", "vendor"]
+
+
+# ---------------------------------------------------------------------------
+# Stage 4.1a — consolidated CLI surface (worktree-isolation refactor)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_args_branch_and_base(monkeypatch):
+    """--branch and --base populate the new RunConfig fields; output_mode defaults to loop."""
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "--branch", "feat/x", "--base", "develop", "/tmp/repo",
+    ])
+    config = _parse_args()
+    assert config.branch == "feat/x"
+    assert config.base == "develop"
+    assert config.output_mode == "loop"
+
+
+def test_parse_args_comment_mode_excludes_review(monkeypatch):
+    """--comment and --review are mutually exclusive (argparse output group)."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--comment", "--review", "/tmp/repo"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_parse_args_comment_mode_sets_output_mode(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--comment", "/tmp/repo"])
+    config = _parse_args()
+    assert config.output_mode == "comment"
+
+
+def test_parse_args_review_mode_sets_output_mode(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--review", "/tmp/repo"])
+    config = _parse_args()
+    assert config.output_mode == "review"
+
+
+def test_parse_args_worktree_modifier(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--worktree", "/tmp/repo"])
+    config = _parse_args()
+    assert config.force_worktree is True
+
+
+def test_parse_args_shallow_modifier(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--shallow", "/tmp/repo"])
+    config = _parse_args()
+    assert config.shallow is True
+
+
+def test_parse_args_copy_repeatable(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "--copy", "a.env", "--copy", "b.env", "/tmp/repo",
+    ])
+    config = _parse_args()
+    assert config.extra_copy == [Path("a.env"), Path("b.env")]
+
+
+def test_parse_args_copy_default_empty(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/repo"])
+    config = _parse_args()
+    assert config.extra_copy == []
+
+
+def test_parse_args_integer_target_errors(monkeypatch, capsys):
+    """Pure-numeric TARGET errors with the suggested feedback message."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "42"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+    err = capsys.readouterr().err
+    assert "did you mean: daydream feedback 42" in err
+
+
+def test_parse_args_feedback_subcommand(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "feedback", "7", "--bot", "copilot"])
+    config = _parse_args()
+    assert config.pr_number == 7
+    assert config.bot == "copilot"
+
+
+def test_parse_args_feedback_subcommand_with_target(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "feedback", "7", "--bot", "copilot", "/tmp/repo",
+    ])
+    config = _parse_args()
+    assert config.pr_number == 7
+    assert config.bot == "copilot"
+    assert config.target == "/tmp/repo"
+
+
+def test_parse_args_feedback_requires_bot(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "feedback", "7"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_parse_args_deprecated_python_warns(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--python", "/tmp/repo"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = _parse_args()
+    assert any(
+        issubclass(w.category, DeprecationWarning) and "--python" in str(w.message)
+        for w in caught
+    )
+    assert config.forced_skill == "python"
+    assert config.shallow is True
+
+
+def test_parse_args_deprecated_ttt_maps_to_comment(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--ttt", "/tmp/repo"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = _parse_args()
+    assert config.output_mode == "comment"
+    assert any(
+        issubclass(w.category, DeprecationWarning) and "--ttt" in str(w.message)
+        for w in caught
+    )
+
+
+def test_parse_args_deprecated_review_only_maps_to_review(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--review-only", "/tmp/repo"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = _parse_args()
+    assert config.output_mode == "review"
+    assert any(
+        issubclass(w.category, DeprecationWarning) and "--review-only" in str(w.message)
+        for w in caught
+    )
+
+
+def test_parse_args_deprecated_deep_is_noop(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--deep", "/tmp/repo"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = _parse_args()
+    # --deep still sets the legacy field for now (Stage 4.1b removes that),
+    # but output_mode stays "loop" — the new surface treats deep as default.
+    assert config.output_mode == "loop"
+    assert any(
+        issubclass(w.category, DeprecationWarning) and "--deep" in str(w.message)
+        for w in caught
+    )
 
 
 def test_phase_subtitles_include_wonder_and_envision():

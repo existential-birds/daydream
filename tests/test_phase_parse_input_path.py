@@ -40,28 +40,28 @@ def _silence_ui(monkeypatch):
     )
 
 
-async def test_input_path_default_uses_review_output_file(tmp_path: Path) -> None:
-    """D-40 regression: default call (no kwarg) reads cwd / REVIEW_OUTPUT_FILE."""
+async def test_input_path_default_uses_review_output_file(tmp_path: Path, make_work) -> None:
+    """D-40 regression: default call (no kwarg) reads work.repo / REVIEW_OUTPUT_FILE."""
     backend = _SpyBackend()
     (tmp_path / REVIEW_OUTPUT_FILE).write_text("# Issues\n1. [a.py:1] x\n")
-    await phase_parse_feedback(backend, tmp_path)
+    await phase_parse_feedback(backend, make_work(tmp_path))
     assert str(tmp_path / REVIEW_OUTPUT_FILE) in backend.last_prompt
 
 
-async def test_input_path_override_used_when_provided(tmp_path: Path) -> None:
+async def test_input_path_override_used_when_provided(tmp_path: Path, make_work) -> None:
     """D-21: input_path overrides the default, enabling per-stack iteration."""
     backend = _SpyBackend()
     custom = tmp_path / ".daydream" / "deep" / "stack-python-review.md"
     custom.parent.mkdir(parents=True, exist_ok=True)
     custom.write_text("# Issues\n1. [api.py:1] x\n")
-    await phase_parse_feedback(backend, tmp_path, input_path=custom)
+    await phase_parse_feedback(backend, make_work(tmp_path), input_path=custom)
     assert str(custom) in backend.last_prompt
     # Default path is NOT in the prompt when override is used
     assert str(tmp_path / REVIEW_OUTPUT_FILE) not in backend.last_prompt
 
 
-async def test_input_path_is_keyword_only(tmp_path: Path) -> None:
+async def test_input_path_is_keyword_only(tmp_path: Path, make_work) -> None:
     """input_path cannot be passed positionally (signature guard)."""
     backend = _SpyBackend()
     with pytest.raises(TypeError):
-        await phase_parse_feedback(backend, tmp_path, tmp_path / "other.md")  # type: ignore[misc]
+        await phase_parse_feedback(backend, make_work(tmp_path), tmp_path / "other.md")  # type: ignore[misc]

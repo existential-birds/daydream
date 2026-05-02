@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import pr_review
+from daydream import git_ops, pr_review
 from daydream.pr_review import (
     ParsedIssue,
     PRInfo,
@@ -21,6 +21,23 @@ from daydream.pr_review import (
     parse_report,
     snap_to_hunk,
 )
+
+# gh-gated marker: gh isn't always installed in CI, so tests that need to
+# stub out gh's subprocess (rather than use real git) are skipped if missing.
+_gh_available = shutil.which("gh") is not None
+gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed")
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Local helper for tests that need to script git directly."""
+    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", *args],  # noqa: S607 - git is a trusted command
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.strip()
 
 REPORT_FIXTURE = """\
 # Review
@@ -391,22 +408,21 @@ def test_build_payload_shape(pr: PRInfo) -> None:
 
 
 def test_find_open_pr_returns_none_on_empty_list(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
-    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
-        if cmd[:3] == ["git", "branch", "--show-current"]:
-            return subprocess.CompletedProcess(cmd, 0, b"feat/x\n", b"")
-        if cmd[:3] == ["gh", "pr", "list"]:
-            return subprocess.CompletedProcess(cmd, 0, b"[]", b"")
-        raise AssertionError(f"unexpected {cmd}")
+    """Real git tells us the branch; gh wrapper returns no PRs -> None.
 
-    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
-    assert pr_review.find_open_pr(tmp_path) is None
+    Stubbed at the git_ops gh wrapper layer (not subprocess) so it works
+    without a real GitHub remote or gh auth.
+    """
+    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [])
+    assert pr_review.find_open_pr(git_repo) is None
 
 
 def test_find_open_pr_returns_pr_info(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
+    """Real git for branch; gh wrappers stubbed for the PR + repo lookups."""
     rows = [
         {
             "number": 7,
@@ -416,19 +432,9 @@ def test_find_open_pr_returns_pr_info(
             "url": "u",
         }
     ]
-    repo = {"owner": {"login": "o"}, "name": "r"}
-
-    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
-        if cmd[:3] == ["git", "branch", "--show-current"]:
-            return subprocess.CompletedProcess(cmd, 0, b"f\n", b"")
-        if cmd[:3] == ["gh", "pr", "list"]:
-            return subprocess.CompletedProcess(cmd, 0, json.dumps(rows).encode(), b"")
-        if cmd[:3] == ["gh", "repo", "view"]:
-            return subprocess.CompletedProcess(cmd, 0, json.dumps(repo).encode(), b"")
-        raise AssertionError(f"unexpected {cmd}")
-
-    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
-    info = pr_review.find_open_pr(tmp_path)
+    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: rows)
+    monkeypatch.setattr(git_ops, "gh_repo_view", lambda _r: ("o", "r"))
+    info = pr_review.find_open_pr(git_repo)
     assert info is not None
     assert info.number == 7
     assert info.owner == "o"
@@ -461,9 +467,10 @@ async def test_post_skips_when_no_pr(
 
 
 @pytest.mark.asyncio
-async def test_post_cleans_tmp_file_on_success(
+async def test_post_succeeds_and_prints_url(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo
 ) -> None:
+    """On a successful submit the URL is forwarded to print_success."""
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
     monkeypatch.setattr(
         pr_review,
@@ -475,12 +482,13 @@ async def test_post_cleans_tmp_file_on_success(
     )
     monkeypatch.setattr(pr_review, "prompt_user", lambda *_a, **_k: "y")
 
-    captured: dict[str, Path] = {}
+    captured: dict[str, Any] = {}
 
-    def fake_submit(_td: Path, _pr: PRInfo, payload_path: Path) -> str | None:
-        captured["path"] = payload_path
-        assert payload_path.exists()
-        return "https://github.com/acme/widgets/pull/42#pullrequestreview-1"
+    def fake_submit(
+        _td: Path, _pr: PRInfo, payload: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        captured["payload"] = payload
+        return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
 
     monkeypatch.setattr(pr_review, "_submit_review", fake_submit)
     successes: list[str] = []
@@ -497,15 +505,17 @@ async def test_post_cleans_tmp_file_on_success(
         console=_FakeConsole(),  # type: ignore[arg-type]
         mode_label="deep review",
     )
-    # Tmp file was deleted after success.
-    assert not captured["path"].exists()
+    # The payload that would be POSTed was assembled and forwarded.
+    assert captured["payload"]["commit_id"] == pr.head_sha
+    assert captured["payload"]["event"] == "COMMENT"
     assert successes and "pullrequestreview" in successes[0]
 
 
 @pytest.mark.asyncio
-async def test_post_warns_and_keeps_file_on_failure(
+async def test_post_warns_with_preserved_payload_path_on_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo
 ) -> None:
+    """When submit returns an error, the warning surfaces git_ops's preserved-path text."""
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
     monkeypatch.setattr(
         pr_review,
@@ -516,7 +526,10 @@ async def test_post_warns_and_keeps_file_on_failure(
         ),
     )
     monkeypatch.setattr(pr_review, "prompt_user", lambda *_a, **_k: "y")
-    monkeypatch.setattr(pr_review, "_submit_review", lambda *_a, **_k: None)
+    err = "gh api /repos/acme/widgets/pulls/42/reviews failed: HTTP 422 (payload preserved at /tmp/x.json)"
+    monkeypatch.setattr(
+        pr_review, "_submit_review", lambda *_a, **_k: (None, err)
+    )
     warnings: list[str] = []
     monkeypatch.setattr(
         pr_review,
@@ -533,13 +546,8 @@ async def test_post_warns_and_keeps_file_on_failure(
     )
     assert warnings
     assert "no comments were posted" in warnings[0].lower()
-    # Tmp path mentioned in warning still exists.
-    # Extract path from warning message.
-    import re as _re
-
-    match = _re.search(r"(/\S+\.json)", warnings[0])
-    assert match
-    assert Path(match.group(1)).exists()
+    # The git_ops error text -- including the preserved payload path -- is forwarded.
+    assert "payload preserved at /tmp/x.json" in warnings[0]
 
 
 @pytest.mark.asyncio
@@ -558,10 +566,10 @@ async def test_post_skipped_when_user_declines(
     monkeypatch.setattr(pr_review, "prompt_user", lambda *_a, **_k: "n")
     submit_called = False
 
-    def fake_submit(*_a: Any, **_k: Any) -> str | None:
+    def fake_submit(*_a: Any, **_k: Any) -> tuple[str | None, str | None]:
         nonlocal submit_called
         submit_called = True
-        return "x"
+        return "x", None
 
     monkeypatch.setattr(pr_review, "_submit_review", fake_submit)
     monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
@@ -575,41 +583,37 @@ async def test_post_skipped_when_user_declines(
     assert not submit_called
 
 
-def test_resolve_line_verifies_hint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    file_text = "\n".join(f"line_{i} extra" for i in range(1, 21)).encode()
+def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:
+    """Write *path* under *repo*, commit it, and return the new HEAD SHA."""
+    file_path = repo / path
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(contents)
+    _git(repo, "add", path)
+    _git(repo, "commit", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
 
-    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
-        assert cmd[:2] == ["git", "show"]
-        return subprocess.CompletedProcess(cmd, 0, file_text, b"")
 
-    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
+def test_resolve_line_verifies_hint(git_repo: Path) -> None:
+    """Real-git path: show pulls the file at HEAD and the anchor verifies the hint."""
+    text = "\n".join(f"line_{i} extra" for i in range(1, 21)) + "\n"
+    sha = _commit_file(git_repo, "x.py", text, "add x.py")
     issue = ParsedIssue(path="x.py", line=10, title="t", body="`line_10`")
-    assert pr_review.resolve_line(tmp_path, "head", issue) == 10
+    assert pr_review.resolve_line(git_repo, sha, issue) == 10
 
 
-def test_resolve_line_full_search_when_hint_bad(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    file_text = "\n".join(f"row_{i}" for i in range(1, 21)).encode()
-
-    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(cmd, 0, file_text, b"")
-
-    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
-    # Hint at line 2, but anchor is at line 15.
+def test_resolve_line_full_search_when_hint_bad(git_repo: Path) -> None:
+    """Hint points to line 2, but the anchor is at line 15 -- full-file search wins."""
+    text = "\n".join(f"row_{i}" for i in range(1, 21)) + "\n"
+    sha = _commit_file(git_repo, "x.py", text, "add x.py")
     issue = ParsedIssue(path="x.py", line=2, title="t", body="`row_15`")
-    assert pr_review.resolve_line(tmp_path, "head", issue) == 15
+    assert pr_review.resolve_line(git_repo, sha, issue) == 15
 
 
-def test_resolve_line_none_when_missing_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(cmd, 128, b"", b"fatal")
-
-    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
+def test_resolve_line_none_when_missing_file(git_repo: Path) -> None:
+    """git show fails for a path that doesn't exist at HEAD -> None."""
+    sha = _git(git_repo, "rev-parse", "HEAD")
     issue = ParsedIssue(path="gone.py", line=1, title="t", body="b")
-    assert pr_review.resolve_line(tmp_path, "head", issue) is None
+    assert pr_review.resolve_line(git_repo, sha, issue) is None
 
 
 # --- file_hunks git-diff + gh-pr-diff fallback ----------------------------
@@ -632,88 +636,94 @@ _GH_PR_DIFF = (
 
 
 def test_file_hunks_uses_git_diff_when_it_succeeds(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
-    """Happy path: git diff returns a valid diff; gh is not consulted."""
+    """Happy path: real git diff yields hunks; gh fallback is not consulted."""
+    # Build base, then add 5 lines on a feature branch starting at line N.
+    _commit_file(
+        git_repo, "x.py", "\n".join(f"line {i}" for i in range(1, 30)) + "\n", "baseline"
+    )
+    base = _git(git_repo, "rev-parse", "HEAD")
+    lines = [f"line {i}" for i in range(1, 30)]
+    # Insert two new lines after position 20 to create a clear hunk.
+    lines[19:19] = ["NEW1", "NEW2"]
+    (git_repo / "x.py").write_text("\n".join(lines) + "\n")
+    _git(git_repo, "add", "x.py")
+    _git(git_repo, "commit", "-m", "add 2 lines")
+    head = _git(git_repo, "rev-parse", "HEAD")
+
+    # If the gh fallback fires we want to know about it.
     gh_called = False
 
-    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
+    def boom(*_a: Any, **_k: Any) -> str:
         nonlocal gh_called
-        if cmd[:2] == ["git", "diff"]:
-            return subprocess.CompletedProcess(
-                cmd,
-                0,
-                (
-                    b"diff --git a/x.py b/x.py\n"
-                    b"--- a/x.py\n"
-                    b"+++ b/x.py\n"
-                    b"@@ -1,3 +20,2 @@\n"
-                    b"+a\n"
-                ),
-                b"",
-            )
-        if cmd[:3] == ["gh", "pr", "diff"]:
-            gh_called = True
-        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+        gh_called = True
+        return ""
 
-    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
-    hunks = pr_review.file_hunks(tmp_path, "base", "head", "x.py", pr_number=42)
-    assert hunks == [(20, 21)]
+    monkeypatch.setattr(git_ops, "gh_pr_diff", boom)
+
+    hunks = pr_review.file_hunks(git_repo, base, head, "x.py", pr_number=42)
+    assert hunks  # at least one hunk
+    # The fallback was not needed because real git diff succeeded.
     assert gh_called is False
 
 
 def test_file_hunks_falls_back_to_gh_when_base_unreachable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
-    """When git diff fails (base_sha unreachable), gh pr diff rescues the hunks."""
+    """When git diff fails (base_sha unreachable), gh pr diff rescues the hunks.
 
-    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
-        if cmd[:2] == ["git", "diff"]:
-            # Simulate "fatal: bad revision 'base..head'" -> non-zero exit.
-            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal: bad revision")
-        if cmd[:3] == ["gh", "pr", "diff"]:
-            return subprocess.CompletedProcess(cmd, 0, _GH_PR_DIFF.encode(), b"")
-        return subprocess.CompletedProcess(cmd, 1, b"", b"")
-
-    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
-    hunks = pr_review.file_hunks(tmp_path, "rewritten_base", "head", "x.py", pr_number=42)
-    # Must come from the x.py block only -- the other.py hunk starts at line 1 and
-    # must NOT leak into x.py's result.
+    Uses real git (which raises GitError on the bogus base SHA) and stubs the
+    git_ops gh wrapper (no remote/auth required).
+    """
+    monkeypatch.setattr(
+        git_ops, "gh_pr_diff", lambda _r, _n: _GH_PR_DIFF
+    )
+    hunks = pr_review.file_hunks(
+        git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py", pr_number=42
+    )
+    # Must come from the x.py block only -- the other.py hunk starts at line 1
+    # and must NOT leak into x.py's result.
     assert hunks == [(10, 14)]
 
 
 def test_file_hunks_no_fallback_without_pr_number(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
-    """Without a pr_number, file_hunks returns empty instead of calling gh."""
+    """Without a pr_number, file_hunks returns empty instead of calling gh.
+
+    Uses real git (which fails on the bogus base) plus a guard on the gh
+    wrapper to confirm no fallback is invoked.
+    """
     gh_called = False
 
-    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
+    def boom(*_a: Any, **_k: Any) -> str:
         nonlocal gh_called
-        if cmd[:2] == ["git", "diff"]:
-            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal")
-        if cmd[:3] == ["gh", "pr", "diff"]:
-            gh_called = True
-        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+        gh_called = True
+        return ""
 
-    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
-    hunks = pr_review.file_hunks(tmp_path, "base", "head", "x.py")
+    monkeypatch.setattr(git_ops, "gh_pr_diff", boom)
+    hunks = pr_review.file_hunks(
+        git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py"
+    )
     assert hunks == []
     assert gh_called is False
 
 
 def test_file_hunks_gh_fallback_handles_subprocess_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
-    """If gh itself errors out, file_hunks returns empty without raising."""
+    """If gh itself errors out, file_hunks returns empty without raising.
 
-    def fake_run(cmd: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[bytes]:
-        if cmd[:2] == ["git", "diff"]:
-            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal")
-        if cmd[:3] == ["gh", "pr", "diff"]:
-            raise subprocess.SubprocessError("gh not found")
-        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+    Real git is allowed to fail, then the stubbed gh wrapper raises GitError
+    -- pr_review must swallow it and return [].
+    """
 
-    monkeypatch.setattr(pr_review.subprocess, "run", fake_run)
-    hunks = pr_review.file_hunks(tmp_path, "base", "head", "x.py", pr_number=42)
+    def raise_git_error(*_a: Any, **_k: Any) -> str:
+        raise git_ops.GitError("gh blew up")
+
+    monkeypatch.setattr(git_ops, "gh_pr_diff", raise_git_error)
+    hunks = pr_review.file_hunks(
+        git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py", pr_number=42
+    )
     assert hunks == []

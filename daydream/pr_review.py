@@ -16,14 +16,13 @@ Everything is best-effort: failures warn and return, never raise.
 
 from __future__ import annotations
 
-import json
 import re
-import subprocess
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from daydream import git_ops
+from daydream.git_ops import GitError
 from daydream.ui import print_info, print_success, print_warning, prompt_user
 
 if TYPE_CHECKING:
@@ -291,27 +290,10 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
 # --- Git / gh helpers ------------------------------------------------------
 
 
-def _run(
-    cmd: list[str], cwd: Path, *, timeout: int = 15, input_bytes: bytes | None = None
-) -> subprocess.CompletedProcess[bytes]:
-    """Run a subprocess with bytes IO; all args hardcoded or derived from JSON."""
-    return (
-        subprocess.run(  # noqa: S603 - args are hardcoded or from parsed gh/git output
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            input=input_bytes,
-            timeout=timeout,
-            shell=False,
-        )
-    )
-
-
 def _current_branch(target_dir: Path) -> str | None:
     try:
-        r = _run(["git", "branch", "--show-current"], target_dir, timeout=5)
-        return r.stdout.decode().strip() or None
-    except (subprocess.SubprocessError, OSError):
+        return git_ops.current_branch(target_dir)
+    except GitError:
         return None
 
 
@@ -320,37 +302,15 @@ def find_open_pr(target_dir: Path) -> PRInfo | None:
     branch = _current_branch(target_dir)
     if not branch:
         return None
-    try:
-        r = _run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--head",
-                branch,
-                "--state",
-                "open",
-                "--json",
-                "number,headRefOid,baseRefOid,baseRefName,url,headRepository,headRepositoryOwner",
-            ],
-            target_dir,
-            timeout=15,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        rows = json.loads(r.stdout.decode() or "[]")
-    except json.JSONDecodeError:
-        return None
+    rows = git_ops.gh_pr_list_for_branch(target_dir, branch)
     if not rows:
         return None
     row = rows[0]
     # Owner/repo lookup via `gh repo view` (handles fork cases cleanly).
-    owner, repo = _repo_owner_name(target_dir)
-    if owner is None or repo is None:
+    slug = git_ops.gh_repo_view(target_dir)
+    if slug is None:
         return None
+    owner, repo = slug
     return PRInfo(
         number=int(row["number"]),
         head_sha=row["headRefOid"],
@@ -360,26 +320,6 @@ def find_open_pr(target_dir: Path) -> PRInfo | None:
         repo=repo,
         url=row.get("url", ""),
     )
-
-
-def _repo_owner_name(target_dir: Path) -> tuple[str | None, str | None]:
-    try:
-        r = _run(
-            ["gh", "repo", "view", "--json", "owner,name"],
-            target_dir,
-            timeout=10,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None, None
-    if r.returncode != 0:
-        return None, None
-    try:
-        data = json.loads(r.stdout.decode())
-    except json.JSONDecodeError:
-        return None, None
-    owner = data.get("owner", {}).get("login")
-    name = data.get("name")
-    return owner, name
 
 
 # --- Line resolution + hunk classification --------------------------------
@@ -415,12 +355,10 @@ def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | N
     Returns None if the file doesn't exist at head or no anchor matches.
     """
     try:
-        r = _run(["git", "show", f"{head_sha}:{issue.path}"], target_dir, timeout=10)
-    except (subprocess.SubprocessError, OSError):
+        raw = git_ops.show(target_dir, head_sha, issue.path)
+    except GitError:
         return None
-    if r.returncode != 0:
-        return None
-    lines = r.stdout.decode(errors="replace").splitlines()
+    lines = raw.decode(errors="replace").splitlines()
     if not lines:
         return None
 
@@ -480,27 +418,13 @@ def file_hunks(
         pr_number: Optional PR number; enables the ``gh pr diff`` fallback.
     """
     git_failed = False
+    diff_text = ""
     try:
-        r = _run(
-            [
-                "git",
-                "diff",
-                "--unified=3",
-                f"{base_sha}..{head_sha}",
-                "--",
-                path,
-            ],
-            target_dir,
-            timeout=20,
+        diff_text = git_ops.diff_paths(
+            target_dir, base_sha, head_sha, [path], unified=3, merge_base_diff=False
         )
-        if r.returncode == 0:
-            diff_text = r.stdout.decode(errors="replace")
-        else:
-            git_failed = True
-            diff_text = ""
-    except (subprocess.SubprocessError, OSError):
+    except GitError:
         git_failed = True
-        diff_text = ""
 
     if git_failed and pr_number is not None:
         diff_text = _gh_pr_diff_for_path(target_dir, pr_number, path)
@@ -511,16 +435,9 @@ def file_hunks(
 def _gh_pr_diff_for_path(target_dir: Path, pr_number: int, path: str) -> str:
     """Fetch the PR's full diff via `gh pr diff` and return just the block for `path`."""
     try:
-        r = _run(
-            ["gh", "pr", "diff", str(pr_number)],
-            target_dir,
-            timeout=30,
-        )
-    except (subprocess.SubprocessError, OSError):
+        full_diff = git_ops.gh_pr_diff(target_dir, pr_number)
+    except GitError:
         return ""
-    if r.returncode != 0:
-        return ""
-    full_diff = r.stdout.decode(errors="replace")
     # Pick the `diff --git a/<path> b/<path>` block.
     needle_a = f"a/{path} "
     needle_b = f"b/{path}\n"
@@ -874,52 +791,36 @@ async def _post(
         return
 
     payload = build_payload(pr, mode_label, classified)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        prefix=f"pr-{pr.number}-review-",
-        suffix=".json",
-        delete=False,
-        encoding="utf-8",
-    ) as tf:
-        tf.write(json.dumps(payload, indent=2))
-        payload_path = Path(tf.name)
-
-    review_url = _submit_review(target_dir, pr, payload_path)
+    review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:
+        # ``error_msg`` carries the GitError text from git_ops, which includes
+        # the preserved tempfile path on failure (see git_ops.gh_api).
+        suffix = f" ({error_msg})" if error_msg else ""
         print_warning(
             console,
-            f"Failed to post PR review; no comments were posted. Payload kept at {payload_path}",
+            f"Failed to post PR review; no comments were posted.{suffix}",
         )
         return
 
-    # Success: clean up the tmp payload (gate 3).
-    payload_path.unlink(missing_ok=True)
     print_success(console, f"Posted review: {review_url}")
 
 
-def _submit_review(target_dir: Path, pr: PRInfo, payload_path: Path) -> str | None:
-    """POST the review payload via `gh api`. Returns html_url or None on failure."""
+def _submit_review(
+    target_dir: Path, pr: PRInfo, payload: dict[str, Any]
+) -> tuple[str | None, str | None]:
+    """POST the review payload via ``gh api``.
+
+    Returns:
+        ``(html_url, None)`` on success, ``(None, error_message)`` on failure.
+        The error message — when present — includes the preserved-payload path
+        produced by :func:`daydream.git_ops.gh_api` so callers can surface it.
+    """
+    endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews"
     try:
-        r = _run(
-            [
-                "gh",
-                "api",
-                "--method",
-                "POST",
-                f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews",
-                "--input",
-                str(payload_path),
-            ],
-            target_dir,
-            timeout=30,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        data = json.loads(r.stdout.decode())
-    except json.JSONDecodeError:
-        return None
+        data = git_ops.gh_api(target_dir, endpoint, method="POST", input_data=payload)
+    except GitError as exc:
+        return None, str(exc)
+    if not isinstance(data, dict):
+        return None, None
     url = data.get("html_url")
-    return str(url) if url else None
+    return (str(url) if url else None), None

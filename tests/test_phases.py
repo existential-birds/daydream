@@ -1,6 +1,7 @@
 # tests/test_phases.py
 """Tests for phase functions with backend abstraction."""
 
+import json
 import subprocess
 
 import pytest
@@ -14,7 +15,7 @@ from daydream.config import REVIEW_OUTPUT_FILE
 
 
 @pytest.mark.asyncio
-async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch):
+async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch, make_work):
     """Test that fix-and-retry starts fresh (no continuation) with enriched prompt."""
     from daydream.phases import phase_test_and_heal
 
@@ -66,7 +67,7 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch)
     ]
 
     backend = FreshContextBackend()
-    success, retries = await phase_test_and_heal(backend, tmp_path, feedback_items=feedback_items)
+    success, retries = await phase_test_and_heal(backend, make_work(tmp_path), feedback_items=feedback_items)
 
     assert success is True
     assert retries == 1
@@ -87,7 +88,7 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_phase_parse_feedback_empty_response_returns_empty_list(tmp_path, monkeypatch):
+async def test_phase_parse_feedback_empty_response_returns_empty_list(tmp_path, monkeypatch, make_work):
     """When the agent returns empty text (schema miss), treat as no issues."""
     from daydream.phases import phase_parse_feedback
 
@@ -112,12 +113,12 @@ async def test_phase_parse_feedback_empty_response_returns_empty_list(tmp_path, 
         def format_skill_invocation(self, skill_key, args=""):
             return f"/{skill_key}"
 
-    result = await phase_parse_feedback(EmptyResponseBackend(), tmp_path)
+    result = await phase_parse_feedback(EmptyResponseBackend(), make_work(tmp_path))
     assert result == []
 
 
 @pytest.mark.asyncio
-async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch):
+async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch, make_work):
     """When structured output fails but raw text is valid JSON, parse it."""
     from daydream.phases import phase_parse_feedback
 
@@ -141,7 +142,7 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch):
         def format_skill_invocation(self, skill_key, args=""):
             return f"/{skill_key}"
 
-    result = await phase_parse_feedback(JsonTextBackend(), tmp_path)
+    result = await phase_parse_feedback(JsonTextBackend(), make_work(tmp_path))
     assert len(result) == 1
     assert result[0]["file"] == "foo.py"
 
@@ -342,7 +343,7 @@ def test_git_diff_no_exclude_still_works(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch):
+async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch, make_work):
     """User confirms the agent's understanding on the first attempt."""
     from daydream.phases import phase_understand_intent
 
@@ -368,7 +369,7 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
     diff_file.write_text("diff --git a/login.py ...")
 
     result = await phase_understand_intent(
-        IntentBackend(), tmp_path,
+        IntentBackend(), make_work(tmp_path),
         diff_path=diff_file,
         log="abc1234 add login page",
         branch="feat/login",
@@ -378,7 +379,7 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeypatch):
+async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeypatch, make_work):
     """User corrects the agent's understanding, then confirms on second attempt."""
     from daydream.phases import phase_understand_intent
 
@@ -413,7 +414,7 @@ async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeyp
     diff_file.write_text("diff --git ...")
 
     result = await phase_understand_intent(
-        IntentBackend(), tmp_path,
+        IntentBackend(), make_work(tmp_path),
         diff_path=diff_file,
         log="abc1234 add login",
         branch="feat/login",
@@ -462,7 +463,7 @@ def test_parse_issue_selection_single():
 
 
 @pytest.mark.asyncio
-async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch):
+async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch, make_work):
     """Agent returns numbered issues via structured output."""
     from daydream.phases import phase_alternative_review
 
@@ -507,7 +508,7 @@ async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch):
     diff_file.write_text("diff --git ...")
 
     issues = await phase_alternative_review(
-        ReviewBackend(), tmp_path,
+        ReviewBackend(), make_work(tmp_path),
         diff_path=diff_file,
         intent_summary="Adds a user authentication service.",
     )
@@ -518,7 +519,7 @@ async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch):
+async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch, make_work):
     """Agent finds no issues — returns empty list."""
     from daydream.phases import phase_alternative_review
 
@@ -542,7 +543,7 @@ async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch):
     diff_file.write_text("diff --git ...")
 
     issues = await phase_alternative_review(
-        NoIssuesBackend(), tmp_path,
+        NoIssuesBackend(), make_work(tmp_path),
         diff_path=diff_file,
         intent_summary="Adds a login page.",
     )
@@ -551,7 +552,7 @@ async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch):
+async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch, make_work):
     """Selected issues produce a markdown plan file in .daydream/."""
     from daydream.phases import phase_generate_plan
 
@@ -600,7 +601,7 @@ async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch):
     diff_file.write_text("diff --git ...")
 
     plan_path = await phase_generate_plan(
-        PlanBackend(), tmp_path,
+        PlanBackend(), make_work(tmp_path),
         diff_path=diff_file,
         intent_summary="Adds authentication service",
         issues=issues,
@@ -615,7 +616,7 @@ async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch):
+async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch, make_work):
     """User enters 'none' — no plan file generated."""
     from daydream.phases import phase_generate_plan
 
@@ -644,7 +645,7 @@ async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch):
     diff_file.write_text("diff ...")
 
     plan_path = await phase_generate_plan(
-        NeverCalledBackend(), tmp_path,
+        NeverCalledBackend(), make_work(tmp_path),
         diff_path=diff_file,
         intent_summary="Test intent",
         issues=issues,
@@ -761,3 +762,54 @@ def test_intent_builder_omits_issue_instructions(tmp_path):
     prompt = build_intent_prompt(exploration_dir=tmp_path)
     assert "Confidence and Convention Rules" not in prompt
     assert "issue" not in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_phase_commit_push_passes_refs_not_diffs(tmp_path, monkeypatch, make_work):
+    """commit-push must be invoked with --repo / --base / --intent (refs-not-diffs).
+
+    Stage 3 contract: phases pass references (paths, base SHA, intent JSON)
+    rather than embedding diffs in the prompt. The receiving skill fetches
+    the diff itself via Read/Grep/Bash. This guards against regressions where
+    a phase might silently drop the new args and revert to the bare skill
+    invocation.
+    """
+    from daydream.phases import phase_commit_push
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    captured: dict[str, object] = {}
+
+    class CapturingBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            captured["skill_key"] = skill_key
+            captured["args"] = args
+            return f"/{skill_key} {args}"
+
+    work = make_work(tmp_path, base_sha="ABC123", head_sha="DEF456")
+    await phase_commit_push(CapturingBackend(), work)
+
+    assert captured["skill_key"] == "beagle-core:commit-push"
+    args = captured["args"]
+    assert isinstance(args, str)
+    assert f"--repo {work.repo}" in args
+    assert f"--base {work.base_sha}" in args
+    assert "--intent" in args
+
+    # Intent file should land under .daydream/intents/<run_id>.json and be JSON.
+    intent_dir = work.repo / ".daydream" / "intents"
+    intents = list(intent_dir.glob("*.json"))
+    assert len(intents) == 1
+    payload = json.loads(intents[0].read_text())
+    assert payload["phase"] == "commit_push"
+    assert payload["head_sha"] == "DEF456"
+    assert payload["base_sha"] == "ABC123"
