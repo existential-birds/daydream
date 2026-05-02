@@ -183,9 +183,21 @@ def _load_trajectories(paths: list[Path]) -> list[Trajectory]:
 
 
 def _aggregate(trajectories: list[Trajectory]) -> _RunAgg:
-    """Walk every step in every trajectory, summing into per-phase rollups."""
+    """Walk every step in every trajectory, summing into per-phase rollups.
+
+    ATIF v1.6 spec: ``Step.model_name`` omission implies the model defined in
+    the root-level agent config (``Trajectory.agent.model_name``). We honor
+    that by computing ``effective_model = step.model_name or
+    traj.agent.model_name`` for each step. Generic backend labels (see
+    :data:`_GENERIC_MODEL_LABELS`) are never added to ``phase.models`` —
+    downstream rendering would relabel them as ``unknown`` anyway, so they
+    must not pollute the per-phase model set. The fallback is still threaded
+    into :func:`_accumulate_metrics` so the cost path can attempt pricing
+    (and fall through to ``cost_unknown`` when the label is generic).
+    """
     agg = _RunAgg()
     for traj in trajectories:
+        agent_default_model = traj.agent.model_name
         for step in traj.steps:
             if step.source != "agent":
                 continue
@@ -195,9 +207,10 @@ def _aggregate(trajectories: list[Trajectory]) -> _RunAgg:
             phase = _ensure_phase(agg, phase_key, step.step_id)
             phase.steps += 1
             phase.tool_calls += len(step.tool_calls or [])
-            if step.model_name:
-                phase.models.add(step.model_name)
-            _accumulate_metrics(agg, phase, step)
+            effective_model = step.model_name or agent_default_model
+            if effective_model and effective_model not in _GENERIC_MODEL_LABELS:
+                phase.models.add(effective_model)
+            _accumulate_metrics(agg, phase, step, fallback_model=agent_default_model)
     return agg
 
 
@@ -216,7 +229,13 @@ def _ensure_phase(agg: _RunAgg, phase_key: str, first_step_id: int) -> _PhaseAgg
     return agg.phases[phase_key]
 
 
-def _accumulate_metrics(agg: _RunAgg, phase: _PhaseAgg, step: Step) -> None:
+def _accumulate_metrics(
+    agg: _RunAgg,
+    phase: _PhaseAgg,
+    step: Step,
+    *,
+    fallback_model: str | None = None,
+) -> None:
     """Add this step's token + cost contribution into the phase aggregate.
 
     Token clamp (single source of truth): per the ATIF Metrics docstring,
@@ -233,6 +252,11 @@ def _accumulate_metrics(agg: _RunAgg, phase: _PhaseAgg, step: Step) -> None:
       tokens, so we subtract the clamped ``cached`` from ``prompt``.
     - Else mark ``phase.cost_unknown`` and remember the model name for the
       footnote.
+
+    Per ATIF v1.6 (``Step.model_name`` field docs), an omitted step model
+    implies the root-level :attr:`Agent.model_name`. Callers thread that
+    value in via ``fallback_model`` so cost synthesis can land on the
+    intended model when the step itself doesn't carry an explicit id.
     """
     metrics = step.metrics
     if metrics is None:
@@ -249,7 +273,7 @@ def _accumulate_metrics(agg: _RunAgg, phase: _PhaseAgg, step: Step) -> None:
         phase.cost_usd += metrics.cost_usd
         return
 
-    model = step.model_name
+    model = step.model_name if step.model_name is not None else fallback_model
     if model is None:
         # Step has no model attribution and no SDK-provided cost: cannot
         # price. Mark unknown so the phase row degrades to '—'.

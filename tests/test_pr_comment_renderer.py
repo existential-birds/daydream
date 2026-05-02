@@ -722,6 +722,60 @@ def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Regression: ATIF v1.6 root-agent model fallback (CodeRabbit #2 on PR #66)
+# ---------------------------------------------------------------------------
+def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
+    """ATIF v1.6: step.model_name=None implies Trajectory.agent.model_name.
+
+    Per the Step.model_name field docstring ("Omission implies the model
+    defined in the root-level agent config"), an agent step that omits
+    model_name must be attributed to the trajectory's root agent model —
+    both for the per-phase model cell AND for cost synthesis. Today
+    daydream's recorder always stamps step.model_name explicitly, so this
+    is a defensive/spec-conformant guarantee on the renderer side.
+    """
+    p = _write_trajectory(
+        tmp_path,
+        # Use a model that's in MODEL_PRICES so cost synthesis lands.
+        model="gpt-5.5",
+        steps=[
+            {
+                "step_id": 1,
+                "timestamp": "2026-05-02T00:00:00.000000Z",
+                "source": "user",
+                "message": "go",
+                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
+            },
+            # All agent steps omit model_name -> renderer must fall back to
+            # agent.model_name from the root config.
+            _agent_step(
+                step_id=2,
+                phase="review",
+                model=None,
+                prompt=10_000,
+                completion=200,
+                cached=0,
+                cost_usd=None,
+            ),
+        ],
+    )
+    out = render_run_info_block([p], "ttt")
+    # Rollup model line uses the root agent's model, not "unknown".
+    assert "- **Model:** gpt-5.5" in out
+    assert "- **Model:** unknown" not in out
+    # Rollup cost is not the unknown sentinel — synthesized via the price
+    # table using the fallback model id.
+    assert "- **Cost:** —" not in out
+    # Per-phase Model cell also shows the fallback model.
+    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
+    cells = [c.strip() for c in review_row.split("|")]
+    # Columns: ['', 'Review', model, steps, tools, input, cached, output, cost, '']
+    assert cells[2] == "gpt-5.5"
+    # No 'unknown model' footnote, since the fallback resolved to a priced model.
+    assert "not in the price table" not in out
+
+
+# ---------------------------------------------------------------------------
 # PHASE_LABELS completeness
 # ---------------------------------------------------------------------------
 def test_phase_labels_covers_all_daydream_phases() -> None:
