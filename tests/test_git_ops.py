@@ -547,7 +547,6 @@ def test_diff_paths_raises_on_invalid_ref(tmp_path: Path) -> None:
 # deterministically. Real gh would require network and GitHub auth.
 
 
-@gh_required
 def test_gh_api_input_data_passes_tempfile_and_cleans_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -586,7 +585,6 @@ def test_gh_api_input_data_passes_tempfile_and_cleans_up(
     assert not Path(captured["input_path"]).exists()
 
 
-@gh_required
 def test_gh_api_input_data_preserves_tempfile_on_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -620,7 +618,6 @@ def test_gh_api_input_data_preserves_tempfile_on_failure(
     preserved.unlink(missing_ok=True)
 
 
-@gh_required
 def test_gh_pr_view_omits_pr_arg_when_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -643,7 +640,6 @@ def test_gh_pr_view_omits_pr_arg_when_none(
     assert all(not part.isdigit() for part in cmd)
 
 
-@gh_required
 def test_gh_pr_view_includes_pr_arg_when_given(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
