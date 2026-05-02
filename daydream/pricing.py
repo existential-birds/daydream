@@ -6,16 +6,15 @@ renderer to synthesize cost from token counts when a backend (notably Codex)
 does not surface USD cost directly. Anthropic-backed runs use cost values
 already supplied by the Claude SDK and do not pass through this module.
 
-Repeals project decision D-16 ("no synthesis of cost from token prices") per
-the enriched-pr-comment spec (.beagle/concepts/enriched-pr-comment/spec.md).
+Reverses project decision D-16 ("no synthesis of cost from token prices").
 Refs #65.
 
 Pricing source: OpenAI pricing snapshot, May 2026 (per 1M tokens). Cached-input
 prices for `gpt-5.5-pro`, `gpt-5-codex`, and `gpt-5.3-codex` were not
 published in USD on https://openai.com/api/pricing/ or
-https://developers.openai.com/codex/pricing at build time; per spec OQ1
-fallback, those entries use the input-token price as a conservative upper
-bound (slight overcount, transparent).
+https://developers.openai.com/codex/pricing at build time; those entries fall
+back to the input-token price as a conservative upper bound (slight overcount,
+transparent).
 
 Exports:
     ModelPrice: dataclass holding input/cached_input/output USD per 1M tokens.

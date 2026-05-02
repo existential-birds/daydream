@@ -1,7 +1,6 @@
 """Pure renderer for the enriched daydream PR-summary comment block.
 
-Implements the M1–M10 + S2 requirements from the enriched-pr-comment spec
-(.beagle/concepts/enriched-pr-comment/spec.md). Refs #65.
+Refs #65.
 
 The single public surface is :func:`render_run_info_block`. Everything else
 in this module is private (leading underscore) and exists to keep the
@@ -16,17 +15,15 @@ Architectural notes:
   :attr:`Trajectory.steps`.
 - Phase grouping uses ``Step.extra['daydream_phase']`` (a string key, since
   the value is loaded from JSON, not an in-memory ``DaydreamPhase`` enum
-  member). Display labels come from :data:`_PHASE_LABELS`, decided in
-  ``.beagle/concepts/enriched-pr-comment/phase-labels-decision.md``.
+  member). Display labels come from :data:`_PHASE_LABELS`.
 - Cost source: when a step's ``Metrics.cost_usd`` is set (Claude SDK does
-  this), it is used verbatim (M5 first sentence). When ``cost_usd`` is
-  ``None`` (Codex), the synthesized value from
-  :func:`daydream.pricing.compute_cost` is used (M5 second sentence; D-16
-  repealed by this project per spec C5). Unknown models render ``—`` plus a
-  footnote (M6).
+  this), it is used verbatim. When ``cost_usd`` is ``None`` (Codex), the
+  synthesized value from :func:`daydream.pricing.compute_cost` is used
+  (reverses project decision D-16). Unknown models render ``—`` plus a
+  footnote.
 - Failure mode: every entry point catches Exception and returns the
-  fallback block (single Mode line + 'run details unavailable'). Per K8 and
-  M9 the comment must always post.
+  fallback block (single Mode line + 'run details unavailable') so the
+  comment always posts.
 """
 
 from __future__ import annotations
@@ -335,8 +332,7 @@ def _render_phase_table(agg: _RunAgg) -> list[str]:
         "| Phase | Model | Steps | Tools | Input | Cached | Output | Cost |",
         "|---|---|---|---|---|---|---|---|",
     ]
-    # Order by first-seen step id so the table reads in execution order
-    # (per phase-labels-decision.md guardrail on column ordering).
+    # Order by first-seen step id so the table reads in execution order.
     ordered = sorted(agg.phases.values(), key=lambda p: p.first_seen_step_id)
     for phase in ordered:
         rows.append(_render_phase_row(phase))
