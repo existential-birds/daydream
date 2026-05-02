@@ -72,7 +72,7 @@ PHASE_LABELS: dict[DaydreamPhase, str] = {
 - Add a unit test that iterates `DaydreamPhase` and asserts every member has
   an entry — fails CI the moment someone adds a new phase without updating
   the label map.
-- Phase **column ordering** in the per-phase table is a separate concern
+- Phase **row ordering** in the per-phase table is a separate concern
   (M2 spec); recommend ordering by first-seen invocation timestamp rather
   than enum declaration order, so flow-specific tables (`--ttt`, `--pr`,
   `--deep`) read in execution order.

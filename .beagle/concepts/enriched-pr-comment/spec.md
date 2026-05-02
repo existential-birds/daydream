@@ -69,6 +69,7 @@ None of those questions are answerable from "Mode: trust-the-technology" alone. 
 - **K6.** **Daydream version goes in a small footer line, not the rollup.** Considered alternatives: rollup line (steals attention from the metrics that drive the value judgment); inside the collapsed block (hidden when readers want provenance). Footer is the conventional place.
 - **K7.** **Field labels: "Steps" (not "Turns") and "Tool calls".** ATIF's native vocabulary is "step." ML researchers will read it precisely; product engineers will infer "model invocations" from context. "Turns" is ambiguous (turn = exchange or just model output?).
 - **K8.** **Comment degrades, never blocks.** If trajectory parsing fails, the comment still posts with today's behavior plus a small "run details unavailable" note. *Rationale:* a missing trajectory must never cost a user their review feedback.
+- **K9.** **Cached-input price fallback: use input-token price when unpublished.** When a model's cached-input price isn't published, fall back to the input-token price as a conservative upper bound. *Rationale:* cached tokens are never more expensive than uncached; using the higher price yields a slight overcount but keeps cost estimates transparent and avoids underreporting.
 
 ## Reference Points
 
@@ -100,8 +101,8 @@ None of those questions are answerable from "Mode: trust-the-technology" alone. 
 
 - **OQ1.** Cached-input price for `gpt-5.5-pro`, `gpt-5-codex`, and `gpt-5.3-codex` — search results don't surface these consistently. Confirm against [OpenAI's pricing page](https://openai.com/api/pricing/) at build time. Fallback if unpublished: use input-token price (slight overcount, transparent).
 - **OQ2.** GPT-5.5's >272K-context multiplier (2× input, 1.5× output) — model only as a flat per-token price, or apply the multiplier when input tokens cross 272,000? The latter requires tracking per-call input size, not just session totals. Default proposal: flat price for v1, note if real runs commonly exceed 272K input tokens.
-- **OQ3.** Phase name canonical strings — orchestrators emit phase identifiers, but the human-readable labels in the table ("Test & heal" vs "test_and_heal") need a single mapping. Is the existing phase name set in `daydream/phases.py` already display-quality, or does it need a label dict?
-- **OQ4.** What's the maintenance trigger for refreshing the price table? Manual ad-hoc update on each daydream release? A pre-release checklist item? A scheduled review? Not blocking v1 but worth deciding before merge.
+- **OQ3.** ~~Phase name canonical strings — orchestrators emit phase identifiers, but the human-readable labels in the table ("Test & heal" vs "test_and_heal") need a single mapping. Is the existing phase name set in `daydream/phases.py` already display-quality, or does it need a label dict?~~ **Resolved:** Explicit `PHASE_LABELS` dict in the PR-comment renderer (see `phase-labels-decision.md`).
+- **OQ4.** ~~What's the maintenance trigger for refreshing the price table? Manual ad-hoc update on each daydream release? A pre-release checklist item? A scheduled review? Not blocking v1 but worth deciding before merge.~~ **Resolved:** Pre-release checklist item. Before each daydream release, verify the price table against [OpenAI's pricing page](https://openai.com/api/pricing/) and update if changed. Add a `# Verify price table` entry to the release checklist in `RELEASING.md`.
 
 ## Future Considerations
 

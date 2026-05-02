@@ -779,7 +779,7 @@ class TrajectoryRecorder:
         self.steps.append(self.redactor.redact_step(step))
         self._registered_siblings.clear()
 
-    def _build_trajectory(self, steps: list[Step] | None = None) -> Trajectory:
+    def build_trajectory(self, steps: list[Step] | None = None) -> Trajectory:
         if steps is None:
             steps = self.steps
         try:
@@ -815,7 +815,7 @@ class TrajectoryRecorder:
         # Phase 4 may revisit if empty runs need a stub file on disk.
         if not self.steps:
             return
-        trajectory = self._build_trajectory()
+        trajectory = self.build_trajectory()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data = json.dumps(trajectory.to_json_dict(), indent=2)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
@@ -874,7 +874,7 @@ class TrajectoryRecorder:
         if not snapshot_steps:
             return
         try:
-            trajectory = self._build_trajectory(steps=snapshot_steps)
+            trajectory = self.build_trajectory(steps=snapshot_steps)
             partial_path = self.path.with_suffix(self.path.suffix + ".partial")
             partial_path.parent.mkdir(parents=True, exist_ok=True)
             json_dict = trajectory.to_json_dict()

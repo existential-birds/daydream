@@ -16,6 +16,7 @@ Everything is best-effort: failures warn and return, never raise.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import tempfile
@@ -720,7 +721,7 @@ def _resolve_trajectory_paths(
         # Snapshot the in-memory parent trajectory to a tempfile (parent
         # file isn't written until __aexit__).
         if recorder.steps:
-            trajectory = recorder._build_trajectory()
+            trajectory = recorder.build_trajectory()
             tmpdir = tempfile.TemporaryDirectory(prefix="daydream-traj-snapshot-")
             snapshot = Path(tmpdir.name) / "parent.json"
             snapshot.write_text(
@@ -736,7 +737,8 @@ def _resolve_trajectory_paths(
                     paths.append(sibling)
     except Exception:  # noqa: BLE001 - renderer treats [] as missing data
         if tmpdir is not None:
-            tmpdir.cleanup()
+            with contextlib.suppress(Exception):
+                tmpdir.cleanup()
         return [], None
     return paths, tmpdir
 
@@ -757,11 +759,12 @@ def _render_review_info_block(mode_label: str) -> str:
             return render_run_info_block(paths, mode_label, daydream.__version__)
         finally:
             if tmpdir is not None:
-                tmpdir.cleanup()
+                with contextlib.suppress(Exception):
+                    tmpdir.cleanup()
     except Exception:  # noqa: BLE001 - posting must never crash on snapshot/discovery
         return (
             f"- **Mode:** {mode_label}\n\n"
-            "*Run details unavailable.*"
+            "*run details unavailable*"
         )
 
 

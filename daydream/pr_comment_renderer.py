@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from daydream.atif import Step, Trajectory
-from daydream.pricing import MODEL_PRICES, compute_cost
+from daydream.pricing import compute_cost
 
 # Display labels for each phase key used in Step.extra['daydream_phase'].
 # Keys are the string values of daydream.trajectory.DaydreamPhase. Defined
@@ -250,11 +250,12 @@ def _accumulate_metrics(agg: _RunAgg, phase: _PhaseAgg, step: Step) -> None:
         # price. Mark unknown so the phase row degrades to '—'.
         phase.cost_unknown = True
         return
-    uncached_input = max(prompt - cached, 0)
+    clamped_cached = min(cached, prompt)
+    uncached_input = prompt - clamped_cached
     synth = compute_cost(
         model=model,
         input_tokens=uncached_input,
-        cached_input_tokens=cached,
+        cached_input_tokens=clamped_cached,
         output_tokens=completion,
     )
     if synth is None:
@@ -438,6 +439,5 @@ def _format_cache_hit_pct(input_tokens: int, cached_tokens: int) -> str | None:
 
 
 __all__ = [
-    "MODEL_PRICES",  # re-exported for convenience; tests/intel may import
     "render_run_info_block",
 ]
