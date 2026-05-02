@@ -1,0 +1,55 @@
+{
+  "schema_version": "ATIF-v1.6",
+  "session_id": "fixture-single-phase-claude",
+  "agent": {
+    "name": "daydream",
+    "version": "0.14.0",
+    "model_name": "claude-sonnet-4-5"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp": "2026-05-02T00:00:00.000000Z",
+      "source": "user",
+      "message": "review the code",
+      "extra": {
+        "daydream_phase": "review",
+        "daydream_run_flow": "ttt"
+      }
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-05-02T00:00:01.000000Z",
+      "source": "agent",
+      "model_name": "claude-sonnet-4-5",
+      "message": "Reviewed.",
+      "tool_calls": [
+        {"tool_call_id": "t1", "function_name": "Read", "arguments": {"file_path": "/x/a.py"}},
+        {"tool_call_id": "t2", "function_name": "Grep", "arguments": {"pattern": "foo"}}
+      ],
+      "observation": {
+        "results": [
+          {"source_call_id": "t1", "content": "ok"},
+          {"source_call_id": "t2", "content": "ok"}
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 12400,
+        "completion_tokens": 1800,
+        "cached_tokens": 8200,
+        "cost_usd": 0.13
+      },
+      "extra": {
+        "daydream_phase": "review",
+        "daydream_run_flow": "ttt"
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 12400,
+    "total_completion_tokens": 1800,
+    "total_cached_tokens": 8200,
+    "total_cost_usd": 0.13,
+    "total_steps": 2
+  }
+}

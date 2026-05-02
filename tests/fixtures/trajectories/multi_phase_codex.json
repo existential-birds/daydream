@@ -1,0 +1,73 @@
+{
+  "schema_version": "ATIF-v1.6",
+  "session_id": "fixture-multi-phase-codex",
+  "agent": {
+    "name": "daydream",
+    "version": "0.14.0",
+    "model_name": "gpt-5.5"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp": "2026-05-02T00:00:00.000000Z",
+      "source": "user",
+      "message": "review",
+      "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"}
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-05-02T00:00:01.000000Z",
+      "source": "agent",
+      "model_name": "gpt-5.5",
+      "message": "review done",
+      "tool_calls": [
+        {"tool_call_id": "r1", "function_name": "Read", "arguments": {}}
+      ],
+      "observation": {"results": [{"source_call_id": "r1", "content": "ok"}]},
+      "metrics": {
+        "prompt_tokens": 10000,
+        "completion_tokens": 1000,
+        "cached_tokens": 5000,
+        "cost_usd": null
+      },
+      "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"}
+    },
+    {
+      "step_id": 3,
+      "timestamp": "2026-05-02T00:00:02.000000Z",
+      "source": "user",
+      "message": "fix",
+      "extra": {"daydream_phase": "fix", "daydream_run_flow": "normal"}
+    },
+    {
+      "step_id": 4,
+      "timestamp": "2026-05-02T00:00:03.000000Z",
+      "source": "agent",
+      "model_name": "gpt-5.5",
+      "message": "fixed",
+      "tool_calls": [
+        {"tool_call_id": "f1", "function_name": "Edit", "arguments": {}},
+        {"tool_call_id": "f2", "function_name": "Edit", "arguments": {}}
+      ],
+      "observation": {
+        "results": [
+          {"source_call_id": "f1", "content": "ok"},
+          {"source_call_id": "f2", "content": "ok"}
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 8000,
+        "completion_tokens": 2000,
+        "cached_tokens": 4000,
+        "cost_usd": null
+      },
+      "extra": {"daydream_phase": "fix", "daydream_run_flow": "normal"}
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 18000,
+    "total_completion_tokens": 3000,
+    "total_cached_tokens": 9000,
+    "total_steps": 4
+  }
+}
