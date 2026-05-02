@@ -16,13 +16,18 @@ Everything is best-effort: failures warn and return, never raise.
 
 from __future__ import annotations
 
+import json
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import daydream
 from daydream import git_ops
 from daydream.git_ops import GitError
+from daydream.pr_comment_renderer import render_run_info_block
+from daydream.trajectory import TrajectoryRecorder, get_current_recorder
 from daydream.ui import print_info, print_success, print_warning, prompt_user
 
 if TYPE_CHECKING:
@@ -685,6 +690,81 @@ def _build_consolidated_prompt(classified: _ClassifiedIssues, pr: PRInfo) -> str
     )
 
 
+def _resolve_trajectory_paths(
+    recorder: TrajectoryRecorder | None,
+) -> tuple[list[Path], tempfile.TemporaryDirectory[str] | None]:
+    """Resolve trajectory file paths to feed the enriched-comment renderer.
+
+    Returns the parent trajectory plus any sibling fork files (deep mode).
+    Because :meth:`TrajectoryRecorder._write` only fires at ``__aexit__``,
+    the parent file does not yet exist when the PR comment is composed
+    mid-run; we therefore snapshot the in-memory parent ATIF Trajectory to a
+    tempfile so the renderer can read it like any other on-disk trajectory.
+    Sibling forks have already exited and written by post-time, so we glob
+    for them.
+
+    Discovery rule: parent path is taken from ``recorder.path``; siblings
+    are every ``*.json`` under ``<target_dir>/.daydream/trajectories/``
+    whose filename starts with the recorder's ``session_id[:8]`` prefix
+    (matches :meth:`TrajectoryRecorder._sibling_path_for`).
+
+    The returned ``TemporaryDirectory`` (when not ``None``) MUST be kept
+    alive by the caller until the renderer finishes; closing it deletes
+    the snapshot file.
+    """
+    if recorder is None:
+        return [], None
+    paths: list[Path] = []
+    tmpdir: tempfile.TemporaryDirectory[str] | None = None
+    try:
+        # Snapshot the in-memory parent trajectory to a tempfile (parent
+        # file isn't written until __aexit__).
+        if recorder.steps:
+            trajectory = recorder._build_trajectory()
+            tmpdir = tempfile.TemporaryDirectory(prefix="daydream-traj-snapshot-")
+            snapshot = Path(tmpdir.name) / "parent.json"
+            snapshot.write_text(
+                json.dumps(trajectory.to_json_dict(), indent=2), encoding="utf-8"
+            )
+            paths.append(snapshot)
+        # Discover sibling fork trajectories on disk (deep mode).
+        prefix = recorder.session_id[:8]
+        sibling_dir = recorder.target_dir / ".daydream" / "trajectories"
+        if sibling_dir.is_dir():
+            for sibling in sorted(sibling_dir.glob(f"{prefix}.*.json")):
+                if sibling.is_file():
+                    paths.append(sibling)
+    except Exception:  # noqa: BLE001 - renderer treats [] as missing data
+        if tmpdir is not None:
+            tmpdir.cleanup()
+        return [], None
+    return paths, tmpdir
+
+
+def _render_review_info_block(mode_label: str) -> str:
+    """Render the enriched run-info block, falling back to the legacy line.
+
+    Wraps :func:`render_run_info_block` with one extra safety net beyond
+    its own internal try/except: if any unexpected exception escapes (e.g.
+    snapshot write failure), we degrade to today's single-Mode-line block
+    plus a 'Run details unavailable.' note. The comment must still post
+    (K8 / M9).
+    """
+    try:
+        recorder = get_current_recorder()
+        paths, tmpdir = _resolve_trajectory_paths(recorder)
+        try:
+            return render_run_info_block(paths, mode_label, daydream.__version__)
+        finally:
+            if tmpdir is not None:
+                tmpdir.cleanup()
+    except Exception:  # noqa: BLE001 - posting must never crash on snapshot/discovery
+        return (
+            f"- **Mode:** {mode_label}\n\n"
+            "*Run details unavailable.*"
+        )
+
+
 def build_payload(
     pr: PRInfo, mode_label: str, classified: _ClassifiedIssues
 ) -> dict[str, Any]:
@@ -696,7 +776,7 @@ def build_payload(
         Counts summary line
         <details> Non-inline findings grouped by file
         <details> Consolidated AI agent prompt
-        <details> Review info (severity/confidence breakdown)
+        <details> Review info (enriched run-info: rollup + per-phase + footer)
         Footer
     """
     all_issues_with_inline_meta = [*classified.body_only]
@@ -720,20 +800,24 @@ def build_payload(
     if classified.inline_issues or classified.body_only:
         body_chunks.append(_build_consolidated_prompt(classified, pr))
 
-    # Collapsible review info with severity/confidence breakdown.
-    info_lines: list[str] = []
-    info_lines.append(f"- **Mode:** {mode_label}")
+    # Collapsible review info: enriched run-info (rollup, per-phase
+    # breakdown, footer) followed by the existing severity/confidence
+    # breakdown. The shell stays per spec Reference Points.
+    enriched_run_info = _render_review_info_block(mode_label)
+    extra_info_lines: list[str] = []
     severity_parts = _count_labels(
         all_issues_with_inline_meta, "severity", ("high", "medium", "low")
     )
     if severity_parts:
-        info_lines.append("- **Severity:** " + ", ".join(severity_parts))
+        extra_info_lines.append("- **Severity:** " + ", ".join(severity_parts))
     confidence_parts = _count_labels(
         all_issues_with_inline_meta, "confidence", ("HIGH", "MEDIUM", "LOW")
     )
     if confidence_parts:
-        info_lines.append("- **Confidence:** " + ", ".join(confidence_parts))
-    review_info = "\n".join(info_lines)
+        extra_info_lines.append("- **Confidence:** " + ", ".join(confidence_parts))
+    review_info = enriched_run_info
+    if extra_info_lines:
+        review_info = f"{review_info}\n\n" + "\n".join(extra_info_lines)
     body_chunks.append(
         "<details>\n"
         "<summary>ℹ️ Review info</summary>\n\n"
