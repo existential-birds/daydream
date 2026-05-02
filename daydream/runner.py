@@ -437,7 +437,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         print_info(console, f"PR feedback mode: PR #{pr_number}")
         print_info(console, f"Bot: {bot}")
         print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {config.model or 'opus'}")
+        print_info(console, f"Model: {config.model or 'claude-opus-4-7'}")
         console.print()
 
         # Phase 1: Fetch PR feedback
