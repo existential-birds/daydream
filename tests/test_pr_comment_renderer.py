@@ -8,6 +8,7 @@ called out in S2.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -635,6 +636,89 @@ def test_e2e_corrupted_trajectory_falls_back_to_single_mode_line() -> None:
     assert "*run details unavailable*" in out
     assert "Per-phase breakdown" not in out
     assert "| Phase |" not in out
+
+
+# ---------------------------------------------------------------------------
+# Regression: corrupt-metrics bleed (CodeRabbit #3 on PR #66)
+# ---------------------------------------------------------------------------
+def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
+    """cached_tokens > prompt_tokens must be clamped to prompt at aggregation.
+
+    Per ATIF v1.6, cached_tokens is a SUBSET of prompt_tokens. A trajectory
+    that reports prompt=10, cached=20 (corrupt or racy upstream) must not
+    bleed the raw 20 into the rollup or per-phase row.
+    """
+    p = _write_trajectory(
+        tmp_path,
+        steps=[
+            {
+                "step_id": 1,
+                "timestamp": "2026-05-02T00:00:00.000000Z",
+                "source": "user",
+                "message": "go",
+                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
+            },
+            _agent_step(
+                step_id=2,
+                phase="review",
+                model="gpt-5.5",
+                prompt=10,
+                completion=5,
+                cached=20,
+                cost_usd=0.0,
+            ),
+        ],
+    )
+    out = render_run_info_block([p], "ttt")
+    # Rollup: cached cell shows clamped 10, hit-ratio 100%, never raw 20.
+    assert "10 in (10 cached, 100% hit) → 5 out" in out
+    assert "20 cached" not in out
+    # Per-phase row: Cached column reads "10".
+    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
+    cells = [c.strip() for c in review_row.split("|")]
+    # Columns: ['', 'Review', model, steps, tools, input, cached, output, cost, '']
+    assert cells[6] == "10"
+
+
+def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
+    """Negative token counts on a step must not surface as negative numbers.
+
+    Token counts are by definition non-negative; a negative value implies a
+    corrupt trajectory. The renderer clamps to 0 at aggregation and the
+    rollup falls back to the no-cache form (cached==0 omits hit ratio).
+    """
+    p = _write_trajectory(
+        tmp_path,
+        steps=[
+            {
+                "step_id": 1,
+                "timestamp": "2026-05-02T00:00:00.000000Z",
+                "source": "user",
+                "message": "go",
+                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
+            },
+            _agent_step(
+                step_id=2,
+                phase="review",
+                model="gpt-5.5",
+                prompt=-5,
+                completion=-2,
+                cached=-3,
+                cost_usd=0.0,
+            ),
+        ],
+    )
+    out = render_run_info_block([p], "ttt")
+    # No negative numbers anywhere in the rendered markdown. (Hyphens
+    # inside model names like ``gpt-5.5`` and the table separator row
+    # ``|---|...`` are fine; we only ban ``-`` adjacent to whitespace or
+    # a markdown cell boundary, which is what a leaked negative token
+    # count would look like.)
+    assert re.search(r"(?:^|\s|\|\s*)-\d", out) is None
+    # Tokens line: 0 in → 0 out, no hit-ratio segment (cached==0 rule).
+    assert "0 in → 0 out" in out
+    assert "cached" not in out.split("**Tokens:**", 1)[1].split("\n", 1)[0]
+    assert "% hit" not in out
 
 
 # ---------------------------------------------------------------------------

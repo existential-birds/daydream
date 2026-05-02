@@ -219,24 +219,28 @@ def _ensure_phase(agg: _RunAgg, phase_key: str, first_step_id: int) -> _PhaseAgg
 def _accumulate_metrics(agg: _RunAgg, phase: _PhaseAgg, step: Step) -> None:
     """Add this step's token + cost contribution into the phase aggregate.
 
+    Token clamp (single source of truth): per the ATIF Metrics docstring,
+    ``cached_tokens`` is a SUBSET of ``prompt_tokens`` (not additive), and
+    all token counts are non-negative. We clamp once at the top so
+    aggregates and synthesized costs share the same clean values.
+
     Cost rule (M5/M6/C5):
 
     - If ``Metrics.cost_usd`` is present, use it verbatim — Claude SDK
       surfaces real billed cost, no need to synthesize.
     - Else if model is in :data:`daydream.pricing.MODEL_PRICES`, synthesize
       cost from token counts. ``compute_cost`` expects *uncached* input
-      tokens, so we subtract ``cached_tokens`` from ``prompt_tokens``
-      before passing in. (Per ATIF Metrics docstring,
-      ``cached_tokens`` is a SUBSET of ``prompt_tokens``, not additive.)
+      tokens, so we subtract the clamped ``cached`` from ``prompt``.
     - Else mark ``phase.cost_unknown`` and remember the model name for the
       footnote.
     """
     metrics = step.metrics
     if metrics is None:
         return
-    prompt = metrics.prompt_tokens or 0
-    cached = metrics.cached_tokens or 0
-    completion = metrics.completion_tokens or 0
+    prompt = max(metrics.prompt_tokens or 0, 0)
+    completion = max(metrics.completion_tokens or 0, 0)
+    cached_raw = max(metrics.cached_tokens or 0, 0)
+    cached = min(cached_raw, prompt)  # ATIF: cached is a SUBSET of prompt
     phase.input_tokens += prompt
     phase.cached_tokens += cached
     phase.output_tokens += completion
@@ -251,12 +255,11 @@ def _accumulate_metrics(agg: _RunAgg, phase: _PhaseAgg, step: Step) -> None:
         # price. Mark unknown so the phase row degrades to '—'.
         phase.cost_unknown = True
         return
-    clamped_cached = min(cached, prompt)
-    uncached_input = prompt - clamped_cached
+    uncached_input = prompt - cached  # already clamped at top — single source of truth
     synth = compute_cost(
         model=model,
         input_tokens=uncached_input,
-        cached_input_tokens=clamped_cached,
+        cached_input_tokens=cached,
         output_tokens=completion,
     )
     if synth is None:
