@@ -65,6 +65,8 @@ class LoopMockBackend(Backend):
     on each iteration (list of issue lists, one per iteration).
     """
 
+    model = "mock-model"
+
     def __init__(self, review_results: list[list[dict[str, Any]]], tests_pass: bool = True):
         self._review_results = review_results
         self._tests_pass = tests_pass

@@ -214,7 +214,7 @@ def _phase_row(markdown: str, label: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-REAL_MODEL_ID = "claude-opus-4-5-20250901"
+FIXTURE_MODEL_ID = "fixture-sdk-model-id"
 
 
 async def test_render_uses_real_sdk_model_id_not_backend_alias(
@@ -232,7 +232,7 @@ async def test_render_uses_real_sdk_model_id_not_backend_alias(
     patch_sdk([
         FakeAssistantMessage(
             content=[FakeTextBlock(text="reviewing the code")],
-            model=REAL_MODEL_ID,
+            model=FIXTURE_MODEL_ID,
         ),
         FakeResultMessage(
             total_cost_usd=0.42,
@@ -254,8 +254,8 @@ async def test_render_uses_real_sdk_model_id_not_backend_alias(
     markdown = render_run_info_block([target_path], "trust-the-technology")
 
     model_line = _model_line(markdown)
-    assert REAL_MODEL_ID in model_line, (
-        f"Bug A: expected real SDK model id {REAL_MODEL_ID!r} in Model line, "
+    assert FIXTURE_MODEL_ID in model_line, (
+        f"Bug A: expected real SDK model id {FIXTURE_MODEL_ID!r} in Model line, "
         f"got: {model_line!r}\n\nFull markdown:\n{markdown}"
     )
     # Sanity: the renderer should NOT be showing the backend alias verbatim
@@ -279,7 +279,7 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
     review_messages = [
         FakeAssistantMessage(
             content=[FakeTextBlock(text="reviewing")],
-            model=REAL_MODEL_ID,
+            model=FIXTURE_MODEL_ID,
         ),
         FakeResultMessage(
             total_cost_usd=0.30,
@@ -293,7 +293,7 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
     fix_messages = [
         FakeAssistantMessage(
             content=[FakeTextBlock(text="fixing")],
-            model=REAL_MODEL_ID,
+            model=FIXTURE_MODEL_ID,
         ),
         FakeResultMessage(
             total_cost_usd=0.15,
@@ -398,7 +398,7 @@ async def test_per_phase_rollup_distinguishes_phases(
     review_messages = [
         FakeAssistantMessage(
             content=[FakeTextBlock(text="reviewing")],
-            model=REAL_MODEL_ID,
+            model=FIXTURE_MODEL_ID,
         ),
         FakeResultMessage(
             total_cost_usd=0.20,
@@ -412,7 +412,7 @@ async def test_per_phase_rollup_distinguishes_phases(
     parse_messages = [
         FakeAssistantMessage(
             content=[FakeTextBlock(text="parsed")],
-            model=REAL_MODEL_ID,
+            model=FIXTURE_MODEL_ID,
         ),
         FakeResultMessage(
             total_cost_usd=0.05,

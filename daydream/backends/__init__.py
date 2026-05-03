@@ -195,6 +195,8 @@ class Backend(Protocol):
     Each backend yields a stream of AgentEvent instances from execute().
     """
 
+    model: str
+
     def execute(
         self,
         cwd: Path,
@@ -215,21 +217,26 @@ def create_backend(name: str, model: str | None = None) -> Backend:
 
     Args:
         name: Backend name ("claude" or "codex").
-        model: Optional model override. Each backend has its own default.
+        model: Optional CLI override. When ``None``, the per-backend default
+            from :mod:`daydream.config` is used. This is the *only* place
+            those defaults are read; downstream layers take ``model: str``
+            as required.
 
     Returns:
-        A Backend instance.
+        A Backend instance whose ``.model`` attribute is a non-empty string.
 
     Raises:
         ValueError: If the backend name is unknown.
 
     """
+    from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+
     if name == "claude":
         from daydream.backends.claude import ClaudeBackend
-        return ClaudeBackend(model=model or "claude-opus-4-7")
+        return ClaudeBackend(model=model or DEFAULT_CLAUDE_MODEL)
     if name == "codex":
         from daydream.backends.codex import CodexBackend
-        return CodexBackend(model=model or "gpt-5.3-codex")
+        return CodexBackend(model=model or DEFAULT_CODEX_MODEL)
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude' or 'codex'.")
 
 

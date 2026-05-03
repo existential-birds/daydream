@@ -13,6 +13,7 @@ from daydream.config import REVIEW_OUTPUT_FILE
 class _DeepMockBackend:
     """Prompt-dispatching mock backend. Subclasses tune cost + agents behavior."""
 
+    model = "mock-model"
     cost_usd: float | None = 0.01
     raise_on_agents: bool = False
 

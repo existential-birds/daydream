@@ -29,7 +29,6 @@ from daydream import git_ops
 from daydream.agent import (
     MissingSkillError,
     console,
-    set_model,
     set_quiet_mode,
 )
 from daydream.backends import Backend, create_backend
@@ -89,7 +88,8 @@ class RunConfig:
     Attributes:
         target: Target directory path for the review. If None, prompts user.
         skill: Review skill to use ("python", "react", or "elixir"). If None, prompts user.
-        model: Claude model to use ("opus", "sonnet", or "haiku", or a dated id). Default is "claude-opus-4-7".
+        model: CLI override for the model id. ``None`` means "use the
+            per-backend default from :mod:`daydream.config`".
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
         review_only: Run review phase only without applying fixes.
@@ -304,7 +304,6 @@ async def run(config: RunConfig | None = None) -> int:
         if codex_in_use:
             quiet = False
     set_quiet_mode(quiet)
-    set_model(config.model or "claude-opus-4-7")
 
     # ``--comment`` and ``--review`` skip the test phase, so they also skip
     # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).
@@ -437,7 +436,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         print_info(console, f"PR feedback mode: PR #{pr_number}")
         print_info(console, f"Bot: {bot}")
         print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {config.model or 'claude-opus-4-7'}")
+        print_info(console, f"Model: {review_backend.model}")
         console.print()
 
         # Phase 1: Fetch PR feedback
@@ -588,7 +587,7 @@ async def _run_review_or_comment(
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
-        print_info(console, f"Model: {config.model or '<backend-default>'}")
+        print_info(console, f"Model: {backend.model}")
         console.print()
 
         # Pre-scan exploration: populate config.exploration_context before phase 1.
@@ -734,7 +733,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {config.model or '<backend-default>'}")
+        print_info(console, f"Model: {review_backend.model}")
         if skill:
             print_info(console, f"Review skill: {skill}")
         if config.review_only:

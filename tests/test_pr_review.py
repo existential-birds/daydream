@@ -125,7 +125,8 @@ BOLD_HEAD_REPORT = """\
    Parser must accept `__...__` the same as `**...**`.
 
 ## Cross-Stack Issues
-3. **[cross-stack] [admin-dashboard/lib/auth.ts:1, book-service/admin_auth.go:41, backend/deps.py:48] Inconsistent auth source**
+3. **[cross-stack] [admin-dashboard/lib/auth.ts:1, book-service/admin_auth.go:41, backend/deps.py:48]
+    Inconsistent auth source**
    Frontend reads the JWT claim, backends query the database.
    **Confidence:** HIGH
 """

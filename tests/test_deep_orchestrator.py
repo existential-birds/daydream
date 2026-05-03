@@ -26,6 +26,8 @@ class _StubBackend:
     tests can assert ordering, agents-kwarg absence, and per-stack isolation.
     """
 
+    model = "mock-model"
+
     def __init__(self, target: Path, *, is_codex: bool = False) -> None:
         self._target = target
         self._is_codex = is_codex

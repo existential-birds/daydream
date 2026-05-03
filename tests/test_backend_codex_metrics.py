@@ -56,7 +56,7 @@ async def test_metrics_event_emitted_at_turn_completed():
 @pytest.mark.asyncio
 async def test_cost_event_still_emitted():
     """The legacy CostEvent emission is preserved (so FinalMetrics aggregation works for Codex too)."""
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("turn_completed_with_usage.jsonl")
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
@@ -73,7 +73,7 @@ async def test_cost_event_still_emitted():
 @pytest.mark.asyncio
 async def test_partial_usage_skips_metrics_event():
     """usage missing output_tokens => no MetricsEvent emitted (EVNT-02 requires both as int)."""
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("turn_completed_partial_usage.jsonl")
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
@@ -90,7 +90,7 @@ async def test_partial_usage_skips_metrics_event():
 @pytest.mark.asyncio
 async def test_codex_parity_gap_d16():
     """D-16: cost_usd and cached_tokens are ALWAYS None for Codex; no token-price-table synthesis."""
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("turn_completed_with_usage.jsonl")
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []

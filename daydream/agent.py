@@ -55,14 +55,12 @@ class AgentState:
 
     Attributes:
         quiet_mode: True to hide tool calls and results, False to show them.
-        model: Model name to use for agent interactions.
         shutdown_requested: True if shutdown has been requested.
         current_backends: List of active backend instances.
 
     """
 
     quiet_mode: bool = False
-    model: str = "claude-opus-4-7"
     shutdown_requested: bool = False
     current_backends: list[Backend] = field(default_factory=list)
 
@@ -124,28 +122,6 @@ def get_quiet_mode() -> bool:
     """
     return _state.quiet_mode
 
-
-def set_model(model: str) -> None:
-    """Set the model to use for agent interactions.
-
-    Args:
-        model: Model name ("opus", "sonnet", or "haiku").
-
-    Returns:
-        None
-
-    """
-    _state.model = model
-
-
-def get_model() -> str:
-    """Get the current model setting.
-
-    Returns:
-        The current model name.
-
-    """
-    return _state.model
 
 
 def set_shutdown_requested(requested: bool) -> None:

@@ -68,6 +68,7 @@ class MockBackend:
     deterministic.
     """
 
+    model = "mock-model"
     events: list[AgentEvent]
 
     def execute(

@@ -24,7 +24,6 @@ from daydream.agent import run_agent
 from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
-    Backend,
     ContinuationToken,
     MetricsEvent,
     ResultEvent,
@@ -48,6 +47,7 @@ PHASES = [DaydreamPhase.REVIEW, DaydreamPhase.FIX, DaydreamPhase.TEST]
 class MockBackend:
     """Minimal Backend replaying a canned event list."""
 
+    model = "mock-model"
     events: list[AgentEvent]
 
     def execute(

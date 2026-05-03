@@ -111,6 +111,8 @@ _VALID_ENVELOPE: dict[str, Any] = {
 class _SpecialistMockBackend:
     """Mock backend that returns specialist results based on output_schema."""
 
+    model = "mock-model"
+
     def __init__(self, results: dict[str, dict] | None = None) -> None:
         self.execute_calls: list[dict[str, Any]] = []
         self._results = results or _VALID_ENVELOPE

@@ -76,7 +76,7 @@ async def test_simple_text_events():
 
 @pytest.mark.asyncio
 async def test_tool_use_events():
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("tool_use.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -107,7 +107,7 @@ async def test_tool_use_events():
 
 @pytest.mark.asyncio
 async def test_structured_output():
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
@@ -125,7 +125,7 @@ async def test_structured_output():
 
 @pytest.mark.asyncio
 async def test_turn_failed_raises():
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("turn_failed.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -139,7 +139,7 @@ async def test_continuation_token_resumes():
     """Test that continuation token is passed as 'resume' argument."""
     from daydream.backends import ContinuationToken
 
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
 
@@ -158,7 +158,7 @@ async def test_continuation_token_resumes():
 @pytest.mark.asyncio
 async def test_streamed_structured_output_via_item_updated():
     """Text delivered via item.updated deltas (item.completed has empty content)."""
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("streamed_structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
@@ -181,7 +181,7 @@ async def test_streamed_structured_output_via_item_updated():
 @pytest.mark.asyncio
 async def test_output_text_content_blocks():
     """agent_message with output_text content blocks (schema-constrained)."""
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("output_text_blocks.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
@@ -200,7 +200,7 @@ async def test_output_text_content_blocks():
 @pytest.mark.asyncio
 async def test_toplevel_text_field():
     """Real Codex format: text directly on item, not in content blocks."""
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("toplevel_text.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
@@ -236,7 +236,7 @@ async def test_toplevel_text_field():
 @pytest.mark.asyncio
 async def test_turn_completed_result_field():
     """Structured output returned in turn.completed result field."""
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("turn_completed_result.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
@@ -257,7 +257,7 @@ async def test_turn_completed_cached_input_tokens():
     """Codex emits cached_input_tokens on turn.completed.usage; surface it on
     MetricsEvent and CostEvent so cache-hit ratios work for the Codex backend
     (refs #65, K4 — fix for the historical hardcoded cached_tokens=None)."""
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("turn_completed_cached_tokens.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -281,20 +281,20 @@ async def test_turn_completed_cached_input_tokens():
 
 
 def test_format_skill_invocation():
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     # Should strip namespace prefix and use $ syntax
     result = backend.format_skill_invocation("beagle-python:review-python")
     assert result == "$review-python"
 
 
 def test_format_skill_invocation_with_args():
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     result = backend.format_skill_invocation("beagle-core:fetch-pr-feedback", "--pr 42 --bot mybot")
     assert result == "$fetch-pr-feedback --pr 42 --bot mybot"
 
 
 def test_format_skill_invocation_no_namespace():
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     result = backend.format_skill_invocation("commit-push")
     assert result == "$commit-push"
 
@@ -346,7 +346,7 @@ class TestUnwrapShellCommand:
 @pytest.mark.asyncio
 async def test_execute_raises_on_agents():
     """CodexBackend refuses agents= with NotImplementedError (Plan 02-04)."""
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     mock_agent = {"description": "test", "prompt": "test"}
 
     with pytest.raises(NotImplementedError, match="Codex backend does not support exploration"):

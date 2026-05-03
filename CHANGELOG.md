@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **agent:** Revert default Claude model from `claude-opus-4-7` to `claude-opus-4-6` ([#67](https://github.com/existential-birds/daydream/issues/67))
+
+  4.7 escalates the SDK's default malware-analysis `<system-reminder>` (injected on every `Read` tool result) into hard refusals on benign user code, citing the reminder verbatim and declining requested edits — a regression vs. 4.6 / 4.5, which treat it as a soft nudge. Trajectory data across three recent deep runs showed 15 reminder-tied refusals out of 135 reads (~11%) and ~2,537 wasted output tokens on "this is benign code, proceeding…" preambles. Reverting to 4.6 until the underlying behavior is addressed.
+
+- **agent:** Make `model` a required `str` end-to-end; default lives only in `daydream.config.DEFAULT_CLAUDE_MODEL` / `DEFAULT_CODEX_MODEL`, resolved exactly once in `create_backend`. Removed five duplicated literal fallbacks (`ClaudeBackend.__init__`, `CodexBackend.__init__`, `AgentState.model`, `runner.set_model(... or "...")`, banner display) so a future model bump is one constant change, not a five-file shotgun edit. `set_model` / `get_model` deleted (`AgentState.model` was unused).
+
 ## [0.14.0] - 2026-04-29
 
 ### Breaking

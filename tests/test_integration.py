@@ -37,6 +37,8 @@ def strip_ansi(text: str) -> str:
 class MockBackend:
     """Mock backend that yields events based on prompt content."""
 
+    model = "mock-model"
+
     def __init__(self, events: list | None = None):
         self._events = events
         self._prompt: str = ""
@@ -87,6 +89,8 @@ class MockBackend:
 
 class MockBackendWithEvents:
     """Mock backend with pre-configured events for tool panel testing."""
+
+    model = "mock-model"
 
     def __init__(self, events: list):
         self._events = events
@@ -588,6 +592,8 @@ async def test_run_trust_full_flow(tmp_path, monkeypatch):
     call_count = 0
 
     class TrustMockBackend:
+        model = "mock-model"
+
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             nonlocal call_count
             call_count += 1
@@ -689,6 +695,8 @@ async def test_run_trust_does_not_prompt_for_skill(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-m", "change"], cwd=tmp_path, capture_output=True, env=env)
 
     class MinimalBackend:
+        model = "mock-model"
+
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text="Intent: changes f.txt.")
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
@@ -783,7 +791,7 @@ async def test_codex_backend_raises_on_agents(tmp_path: Path):
     """CodexBackend.execute() refuses agents= with NotImplementedError."""
     from daydream.backends.codex import CodexBackend
 
-    backend = CodexBackend()
+    backend = CodexBackend(model="fixture-model")
     with pytest.raises(NotImplementedError, match="Codex backend does not support exploration"):
         async for _ in backend.execute(tmp_path, "prompt", agents={"x": object()}):
             pass

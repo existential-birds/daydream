@@ -82,6 +82,7 @@ class MockBackend:
     on internal helpers from another test module.
     """
 
+    model = "mock-model"
     events: list[AgentEvent]
 
     def execute(

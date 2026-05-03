@@ -214,13 +214,13 @@ async def test_execute_structured_output(patch_sdk):
 
 
 def test_format_skill_invocation_full_key():
-    backend = ClaudeBackend()
+    backend = ClaudeBackend(model="fixture-model")
     result = backend.format_skill_invocation("beagle-python:review-python")
     assert result == "/beagle-python:review-python"
 
 
 def test_format_skill_invocation_with_args():
-    backend = ClaudeBackend()
+    backend = ClaudeBackend(model="fixture-model")
     result = backend.format_skill_invocation("beagle-core:fetch-pr-feedback", "--pr 42 --bot mybot")
     assert result == "/beagle-core:fetch-pr-feedback --pr 42 --bot mybot"
 
