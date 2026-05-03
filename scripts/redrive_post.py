@@ -185,17 +185,12 @@ def _repo_owner_name(target_dir: Path) -> tuple[str | None, str | None]:
 
 
 async def _run(target_dir: Path, pr_number: int, auto_yes: bool = False) -> None:
-    from rich.console import Console
-
     from daydream.pr_review import (
         PRInfo,
         build_payload,
         classify,
         parse_report,
     )
-    from daydream.ui import print_info, print_success, print_warning
-
-    console = Console()
 
     # --- Build report from artifacts ---
     deep_dir = target_dir / ".daydream" / "deep"
@@ -260,7 +255,7 @@ async def _run(target_dir: Path, pr_number: int, auto_yes: bool = False) -> None
             print("Skipped.")
             return
 
-    payload = build_payload(pr, "deep review", classified)
+    payload = build_payload(pr, classified)
     with tempfile.NamedTemporaryFile(
         mode="w",
         prefix=f"pr-{pr.number}-review-",
