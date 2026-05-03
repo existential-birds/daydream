@@ -59,10 +59,14 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
         if exact.is_dir():
             run_dir = exact
         elif runs_dir.is_dir():
-            for d in runs_dir.iterdir():
-                if d.is_dir() and d.name.startswith(session_id):
-                    run_dir = d
-                    break
+            matches = sorted(
+                d for d in runs_dir.iterdir()
+                if d.is_dir() and d.name.startswith(session_id)
+            )
+            if len(matches) == 1:
+                run_dir = matches[0]
+            elif len(matches) > 1:
+                raise ValueError(f"Session prefix '{session_id}' matches multiple runs")
     else:
         latest = _latest_main_trajectory(daydream_dir)
         if latest:
