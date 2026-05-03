@@ -73,7 +73,6 @@ class _PhaseAgg:
     """
 
     phase_key: str
-    first_seen_step_id: int
     steps: int = 0
     tool_calls: int = 0
     input_tokens: int = 0
@@ -204,7 +203,7 @@ def _aggregate(trajectories: list[Trajectory]) -> _RunAgg:
             phase_key = _phase_key_of(step)
             if phase_key is None:
                 continue
-            phase = _ensure_phase(agg, phase_key, step.step_id)
+            phase = _ensure_phase(agg, phase_key)
             phase.steps += 1
             phase.tool_calls += len(step.tool_calls or [])
             effective_model = step.model_name or agent_default_model
@@ -220,12 +219,9 @@ def _phase_key_of(step: Step) -> str | None:
     return val if isinstance(val, str) else None
 
 
-def _ensure_phase(agg: _RunAgg, phase_key: str, first_step_id: int) -> _PhaseAgg:
+def _ensure_phase(agg: _RunAgg, phase_key: str) -> _PhaseAgg:
     if phase_key not in agg.phases:
-        agg.phases[phase_key] = _PhaseAgg(
-            phase_key=phase_key,
-            first_seen_step_id=first_step_id,
-        )
+        agg.phases[phase_key] = _PhaseAgg(phase_key=phase_key)
     return agg.phases[phase_key]
 
 
@@ -364,8 +360,11 @@ def _render_phase_table(agg: _RunAgg) -> list[str]:
         "| Phase | Model | Steps | Tools | Input | Cached | Output | Cost |",
         "|---|---|---|---|---|---|---|---|",
     ]
-    # Order by first-seen step id so the table reads in execution order.
-    ordered = sorted(agg.phases.values(), key=lambda p: p.first_seen_step_id)
+    # Preserve dict insertion order: _ensure_phase inserts each phase on
+    # first encounter, so dict order already matches traversal order. Per-
+    # file step_id restarts at 1 in deep-mode forks, so sorting by step_id
+    # would mix fork phases ahead of later-numbered parent phases.
+    ordered = list(agg.phases.values())
     for phase in ordered:
         rows.append(_render_phase_row(phase))
     rows.append("")

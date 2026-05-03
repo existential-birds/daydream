@@ -624,6 +624,28 @@ def test_e2e_deep_mode_aggregates_fork_files() -> None:
     assert "$0.07" in fix_row  # 0.04 + 0.03
 
 
+def test_deep_mode_phase_rows_preserve_traversal_order() -> None:
+    """Phase rows in deep mode follow first-encounter order across files.
+
+    Regression for CodeRabbit #6 on PR #66: each fork trajectory restarts
+    step_id at 1, so sorting phases by ``first_seen_step_id`` would rank a
+    fork's first phase (Fix, step_id=2) ahead of the parent's later phase
+    (Parse Feedback, step_id=4). The fix relies on dict insertion order
+    instead — parent phases land before fork phases.
+    """
+    out = render_run_info_block(
+        [_DEEP_PARENT, _DEEP_FORK_A, _DEEP_FORK_B],
+        "deep review",
+    )
+    phase_rows = [
+        line
+        for line in out.splitlines()
+        if line.startswith("| ") and "---" not in line and "Phase" not in line
+    ]
+    labels = [row.split("|")[1].strip() for row in phase_rows]
+    assert labels == ["Review", "Parse Feedback", "Fix"], labels
+
+
 def test_e2e_corrupted_trajectory_falls_back_to_single_mode_line() -> None:
     """Truncated/invalid JSON: renderer never raises, posts fallback block.
 
