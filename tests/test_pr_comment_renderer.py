@@ -122,7 +122,7 @@ def test_m2_per_phase_breakdown_is_collapsed_table() -> None:
     assert "<details><summary>Per-phase breakdown</summary>" in out
     assert "</details>" in out
     # Header row with all required columns.
-    assert "| Phase | Model | Steps | Tools | Input | Cached | Output | Cost |" in out
+    assert "| Phase | Model | Tools | Input (cached) | Output | Cost |" in out
     # Both phases present.
     assert "| Review |" in out
     assert "| Fix |" in out
@@ -141,7 +141,7 @@ def test_m4_uniform_layout_across_mode_labels() -> None:
         assert label in b
         assert label in c
     # Same column header in all three.
-    header = "| Phase | Model | Steps | Tools | Input | Cached | Output | Cost |"
+    header = "| Phase | Model | Tools | Input (cached) | Output | Cost |"
     assert header in a
     assert header in b
     assert header in c
@@ -445,10 +445,9 @@ def test_aggregates_across_multiple_trajectory_files() -> None:
     # has 1 agent step in review and 1 in fix. sibling has 1 in fix.
     # So total agent steps = 3, tools = 1 + 2 + 1 = 4.
     assert "- **Steps / tool calls:** 3 / 4" in out
-    # Fix row aggregates across both files: 13,000 input, 6,000 cached, 2,500 output.
+    # Fix row aggregates across both files: 13,000 input (46% cached), 2,500 output.
     fix_row = next(line for line in out.splitlines() if line.startswith("| Fix |"))
     assert "13,000" in fix_row
-    assert "6,000" in fix_row
     assert "2,500" in fix_row
 
 
@@ -486,11 +485,10 @@ def test_e2e_single_phase_claude_renders_full_block() -> None:
     assert "- **Steps / tool calls:** 1 / 2" in out
     # Per-phase table — one Review row, no Fix.
     assert "<details><summary>Per-phase breakdown</summary>" in out
-    assert "| Phase | Model | Steps | Tools | Input | Cached | Output | Cost |" in out
+    assert "| Phase | Model | Tools | Input (cached) | Output | Cost |" in out
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     assert "claude-sonnet-4-5" in review_row
     assert "12,400" in review_row
-    assert "8,200" in review_row
     assert "1,800" in review_row
     assert "$0.13" in review_row
     assert "| Fix |" not in out
@@ -523,7 +521,6 @@ def test_e2e_multi_phase_renders_per_phase_table_rows() -> None:
     # Spot-check token counts on Fix row (largest).
     fix_row = next(r for r in phase_rows if r.startswith("| Fix |"))
     assert "7,000" in fix_row
-    assert "4,000" in fix_row
     assert "2,000" in fix_row
     assert "$0.10" in fix_row
 
@@ -569,7 +566,6 @@ def test_e2e_codex_cached_tokens_show_in_rollup() -> None:
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     assert "gpt-5.5" in review_row
     assert "20,000" in review_row
-    assert "14,000" in review_row
     assert "$0.07" in review_row
 
 
@@ -615,11 +611,9 @@ def test_e2e_deep_mode_aggregates_fork_files() -> None:
     assert "- **Cost:** $0.19" in out
     # Steps: 4 agent steps total. Tools: 2 (parent review) + 0 (parse) + 2 + 1 = 5.
     assert "- **Steps / tool calls:** 4 / 5" in out
-    # Fix row aggregates across both forks: 5,000 in / 2,500 cached / 1,300 out.
+    # Fix row aggregates across both forks: 5,000 input (50% cached) / 1,300 out.
     fix_row = next(line for line in out.splitlines() if line.startswith("| Fix |"))
-    assert "| 2 |" in fix_row  # 2 fix steps merged from forks A + B
     assert "5,000" in fix_row
-    assert "2,500" in fix_row
     assert "1,300" in fix_row
     assert "$0.07" in fix_row  # 0.04 + 0.03
 
@@ -695,11 +689,11 @@ def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
     # Rollup: cached cell shows clamped 10, hit-ratio 100%, never raw 20.
     assert "10 in (10 cached, 100% hit) → 5 out" in out
     assert "20 cached" not in out
-    # Per-phase row: Cached column reads "10".
+    # Per-phase row: Input (cached) cell reads "10 (100%)" — clamped.
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     cells = [c.strip() for c in review_row.split("|")]
-    # Columns: ['', 'Review', model, steps, tools, input, cached, output, cost, '']
-    assert cells[6] == "10"
+    # Columns: ['', 'Review', model, tools, input(cached), output, cost, '']
+    assert cells[4] == "10 (100%)"
 
 
 def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
@@ -791,7 +785,7 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
     # Per-phase Model cell also shows the fallback model.
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     cells = [c.strip() for c in review_row.split("|")]
-    # Columns: ['', 'Review', model, steps, tools, input, cached, output, cost, '']
+    # Columns: ['', 'Review', model, tools, input(cached), output, cost, '']
     assert cells[2] == "gpt-5.5"
     # No 'unknown model' footnote, since the fallback resolved to a priced model.
     assert "not in the price table" not in out

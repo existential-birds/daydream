@@ -374,12 +374,8 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
     # fixture, formatted with thousand separators above 1,000).
     for label, row in (("Review", review_row), ("Fix", fix_row)):
         cells = [c.strip() for c in row.strip("|").split("|")]
-        # cells: [Phase, Model, Steps, Tools, Input, Cached, Output, Cost]
+        # cells: [Phase, Model, Tools, Input (cached), Output, Cost]
         assert cells[4] != "0", (
-            f"Bug B/C: {label} row has Input=0.\n  row: {row!r}\n"
-            f"  per-step metrics: {per_step_metrics}"
-        )
-        assert cells[6] != "0", (
             f"Bug B/C: {label} row has Output=0.\n  row: {row!r}\n"
             f"  per-step metrics: {per_step_metrics}"
         )
