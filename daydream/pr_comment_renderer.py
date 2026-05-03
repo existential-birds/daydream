@@ -357,8 +357,8 @@ def _render_phase_table(agg: _RunAgg) -> list[str]:
     rows: list[str] = [
         "<details><summary>Per-phase breakdown</summary>",
         "",
-        "| Phase | Model | Steps | Tools | Input | Cached | Output | Cost |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Phase | Model | Tools | Input (cached) | Output | Cost |",
+        "|---|---|---|---|---|---|",
     ]
     # Preserve dict insertion order: _ensure_phase inserts each phase on
     # first encounter, so dict order already matches traversal order. Per-
@@ -382,10 +382,14 @@ def _render_phase_row(phase: _PhaseAgg) -> str:
         only = next(iter(phase.models))
         model_cell = "unknown" if only in _GENERIC_MODEL_LABELS else only
     cost_cell = "—" if phase.cost_unknown else _format_cost(phase.cost_usd)
+    pct = _format_cache_hit_pct(phase.input_tokens, phase.cached_tokens)
+    if pct is not None and phase.cached_tokens > 0:
+        input_cell = f"{_format_int(phase.input_tokens)} ({pct})"
+    else:
+        input_cell = _format_int(phase.input_tokens)
     return (
-        f"| {label} | {model_cell} | {_format_int(phase.steps)} | "
-        f"{_format_int(phase.tool_calls)} | {_format_int(phase.input_tokens)} | "
-        f"{_format_int(phase.cached_tokens)} | {_format_int(phase.output_tokens)} | "
+        f"| {label} | {model_cell} | {_format_int(phase.tool_calls)} | "
+        f"{input_cell} | {_format_int(phase.output_tokens)} | "
         f"{cost_cell} |"
     )
 

@@ -419,7 +419,7 @@ def test_build_payload_shape(
     assert "- **Tokens:**" in body
     assert "- **Steps / tool calls:**" in body
     assert "<details><summary>Per-phase breakdown</summary>" in body
-    assert "| Phase | Model | Steps | Tools | Input | Cached | Output | Cost |" in body
+    assert "| Phase | Model | Tools | Input (cached) | Output | Cost |" in body
     # Footer is the last block.
     assert body.rstrip().endswith("</sub>")
 
