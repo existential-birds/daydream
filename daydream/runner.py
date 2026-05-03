@@ -20,6 +20,7 @@ dispatch interprets them. ``run_feedback`` is the entry point used by the
 """
 
 import shutil
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -106,8 +107,8 @@ class RunConfig:
         ignore_paths: Paths to exclude from diffs (passed to `git :(exclude)` pathspecs
             and surfaced in review prompts). Default is an empty list.
         trajectory_path: Path to write the ATIF v1.6 trajectory JSON. Default-resolved
-            by run flows to ``<target>/.daydream/trajectory-<ts>-<id>.json`` (unique per
-            run) when None. Phase 4 wires the ``--trajectory <path>`` CLI flag.
+            by run flows to ``<target>/.daydream/runs/<session_id>/trajectory.json``
+            when None. Phase 4 wires the ``--trajectory <path>`` CLI flag.
         pr_repo: GitHub repository in ``owner/repo`` format. Auto-detected from ``gh``
             when ``--pr`` is used. Stored in trajectory metadata for eval linkage.
         archive: Archive run artifacts to centralized store. Default True.
@@ -421,12 +422,14 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
     review_backend = _resolve_backend(config, "review", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
 
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
+    session_id = str(uuid.uuid4())
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
     async with TrajectoryRecorder(
         path=trajectory_path,
         run_flow=DaydreamRunFlow.PR,
         target_dir=target_dir,
         agent_model_name=config.model or "",
+        session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
@@ -573,12 +576,14 @@ async def _run_review_or_comment(
     diff_path.write_text(diff)
 
     flow = DaydreamRunFlow.TTT
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
+    session_id = str(uuid.uuid4())
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
     async with TrajectoryRecorder(
         path=trajectory_path,
         run_flow=flow,
         target_dir=target_dir,
         agent_model_name=config.model or "",
+        session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
@@ -720,12 +725,14 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
     fix_backend = _resolve_backend(config, "fix", backend_cache)
     test_backend = _resolve_backend(config, "test", backend_cache)
 
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
+    session_id = str(uuid.uuid4())
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
     async with TrajectoryRecorder(
         path=trajectory_path,
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=target_dir,
         agent_model_name=config.model or "",
+        session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,

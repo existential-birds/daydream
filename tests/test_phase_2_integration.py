@@ -136,6 +136,7 @@ async def test_claude_metrics_populated_on_every_agent_step(tmp_path: Path) -> N
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name="opus",
+        session_id="test",
     ):
         await run_agent(backend, tmp_path, "review please", phase=DaydreamPhase.REVIEW)
 
@@ -191,6 +192,7 @@ async def test_every_step_has_timestamp_and_extra_labels(tmp_path: Path) -> None
         run_flow=DaydreamRunFlow.PR,
         target_dir=tmp_path,
         agent_model_name="sonnet",
+        session_id="test",
     ):
         await run_agent(backend, tmp_path, "fix me", phase=DaydreamPhase.FIX)
 
@@ -240,6 +242,7 @@ async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) ->
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name="opus",
+        session_id="test",
     ):
         await run_agent(backend, tmp_path, "test it", phase=DaydreamPhase.TEST)
 
@@ -305,6 +308,7 @@ async def test_final_metrics_equals_sum_of_per_step_metrics(tmp_path: Path) -> N
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name="opus",
+        session_id="test",
     ):
         await run_agent(backend1, tmp_path, "first prompt", phase=DaydreamPhase.REVIEW)
         await run_agent(backend2, tmp_path, "second prompt", phase=DaydreamPhase.FIX)
@@ -391,6 +395,7 @@ async def test_user_step_has_no_agent_only_fields(tmp_path: Path) -> None:
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name="opus",
+        session_id="test",
     ):
         await run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW)
 

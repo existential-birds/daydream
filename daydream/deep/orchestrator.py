@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import uuid
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -282,12 +283,14 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     diff_path.write_text(diff)
     dd = deep_dir(target_dir)
 
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir)
+    session_id = str(uuid.uuid4())
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
     async with TrajectoryRecorder(
         path=trajectory_path,
         run_flow=DaydreamRunFlow.DEEP,
         target_dir=target_dir,
         agent_model_name=config.model or "",
+        session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,

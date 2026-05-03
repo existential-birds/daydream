@@ -627,11 +627,9 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
     body = payload["body"]
     assert isinstance(body, str)
 
-    # --- Mode line: should reflect deep review --------------------------
-    mode_line = _line_starting(body, "- **Mode:**")
-    assert "deep review" in mode_line.lower(), (
-        f"expected 'deep review' in Mode line, got: {mode_line!r}\n\n"
-        f"full body:\n{body}"
+    # --- Mode line: removed everywhere ----------------------------------
+    assert "**Mode:**" not in body, (
+        f"BUG: Mode line should be gone from PR-comment body.\n\nfull body:\n{body}"
     )
 
     # --- Model line: real SDK id, not 'unknown' / backend alias ---------

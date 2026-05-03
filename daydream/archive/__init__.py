@@ -130,47 +130,32 @@ def _archive_run_inner(
 def _copy_bundle(target_dir: Path, run_dir: Path, recorder: TrajectoryRecorder) -> None:
     """Copy ``.daydream/`` artifacts to the archive run directory.
 
-    Copies the recorder's actual trajectory output (works for both default
-    and ``--trajectory /custom/path`` runs), the ``trajectories/``
-    subdirectory, ``review-output.md``, ``deep/`` artifacts, and
-    ``diff.patch``. Falls back to glob pattern for legacy naming when the
-    recorder path doesn't exist. Missing files are silently skipped.
+    Trajectory subtree (``runs/<session_id>/trajectory.json`` plus
+    ``runs/<session_id>/trajectories/``) is copied wholesale via copytree
+    so the archive layout mirrors the live layout exactly. Other artifacts
+    (``review-output.md``, ``deep/``, ``diff.patch``) keep their existing
+    copy logic. Missing files are silently skipped.
     """
     daydream_dir = target_dir / ".daydream"
-    prefix = recorder.session_id[:8]
 
-    # Primary: copy the recorder's actual output path
-    if recorder.path.is_file():
-        shutil.copy2(recorder.path, run_dir / "trajectory.json")
+    # Trajectory subtree: live and archive share the run-dir shape, so a
+    # single copytree handles trajectory.json + trajectory.json.partial +
+    # trajectories/* in one go.
+    live_run_dir = daydream_dir / "runs" / recorder.session_id
+    if live_run_dir.is_dir():
+        shutil.copytree(live_run_dir, run_dir, dirs_exist_ok=True)
 
-    partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
-    if partial_path.is_file():
-        shutil.copy2(partial_path, run_dir / "trajectory.json.partial")
-
-    # Fallback: glob for default naming pattern (legacy compat)
-    if not (run_dir / "trajectory.json").exists():
-        for traj_file in daydream_dir.glob(f"trajectory-*-{prefix}.json"):
-            shutil.copy2(traj_file, run_dir / "trajectory.json")
-            break
-
-    if not (run_dir / "trajectory.json.partial").exists():
-        for partial_file in daydream_dir.glob(f"trajectory-*-{prefix}.json.partial"):
-            shutil.copy2(partial_file, run_dir / "trajectory.json.partial")
-            break
-
-    # Forked sub-trajectories
-    trajectories_dir = daydream_dir / "trajectories"
-    if trajectories_dir.is_dir():
-        dest_traj = run_dir / "trajectories"
-        # Copy only files matching this session's prefix
-        matched = [
-            *trajectories_dir.glob(f"{prefix}.*.json"),
-            *trajectories_dir.glob(f"{prefix}.*.json.partial"),
-        ]
-        if matched:
-            dest_traj.mkdir(exist_ok=True)
-            for f in matched:
-                shutil.copy2(f, dest_traj / f.name)
+    # When --trajectory points to a custom path outside the live run dir,
+    # the main trajectory file won't be captured by the copytree above.
+    # Copy it explicitly so the archive always contains trajectory.json.
+    if recorder.explicit_path and recorder.path.is_file():
+        try:
+            resolved = recorder.path.resolve()
+            inside_run_dir = resolved.is_relative_to(live_run_dir.resolve())
+        except (OSError, ValueError):
+            inside_run_dir = False
+        if not inside_run_dir:
+            shutil.copy2(recorder.path, run_dir / "trajectory.json")
 
     # Review output (in target root, not .daydream/)
     review_output = target_dir / REVIEW_OUTPUT_FILE

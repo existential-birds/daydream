@@ -23,7 +23,6 @@ import json
 import os
 import re
 import tempfile
-import uuid
 from contextlib import nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -45,6 +44,20 @@ from daydream.atif import (
     Trajectory,
 )
 from daydream.ui import create_console, print_error, print_warning
+
+# Run-directory layout (single source of truth)
+# =============================================
+# Live + archive trajectories share an identical on-disk shape:
+#
+#   <root>/runs/<session_id>/trajectory.json
+#   <root>/runs/<session_id>/trajectories/<descriptor>.json
+#
+# Live: ``root = <target>/.daydream``. Archive: ``root = <archive>/`` per
+# ``daydream.archive``. The recorder constructs and writes both paths via
+# ``default_trajectory_path`` and ``_sibling_path_for``.
+_RUNS_SUBDIR = "runs"
+_TRAJECTORIES_SUBDIR = "trajectories"
+_DAYDREAM_DIRNAME = ".daydream"
 
 if TYPE_CHECKING:
     from daydream.backends import AgentEvent
@@ -107,15 +120,19 @@ def _safe_descriptor(raw: str) -> str:
     return slug
 
 
-def default_trajectory_path(target_dir: Path) -> Path:
-    """Return a unique default trajectory path under ``<target>/.daydream/``.
+def default_trajectory_path(target_dir: Path, session_id: str) -> Path:
+    """Return the default trajectory path under ``<target>/.daydream/runs/<session_id>/``.
 
-    Embeds a compact UTC timestamp and short UUID suffix so sequential and
-    concurrent runs never collide.
+    The session_id segment guarantees uniqueness per run; the recorder
+    creates the directory before its first write.
     """
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    short_id = uuid.uuid4().hex[:8]
-    return target_dir / ".daydream" / f"trajectory-{ts}-{short_id}.json"
+    return (
+        target_dir
+        / _DAYDREAM_DIRNAME
+        / _RUNS_SUBDIR
+        / session_id
+        / "trajectory.json"
+    )
 
 
 def maybe_fork(recorder: "TrajectoryRecorder | None", descriptor: str) -> Any:
@@ -654,13 +671,13 @@ class TrajectoryRecorder:
     ``print_warning`` per D-11 (Phase 4 adds the explicit fail-loud branch).
 
     Attributes:
-        path: Output JSON path; default ``<target>/.daydream/trajectory-<ts>-<id>.json``.
+        path: Output JSON path; default ``<target>/.daydream/runs/<session_id>/trajectory.json``.
         run_flow: Per-trajectory invariant (D-07) stamped on every Step.
         target_dir: Repo/target directory; recorded into Trajectory.extra.
         agent_model_name: Active model name; stamped into Agent and every
             agent Step's model_name.
         redactor: No-op in Phase 2 (D-12); Phase 4 fills in rule list.
-        session_id: UUID4 generated at recorder init (CORE-07).
+        session_id: UUID4 for this run, supplied by the caller (CORE-07).
         steps: Sequential Steps from every Invocation, step_id 1..N.
         pr_number: GitHub PR number if reviewing a PR. Stored in trajectory extra.
         pr_repo: GitHub repo (``owner/repo``) if reviewing a PR. Stored in trajectory extra.
@@ -673,8 +690,8 @@ class TrajectoryRecorder:
     run_flow: DaydreamRunFlow
     target_dir: Path
     agent_model_name: str
+    session_id: str
     redactor: Redactor = field(default_factory=Redactor)
-    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     steps: list[Step] = field(default_factory=list)
     parent: TrajectoryRecorder | None = None
     descriptor: str = ""
@@ -775,9 +792,22 @@ class TrajectoryRecorder:
             self._final_totals["any_cost_seen"] = True
 
     def _sibling_path_for(self, descriptor: str) -> Path:
-        """Return the sibling trajectory file path for *descriptor*."""
+        """Return the sibling trajectory file path for *descriptor*.
+
+        Layout: ``<target>/.daydream/runs/<session_id>/trajectories/<slug>.json``.
+        Sibling files live under the same per-run directory as the parent
+        trajectory, so every fork in the run dir belongs to this run by
+        construction (no prefix filtering required).
+        """
         slug = _safe_descriptor(descriptor)
-        return self.target_dir / ".daydream" / "trajectories" / f"{self.session_id[:8]}.{slug}.json"
+        return (
+            self.target_dir
+            / _DAYDREAM_DIRNAME
+            / _RUNS_SUBDIR
+            / self.session_id
+            / _TRAJECTORIES_SUBDIR
+            / f"{slug}.json"
+        )
 
     def fork(self, descriptor: str) -> "_ForkCM":
         """Create a child recorder for a parallel task group.

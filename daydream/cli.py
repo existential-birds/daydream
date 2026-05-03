@@ -124,7 +124,10 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         type=Path,
         dest="trajectory_path",
-        help="Write ATIF v1.6 trajectory JSON to this path (default: <target>/.daydream/trajectory-<ts>-<id>.json)",
+        help=(
+            "Write ATIF v1.6 trajectory JSON to this path "
+            "(default: <target>/.daydream/runs/<session_id>/trajectory.json)"
+        ),
     )
     parser.add_argument(
         "--no-archive",
@@ -169,6 +172,39 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Model to use (default: backend-specific). Examples: opus, sonnet, haiku, gpt-5.3-codex",
     )
+
+
+def _build_summarize_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream summarize <path>``.
+
+    Like the ``feedback`` subcommand, ``summarize`` is dispatched manually
+    from ``main()`` before the main parser runs so its positional argument
+    doesn't collide with the top-level ``TARGET``.
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream summarize",
+        description=(
+            "Print run-info markdown (rollup + per-phase breakdown table) "
+            "for a trajectory file or run directory."
+        ),
+    )
+    parser.add_argument(
+        "path",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Either a trajectory JSON file or a run directory containing "
+            "trajectory.json (and optional trajectories/ siblings)."
+        ),
+    )
+    return parser
+
+
+def _run_summarize(args: argparse.Namespace) -> int:
+    """Dispatch ``daydream summarize`` to the summarize module."""
+    from daydream.summarize import summarize
+
+    return summarize(args.path)
 
 
 def _build_feedback_parser() -> argparse.ArgumentParser:
@@ -456,6 +492,10 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         feedback_parser = _build_feedback_parser()
         feedback_args = feedback_parser.parse_args(raw_argv[1:])
         return _build_feedback_config(feedback_args)
+
+    # ``summarize`` is dispatched in main() before _parse_args is called, so
+    # we never reach this branch from the summarize path. Kept here only as
+    # a guard for callers that hand crafted-argv to _parse_args directly.
 
     parser = _build_main_parser()
     args = parser.parse_args(raw_argv)
@@ -783,6 +823,12 @@ def main() -> None:
         if argv and argv[0] == "label":
             _handle_label_command(argv[1:])
             return
+
+        # ``summarize`` is sync — short-circuit before anyio.run kicks in.
+        if argv and argv[0] == "summarize":
+            summarize_parser = _build_summarize_parser()
+            summarize_args = summarize_parser.parse_args(argv[1:])
+            sys.exit(_run_summarize(summarize_args))
 
         is_feedback_subcommand = bool(argv) and argv[0] == "feedback"
         config = _parse_args()

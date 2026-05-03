@@ -22,20 +22,21 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _latest_main_trajectory(daydream_dir: Path) -> Path | None:
-    """Return the most recent ``trajectory-*.json`` file by mtime, or None."""
-    candidates = list(daydream_dir.glob("trajectory-*.json"))
+    """Return the most recent main trajectory by mtime, or None.
+
+    New layout: ``runs/<session_id>/trajectory.json``.
+    """
+    candidates = list(daydream_dir.glob("runs/*/trajectory.json"))
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def _session_prefix(trajectory: dict) -> str:
-    """Extract the 8-char session prefix used for forked filenames."""
-    return trajectory.get("session_id", "")[:8]
-
-
 def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict:
     """Load trajectory files for a single session from a .daydream directory.
+
+    New layout: ``runs/<session_id>/trajectory.json`` plus
+    ``runs/<session_id>/trajectories/<descriptor>.json``.
 
     Args:
         daydream_dir: Path to the ``.daydream`` directory.
@@ -48,59 +49,45 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
     """
     main = None
     forked: list[dict] = []
-    traj_dir = daydream_dir / "trajectories"
+    runs_dir = daydream_dir / "runs"
 
-    # --- Resolve the main trajectory ----------------------------------------
+    # --- Resolve the run directory ------------------------------------------
+    run_dir: Path | None = None
     if session_id:
-        # Match by full session_id or prefix in the filename
-        for f in daydream_dir.glob("trajectory-*.json"):
-            data = json.loads(f.read_text())
-            sid = data.get("session_id", "")
-            if sid == session_id or sid.startswith(session_id):
-                main = data
-                main["_source_file"] = f.name
-                break
+        # Exact match first, then prefix match on run directory names
+        exact = runs_dir / session_id
+        if exact.is_dir():
+            run_dir = exact
+        elif runs_dir.is_dir():
+            matches = sorted(
+                d for d in runs_dir.iterdir()
+                if d.is_dir() and d.name.startswith(session_id)
+            )
+            if len(matches) == 1:
+                run_dir = matches[0]
+            elif len(matches) > 1:
+                raise ValueError(f"Session prefix '{session_id}' matches multiple runs")
     else:
         latest = _latest_main_trajectory(daydream_dir)
         if latest:
-            main = json.loads(latest.read_text())
-            main["_source_file"] = latest.name
+            # latest is runs/<session_id>/trajectory.json — parent is the run dir
+            run_dir = latest.parent
+
+    # --- Resolve the main trajectory ----------------------------------------
+    if run_dir:
+        main_path = run_dir / "trajectory.json"
+        if main_path.is_file():
+            main = json.loads(main_path.read_text())
+            main["_source_file"] = main_path.name
 
     # --- Resolve forked trajectories ----------------------------------------
-    if main:
-        prefix = _session_prefix(main)
-        if traj_dir.is_dir() and prefix:
-            for f in sorted(traj_dir.glob(f"{prefix}.*.json")):
+    if run_dir:
+        traj_dir = run_dir / "trajectories"
+        if traj_dir.is_dir():
+            for f in sorted(traj_dir.glob("*.json")):
                 data = json.loads(f.read_text())
                 data["_source_file"] = f.name
                 forked.append(data)
-    elif traj_dir.is_dir():
-        # No main trajectory found — group forked files by prefix, use latest
-        prefix_groups: dict[str, list[Path]] = {}
-        for f in sorted(traj_dir.glob("*.json")):
-            pfx = f.name.split(".")[0]
-            prefix_groups.setdefault(pfx, []).append(f)
-
-        if prefix_groups:
-            if session_id:
-                # Filter to matching prefix
-                matching = {
-                    k: v for k, v in prefix_groups.items()
-                    if k.startswith(session_id[:8])
-                }
-                best_prefix = next(iter(matching), None) if matching else None
-            else:
-                # Pick the group with the most recently modified file
-                best_prefix = max(
-                    prefix_groups,
-                    key=lambda k: max(f.stat().st_mtime for f in prefix_groups[k]),
-                )
-
-            if best_prefix:
-                for f in sorted(prefix_groups[best_prefix]):
-                    data = json.loads(f.read_text())
-                    data["_source_file"] = f.name
-                    forked.append(data)
 
     return {"main": main, "forked": forked}
 
@@ -116,10 +103,17 @@ def _parse_iso_ts(ts: str) -> datetime:
 def _agent_label(filename: str) -> str:
     """Human-readable label from trajectory filename.
 
-    ``10073f9b.deep-python.json`` → ``deep-python``
-    ``trajectory-20260429-121816-5f0088a9.json`` → ``main``
+    New layout::
+
+        ``trajectory.json`` → ``main``
+        ``deep-python.json`` → ``deep-python``
+
+    Legacy layout::
+
+        ``trajectory-20260429-121816-5f0088a9.json`` → ``main``
+        ``10073f9b.deep-python.json`` → ``deep-python``
     """
-    if filename.startswith("trajectory-"):
+    if filename.startswith("trajectory"):
         return "main"
     parts = filename.rsplit(".", 2)
     if len(parts) >= 3:
