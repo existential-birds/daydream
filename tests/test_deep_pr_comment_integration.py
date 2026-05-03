@@ -672,7 +672,11 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
         cells = _row_cells(row)
         # Layout: | Phase | Model | Tools | Input (cached) | Output | Cost |
         assert len(cells) >= 6, f"unexpected row layout: {row!r}"
-        phase_name, model_cell, _tools, _cached, _out, cost_cell = cells[:6]
+        phase_name, model_cell, _tools, input_cell, _out, cost_cell = cells[:6]
+        assert input_cell != "0", (
+            f"BUG: row {phase_name!r} has Input='0' "
+            f"(per-step token metrics never propagated).\n  row: {row!r}"
+        )
         assert model_cell != "unknown", (
             f"BUG: row {phase_name!r} has Model='unknown' "
             f"(SDK model id never propagated to the per-phase rollup).\n"
@@ -781,12 +785,12 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
         _phase_name,
         model_cell,
         tools_cell,
-        _cached_cell,
+        _input_cell,
         _output_cell,
         cost_cell,
     ) = cells[:6]
 
-    # --- The four production-bug symptoms, asserted one at a time. --------
+    # --- The three production-bug symptoms, asserted one at a time. -------
 
     # 1. Model column — production shows 'unknown'. The fork's child
     #    recorder should have upgraded this to the SDK id.

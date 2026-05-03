@@ -368,15 +368,21 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
         f"Bug B/C: Fix row shows $0.00 cost.\n  row: {fix_row!r}\n"
         f"  per-step metrics: {per_step_metrics}"
     )
-    # The token columns are pipe-delimited; an all-zero row reads
-    # ``"| ... | 0 | 0 | 0 | 0 |"``. A loose check on three zeros in a row
-    # isn't false-positive prone (real token counts are >=100 in our
-    # fixture, formatted with thousand separators above 1,000).
+    # 6-column layout: Phase | Model | Tools | Input (cached) | Output | Cost
+    # Only 3 numeric columns (Input, Output, Cost). We spot-check Output!=0
+    # as a canary — real token counts are >=100 in our fixture.
     for label, row in (("Review", review_row), ("Fix", fix_row)):
         cells = [c.strip() for c in row.strip("|").split("|")]
         # cells: [Phase, Model, Tools, Input (cached), Output, Cost]
         assert cells[4] != "0", (
             f"Bug B/C: {label} row has Output=0.\n  row: {row!r}\n"
+            f"  per-step metrics: {per_step_metrics}"
+        )
+        # Inline parenthetical cache percentage must appear when cached
+        # tokens are non-zero — format is e.g. "5,000 (40%)".
+        assert re.search(r"\(\d+%\)", cells[3]), (
+            f"Bug B/C: {label} row missing cache-percentage parenthetical.\n"
+            f"  input cell: {cells[3]!r}\n  row: {row!r}\n"
             f"  per-step metrics: {per_step_metrics}"
         )
 
