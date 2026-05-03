@@ -53,7 +53,7 @@ _PHASE_LABELS: dict[str, str] = {
     "exploration": "Exploration",
 }
 
-_FALLBACK_NOTE = "*run details unavailable*"
+FALLBACK_NOTE = "*run details unavailable*"
 
 # Generic backend labels that pre-date a real SDK model id arriving on the
 # event stream. Defense-in-depth: trajectory.TrajectoryRecorder upgrades
@@ -409,7 +409,7 @@ def _render_unknown_models_note(agg: _RunAgg) -> str:
 
 def _render_fallback() -> str:
     """M9: degrade to a 'run details unavailable' note plus version footer."""
-    return f"{_FALLBACK_NOTE}\n\n{_version_footer()}"
+    return f"{FALLBACK_NOTE}\n\n{_version_footer()}"
 
 
 def _format_int(n: int) -> str:
@@ -460,5 +460,6 @@ def _format_cache_hit_pct(input_tokens: int, cached_tokens: int) -> str | None:
 
 
 __all__ = [
+    "FALLBACK_NOTE",
     "render_run_info_block",
 ]

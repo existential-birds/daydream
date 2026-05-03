@@ -23,7 +23,6 @@ import json
 import os
 import re
 import tempfile
-import uuid
 from contextlib import nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -672,13 +671,13 @@ class TrajectoryRecorder:
     ``print_warning`` per D-11 (Phase 4 adds the explicit fail-loud branch).
 
     Attributes:
-        path: Output JSON path; default ``<target>/.daydream/trajectory-<ts>-<id>.json``.
+        path: Output JSON path; default ``<target>/.daydream/runs/<session_id>/trajectory.json``.
         run_flow: Per-trajectory invariant (D-07) stamped on every Step.
         target_dir: Repo/target directory; recorded into Trajectory.extra.
         agent_model_name: Active model name; stamped into Agent and every
             agent Step's model_name.
         redactor: No-op in Phase 2 (D-12); Phase 4 fills in rule list.
-        session_id: UUID4 generated at recorder init (CORE-07).
+        session_id: UUID4 for this run, supplied by the caller (CORE-07).
         steps: Sequential Steps from every Invocation, step_id 1..N.
         pr_number: GitHub PR number if reviewing a PR. Stored in trajectory extra.
         pr_repo: GitHub repo (``owner/repo``) if reviewing a PR. Stored in trajectory extra.
@@ -691,8 +690,8 @@ class TrajectoryRecorder:
     run_flow: DaydreamRunFlow
     target_dir: Path
     agent_model_name: str
+    session_id: str
     redactor: Redactor = field(default_factory=Redactor)
-    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     steps: list[Step] = field(default_factory=list)
     parent: TrajectoryRecorder | None = None
     descriptor: str = ""

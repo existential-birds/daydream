@@ -41,6 +41,7 @@ def _make_recorder(tmp_path: Path, *, agent_model_name: str = "opus") -> Traject
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name=agent_model_name,
+        session_id="test",
     )
 
 
@@ -380,6 +381,7 @@ async def test_trajectory_agent_identity_is_daydream(tmp_path: Path) -> None:
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name="opus",
+        session_id="test",
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -892,6 +894,7 @@ def test_write_partial_no_op_when_steps_empty(tmp_path: Path) -> None:
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name="opus",
+        session_id="test",
     )
     recorder.write_partial()
     partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")

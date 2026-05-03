@@ -11,12 +11,12 @@ No GitHub posting, no filtering, no diff. Pure read + render + print.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-from daydream.pr_comment_renderer import render_run_info_block
+from rich.console import Console
 
-_FALLBACK_NOTE = "*run details unavailable*"
+from daydream.pr_comment_renderer import FALLBACK_NOTE, render_run_info_block
+from daydream.ui import NEON_THEME, print_error
 
 
 def summarize(path: Path) -> int:
@@ -29,30 +29,36 @@ def summarize(path: Path) -> int:
         0 on success, non-zero when the path could not be resolved or no
         parseable trajectory could be produced.
     """
+    # Errors go to stderr so stdout stays clean for the markdown summary.
+    err_console = Console(stderr=True, theme=NEON_THEME)
+
     if not path.exists():
-        print(f"daydream summarize: path does not exist: {path}", file=sys.stderr)
+        print_error(err_console, "Invalid Path", f"path does not exist: {path}")
         return 1
 
     if path.is_file():
         if path.suffix != ".json":
-            print(
-                f"daydream summarize: file must be a .json trajectory: {path}",
-                file=sys.stderr,
+            print_error(
+                err_console,
+                "Invalid Path",
+                f"file must be a .json trajectory: {path}",
             )
             return 1
         paths = [path]
     elif path.is_dir():
         paths = _collect_run_dir(path)
         if not paths:
-            print(
-                f"daydream summarize: no trajectory.json or trajectories/ found under {path}",
-                file=sys.stderr,
+            print_error(
+                err_console,
+                "Invalid Path",
+                f"no trajectory.json or trajectories/ found under {path}",
             )
             return 1
     else:
-        print(
-            f"daydream summarize: path is not a file or directory: {path}",
-            file=sys.stderr,
+        print_error(
+            err_console,
+            "Invalid Path",
+            f"path is not a file or directory: {path}",
         )
         return 1
 
@@ -61,13 +67,24 @@ def summarize(path: Path) -> int:
 
     # Renderer fell back because every input failed to parse — surface a
     # non-zero exit so callers know they didn't get a real summary.
-    if _FALLBACK_NOTE in output:
+    if FALLBACK_NOTE in output:
         return 2
     return 0
 
 
 def _collect_run_dir(run_dir: Path) -> list[Path]:
-    """Collect ``trajectory.json`` plus any ``trajectories/*.json`` siblings."""
+    """Collect ``trajectory.json`` plus any ``trajectories/*.json`` siblings.
+
+    Supports three input shapes:
+
+    1. A specific run directory (``runs/<session_id>/``) containing
+       ``trajectory.json`` directly.
+    2. A ``.daydream/`` directory using the **old** flat layout with
+       ``trajectory.json`` (and optional ``trajectories/``) at the top level.
+    3. A ``.daydream/`` directory using the **new** layout where trajectories
+       live under ``runs/<session_id>/``.  The most recently modified run is
+       selected automatically.
+    """
     paths: list[Path] = []
     parent = run_dir / "trajectory.json"
     if parent.is_file():
@@ -77,6 +94,21 @@ def _collect_run_dir(run_dir: Path) -> list[Path]:
         for sibling in sorted(siblings_dir.glob("*.json")):
             if sibling.is_file():
                 paths.append(sibling)
+
+    # If nothing found directly, check for new-style runs/ subdirectory and
+    # pick the most recent run by mtime (mirrors eval/analyzer.py logic).
+    if not paths:
+        candidates = list(run_dir.glob("runs/*/trajectory.json"))
+        if candidates:
+            latest = max(candidates, key=lambda p: p.stat().st_mtime)
+            nested_run_dir = latest.parent
+            paths.append(latest)
+            nested_siblings = nested_run_dir / "trajectories"
+            if nested_siblings.is_dir():
+                for sibling in sorted(nested_siblings.glob("*.json")):
+                    if sibling.is_file():
+                        paths.append(sibling)
+
     return paths
 
 

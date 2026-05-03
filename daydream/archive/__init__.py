@@ -145,6 +145,18 @@ def _copy_bundle(target_dir: Path, run_dir: Path, recorder: TrajectoryRecorder) 
     if live_run_dir.is_dir():
         shutil.copytree(live_run_dir, run_dir, dirs_exist_ok=True)
 
+    # When --trajectory points to a custom path outside the live run dir,
+    # the main trajectory file won't be captured by the copytree above.
+    # Copy it explicitly so the archive always contains trajectory.json.
+    if recorder.explicit_path and recorder.path.is_file():
+        try:
+            resolved = recorder.path.resolve()
+            inside_run_dir = resolved.is_relative_to(live_run_dir.resolve())
+        except (OSError, ValueError):
+            inside_run_dir = False
+        if not inside_run_dir:
+            shutil.copy2(recorder.path, run_dir / "trajectory.json")
+
     # Review output (in target root, not .daydream/)
     review_output = target_dir / REVIEW_OUTPUT_FILE
     if review_output.is_file():

@@ -177,6 +177,7 @@ def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
         # When --model isn't set, the recorder gets the backend NAME — which
         # is exactly the value Bug A leaves in every Step.model_name.
         agent_model_name="claude",
+        session_id="test",
     )
 
 

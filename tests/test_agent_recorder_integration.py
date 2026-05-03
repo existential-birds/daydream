@@ -107,6 +107,7 @@ def _make_recorder(
         run_flow=run_flow,
         target_dir=tmp_path,
         agent_model_name=agent_model_name,
+        session_id="test",
     )
 
 

@@ -36,6 +36,7 @@ def _make_recorder(
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name="test-model",
+        session_id="test",
         on_write=on_write,
     )
 
@@ -131,6 +132,7 @@ async def test_full_archive_round_trip(tmp_path: Path, monkeypatch: pytest.Monke
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=target_dir,
         agent_model_name="opus",
+        session_id="test",
         on_write=callback,
     )
 

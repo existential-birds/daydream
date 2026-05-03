@@ -27,6 +27,7 @@ class _MockRecorder:
     session_id: str = "abcd1234-0000-0000-0000-000000000000"
     path: Path = field(default_factory=lambda: Path("/nonexistent/trajectory.json"))
     run_flow: MagicMock = field(default_factory=lambda: MagicMock(value="normal"))
+    explicit_path: bool = False
     pr_number: int | None = None
     pr_repo: str | None = None
     _final_totals: dict = field(
@@ -329,11 +330,12 @@ def test_get_archive_dir_default(monkeypatch, tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def _make_recorder_mock(session_id: str, path: Path) -> MagicMock:
+def _make_recorder_mock(session_id: str, path: Path, *, explicit_path: bool = False) -> MagicMock:
     """Build a mock TrajectoryRecorder with session_id and path attributes."""
     recorder = MagicMock()
     recorder.session_id = session_id
     recorder.path = path
+    recorder.explicit_path = explicit_path
     return recorder
 
 
@@ -435,6 +437,24 @@ def test_copy_bundle_sub_trajectories_copied(tmp_path: Path):
     assert sub.is_dir()
     copied = sorted(p.name for p in sub.iterdir())
     assert copied == ["deep-python.json"]
+
+
+def test_copy_bundle_explicit_trajectory_path(tmp_path: Path):
+    """When --trajectory points outside the live run dir, the file is still archived."""
+    session_id = "abcd1234-0000-0000-0000-000000000000"
+    target, run_dir, _ = _setup_bundle(tmp_path, session_id)
+
+    # Simulate --trajectory /tmp/custom.json: file lives outside .daydream/runs/
+    custom_traj = tmp_path / "custom-trajectory.json"
+    custom_traj.write_text('{"custom": true}')
+
+    recorder = _make_recorder_mock(session_id, custom_traj, explicit_path=True)
+    _copy_bundle(target, run_dir, recorder)
+
+    # The copytree still copies the live run dir contents (the default trajectory).
+    # The custom path is copied on top as trajectory.json.
+    archived = json.loads((run_dir / "trajectory.json").read_text())
+    assert archived["custom"] is True
 
 
 def test_copy_bundle_skips_missing(tmp_path: Path):

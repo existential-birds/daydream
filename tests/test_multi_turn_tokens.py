@@ -81,6 +81,7 @@ def _make_recorder(tmp_path: Path, *, agent_model_name: str = "opus") -> Traject
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
         agent_model_name=agent_model_name,
+        session_id="test",
     )
 
 
