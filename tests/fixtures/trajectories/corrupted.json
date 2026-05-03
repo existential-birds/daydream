@@ -1,0 +1,15 @@
+{
+  "schema_version": "ATIF-v1.6",
+  "session_id": "fixture-corrupted",
+  "agent": {
+    "name": "daydream",
+    "version": "0.14.0",
+    "model_name": "claude-sonnet-4-5"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp": "2026-05-02T00:00:00.000000Z",
+      "source": "user",
+      "message": "review",
+      "extra": {"daydream_phase": "review"

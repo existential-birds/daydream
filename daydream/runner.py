@@ -89,7 +89,7 @@ class RunConfig:
     Attributes:
         target: Target directory path for the review. If None, prompts user.
         skill: Review skill to use ("python", "react", or "elixir"). If None, prompts user.
-        model: Claude model to use ("opus", "sonnet", or "haiku"). Default is "opus".
+        model: Claude model to use ("opus", "sonnet", or "haiku", or a dated id). Default is "claude-opus-4-7".
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
         review_only: Run review phase only without applying fixes.
@@ -304,7 +304,7 @@ async def run(config: RunConfig | None = None) -> int:
         if codex_in_use:
             quiet = False
     set_quiet_mode(quiet)
-    set_model(config.model or "opus")
+    set_model(config.model or "claude-opus-4-7")
 
     # ``--comment`` and ``--review`` skip the test phase, so they also skip
     # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).
@@ -427,7 +427,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.PR,
         target_dir=target_dir,
-        agent_model_name=config.model or config.backend or "claude",
+        agent_model_name=config.model or "",
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
@@ -437,7 +437,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         print_info(console, f"PR feedback mode: PR #{pr_number}")
         print_info(console, f"Bot: {bot}")
         print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {config.model or 'opus'}")
+        print_info(console, f"Model: {config.model or 'claude-opus-4-7'}")
         console.print()
 
         # Phase 1: Fetch PR feedback
@@ -579,7 +579,7 @@ async def _run_review_or_comment(
         path=trajectory_path,
         run_flow=flow,
         target_dir=target_dir,
-        agent_model_name=config.model or config.backend or "claude",
+        agent_model_name=config.model or "",
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
@@ -726,7 +726,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=target_dir,
-        agent_model_name=config.model or config.backend or "claude",
+        agent_model_name=config.model or "",
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,

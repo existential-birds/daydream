@@ -350,7 +350,9 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
     assert result.inline[1]["line"] == 106
 
 
-def test_build_payload_shape(pr: PRInfo) -> None:
+def test_build_payload_shape(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
     classified = pr_review._ClassifiedIssues(
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
         body_only=[
@@ -374,6 +376,16 @@ def test_build_payload_shape(pr: PRInfo) -> None:
             )
         ],
     )
+
+    # S1: feed the enriched renderer a real Task-4 fixture trajectory by
+    # stubbing _resolve_trajectory_paths to return a single fixture path.
+    fixture = (
+        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    )
+    monkeypatch.setattr(
+        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
+    )
+
     payload = build_payload(pr, "deep review", classified)
     assert payload["commit_id"] == "head123"
     assert payload["event"] == "COMMENT"
@@ -381,17 +393,13 @@ def test_build_payload_shape(pr: PRInfo) -> None:
 
     body = payload["body"]
     # Title header.
-    assert "Code Review Summary" in body
-    # Footer has wizard emoji + daydream repo link.
-    assert "🧙" in body
+    assert "**Code Review Summary**" in body
+    # Footer rolls daydream version into the wizard line.
+    assert "🧙 Posted by [daydream v" in body
     assert pr_review.DAYDREAM_REPO_URL in body
-    # Mode label lives in collapsible review info now.
+    # Mode label still rendered (now via the enriched rollup).
     assert "deep review" in body
-    # Actionable count header.
-    assert "Actionable comments posted: 1" in body
-    # Counts line.
-    assert "1 inline comment(s), 1 non-inline finding(s)" in body
-    # Severity/confidence in collapsible review info section.
+    # Severity/confidence still surface inside the collapsible block.
     assert "**Severity:**" in body and "1 high" in body and "1 low" in body
     assert "**Confidence:**" in body and "1 HIGH" in body and "1 MEDIUM" in body
     # Non-inline section grouped by file in <details>.
@@ -403,7 +411,15 @@ def test_build_payload_shape(pr: PRInfo) -> None:
     assert "repos/acme/widgets/pulls/42/comments" in body
     # Review info collapsible.
     assert "ℹ️ Review info" in body
-    # Footer.
+    # S1 enriched-renderer fields (M1, M2): rollup labels and per-phase table shell.
+    assert "- **Mode:** deep review" in body
+    assert "- **Model:**" in body
+    assert "- **Cost:**" in body
+    assert "- **Tokens:**" in body
+    assert "- **Steps / tool calls:**" in body
+    assert "<details><summary>Per-phase breakdown</summary>" in body
+    assert "| Phase | Model | Steps | Tools | Input | Cached | Output | Cost |" in body
+    # Footer is the last block.
     assert body.rstrip().endswith("</sub>")
 
 

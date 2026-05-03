@@ -77,7 +77,7 @@ def test_result_event_nullable():
 def test_create_backend_claude_default():
     backend = create_backend("claude")
     assert isinstance(backend, ClaudeBackend)
-    assert backend.model == "opus"
+    assert backend.model == "claude-opus-4-7"
 
 
 def test_create_backend_claude_custom_model():

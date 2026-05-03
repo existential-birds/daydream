@@ -38,7 +38,7 @@ class ClaudeBackend:
     Translates Claude SDK message types into the unified AgentEvent stream.
     """
 
-    def __init__(self, model: str = "opus"):
+    def __init__(self, model: str = "claude-opus-4-7"):
         self.model = model
         self._client: ClaudeSDKClient | None = None
 
@@ -87,6 +87,11 @@ class ClaudeBackend:
             options.agents = agents
 
         structured_result: Any = None
+        # Track the most recently observed AssistantMessage.model so we can
+        # stamp the real SDK model id (e.g. ``claude-opus-4-5-20250901``) on
+        # the trailing CostEvent. The trajectory recorder uses this to
+        # upgrade the generic ``"claude"`` backend label to the actual id.
+        last_assistant_model: str | None = None
 
         async with ClaudeSDKClient(options=options) as client:
             self._client = client
@@ -94,6 +99,11 @@ class ClaudeBackend:
                 await client.query(prompt)
                 async for msg in client.receive_response():
                     if isinstance(msg, AssistantMessage):
+                        # Real SDK AssistantMessage has a ``model: str`` field
+                        # (no ``usage``); see backends/__init__.py docstring.
+                        msg_model = getattr(msg, "model", None)
+                        if isinstance(msg_model, str) and msg_model:
+                            last_assistant_model = msg_model
                         for block in msg.content:
                             if isinstance(block, TextBlock) and block.text:
                                 yield TextEvent(text=block.text)
@@ -131,6 +141,7 @@ class ClaudeBackend:
                                 completion_tokens=msg_usage["output_tokens"],
                                 cached_tokens=msg_usage.get("cache_read_input_tokens"),
                                 cost_usd=None,
+                                model_name=last_assistant_model,
                             )
 
                     elif isinstance(msg, UserMessage):
@@ -164,6 +175,7 @@ class ClaudeBackend:
                                 input_tokens=usage.get("input_tokens"),
                                 output_tokens=usage.get("output_tokens"),
                                 cached_tokens=usage.get("cache_read_input_tokens"),
+                                model_name=last_assistant_model,
                             )
 
                 yield ResultEvent(

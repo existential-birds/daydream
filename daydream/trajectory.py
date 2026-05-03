@@ -52,6 +52,12 @@ if TYPE_CHECKING:
 _console = create_console()
 _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "cost": 0.0, "any_cost_seen": False}  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
 
+# Generic backend labels that should be replaced as soon as a real SDK
+# model id arrives via MetricsEvent / CostEvent. Runner stamps the recorder
+# with one of these (or empty) at init since the real model id isn't known
+# until the first agent turn streams back.
+_GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", ""})
+
 # Redaction patterns (REDA-01..04)
 # =================================
 # Compiled-regex module constants matching the daydream/ui.py style. Order
@@ -495,6 +501,9 @@ class Invocation:
                 cached_tokens=event.cached_tokens,
                 cost_usd=event.cost_usd,
             )
+            if event.model_name:
+                target["_model_name"] = event.model_name
+                self.recorder._upgrade_model_name(event.model_name)
             # Aggregate into recorder-level totals for FinalMetrics (MAP-07).
             self.recorder._accumulate_metrics(
                 prompt_tokens=event.prompt_tokens,
@@ -503,8 +512,33 @@ class Invocation:
                 cost_usd=event.cost_usd,
             )
         elif isinstance(event, CostEvent):
-            # End-of-call signal — accumulate into recorder-level totals so
-            # FinalMetrics reflects per-step cost_usd from the backend.
+            # End-of-call signal — also fold per-step metrics onto the open
+            # Step so the renderer's per-step rollup sees real cost / tokens
+            # (Bug C: previously CostEvent only updated _final_totals).
+            self._ensure_open_step()
+            assert self._open_step_dict is not None
+            target = self._open_step_dict
+            existing = target["_metrics"]
+            if existing is None:
+                target["_metrics"] = Metrics(
+                    prompt_tokens=event.input_tokens,
+                    completion_tokens=event.output_tokens,
+                    cached_tokens=event.cached_tokens,
+                    cost_usd=event.cost_usd,
+                )
+            else:
+                # MetricsEvent already populated this step. Prefer the
+                # existing token counts but backfill cost_usd if it wasn't
+                # surfaced per-message.
+                if existing.cost_usd is None and event.cost_usd is not None:
+                    target["_metrics"] = existing.model_copy(
+                        update={"cost_usd": event.cost_usd}
+                    )
+            if event.model_name:
+                target["_model_name"] = event.model_name
+                self.recorder._upgrade_model_name(event.model_name)
+            # Aggregate into recorder-level totals so FinalMetrics reflects
+            # per-step cost_usd from the backend.
             self.recorder._accumulate_metrics(
                 prompt_tokens=event.input_tokens,
                 completion_tokens=event.output_tokens,
@@ -704,6 +738,24 @@ class TrajectoryRecorder:
     def _extend_steps(self, steps: list[Step]) -> None:
         self.steps.extend(steps)
 
+    def _upgrade_model_name(self, candidate: str) -> None:
+        """Promote *candidate* over a generic backend label.
+
+        Runner stamps the recorder with a generic alias (``"claude"`` /
+        ``"codex"``) or empty string at init since the real SDK model id is
+        only known after the first agent turn streams back. The first real
+        model id observed from MetricsEvent / CostEvent upgrades the
+        recorder's ``agent_model_name`` so the rendered Trajectory.agent
+        carries the real id rather than the alias.
+        """
+        if not candidate:
+            return
+        current = self.agent_model_name or ""
+        if current and current not in _GENERIC_MODEL_LABELS and current == candidate:
+            return
+        if current in _GENERIC_MODEL_LABELS or not current:
+            self.agent_model_name = candidate
+
     def _accumulate_metrics(
         self,
         *,
@@ -779,7 +831,7 @@ class TrajectoryRecorder:
         self.steps.append(self.redactor.redact_step(step))
         self._registered_siblings.clear()
 
-    def _build_trajectory(self, steps: list[Step] | None = None) -> Trajectory:
+    def build_trajectory(self, steps: list[Step] | None = None) -> Trajectory:
         if steps is None:
             steps = self.steps
         try:
@@ -815,7 +867,7 @@ class TrajectoryRecorder:
         # Phase 4 may revisit if empty runs need a stub file on disk.
         if not self.steps:
             return
-        trajectory = self._build_trajectory()
+        trajectory = self.build_trajectory()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data = json.dumps(trajectory.to_json_dict(), indent=2)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
@@ -874,7 +926,7 @@ class TrajectoryRecorder:
         if not snapshot_steps:
             return
         try:
-            trajectory = self._build_trajectory(steps=snapshot_steps)
+            trajectory = self.build_trajectory(steps=snapshot_steps)
             partial_path = self.path.with_suffix(self.path.suffix + ".partial")
             partial_path.parent.mkdir(parents=True, exist_ok=True)
             json_dict = trajectory.to_json_dict()

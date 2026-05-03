@@ -287,7 +287,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.DEEP,
         target_dir=target_dir,
-        agent_model_name=config.model or config.backend or "claude",
+        agent_model_name=config.model or "",
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
