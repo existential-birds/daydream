@@ -126,8 +126,10 @@ async def test_fix_parallel_produces_n_sibling_files(tmp_path: Path) -> None:
                 descriptors_found.add(desc)
     assert descriptors_found == {"fix-0", "fix-1", "fix-2"}
 
-    # 3 sibling files exist
-    traj_dir = tmp_path / ".daydream" / "trajectories"
+    # 3 sibling files exist under the per-run trajectories/ subdir.
+    traj_dir = (
+        tmp_path / ".daydream" / "runs" / recorder.session_id / "trajectories"
+    )
     sibling_files = sorted(traj_dir.iterdir())
     assert len(sibling_files) == 3
 

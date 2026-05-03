@@ -342,23 +342,24 @@ def _setup_bundle(
 ) -> tuple[Path, Path, MagicMock]:
     """Create a realistic target directory with artifacts and an empty run dir.
 
-    Returns (target_dir, run_dir, mock_recorder) where the recorder's path
-    points to a non-existent file so the glob fallback is exercised.
+    Layout mirrors live-recorder output: ``.daydream/runs/<session_id>/``
+    holds ``trajectory.json`` + a ``trajectories/`` subdir for forks. The
+    archive copier copies that subtree wholesale.
     """
-    prefix = session_id[:8]
     target = tmp_path / "target"
     daydream = target / ".daydream"
     daydream.mkdir(parents=True)
+    live_run_dir = daydream / "runs" / session_id
+    live_run_dir.mkdir(parents=True)
 
-    # Main trajectory
-    traj = daydream / f"trajectory-20260429-120000-{prefix}.json"
+    # Main trajectory under the run dir.
+    traj = live_run_dir / "trajectory.json"
     traj.write_text('{"session_id": "test"}')
 
-    # Sub-trajectories
-    sub_dir = daydream / "trajectories"
+    # Sub-trajectories live next to the parent.
+    sub_dir = live_run_dir / "trajectories"
     sub_dir.mkdir()
-    (sub_dir / f"{prefix}.deep-python.json").write_text('{"fork": true}')
-    (sub_dir / "other-prefix.json").write_text('{"should": "skip"}')
+    (sub_dir / "deep-python.json").write_text('{"fork": true}')
 
     # Deep artifacts
     deep = daydream / "deep"
@@ -374,8 +375,8 @@ def _setup_bundle(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    # Recorder with non-existent path to exercise glob fallback
-    recorder = _make_recorder_mock(session_id, tmp_path / "nonexistent-trajectory.json")
+    # Recorder.path points at the live trajectory inside the run dir.
+    recorder = _make_recorder_mock(session_id, traj)
 
     return target, run_dir, recorder
 
@@ -388,32 +389,16 @@ def test_copy_bundle_trajectory(tmp_path: Path):
     assert json.loads((run_dir / "trajectory.json").read_text())["session_id"] == "test"
 
 
-def test_copy_bundle_trajectory_from_recorder_path(tmp_path: Path):
-    """When the recorder path exists (e.g. --trajectory /custom/path), copy from there directly."""
-    target, run_dir, recorder = _setup_bundle(tmp_path)
+def test_copy_bundle_partial_trajectory(tmp_path: Path):
+    """Partial trajectory file inside the live run dir is copied too."""
+    session_id = "abcd1234-0000-0000-0000-000000000000"
+    target, run_dir, recorder = _setup_bundle(tmp_path, session_id)
 
-    # Place the trajectory at a custom location and point recorder.path to it
-    custom_path = tmp_path / "custom" / "my-trajectory.json"
-    custom_path.parent.mkdir(parents=True)
-    custom_path.write_text('{"session_id": "custom"}')
-    recorder.path = custom_path
-
-    _copy_bundle(target, run_dir, recorder)
-
-    assert (run_dir / "trajectory.json").exists()
-    assert json.loads((run_dir / "trajectory.json").read_text())["session_id"] == "custom"
-
-
-def test_copy_bundle_partial_from_recorder_path(tmp_path: Path):
-    """Partial file adjacent to recorder.path is also copied."""
-    target, run_dir, recorder = _setup_bundle(tmp_path)
-
-    custom_path = tmp_path / "custom" / "out.json"
-    custom_path.parent.mkdir(parents=True)
-    custom_path.write_text('{"done": true}')
-    partial = custom_path.with_suffix(".json.partial")
+    # Drop a .partial sibling next to the live trajectory.json.
+    partial = (
+        target / ".daydream" / "runs" / session_id / "trajectory.json.partial"
+    )
     partial.write_text('{"partial": true}')
-    recorder.path = custom_path
 
     _copy_bundle(target, run_dir, recorder)
 
@@ -441,15 +426,15 @@ def test_copy_bundle_diff_patch(tmp_path: Path):
     assert (run_dir / "diff.patch").read_text() == "diff content"
 
 
-def test_copy_bundle_sub_trajectories_filtered(tmp_path: Path):
+def test_copy_bundle_sub_trajectories_copied(tmp_path: Path):
+    """Sibling trajectories under the live run dir copy verbatim — no prefix filtering."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _copy_bundle(target, run_dir, recorder)
 
     sub = run_dir / "trajectories"
     assert sub.is_dir()
-    copied = list(sub.iterdir())
-    assert len(copied) == 1
-    assert copied[0].name == "abcd1234.deep-python.json"
+    copied = sorted(p.name for p in sub.iterdir())
+    assert copied == ["deep-python.json"]
 
 
 def test_copy_bundle_skips_missing(tmp_path: Path):

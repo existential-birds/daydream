@@ -935,7 +935,7 @@ async def test_resume_fix_skips_pr_post(
     post_calls: list[dict[str, Any]] = []
 
     async def _spy(
-        target_dir: Path, report_path: Path, *, console: Any, mode_label: str = "deep review"
+        target_dir: Path, report_path: Path, *, console: Any
     ) -> None:
         post_calls.append({"target_dir": target_dir, "report_path": report_path})
 

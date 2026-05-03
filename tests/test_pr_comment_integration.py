@@ -251,7 +251,7 @@ async def test_render_uses_real_sdk_model_id_not_backend_alias(
         await run_agent(backend, tmp_path, "review please", phase=DaydreamPhase.REVIEW)
 
     assert target_path.exists(), "Trajectory file should have been written"
-    markdown = render_run_info_block([target_path], "trust-the-technology")
+    markdown = render_run_info_block([target_path])
 
     model_line = _model_line(markdown)
     assert FIXTURE_MODEL_ID in model_line, (
@@ -327,7 +327,7 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
     agent_steps = [s for s in traj_data["steps"] if s["source"] == "agent"]
     per_step_metrics = [s.get("metrics") for s in agent_steps]
 
-    markdown = render_run_info_block([target_path], "trust-the-technology")
+    markdown = render_run_info_block([target_path])
 
     cost_line = _cost_line(markdown)
     tokens_line = _tokens_line(markdown)
@@ -442,7 +442,7 @@ async def test_per_phase_rollup_distinguishes_phases(
     agent_steps = [s for s in traj_data["steps"] if s["source"] == "agent"]
     per_step_metrics = [s.get("metrics") for s in agent_steps]
 
-    markdown = render_run_info_block([target_path], "trust-the-technology")
+    markdown = render_run_info_block([target_path])
 
     review_row = _phase_row(markdown, "Review")
     parse_row = _phase_row(markdown, "Parse Feedback")

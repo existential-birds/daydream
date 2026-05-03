@@ -539,14 +539,21 @@ async def test_sibling_inherits_session_id(tmp_path: Path) -> None:
 
 
 async def test_sibling_file_path_format(tmp_path: Path) -> None:
-    """SUBA-06: Sibling path matches <target>/.daydream/trajectories/<hex8>.<descriptor>.json."""
+    """SUBA-06: Sibling path is <target>/.daydream/runs/<session_id>/trajectories/<descriptor>.json."""
     recorder = _make_recorder(tmp_path)
     async with recorder:
         async with recorder.fork("deep-python") as child:
             async with child.invocation(phase=DaydreamPhase.DEEP) as inv:
                 _observe_text_and_result(inv)
 
-    expected = tmp_path / ".daydream" / "trajectories" / f"{recorder.session_id[:8]}.deep-python.json"
+    expected = (
+        tmp_path
+        / ".daydream"
+        / "runs"
+        / recorder.session_id
+        / "trajectories"
+        / "deep-python.json"
+    )
     assert child.path == expected
     assert expected.exists()
 
@@ -662,7 +669,8 @@ async def test_dispatch_step_uses_relative_path(tmp_path: Path) -> None:
         if s["source"] == "agent" and "Dispatching" in s.get("message", "")
     ]
     ref = dispatch_steps[0]["observation"]["results"][0]["subagent_trajectory_ref"][0]
-    assert ref["trajectory_path"].startswith("trajectories/")
+    assert ref["trajectory_path"].startswith("runs/")
+    assert ref["trajectory_path"].endswith(".json")
 
 
 # ---------------------------------------------------------------------------
