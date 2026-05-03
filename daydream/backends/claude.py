@@ -38,7 +38,7 @@ class ClaudeBackend:
     Translates Claude SDK message types into the unified AgentEvent stream.
     """
 
-    def __init__(self, model: str = "claude-opus-4-7"):
+    def __init__(self, model: str):
         self.model = model
         self._client: ClaudeSDKClient | None = None
 

@@ -74,10 +74,11 @@ def test_result_event_nullable():
     assert event.continuation is None
 
 
-def test_create_backend_claude_default():
+def test_create_backend_claude_default_uses_config_constant():
+    from daydream.config import DEFAULT_CLAUDE_MODEL
     backend = create_backend("claude")
     assert isinstance(backend, ClaudeBackend)
-    assert backend.model == "claude-opus-4-7"
+    assert backend.model == DEFAULT_CLAUDE_MODEL
 
 
 def test_create_backend_claude_custom_model():
@@ -86,12 +87,12 @@ def test_create_backend_claude_custom_model():
     assert backend.model == "sonnet"
 
 
-def test_create_backend_codex_default():
-    backend = create_backend("codex")
-    # Import here to avoid circular — just check it's not ClaudeBackend
+def test_create_backend_codex_default_uses_config_constant():
     from daydream.backends.codex import CodexBackend
+    from daydream.config import DEFAULT_CODEX_MODEL
+    backend = create_backend("codex")
     assert isinstance(backend, CodexBackend)
-    assert backend.model == "gpt-5.3-codex"
+    assert backend.model == DEFAULT_CODEX_MODEL
 
 
 def test_create_backend_codex_custom_model():

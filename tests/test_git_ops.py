@@ -15,15 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
-from daydream import git_ops
-from daydream.git_ops import (
-    BranchNotFoundError,
-    GitError,
-    NotAWorktreeError,
-    WrongBranchError,
-)
-
 from conftest import (
     _bare_remote,
     _commit,
@@ -31,6 +22,14 @@ from conftest import (
     _git,
     _init_repo,
     _make_repo_with_main,
+)
+
+from daydream import git_ops
+from daydream.git_ops import (
+    BranchNotFoundError,
+    GitError,
+    NotAWorktreeError,
+    WrongBranchError,
 )
 
 # --- assert_is_worktree / is_inside_worktree --------------------------------

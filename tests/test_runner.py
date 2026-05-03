@@ -261,28 +261,26 @@ async def test_legacy_trust_the_technology_maps_to_comment(
 
 
 @pytest.mark.asyncio
-async def test_pr_feedback_banner_uses_canonical_default_model(
+async def test_pr_feedback_banner_echoes_resolved_backend_model(
     monkeypatch, tmp_path
 ):
-    """When ``config.model`` is None the PR-feedback banner must reflect the
-    actual runtime default (``claude-opus-4-7``) — not the stale ``opus``
-    fallback that drifted out of sync with ``set_model()`` in :func:`run`.
-    Regression for CodeRabbit finding #5 on PR #66.
+    """The PR-feedback banner reports the model id that the resolved backend
+    actually carries — not a parallel literal hardcoded in the runner. Tests
+    propagation, not a specific id.
     """
     work = _fake_work(tmp_path)
 
-    # Stub backend resolution so we don't try to instantiate a real Claude
-    # SDK client during the banner check.
-    class _DummyBackend:
-        pass
+    class _StubBackend:
+        def __init__(self, model: str):
+            self.model = model
+
+    chosen_model = "fixture-model-xyz"
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, _cache=None: _DummyBackend(),
+        lambda _config, _phase, _cache=None: _StubBackend(chosen_model),
     )
 
-    # Stub the first two phases so the flow exits cleanly via the
-    # "No actionable feedback" early return — we only need the banner.
     async def _no_op_fetch(*_args, **_kwargs):
         return None
 
@@ -292,14 +290,11 @@ async def test_pr_feedback_banner_uses_canonical_default_model(
     monkeypatch.setattr("daydream.runner.phase_fetch_pr_feedback", _no_op_fetch)
     monkeypatch.setattr("daydream.runner.phase_parse_feedback", _empty_parse)
 
-    # Capture print_info calls. ``print_info`` is the seam — every banner
-    # line in ``_run_pr_feedback`` goes through it.
     captured: list[str] = []
-
-    def _capture(_console, message):
-        captured.append(message)
-
-    monkeypatch.setattr("daydream.runner.print_info", _capture)
+    monkeypatch.setattr(
+        "daydream.runner.print_info",
+        lambda _console, message: captured.append(message),
+    )
 
     config = RunConfig(
         target=str(tmp_path),
@@ -310,13 +305,6 @@ async def test_pr_feedback_banner_uses_canonical_default_model(
 
     exit_code = await runner._run_pr_feedback(work, config)
     assert exit_code == 0
-
-    assert "Model: claude-opus-4-7" in captured, (
-        f"Expected canonical default in banner; got {captured!r}"
-    )
-    # Guard against the old stale literal sneaking back in. The banner line
-    # is exactly ``Model: <id>``; assert the bare ``Model: opus`` form is
-    # absent.
-    assert "Model: opus" not in captured, (
-        f"Stale 'Model: opus' banner regressed; got {captured!r}"
+    assert f"Model: {chosen_model}" in captured, (
+        f"Banner did not echo backend.model; got {captured!r}"
     )

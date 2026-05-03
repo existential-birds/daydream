@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-REAL_MODEL_ID = "claude-opus-4-7-20251101"
+FIXTURE_MODEL_ID = "fixture-model-id"
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +181,7 @@ class _FakeSDKClient:
         ``ClaudeBackend.execute`` records a non-zero ``tool_calls`` count
         AND surfaces real cost + usage on the trailing CostEvent. The
         CostEvent is what carries ``model_name`` to the recorder, so the
-        fork's child trajectory should pick up REAL_MODEL_ID.
+        fork's child trajectory should pick up FIXTURE_MODEL_ID.
         """
         tool_id = f"toolu_{tool_name.lower()}_01"
         return [
@@ -189,7 +189,7 @@ class _FakeSDKClient:
                 content=[
                     FakeToolUseBlock(id=tool_id, name=tool_name, input=tool_input),
                 ],
-                model=REAL_MODEL_ID,
+                model=FIXTURE_MODEL_ID,
             ),
             FakeUserMessage(
                 content=[
@@ -202,7 +202,7 @@ class _FakeSDKClient:
             ),
             FakeAssistantMessage(
                 content=[FakeTextBlock(text="exploration complete")],
-                model=REAL_MODEL_ID,
+                model=FIXTURE_MODEL_ID,
             ),
             FakeResultMessage(
                 structured_output=structured,
@@ -259,7 +259,7 @@ class _FakeSDKClient:
             return [
                 FakeAssistantMessage(
                     content=[FakeTextBlock(text="evaluating alternatives")],
-                    model=REAL_MODEL_ID,
+                    model=FIXTURE_MODEL_ID,
                 ),
                 FakeResultMessage(
                     structured_output={"issues": []},
@@ -278,7 +278,7 @@ class _FakeSDKClient:
             return [
                 FakeAssistantMessage(
                     content=[FakeTextBlock(text="parsing")],
-                    model=REAL_MODEL_ID,
+                    model=FIXTURE_MODEL_ID,
                 ),
                 FakeResultMessage(
                     structured_output={"issues": []},
@@ -296,7 +296,7 @@ class _FakeSDKClient:
             return [
                 FakeAssistantMessage(
                     content=[FakeTextBlock(text="The PR refactors foo() for clarity.")],
-                    model=REAL_MODEL_ID,
+                    model=FIXTURE_MODEL_ID,
                 ),
                 FakeResultMessage(
                     total_cost_usd=0.08,
@@ -313,7 +313,7 @@ class _FakeSDKClient:
         return [
             FakeAssistantMessage(
                 content=[FakeTextBlock(text="ok, wrote the review")],
-                model=REAL_MODEL_ID,
+                model=FIXTURE_MODEL_ID,
             ),
             FakeResultMessage(
                 total_cost_usd=0.20,
@@ -636,9 +636,9 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
 
     # --- Model line: real SDK id, not 'unknown' / backend alias ---------
     model_line = _line_starting(body, "- **Model:**")
-    assert REAL_MODEL_ID in model_line, (
+    assert FIXTURE_MODEL_ID in model_line, (
         f"BUG: rollup Model line is missing the real SDK model id "
-        f"({REAL_MODEL_ID!r}).\n  got: {model_line!r}\n\n"
+        f"({FIXTURE_MODEL_ID!r}).\n  got: {model_line!r}\n\n"
         f"full body:\n{body}"
     )
     assert "unknown" not in model_line, (
@@ -678,9 +678,9 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
             f"(SDK model id never propagated to the per-phase rollup).\n"
             f"  row: {row!r}"
         )
-        assert REAL_MODEL_ID in model_cell, (
+        assert FIXTURE_MODEL_ID in model_cell, (
             f"BUG: row {phase_name!r} Model cell missing real SDK id "
-            f"{REAL_MODEL_ID!r}.\n  row: {row!r}"
+            f"{FIXTURE_MODEL_ID!r}.\n  row: {row!r}"
         )
         # Steps cell is a stringified int. A row with 0 steps would not
         # have rendered, but be defensive.
@@ -811,9 +811,9 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
         f"BUG: Exploration row Model='unknown' (matches production bug).\n"
         f"  row: {exploration_row!r}\n\nfull body:\n{body}"
     )
-    assert REAL_MODEL_ID in model_cell, (
+    assert FIXTURE_MODEL_ID in model_cell, (
         f"BUG: Exploration row Model cell is missing real SDK id "
-        f"{REAL_MODEL_ID!r}.\n  got Model cell: {model_cell!r}\n"
+        f"{FIXTURE_MODEL_ID!r}.\n  got Model cell: {model_cell!r}\n"
         f"  row: {exploration_row!r}"
     )
 

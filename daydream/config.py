@@ -9,9 +9,17 @@ Exports:
     REVIEW_SKILLS: dict[ReviewSkillChoice, str] - Mapping of review type identifiers to skill names.
     REVIEW_OUTPUT_FILE: str - Default filename for storing review results.
     UNKNOWN_SKILL_PATTERN: str - Regex pattern for detecting unknown skill errors.
+    DEFAULT_CLAUDE_MODEL: str - Default Claude model id when no override is given.
+    DEFAULT_CODEX_MODEL: str - Default Codex model id when no override is given.
 """
 
 from enum import Enum
+
+# Default model ids — single source of truth. Resolved by ``create_backend`` only
+# when no explicit override is supplied. Every other layer takes ``model: str``
+# as required and does no fallback of its own.
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-6"
+DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 
 
 class ReviewSkillChoice(Enum):

@@ -296,7 +296,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
-        print_info(console, f"Model: {config.model or '<backend-default>'}")
+        print_info(console, f"Model: {backend.model}")
         console.print()
 
         # ------ Resume gate (D-34, D-36, D-37) ------

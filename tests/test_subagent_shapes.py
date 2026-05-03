@@ -37,6 +37,7 @@ from daydream.trajectory import (
 class MockBackend:
     """Minimal Backend replaying a canned event list."""
 
+    model = "mock-model"
     events: list[AgentEvent]
 
     def execute(

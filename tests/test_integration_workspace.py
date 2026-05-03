@@ -36,7 +36,6 @@ from daydream.backends import (
 )
 from daydream.runner import RunConfig
 
-
 # --- Helpers ---------------------------------------------------------------
 
 
@@ -82,6 +81,8 @@ class MockBackend:
     cleanup, exit codes, captured errors) rather than on what the backend
     happened to be asked to do.
     """
+
+    model = "mock-model"
 
     def __init__(self, events: list[AgentEvent] | None = None) -> None:
         default: list[AgentEvent] = [

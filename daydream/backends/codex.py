@@ -67,7 +67,7 @@ class CodexBackend:
     Translates Codex JSONL events into the unified AgentEvent stream.
     """
 
-    def __init__(self, model: str = "gpt-5.3-codex"):
+    def __init__(self, model: str):
         self.model = model
         self._process: asyncio.subprocess.Process | None = None
 
