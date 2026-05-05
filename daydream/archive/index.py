@@ -87,6 +87,19 @@ INSERT OR REPLACE INTO runs (
 """
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Add columns that exist in _CREATE_TABLE but are missing from the live DB."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    migrations: list[tuple[str, str]] = [
+        ("review_backend", "TEXT"),
+        ("fix_backend", "TEXT"),
+        ("test_backend", "TEXT"),
+    ]
+    for col, col_type in migrations:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {col_type}")
+
+
 def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     """Open the index database, creating schema if needed.
 
@@ -106,6 +119,7 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(_CREATE_TABLE)
+    _migrate_schema(conn)
     for idx_sql in _CREATE_INDEXES:
         conn.execute(idx_sql)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
