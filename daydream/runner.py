@@ -33,7 +33,7 @@ from daydream.agent import (
     set_quiet_mode,
 )
 from daydream.backends import Backend, create_backend
-from daydream.config import REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
+from daydream.config import DEFAULT_EXPLORATION_MODEL, REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
 from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
 from daydream.git_ops import GitError
@@ -104,6 +104,9 @@ class RunConfig:
         loop: Enable continuous review/fix/test iterations. Default is False.
         max_iterations: Maximum number of loop iterations before exiting. Default is 5.
         deep: Run the deep-review pipeline (TTT + per-stack + cross-stack merge). D-01.
+        exploration_model: Model override for exploration subagents. When set, a separate
+            backend is created for the exploration phase using this model. Defaults to
+            :data:`config.DEFAULT_EXPLORATION_MODEL`.
         ignore_paths: Paths to exclude from diffs (passed to `git :(exclude)` pathspecs
             and surfaced in review prompts). Default is an empty list.
         trajectory_path: Path to write the ATIF v1.6 trajectory JSON. Default-resolved
@@ -135,6 +138,7 @@ class RunConfig:
     deep: bool = False
     exploration_context: ExplorationContext | None = None
     exploration_depth: int = 1
+    exploration_model: str | None = None
     ignore_paths: list[str] = field(default_factory=list)
     trajectory_path: Path | None = None
     pr_repo: str | None = None
@@ -605,9 +609,12 @@ async def _run_review_or_comment(
                 config.exploration_context = ExplorationContext()
             else:
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+                explore_model = config.exploration_model or DEFAULT_EXPLORATION_MODEL
+                explore_backend = create_backend(config.backend, model=explore_model)
+                print_dim(console, f"Exploration model: {explore_backend.model}")
                 config.exploration_context = await safe_explore(
                     pre_scan,
-                    backend,
+                    explore_backend,
                     target_dir,
                     diff,
                     config.exploration_depth,
@@ -768,9 +775,12 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 config.exploration_context = ExplorationContext()
             else:
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+                explore_model = config.exploration_model or DEFAULT_EXPLORATION_MODEL
+                explore_backend = create_backend(config.backend, model=explore_model)
+                print_dim(console, f"Exploration model: {explore_backend.model}")
                 config.exploration_context = await safe_explore(
                     pre_scan,
-                    review_backend,
+                    explore_backend,
                     target_dir,
                     diff_text,
                     config.exploration_depth,
