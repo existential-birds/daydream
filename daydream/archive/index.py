@@ -97,7 +97,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     ]
     for col, col_type in migrations:
         if col not in existing:
-            conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {col_type}")
+            try:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
 
 
 def _get_connection(archive_dir: Path) -> sqlite3.Connection:
