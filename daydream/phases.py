@@ -1276,7 +1276,8 @@ async def phase_generate_plan(
     issues: list[dict[str, Any]],
     *,
     exploration_dir: Path | None = None,
-) -> Path | None:
+    auto_select_all: bool = False,
+) -> tuple[Path | None, dict[str, Any] | None]:
     """Phase: Generate an implementation plan for selected issues.
 
     Prompts the user to select which issues to address, then launches an
@@ -1289,27 +1290,32 @@ async def phase_generate_plan(
         diff_path: Path to the diff file on disk.
         intent_summary: Confirmed intent summary.
         issues: Full list of issues from phase_alternative_review.
+        auto_select_all: Skip the interactive prompt and select all issues.
 
     Returns:
-        Path to the generated plan file, or None if user skipped.
+        Tuple of (path to plan file, raw plan dict). Either or both may be None.
 
     """
     print_phase_hero(console, "ENVISION", phase_subtitle("ENVISION"))
 
-    console.print()
-    response = prompt_user(
-        console,
-        "Create an implementation plan? Enter issue numbers (e.g., 1,3,5) or 'all', or 'none' to skip",
-        "all",
-    )
+    if auto_select_all:
+        selected_ids: list[int] = [i["id"] for i in issues]
+    else:
+        console.print()
+        response = prompt_user(
+            console,
+            "Create an implementation plan? Enter issue numbers (e.g., 1,3,5) or 'all', or 'none' to skip",
+            "all",
+        )
 
-    selected_ids = _parse_issue_selection(response, issues)
-    if selected_ids is None:
-        print_dim(console, "Skipping plan generation")
-        return None
-    if not selected_ids:
-        print_warning(console, "No valid issue numbers found in selection")
-        return None
+        parsed = _parse_issue_selection(response, issues)
+        if parsed is None:
+            print_dim(console, "Skipping plan generation")
+            return None, None
+        if not parsed:
+            print_warning(console, "No valid issue numbers found in selection")
+            return None, None
+        selected_ids = parsed
 
     selected_issues = [i for i in issues if i["id"] in selected_ids]
     issues_text = "\n".join(
@@ -1336,7 +1342,7 @@ async def phase_generate_plan(
                 console,
                 f"Failed to generate structured plan; agent returned {type(result).__name__}",
             )
-        return None
+        return None, None
 
     # Ensure .daydream/ directory exists
     daydream_dir = work.repo / ".daydream"
@@ -1350,7 +1356,7 @@ async def phase_generate_plan(
     _write_plan_markdown(plan_path, result, intent_summary, branch_name, selected_issues)
 
     print_success(console, f"Plan written to {plan_path}")
-    return plan_path
+    return plan_path, result
 
 
 # -------------------------

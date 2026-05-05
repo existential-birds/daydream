@@ -151,6 +151,7 @@ class RunConfig:
     shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)
     forced_skill: str | None = None  # set by deprecated language flags
+    plan: bool = False
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -634,12 +635,19 @@ async def _run_review_or_comment(
             print_success(console, "No issues found — the implementation looks good!")
             return 0
 
-        # Phase 3: Generate plan
+        # Phase 3: Generate plan.
+        # For ``--comment`` mode, ENVISION is skipped by default (extra
+        # latency for a prompt-only flow). ``--plan`` opts back in and
+        # feeds the structured plan into the PR comment prompt.
+        plan_data: dict[str, Any] | None = None
+        skip_plan = post_to_pr and not config.plan
         try:
-            await phase_generate_plan(
-                backend, work, diff_path, intent_summary, issues,
-                exploration_dir=exploration_dir,
-            )
+            if not skip_plan:
+                _, plan_data = await phase_generate_plan(
+                    backend, work, diff_path, intent_summary, issues,
+                    exploration_dir=exploration_dir,
+                    auto_select_all=post_to_pr,
+                )
         finally:
             exploration_cleanup = target_dir / ".daydream" / "exploration"
             if exploration_cleanup.is_dir():
@@ -652,7 +660,7 @@ async def _run_review_or_comment(
             from daydream.pr_review import post_review_to_pr_from_alt_issues
 
             await post_review_to_pr_from_alt_issues(
-                target_dir, issues, console=console
+                target_dir, issues, console=console, plan_data=plan_data,
             )
 
         return 0

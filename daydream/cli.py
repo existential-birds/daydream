@@ -330,6 +330,13 @@ def _build_main_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Extra path to copy into ephemeral worktree (repeatable).",
     )
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        default=False,
+        dest="plan",
+        help="Generate an implementation plan and embed it in PR comments (use with --comment).",
+    )
 
     # ---- Deprecated language / skill flags (mapped to forced_skill + shallow) ----
     skill_group = parser.add_mutually_exclusive_group()
@@ -661,6 +668,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         shallow=args.shallow,
         extra_copy=list(args.extra_copy),
         forced_skill=forced_skill,
+        plan=args.plan,
     )
 
 

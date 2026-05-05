@@ -661,6 +661,7 @@ async def test_run_trust_full_flow(tmp_path, monkeypatch):
     config = RunConfig(
         target=str(tmp_path),
         trust_the_technology=True,
+        plan=True,
     )
 
     exit_code = await run(config)
