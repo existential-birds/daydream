@@ -1,7 +1,6 @@
 # tests/test_phases.py
 """Tests for phase functions with backend abstraction."""
 
-import json
 import subprocess
 
 import pytest
@@ -767,52 +766,79 @@ def test_intent_builder_omits_issue_instructions(tmp_path):
     assert "issue" not in prompt.lower()
 
 
-@pytest.mark.asyncio
-async def test_phase_commit_push_passes_refs_not_diffs(tmp_path, monkeypatch, make_work):
-    """commit-push must be invoked with --repo / --base / --intent (refs-not-diffs).
+def test_build_review_prompt_with_prior_commits():
+    from daydream.phases import build_review_prompt
 
-    Stage 3 contract: phases pass references (paths, base SHA, intent JSON)
-    rather than embedding diffs in the prompt. The receiving skill fetches
-    the diff itself via Read/Grep/Bash. This guards against regressions where
-    a phase might silently drop the new args and revert to the bare skill
-    invocation.
-    """
+    prompt = build_review_prompt(prior_commits="abc1234 fix: something")
+    assert "settled decisions" in prompt
+    assert "abc1234 fix: something" in prompt
+
+
+def test_build_review_prompt_without_prior_commits():
+    from daydream.phases import build_review_prompt
+
+    prompt = build_review_prompt(prior_commits=None)
+    assert "settled decisions" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_commit_push_includes_daydream_trailers(tmp_path, monkeypatch, make_work):
+    """commit-push must include Daydream-Run and Daydream-Version trailers."""
     from daydream.phases import phase_commit_push
 
+    monkeypatch.setattr("daydream.phases.print_dim", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
-    captured: dict[str, object] = {}
+    captured: dict[str, str] = {}
 
     class CapturingBackend:
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            captured["prompt"] = prompt
             yield ResultEvent(structured_output=None, continuation=None)
 
         async def cancel(self):
             pass
 
         def format_skill_invocation(self, skill_key, args=""):
-            captured["skill_key"] = skill_key
-            captured["args"] = args
             return f"/{skill_key} {args}"
 
     work = make_work(tmp_path, base_sha="ABC123", head_sha="DEF456")
     await phase_commit_push(CapturingBackend(), work)
 
-    assert captured["skill_key"] == "beagle-core:commit-push"
-    args = captured["args"]
-    assert isinstance(args, str)
-    assert f"--repo {work.repo}" in args
-    assert f"--base {work.base_sha}" in args
-    assert "--intent" in args
+    assert "Daydream-Run:" in captured["prompt"]
+    assert "Daydream-Version:" in captured["prompt"]
+    assert work.run_id in captured["prompt"]
 
-    # Intent file should land under .daydream/intents/<run_id>.json and be JSON.
-    intent_dir = work.repo / ".daydream" / "intents"
-    intents = list(intent_dir.glob("*.json"))
-    assert len(intents) == 1
-    payload = json.loads(intents[0].read_text())
-    assert payload["phase"] == "commit_push"
-    assert payload["head_sha"] == "DEF456"
-    assert payload["base_sha"] == "ABC123"
+
+@pytest.mark.asyncio
+async def test_phase_commit_iteration_includes_daydream_trailers(tmp_path, monkeypatch, make_work):
+    """phase_commit_iteration must include Daydream-Run and Daydream-Version trailers."""
+    from daydream.phases import phase_commit_iteration
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    captured: dict[str, str] = {}
+
+    class CapturingBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            captured["prompt"] = prompt
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key} {args}"
+
+    work = make_work(tmp_path)
+    await phase_commit_iteration(CapturingBackend(), work, 2)
+
+    assert "Daydream-Run:" in captured["prompt"]
+    assert "Daydream-Version:" in captured["prompt"]
+    assert "Iteration: 2" in captured["prompt"]
+    assert "Do NOT push" in captured["prompt"]

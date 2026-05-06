@@ -462,6 +462,28 @@ def log(repo: Path, base: str, head: str = "HEAD") -> str:
     return proc.stdout.strip()
 
 
+def daydream_commits(repo: Path, base: str, head: str = "HEAD") -> str | None:
+    """Return oneline log of prior daydream commits in ``base..head``.
+
+    Args:
+        repo: Repository working directory.
+        base: Base ref (e.g. ``"main"``).
+        head: Comparison ref. Defaults to ``"HEAD"``.
+
+    Returns:
+        Stripped log output, or ``None`` if no daydream commits found.
+    """
+    proc = _run_git(
+        repo,
+        ["log", f"{base}..{head}", "--oneline", "--grep=Daydream-Run:"],
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        return None
+    output = proc.stdout.strip()
+    return output or None
+
+
 def show(repo: Path, ref: str, path: str) -> bytes:
     """Return the raw bytes of *path* at *ref* via ``git show``.
 
