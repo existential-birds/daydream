@@ -20,6 +20,7 @@ from enum import Enum
 # as required and does no fallback of its own.
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-6"
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
+DEFAULT_EXPLORATION_MODEL = "claude-sonnet-4-6"
 
 
 class ReviewSkillChoice(Enum):

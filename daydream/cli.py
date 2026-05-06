@@ -172,6 +172,15 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Model to use (default: backend-specific). Examples: opus, sonnet, haiku, gpt-5.3-codex",
     )
+    parser.add_argument(
+        "--exploration-model",
+        default=None,
+        dest="exploration_model",
+        help=(
+            "Model for exploration subagents (default: claude-sonnet-4-6). "
+            "Use a smaller model to save cost."
+        ),
+    )
 
 
 def _build_summarize_parser() -> argparse.ArgumentParser:
@@ -329,6 +338,13 @@ def _build_main_parser() -> argparse.ArgumentParser:
         dest="extra_copy",
         type=Path,
         help="Extra path to copy into ephemeral worktree (repeatable).",
+    )
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        default=False,
+        dest="plan",
+        help="Generate an implementation plan and embed it in PR comments (use with --comment).",
     )
 
     # ---- Deprecated language / skill flags (mapped to forced_skill + shallow) ----
@@ -634,6 +650,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         target=args.target,
         skill=args.skill,
         model=args.model,
+        exploration_model=args.exploration_model,
         cleanup=args.cleanup,
         quiet=True,
         review_only=args.review_only,
@@ -661,6 +678,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         shallow=args.shallow,
         extra_copy=list(args.extra_copy),
         forced_skill=forced_skill,
+        plan=args.plan,
     )
 
 
@@ -683,6 +701,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         target=args.target,
         skill=None,
         model=args.model,
+        exploration_model=None,
         cleanup=None,
         quiet=True,
         review_only=False,

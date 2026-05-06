@@ -600,7 +600,7 @@ async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch, make_w
     diff_file = tmp_path / "diff.patch"
     diff_file.write_text("diff --git ...")
 
-    plan_path = await phase_generate_plan(
+    plan_path, plan_result = await phase_generate_plan(
         PlanBackend(), make_work(tmp_path),
         diff_path=diff_file,
         intent_summary="Adds authentication service",
@@ -608,6 +608,8 @@ async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch, make_w
     )
 
     assert plan_path is not None
+    assert plan_result is not None
+    assert "plan" in plan_result
     assert plan_path.exists()
     assert (tmp_path / ".daydream").is_dir()
     content = plan_path.read_text()
@@ -644,7 +646,7 @@ async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch, make_work
     diff_file = tmp_path / "diff.patch"
     diff_file.write_text("diff ...")
 
-    plan_path = await phase_generate_plan(
+    plan_path, plan_result = await phase_generate_plan(
         NeverCalledBackend(), make_work(tmp_path),
         diff_path=diff_file,
         intent_summary="Test intent",
@@ -652,6 +654,7 @@ async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch, make_work
     )
 
     assert plan_path is None
+    assert plan_result is None
     assert not (tmp_path / ".daydream").exists()
 
 
