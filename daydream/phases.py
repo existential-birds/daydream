@@ -339,6 +339,26 @@ def _exploration_pointer(exploration_dir: Path | None) -> str:
     )
 
 
+def _settled_decisions_block(prior_commits: str | None) -> str:
+    """Return prompt block marking prior daydream commits as settled, or empty string.
+
+    Args:
+        prior_commits: Oneline log of prior daydream commits on this branch.
+            When None or empty, returns empty string.
+
+    Returns:
+        Prompt block instructing the agent to treat prior commits as settled decisions.
+
+    """
+    if not prior_commits:
+        return ""
+    return (
+        "Prior automated-review commits on this branch — treat as settled "
+        "decisions unless they introduce bugs or security issues:\n"
+        f"{prior_commits}"
+    )
+
+
 def build_review_prompt(
     *,
     skill_invocation: str = "",
@@ -365,12 +385,9 @@ def build_review_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
-    if prior_commits:
-        parts.append(
-            "Prior automated-review commits on this branch — treat as settled "
-            "decisions unless they introduce bugs or security issues:\n"
-            f"{prior_commits}"
-        )
+    settled = _settled_decisions_block(prior_commits)
+    if settled:
+        parts.append(settled)
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     body = (
@@ -846,8 +863,23 @@ async def _do_commit(
     push: bool = False,
     interactive: bool = False,
     iteration: int | None = None,
+    items: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Stage, commit, and optionally push with daydream trailers."""
+    """Stage, commit, and optionally push with daydream trailers.
+
+    Args:
+        backend: LLM backend used to run the commit agent.
+        work: Current workspace context (repo path, run ID, etc.).
+        push: If True, push to the remote after committing.
+        interactive: If True, prompt the user for confirmation before
+            committing.
+        iteration: When set, append an ``Iteration: <n>`` trailer to the
+            commit message body.
+        items: Optional list of fix dicts (with ``file`` and ``description``
+            keys) summarising changes applied in this run; included in the
+            agent prompt so the commit message is accurate.
+
+    """
     if interactive:
         response = prompt_user(console, "Commit and push changes? [y/N]", "n")
         if response.lower() not in ("y", "yes"):
@@ -857,10 +889,23 @@ async def _do_commit(
     iteration_line = f"End the body with: Iteration: {iteration}\n\n" if iteration is not None else ""
     push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
 
+    if items:
+        summaries = "\n".join(
+            f"- {it.get('file', 'unknown')}: {it.get('description', 'no description')}"
+            for it in items
+        )
+        items_context = (
+            "The following fixes were applied in this run — use them to write "
+            f"an accurate commit message:\n{summaries}\n\n"
+        )
+    else:
+        items_context = ""
+
     prompt = (
         "Stage all changes and commit using a conventional commit message. "
         "Review the diff to write a meaningful summary of what was fixed or changed. "
         "Use the format: <type>: <concise summary of changes>\n\n"
+        f"{items_context}"
         "Pick the most appropriate type from: fix, refactor, style, perf. "
         "If multiple categories of changes exist, pick the dominant one. "
         "Keep the subject line under 72 characters. "
@@ -874,6 +919,30 @@ async def _do_commit(
     )
     await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
 
+    # --- Post-commit trailer verification ---
+    # The agent may omit trailers despite being asked.  Verify and amend if
+    # missing so that daydream_commits() can always find them.
+    expected_trailers = {
+        "Daydream-Run": work.run_id,
+        "Daydream-Version": daydream.__version__,
+    }
+    try:
+        msg = git_ops.head_commit_message(work.repo)
+    except GitError:
+        # No commit to verify (e.g. agent failed to commit) — leave as-is.
+        return
+
+    missing = {k: v for k, v in expected_trailers.items() if f"{k}: {v}" not in msg}
+    if missing:
+        print_warning(
+            console,
+            f"Commit missing daydream trailer(s): {', '.join(missing)}; amending",
+        )
+        try:
+            git_ops.amend_trailers(work.repo, missing)
+        except GitError as exc:
+            print_warning(console, f"Failed to amend trailers: {exc}")
+
 
 async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
     """Prompt user to commit and push changes.
@@ -884,7 +953,9 @@ async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
 
     """
     console.print()
+    print_info(console, "Committing and pushing changes...")
     await _do_commit(backend, work, push=True, interactive=True)
+    print_success(console, "Commit and push complete")
 
 
 async def phase_fetch_pr_feedback(
@@ -1029,12 +1100,13 @@ async def phase_commit_push_auto(
     Args:
         backend: The Backend to execute against.
         work: Workspace context for the commit.
-        items: Optional fix items applied this run (kept for API compat).
+        items: Optional fix items applied this run; forwarded to the commit
+            agent so it can craft an accurate commit message.
 
     """
     console.print()
     print_info(console, "Committing and pushing changes...")
-    await _do_commit(backend, work, push=True)
+    await _do_commit(backend, work, push=True, items=items)
     print_success(console, "Commit and push complete")
 
 

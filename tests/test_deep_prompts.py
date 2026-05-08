@@ -154,6 +154,83 @@ def _merge_paths(tmp_path: Path) -> dict[str, Path | list[Path] | None]:
     }
 
 
+def test_per_stack_prompt_includes_prior_commits(tmp_path: Path) -> None:
+    """prior_commits block appears in per-stack prompt when provided."""
+    p = _paths(tmp_path)
+    commits = "abc1234 fix: handle edge case\ndef5678 feat: add retry logic"
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        prior_commits=commits,
+        **p,
+    )
+    assert "Prior automated-review commits on this branch" in out
+    assert "abc1234 fix: handle edge case" in out
+    assert "def5678 feat: add retry logic" in out
+
+
+def test_per_stack_prompt_omits_prior_commits_when_none(tmp_path: Path) -> None:
+    """prior_commits block absent when prior_commits is None."""
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        prior_commits=None,
+        **p,
+    )
+    assert "Prior automated-review commits" not in out
+
+
+def test_per_stack_prompt_omits_prior_commits_when_empty(tmp_path: Path) -> None:
+    """prior_commits block absent when prior_commits is empty string."""
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        prior_commits="",
+        **p,
+    )
+    assert "Prior automated-review commits" not in out
+
+
+def test_generic_fallback_prompt_includes_prior_commits(tmp_path: Path) -> None:
+    """prior_commits block appears in generic-fallback prompt when provided."""
+    p = _paths(tmp_path)
+    commits = "abc1234 fix: handle edge case"
+    out = build_generic_fallback_prompt(
+        files=["config.yaml"],
+        prior_commits=commits,
+        **p,
+    )
+    assert "Prior automated-review commits on this branch" in out
+    assert "abc1234 fix: handle edge case" in out
+
+
+def test_generic_fallback_prompt_omits_prior_commits_when_none(tmp_path: Path) -> None:
+    """prior_commits block absent from generic-fallback when prior_commits is None."""
+    p = _paths(tmp_path)
+    out = build_generic_fallback_prompt(
+        files=["config.yaml"],
+        prior_commits=None,
+        **p,
+    )
+    assert "Prior automated-review commits" not in out
+
+
+def test_generic_fallback_prompt_omits_prior_commits_when_empty(tmp_path: Path) -> None:
+    """prior_commits block absent from generic-fallback when prior_commits is empty."""
+    p = _paths(tmp_path)
+    out = build_generic_fallback_prompt(
+        files=["config.yaml"],
+        prior_commits="",
+        **p,
+    )
+    assert "Prior automated-review commits" not in out
+
+
 def test_merge_prompt_forbids_bold_wrapper_on_numbered_head(tmp_path: Path) -> None:
     """The prompt must tell the merge agent not to bold-wrap `N. [FILE] TITLE`.
 

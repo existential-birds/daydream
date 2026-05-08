@@ -13,6 +13,7 @@ from daydream.phases import (
     _confidence_and_convention_instructions,
     _dependency_impact_instructions,
     _exploration_pointer,
+    _settled_decisions_block,
 )
 
 DOC_REVIEW_NOTICE = (
@@ -93,12 +94,9 @@ def build_per_stack_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
-    if prior_commits:
-        parts.append(
-            "Prior automated-review commits on this branch — treat as settled "
-            "decisions unless they introduce bugs or security issues:\n"
-            f"{prior_commits}"
-        )
+    settled = _settled_decisions_block(prior_commits)
+    if settled:
+        parts.append(settled)
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
@@ -264,12 +262,9 @@ def build_generic_fallback_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
-    if prior_commits:
-        parts.append(
-            "Prior automated-review commits on this branch — treat as settled "
-            "decisions unless they introduce bugs or security issues:\n"
-            f"{prior_commits}"
-        )
+    settled = _settled_decisions_block(prior_commits)
+    if settled:
+        parts.append(settled)
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
