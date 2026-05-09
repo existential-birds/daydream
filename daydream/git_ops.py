@@ -32,10 +32,13 @@ The module is intentionally dependency-free: stdlib only.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 # --- Errors ------------------------------------------------------------------
 
@@ -200,6 +203,77 @@ def head_sha(repo: Path) -> str:
     if proc.returncode != 0:
         raise GitError(f"cannot resolve HEAD in {repo}: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def head_commit_message(repo: Path) -> str:
+    """Return the full commit message of ``HEAD``.
+
+    Args:
+        repo: Repository working directory.
+
+    Returns:
+        The commit message body of the current ``HEAD`` commit.
+
+    Raises:
+        GitError: If ``git log`` fails (e.g. empty repository).
+    """
+    proc = _run_git(repo, ["log", "-1", "--format=%B", "HEAD"], timeout=5)
+    if proc.returncode != 0:
+        raise GitError(f"cannot read HEAD message in {repo}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def amend_trailers(repo: Path, trailers: dict[str, str]) -> None:
+    """Amend ``HEAD`` to append missing git trailers.
+
+    Uses ``git interpret-trailers`` to inject trailers, then amends the
+    commit with the updated message.  This is a no-op if *trailers* is empty.
+
+    Args:
+        repo: Repository working directory.
+        trailers: Mapping of trailer keys to values (e.g.
+            ``{"Daydream-Run": "abc123"}``).
+
+    Raises:
+        GitError: If the amend fails.
+    """
+    if not trailers:
+        return
+
+    # Build the amended message via git interpret-trailers.
+    trailer_args: list[str] = []
+    for key, value in trailers.items():
+        trailer_args += ["--trailer", f"{key}: {value}"]
+
+    msg_proc = _run_git(repo, ["log", "-1", "--format=%B", "HEAD"], timeout=5)
+    if msg_proc.returncode != 0:
+        raise GitError(f"cannot read HEAD message: {msg_proc.stderr.strip()}")
+
+    # Pipe message through interpret-trailers (run directly, not via _run_git
+    # because we need stdin).
+    try:
+        interp = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            ["git", "interpret-trailers", *trailer_args],  # noqa: S607 - git is a trusted command
+            input=msg_proc.stdout,
+            capture_output=True,
+            text=True,
+            cwd=repo,
+            timeout=5,
+            shell=False,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise GitError(f"git interpret-trailers failed: {exc}") from exc
+
+    if interp.returncode != 0:
+        raise GitError(f"git interpret-trailers failed: {interp.stderr.strip()}")
+
+    amended_msg = interp.stdout
+    amend_proc = _run_git(
+        repo, ["commit", "--amend", "--no-edit", "-m", amended_msg.strip()], timeout=30,
+    )
+    if amend_proc.returncode != 0:
+        raise GitError(f"git commit --amend failed: {amend_proc.stderr.strip()}")
 
 
 def remote_url(repo: Path, remote: str = "origin") -> str | None:
@@ -460,6 +534,35 @@ def log(repo: Path, base: str, head: str = "HEAD") -> str:
     if proc.returncode != 0:
         raise GitError(f"git log {base}..{head} failed: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def daydream_commits(repo: Path, base: str, head: str = "HEAD") -> str | None:
+    """Return oneline log of prior daydream commits in ``base..head``.
+
+    Args:
+        repo: Repository working directory.
+        base: Base ref (e.g. ``"main"``).
+        head: Comparison ref. Defaults to ``"HEAD"``.
+
+    Returns:
+        Stripped log output, or ``None`` if no daydream commits found.
+    """
+    proc = _run_git(
+        repo,
+        ["log", f"{base}..{head}", "--oneline", "--grep=Daydream-Run:"],
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        _logger.warning(
+            "git log %s..%s --grep=Daydream-Run: failed (rc=%d): %s",
+            base,
+            head,
+            proc.returncode,
+            (proc.stderr or "").strip(),
+        )
+        return None
+    output = proc.stdout.strip()
+    return output or None
 
 
 def show(repo: Path, ref: str, path: str) -> bytes:

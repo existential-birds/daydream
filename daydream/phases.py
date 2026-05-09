@@ -1,12 +1,12 @@
 """Phase functions for the review and fix loop."""
 
-import shlex
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
+import daydream
 from daydream import git_ops
 from daydream.agent import (
     console,
@@ -17,7 +17,7 @@ from daydream.agent import (
 from daydream.backends import Backend, ContinuationToken
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
-from daydream.workspace import WorkContext, write_intent_json
+from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
@@ -339,12 +339,33 @@ def _exploration_pointer(exploration_dir: Path | None) -> str:
     )
 
 
+def _settled_decisions_block(prior_commits: str | None) -> str:
+    """Return prompt block marking prior daydream commits as settled, or empty string.
+
+    Args:
+        prior_commits: Oneline log of prior daydream commits on this branch.
+            When None or empty, returns empty string.
+
+    Returns:
+        Prompt block instructing the agent to treat prior commits as settled decisions.
+
+    """
+    if not prior_commits:
+        return ""
+    return (
+        "Prior automated-review commits on this branch — treat as settled "
+        "decisions unless they introduce bugs or security issues:\n"
+        f"{prior_commits}"
+    )
+
+
 def build_review_prompt(
     *,
     skill_invocation: str = "",
     diff_instruction: str = "",
     review_output_path: str = "",
     exploration_dir: Path | None = None,
+    prior_commits: str | None = None,
 ) -> str:
     """Assemble the prompt for `phase_review`.
 
@@ -353,6 +374,8 @@ def build_review_prompt(
         diff_instruction: Diff scope instruction text.
         review_output_path: Absolute path the agent should write its review to.
         exploration_dir: Optional path to exploration output directory.
+        prior_commits: Oneline log of prior daydream commits on this branch.
+            When present, injected as settled-decisions context.
 
     Returns:
         Fully assembled prompt string.
@@ -362,6 +385,9 @@ def build_review_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
+    settled = _settled_decisions_block(prior_commits)
+    if settled:
+        parts.append(settled)
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     body = (
@@ -485,6 +511,11 @@ def revert_uncommitted_changes(cwd: Path) -> bool:
             print_warning(console, f"Revert failed: {type(e).__name__}: {e}")
         return False
     return True
+
+
+def _prior_daydream_commits(work: WorkContext) -> str | None:
+    """Return oneline log of prior daydream commits on this branch."""
+    return git_ops.daydream_commits(work.repo, work.base_branch)
 
 
 def _detect_default_branch(cwd: Path) -> str | None:
@@ -632,11 +663,13 @@ async def phase_review(
             f"Use git pathspec magic, e.g. `git diff {ref} -- . {pathspec_args}`.\n"
         )
 
+    prior_commits = _prior_daydream_commits(work)
     prompt = build_review_prompt(
         skill_invocation=skill_invocation,
         diff_instruction=diff_instruction,
         review_output_path=str(review_output_path),
         exploration_dir=exploration_dir,
+        prior_commits=prior_commits,
     )
 
     await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.REVIEW)
@@ -823,15 +856,92 @@ async def phase_test_and_heal(
             return False, retries_used
 
 
-def _commit_push_args(work: WorkContext, intent_path: Path) -> str:
-    """Format the refs-not-diffs arg string for commit-push skills."""
-    # Use relative path to avoid exposing filesystem structure if logged
-    relative_intent = intent_path.relative_to(work.repo)
-    return (
-        f"--repo {shlex.quote(str(work.repo))} "
-        f"--base {shlex.quote(work.base_sha)} "
-        f"--intent {shlex.quote(str(relative_intent))}"
+async def _do_commit(
+    backend: Backend,
+    work: WorkContext,
+    *,
+    push: bool = False,
+    interactive: bool = False,
+    iteration: int | None = None,
+    items: list[dict[str, Any]] | None = None,
+) -> None:
+    """Stage, commit, and optionally push with daydream trailers.
+
+    Args:
+        backend: LLM backend used to run the commit agent.
+        work: Current workspace context (repo path, run ID, etc.).
+        push: If True, push to the remote after committing.
+        interactive: If True, prompt the user for confirmation before
+            committing.
+        iteration: When set, append an ``Iteration: <n>`` trailer to the
+            commit message body.
+        items: Optional list of fix dicts (with ``file`` and ``description``
+            keys) summarising changes applied in this run; included in the
+            agent prompt so the commit message is accurate.
+
+    """
+    if interactive:
+        response = prompt_user(console, "Commit and push changes? [y/N]", "n")
+        if response.lower() not in ("y", "yes"):
+            print_dim(console, "Skipping commit and push")
+            return
+
+    iteration_line = f"End the body with: Iteration: {iteration}\n\n" if iteration is not None else ""
+    push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
+
+    if items:
+        summaries = "\n".join(
+            f"- {it.get('file', 'unknown')}: {it.get('description', 'no description')}"
+            for it in items
+        )
+        items_context = (
+            "The following fixes were applied in this run — use them to write "
+            f"an accurate commit message:\n{summaries}\n\n"
+        )
+    else:
+        items_context = ""
+
+    prompt = (
+        "Stage all changes and commit using a conventional commit message. "
+        "Review the diff to write a meaningful summary of what was fixed or changed. "
+        "Use the format: <type>: <concise summary of changes>\n\n"
+        f"{items_context}"
+        "Pick the most appropriate type from: fix, refactor, style, perf. "
+        "If multiple categories of changes exist, pick the dominant one. "
+        "Keep the subject line under 72 characters. "
+        "Add a body with bullet points if there are multiple distinct changes. "
+        f"{iteration_line}"
+        "Add these EXACT git trailers as the last lines of the commit message "
+        "(after a blank line following the body):\n\n"
+        f"Daydream-Run: {work.run_id}\n"
+        f"Daydream-Version: {daydream.__version__}\n\n"
+        f"{push_line}"
     )
+    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
+
+    # --- Post-commit trailer verification ---
+    # The agent may omit trailers despite being asked.  Verify and amend if
+    # missing so that daydream_commits() can always find them.
+    expected_trailers = {
+        "Daydream-Run": work.run_id,
+        "Daydream-Version": daydream.__version__,
+    }
+    try:
+        msg = git_ops.head_commit_message(work.repo)
+    except GitError:
+        # No commit to verify (e.g. agent failed to commit) — leave as-is.
+        return
+
+    missing = {k: v for k, v in expected_trailers.items() if f"{k}: {v}" not in msg}
+    if missing:
+        print_warning(
+            console,
+            f"Commit missing daydream trailer(s): {', '.join(missing)}; amending",
+        )
+        try:
+            git_ops.amend_trailers(work.repo, missing)
+        except GitError as exc:
+            print_warning(console, f"Failed to amend trailers: {exc}")
 
 
 async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
@@ -839,35 +949,13 @@ async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
 
     Args:
         backend: The Backend to execute against.
-        work: Workspace context for the commit; passed through as
-            ``--repo`` / ``--base`` / ``--intent`` refs to the skill so the
-            agent fetches the diff itself instead of receiving it inline.
-
-    Returns:
-        None
+        work: Workspace context for the commit.
 
     """
-    response = prompt_user(console, "Commit and push changes? [y/N]", "n")
-
-    if response.lower() in ("y", "yes"):
-        console.print()
-        print_info(console, "Running commit-push skill...")
-        intent_path = write_intent_json(
-            work,
-            {
-                "phase": "commit_push",
-                "head_sha": work.head_sha,
-                "base_branch": work.base_branch,
-                "base_sha": work.base_sha,
-            },
-        )
-        skill_invocation = backend.format_skill_invocation(
-            "beagle-core:commit-push", _commit_push_args(work, intent_path),
-        )
-        await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.FIX)
-        print_success(console, "Commit and push complete")
-    else:
-        print_dim(console, "Skipping commit and push")
+    console.print()
+    print_info(console, "Committing and pushing changes...")
+    await _do_commit(backend, work, push=True, interactive=True)
+    print_success(console, "Commit and push complete")
 
 
 async def phase_fetch_pr_feedback(
@@ -999,19 +1087,8 @@ async def phase_commit_iteration(backend: Backend, work: WorkContext, iteration:
         iteration: Current iteration number (used in commit message)
 
     """
-    prompt = (
-        "Stage all changes and commit using a conventional commit message. "
-        "Review the diff to write a meaningful summary of what was fixed or changed. "
-        "Use the format: <type>: <concise summary of changes>\n\n"
-        "Pick the most appropriate type from: fix, refactor, style, perf. "
-        "If multiple categories of changes exist, pick the dominant one. "
-        "Keep the subject line under 72 characters. "
-        "Add a body with bullet points if there are multiple distinct changes. "
-        f"End the body with: Iteration: {iteration}\n\n"
-        "Do NOT push. Only commit."
-    )
     print_info(console, f"Committing iteration {iteration} changes...")
-    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
+    await _do_commit(backend, work, iteration=iteration)
     print_success(console, f"Iteration {iteration} changes committed")
 
 
@@ -1022,31 +1099,14 @@ async def phase_commit_push_auto(
 
     Args:
         backend: The Backend to execute against.
-        work: Workspace context for the commit; refs are forwarded to the
-            commit-push skill so it can fetch the diff itself.
-        items: Optional fix items applied this run; embedded into the intent
-            JSON so the receiving skill can craft a more informed commit.
-
-    Returns:
-        None
+        work: Workspace context for the commit.
+        items: Optional fix items applied this run; forwarded to the commit
+            agent so it can craft an accurate commit message.
 
     """
     console.print()
-    print_info(console, "Running commit-push skill...")
-    intent_path = write_intent_json(
-        work,
-        {
-            "phase": "commit_push_auto",
-            "head_sha": work.head_sha,
-            "base_branch": work.base_branch,
-            "base_sha": work.base_sha,
-            "items": items or [],
-        },
-    )
-    skill_invocation = backend.format_skill_invocation(
-        "beagle-core:commit-push", _commit_push_args(work, intent_path),
-    )
-    await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.FIX)
+    print_info(console, "Committing and pushing changes...")
+    await _do_commit(backend, work, push=True, items=items)
     print_success(console, "Commit and push complete")
 
 
@@ -1411,6 +1471,7 @@ async def phase_per_stack_reviews(
     results: dict[str, Path] = {}
     failures: dict[str, str] = {}
     limiter = anyio.CapacityLimiter(4)
+    prior_commits = _prior_daydream_commits(work)
 
     async with anyio.create_task_group() as tg:
         for stack in stacks:
@@ -1424,6 +1485,7 @@ async def phase_per_stack_reviews(
                     output_path=output_path,
                     exploration_dir=exploration_dir,
                     is_docs_only=stack.is_docs_only,
+                    prior_commits=prior_commits,
                 )
             else:
                 prompt = build_per_stack_prompt(
@@ -1435,6 +1497,7 @@ async def phase_per_stack_reviews(
                     alternatives_path=alternatives_path,
                     output_path=output_path,
                     exploration_dir=exploration_dir,
+                    prior_commits=prior_commits,
                 )
 
             # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).

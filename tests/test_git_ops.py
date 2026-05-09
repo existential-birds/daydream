@@ -639,6 +639,37 @@ def test_gh_pr_view_omits_pr_arg_when_none(
     assert all(not part.isdigit() for part in cmd)
 
 
+# --- daydream_commits ---------------------------------------------------------
+
+
+def test_daydream_commits_returns_tagged_commits(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "feat/x")
+    (repo / "a.py").write_text("a\n")
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-m", "fix: something\n\nDaydream-Run: test-123\nDaydream-Version: 0.14.0")
+    result = git_ops.daydream_commits(repo, "main")
+    assert result is not None
+    assert "fix: something" in result
+
+
+def test_daydream_commits_excludes_untagged(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "feat/x")
+    (repo / "b.py").write_text("b\n")
+    _git(repo, "add", "b.py")
+    _commit(repo, "chore: unrelated change")
+    result = git_ops.daydream_commits(repo, "main")
+    assert result is None
+
+
+def test_daydream_commits_none_when_no_commits(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "feat/x")
+    result = git_ops.daydream_commits(repo, "main")
+    assert result is None
+
+
 def test_gh_pr_view_includes_pr_arg_when_given(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

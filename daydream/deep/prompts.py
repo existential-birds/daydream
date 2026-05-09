@@ -13,6 +13,7 @@ from daydream.phases import (
     _confidence_and_convention_instructions,
     _dependency_impact_instructions,
     _exploration_pointer,
+    _settled_decisions_block,
 )
 
 DOC_REVIEW_NOTICE = (
@@ -71,6 +72,7 @@ def build_per_stack_prompt(
     alternatives_path: Path,
     output_path: Path,
     exploration_dir: Path | None = None,
+    prior_commits: str | None = None,
 ) -> str:
     """Assemble the per-stack review prompt.
 
@@ -83,6 +85,7 @@ def build_per_stack_prompt(
         alternatives_path: Path to TTT alternatives.json.
         output_path: Where the agent must write its review.
         exploration_dir: Pre-scan exploration directory (if available).
+        prior_commits: Oneline log of prior daydream commits on this branch.
 
     Returns:
         Assembled prompt string.
@@ -91,6 +94,9 @@ def build_per_stack_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
+    settled = _settled_decisions_block(prior_commits)
+    if settled:
+        parts.append(settled)
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
@@ -231,6 +237,7 @@ def build_generic_fallback_prompt(
     output_path: Path,
     exploration_dir: Path | None = None,
     is_docs_only: bool = False,
+    prior_commits: str | None = None,
 ) -> str:
     """Assemble the generic-fallback review prompt (no skill invocation).
 
@@ -244,6 +251,7 @@ def build_generic_fallback_prompt(
         output_path: Where the agent must write its review.
         exploration_dir: Pre-scan exploration directory (if available).
         is_docs_only: Whether the whole diff is docs-only (D-20).
+        prior_commits: Oneline log of prior daydream commits on this branch.
 
     Returns:
         Assembled prompt string.
@@ -254,6 +262,9 @@ def build_generic_fallback_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
+    settled = _settled_decisions_block(prior_commits)
+    if settled:
+        parts.append(settled)
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
