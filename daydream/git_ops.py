@@ -252,8 +252,8 @@ def amend_trailers(repo: Path, trailers: dict[str, str]) -> None:
     # Pipe message through interpret-trailers (run directly, not via _run_git
     # because we need stdin).
     try:
-        interp = subprocess.run(  # noqa: S603, S607
-            ["git", "interpret-trailers", *trailer_args],
+        interp = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            ["git", "interpret-trailers", *trailer_args],  # noqa: S607 - git is a trusted command
             input=msg_proc.stdout,
             capture_output=True,
             text=True,
