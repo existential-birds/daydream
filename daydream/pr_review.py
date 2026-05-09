@@ -116,7 +116,7 @@ async def post_review_to_pr_from_alt_issues(
     console: Console,
     plan_data: dict[str, Any] | None = None,
 ) -> None:
-    """Convert alt-review issues (from `--ttt`) and offer to post to the PR.
+    """Convert alt-review issues (from `--comment`) and offer to post to the PR.
 
     Args:
         target_dir: Repo root.

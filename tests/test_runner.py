@@ -240,27 +240,6 @@ async def test_run_feedback_routes_through_pr_feedback(
 
 
 @pytest.mark.asyncio
-async def test_legacy_trust_the_technology_maps_to_comment(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
-):
-    """``trust_the_technology=True`` is the deprecated alias for ``--comment``."""
-    called: dict[str, str] = {}
-
-    async def stub(work, config):
-        called["mode"] = config.output_mode
-        return 0
-
-    # Stub gh_pr_list_for_branch so the comment pre-flight (only fires when
-    # branch is set) doesn't matter — branch is None here, so it's skipped.
-    monkeypatch.setattr("daydream.runner._run_comment", stub)
-    config = RunConfig(target=str(tmp_path), trust_the_technology=True)
-
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called["mode"] == "comment"
-
-
-@pytest.mark.asyncio
 async def test_pr_feedback_banner_echoes_resolved_backend_model(
     monkeypatch, tmp_path
 ):

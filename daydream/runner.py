@@ -1,22 +1,20 @@
 """Main orchestration logic for the review and fix loop.
 
-Stage 4.1b unified the runner around a single :func:`run` entry point. ``run``
-opens the workspace via :func:`daydream.workspace.open_workspace` and then
-dispatches to a private helper based on ``config.pr_number`` /
-``config.output_mode`` / ``config.shallow`` / ``config.deep``::
+The runner is unified around a single :func:`run` entry point. ``run`` opens
+the workspace via :func:`daydream.workspace.open_workspace` and then dispatches
+to a private helper based on ``config.pr_number`` / ``config.output_mode`` /
+``config.shallow``::
 
-    pr_number set            -> _run_pr_feedback (today's PR feedback flow)
+    pr_number set            -> _run_pr_feedback (PR feedback flow)
     output_mode == "comment" -> _run_comment    (review + post inline PR comments)
     output_mode == "review"  -> _run_review     (review report only, no posting)
     output_mode == "loop":
         config.shallow       -> _run_loop_shallow (single-stack review-fix-test)
-        else                 -> _run_loop_deep    (deep multi-stack pipeline)
+        else                 -> _run_loop_deep    (deep multi-stack pipeline, default)
 
-The deprecated ``--ttt`` / ``--pr`` / ``--deep`` flags continue to work for
-one release: they populate the legacy fields on :class:`RunConfig` and the
-dispatch interprets them. ``run_feedback`` is the entry point used by the
-``daydream feedback <pr#>`` subcommand and is a thin wrapper that sets
-``pr_number`` and re-enters :func:`run`.
+``run_feedback`` is the entry point used by the ``daydream feedback <pr#>``
+subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
+:func:`run`.
 """
 
 import shutil
@@ -88,13 +86,14 @@ class RunConfig:
 
     Attributes:
         target: Target directory path for the review. If None, prompts user.
-        skill: Review skill to use ("python", "react", or "elixir"). If None, prompts user.
+        skill: Review skill to use ("python", "react", "elixir", "go", "rust",
+            or "ios"). If None and shallow, prompts user.
         model: CLI override for the model id. ``None`` means "use the
             per-backend default from :mod:`daydream.config`".
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
-        review_only: Run review phase only without applying fixes.
-        start_at: Phase to start at ("review", "parse", "fix", or "test").
+        start_at: Phase to start at ("review", "parse", "fix", "test", "ttt",
+            "per-stack", or "merge").
         pr_number: GitHub PR number for PR feedback mode. If None, normal mode.
         bot: Bot username whose comments to fetch (e.g. "coderabbitai[bot]").
         backend: Default backend to use ("claude" or "codex"). Default is "claude".
@@ -103,7 +102,6 @@ class RunConfig:
         test_backend: Override backend for the test phase. If None, uses backend.
         loop: Enable continuous review/fix/test iterations. Default is False.
         max_iterations: Maximum number of loop iterations before exiting. Default is 5.
-        deep: Run the deep-review pipeline (TTT + per-stack + cross-stack merge). D-01.
         exploration_model: Model override for exploration subagents. When set, a separate
             backend is created for the exploration phase using this model. Defaults to
             :data:`config.DEFAULT_EXPLORATION_MODEL`.
@@ -111,20 +109,27 @@ class RunConfig:
             and surfaced in review prompts). Default is an empty list.
         trajectory_path: Path to write the ATIF v1.6 trajectory JSON. Default-resolved
             by run flows to ``<target>/.daydream/runs/<session_id>/trajectory.json``
-            when None. Phase 4 wires the ``--trajectory <path>`` CLI flag.
+            when None.
         pr_repo: GitHub repository in ``owner/repo`` format. Auto-detected from ``gh``
-            when ``--pr`` is used. Stored in trajectory metadata for eval linkage.
+            in deep (default) mode. Stored in trajectory metadata for eval linkage.
         archive: Archive run artifacts to centralized store. Default True.
         run_eval: Run deterministic evaluation on archived artifacts. Default False.
+        branch: Specific branch to review. If None, uses cwd's HEAD.
+        base: Base ref to compare against. If None, auto-resolves.
+        output_mode: ``"loop"`` (review→fix→test, default), ``"comment"``
+            (review + post inline PR comments), or ``"review"`` (review report only).
+        force_worktree: Force ephemeral worktree even when ``branch`` is None.
+        shallow: Single-stack review (skip multi-stack auto-detection).
+        extra_copy: Extra paths to copy into ephemeral worktrees.
+        plan: Generate an implementation plan and embed it in PR comments.
 
     """
 
     target: str | None = None
-    skill: str | None = None  # "python", "react", or "elixir"
+    skill: str | None = None  # "python", "react", "elixir", "go", "rust", "ios"
     model: str | None = None
     cleanup: bool | None = None
     quiet: bool = True
-    review_only: bool = False
     start_at: str = "review"
     pr_number: int | None = None
     bot: str | None = None
@@ -134,8 +139,6 @@ class RunConfig:
     test_backend: str | None = None
     loop: bool = False
     max_iterations: int = 5
-    trust_the_technology: bool = False
-    deep: bool = False
     exploration_context: ExplorationContext | None = None
     exploration_depth: int = 1
     exploration_model: str | None = None
@@ -145,16 +148,12 @@ class RunConfig:
     archive: bool = True
     run_eval: bool = False
 
-    # Stage 4 — new consolidated CLI surface. Wired into argparse in cli.py;
-    # runner-side dispatch lands in Stage 4.1b. Defaults preserve current
-    # behavior so partial RunConfig construction in tests stays valid.
     branch: str | None = None
     base: str | None = None
     output_mode: OutputMode = "loop"
     force_worktree: bool = False
     shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)
-    forced_skill: str | None = None  # set by deprecated language flags
     plan: bool = False
 
 
@@ -261,9 +260,9 @@ async def run(config: RunConfig | None = None) -> int:
 
     Opens the workspace via :func:`open_workspace` and dispatches to the
     appropriate flow helper based on ``config.pr_number`` / ``config.output_mode``
-    / ``config.shallow`` / ``config.deep``. Centralising workspace lifecycle
-    means every flow gets a real :class:`WorkContext` (in-place or ephemeral)
-    with consistent base/branch resolution.
+    / ``config.shallow``. Centralising workspace lifecycle means every flow gets
+    a real :class:`WorkContext` (in-place or ephemeral) with consistent
+    base/branch resolution.
 
     Args:
         config: Optional configuration. Defaults to a fresh :class:`RunConfig`
@@ -289,13 +288,6 @@ async def run(config: RunConfig | None = None) -> int:
     if not target_dir.is_dir():
         print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
         return 1
-
-    # Translate legacy fields into the new dispatch surface. ``--ttt`` was
-    # mapped to ``--comment`` by Stage 4.1a in the CLI layer, but tests still
-    # construct ``RunConfig(trust_the_technology=True)`` directly. Honour both
-    # spellings until the legacy field is deleted.
-    if config.trust_the_technology and config.output_mode == "loop":
-        config.output_mode = "comment"
 
     # Quiet mode tweak: Codex backends need their shell output visible because
     # those commands ARE the user-facing signal. Done before any backend is
@@ -363,10 +355,10 @@ async def run_feedback(config: RunConfig, pr: int) -> int:
 async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     """Pick the flow helper for the resolved workspace + config.
 
-    Order matters: ``pr_number`` overrides everything (it's only set by the
-    deprecated ``--pr``/``feedback`` paths). Then output_mode picks comment vs
+    Order matters: ``pr_number`` overrides everything (set by the
+    ``daydream feedback <pr#>`` subcommand). Then output_mode picks comment vs
     review vs loop. Inside loop, ``config.shallow`` selects the single-stack
-    pipeline; otherwise the deep multi-stack pipeline runs (the new default).
+    pipeline; otherwise the deep multi-stack pipeline runs (default).
     """
     if config.pr_number is not None:
         return await _run_pr_feedback(work, config)
@@ -400,9 +392,8 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
 
     if config.shallow:
         return await _run_loop_shallow(work, config)
-    # Default (Stage 4.2): deep multi-stack pipeline. Pass ``--shallow`` to opt
-    # into the single-stack flow. The deprecated ``--deep`` flag is now a
-    # no-op since deep IS the default.
+    # Default: deep multi-stack pipeline. Pass ``--shallow`` to opt into the
+    # single-stack flow.
     return await _run_loop_deep(work, config)
 
 
@@ -416,7 +407,11 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
     commits/pushes, and posts a "fixed" reply on each addressed comment.
     """
     if config.pr_number is None or config.bot is None:
-        print_error(console, "Invalid PR config", "--pr and --bot are required for PR feedback mode.")
+        print_error(
+            console,
+            "Invalid PR config",
+            "PR number and --bot are required (use: daydream feedback <pr#> --bot <name>).",
+        )
         return 1
 
     pr_number = config.pr_number
@@ -685,18 +680,16 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
     """
     target_dir = work.repo
 
-    # Resolve skill (forced via deprecated language flag, explicit ``--skill``,
-    # or interactive menu).
+    # Resolve skill (explicit ``-s/--skill`` or interactive menu).
     skill: str | None = None
-    forced = config.forced_skill or config.skill
     if config.start_at != "test":
-        if forced is not None:
-            if forced in SKILL_MAP:
-                skill = SKILL_MAP[forced]
-            elif forced in REVIEW_SKILLS.values():
-                skill = forced
+        if config.skill is not None:
+            if config.skill in SKILL_MAP:
+                skill = SKILL_MAP[config.skill]
+            elif config.skill in REVIEW_SKILLS.values():
+                skill = config.skill
             else:
-                print_error(console, "Invalid Skill", f"'{forced}' is not a valid skill")
+                print_error(console, "Invalid Skill", f"'{config.skill}' is not a valid skill")
                 return 1
         else:
             console.print()
@@ -758,8 +751,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         print_info(console, f"Model: {review_backend.model}")
         if skill:
             print_info(console, f"Review skill: {skill}")
-        if config.review_only:
-            print_info(console, "Mode: review-only (skipping fixes)")
         if config.start_at != "review":
             print_skipped_phases(console, config.start_at)
         console.print()
@@ -941,22 +932,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                     print_error(console, "Phase 2 Error", str(exc))
                     print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                     return 1
-
-            # Review-only exit
-            if config.review_only:
-                print_summary(
-                    console,
-                    SummaryData(
-                        skill=skill or "N/A",
-                        target=str(target_dir),
-                        feedback_count=len(feedback_items),
-                        fixes_applied=0,
-                        test_retries=0,
-                        tests_passed=True,
-                        review_only=True,
-                    ),
-                )
-                return 0
 
             # Phase 3: Fix
             if config.start_at in ("review", "parse", "fix"):

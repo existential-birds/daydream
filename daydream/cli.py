@@ -20,26 +20,8 @@ from daydream.ui import (
     ShutdownPanel,
     get_shutdown_panel,
     print_error,
-    print_warning,
     set_shutdown_panel,
 )
-
-
-def _warn_deprecated(flag: str, replacement: str) -> None:
-    """Emit a deprecation warning for an old-CLI flag.
-
-    Sends the same message through both ``warnings.warn`` (for tooling /
-    pytest's ``pytest.warns``) and ``ui.print_warning`` (so end users see a
-    visible panel — Python's warnings module is silent by default at the CLI).
-
-    Args:
-        flag: The deprecated flag as written on the command line (e.g. ``--ttt``).
-        replacement: One-line user-facing replacement guidance.
-
-    """
-    msg = f"{flag} is deprecated: {replacement} Removed in next release."
-    warnings.warn(msg, DeprecationWarning, stacklevel=2)
-    print_warning(console, msg)
 
 
 def _signal_handler(signum: int, frame: object) -> None:
@@ -268,9 +250,6 @@ def _build_main_parser() -> argparse.ArgumentParser:
     )
 
     # ---- Output mode (mutually exclusive; default = fix-loop) ----
-    # Includes both the new flags (--comment, --review) and the deprecated
-    # synonyms (--ttt, --review-only) so argparse handles conflict detection
-    # for free.
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument(
         "--comment",
@@ -285,20 +264,6 @@ def _build_main_parser() -> argparse.ArgumentParser:
         default=False,
         dest="review",
         help="Review and write a report to terminal/markdown, then exit.",
-    )
-    output_group.add_argument(
-        "--ttt", "--trust-the-technology",
-        action="store_true",
-        default=False,
-        dest="trust_the_technology",
-        help=argparse.SUPPRESS,  # deprecated; mapped to --comment
-    )
-    output_group.add_argument(
-        "--review-only",
-        action="store_true",
-        default=False,
-        dest="review_only",
-        help=argparse.SUPPRESS,  # deprecated; mapped to --review
     )
 
     # ---- Selection ----
@@ -347,79 +312,12 @@ def _build_main_parser() -> argparse.ArgumentParser:
         help="Generate an implementation plan and embed it in PR comments (use with --comment).",
     )
 
-    # ---- Deprecated language / skill flags (mapped to forced_skill + shallow) ----
-    skill_group = parser.add_mutually_exclusive_group()
-    skill_group.add_argument(
+    # ---- Skill selection (overrides auto-detect) ----
+    parser.add_argument(
         "-s", "--skill",
         choices=["python", "react", "elixir", "go", "rust", "ios"],
         default=None,
-        help="Review skill: python, react, elixir, go, rust, ios",
-    )
-    skill_group.add_argument(
-        "--python",
-        action="store_const",
-        const="python",
-        dest="skill",
-        help=argparse.SUPPRESS,
-    )
-    skill_group.add_argument(
-        "--typescript",
-        action="store_const",
-        const="react",
-        dest="skill",
-        help=argparse.SUPPRESS,
-    )
-    skill_group.add_argument(
-        "--elixir",
-        action="store_const",
-        const="elixir",
-        dest="skill",
-        help=argparse.SUPPRESS,
-    )
-    skill_group.add_argument(
-        "--go",
-        action="store_const",
-        const="go",
-        dest="skill",
-        help=argparse.SUPPRESS,
-    )
-    skill_group.add_argument(
-        "--rust",
-        action="store_const",
-        const="rust",
-        dest="skill",
-        help=argparse.SUPPRESS,
-    )
-    skill_group.add_argument(
-        "--ios",
-        action="store_const",
-        const="ios",
-        dest="skill",
-        help=argparse.SUPPRESS,
-    )
-
-    # ---- Other deprecated flags ----
-    parser.add_argument(
-        "--pr",
-        nargs="?",
-        const=-1,
-        default=None,
-        type=int,
-        metavar="NUMBER",
-        help=argparse.SUPPRESS,  # deprecated: use `daydream feedback <n>`
-    )
-    parser.add_argument(
-        "--bot",
-        default=None,
-        metavar="BOT_NAME",
-        help="Bot username to filter PR comments (required with --pr).",
-    )
-    parser.add_argument(
-        "--deep",
-        action="store_true",
-        default=False,
-        dest="deep",
-        help=argparse.SUPPRESS,  # deprecated no-op: deep is now the default
+        help="Force a specific review skill (default: auto-detect from changed files)",
     )
 
     # ---- Cleanup / phase resume ----
@@ -444,8 +342,8 @@ def _build_main_parser() -> argparse.ArgumentParser:
         dest="start_at",
         help=(
             "Start at a specific phase (default: review). "
-            "Choices: review | parse | fix | test | ttt (deep-only) | "
-            "per-stack (deep-only) | merge (deep-only). Deep-only stages require --deep."
+            "Choices: review | parse | fix | test | ttt | per-stack | merge. "
+            "ttt, per-stack, and merge are valid only in deep (non-shallow) mode."
         ),
     )
 
@@ -481,16 +379,11 @@ def _build_main_parser() -> argparse.ArgumentParser:
 def _parse_args(argv: list[str] | None = None) -> RunConfig:
     """Parse command line arguments and return a RunConfig.
 
-    Implements the consolidated CLI surface described in the worktree-isolation
-    plan: a positional ``target`` directory, the ``feedback`` subcommand,
-    output-mode flags (``--comment`` / ``--review``), selection flags
-    (``--branch`` / ``--base``), modifiers (``--worktree`` / ``--shallow`` /
-    ``--copy``), and one-release deprecation warnings for the old surface
-    (``--python`` / ``--ttt`` / ``--pr`` / ``--deep`` / ``--review-only``).
-
-    The runner-side dispatch on the new ``output_mode`` field lands in
-    Stage 4.1b; for now the legacy fields stay populated so the existing run
-    flows continue to work unchanged.
+    Implements the consolidated CLI surface: a positional ``target`` directory,
+    the ``feedback`` subcommand, output-mode flags (``--comment`` / ``--review``),
+    selection flags (``--branch`` / ``--base``), and modifiers (``--worktree`` /
+    ``--shallow`` / ``--copy``). Deep is the default; ``--shallow`` opts into
+    single-stack mode.
 
     Args:
         argv: Optional list of arguments. Defaults to ``sys.argv[1:]`` when None.
@@ -523,127 +416,37 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
             f"did you mean: daydream feedback {args.target}?"
         )
 
-    # ----- Map deprecated flags to new fields with warnings -----
-    forced_skill: str | None = None
+    # ----- Resolve output mode -----
     output_mode: str = "loop"
-
-    if args.skill is not None:
-        # Came from --python / --typescript / etc. — treat as deprecated
-        # language flag (also covers `-s python` for backward compat; harmless
-        # to warn there too since the whole language-pinning mode is going away).
-        _warn_deprecated(
-            f"--{args.skill}",
-            f"use --shallow (deep is now default; {args.skill} auto-detected from changed files).",
-        )
-        forced_skill = args.skill
-        args.shallow = True
-
-    if args.trust_the_technology:
-        _warn_deprecated("--ttt", "use --comment.")
-        output_mode = "comment"
-
-    if args.review_only:
-        _warn_deprecated("--review-only", "use --review.")
-        output_mode = "review"
-
     if args.comment:
         output_mode = "comment"
     elif args.review:
         output_mode = "review"
 
-    if args.deep:
-        _warn_deprecated("--deep", "deep is now the default; --deep is unnecessary.")
+    # ttt/per-stack/merge are deep-pipeline resume stages; they don't apply
+    # to shallow runs.
+    if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
+        parser.error(f"--start-at {args.start_at} is not valid with --shallow")
 
-    # Validate --trust-the-technology mutual exclusions.
-    # Note: --ttt vs --review-only is now caught by the output_group mutex
-    # (both share that group), so we no longer check it here explicitly.
-    if args.trust_the_technology:
-        if args.skill:
-            parser.error("--trust-the-technology and skill flags are mutually exclusive")
-        if args.loop:
-            parser.error("--trust-the-technology and --loop are mutually exclusive")
-        if args.pr is not None:
-            parser.error("--trust-the-technology and --pr are mutually exclusive")
+    # parse and test resume points are ambiguous under deep (default) mode —
+    # the deep pipeline has two parse points and no single test phase.
+    if not args.shallow and args.start_at in ("parse", "test"):
+        parser.error(
+            f"--start-at {args.start_at} is not supported in deep mode "
+            "(use --shallow, or --start-at fix to resume after the merged report)"
+        )
 
-    # Validate --deep mutual exclusions (D-06) and --start-at parse rejection (D-04)
-    if args.deep:
-        if args.pr is not None:
-            parser.error("--deep and --pr are mutually exclusive")
-        if args.loop:
-            parser.error("--deep and --loop are mutually exclusive")
-        if args.trust_the_technology:
-            parser.error(
-                "--deep and --trust-the-technology are mutually exclusive "
-                "(deep runs TTT internally)"
-            )
-        if args.review_only:
-            parser.error("--deep and --review-only are mutually exclusive")
-        if args.skill:
-            parser.error(
-                "--deep and skill flags are mutually exclusive "
-                "(deep mode detects stacks and invokes per-stack skills internally)"
-            )
-        if args.start_at == "parse":
-            parser.error(
-                "--start-at parse is ambiguous under --deep "
-                "(two parse points in the deep pipeline); "
-                "use --start-at fix to resume after the merged report"
-            )
-        if args.start_at == "test":
-            parser.error(
-                "--start-at test is not supported under --deep "
-                "(deep resume stages are ttt|per-stack|merge|fix); "
-                "use --start-at fix to resume after the merged report"
-            )
-
-    # D-05: deep-only stages require --deep
-    if args.start_at in ("ttt", "per-stack", "merge") and not args.deep:
-        parser.error(f"--start-at {args.start_at} requires --deep")
-
-    # Validate mutual exclusion: --start-at and --review-only
-    if args.start_at != "review" and args.review_only:
-        parser.error("--start-at and --review-only are mutually exclusive")
-
-    # Validate --pr mutual exclusions
-    if args.pr is not None:
-        if not args.bot:
-            parser.error("--bot is required when using --pr")
-        if args.review_only:
-            parser.error("--pr and --review-only are mutually exclusive")
-        if args.start_at != "review":
-            parser.error("--pr and --start-at are mutually exclusive")
-        if args.skill:
-            parser.error("--pr and skill flags are mutually exclusive")
-        # Deprecated: surface the new path before we route.
-        _warn_deprecated("--pr", f"use `daydream feedback {args.pr}` instead.")
-
-    # Validate --bot without --pr
-    if args.bot and args.pr is None:
-        parser.error("--bot requires --pr")
-
-    # Validate --loop mutual exclusions
-    if args.loop:
-        if args.review_only:
-            parser.error("--loop and --review-only are mutually exclusive")
-        if args.start_at != "review":
-            parser.error("--loop requires starting at review phase (incompatible with --start-at)")
-
-    # Auto-detect PR number if --pr used without a number
-    pr_number = args.pr
-    if pr_number == -1:
-        pr_number = _auto_detect_pr_number()
-        if pr_number is None:
-            parser.error("Could not auto-detect PR number from current branch. Specify --pr NUMBER explicitly.")
-    if pr_number is not None and pr_number <= 0:
-        parser.error("--pr must be a positive integer")
+    # Validate --loop incompatibilities
+    if args.loop and args.start_at != "review":
+        parser.error("--loop requires starting at review phase (incompatible with --start-at)")
 
     # Warn if --max-iterations without --loop
     if args.max_iterations != 5 and not args.loop:
         warnings.warn("--max-iterations has no effect without --loop", stacklevel=2)
 
-    # Detect repo slug for trajectory metadata when reviewing a PR
+    # Detect repo slug for trajectory metadata in deep (default) mode
     pr_repo: str | None = None
-    if pr_number is not None or args.deep:
+    if not args.shallow:
         pr_repo = _detect_repo_slug()
 
     return RunConfig(
@@ -653,10 +456,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         exploration_model=args.exploration_model,
         cleanup=args.cleanup,
         quiet=True,
-        review_only=args.review_only,
         start_at=args.start_at,
-        pr_number=pr_number,
-        bot=args.bot,
+        pr_number=None,
+        bot=None,
         backend=args.backend,
         review_backend=args.review_backend,
         fix_backend=args.fix_backend,
@@ -664,20 +466,16 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         ignore_paths=args.ignore_paths,
         loop=args.loop,
         max_iterations=args.max_iterations,
-        trust_the_technology=args.trust_the_technology,
-        deep=args.deep,
         trajectory_path=args.trajectory_path,
         pr_repo=pr_repo,
         archive=not args.no_archive,
         run_eval=args.run_eval,
-        # Stage 4 — new consolidated CLI surface.
         branch=args.branch,
         base=args.base,
         output_mode=output_mode,  # type: ignore[arg-type]
         force_worktree=args.force_worktree,
         shallow=args.shallow,
         extra_copy=list(args.extra_copy),
-        forced_skill=forced_skill,
         plan=args.plan,
     )
 
@@ -685,10 +483,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
 def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
     """Build a RunConfig from the ``feedback`` subcommand namespace.
 
-    The feedback subcommand replaces today's ``--pr <n>`` flow. For Stage 4.1a
-    the runner-side dispatch hasn't moved yet, so we populate the legacy
-    ``pr_number``/``bot`` fields and let ``main()`` keep calling
-    ``runner.run_pr_feedback`` via the existing path.
+    The feedback subcommand handles PR bot comments — fetching them, applying
+    fixes, and posting responses. ``pr_number`` and ``bot`` are populated here
+    and consumed by :func:`runner.run_feedback`.
     """
     pr_number: int = args.pr_number
     if pr_number <= 0:
@@ -704,7 +501,6 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         exploration_model=None,
         cleanup=None,
         quiet=True,
-        review_only=False,
         start_at="review",
         pr_number=pr_number,
         bot=args.bot,
@@ -715,16 +511,10 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         ignore_paths=[],
         loop=False,
         max_iterations=5,
-        trust_the_technology=False,
-        deep=False,
         trajectory_path=args.trajectory_path,
         pr_repo=pr_repo,
         archive=not args.no_archive,
         run_eval=args.run_eval,
-        # Stage 4 — new consolidated CLI surface. feedback flow is currently
-        # routed via the legacy pr_number/bot fields; output_mode stays "loop"
-        # because the feedback flow is its own thing. Stage 4.1b will fold this
-        # into a single run() dispatch.
         output_mode="loop",
     )
 

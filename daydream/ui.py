@@ -2058,7 +2058,6 @@ class SummaryData:
         fixes_applied: Number of fixes that were applied.
         test_retries: Number of times tests were retried.
         tests_passed: Whether all tests passed after fixes.
-        review_only: If True, only review was performed (no fixes).
         loop_mode: If True, loop mode was enabled for iterative fixes.
         iterations_used: Number of loop iterations used (1 if not in loop mode).
 
@@ -2070,7 +2069,6 @@ class SummaryData:
     fixes_applied: int
     test_retries: int
     tests_passed: bool
-    review_only: bool = False
     loop_mode: bool = False
     iterations_used: int = 1
 
@@ -2102,23 +2100,16 @@ def print_summary(console: Console, data: SummaryData) -> None:
     table.add_row("Target", data.target)
     table.add_row("Issues Found", str(data.feedback_count))
 
-    if data.review_only:
-        # Review-only mode: show mode badge instead of fix/test stats
-        mode_badge = pill(" REVIEW ONLY ", NEON_COLORS["cyan"], NEON_COLORS["background"])
-        table.add_row("Mode", mode_badge)
-    else:
-        # Full mode: show fix and test stats
-        if data.loop_mode:
-            table.add_row("Iterations", str(data.iterations_used))
-        table.add_row("Fixes Applied", str(data.fixes_applied))
-        table.add_row("Test Retries", str(data.test_retries))
+    if data.loop_mode:
+        table.add_row("Iterations", str(data.iterations_used))
+    table.add_row("Fixes Applied", str(data.fixes_applied))
+    table.add_row("Test Retries", str(data.test_retries))
 
-        # Create pass/fail pill
-        if data.tests_passed:
-            status_badge = pill(" PASSED ", NEON_COLORS["green"], NEON_COLORS["background"])
-        else:
-            status_badge = pill(" FAILED ", NEON_COLORS["red"], NEON_COLORS["background"])
-        table.add_row("Tests", status_badge)
+    if data.tests_passed:
+        status_badge = pill(" PASSED ", NEON_COLORS["green"], NEON_COLORS["background"])
+    else:
+        status_badge = pill(" FAILED ", NEON_COLORS["red"], NEON_COLORS["background"])
+    table.add_row("Tests", status_badge)
 
     console.print(table)
 

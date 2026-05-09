@@ -203,7 +203,7 @@ def test_cli_no_archive_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--no-archive sets config.archive to False."""
     from daydream.cli import _parse_args
 
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--python", "--no-archive"])
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--no-archive"])
     config = _parse_args()
     assert config.archive is False
 
@@ -217,7 +217,7 @@ def test_cli_eval_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--eval sets config.run_eval to True."""
     from daydream.cli import _parse_args
 
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--python", "--eval"])
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--eval"])
     config = _parse_args()
     assert config.run_eval is True
 
@@ -231,7 +231,7 @@ def test_cli_defaults_archive_and_eval(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without --no-archive or --eval, archive=True and run_eval=False."""
     from daydream.cli import _parse_args
 
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--python"])
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake"])
     config = _parse_args()
     assert config.archive is True
     assert config.run_eval is False

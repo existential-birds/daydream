@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **cli:** Remove deprecated CLI flags ([#64](https://github.com/existential-birds/daydream/issues/64)). The aliases introduced in #44 alongside the new consolidated surface are gone:
+
+  | Removed | Replacement |
+  |---|---|
+  | `--ttt`, `--trust-the-technology` | `--comment` |
+  | `--review-only` | `--review` |
+  | `--deep` | (removed; deep is the default — pass `--shallow` to opt out) |
+  | `--pr <n>` (top-level), top-level `--bot` | `daydream feedback <n> --bot <name>` subcommand |
+  | `--python`, `--typescript`, `--elixir`, `--go`, `--rust`, `--ios` | `-s <skill>` (or auto-detect from changed files) |
+
+  Removes the `_warn_deprecated` helper and its 5 deprecation warnings from `daydream/cli.py`. Drops the now-dead `RunConfig.review_only`, `trust_the_technology`, `deep`, and `forced_skill` fields and their downstream branches in `runner.py` and `ui.py`. Archive manifest still emits `review_only` / `deep` keys (derived from `output_mode` / `shallow`) so the index schema is unchanged.
+
 ### Changed
 
 - **agent:** Revert default Claude model from `claude-opus-4-7` to `claude-opus-4-6` ([#67](https://github.com/existential-birds/daydream/issues/67))

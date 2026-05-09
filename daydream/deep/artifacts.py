@@ -140,6 +140,6 @@ def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
             f"Cannot resume at stage '{stage}' -- missing artifacts:\n\n"
             f"{expected_block}\n\n"
             f"Re-run from an earlier stage:\n"
-            f"  daydream --deep --start-at {earlier}"
+            f"  daydream --start-at {earlier}"
         )
         raise FileNotFoundError(msg)

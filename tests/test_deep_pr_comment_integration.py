@@ -602,10 +602,7 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
 
     config = RunConfig(
         target=str(deep_target),
-        # Production cli sets deep=True via --deep but Stage 4.2 makes deep
-        # the default for output_mode="loop" + non-shallow. Set it explicitly
-        # for clarity even though the default would route the same way.
-        deep=True,
+        # Deep is the default for output_mode="loop" + non-shallow.
         cleanup=False,
         archive=False,
     )
@@ -729,7 +726,6 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
 
     config = RunConfig(
         target=str(deep_target_multi),
-        deep=True,
         cleanup=False,
         archive=False,
     )

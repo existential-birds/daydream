@@ -599,7 +599,7 @@ def check_review_file_exists(target_dir: Path) -> None:
 Expected: {review_output_path}
 
 Run a full review first:
-  daydream {target_dir} --python"""
+  daydream {target_dir}"""
         raise FileNotFoundError(msg)
 
 

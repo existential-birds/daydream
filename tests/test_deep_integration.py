@@ -184,7 +184,6 @@ async def _run_deep(target: Path, backend: _DeepMockBackend, monkeypatch) -> int
     # The orchestrator only runs pre-scan when `exploration_context is None`.
     config = RunConfig(
         target=str(target),
-        deep=True,
         cleanup=False,
         exploration_context=ExplorationContext(),
     )
