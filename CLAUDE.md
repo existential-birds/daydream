@@ -161,7 +161,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Private helpers prefixed with underscore: `_signal_handler`, `_build_fix_prompt`, `_parse_args`
 - Phase functions follow `phase_<name>` convention: `phase_review`, `phase_fix`, `phase_parse_feedback`, `phase_test_and_heal`, `phase_understand_intent`, `phase_generate_plan`
 - Prompt builder functions follow `build_<thing>_prompt`: `build_review_prompt`, `build_intent_prompt`, `build_plan_prompt`
-- Setter/getter pairs for module-level state: `set_quiet_mode`/`get_quiet_mode`, `set_model`/`get_model`
+- Setter/getter pairs for module-level state: `set_quiet_mode`/`get_quiet_mode`
 - `snake_case` throughout
 - Boolean flags use descriptive names: `cleanup_enabled`, `shutdown_requested`, `force_worktree`, `shallow`
 - Type-annotated at declaration where possible
@@ -262,7 +262,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - All AI calls go through `run_agent()` in `daydream/agent.py` — never the SDK directly
 - The `Backend` protocol decouples phase logic from specific AI providers (Claude SDK or Codex CLI)
 - Both backends emit identical `AgentEvent` dataclass instances consumed by `run_agent()`
-- Three distinct run flows dispatched by `runner.py`: `run()` (normal), `run_pr_feedback()` (PR mode), `run_trust()` (TTT mode), and `run_deep()` (deep mode in `deep/orchestrator.py`)
+- Five distinct run flows dispatched by `_dispatch()` in `runner.py`: `_run_pr_feedback()` (PR feedback), `_run_comment()` (comment mode), `_run_review()` (review mode), `_run_loop_shallow()` (single-stack), and `_run_loop_deep()` (deep multi-stack, default)
 - Module-level singleton state (`AgentState`) manages cross-cutting concerns
 ## Layers
 - Purpose: Entry point, argument parsing, signal handling
@@ -272,7 +272,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Used by: Console entry point (`pyproject.toml`), `daydream/__main__.py`
 - Purpose: Flow selection, backend instantiation, phase sequencing, loop control
 - Location: `daydream/runner.py`
-- Contains: `RunConfig` dataclass, `run()`, `run_pr_feedback()`, `run_trust()`, `_resolve_backend()`
+- Contains: `RunConfig` dataclass, `run()`, `run_feedback()`, `_dispatch()`, `_resolve_backend()`
 - Depends on: `phases.py`, `backends/`, `agent.py`, `ui.py`, `config.py`, `exploration.py`
 - Used by: `cli.py` via `anyio.run(run, config)`
 - Purpose: Stateless async functions implementing each discrete workflow step
@@ -330,8 +330,10 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - All are `@dataclass` instances; no base class, just a `TypeAlias` union defined in `daydream/backends/__init__.py`
 - Purpose: Single configuration object carrying all CLI settings into `run()`
 - Pattern: `@dataclass` with defaults; constructed entirely in `_parse_args()`
+- Dispatch fields: `pr_number` (PR feedback flow), `output_mode` (`"loop"` | `"comment"` | `"review"`), `shallow` (single-stack vs deep)
 - Per-phase backend overrides: `review_backend`, `fix_backend`, `test_backend`
 - Located in `daydream/runner.py`
+- Note: The archive manifest (`daydream/archive/manifest.py`) emits `review_only` and `deep` keys derived from `output_mode` and `shallow` for index schema compatibility; these are not RunConfig fields
 - Purpose: Aggregated pre-scan results (affected files, conventions, dependencies) for review prompt injection
 - Pattern: `@dataclass` with `to_prompt_section()` and `write_to_dir()` methods
 - Located in `daydream/exploration.py`; populated by `pre_scan()` in `daydream/exploration_runner.py`

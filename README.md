@@ -267,7 +267,7 @@ After tests pass, optionally commit and push changes.
 | File | Description |
 |------|-------------|
 | `.review-output.md` | Review results (removed with `--cleanup`, required for `--start-at parse/fix`) |
-| `.daydream/trajectory-<ts>-<id>.json` | ATIF v1.6 trajectory (customize path with `--trajectory`) |
+| `.daydream/runs/<id>/trajectory.json` | ATIF v1.6 trajectory (customize path with `--trajectory`) |
 | `.daydream/trajectories/` | Forked sub-trajectories from parallel fan-outs (fix-parallel, deep, exploration) |
 | `.daydream/diff.patch` | Unified git diff captured at run start |
 | `.daydream/plan-{timestamp}.md` | Implementation plan (created by `--comment --plan` and `--review`) |
@@ -290,7 +290,7 @@ A SQLite index at `~/.daydream/archive/index.db` enables cross-project querying 
 
 ## Trajectory Output
 
-Every daydream run produces an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory file at `<target>/.daydream/trajectory-<ts>-<id>.json`. The trajectory captures the full agent interaction history — prompts, responses, tool calls, observations, and per-step token/cost metrics. Use `--trajectory <path>` to write to a custom location.
+Every daydream run produces an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory file at `<target>/.daydream/runs/<id>/trajectory.json`. The trajectory captures the full agent interaction history — prompts, responses, tool calls, observations, and per-step token/cost metrics. Use `--trajectory <path>` to write to a custom location.
 
 Sensitive content is automatically redacted before writing: API keys (`sk-*`, `ghp_*`, `xoxb-*`, `AKIA*`), JWT tokens, URL credentials, username segments in file paths, and `.env`-style secret values are replaced with type-specific `[REDACTED_*]` tokens. Interrupted runs (SIGINT/SIGTERM) flush a `<path>.partial` file with `extra.partial=true` so consumers can detect incomplete trajectories.
 

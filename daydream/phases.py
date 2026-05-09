@@ -864,7 +864,7 @@ async def _do_commit(
     interactive: bool = False,
     iteration: int | None = None,
     items: list[dict[str, Any]] | None = None,
-) -> None:
+) -> bool:
     """Stage, commit, and optionally push with daydream trailers.
 
     Args:
@@ -879,12 +879,15 @@ async def _do_commit(
             keys) summarising changes applied in this run; included in the
             agent prompt so the commit message is accurate.
 
+    Returns:
+        True if a commit was performed, False if the user declined.
+
     """
     if interactive:
         response = prompt_user(console, "Commit and push changes? [y/N]", "n")
         if response.lower() not in ("y", "yes"):
             print_dim(console, "Skipping commit and push")
-            return
+            return False
 
     iteration_line = f"End the body with: Iteration: {iteration}\n\n" if iteration is not None else ""
     push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
@@ -917,11 +920,29 @@ async def _do_commit(
         f"Daydream-Version: {daydream.__version__}\n\n"
         f"{push_line}"
     )
+    try:
+        sha_before = git_ops.head_sha(work.repo)
+    except GitError:
+        sha_before = None
+
     await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
 
     # --- Post-commit trailer verification ---
     # The agent may omit trailers despite being asked.  Verify and amend if
     # missing so that daydream_commits() can always find them.
+    # Only verify when the agent actually created a new commit; otherwise we
+    # would silently amend the user's prior commit.
+    try:
+        sha_after = git_ops.head_sha(work.repo)
+    except GitError:
+        # No HEAD at all (empty repo, agent didn't commit) — nothing to verify.
+        return True
+
+    if sha_before is None or sha_after == sha_before:
+        # Cannot confirm the agent created a new commit — skip trailer
+        # verification to avoid amending a pre-existing (non-daydream) commit.
+        return True
+
     expected_trailers = {
         "Daydream-Run": work.run_id,
         "Daydream-Version": daydream.__version__,
@@ -929,8 +950,7 @@ async def _do_commit(
     try:
         msg = git_ops.head_commit_message(work.repo)
     except GitError:
-        # No commit to verify (e.g. agent failed to commit) — leave as-is.
-        return
+        return True
 
     missing = {k: v for k, v in expected_trailers.items() if f"{k}: {v}" not in msg}
     if missing:
@@ -939,9 +959,11 @@ async def _do_commit(
             f"Commit missing daydream trailer(s): {', '.join(missing)}; amending",
         )
         try:
-            git_ops.amend_trailers(work.repo, missing)
+            git_ops.amend_trailers(work.repo, missing, message=msg)
         except GitError as exc:
             print_warning(console, f"Failed to amend trailers: {exc}")
+
+    return True
 
 
 async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
@@ -954,8 +976,9 @@ async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
     """
     console.print()
     print_info(console, "Committing and pushing changes...")
-    await _do_commit(backend, work, push=True, interactive=True)
-    print_success(console, "Commit and push complete")
+    committed = await _do_commit(backend, work, push=True, interactive=True)
+    if committed:
+        print_success(console, "Commit and push complete")
 
 
 async def phase_fetch_pr_feedback(

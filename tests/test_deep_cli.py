@@ -43,8 +43,5 @@ def test_deep_rejects_shallow_only_stages(stage: str) -> None:
 @pytest.mark.parametrize("stage", ["parse", "test", "fix", "review"])
 def test_shallow_accepts_loop_stages(stage: str) -> None:
     """review/parse/fix/test resume stages are valid with --shallow."""
-    if stage == "fix":
-        config = _parse_args(["target", "--shallow", "--start-at", stage])
-    else:
-        config = _parse_args(["target", "--shallow", "--start-at", stage])
+    config = _parse_args(["target", "--shallow", "--start-at", stage])
     assert config.start_at == stage

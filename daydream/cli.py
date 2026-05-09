@@ -437,6 +437,8 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         )
 
     # Validate --loop incompatibilities
+    if args.loop and output_mode != "loop":
+        parser.error("--loop cannot be combined with --review/--comment")
     if args.loop and args.start_at != "review":
         parser.error("--loop requires starting at review phase (incompatible with --start-at)")
 

@@ -223,7 +223,7 @@ def head_commit_message(repo: Path) -> str:
     return proc.stdout.strip()
 
 
-def amend_trailers(repo: Path, trailers: dict[str, str]) -> None:
+def amend_trailers(repo: Path, trailers: dict[str, str], *, message: str | None = None) -> None:
     """Amend ``HEAD`` to append missing git trailers.
 
     Uses ``git interpret-trailers`` to inject trailers, then amends the
@@ -233,6 +233,9 @@ def amend_trailers(repo: Path, trailers: dict[str, str]) -> None:
         repo: Repository working directory.
         trailers: Mapping of trailer keys to values (e.g.
             ``{"Daydream-Run": "abc123"}``).
+        message: When provided, use this as the current ``HEAD`` commit message
+            instead of reading it via ``git log``.  Avoids a redundant
+            subprocess call when the caller has already read the message.
 
     Raises:
         GitError: If the amend fails.
@@ -245,16 +248,20 @@ def amend_trailers(repo: Path, trailers: dict[str, str]) -> None:
     for key, value in trailers.items():
         trailer_args += ["--trailer", f"{key}: {value}"]
 
-    msg_proc = _run_git(repo, ["log", "-1", "--format=%B", "HEAD"], timeout=5)
-    if msg_proc.returncode != 0:
-        raise GitError(f"cannot read HEAD message: {msg_proc.stderr.strip()}")
+    if message is None:
+        msg_proc = _run_git(repo, ["log", "-1", "--format=%B", "HEAD"], timeout=5)
+        if msg_proc.returncode != 0:
+            raise GitError(f"cannot read HEAD message: {msg_proc.stderr.strip()}")
+        raw_message = msg_proc.stdout
+    else:
+        raw_message = message
 
     # Pipe message through interpret-trailers (run directly, not via _run_git
     # because we need stdin).
     try:
         interp = subprocess.run(  # noqa: S603 - arguments are not user-controlled
             ["git", "interpret-trailers", *trailer_args],  # noqa: S607 - git is a trusted command
-            input=msg_proc.stdout,
+            input=raw_message,
             capture_output=True,
             text=True,
             cwd=repo,
@@ -270,7 +277,7 @@ def amend_trailers(repo: Path, trailers: dict[str, str]) -> None:
 
     amended_msg = interp.stdout
     amend_proc = _run_git(
-        repo, ["commit", "--amend", "--no-edit", "-m", amended_msg.strip()], timeout=30,
+        repo, ["commit", "--amend", "-m", amended_msg.strip()], timeout=30,
     )
     if amend_proc.returncode != 0:
         raise GitError(f"git commit --amend failed: {amend_proc.stderr.strip()}")
