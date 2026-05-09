@@ -20,9 +20,11 @@ daydream [TARGET] [OPTIONS]
 python -m daydream
 
 # Examples
-daydream /path/to/project --python      # Python/FastAPI review
-daydream /path/to/project --typescript  # React/TypeScript review
-daydream --review-only /path/to/project # Review only, skip fixes
+daydream /path/to/project                          # Default: deep multi-stack loop
+daydream --shallow -s python /path/to/project      # Shallow Python review-fix-test loop
+daydream --review /path/to/project                 # Review only, skip fixes
+daydream --comment --branch feat/x /path/to/project  # Post inline PR comments
+daydream feedback 42 --bot "coderabbitai[bot]" /path/to/project  # Bot PR comments
 daydream --trajectory /tmp/out.json /path/to/project  # Custom trajectory path
 
 # Development
@@ -79,7 +81,7 @@ Requires the Beagle plugin for Claude Code to be installed. The review skills (`
 
 **Daydream**
 
-Daydream is a Python CLI that automates code review and fix loops using the Claude Agent SDK. It launches review agents equipped with Beagle skills to review code, parse actionable feedback, apply fixes automatically, and validate by running tests — with secondary flows for stack-agnostic PR review (`--ttt`), GitHub PR feedback ingestion (`--pr`), and multi-stack deep review (`--deep`). Today it logs each run as unstructured prefix-tagged lines (`[TEXT]`, `[TOOL_USE]`, `[COST]`, …) into a flat `.review-debug-{ts}.log`. The current milestone replaces that custom debug logging with the **Agent Trajectory Interchange Format (ATIF v1.6)** so daydream's runs become first-class, machine-parseable trajectories interoperable with the Harbor ecosystem.
+Daydream is a Python CLI that automates code review and fix loops using the Claude Agent SDK. It launches review agents equipped with Beagle skills to review code, parse actionable feedback, apply fixes automatically, and validate by running tests. The default flow is a deep multi-stack pipeline; `--shallow` opts into a single-skill loop; `--comment` and `--review` turn the run into a review-only flow that posts to a PR or writes a report. The `daydream feedback <pr#>` subcommand ingests bot review comments. Each run is recorded as an **Agent Trajectory Interchange Format (ATIF v1.6)** trajectory, interoperable with the Harbor ecosystem.
 
 **Core Value:** Reviews and recommendations must be grounded in actual codebase understanding — not guesses based on the diff alone. (Unchanged.) For this milestone specifically: **every daydream run produces a valid, replayable ATIF v1.6 trajectory that captures the full agent interaction history, tool I/O, and token/cost metrics.**
 
@@ -88,7 +90,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - **SDK**: Must continue using `claude-agent-sdk` for agent capabilities — no custom orchestration framework. ATIF is layered on top of the existing `Backend` / `AgentEvent` abstraction.
 - **Backends**: Both Claude and Codex backends must produce ATIF trajectories. Codex parity is partial by design (no `cost_usd`, no `cached_tokens` from `turn.completed.usage`) — ATIF Metrics fields are all optional, so this is acceptable.
 - **Existing tests**: All 343 tests must pass post-migration. New tests added for trajectory recording, redaction, and Harbor-golden round-trip validation.
-- **CLI**: `--debug` is removed; `--trajectory <path>` is added. The `--ttt`, `--pr`, and `--deep` flags continue to work and produce trajectories.
+- **CLI**: `--debug` is removed; `--trajectory <path>` is added. All output modes (`--comment`, `--review`, default loop) and the `daydream feedback` subcommand produce trajectories.
 - **Dependencies**: No `harbor` runtime dep. Vendored ATIF code under `daydream/atif/` (Apache-2.0). `pydantic>=2.11.7` promoted to explicit dep (already transitive via `claude-agent-sdk`).
 - **Schema version**: Pinned to ATIF-v1.6 (emission). No multi-version emission support.
 - **Recorder placement**: `TrajectoryRecorder` lives in new `daydream/trajectory.py` module, propagated via `ContextVar` (not `AgentState`). Test isolation via autouse `_reset_trajectory_recorder` fixture in `conftest.py` mirroring the existing `reset_state()` pattern.
@@ -159,9 +161,9 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Private helpers prefixed with underscore: `_signal_handler`, `_build_fix_prompt`, `_parse_args`
 - Phase functions follow `phase_<name>` convention: `phase_review`, `phase_fix`, `phase_parse_feedback`, `phase_test_and_heal`, `phase_understand_intent`, `phase_generate_plan`
 - Prompt builder functions follow `build_<thing>_prompt`: `build_review_prompt`, `build_intent_prompt`, `build_plan_prompt`
-- Setter/getter pairs for module-level state: `set_quiet_mode`/`get_quiet_mode`, `set_model`/`get_model`
+- Setter/getter pairs for module-level state: `set_quiet_mode`/`get_quiet_mode`
 - `snake_case` throughout
-- Boolean flags use descriptive names: `cleanup_enabled`, `shutdown_requested`, `trust_the_technology`, `review_only`
+- Boolean flags use descriptive names: `cleanup_enabled`, `shutdown_requested`, `force_worktree`, `shallow`
 - Type-annotated at declaration where possible
 - `PascalCase` for all classes: `RunConfig`, `AgentState`, `MockBackend`, `ClaudeBackend`, `CodexBackend`
 - Event dataclasses use `<Name>Event` pattern: `TextEvent`, `ToolStartEvent`, `CostEvent`, `ResultEvent`, `ThinkingEvent`, `ToolResultEvent`
@@ -260,7 +262,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - All AI calls go through `run_agent()` in `daydream/agent.py` — never the SDK directly
 - The `Backend` protocol decouples phase logic from specific AI providers (Claude SDK or Codex CLI)
 - Both backends emit identical `AgentEvent` dataclass instances consumed by `run_agent()`
-- Three distinct run flows dispatched by `runner.py`: `run()` (normal), `run_pr_feedback()` (PR mode), `run_trust()` (TTT mode), and `run_deep()` (deep mode in `deep/orchestrator.py`)
+- Five distinct run flows dispatched by `_dispatch()` in `runner.py`: `_run_pr_feedback()` (PR feedback), `_run_comment()` (comment mode), `_run_review()` (review mode), `_run_loop_shallow()` (single-stack), and `_run_loop_deep()` (deep multi-stack, default)
 - Module-level singleton state (`AgentState`) manages cross-cutting concerns
 ## Layers
 - Purpose: Entry point, argument parsing, signal handling
@@ -270,7 +272,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Used by: Console entry point (`pyproject.toml`), `daydream/__main__.py`
 - Purpose: Flow selection, backend instantiation, phase sequencing, loop control
 - Location: `daydream/runner.py`
-- Contains: `RunConfig` dataclass, `run()`, `run_pr_feedback()`, `run_trust()`, `_resolve_backend()`
+- Contains: `RunConfig` dataclass, `run()`, `run_feedback()`, `_dispatch()`, `_resolve_backend()`
 - Depends on: `phases.py`, `backends/`, `agent.py`, `ui.py`, `config.py`, `exploration.py`
 - Used by: `cli.py` via `anyio.run(run, config)`
 - Purpose: Stateless async functions implementing each discrete workflow step
@@ -307,12 +309,12 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Location: `daydream/deep/`
 - Contains: `run_deep()` orchestrator, `detect_stacks()` file router, artifact path helpers, dedup pre-filter, per-stack/merge prompt builders
 - Depends on: `phases.py`, `runner.py`, `backends/`, `ui.py`, `config.py`, `exploration.py`
-- Used by: `runner.py` (`run()` delegates to `run_deep()` when `config.deep=True`)
+- Used by: `runner.py` (`run()` delegates to `run_deep()` by default; `--shallow` opts out)
 ## Data Flow
-### Normal Flow (review → parse → fix → test)
-### Deep Review Flow (`--deep`)
-### PR Feedback Flow (`--pr`)
-### Trust-the-Technology Flow (`--ttt`)
+### Shallow Loop (`--shallow`): review → parse → fix → test
+### Deep Review (default): exploration → intent → alternatives → per-stack → merge
+### PR Feedback (`daydream feedback <pr#> --bot <name>`)
+### Comment / Review (`--comment` / `--review`)
 - `AgentState` singleton in `daydream/agent.py` holds: `quiet_mode`, `model`, `shutdown_requested`, `current_backends`
 - Modified only through named setters; reset via `reset_state()` in tests
 - `RunConfig` dataclass in `daydream/runner.py` carries per-run configuration
@@ -328,15 +330,17 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - All are `@dataclass` instances; no base class, just a `TypeAlias` union defined in `daydream/backends/__init__.py`
 - Purpose: Single configuration object carrying all CLI settings into `run()`
 - Pattern: `@dataclass` with defaults; constructed entirely in `_parse_args()`
+- Dispatch fields: `pr_number` (PR feedback flow), `output_mode` (`"loop"` | `"comment"` | `"review"`), `shallow` (single-stack vs deep)
 - Per-phase backend overrides: `review_backend`, `fix_backend`, `test_backend`
 - Located in `daydream/runner.py`
+- Note: The archive manifest (`daydream/archive/manifest.py`) emits `review_only` and `deep` keys derived from `output_mode` and `shallow` for index schema compatibility; these are not RunConfig fields
 - Purpose: Aggregated pre-scan results (affected files, conventions, dependencies) for review prompt injection
 - Pattern: `@dataclass` with `to_prompt_section()` and `write_to_dir()` methods
 - Located in `daydream/exploration.py`; populated by `pre_scan()` in `daydream/exploration_runner.py`
 - Type: `tuple[dict[str, Any], bool, str | None]` — (item, success, error_message)
 - Used in `run_pr_feedback()` to collect per-fix outcomes before commit/respond
 - `FEEDBACK_SCHEMA`: For `phase_parse_feedback()` — extracts `{issues: [{id, description, file, line, confidence, rationale}]}`
-- `ALTERNATIVE_REVIEW_SCHEMA`: For `--ttt` alternative review — includes severity, recommendation, files
+- `ALTERNATIVE_REVIEW_SCHEMA`: For `--comment`/`--review` alternative review — includes severity, recommendation, files
 - `PLAN_SCHEMA`: For `phase_generate_plan()` — file-level change plan
 - All defined inline in `daydream/phases.py`
 - Purpose: Routes changed files to per-stack review agents in deep mode
@@ -353,7 +357,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Triggers: `anyio.run(run, config)` from `cli.main()`, direct call in tests
 - Responsibilities: Full workflow orchestration; accepts `RunConfig | None`
 - Location: `daydream/deep/orchestrator.py:run_deep()`
-- Triggers: `runner.run()` when `config.deep=True`
+- Triggers: `runner.run()` by default (when `config.shallow=False` and no PR/comment/review override)
 - Responsibilities: Full deep-review pipeline (exploration → TTT → per-stack → merge → fix gate)
 ## Architectural Constraints
 - **Async runtime:** `anyio.run()` is the event loop entry point; all phase functions are `async`. Parallel fan-out uses `anyio.create_task_group()` with `anyio.CapacityLimiter(4)` (see `phase_per_stack_reviews()` and `phase_fix_parallel()` in `daydream/phases.py`)

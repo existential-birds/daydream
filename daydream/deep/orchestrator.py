@@ -245,8 +245,8 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     ``config.start_at in ("ttt", "per-stack", "merge", "fix")``.
 
     Args:
-        config: Run configuration. ``config.deep`` must be True;
-            ``config.start_at`` drives resume behavior.
+        config: Run configuration. ``config.shallow`` must be False (deep is
+            the default); ``config.start_at`` drives resume behavior.
         work: Resolved working environment for the run.
 
     Returns:

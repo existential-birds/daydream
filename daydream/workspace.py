@@ -16,7 +16,6 @@ The module shells out via :mod:`daydream.git_ops` only.
 
 from __future__ import annotations
 
-import json
 import logging
 import secrets
 import shutil
@@ -25,7 +24,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
 from daydream import git_ops
 from daydream.git_ops import BranchNotFoundError, GitError
@@ -408,27 +407,3 @@ def make_in_place_workcontext(target: Path) -> WorkContext:
         is_ephemeral=False,
         run_id=_make_run_id(),
     )
-
-
-def write_intent_json(work: WorkContext, payload: dict[str, Any]) -> Path:
-    """Write *payload* as JSON under ``<repo>/.daydream/intents/<run_id>.json``.
-
-    The intents directory is gitignored (``.daydream/`` is excluded by the
-    project's ``.gitignore``). The file is rewritten on each call -- callers
-    that need historical snapshots should include their own discriminator in
-    the payload.
-
-    Args:
-        work: Active workspace context (provides ``repo`` and ``run_id``).
-        payload: JSON-serializable mapping describing the upcoming commit
-            (fix items, phase name, head SHA, etc.). Path / dataclass values
-            should be converted to ``str`` / ``dict`` by the caller.
-
-    Returns:
-        Absolute path to the written intent file.
-    """
-    intents_dir = work.repo / ".daydream" / "intents"
-    intents_dir.mkdir(parents=True, exist_ok=True)
-    intent_path = intents_dir / f"{work.run_id}.json"
-    intent_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str))
-    return intent_path

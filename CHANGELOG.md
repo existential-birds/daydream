@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **trajectory:** Change default trajectory path from `<target>/.daydream/trajectory-<ts>-<id>.json` to `<target>/.daydream/runs/<session_id>/trajectory.json`. Scripts that glob for `trajectory-*.json` directly under `.daydream/` must update to `runs/*/trajectory.json`. The `--trajectory <path>` flag continues to work for custom locations.
+
+- **cli:** Remove deprecated CLI flags ([#64](https://github.com/existential-birds/daydream/issues/64)). The aliases introduced in #44 alongside the new consolidated surface are gone:
+
+  | Removed | Replacement |
+  |---|---|
+  | `--ttt`, `--trust-the-technology` | `--comment` |
+  | `--review-only` | `--review` |
+  | `--deep` | (removed; deep is the default — pass `--shallow` to opt out) |
+  | `--pr <n>` (top-level), top-level `--bot` | `daydream feedback <n> --bot <name>` subcommand |
+  | `--python`, `--typescript`, `--elixir`, `--go`, `--rust`, `--ios` | `-s <skill>` (or auto-detect from changed files) |
+
+  Removes the `_warn_deprecated` helper and its 5 deprecation warnings from `daydream/cli.py`. Drops the now-dead `RunConfig.review_only`, `trust_the_technology`, `deep`, and `forced_skill` fields and their downstream branches in `runner.py` and `ui.py`. Archive manifest still emits `review_only` / `deep` keys (derived from `output_mode` / `shallow`) so the index schema is unchanged.
+
 ### Changed
 
 - **agent:** Revert default Claude model from `claude-opus-4-7` to `claude-opus-4-6` ([#67](https://github.com/existential-birds/daydream/issues/67))
@@ -14,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   4.7 escalates the SDK's default malware-analysis `<system-reminder>` (injected on every `Read` tool result) into hard refusals on benign user code, citing the reminder verbatim and declining requested edits — a regression vs. 4.6 / 4.5, which treat it as a soft nudge. Trajectory data across three recent deep runs showed 15 reminder-tied refusals out of 135 reads (~11%) and ~2,537 wasted output tokens on "this is benign code, proceeding…" preambles. Reverting to 4.6 until the underlying behavior is addressed.
 
 - **agent:** Make `model` a required `str` end-to-end; default lives only in `daydream.config.DEFAULT_CLAUDE_MODEL` / `DEFAULT_CODEX_MODEL`, resolved exactly once in `create_backend`. Removed five duplicated literal fallbacks (`ClaudeBackend.__init__`, `CodexBackend.__init__`, `AgentState.model`, `runner.set_model(... or "...")`, banner display) so a future model bump is one constant change, not a five-file shotgun edit. `set_model` / `get_model` deleted (`AgentState.model` was unused).
+
+### Added
+
+- **phases:** Tag every daydream commit with `Daydream-Run: <run_id>` and `Daydream-Version: <version>` git trailers. Both `phase_commit_push` and `phase_commit_iteration` inject the trailers into the commit agent prompt and verify them post-commit, amending if the agent omitted them. A new `git_ops.amend_trailers()` helper uses `git interpret-trailers` to append missing trailers, and `git_ops.daydream_commits()` queries the log for commits carrying the `Daydream-Run` trailer.
+
+### Fixed
+
+- **phases:** Guard `_do_commit` trailer amendment against amending non-daydream commits when the pre-commit SHA could not be read. When `head_sha()` raised `GitError` before the agent ran, `sha_before` was `None`, so the `sha_after == sha_before` check always passed through, potentially amending a pre-existing user commit with daydream trailers. Now also checks for `sha_before is None` and skips trailer verification in that case.
 
 ## [0.14.0] - 2026-04-29
 

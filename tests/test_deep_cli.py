@@ -1,57 +1,47 @@
-"""Deep-mode CLI parsing tests (D-01..D-06)."""
+"""Deep-mode CLI validation tests.
+
+Deep is the default; ``--shallow`` opts into the single-stack flow.
+"""
 
 import pytest
 
 from daydream.cli import _parse_args
 
 
-def test_deep_flag_parsed() -> None:
-    """D-01: --deep sets config.deep=True."""
-    args = _parse_args(["target", "--deep"])
-    assert args.deep is True
+def test_default_is_deep() -> None:
+    """Without --shallow, the run is deep (config.shallow == False)."""
+    config = _parse_args(["target"])
+    assert config.shallow is False
 
 
-def test_no_stack_declaration_flags() -> None:
-    """D-02: no --stack / --also-review / --skip-stack flags."""
-    with pytest.raises(SystemExit):
-        _parse_args(["target", "--deep", "--stack", "python"])
-
-
-@pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
-def test_start_at_deep_stages_accepted(stage: str) -> None:
-    """D-03: --start-at ttt|per-stack|merge accepted under --deep."""
-    args = _parse_args(["target", "--deep", "--start-at", stage])
-    assert args.start_at == stage
-
-
-def test_deep_rejects_start_at_parse() -> None:
-    """D-04: --start-at parse rejected under --deep."""
-    with pytest.raises(SystemExit):
-        _parse_args(["target", "--deep", "--start-at", "parse"])
+def test_shallow_flag_opts_in() -> None:
+    config = _parse_args(["target", "--shallow"])
+    assert config.shallow is True
 
 
 @pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
-def test_deep_stages_require_deep_flag(stage: str) -> None:
-    """D-05: deep-only stages only legal with --deep."""
+def test_deep_resume_stages_accepted(stage: str) -> None:
+    """ttt/per-stack/merge are valid resume stages in the (default) deep mode."""
+    config = _parse_args(["target", "--start-at", stage])
+    assert config.start_at == stage
+
+
+@pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
+def test_shallow_rejects_deep_resume_stages(stage: str) -> None:
+    """Deep-pipeline resume stages are not valid with --shallow."""
+    with pytest.raises(SystemExit):
+        _parse_args(["target", "--shallow", "--start-at", stage])
+
+
+@pytest.mark.parametrize("stage", ["parse", "test"])
+def test_deep_rejects_shallow_only_stages(stage: str) -> None:
+    """parse/test resume points are ambiguous in deep mode and are rejected."""
     with pytest.raises(SystemExit):
         _parse_args(["target", "--start-at", stage])
 
 
-@pytest.mark.parametrize("other_flag", [["--pr", "123"], ["--loop"], ["--ttt"], ["--review-only"]])
-def test_deep_mutex(other_flag: list[str]) -> None:
-    """D-06: --deep is mutually exclusive with --pr, --loop, --ttt, --review-only."""
-    with pytest.raises(SystemExit):
-        _parse_args(["target", "--deep", *other_flag])
-
-
-def test_deep_rejects_start_at_test() -> None:
-    """--start-at test is not a valid deep resume stage; reject at CLI boundary."""
-    with pytest.raises(SystemExit):
-        _parse_args(["target", "--deep", "--start-at", "test"])
-
-
-@pytest.mark.parametrize("skill_flag", ["--python", "--typescript", "--elixir", "--go", "--rust"])
-def test_deep_rejects_skill_flag(skill_flag: str) -> None:
-    """Skill flags are ignored under --deep; reject at CLI boundary instead."""
-    with pytest.raises(SystemExit):
-        _parse_args(["target", "--deep", skill_flag])
+@pytest.mark.parametrize("stage", ["parse", "test", "fix", "review"])
+def test_shallow_accepts_loop_stages(stage: str) -> None:
+    """review/parse/fix/test resume stages are valid with --shallow."""
+    config = _parse_args(["target", "--shallow", "--start-at", stage])
+    assert config.start_at == stage

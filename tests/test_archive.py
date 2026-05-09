@@ -49,8 +49,8 @@ class _MockConfig:
     review_backend: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
-    review_only: bool = False
-    deep: bool = False
+    output_mode: str = "loop"
+    shallow: bool = False
     loop: bool = False
     archive: bool = True
     run_eval: bool = False

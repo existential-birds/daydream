@@ -571,8 +571,8 @@ async def test_concurrent_tool_panels_display_results(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_trust_full_flow(tmp_path, monkeypatch):
-    """Integration test: full --trust-the-technology flow through all three phases."""
+async def test_run_comment_full_flow(tmp_path, monkeypatch):
+    """Integration test: full --comment flow through all three phases."""
     import os
     import subprocess
 
@@ -660,7 +660,7 @@ async def test_run_trust_full_flow(tmp_path, monkeypatch):
 
     config = RunConfig(
         target=str(tmp_path),
-        trust_the_technology=True,
+        output_mode="comment",
         plan=True,
     )
 
@@ -678,8 +678,8 @@ async def test_run_trust_full_flow(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_trust_does_not_prompt_for_skill(tmp_path, monkeypatch):
-    """--ttt mode should never prompt for skill selection."""
+async def test_run_comment_does_not_prompt_for_skill(tmp_path, monkeypatch):
+    """--comment mode should never prompt for skill selection."""
     import os
     import subprocess
 
@@ -722,10 +722,10 @@ async def test_run_trust_does_not_prompt_for_skill(tmp_path, monkeypatch):
 
     # This should NOT be called — if skill prompt_user is called, fail
     def runner_prompt_trap(*args, **kwargs):
-        raise AssertionError("Should not prompt for skill selection in --ttt mode")
+        raise AssertionError("Should not prompt for skill selection in --comment mode")
     monkeypatch.setattr("daydream.runner.prompt_user", runner_prompt_trap)
 
-    config = RunConfig(target=str(tmp_path), trust_the_technology=True)
+    config = RunConfig(target=str(tmp_path), output_mode="comment")
     exit_code = await run(config)
     assert exit_code == 0
 

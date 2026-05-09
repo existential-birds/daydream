@@ -192,7 +192,8 @@ async def _run_deep(target: Path, *, start_at: str = "review") -> int:
     from daydream.runner import RunConfig, run
 
     # cleanup=False suppresses the interactive cleanup prompt in runner.run().
-    config = RunConfig(target=str(target), deep=True, start_at=start_at, cleanup=False)
+    # Deep is the default; no shallow flag set.
+    config = RunConfig(target=str(target), start_at=start_at, cleanup=False)
     return await run(config)
 
 
