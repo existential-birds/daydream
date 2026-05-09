@@ -1,7 +1,7 @@
 """Post daydream review findings as inline comments on the current branch's PR.
 
 Shared by deep-review mode (parses `.review-output.md`) and
-trust-the-technology mode (consumes alt-review issues directly).
+comment mode (`--comment`) (consumes alt-review issues directly).
 
 Flow:
     1. Locate the open PR for the current branch via `gh pr list`.

@@ -935,10 +935,12 @@ async def _do_commit(
     try:
         sha_after = git_ops.head_sha(work.repo)
     except GitError:
-        # No HEAD at all (empty repo, agent didn't commit) — nothing to verify.
-        return True
+        # No HEAD after the agent run means no commit was created.
+        return False
 
-    if sha_before is None or sha_after == sha_before:
+    if sha_after == sha_before:
+        return False
+    if sha_before is None:
         # Cannot confirm the agent created a new commit — skip trailer
         # verification to avoid amending a pre-existing (non-daydream) commit.
         return True

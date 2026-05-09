@@ -680,9 +680,9 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
     """
     target_dir = work.repo
 
-    # Resolve skill (explicit ``-s/--skill`` or interactive menu).
+    # Resolve skill only when the review phase will run.
     skill: str | None = None
-    if config.start_at != "test":
+    if config.start_at == "review":
         if config.skill is not None:
             if config.skill in SKILL_MAP:
                 skill = SKILL_MAP[config.skill]

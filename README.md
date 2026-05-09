@@ -15,7 +15,7 @@ Daydream launches review agents equipped with [Beagle](https://github.com/existe
 - **Codebase exploration**: Tree-sitter-powered pre-scan resolves imports and detects conventions to ground reviews in actual codebase context
 - **Intelligent parsing**: Extracts actionable issues from review output, skipping positive observations
 - **Automated fixes**: Applies fixes one-by-one with minimal changes
-- **PR feedback subcommand**: `daydream feedback <pr#>` fetches bot review comments, fixes in parallel, and responds automatically
+- **PR feedback subcommand**: `daydream feedback <pr#>` fetches bot review comments, fixes them sequentially, and responds automatically
 - **Multi-backend support**: Claude (default) or OpenAI Codex, with per-phase backend overrides
 - **Parallel execution**: Up to 4 concurrent fix agents with live progress tracking
 - **Test validation**: Runs your test suite and offers interactive retry/fix options on failure
@@ -258,7 +258,7 @@ After tests pass, optionally commit and push changes.
 
 1. **Fetch**: Pulls bot comments from the PR via the `fetch-pr-feedback` Beagle skill
 2. **Parse**: Extracts actionable issues (reuses the shallow-mode parser)
-3. **Fix**: Applies fixes concurrently with up to 4 parallel agents, each tackling one issue
+3. **Fix**: Applies fixes sequentially, one issue at a time
 4. **Commit & Push**: Automatically commits and pushes all changes
 5. **Respond**: Posts fix results back on the PR as comment replies
 
