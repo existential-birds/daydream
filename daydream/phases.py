@@ -1,5 +1,7 @@
 """Phase functions for the review and fix loop."""
 
+import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,8 +17,14 @@ from daydream.agent import (
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
+from daydream.clipboard import copy_to_clipboard
 from daydream.git_ops import BranchNotFoundError, GitError
-from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
+from daydream.trajectory import (
+    DaydreamPhase,
+    TrajectoryRecorder,
+    get_current_recorder,
+    maybe_fork,
+)
 from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
@@ -189,6 +197,355 @@ async def _run_setup_investigator(
             return await _invoke()
     except Exception:  # noqa: BLE001 - fork bookkeeping failures are non-fatal
         return None
+
+
+def _build_failure_summarizer_prompt(
+    *,
+    test_output: str,
+    trajectory_path: Path | None,
+    trajectories_dir: Path | None,
+    diff_path: Path | None,
+    manifest_path: Path | None,
+    deep_dir: Path | None,
+    changed_files: list[Path],
+    has_trajectory: bool,
+) -> str:
+    """Build a read-only prompt for the failure-summarizer subagent.
+
+    The summarizer is instructed to produce a paste-ready handoff prompt
+    (single ``handoff_prompt`` JSON field) that the caller writes verbatim
+    to ``handoff.md``. The summarizer is strictly read-only and must
+    reference artifacts by absolute path — never embed diffs or
+    test-output excerpts.
+
+    Args:
+        test_output: Raw failing test output to ground the summary.
+        trajectory_path: Live ``trajectory.json`` path if available.
+        trajectories_dir: Live ``trajectories/`` directory if available.
+        diff_path: Path to ``diff.patch`` if available.
+        manifest_path: Path to ``manifest.json`` if available.
+        deep_dir: Path to ``deep/`` if available.
+        changed_files: Absolute repo paths of files changed in this run.
+        has_trajectory: When False the summarizer must include the
+            literal ``> Note: trajectory unavailable for this run`` line.
+
+    Returns:
+        Prompt string demanding the JSON ``handoff_prompt`` field.
+    """
+    lines = test_output.splitlines()
+    if len(lines) > TEST_OUTPUT_TAIL_LINES:
+        truncated = "\n".join(lines[-TEST_OUTPUT_TAIL_LINES:])
+        output_section = f"Tail of the failing test output:\n\n{truncated}"
+    else:
+        output_section = f"Failing test output:\n\n{test_output}"
+
+    artifact_lines: list[str] = []
+    if trajectory_path is not None:
+        artifact_lines.append(f"- trajectory: {trajectory_path}")
+    if trajectories_dir is not None:
+        artifact_lines.append(f"- sub-trajectories: {trajectories_dir}")
+    if diff_path is not None:
+        artifact_lines.append(f"- diff: {diff_path}")
+    if manifest_path is not None:
+        artifact_lines.append(f"- manifest: {manifest_path}")
+    if deep_dir is not None:
+        artifact_lines.append(f"- deep artifacts: {deep_dir}")
+    artifacts_block = "\n".join(artifact_lines) if artifact_lines else "(none on disk)"
+
+    changed_block = (
+        "\n".join(f"- {p}" for p in changed_files) if changed_files else "(none detected)"
+    )
+
+    no_trajectory_clause = (
+        "" if has_trajectory
+        else "\nThe handoff MUST include this literal line verbatim on its own line:\n"
+             "    > Note: trajectory unavailable for this run\n"
+    )
+
+    return (
+        "You are a read-only failure-summarizer. Your job is to write a "
+        "paste-ready handoff prompt that another agent will use, in a fresh "
+        "session, to propose a fix for the failure daydream just hit.\n\n"
+        "## Hard Constraints (read-only contract)\n"
+        "- You MAY use Read, Grep, and Glob to inspect the artifacts listed below.\n"
+        "- You MAY use Bash for NON-MUTATING discovery only (`ls`, `cat`, `git status`).\n"
+        "- You MUST NOT run tests, builds, or installers.\n"
+        "- You MUST NOT modify, create, or delete any files.\n"
+        "- You MUST NOT invoke Write, Edit, or any file-mutating tool.\n"
+        "- You MUST reference artifacts by absolute path. Do NOT embed diff "
+        "hunks, trajectory excerpts, or test-output excerpts in the handoff.\n\n"
+        "## On-disk artifacts (read these first to ground your summary)\n"
+        f"{artifacts_block}\n\n"
+        "## Files changed during this daydream run\n"
+        f"{changed_block}\n\n"
+        f"## Failing test output (for your context only — do NOT paste into handoff)\n\n{output_section}\n\n"
+        f"{no_trajectory_clause}"
+        "## Handoff prompt template\n"
+        "Produce a Markdown document with these sections, in this order:\n\n"
+        "1. **Summary** — one paragraph: what daydream attempted, where it "
+        "failed (which phase / what gate blocked).\n"
+        "2. **Artifacts** — bulleted list of absolute paths from the section "
+        "above. No embedded contents.\n"
+        "3. **Changed files** — bulleted list of absolute repo paths from the "
+        "section above.\n"
+        "4. **Instructions for the next agent** — explicit, numbered:\n"
+        "   1. Explore the codebase before proposing anything. Read the "
+        "artifacts above and use Read/Grep/Glob to build your own model.\n"
+        "   2. Propose an architecturally clean, idiomatic solution rooted "
+        "in the project's existing patterns.\n"
+        "   3. REFUSE to ship inline hacks that only paper over the "
+        "symptom (stubbing assertions, skipping tests, hardcoding values to "
+        "make a check pass). Root-cause the failure.\n\n"
+        "## Output\n"
+        "Return a JSON object matching this schema (and ONLY this JSON, no prose):\n"
+        '{"handoff_prompt": "<the full Markdown handoff body, ready to paste>"}\n'
+    )
+
+
+FAILURE_SUMMARIZER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "handoff_prompt": {"type": "string"},
+    },
+    "required": ["handoff_prompt"],
+    "additionalProperties": False,
+}
+
+
+def _changed_files(repo: Path) -> list[Path]:
+    """Return absolute paths of files changed in *repo* (working tree).
+
+    Best-effort: combines staged + unstaged changes via
+    ``git diff --name-only HEAD``. Returns an empty list if git is
+    unavailable or the repo has no commits yet.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 - args are not user-controlled
+            ["git", "diff", "--name-only", "HEAD"],  # noqa: S607 - hardcoded program
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return []
+    if proc.returncode != 0:
+        return []
+    names = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return [(repo / name).resolve() for name in names]
+
+
+def _resolve_handoff_paths(
+    recorder: TrajectoryRecorder | None, work: WorkContext,
+) -> tuple[Path, Path | None, Path | None, Path | None, Path | None, Path | None]:
+    """Return ``(handoff_path, trajectory_path, trajectories_dir, diff_path, manifest_path, deep_dir)``.
+
+    When *recorder* is set, paths point into the live trajectory subtree
+    under ``<repo>/.daydream/runs/<session_id>/``. When *recorder* is
+    None, ``handoff_path`` falls back to ``<repo>/.daydream/handoff-<ts>.md``
+    and every other path is None.
+
+    Existence is checked for each artifact path; missing artifacts come
+    back as None so the summarizer prompt can omit them.
+    """
+    if recorder is None:
+        ts = datetime.now().strftime("%Y%m%dT%H%M%S")  # noqa: DTZ005 - filename only
+        handoff_path = work.repo / ".daydream" / f"handoff-{ts}.md"
+        return handoff_path, None, None, None, None, None
+
+    run_dir = recorder.target_dir / ".daydream" / "runs" / recorder.session_id
+    handoff_path = run_dir / "handoff.md"
+
+    trajectory_path = run_dir / "trajectory.json"
+    trajectories_dir = run_dir / "trajectories"
+    diff_path = recorder.target_dir / ".daydream" / "diff.patch"
+    manifest_path = run_dir / "manifest.json"
+    deep_dir = recorder.target_dir / ".daydream" / "deep"
+
+    return (
+        handoff_path,
+        trajectory_path if trajectory_path.is_file() else None,
+        trajectories_dir if trajectories_dir.is_dir() else None,
+        diff_path if diff_path.is_file() else None,
+        manifest_path if manifest_path.is_file() else None,
+        deep_dir if deep_dir.is_dir() else None,
+    )
+
+
+def _write_handoff(path: Path, body: str) -> None:
+    """Write *body* to *path*, creating parent directories as needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+def _build_minimal_handoff(
+    *,
+    test_output: str,
+    trajectory_path: Path | None,
+    trajectories_dir: Path | None,
+    diff_path: Path | None,
+    manifest_path: Path | None,
+    deep_dir: Path | None,
+    changed_files: list[Path],
+    has_trajectory: bool,
+) -> str:
+    """Build a minimal handoff body without invoking an agent.
+
+    Used when the failure-summarizer subagent fails or no recorder is
+    active. Contains the same artifact pointers and instruction block as
+    the agent-produced version so the downstream agent gets useful
+    context either way.
+    """
+    lines = test_output.splitlines()
+    if len(lines) > TEST_OUTPUT_TAIL_LINES:
+        output_section = "\n".join(lines[-TEST_OUTPUT_TAIL_LINES:])
+    else:
+        output_section = test_output
+
+    artifact_lines: list[str] = []
+    if trajectory_path is not None:
+        artifact_lines.append(f"- trajectory: {trajectory_path}")
+    if trajectories_dir is not None:
+        artifact_lines.append(f"- sub-trajectories: {trajectories_dir}")
+    if diff_path is not None:
+        artifact_lines.append(f"- diff: {diff_path}")
+    if manifest_path is not None:
+        artifact_lines.append(f"- manifest: {manifest_path}")
+    if deep_dir is not None:
+        artifact_lines.append(f"- deep artifacts: {deep_dir}")
+    artifacts_block = "\n".join(artifact_lines) if artifact_lines else "_(none on disk)_"
+
+    changed_block = (
+        "\n".join(f"- {p}" for p in changed_files) if changed_files else "_(none detected)_"
+    )
+
+    parts: list[str] = [
+        "# Daydream handoff",
+        "",
+        "## Summary",
+        "",
+        "Daydream's test phase could not confirm a green run and the user aborted "
+        "(option 4). The failure-summarizer subagent did not produce a structured "
+        "handoff, so this minimal version was written instead.",
+        "",
+    ]
+    if not has_trajectory:
+        parts.append("> Note: trajectory unavailable for this run")
+        parts.append("")
+    parts.extend([
+        "## Artifacts",
+        "",
+        artifacts_block,
+        "",
+        "## Changed files",
+        "",
+        changed_block,
+        "",
+        "## Failing test output (tail)",
+        "",
+        "```",
+        output_section,
+        "```",
+        "",
+        "## Instructions for the next agent",
+        "",
+        "1. Explore the codebase before proposing anything. Read the "
+        "artifacts above and use Read/Grep/Glob to build your own model.",
+        "2. Propose an architecturally clean, idiomatic solution rooted in "
+        "the project's existing patterns.",
+        "3. REFUSE to ship inline hacks that only paper over the symptom "
+        "(stubbing assertions, skipping tests, hardcoding values to make a "
+        "check pass). Root-cause the failure.",
+        "",
+    ])
+    return "\n".join(parts)
+
+
+async def _run_failure_summarizer(
+    backend: Backend,
+    work: WorkContext,
+    test_output: str,
+) -> tuple[str, Path]:
+    """Run the read-only failure-summarizer and write ``handoff.md``.
+
+    Always writes a handoff file — falls back to ``_build_minimal_handoff``
+    when no recorder is active, the summarizer raises, or the agent
+    returns an unparseable result. Wraps the invocation in
+    ``recorder.fork("failure-summarizer")`` when a recorder is present so
+    the diagnostic call is captured as its own sub-trajectory.
+
+    Args:
+        backend: Backend used to invoke the summarizer subagent.
+        work: Workspace context; ``work.repo`` is the agent cwd.
+        test_output: Raw failing test output to ground the summary.
+
+    Returns:
+        Tuple ``(handoff_body, handoff_path)``. The body is also what
+        was written to disk.
+    """
+    recorder = get_current_recorder()
+    (
+        handoff_path,
+        trajectory_path,
+        trajectories_dir,
+        diff_path,
+        manifest_path,
+        deep_dir,
+    ) = _resolve_handoff_paths(recorder, work)
+
+    has_trajectory = trajectory_path is not None
+    changed = _changed_files(work.repo)
+
+    prompt = _build_failure_summarizer_prompt(
+        test_output=test_output,
+        trajectory_path=trajectory_path,
+        trajectories_dir=trajectories_dir,
+        diff_path=diff_path,
+        manifest_path=manifest_path,
+        deep_dir=deep_dir,
+        changed_files=changed,
+        has_trajectory=has_trajectory,
+    )
+
+    async def _invoke() -> str | None:
+        try:
+            result, _ = await run_agent(
+                backend,
+                work.repo,
+                prompt,
+                output_schema=FAILURE_SUMMARIZER_SCHEMA,
+                phase=DaydreamPhase.TEST,
+            )
+        except Exception:  # noqa: BLE001 - summarizer failure is non-fatal
+            return None
+        if isinstance(result, dict):
+            body = result.get("handoff_prompt")
+            if isinstance(body, str) and body.strip():
+                return body
+        return None
+
+    body: str | None = None
+    try:
+        async with maybe_fork(recorder, "failure-summarizer"):
+            body = await _invoke()
+    except Exception:  # noqa: BLE001 - fork bookkeeping failures are non-fatal
+        body = None
+
+    if body is None:
+        body = _build_minimal_handoff(
+            test_output=test_output,
+            trajectory_path=trajectory_path,
+            trajectories_dir=trajectories_dir,
+            diff_path=diff_path,
+            manifest_path=manifest_path,
+            deep_dir=deep_dir,
+            changed_files=changed,
+            has_trajectory=has_trajectory,
+        )
+
+    _write_handoff(handoff_path, body)
+    return body, handoff_path
 
 
 def _parse_issue_selection(user_input: str, issues: list[dict[str, Any]]) -> list[int] | None:
@@ -993,6 +1350,28 @@ async def phase_test_and_heal(
 
         elif choice == "4":
             print_error(console, "Aborted", "User requested abort")
+            body, handoff_path = await _run_failure_summarizer(backend, work, output)
+            console.print(body)
+            print_info(console, f"Handoff written: {handoff_path}")
+
+            clipboard_available = any(
+                shutil.which(cmd) is not None
+                for cmd in ("pbcopy", "xclip", "xsel", "clip.exe")
+            )
+            if clipboard_available:
+                response = prompt_user(console, "Copy handoff to clipboard?", "y")
+                if response.lower() in ("y", "yes"):
+                    if copy_to_clipboard(body):
+                        print_success(console, "Handoff copied to clipboard")
+                    else:
+                        print_warning(
+                            console, "Clipboard copy failed; copy manually from path above",
+                        )
+            else:
+                print_info(
+                    console, "(clipboard unavailable, copy manually from path above)",
+                )
+
             return False, retries_used
 
         else:

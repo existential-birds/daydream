@@ -1050,3 +1050,306 @@ async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
     # Retry happened with the original generic prompt
     assert backend.captured_prompts[2] == backend.captured_prompts[0]
     assert "Run this exact test command" not in backend.captured_prompts[2]
+
+
+# ---------------------------------------------------------------------------
+# phase_test_and_heal — option 4 failure-summarizer + handoff
+# ---------------------------------------------------------------------------
+
+
+class _SummarizerBackend:
+    """Mock backend cycling through scripted ResultEvents for option 4.
+
+    Script entries:
+        - ``"fail"``: yields failing test output.
+        - ``("handoff", body)``: yields a ``ResultEvent`` whose
+          ``structured_output`` is ``{"handoff_prompt": body}``.
+        - ``("raise", ExcType)``: raises ``ExcType`` inside execute.
+        - ``("garbage", value)``: yields a ``ResultEvent`` with an
+          unparseable ``structured_output`` (no ``handoff_prompt`` key).
+    """
+
+    def __init__(self, script: list) -> None:
+        self.script = list(script)
+        self.captured_prompts: list[str] = []
+
+    async def execute(
+        self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None,
+    ):
+        self.captured_prompts.append(prompt)
+        if not self.script:
+            raise AssertionError("backend invoked beyond scripted call count")
+        entry = self.script.pop(0)
+        if entry == "fail":
+            yield TextEvent(text="1 failed, 0 passed")
+            yield ResultEvent(structured_output=None, continuation=None)
+        elif isinstance(entry, tuple) and entry[0] == "handoff":
+            yield ResultEvent(
+                structured_output={"handoff_prompt": entry[1]}, continuation=None,
+            )
+        elif isinstance(entry, tuple) and entry[0] == "raise":
+            raise entry[1]("scripted summarizer failure")
+        elif isinstance(entry, tuple) and entry[0] == "garbage":
+            yield ResultEvent(structured_output=entry[1], continuation=None)
+        else:
+            raise AssertionError(f"unknown script entry: {entry!r}")
+
+    async def cancel(self):
+        pass
+
+    def format_skill_invocation(self, skill_key, args=""):
+        return f"/{skill_key}"
+
+
+def _install_recorder(monkeypatch, tmp_path):
+    """Plant a fake recorder with .target_dir and .session_id on get_current_recorder.
+
+    Also stubs ``maybe_fork`` to a no-op async context manager so the fake
+    recorder doesn't need a real ``.fork()`` method.
+    """
+    from contextlib import asynccontextmanager
+
+    class _FakeRecorder:
+        target_dir = tmp_path
+        session_id = "test-session-id"
+
+    fake = _FakeRecorder()
+    monkeypatch.setattr("daydream.phases.get_current_recorder", lambda: fake)
+
+    @asynccontextmanager
+    async def _noop_fork(recorder, descriptor):
+        yield
+
+    monkeypatch.setattr("daydream.phases.maybe_fork", _noop_fork)
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_option4_writes_handoff_to_live_path(
+    tmp_path, monkeypatch, make_work,
+):
+    """Option 4 → handoff.md written to <target>/.daydream/runs/<session_id>/."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    # No clipboard available — keep flow simple
+    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+
+    backend = _SummarizerBackend([
+        "fail",
+        ("handoff", "# Handoff\n\nbody here"),
+    ])
+
+    choices = iter(["4"])
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+    )
+
+    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+
+    assert success is False
+    assert retries == 0
+    expected = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
+    assert expected.is_file()
+    assert expected.read_text(encoding="utf-8") == "# Handoff\n\nbody here"
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
+    tmp_path, monkeypatch, make_work,
+):
+    """When pbcopy is on PATH → user is offered; 'y' triggers copy_to_clipboard."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "daydream.phases.shutil.which",
+        lambda cmd: "/usr/bin/pbcopy" if cmd == "pbcopy" else None,
+    )
+
+    copied: list[str] = []
+    monkeypatch.setattr(
+        "daydream.phases.copy_to_clipboard",
+        lambda text: (copied.append(text) or True),
+    )
+
+    backend = _SummarizerBackend([
+        "fail",
+        ("handoff", "BODY"),
+    ])
+
+    # Choice "4" then clipboard "y"
+    answers = iter(["4", "y"])
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user", lambda *a, **kw: next(answers, "n"),
+    )
+
+    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+
+    assert success is False
+    assert copied == ["BODY"]
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
+    tmp_path, monkeypatch, make_work,
+):
+    """No clipboard tool on PATH → graceful skip line printed, no offer."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+
+    infos: list[str] = []
+    monkeypatch.setattr(
+        "daydream.phases.print_info",
+        lambda console_arg, message: infos.append(message),
+    )
+    # Track prompt_user — must NOT be called for clipboard confirmation
+    user_prompts: list[str] = []
+    answers = iter(["4"])
+
+    def fake_prompt(console_arg, message, default=""):
+        user_prompts.append(message)
+        return next(answers, "n")
+
+    monkeypatch.setattr("daydream.phases.prompt_user", fake_prompt)
+
+    copy_called = False
+
+    def fake_copy(text: str) -> bool:
+        nonlocal copy_called
+        copy_called = True
+        return True
+
+    monkeypatch.setattr("daydream.phases.copy_to_clipboard", fake_copy)
+
+    backend = _SummarizerBackend([
+        "fail",
+        ("handoff", "BODY"),
+    ])
+
+    await phase_test_and_heal(backend, make_work(tmp_path))
+
+    # The skip notice was emitted
+    assert any("clipboard unavailable" in m for m in infos)
+    # Only the menu "Choice" prompt fires — no clipboard confirmation prompt
+    assert user_prompts == ["Choice"]
+    assert copy_called is False
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_option4_no_recorder_writes_fallback_handoff(
+    tmp_path, monkeypatch, make_work,
+):
+    """No active recorder → handoff written under <repo>/.daydream/handoff-*.md, note included."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    monkeypatch.setattr("daydream.phases.get_current_recorder", lambda: None)
+    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+
+    captured_prompts_to_backend: list[str] = []
+
+    backend = _SummarizerBackend([
+        "fail",
+        ("handoff", "AGENT_BODY"),
+    ])
+    # Wrap execute to capture the prompt sent to the summarizer
+    orig_execute = backend.execute
+
+    async def wrapped_execute(*args, **kwargs):
+        # Second positional arg is the prompt
+        if len(args) >= 2:
+            captured_prompts_to_backend.append(args[1])
+        elif "prompt" in kwargs:
+            captured_prompts_to_backend.append(kwargs["prompt"])
+        async for ev in orig_execute(*args, **kwargs):
+            yield ev
+
+    backend.execute = wrapped_execute  # type: ignore[method-assign]
+
+    choices = iter(["4"])
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+    )
+
+    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    assert success is False
+
+    fallback_dir = tmp_path / ".daydream"
+    assert fallback_dir.is_dir()
+    handoffs = list(fallback_dir.glob("handoff-*.md"))
+    assert len(handoffs) == 1
+    assert handoffs[0].read_text(encoding="utf-8") == "AGENT_BODY"
+
+    # Summarizer prompt (second backend call) carries the no-trajectory note instruction
+    summarizer_prompt = captured_prompts_to_backend[1]
+    assert "> Note: trajectory unavailable for this run" in summarizer_prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_option4_summarizer_failure_writes_minimal(
+    tmp_path, monkeypatch, make_work,
+):
+    """Summarizer raising → minimal handoff is written anyway."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+
+    backend = _SummarizerBackend([
+        "fail",
+        ("raise", RuntimeError),
+    ])
+
+    choices = iter(["4"])
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+    )
+
+    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    assert success is False
+
+    handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
+    assert handoff.is_file()
+    body = handoff.read_text(encoding="utf-8")
+    # Minimal handoff is the markdown stub built locally
+    assert "# Daydream handoff" in body
+    assert "Instructions for the next agent" in body
+    # Contains the failing test output as a tail block
+    assert "```" in body
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
+    tmp_path, monkeypatch, make_work,
+):
+    """Summarizer returning a structured_output without 'handoff_prompt' → minimal fallback."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+
+    backend = _SummarizerBackend([
+        "fail",
+        ("garbage", {"unexpected": "shape"}),
+    ])
+
+    choices = iter(["4"])
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+    )
+
+    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    assert success is False
+
+    handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
+    assert handoff.is_file()
+    body = handoff.read_text(encoding="utf-8")
+    assert "# Daydream handoff" in body
