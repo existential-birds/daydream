@@ -814,6 +814,36 @@ async def test_phase_commit_push_includes_daydream_trailers(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_phase_commit_push_auto_includes_daydream_trailers(tmp_path, monkeypatch, make_work):
+    """phase_commit_push_auto must include Daydream-Run and Daydream-Version trailers."""
+    from daydream.phases import phase_commit_push_auto
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    captured: dict[str, str] = {}
+
+    class CapturingBackend:
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            captured["prompt"] = prompt
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key} {args}"
+
+    work = make_work(tmp_path)
+    await phase_commit_push_auto(CapturingBackend(), work)
+
+    assert "Daydream-Run:" in captured["prompt"]
+    assert "Daydream-Version:" in captured["prompt"]
+    assert work.run_id in captured["prompt"]
+
+
+@pytest.mark.asyncio
 async def test_phase_commit_iteration_includes_daydream_trailers(tmp_path, monkeypatch, make_work):
     """phase_commit_iteration must include Daydream-Run and Daydream-Version trailers."""
     from daydream.phases import phase_commit_iteration

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.deep.detection import StackAssignment
@@ -145,6 +146,27 @@ async def test_fan_out_closure_capture(tmp_path: Path, make_work) -> None:
     assert any("python" in p for p in prompts)
     assert any("react" in p for p in prompts)
     assert any("generic-fallback" in p for p in prompts)
+
+
+async def test_fan_out_propagates_prior_commits(tmp_path: Path, make_work) -> None:
+    """prior_commits from _prior_daydream_commits is injected into every prompt."""
+    backend = _RecordingBackend()
+    diff, intent, alts = _mk_context_files(tmp_path)
+    fake_log = "abc1234 fix(api): handle nulls [Daydream-Run: abc]"
+
+    with patch("daydream.phases._prior_daydream_commits", return_value=fake_log):
+        await phase_per_stack_reviews(
+            backend,
+            make_work(tmp_path),
+            _mk_stacks(),
+            diff_path=diff,
+            intent_path=intent,
+            alternatives_path=alts,
+        )
+
+    assert len(backend.prompts) == 3
+    for prompt in backend.prompts:
+        assert fake_log in prompt
 
 
 async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work) -> None:

@@ -202,6 +202,25 @@ def head_sha(repo: Path) -> str:
     return proc.stdout.strip()
 
 
+def commit_message(repo: Path, ref: str = "HEAD") -> str | None:
+    """Return the full commit message of *ref*, or ``None`` on failure.
+
+    Soft-failure semantics: returns ``None`` when *ref* doesn't resolve
+    (e.g. empty repository, invalid ref).
+
+    Args:
+        repo: Repository working directory.
+        ref: Commit reference. Defaults to ``"HEAD"``.
+
+    Returns:
+        The commit message body, or ``None`` on any non-zero exit.
+    """
+    proc = _run_git(repo, ["log", "-1", "--format=%B", ref], timeout=5)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
 def remote_url(repo: Path, remote: str = "origin") -> str | None:
     """Return the URL configured for *remote*, or ``None`` when unset/missing.
 

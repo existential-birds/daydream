@@ -506,7 +506,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # front ourselves and route to a dedicated parser.
     if raw_argv and raw_argv[0] == "feedback":
         feedback_parser = _build_feedback_parser()
-        feedback_args = feedback_parser.parse_args(raw_argv[1:])
+        feedback_args = feedback_parser.parse_intermixed_args(raw_argv[1:])
         return _build_feedback_config(feedback_args)
 
     # ``summarize`` is dispatched in main() before _parse_args is called, so

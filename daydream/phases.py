@@ -339,6 +339,17 @@ def _exploration_pointer(exploration_dir: Path | None) -> str:
     )
 
 
+def _prior_commits_block(prior_commits: str | None) -> str:
+    """Return settled-decisions context for prior daydream commits, or empty string."""
+    if not prior_commits:
+        return ""
+    return (
+        "Prior automated-review commits on this branch — treat as settled "
+        "decisions unless they introduce bugs or security issues:\n"
+        f"{prior_commits}"
+    )
+
+
 def build_review_prompt(
     *,
     skill_invocation: str = "",
@@ -365,12 +376,9 @@ def build_review_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
-    if prior_commits:
-        parts.append(
-            "Prior automated-review commits on this branch — treat as settled "
-            "decisions unless they introduce bugs or security issues:\n"
-            f"{prior_commits}"
-        )
+    prior_block = _prior_commits_block(prior_commits)
+    if prior_block:
+        parts.append(prior_block)
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     body = (
@@ -846,6 +854,7 @@ async def _do_commit(
     push: bool = False,
     interactive: bool = False,
     iteration: int | None = None,
+    items: list[dict[str, Any]] | None = None,
 ) -> None:
     """Stage, commit, and optionally push with daydream trailers."""
     if interactive:
@@ -854,13 +863,22 @@ async def _do_commit(
             print_dim(console, "Skipping commit and push")
             return
 
-    iteration_line = f"End the body with: Iteration: {iteration}\n\n" if iteration is not None else ""
+    iteration_line = f"End the body with: Iteration: {iteration}\n\n" if iteration is not None else "\n"
     push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
+
+    items_context = ""
+    if items:
+        lines = [
+            f"- {it.get('file', 'Unknown file')}:{it.get('line', '?')} — {it.get('description', 'No description')}"
+            for it in items
+        ]
+        items_context = "The following issues were fixed in this commit:\n" + "\n".join(lines) + "\n\n"
 
     prompt = (
         "Stage all changes and commit using a conventional commit message. "
         "Review the diff to write a meaningful summary of what was fixed or changed. "
         "Use the format: <type>: <concise summary of changes>\n\n"
+        f"{items_context}"
         "Pick the most appropriate type from: fix, refactor, style, perf. "
         "If multiple categories of changes exist, pick the dominant one. "
         "Keep the subject line under 72 characters. "
@@ -873,6 +891,15 @@ async def _do_commit(
         f"{push_line}"
     )
     await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
+
+    msg = git_ops.commit_message(work.repo)
+    if msg is not None and (
+        "Daydream-Run:" not in msg or "Daydream-Version:" not in msg
+    ):
+        print_warning(
+            console,
+            "Commit is missing Daydream-Run/Daydream-Version trailers",
+        )
 
 
 async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
@@ -1029,12 +1056,12 @@ async def phase_commit_push_auto(
     Args:
         backend: The Backend to execute against.
         work: Workspace context for the commit.
-        items: Optional fix items applied this run (kept for API compat).
+        items: Optional fix items applied this run (included in commit prompt).
 
     """
     console.print()
     print_info(console, "Committing and pushing changes...")
-    await _do_commit(backend, work, push=True)
+    await _do_commit(backend, work, push=True, items=items)
     print_success(console, "Commit and push complete")
 
 
