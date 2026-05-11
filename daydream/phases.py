@@ -315,25 +315,42 @@ FAILURE_SUMMARIZER_SCHEMA: dict[str, Any] = {
 def _changed_files(repo: Path) -> list[Path]:
     """Return absolute paths of files changed in *repo* (working tree).
 
-    Best-effort: combines staged + unstaged changes via
-    ``git diff --name-only HEAD``. Returns an empty list if git is
+    Best-effort: combines staged + unstaged changes (``git diff --name-only
+    HEAD``) with new untracked files (``git ls-files --others
+    --exclude-standard``). Files created during a daydream fix are still
+    untracked at abort time, so the diff alone would omit them and leave
+    the handoff missing critical context. Returns an empty list if git is
     unavailable or the repo has no commits yet.
     """
-    try:
-        proc = subprocess.run(  # noqa: S603 - args are not user-controlled
-            ["git", "diff", "--name-only", "HEAD"],  # noqa: S607 - hardcoded program
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return []
-    if proc.returncode != 0:
-        return []
-    names = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    return [(repo / name).resolve() for name in names]
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for args in (
+        ["git", "diff", "--name-only", "HEAD"],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    ):
+        try:
+            proc = subprocess.run(  # noqa: S603 - args are not user-controlled
+                args,  # noqa: S607 - hardcoded program
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except (subprocess.SubprocessError, OSError):
+            continue
+        if proc.returncode != 0:
+            continue
+        for line in proc.stdout.splitlines():
+            name = line.strip()
+            if not name:
+                continue
+            resolved = (repo / name).resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(resolved)
+    return paths
 
 
 def _resolve_handoff_paths(
@@ -341,35 +358,63 @@ def _resolve_handoff_paths(
 ) -> tuple[Path, Path | None, Path | None, Path | None, Path | None, Path | None]:
     """Return ``(handoff_path, trajectory_path, trajectories_dir, diff_path, manifest_path, deep_dir)``.
 
-    When *recorder* is set, paths point into the live trajectory subtree
-    under ``<repo>/.daydream/runs/<session_id>/``. When *recorder* is
-    None, ``handoff_path`` falls back to ``<repo>/.daydream/handoff-<ts>.md``
-    and every other path is None.
+    The handoff file is always anchored on ``work.source`` so it survives
+    ephemeral-worktree cleanup. The artifact reference paths point at
+    locations that will exist when the next agent reads the handoff:
 
-    Existence is checked for each artifact path; missing artifacts come
-    back as None so the summarizer prompt can omit them.
+    * In-place runs: live trajectory subtree under
+      ``<source>/.daydream/runs/<session_id>/`` (written by the recorder
+      on ``__aexit__`` shortly after this function runs).
+    * Ephemeral runs with archiving enabled: archive subtree under
+      ``<archive_root>/runs/<session_id>/`` (populated by the on_write
+      callback after ``__aexit__``).
+    * Ephemeral runs with archiving disabled: live paths, even though
+      the worktree will be removed — best-effort, with no persistent
+      copy of the artifacts available.
+
+    When *recorder* is ``None``, ``handoff_path`` falls back to
+    ``<source>/.daydream/handoff-<ts>.md`` (no session id available) and
+    every other path is ``None``.
+
+    Returned artifact paths are not existence-checked: at handoff time
+    the trajectory has not been flushed yet and the archive bundle has
+    not been copied. The caller treats them as forward references.
     """
     if recorder is None:
         ts = datetime.now().strftime("%Y%m%dT%H%M%S")  # noqa: DTZ005 - filename only
-        handoff_path = work.repo / ".daydream" / f"handoff-{ts}.md"
+        handoff_path = work.source / ".daydream" / f"handoff-{ts}.md"
         return handoff_path, None, None, None, None, None
 
-    run_dir = recorder.target_dir / ".daydream" / "runs" / recorder.session_id
-    handoff_path = run_dir / "handoff.md"
+    handoff_run_dir = work.source / ".daydream" / "runs" / recorder.session_id
+    handoff_path = handoff_run_dir / "handoff.md"
 
-    trajectory_path = run_dir / "trajectory.json"
-    trajectories_dir = run_dir / "trajectories"
-    diff_path = recorder.target_dir / ".daydream" / "diff.patch"
-    manifest_path = run_dir / "manifest.json"
-    deep_dir = recorder.target_dir / ".daydream" / "deep"
+    archive_enabled = recorder.on_write is not None
+    if work.is_ephemeral and archive_enabled:
+        # The ephemeral worktree (and everything under it) will be
+        # removed after the recorder exits; the archive callback copies
+        # the bundle to <archive_root>/runs/<session_id>/. Reference the
+        # archive paths so the handoff stays valid post-cleanup.
+        from daydream.archive import get_archive_dir
+
+        artifact_root = get_archive_dir() / "runs" / recorder.session_id
+        diff_path = artifact_root / "diff.patch"
+        deep_dir = artifact_root / "deep"
+    else:
+        artifact_root = recorder.target_dir / ".daydream" / "runs" / recorder.session_id
+        diff_path = recorder.target_dir / ".daydream" / "diff.patch"
+        deep_dir = recorder.target_dir / ".daydream" / "deep"
+
+    trajectory_path = artifact_root / "trajectory.json"
+    trajectories_dir = artifact_root / "trajectories"
+    manifest_path = artifact_root / "manifest.json"
 
     return (
         handoff_path,
-        trajectory_path if trajectory_path.is_file() else None,
-        trajectories_dir if trajectories_dir.is_dir() else None,
-        diff_path if diff_path.is_file() else None,
-        manifest_path if manifest_path.is_file() else None,
-        deep_dir if deep_dir.is_dir() else None,
+        trajectory_path,
+        trajectories_dir,
+        diff_path,
+        manifest_path,
+        deep_dir,
     )
 
 
@@ -494,7 +539,15 @@ async def _run_failure_summarizer(
         deep_dir,
     ) = _resolve_handoff_paths(recorder, work)
 
-    has_trajectory = trajectory_path is not None
+    # Drop a ``.partial`` snapshot of the trajectory before invoking the
+    # summarizer. The recorder's ``_write()`` only fires in ``__aexit__``
+    # (which happens after this function returns), so without this the
+    # main trajectory file would not exist on disk while the handoff is
+    # being read. ``write_partial`` is best-effort and never raises.
+    if recorder is not None:
+        recorder.write_partial()
+
+    has_trajectory = recorder is not None
     changed = _changed_files(work.repo)
 
     prompt = _build_failure_summarizer_prompt(

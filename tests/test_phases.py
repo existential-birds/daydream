@@ -2,6 +2,7 @@
 """Tests for phase functions with backend abstraction."""
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -1101,17 +1102,26 @@ class _SummarizerBackend:
         return f"/{skill_key}"
 
 
-def _install_recorder(monkeypatch, tmp_path):
+def _install_recorder(monkeypatch, tmp_path, *, on_write=None):
     """Plant a fake recorder with .target_dir and .session_id on get_current_recorder.
 
     Also stubs ``maybe_fork`` to a no-op async context manager so the fake
-    recorder doesn't need a real ``.fork()`` method.
+    recorder doesn't need a real ``.fork()`` method. ``on_write`` mirrors
+    the real recorder field so the handoff path resolver can detect
+    whether archiving is enabled.
     """
     from contextlib import asynccontextmanager
 
     class _FakeRecorder:
         target_dir = tmp_path
         session_id = "test-session-id"
+        partial_writes = 0
+
+        def __init__(self) -> None:
+            self.on_write = on_write
+
+        def write_partial(self) -> None:
+            self.partial_writes += 1
 
     fake = _FakeRecorder()
     monkeypatch.setattr("daydream.phases.get_current_recorder", lambda: fake)
@@ -1353,3 +1363,223 @@ async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
     assert handoff.is_file()
     body = handoff.read_text(encoding="utf-8")
     assert "# Daydream handoff" in body
+
+
+# ---------------------------------------------------------------------------
+# _resolve_handoff_paths — ephemeral worktree + archive routing
+# ---------------------------------------------------------------------------
+
+
+def _make_ephemeral_workcontext(source: Path, repo: Path):
+    """Build a WorkContext where ``source != repo`` (ephemeral case)."""
+    from daydream.workspace import WorkContext
+
+    return WorkContext(
+        repo=repo,
+        source=source,
+        base_branch="main",
+        base_sha="DEADBEEF",
+        head_branch=None,
+        head_sha="CAFEBABE",
+        is_ephemeral=True,
+        run_id="20260101000000-deadbeef",
+    )
+
+
+def test_resolve_handoff_paths_ephemeral_archive_routes_to_persistent(
+    tmp_path, monkeypatch,
+):
+    """Ephemeral + archive: handoff under source, artifacts under archive root."""
+    from daydream.phases import _resolve_handoff_paths
+
+    source = tmp_path / "source"
+    source.mkdir()
+    worktree = source / ".daydream" / "worktrees" / "ephemeral-run"
+    worktree.mkdir(parents=True)
+    archive_root = tmp_path / "archive"
+
+    monkeypatch.setattr(
+        "daydream.archive.get_archive_dir", lambda: archive_root,
+    )
+
+    work = _make_ephemeral_workcontext(source, worktree)
+
+    class _Recorder:
+        target_dir = worktree
+        session_id = "sess-xyz"
+        on_write = lambda *_args, **_kw: None  # archiving enabled  # noqa: E731
+
+    handoff, trajectory, traj_dir, diff, manifest, deep = _resolve_handoff_paths(
+        _Recorder(), work,
+    )
+
+    # Handoff lives on source — survives worktree cleanup.
+    assert handoff == source / ".daydream" / "runs" / "sess-xyz" / "handoff.md"
+    # Trajectory / sub-trajectories / manifest live under archive root.
+    archive_run_dir = archive_root / "runs" / "sess-xyz"
+    assert trajectory == archive_run_dir / "trajectory.json"
+    assert traj_dir == archive_run_dir / "trajectories"
+    assert manifest == archive_run_dir / "manifest.json"
+    # diff.patch and deep/ live alongside trajectory in the archive bundle.
+    assert diff == archive_run_dir / "diff.patch"
+    assert deep == archive_run_dir / "deep"
+
+
+def test_resolve_handoff_paths_inplace_uses_live_target_dir(tmp_path):
+    """In-place: artifact references stay under recorder.target_dir."""
+    from daydream.phases import _resolve_handoff_paths
+    from daydream.workspace import WorkContext
+
+    work = WorkContext(
+        repo=tmp_path,
+        source=tmp_path,
+        base_branch="main",
+        base_sha="DEADBEEF",
+        head_branch="feat/x",
+        head_sha="CAFEBABE",
+        is_ephemeral=False,
+        run_id="20260101000000-deadbeef",
+    )
+
+    class _Recorder:
+        target_dir = tmp_path
+        session_id = "sess-abc"
+        on_write = None  # archive disabled — should be irrelevant in-place
+
+    handoff, trajectory, traj_dir, diff, manifest, deep = _resolve_handoff_paths(
+        _Recorder(), work,
+    )
+
+    live_run_dir = tmp_path / ".daydream" / "runs" / "sess-abc"
+    assert handoff == live_run_dir / "handoff.md"
+    assert trajectory == live_run_dir / "trajectory.json"
+    assert traj_dir == live_run_dir / "trajectories"
+    assert manifest == live_run_dir / "manifest.json"
+    assert diff == tmp_path / ".daydream" / "diff.patch"
+    assert deep == tmp_path / ".daydream" / "deep"
+
+
+def test_resolve_handoff_paths_returns_paths_even_when_files_missing(tmp_path):
+    """Trajectory ref is set even though the recorder has not flushed yet.
+
+    The old behavior gated artifact refs on ``is_file()`` / ``is_dir()``,
+    so the handoff was generated with ``has_trajectory=False`` on every
+    abort (the recorder writes ``trajectory.json`` in ``__aexit__``,
+    which runs after the handoff helper). Now we surface the forward
+    reference unconditionally.
+    """
+    from daydream.phases import _resolve_handoff_paths
+    from daydream.workspace import WorkContext
+
+    work = WorkContext(
+        repo=tmp_path,
+        source=tmp_path,
+        base_branch="main",
+        base_sha="DEADBEEF",
+        head_branch="feat/x",
+        head_sha="CAFEBABE",
+        is_ephemeral=False,
+        run_id="20260101000000-deadbeef",
+    )
+
+    class _Recorder:
+        target_dir = tmp_path
+        session_id = "sess-empty"
+        on_write = None
+
+    _, trajectory, traj_dir, _, manifest, deep = _resolve_handoff_paths(
+        _Recorder(), work,
+    )
+
+    # None of these files exist on disk yet, but the resolver must still
+    # surface them as references so the handoff body points at where they
+    # will be after the recorder exits / archive callback fires.
+    assert trajectory is not None and not trajectory.exists()
+    assert traj_dir is not None and not traj_dir.exists()
+    assert manifest is not None and not manifest.exists()
+    assert deep is not None and not deep.exists()
+
+
+# ---------------------------------------------------------------------------
+# _changed_files — untracked files must appear in the handoff change list
+# ---------------------------------------------------------------------------
+
+
+def _init_git_repo(repo: Path) -> None:
+    """Initialize a minimal git repo with a single tracked commit."""
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    seed = repo / "seed.txt"
+    seed.write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "seed.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True,
+    )
+
+
+def test_changed_files_includes_untracked_new_files(tmp_path):
+    """A fix that creates a new file is still untracked at abort time."""
+    from daydream.phases import _changed_files
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+
+    # Modify a tracked file (picked up by `git diff --name-only HEAD`)
+    (repo / "seed.txt").write_text("seed\nmore\n", encoding="utf-8")
+    # Add an untracked-but-not-ignored file (must also be reported)
+    (repo / "new.py").write_text("print('hi')\n", encoding="utf-8")
+    # Add a gitignored file (must NOT be reported)
+    (repo / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (repo / "ignored.txt").write_text("nope\n", encoding="utf-8")
+
+    paths = _changed_files(repo)
+    names = {p.name for p in paths}
+
+    assert "seed.txt" in names  # tracked + modified
+    assert "new.py" in names  # untracked + not ignored
+    assert "ignored.txt" not in names  # excluded by --exclude-standard
+    # Deduped — each path appears at most once
+    assert len(paths) == len(set(paths))
+
+
+def test_changed_files_returns_empty_on_non_git_dir(tmp_path):
+    """Outside a git repo the helper still degrades gracefully to []."""
+    from daydream.phases import _changed_files
+
+    assert _changed_files(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# _run_failure_summarizer — writes a partial trajectory snapshot pre-exit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_option4_calls_write_partial_before_summarizer(
+    tmp_path, monkeypatch, make_work,
+):
+    """Abort flushes a `.partial` snapshot so the trajectory exists on disk."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    fake = _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+
+    backend = _SummarizerBackend([
+        "fail",
+        ("handoff", "BODY"),
+    ])
+
+    choices = iter(["4"])
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+    )
+
+    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+
+    assert success is False
+    # write_partial must be called exactly once on the abort path so the
+    # trajectory data is on disk while the handoff is being displayed.
+    assert fake.partial_writes == 1
