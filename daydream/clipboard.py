@@ -7,6 +7,7 @@ False when no mechanism is available or any subprocess call fails so
 callers can degrade gracefully without raising.
 
 Exports:
+    clipboard_available: Check whether a clipboard mechanism is present.
     copy_to_clipboard: Copy ``text`` to the system clipboard.
 """
 
@@ -37,6 +38,11 @@ def _detect_clipboard_command() -> list[str] | None:
         if shutil.which(argv[0]) is not None:
             return list(argv)
     return None
+
+
+def clipboard_available() -> bool:
+    """Return True if a clipboard mechanism is present on this system."""
+    return _detect_clipboard_command() is not None
 
 
 def copy_to_clipboard(text: str) -> bool:

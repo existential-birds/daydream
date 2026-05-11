@@ -632,6 +632,46 @@ def status_porcelain(repo: Path) -> str:
     return proc.stdout
 
 
+def changed_files(repo: Path) -> list[str]:
+    """Return repo-relative paths of files changed in the working tree.
+
+    Best-effort: combines staged + unstaged changes (``git diff --name-only
+    HEAD``) with new untracked files (``git ls-files --others
+    --exclude-standard``).  Files created during a daydream fix are still
+    untracked at abort time, so the diff alone would omit them and leave the
+    handoff missing critical context.
+
+    Soft-failure semantics: returns an empty list when git is unavailable, the
+    repo has no commits yet, or either subcommand fails.  Individual
+    subcommand failures are logged and skipped — the other subcommand's
+    results are still returned.
+
+    Args:
+        repo: Repository working directory.
+
+    Returns:
+        De-duplicated list of repo-relative path strings.  Empty on error.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for args in (
+        ["diff", "--name-only", "HEAD"],
+        ["ls-files", "--others", "--exclude-standard"],
+    ):
+        try:
+            proc = _run_git(repo, args, timeout=10)
+        except GitError:
+            continue
+        if proc.returncode != 0:
+            continue
+        for line in proc.stdout.splitlines():
+            name = line.strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
 def upstream_ahead_count(repo: Path, branch: str) -> int:
     """Return the number of commits ``<branch>@{upstream}`` is ahead of *branch*.
 

@@ -1,7 +1,6 @@
 """Phase functions for the review and fix loop."""
 
-import shutil
-import subprocess
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,7 +16,7 @@ from daydream.agent import (
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
-from daydream.clipboard import copy_to_clipboard
+from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.trajectory import (
     DaydreamPhase,
@@ -45,6 +44,8 @@ from daydream.ui import (
     print_warning,
     prompt_user,
 )
+
+_logger = logging.getLogger(__name__)
 
 TEST_OUTPUT_TAIL_LINES = 100
 
@@ -186,6 +187,7 @@ async def _run_setup_investigator(
                 phase=DaydreamPhase.TEST,
             )
         except Exception:  # noqa: BLE001 - investigator failure is non-fatal
+            _logger.debug("setup-investigator agent failed", exc_info=True)
             return None
 
         if isinstance(result, dict) and "verdict" in result:
@@ -196,6 +198,7 @@ async def _run_setup_investigator(
         async with maybe_fork(recorder, "setup-investigator"):
             return await _invoke()
     except Exception:  # noqa: BLE001 - fork bookkeeping failures are non-fatal
+        _logger.debug("setup-investigator fork failed", exc_info=True)
         return None
 
 
@@ -315,42 +318,11 @@ FAILURE_SUMMARIZER_SCHEMA: dict[str, Any] = {
 def _changed_files(repo: Path) -> list[Path]:
     """Return absolute paths of files changed in *repo* (working tree).
 
-    Best-effort: combines staged + unstaged changes (``git diff --name-only
-    HEAD``) with new untracked files (``git ls-files --others
-    --exclude-standard``). Files created during a daydream fix are still
-    untracked at abort time, so the diff alone would omit them and leave
-    the handoff missing critical context. Returns an empty list if git is
-    unavailable or the repo has no commits yet.
+    Delegates to :func:`git_ops.changed_files` for the actual git queries,
+    then resolves the repo-relative names to absolute paths.  Returns an
+    empty list if git is unavailable or the repo has no commits yet.
     """
-    paths: list[Path] = []
-    seen: set[Path] = set()
-    for args in (
-        ["git", "diff", "--name-only", "HEAD"],
-        ["git", "ls-files", "--others", "--exclude-standard"],
-    ):
-        try:
-            proc = subprocess.run(  # noqa: S603 - args are not user-controlled
-                args,  # noqa: S607 - hardcoded program
-                cwd=repo,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=10,
-            )
-        except (subprocess.SubprocessError, OSError):
-            continue
-        if proc.returncode != 0:
-            continue
-        for line in proc.stdout.splitlines():
-            name = line.strip()
-            if not name:
-                continue
-            resolved = (repo / name).resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            paths.append(resolved)
-    return paths
+    return [(repo / name).resolve() for name in git_ops.changed_files(repo)]
 
 
 def _resolve_handoff_paths(
@@ -420,8 +392,11 @@ def _resolve_handoff_paths(
 
 def _write_handoff(path: Path, body: str) -> None:
     """Write *body* to *path*, creating parent directories as needed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    except OSError:
+        _logger.warning("failed to write handoff to %s", path, exc_info=True)
 
 
 def _build_minimal_handoff(
@@ -571,6 +546,7 @@ async def _run_failure_summarizer(
                 phase=DaydreamPhase.TEST,
             )
         except Exception:  # noqa: BLE001 - summarizer failure is non-fatal
+            _logger.debug("failure-summarizer agent failed", exc_info=True)
             return None
         if isinstance(result, dict):
             body = result.get("handoff_prompt")
@@ -583,6 +559,7 @@ async def _run_failure_summarizer(
         async with maybe_fork(recorder, "failure-summarizer"):
             body = await _invoke()
     except Exception:  # noqa: BLE001 - fork bookkeeping failures are non-fatal
+        _logger.debug("failure-summarizer fork failed", exc_info=True)
         body = None
 
     if body is None:
@@ -1335,13 +1312,22 @@ async def phase_test_and_heal(
             print_info(console, "Running test suite...")
 
         if test_command_override:
+            # Sanitize LLM-suggested command: collapse to single line,
+            # strip control chars that could escape the code fence.
+            sanitized_cmd = " ".join(test_command_override.split())
             prompt = (
-                f"Run this exact test command: {test_command_override}\n"
+                "Run this exact test command:\n"
+                f"```\n{sanitized_cmd}\n```\n"
                 "Report if tests pass or fail."
             )
         else:
             prompt = "Run the project's test suite. Report if tests pass or fail."
-        # Reset override after using it; subsequent loop iterations choose fresh.
+        # USE-ONCE RESET: test_command_override is consumed by the prompt
+        # construction above (lines ~1314-1324) and must be cleared before
+        # run_agent executes so the *next* loop iteration falls back to the
+        # default test-suite prompt.  This reset MUST stay between prompt
+        # construction and the bottom-of-loop branches that may re-assign
+        # test_command_override (choice "1" → setup investigator, line ~1367).
         test_command_override = None
 
         output, continuation = await run_agent(
@@ -1404,14 +1390,21 @@ async def phase_test_and_heal(
         elif choice == "4":
             print_error(console, "Aborted", "User requested abort")
             body, handoff_path = await _run_failure_summarizer(backend, work, output)
-            console.print(body)
+            # Show a short preview — the full handoff can be large enough
+            # to push important messages off-screen.
+            preview_lines = body.splitlines()
+            max_preview = 20
+            if len(preview_lines) <= max_preview:
+                console.print(body)
+            else:
+                console.print("\n".join(preview_lines[:max_preview]))
+                print_info(
+                    console,
+                    f"... ({len(preview_lines) - max_preview} more lines, see file below)",
+                )
             print_info(console, f"Handoff written: {handoff_path}")
 
-            clipboard_available = any(
-                shutil.which(cmd) is not None
-                for cmd in ("pbcopy", "xclip", "xsel", "clip.exe")
-            )
-            if clipboard_available:
+            if clipboard_available():
                 response = prompt_user(console, "Copy handoff to clipboard?", "y")
                 if response.lower() in ("y", "yes"):
                     if copy_to_clipboard(body):

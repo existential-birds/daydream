@@ -864,7 +864,21 @@ def _silence_phase_io(monkeypatch) -> None:
     )
 
 
-class _InvestigatorBackend:
+class _ScriptedBackend:
+    """Base mock backend with shared init, cancel, and format_skill_invocation."""
+
+    def __init__(self, script: list) -> None:
+        self.script = list(script)
+        self.captured_prompts: list[str] = []
+
+    async def cancel(self):
+        pass
+
+    def format_skill_invocation(self, skill_key, args=""):
+        return f"/{skill_key}"
+
+
+class _InvestigatorBackend(_ScriptedBackend):
     """Mock backend whose calls cycle through scripted ResultEvents.
 
     Each call to ``execute`` pops a script entry. The entry is either a
@@ -873,10 +887,6 @@ class _InvestigatorBackend:
     ``"pass"`` (yields passing output) or ``("raise", ExceptionType)`` (raises
     inside execute to simulate investigator failure).
     """
-
-    def __init__(self, script: list) -> None:
-        self.script = list(script)
-        self.captured_prompts: list[str] = []
 
     async def execute(
         self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None,
@@ -901,12 +911,6 @@ class _InvestigatorBackend:
             yield ResultEvent(structured_output=None, continuation=None)
         else:
             raise AssertionError(f"unknown script entry: {entry!r}")
-
-    async def cancel(self):
-        pass
-
-    def format_skill_invocation(self, skill_key, args=""):
-        return f"/{skill_key}"
 
 
 @pytest.mark.asyncio
@@ -976,9 +980,10 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
     assert success is True
     assert retries == 1
     assert len(backend.captured_prompts) == 3
-    # Retry uses the pinned command prompt
+    # Retry uses the pinned command prompt (formatted with a code block)
     retry_prompt = backend.captured_prompts[2]
-    assert "Run this exact test command: make check" in retry_prompt
+    assert "Run this exact test command:" in retry_prompt
+    assert "make check" in retry_prompt
 
 
 @pytest.mark.asyncio
@@ -1058,7 +1063,7 @@ async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
 # ---------------------------------------------------------------------------
 
 
-class _SummarizerBackend:
+class _SummarizerBackend(_ScriptedBackend):
     """Mock backend cycling through scripted ResultEvents for option 4.
 
     Script entries:
@@ -1069,10 +1074,6 @@ class _SummarizerBackend:
         - ``("garbage", value)``: yields a ``ResultEvent`` with an
           unparseable ``structured_output`` (no ``handoff_prompt`` key).
     """
-
-    def __init__(self, script: list) -> None:
-        self.script = list(script)
-        self.captured_prompts: list[str] = []
 
     async def execute(
         self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None,
@@ -1094,12 +1095,6 @@ class _SummarizerBackend:
             yield ResultEvent(structured_output=entry[1], continuation=None)
         else:
             raise AssertionError(f"unknown script entry: {entry!r}")
-
-    async def cancel(self):
-        pass
-
-    def format_skill_invocation(self, skill_key, args=""):
-        return f"/{skill_key}"
 
 
 def _install_recorder(monkeypatch, tmp_path, *, on_write=None):
@@ -1144,7 +1139,7 @@ async def test_phase_test_and_heal_option4_writes_handoff_to_live_path(
     _silence_phase_io(monkeypatch)
     _install_recorder(monkeypatch, tmp_path)
     # No clipboard available — keep flow simple
-    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
 
     backend = _SummarizerBackend([
         "fail",
@@ -1174,10 +1169,7 @@ async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
 
     _silence_phase_io(monkeypatch)
     _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        "daydream.phases.shutil.which",
-        lambda cmd: "/usr/bin/pbcopy" if cmd == "pbcopy" else None,
-    )
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: True)
 
     copied: list[str] = []
     monkeypatch.setattr(
@@ -1211,7 +1203,7 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
 
     _silence_phase_io(monkeypatch)
     _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
 
     infos: list[str] = []
     monkeypatch.setattr(
@@ -1260,7 +1252,7 @@ async def test_phase_test_and_heal_option4_no_recorder_writes_fallback_handoff(
 
     _silence_phase_io(monkeypatch)
     monkeypatch.setattr("daydream.phases.get_current_recorder", lambda: None)
-    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
 
     captured_prompts_to_backend: list[str] = []
 
@@ -1310,7 +1302,7 @@ async def test_phase_test_and_heal_option4_summarizer_failure_writes_minimal(
 
     _silence_phase_io(monkeypatch)
     _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
 
     backend = _SummarizerBackend([
         "fail",
@@ -1344,7 +1336,7 @@ async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
 
     _silence_phase_io(monkeypatch)
     _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
 
     backend = _SummarizerBackend([
         "fail",
@@ -1565,7 +1557,7 @@ async def test_option4_calls_write_partial_before_summarizer(
 
     _silence_phase_io(monkeypatch)
     fake = _install_recorder(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.phases.shutil.which", lambda cmd: None)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
 
     backend = _SummarizerBackend([
         "fail",
