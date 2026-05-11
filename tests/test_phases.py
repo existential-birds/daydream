@@ -842,3 +842,211 @@ async def test_phase_commit_iteration_includes_daydream_trailers(tmp_path, monke
     assert "Daydream-Version:" in captured["prompt"]
     assert "Iteration: 2" in captured["prompt"]
     assert "Do NOT push" in captured["prompt"]
+
+
+# ---------------------------------------------------------------------------
+# phase_test_and_heal — option 1 setup-investigator wiring
+# ---------------------------------------------------------------------------
+
+
+def _silence_phase_io(monkeypatch) -> None:
+    """Silence Rich console output for phase_test_and_heal tests."""
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_menu", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_error", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "daydream.phases.console",
+        type("C", (), {"print": lambda *a, **kw: None})(),
+    )
+
+
+class _InvestigatorBackend:
+    """Mock backend whose calls cycle through scripted ResultEvents.
+
+    Each call to ``execute`` pops a script entry. The entry is either a
+    ``"fail"`` (yields plain failing test output) or a ``("verdict", dict)``
+    (yields a structured ResultEvent the investigator schema can parse) or
+    ``"pass"`` (yields passing output) or ``("raise", ExceptionType)`` (raises
+    inside execute to simulate investigator failure).
+    """
+
+    def __init__(self, script: list) -> None:
+        self.script = list(script)
+        self.captured_prompts: list[str] = []
+
+    async def execute(
+        self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None,
+    ):
+        self.captured_prompts.append(prompt)
+        if not self.script:
+            raise AssertionError("backend invoked beyond scripted call count")
+        entry = self.script.pop(0)
+        if entry == "fail":
+            yield TextEvent(text="1 failed, 0 passed")
+            yield ResultEvent(structured_output=None, continuation=None)
+        elif entry == "pass":
+            yield TextEvent(text="All 1 tests passed")
+            yield ResultEvent(structured_output=None, continuation=None)
+        elif isinstance(entry, tuple) and entry[0] == "verdict":
+            yield ResultEvent(structured_output=entry[1], continuation=None)
+        elif isinstance(entry, tuple) and entry[0] == "raise":
+            raise entry[1]("scripted investigator failure")
+        elif isinstance(entry, tuple) and entry[0] == "text_json":
+            # Simulate JSON-as-text that won't satisfy investigator schema
+            yield TextEvent(text=entry[1])
+            yield ResultEvent(structured_output=None, continuation=None)
+        else:
+            raise AssertionError(f"unknown script entry: {entry!r}")
+
+    async def cancel(self):
+        pass
+
+    def format_skill_invocation(self, skill_key, args=""):
+        return f"/{skill_key}"
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_option1_verdict_correct_uses_original_prompt(
+    tmp_path, monkeypatch, make_work,
+):
+    """Investigator verdict 'correct' → retry uses the original generic prompt."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+
+    backend = _InvestigatorBackend([
+        "fail",  # initial test run -> fail
+        ("verdict", {
+            "verdict": "correct",
+            "suggested_command": None,
+            "reason": "make test is the canonical target",
+        }),  # investigator
+        "pass",  # retry succeeds
+    ])
+
+    choices = iter(["1"])  # user picks option 1 once
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+    )
+
+    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+
+    assert success is True
+    assert retries == 1
+    # Three prompts captured: initial test, investigator, retry test
+    assert len(backend.captured_prompts) == 3
+    # Investigator prompt is the read-only diagnostic prompt
+    assert "read-only setup-investigator" in backend.captured_prompts[1]
+    # Retry prompt is the original generic one (no pinned command)
+    assert backend.captured_prompts[2] == backend.captured_prompts[0]
+    assert "Run this exact test command" not in backend.captured_prompts[2]
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
+    tmp_path, monkeypatch, make_work,
+):
+    """Investigator suggests replacement + user confirms → retry pins new command."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+
+    backend = _InvestigatorBackend([
+        "fail",
+        ("verdict", {
+            "verdict": "replace",
+            "suggested_command": "make check",
+            "reason": "Makefile defines `check` as the CI test target",
+        }),
+        "pass",
+    ])
+
+    # First prompt_user call: "Choice" -> "1". Second: confirm "y".
+    answers = iter(["1", "y"])
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user", lambda *a, **kw: next(answers, "3"),
+    )
+
+    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+
+    assert success is True
+    assert retries == 1
+    assert len(backend.captured_prompts) == 3
+    # Retry uses the pinned command prompt
+    retry_prompt = backend.captured_prompts[2]
+    assert "Run this exact test command: make check" in retry_prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_option1_verdict_replace_user_declines(
+    tmp_path, monkeypatch, make_work,
+):
+    """Investigator suggests replacement + user declines → retry uses original prompt."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+
+    backend = _InvestigatorBackend([
+        "fail",
+        ("verdict", {
+            "verdict": "replace",
+            "suggested_command": "make check",
+            "reason": "Makefile defines `check`",
+        }),
+        "pass",
+    ])
+
+    answers = iter(["1", "n"])
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user", lambda *a, **kw: next(answers, "3"),
+    )
+
+    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+
+    assert success is True
+    assert retries == 1
+    # Retry uses the original generic prompt; suggestion not pinned
+    assert backend.captured_prompts[2] == backend.captured_prompts[0]
+    assert "Run this exact test command" not in backend.captured_prompts[2]
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
+    tmp_path, monkeypatch, make_work,
+):
+    """Investigator raising / returning garbage → warning + retry with original cmd."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+
+    warnings_captured: list[str] = []
+    monkeypatch.setattr(
+        "daydream.phases.print_warning",
+        lambda console_arg, message: warnings_captured.append(message),
+    )
+
+    backend = _InvestigatorBackend([
+        "fail",
+        ("raise", RuntimeError),  # investigator blows up
+        "pass",
+    ])
+
+    choices = iter(["1"])
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
+    )
+
+    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+
+    assert success is True
+    assert retries == 1
+    # The fallback warning was emitted
+    assert any(
+        "Setup investigator failed" in msg for msg in warnings_captured
+    ), f"Expected fallback warning, got: {warnings_captured!r}"
+    # Retry happened with the original generic prompt
+    assert backend.captured_prompts[2] == backend.captured_prompts[0]
+    assert "Run this exact test command" not in backend.captured_prompts[2]

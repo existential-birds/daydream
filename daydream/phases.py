@@ -77,6 +77,120 @@ def _build_fix_prompt(
     return "\n".join(parts)
 
 
+def _build_setup_investigator_prompt(test_output: str) -> str:
+    """Build a read-only diagnostic prompt for the setup-investigator subagent.
+
+    The investigator diagnoses whether the test invocation itself was wrong
+    (wrong command, missing setup step, missing env var) — NOT whether the
+    code under test is broken. It is strictly read-only.
+
+    Args:
+        test_output: Raw failing test output to include verbatim.
+
+    Returns:
+        Prompt string demanding a JSON verdict.
+
+    """
+    lines = test_output.splitlines()
+    if len(lines) > TEST_OUTPUT_TAIL_LINES:
+        truncated = "\n".join(lines[-TEST_OUTPUT_TAIL_LINES:])
+        output_section = f"Tail of the failing test output:\n\n{truncated}"
+    else:
+        output_section = f"Failing test output:\n\n{test_output}"
+
+    return (
+        "You are a read-only setup-investigator. Your ONLY job is to decide whether "
+        "the test command that just failed was the WRONG command to run — not whether "
+        "the code under test is broken.\n\n"
+        "## Hard Constraints (read-only contract)\n"
+        "- You MAY use Read, Grep, and Glob to inspect files.\n"
+        "- You MAY use Bash for NON-MUTATING discovery only: `make help`, `npm run` "
+        "(no script name — just list scripts), `ls`, `cat`, `pwd`, `git status`.\n"
+        "- You MUST NOT run tests, build steps, or installers.\n"
+        "- You MUST NOT modify, create, or delete any files.\n"
+        "- You MUST NOT invoke Write, Edit, or any file-mutating tool.\n\n"
+        "## Files to inspect\n"
+        "Look at these to discover the project's canonical test invocation:\n"
+        "- `Makefile` (look for `test`, `check`, `ci` targets)\n"
+        "- `pyproject.toml` (scripts, tool config)\n"
+        "- `package.json` (scripts)\n"
+        "- CI configs: `.github/workflows/`, `.circleci/`, `.gitlab-ci.yml`\n"
+        "- `CLAUDE.md` and `README*` for documented test commands\n\n"
+        f"## Failing invocation\n\n{output_section}\n\n"
+        "## Output\n"
+        "Return a JSON object matching this schema (and ONLY this JSON, no prose):\n"
+        '{"verdict": "correct" | "replace", '
+        '"suggested_command": <string or null>, '
+        '"reason": <string>}\n\n'
+        "- `verdict: \"correct\"` means the command was the right one; failure is "
+        "code/test breakage, not invocation error. Set `suggested_command` to null.\n"
+        "- `verdict: \"replace\"` means a different command should have been used. "
+        "Set `suggested_command` to the exact shell command to run.\n"
+        "- `reason` is a one-sentence explanation citing the file/line evidence."
+    )
+
+
+SETUP_INVESTIGATOR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["correct", "replace"]},
+        "suggested_command": {"type": ["string", "null"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["verdict", "suggested_command", "reason"],
+    "additionalProperties": False,
+}
+
+
+async def _run_setup_investigator(
+    backend: Backend,
+    work: WorkContext,
+    test_output: str,
+) -> dict[str, Any] | None:
+    """Run the read-only setup-investigator subagent and return its verdict.
+
+    Wraps the invocation in ``recorder.fork("setup-investigator")`` when a
+    trajectory recorder is active so the diagnostic call is captured as its
+    own sub-trajectory. Returns ``None`` on any failure (exception during
+    ``run_agent`` or unparseable JSON) so the caller can fall back to the
+    original retry command.
+
+    Args:
+        backend: The Backend to execute against.
+        work: Workspace context; ``work.repo`` is the agent cwd.
+        test_output: Raw failing test output to embed in the prompt.
+
+    Returns:
+        Parsed verdict dict with keys ``verdict``, ``suggested_command``,
+        ``reason`` on success, or ``None`` on any failure.
+
+    """
+    recorder = get_current_recorder()
+    prompt = _build_setup_investigator_prompt(test_output)
+
+    async def _invoke() -> dict[str, Any] | None:
+        try:
+            result, _ = await run_agent(
+                backend,
+                work.repo,
+                prompt,
+                output_schema=SETUP_INVESTIGATOR_SCHEMA,
+                phase=DaydreamPhase.TEST,
+            )
+        except Exception:  # noqa: BLE001 - investigator failure is non-fatal
+            return None
+
+        if isinstance(result, dict) and "verdict" in result:
+            return result
+        return None
+
+    try:
+        async with maybe_fork(recorder, "setup-investigator"):
+            return await _invoke()
+    except Exception:  # noqa: BLE001 - fork bookkeeping failures are non-fatal
+        return None
+
+
 def _parse_issue_selection(user_input: str, issues: list[dict[str, Any]]) -> list[int] | None:
     """Parse user's issue selection into a list of issue IDs.
 
@@ -801,6 +915,7 @@ async def phase_test_and_heal(
 
     retries_used = 0
     continuation: ContinuationToken | None = None
+    test_command_override: str | None = None
 
     while True:
         console.print()
@@ -809,7 +924,16 @@ async def phase_test_and_heal(
         else:
             print_info(console, "Running test suite...")
 
-        prompt = "Run the project's test suite. Report if tests pass or fail."
+        if test_command_override:
+            prompt = (
+                f"Run this exact test command: {test_command_override}\n"
+                "Report if tests pass or fail."
+            )
+        else:
+            prompt = "Run the project's test suite. Report if tests pass or fail."
+        # Reset override after using it; subsequent loop iterations choose fresh.
+        test_command_override = None
+
         output, continuation = await run_agent(
             backend, work.repo, prompt, continuation=continuation, phase=DaydreamPhase.TEST,
         )
@@ -831,6 +955,26 @@ async def phase_test_and_heal(
         choice = prompt_user(console, "Choice", "2")
 
         if choice == "1":
+            verdict = await _run_setup_investigator(backend, work, output)
+
+            if verdict is None:
+                print_warning(
+                    console,
+                    "Setup investigator failed; retrying with original command",
+                )
+            else:
+                v = verdict.get("verdict")
+                reason = verdict.get("reason", "")
+                suggested = verdict.get("suggested_command")
+                print_info(console, f"Setup investigator verdict: {v} — {reason}")
+
+                if v == "replace" and isinstance(suggested, str) and suggested.strip():
+                    response = prompt_user(
+                        console, "Use suggested command instead?", "n",
+                    )
+                    if response.lower() in ("y", "yes"):
+                        test_command_override = suggested.strip()
+
             retries_used += 1
             continue
 
