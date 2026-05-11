@@ -1724,14 +1724,32 @@ async def test_phase_test_and_heal_option1_shows_suggested_command_before_confir
 
 def _init_git_repo(repo: Path) -> None:
     """Initialize a minimal git repo with a single tracked commit."""
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    subprocess.run(  # noqa: S603
+        ["git", "init", "-q", "-b", "main"],  # noqa: S607
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "config", "user.email", "t@t"],  # noqa: S607
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "config", "user.name", "t"],  # noqa: S607
+        cwd=repo,
+        check=True,
+    )
     seed = repo / "seed.txt"
     seed.write_text("seed\n", encoding="utf-8")
-    subprocess.run(["git", "add", "seed.txt"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True,
+    subprocess.run(  # noqa: S603
+        ["git", "add", "seed.txt"],  # noqa: S607
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "commit", "-q", "-m", "seed"],  # noqa: S607
+        cwd=repo,
+        check=True,
     )
 
 
