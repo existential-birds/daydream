@@ -151,6 +151,19 @@ SETUP_INVESTIGATOR_SCHEMA: dict[str, Any] = {
 }
 
 
+def _sanitize_suggested_command(raw: str) -> str:
+    """Sanitize an LLM-suggested shell command for safe inclusion in a fenced prompt.
+
+    Collapses all whitespace runs to a single space and strips backticks.
+    Newlines and backticks are the two characters that can break out of a
+    triple-backtick code fence in a downstream prompt; nothing in a legitimate
+    test command requires either. The result is suitable for both the
+    next-turn ``run_agent`` prompt and for surfacing in the user-facing
+    confirmation preview.
+    """
+    return " ".join(raw.replace("`", "").split())
+
+
 async def _run_setup_investigator(
     backend: Backend,
     work: WorkContext,
@@ -357,15 +370,13 @@ def _resolve_handoff_paths(
         handoff_path = work.source / ".daydream" / f"handoff-{ts}.md"
         return handoff_path, None, None, None, None, None
 
-    handoff_run_dir = work.source / ".daydream" / "runs" / recorder.session_id
-    handoff_path = handoff_run_dir / "handoff.md"
-
     archive_enabled = recorder.on_write is not None
     if work.is_ephemeral and archive_enabled:
         # The ephemeral worktree (and everything under it) will be
         # removed after the recorder exits; the archive callback copies
-        # the bundle to <archive_root>/runs/<session_id>/. Reference the
-        # archive paths so the handoff stays valid post-cleanup.
+        # the bundle to <archive_root>/runs/<session_id>/. Write the
+        # handoff alongside the archived artifacts so the bundle is
+        # self-contained and post-cleanup references stay valid.
         from daydream.archive import get_archive_dir
 
         artifact_root = get_archive_dir() / "runs" / recorder.session_id
@@ -375,6 +386,8 @@ def _resolve_handoff_paths(
         artifact_root = recorder.target_dir / ".daydream" / "runs" / recorder.session_id
         diff_path = recorder.target_dir / ".daydream" / "diff.patch"
         deep_dir = recorder.target_dir / ".daydream" / "deep"
+
+    handoff_path = artifact_root / "handoff.md"
 
     trajectory_path = artifact_root / "trajectory.json"
     trajectories_dir = artifact_root / "trajectories"
@@ -390,13 +403,21 @@ def _resolve_handoff_paths(
     )
 
 
-def _write_handoff(path: Path, body: str) -> None:
-    """Write *body* to *path*, creating parent directories as needed."""
+def _write_handoff(path: Path, body: str) -> bool:
+    """Write *body* to *path*, creating parent directories as needed.
+
+    Returns ``True`` on success, ``False`` on ``OSError`` (filesystem
+    full, permission denied, parent directory cleaned up mid-run, etc.).
+    The caller is responsible for surfacing the body inline when this
+    returns False so the user does not lose the handoff content.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8")
     except OSError:
         _logger.warning("failed to write handoff to %s", path, exc_info=True)
+        return False
+    return True
 
 
 def _build_minimal_handoff(
@@ -486,7 +507,7 @@ async def _run_failure_summarizer(
     backend: Backend,
     work: WorkContext,
     test_output: str,
-) -> tuple[str, Path]:
+) -> tuple[str, Path, bool]:
     """Run the read-only failure-summarizer and write ``handoff.md``.
 
     Always writes a handoff file — falls back to ``_build_minimal_handoff``
@@ -501,8 +522,10 @@ async def _run_failure_summarizer(
         test_output: Raw failing test output to ground the summary.
 
     Returns:
-        Tuple ``(handoff_body, handoff_path)``. The body is also what
-        was written to disk.
+        Tuple ``(handoff_body, handoff_path, written)``. ``written`` is
+        ``False`` when the filesystem write failed; callers must surface
+        the body inline in that case so the user does not lose it. The
+        body is what was written to disk on success.
     """
     recorder = get_current_recorder()
     (
@@ -574,8 +597,8 @@ async def _run_failure_summarizer(
             has_trajectory=has_trajectory,
         )
 
-    _write_handoff(handoff_path, body)
-    return body, handoff_path
+    written = _write_handoff(handoff_path, body)
+    return body, handoff_path, written
 
 
 def _parse_issue_selection(user_input: str, issues: list[dict[str, Any]]) -> list[int] | None:
@@ -1312,9 +1335,7 @@ async def phase_test_and_heal(
             print_info(console, "Running test suite...")
 
         if test_command_override:
-            # Sanitize LLM-suggested command: collapse to single line,
-            # strip control chars that could escape the code fence.
-            sanitized_cmd = " ".join(test_command_override.split())
+            sanitized_cmd = _sanitize_suggested_command(test_command_override)
             prompt = (
                 "Run this exact test command:\n"
                 f"```\n{sanitized_cmd}\n```\n"
@@ -1365,11 +1386,21 @@ async def phase_test_and_heal(
                 print_info(console, f"Setup investigator verdict: {v} — {reason}")
 
                 if v == "replace" and isinstance(suggested, str) and suggested.strip():
+                    # Show the sanitized command the user would actually run
+                    # *before* asking them to approve it. Sanitization (same
+                    # transform used for the retry prompt) collapses
+                    # whitespace and strips backticks so the preview matches
+                    # what gets pinned and any fence-break attempts are
+                    # visible.
+                    sanitized_preview = _sanitize_suggested_command(suggested)
+                    print_info(
+                        console, f"Suggested command: {sanitized_preview}",
+                    )
                     response = prompt_user(
                         console, "Use suggested command instead?", "n",
                     )
                     if response.lower() in ("y", "yes"):
-                        test_command_override = suggested.strip()
+                        test_command_override = sanitized_preview
 
             retries_used += 1
             continue
@@ -1389,20 +1420,33 @@ async def phase_test_and_heal(
 
         elif choice == "4":
             print_error(console, "Aborted", "User requested abort")
-            body, handoff_path = await _run_failure_summarizer(backend, work, output)
-            # Show a short preview — the full handoff can be large enough
-            # to push important messages off-screen.
-            preview_lines = body.splitlines()
-            max_preview = 20
-            if len(preview_lines) <= max_preview:
-                console.print(body)
+            body, handoff_path, handoff_written = await _run_failure_summarizer(
+                backend, work, output,
+            )
+            if handoff_written:
+                # Show a short preview — the full handoff can be large enough
+                # to push important messages off-screen.
+                preview_lines = body.splitlines()
+                max_preview = 20
+                if len(preview_lines) <= max_preview:
+                    console.print(body)
+                else:
+                    console.print("\n".join(preview_lines[:max_preview]))
+                    print_info(
+                        console,
+                        f"... ({len(preview_lines) - max_preview} more lines, see file below)",
+                    )
+                print_info(console, f"Handoff written: {handoff_path}")
             else:
-                console.print("\n".join(preview_lines[:max_preview]))
-                print_info(
+                # Filesystem write failed (full disk, perms, parent gone).
+                # The path printed above would not exist — surface the full
+                # body inline so the user can copy it manually.
+                print_warning(
                     console,
-                    f"... ({len(preview_lines) - max_preview} more lines, see file below)",
+                    f"Failed to write handoff to {handoff_path}; "
+                    "printing inline so it is not lost:",
                 )
-            print_info(console, f"Handoff written: {handoff_path}")
+                console.print(body)
 
             if clipboard_available():
                 response = prompt_user(console, "Copy handoff to clipboard?", "y")
@@ -1410,12 +1454,22 @@ async def phase_test_and_heal(
                     if copy_to_clipboard(body):
                         print_success(console, "Handoff copied to clipboard")
                     else:
+                        recovery = (
+                            "copy manually from path above"
+                            if handoff_written
+                            else "copy manually from the inline output above"
+                        )
                         print_warning(
-                            console, "Clipboard copy failed; copy manually from path above",
+                            console, f"Clipboard copy failed; {recovery}",
                         )
             else:
+                recovery = (
+                    "copy manually from path above"
+                    if handoff_written
+                    else "copy manually from the inline output above"
+                )
                 print_info(
-                    console, "(clipboard unavailable, copy manually from path above)",
+                    console, f"(clipboard unavailable, {recovery})",
                 )
 
             return False, retries_used
