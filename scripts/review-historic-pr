@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+#
+# Review a historic (already-merged) GitHub pull request with daydream.
+#
+# Pins the review to the exact code state the PR introduced: PR head against
+# the merge-base on the original target branch. This gives apples-to-apples
+# output with whatever was reviewed at PR time (e.g. greptile, coderabbit).
+#
+# Usage:
+#   scripts/review-historic-pr <PR_NUMBER> [TARGET_DIR]
+#
+# Examples:
+#   scripts/review-historic-pr 42
+#   scripts/review-historic-pr 42 /path/to/repo
+#   KEEP_BRANCHES=1 scripts/review-historic-pr 42        # skip branch cleanup
+#   DAYDREAM_ARGS="--shallow" scripts/review-historic-pr 42
+#   ZIP=1 scripts/review-historic-pr 42                  # auto-bundle (no prompt)
+#   ZIP=0 scripts/review-historic-pr 42                  # skip bundling
+#   ZIP_OUT=/tmp/out.zip scripts/review-historic-pr 42   # bundle path override
+#
+# Outputs (on success):
+#   <repo>/.review-output.md                — merged review with file/line/body
+#   <repo>/.daydream/runs/<uuid>/...        — ATIF trajectory + sibling forks
+#   <bundle.zip>                            — both of the above, if confirmed
+#
+# Requires: gh, git, jq, daydream on $PATH. zip required only when bundling.
+
+set -euo pipefail
+
+usage() {
+  sed -n '3,27p' "$0" | sed 's/^# \{0,1\}//'
+  exit 64
+}
+
+[[ $# -lt 1 || $# -gt 2 ]] && usage
+[[ "${1:-}" =~ ^[0-9]+$ ]] || { echo "error: PR_NUMBER must be numeric" >&2; usage; }
+
+PR="$1"
+TARGET_DIR="${2:-.}"
+ORIG_PWD="$(pwd)"
+
+for cmd in gh git jq daydream; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "error: $cmd not on \$PATH" >&2; exit 127; }
+done
+
+cd "$TARGET_DIR"
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "error: $TARGET_DIR is not a git repo" >&2; exit 1; }
+
+HEAD_BR="daydream-pr-${PR}-$$"
+BASE_BR="daydream-pr-${PR}-$$-base"
+
+cleanup() {
+  if [[ "${KEEP_BRANCHES:-0}" != "1" ]]; then
+    git branch -D "$HEAD_BR" "$BASE_BR" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+echo "→ Fetching PR #$PR metadata..."
+META="$(gh pr view "$PR" --json baseRefName,state,mergedAt,mergeCommit)"
+BASE_BRANCH="$(jq -r .baseRefName <<<"$META")"
+STATE="$(jq -r .state <<<"$META")"
+MERGED_AT="$(jq -r .mergedAt <<<"$META")"
+MERGE_COMMIT="$(jq -r '.mergeCommit.oid // empty' <<<"$META")"
+
+echo "  state=$STATE  base=$BASE_BRANCH  merged_at=$MERGED_AT"
+
+[[ "$STATE" == "MERGED" ]] || { echo "error: PR #$PR is not merged (state=$STATE)" >&2; exit 1; }
+
+echo "→ Fetching PR head ref (refs/pull/$PR/head) → $HEAD_BR..."
+git fetch --quiet origin "pull/$PR/head:$HEAD_BR" --force
+
+echo "→ Fetching base branch ($BASE_BRANCH)..."
+git fetch --quiet origin "$BASE_BRANCH"
+
+HEAD_SHA="$(git rev-parse "$HEAD_BR")"
+BASE_SHA="$(git merge-base "$HEAD_BR" "origin/$BASE_BRANCH")"
+# Merge-commit merges leave the PR head as an ancestor of the base branch, so
+# merge-base collapses to HEAD_SHA. Fall back to the merge commit's first
+# parent — the base tip at merge time — to recover the true historical base.
+if [[ "$BASE_SHA" == "$HEAD_SHA" && -n "$MERGE_COMMIT" ]]; then
+  PARENTS="$(git show -s --format=%P "$MERGE_COMMIT")"
+  # shellcheck disable=SC2086
+  set -- $PARENTS
+  if [[ $# -ge 2 ]]; then
+    BASE_SHA="$1"
+    echo "→ merge-base collapsed to HEAD; using merge-commit first parent"
+  fi
+fi
+echo "→ Historical merge-base: $BASE_SHA"
+git branch -f "$BASE_BR" "$BASE_SHA" >/dev/null
+
+echo "→ Running daydream --review..."
+START_EPOCH=$(date +%s)
+# shellcheck disable=SC2086
+daydream --review \
+  --branch "$HEAD_BR" \
+  --base "$BASE_BR" \
+  ${DAYDREAM_ARGS:-} \
+  .
+
+# Locate the trajectory run dir produced by this invocation. daydream writes
+# main + fork trajectories under <repo>/.daydream/runs/<session_id>/ with a
+# UUID we don't know up front; pick the newest dir whose mtime postdates the
+# daydream launch so we don't grab a stale run.
+RUN_DIR=""
+if [[ -d .daydream/runs ]]; then
+  newest="$(ls -1dt .daydream/runs/*/ 2>/dev/null | head -1 || true)"
+  newest="${newest%/}"
+  if [[ -n "$newest" && -d "$newest" ]]; then
+    mtime="$(stat -f '%m' "$newest" 2>/dev/null || stat -c '%Y' "$newest" 2>/dev/null || echo 0)"
+    [[ "$mtime" -ge "$START_EPOCH" ]] && RUN_DIR="$newest"
+  fi
+fi
+
+REVIEW_MD=".review-output.md"
+
+if [[ -z "$RUN_DIR" || ! -f "$REVIEW_MD" ]]; then
+  echo "error: missing required artifacts (run_dir='${RUN_DIR:-<missing>}', review='${REVIEW_MD}' exists=$([[ -f "$REVIEW_MD" ]] && echo yes || echo no))" >&2
+  exit 1
+fi
+
+DEFAULT_ZIP="$ORIG_PWD/daydream-pr-${PR}-$(date -u +%Y%m%dT%H%M%SZ).zip"
+ZIP_PATH="${ZIP_OUT:-$DEFAULT_ZIP}"
+
+do_zip=""
+case "${ZIP:-}" in
+  1) do_zip=yes ;;
+  0) do_zip=no ;;
+  *)
+    if [[ -t 0 ]]; then
+      read -r -p "Bundle trajectory + review into $ZIP_PATH? [Y/n] " ans
+      [[ "$ans" =~ ^[Nn] ]] && do_zip=no || do_zip=yes
+    else
+      do_zip=yes  # non-interactive: default to bundling
+    fi
+    ;;
+esac
+
+if [[ "$do_zip" == "yes" ]]; then
+  command -v zip >/dev/null 2>&1 || { echo "error: zip not on \$PATH (set ZIP=0 to skip)" >&2; exit 127; }
+  mkdir -p "$(dirname "$ZIP_PATH")"
+  zip -qr "$ZIP_PATH" "$RUN_DIR" "$REVIEW_MD"
+  echo "→ Wrote $ZIP_PATH"
+else
+  echo "→ Skipped bundle. Artifacts at: $RUN_DIR, $(pwd)/$REVIEW_MD"
+fi
