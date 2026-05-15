@@ -37,8 +37,8 @@ done
 cd "$TARGET_DIR"
 git rev-parse --git-dir >/dev/null 2>&1 || { echo "error: $TARGET_DIR is not a git repo" >&2; exit 1; }
 
-HEAD_BR="daydream-pr-${PR}"
-BASE_BR="daydream-pr-${PR}-base"
+HEAD_BR="daydream-pr-${PR}-$$"
+BASE_BR="daydream-pr-${PR}-$$-base"
 
 cleanup() {
   if [[ "${KEEP_BRANCHES:-0}" != "1" ]]; then
@@ -54,6 +54,8 @@ STATE="$(jq -r .state <<<"$META")"
 MERGED_AT="$(jq -r .mergedAt <<<"$META")"
 
 echo "  state=$STATE  base=$BASE_BRANCH  merged_at=$MERGED_AT"
+
+[[ "$STATE" == "MERGED" ]] || { echo "error: PR #$PR is not merged (state=$STATE)" >&2; exit 1; }
 
 echo "→ Fetching PR head ref (refs/pull/$PR/head) → $HEAD_BR..."
 git fetch --quiet origin "pull/$PR/head:$HEAD_BR" --force
