@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""Batch-evaluate archived daydream runs in parallel.
+
+Runs the deterministic analyzer on every run in the archive that matches
+the given time window, writes per-run evaluation JSON, and prints a
+summary table to stdout.
+
+Usage:
+  scripts/batch-eval [OPTIONS]
+
+Options:
+  --days N          Evaluate runs from the last N days (default: 21)
+  --since DATE      Evaluate runs archived on or after DATE (ISO 8601)
+  --workers N       Parallel worker count (default: cpu_count)
+  --archive DIR     Override archive directory (default: ~/.daydream/archive)
+  --pr              Auto-fetch PR feedback for runs with PR metadata
+  --json            Print full JSON array instead of summary table
+  --reuse           Skip runs that already have an evaluation JSON
+  -h, --help        Show this help
+
+Examples:
+  scripts/batch-eval                          # Last 3 weeks, default parallelism
+  scripts/batch-eval --days 7                 # Last week only
+  scripts/batch-eval --since 2026-05-01       # Since May 1st
+  scripts/batch-eval --workers 2 --pr         # 2 workers, include PR feedback
+  scripts/batch-eval --json > evals.json      # Machine-readable output
+
+Outputs:
+  Per-run: <archive>/runs/<session>/evaluation.json
+  Stdout:  Summary table (or JSON with --json)
+"""
+
+import argparse
+import json
+import os
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Batch-evaluate archived daydream runs",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--days", type=int, default=21, help="Evaluate runs from the last N days")
+    p.add_argument("--since", type=str, help="Evaluate runs archived on or after DATE (ISO 8601)")
+    p.add_argument("--workers", type=int, default=os.cpu_count(), help="Parallel worker count")
+    p.add_argument("--archive", type=str, default=None, help="Override archive directory")
+    p.add_argument("--pr", action="store_true", help="Auto-fetch PR feedback for runs with PR metadata")
+    p.add_argument("--json", action="store_true", help="Print full JSON array instead of summary table")
+    p.add_argument("--reuse", action="store_true", help="Skip runs that already have an evaluation JSON")
+    return p.parse_args()
+
+
+def resolve_archive_dir(override: str | None) -> Path:
+    if override:
+        return Path(override)
+    env = os.environ.get("DAYDREAM_ARCHIVE_DIR")
+    if env:
+        return Path(env)
+    return Path.home() / ".daydream" / "archive"
+
+
+def discover_runs(archive_dir: Path, cutoff: datetime) -> list[dict]:
+    """Find all run directories with manifests archived after cutoff."""
+    runs_dir = archive_dir / "runs"
+    if not runs_dir.is_dir():
+        return []
+
+    results = []
+    for d in sorted(runs_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        manifest_path = d / "manifest.json"
+        if not manifest_path.is_file():
+            # No manifest — check trajectory.json mtime as fallback
+            traj = d / "trajectory.json"
+            if not traj.is_file():
+                continue
+            mtime = datetime.fromtimestamp(traj.stat().st_mtime, tz=timezone.utc)
+            if mtime < cutoff:
+                continue
+            results.append({
+                "session_id": d.name,
+                "run_dir": d,
+                "archived_at": mtime.isoformat(),
+                "manifest": None,
+            })
+            continue
+
+        manifest = json.loads(manifest_path.read_text())
+        archived_at = manifest.get("archived_at", "")
+        try:
+            ts = datetime.fromisoformat(archived_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if ts < cutoff:
+            continue
+
+        results.append({
+            "session_id": manifest.get("session_id", d.name),
+            "run_dir": d,
+            "archived_at": archived_at,
+            "manifest": manifest,
+        })
+
+    return results
+
+
+def evaluate_one(archive_dir: Path, session_id: str, fetch_pr: bool) -> dict:
+    """Run the analyzer on a single session. Executed in a worker process."""
+    # Import inside worker to avoid pickling issues
+    from daydream.eval.analyzer import analyze_session
+
+    result = analyze_session(archive_dir, session_id=session_id)
+
+    if fetch_pr and "error" not in result:
+        pr_meta = result.get("pr") or {}
+        pr_repo = pr_meta.get("pr_repo")
+        pr_number = pr_meta.get("pr_number")
+        if pr_repo and pr_number:
+            try:
+                from daydream.eval.pr_feedback import fetch_pr_feedback
+
+                deep_dir = archive_dir / "runs" / session_id / "deep"
+                findings = []
+                if deep_dir.is_dir():
+                    for f in sorted(deep_dir.glob("stack-*-records.json")):
+                        findings.extend(json.loads(f.read_text()))
+                result["pr_feedback"] = fetch_pr_feedback(pr_repo, pr_number, findings)
+            except Exception as exc:  # noqa: BLE001
+                result["pr_feedback_error"] = str(exc)
+
+    return result
+
+
+def write_evaluation(run_dir: Path, result: dict) -> Path:
+    """Write evaluation.json to the run directory."""
+    out_path = run_dir / "evaluation.json"
+    out_path.write_text(json.dumps(result, indent=2) + "\n")
+    return out_path
+
+
+def format_table(runs: list[dict], results: list[dict]) -> str:
+    """Format a summary table from run metadata and analyzer results."""
+    lines = []
+
+    # Header
+    cols = [
+        ("Session", 10),
+        ("Repo", 25),
+        ("Branch", 22),
+        ("Cost", 8),
+        ("Findings", 8),
+        ("Grounded", 8),
+        ("Coverage", 8),
+        ("Agents", 6),
+        ("Status", 8),
+    ]
+    header = "  ".join(f"{name:<{w}}" for name, w in cols)
+    lines.append(header)
+    lines.append("-" * len(header))
+
+    for run, result in zip(runs, results):
+        manifest = run.get("manifest") or {}
+        git = manifest.get("git") or {}
+        sid = run["session_id"][:8]
+
+        if "error" in result:
+            lines.append(f"  {sid:<10}  {'':25}  {'':22}  {'':8}  {'':8}  {'':8}  {'':8}  {'':6}  ERROR")
+            continue
+
+        repo = git.get("repo_slug", "")[:25]
+        branch = git.get("branch", "")[:22]
+        cost = f"${result.get('cost', {}).get('total_cost_usd', 0):.2f}"
+        findings = str(result.get("findings", {}).get("total", 0))
+        grounding = result.get("grounding", {})
+        gr_rate = grounding.get("grounding_rate")
+        gr_str = f"{gr_rate:.0%}" if gr_rate is not None else "n/a"
+        cov = result.get("coverage", {}).get("coverage_ratio")
+        cov_str = f"{cov:.0%}" if cov is not None else "n/a"
+        agents = str(result.get("trajectory_count", 0))
+
+        lines.append(
+            f"  {sid:<10}  {repo:<25}  {branch:<22}  {cost:<8}  {findings:<8}  "
+            f"{gr_str:<8}  {cov_str:<8}  {agents:<6}  ok"
+        )
+
+    # Summary
+    ok_results = [r for r in results if "error" not in r]
+    if ok_results:
+        total_cost = sum(r.get("cost", {}).get("total_cost_usd", 0) for r in ok_results)
+        total_findings = sum(r.get("findings", {}).get("total", 0) for r in ok_results)
+        avg_grounding = (
+            sum(r.get("grounding", {}).get("grounding_rate", 0) for r in ok_results) / len(ok_results)
+        )
+        lines.append("-" * len(header))
+        lines.append(
+            f"  {'TOTAL':<10}  {len(ok_results)} runs{'':<20}  {'':<22}  "
+            f"${total_cost:<7.2f}  {total_findings:<8}  {avg_grounding:<7.0%}  {'':<8}  {'':<6}"
+        )
+
+    return "\n".join(lines)
+
+
+def main() -> int:
+    args = parse_args()
+
+    archive_dir = resolve_archive_dir(args.archive)
+    if not archive_dir.is_dir():
+        print(f"error: archive directory not found: {archive_dir}", file=sys.stderr)
+        return 1
+
+    # Resolve cutoff
+    if args.since:
+        try:
+            cutoff = datetime.fromisoformat(args.since)
+            if cutoff.tzinfo is None:
+                cutoff = cutoff.replace(tzinfo=timezone.utc)
+        except ValueError:
+            print(f"error: invalid date: {args.since}", file=sys.stderr)
+            return 1
+    else:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+
+    runs = discover_runs(archive_dir, cutoff)
+    if not runs:
+        print(f"No runs found in {archive_dir} since {cutoff.date()}", file=sys.stderr)
+        return 0
+
+    print(f"Found {len(runs)} run(s) since {cutoff.date()}", file=sys.stderr)
+
+    # Check for existing evaluations when --reuse
+    if args.reuse:
+        to_eval = []
+        reused = []
+        for run in runs:
+            eval_path = run["run_dir"] / "evaluation.json"
+            if eval_path.is_file():
+                reused.append((run, json.loads(eval_path.read_text())))
+            else:
+                to_eval.append(run)
+        if reused:
+            print(f"Reusing {len(reused)} existing evaluation(s)", file=sys.stderr)
+    else:
+        to_eval = runs
+        reused = []
+
+    # Run evaluations in parallel
+    results_map: dict[str, dict] = {}
+    errors = 0
+
+    if to_eval:
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            futures = {
+                pool.submit(evaluate_one, archive_dir, run["session_id"], args.pr): run
+                for run in to_eval
+            }
+            for future in as_completed(futures):
+                run = futures[future]
+                sid = run["session_id"][:8]
+                try:
+                    result = future.result()
+                    results_map[run["session_id"]] = result
+                    write_evaluation(run["run_dir"], result)
+                    status = "error" if "error" in result else "ok"
+                    print(f"  [{status}] {sid}", file=sys.stderr)
+                    if "error" in result:
+                        errors += 1
+                except Exception as exc:  # noqa: BLE001
+                    results_map[run["session_id"]] = {"error": str(exc)}
+                    print(f"  [fail] {sid}: {exc}", file=sys.stderr)
+                    errors += 1
+
+    # Merge reused results
+    for run, result in reused:
+        results_map[run["session_id"]] = result
+
+    # Order results to match input run order
+    ordered_results = [results_map[run["session_id"]] for run in runs]
+
+    # Output
+    if args.json:
+        json.dump(ordered_results, sys.stdout, indent=2)
+        print()
+    else:
+        print()
+        print(format_table(runs, ordered_results))
+
+    print(f"\n{len(runs)} evaluated, {errors} error(s)", file=sys.stderr)
+    return 1 if errors == len(runs) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

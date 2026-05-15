@@ -89,7 +89,7 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
                 data["_source_file"] = f.name
                 forked.append(data)
 
-    return {"main": main, "forked": forked}
+    return {"main": main, "forked": forked, "run_dir": run_dir}
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +554,13 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
     if not trajectories["main"] and not trajectories["forked"]:
         return {"error": f"No trajectory files found in {daydream_dir}"}
 
+    # Archive layout stores deep/ and diff.patch inside the run dir, not at the
+    # daydream_dir level.  Use run_dir for artifact lookups when it has them.
+    run_dir = trajectories.get("run_dir")
+    artifact_dir = daydream_dir
+    if run_dir and (run_dir / "deep").is_dir():
+        artifact_dir = run_dir
+
     main = trajectories["main"] or trajectories["forked"][0]
     session_id = main.get("session_id", "unknown")
     agent_info = main.get("agent", {})
@@ -565,8 +572,8 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
 
     costs = analyze_costs(trajectories)
     tools = analyze_tools(trajectories)
-    findings_data = analyze_findings(daydream_dir)
-    coverage = analyze_coverage(trajectories, daydream_dir)
+    findings_data = analyze_findings(artifact_dir)
+    coverage = analyze_coverage(trajectories, artifact_dir)
     grounding = analyze_grounding(trajectories, findings_data["findings"])
     exploration = analyze_exploration_utilization(trajectories)
     timing = analyze_timing(trajectories)
