@@ -116,8 +116,8 @@ fi
 REVIEW_MD=".review-output.md"
 
 if [[ -z "$RUN_DIR" || ! -f "$REVIEW_MD" ]]; then
-  echo "warn: skipping bundle (run_dir='${RUN_DIR:-<missing>}', review='${REVIEW_MD}' exists=$([[ -f "$REVIEW_MD" ]] && echo yes || echo no))" >&2
-  exit 0
+  echo "error: missing required artifacts (run_dir='${RUN_DIR:-<missing>}', review='${REVIEW_MD}' exists=$([[ -f "$REVIEW_MD" ]] && echo yes || echo no))" >&2
+  exit 1
 fi
 
 DEFAULT_ZIP="$ORIG_PWD/daydream-pr-${PR}-$(date -u +%Y%m%dT%H%M%SZ).zip"
