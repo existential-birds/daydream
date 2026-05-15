@@ -57,10 +57,11 @@ cleanup() {
 trap cleanup EXIT
 
 echo "→ Fetching PR #$PR metadata..."
-META="$(gh pr view "$PR" --json baseRefName,state,mergedAt)"
+META="$(gh pr view "$PR" --json baseRefName,state,mergedAt,mergeCommit)"
 BASE_BRANCH="$(jq -r .baseRefName <<<"$META")"
 STATE="$(jq -r .state <<<"$META")"
 MERGED_AT="$(jq -r .mergedAt <<<"$META")"
+MERGE_COMMIT="$(jq -r '.mergeCommit.oid // empty' <<<"$META")"
 
 echo "  state=$STATE  base=$BASE_BRANCH  merged_at=$MERGED_AT"
 
@@ -72,7 +73,20 @@ git fetch --quiet origin "pull/$PR/head:$HEAD_BR" --force
 echo "→ Fetching base branch ($BASE_BRANCH)..."
 git fetch --quiet origin "$BASE_BRANCH"
 
+HEAD_SHA="$(git rev-parse "$HEAD_BR")"
 BASE_SHA="$(git merge-base "$HEAD_BR" "origin/$BASE_BRANCH")"
+# Merge-commit merges leave the PR head as an ancestor of the base branch, so
+# merge-base collapses to HEAD_SHA. Fall back to the merge commit's first
+# parent — the base tip at merge time — to recover the true historical base.
+if [[ "$BASE_SHA" == "$HEAD_SHA" && -n "$MERGE_COMMIT" ]]; then
+  PARENTS="$(git show -s --format=%P "$MERGE_COMMIT")"
+  # shellcheck disable=SC2086
+  set -- $PARENTS
+  if [[ $# -ge 2 ]]; then
+    BASE_SHA="$1"
+    echo "→ merge-base collapsed to HEAD; using merge-commit first parent"
+  fi
+fi
 echo "→ Historical merge-base: $BASE_SHA"
 git branch -f "$BASE_BR" "$BASE_SHA" >/dev/null
 
