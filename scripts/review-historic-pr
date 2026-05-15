@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+#
+# Review a historic (already-merged) GitHub pull request with daydream.
+#
+# Pins the review to the exact code state the PR introduced: PR head against
+# the merge-base on the original target branch. This gives apples-to-apples
+# output with whatever was reviewed at PR time (e.g. greptile, coderabbit).
+#
+# Usage:
+#   scripts/review-historic-pr <PR_NUMBER> [TARGET_DIR]
+#
+# Examples:
+#   scripts/review-historic-pr 42
+#   scripts/review-historic-pr 42 /path/to/repo
+#   KEEP_BRANCHES=1 scripts/review-historic-pr 42        # skip cleanup
+#   DAYDREAM_ARGS="--shallow" scripts/review-historic-pr 42
+#
+# Requires: gh, git, jq, daydream on $PATH.
+
+set -euo pipefail
+
+usage() {
+  sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'
+  exit 64
+}
+
+[[ $# -lt 1 || $# -gt 2 ]] && usage
+[[ "${1:-}" =~ ^[0-9]+$ ]] || { echo "error: PR_NUMBER must be numeric" >&2; usage; }
+
+PR="$1"
+TARGET_DIR="${2:-.}"
+
+for cmd in gh git jq daydream; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "error: $cmd not on \$PATH" >&2; exit 127; }
+done
+
+cd "$TARGET_DIR"
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "error: $TARGET_DIR is not a git repo" >&2; exit 1; }
+
+HEAD_BR="daydream-pr-${PR}"
+BASE_BR="daydream-pr-${PR}-base"
+
+cleanup() {
+  if [[ "${KEEP_BRANCHES:-0}" != "1" ]]; then
+    git branch -D "$HEAD_BR" "$BASE_BR" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+echo "→ Fetching PR #$PR metadata..."
+META="$(gh pr view "$PR" --json baseRefName,state,mergedAt)"
+BASE_BRANCH="$(jq -r .baseRefName <<<"$META")"
+STATE="$(jq -r .state <<<"$META")"
+MERGED_AT="$(jq -r .mergedAt <<<"$META")"
+
+echo "  state=$STATE  base=$BASE_BRANCH  merged_at=$MERGED_AT"
+
+echo "→ Fetching PR head ref (refs/pull/$PR/head) → $HEAD_BR..."
+git fetch --quiet origin "pull/$PR/head:$HEAD_BR" --force
+
+echo "→ Fetching base branch ($BASE_BRANCH)..."
+git fetch --quiet origin "$BASE_BRANCH"
+
+BASE_SHA="$(git merge-base "$HEAD_BR" "origin/$BASE_BRANCH")"
+echo "→ Historical merge-base: $BASE_SHA"
+git branch -f "$BASE_BR" "$BASE_SHA" >/dev/null
+
+echo "→ Running daydream --review..."
+# shellcheck disable=SC2086
+daydream --review \
+  --branch "$HEAD_BR" \
+  --base "$BASE_BR" \
+  ${DAYDREAM_ARGS:-} \
+  .
