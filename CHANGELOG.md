@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-15
+
+### Added
+
+- **scripts:** Add `scripts/review-historic-pr <PR>` helper for benchmarking daydream against already-merged PRs ([#79](https://github.com/existential-birds/daydream/pull/79))
+
+  Pins the review to the exact code state the PR introduced (PR head against the merge-base on the original target branch) so output is apples-to-apples with whatever was reviewed at PR time (greptile, coderabbit, etc.). Honors `DAYDREAM_ARGS`, `KEEP_BRANCHES`, and optional `ZIP` / `ZIP_OUT` env vars for bundling `.review-output.md` plus the ATIF trajectory directory. Requires `gh`, `git`, `jq`, and `daydream` on `$PATH`.
+
+### Changed
+
+- **trajectory:** Read the daydream version from `daydream.__version__` instead of `importlib.metadata.version("daydream")` when stamping `agent.version` into ATIF trajectories ([#81](https://github.com/existential-birds/daydream/pull/81))
+
+  Brings the trajectory recorder in line with every other version-stamping surface (PR comment renderer, PR review wizard, `Daydream-Version:` git trailer). Eliminates the silent `"0.0.0"` fallback that fired on `PackageNotFoundError` — a broken or partial install will now surface the failure loudly. Also eliminates editable-install lag: `importlib.metadata` reads from the installed package record (which only refreshes on `uv sync`), so trajectories used to stamp the *previous* version after a `__version__` bump until the next sync. Reading the module attribute is always current.
+
 ## [0.15.0] - 2026-05-11
 
 ### Breaking
@@ -447,7 +461,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.15.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/existential-birds/daydream/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/existential-birds/daydream/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/existential-birds/daydream/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/existential-birds/daydream/compare/v0.13.0...v0.13.1
