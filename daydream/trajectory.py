@@ -28,10 +28,10 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+import daydream
 from daydream.atif import (
     Agent,
     FinalMetrics,
@@ -864,10 +864,7 @@ class TrajectoryRecorder:
     def build_trajectory(self, steps: list[Step] | None = None) -> Trajectory:
         if steps is None:
             steps = self.steps
-        try:
-            version = metadata.version("daydream")
-        except metadata.PackageNotFoundError:
-            version = "0.0.0"
+        version = daydream.__version__
 
         final_metrics = FinalMetrics(
             total_prompt_tokens=self._final_totals["prompt"] or None,
