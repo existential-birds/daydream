@@ -51,6 +51,7 @@ _PHASE_LABELS: dict[str, str] = {
     "pr_feedback": "PR Feedback",
     "deep": "Deep Review",
     "exploration": "Exploration",
+    "verify": "Verify Recommendations",
 }
 
 FALLBACK_NOTE = "*run details unavailable*"
