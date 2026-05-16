@@ -4,11 +4,13 @@ Implements a 1980s neon terminal aesthetic using the Rich library,
 with a Dracula-based color theme and animated elements.
 """
 
+import json
 import random
 import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 import pyfiglet
 from rich import box
@@ -3363,6 +3365,36 @@ def print_stage_progress(console: Console, current: int, total: int, name: str) 
         name: Human-readable stage name.
     """
     console.print(f"[neon.cyan]\u25b6[/] [neon.fg][stage {current}/{total}: {name}][/]")
+
+
+def print_verification_summary(console: Console, verdicts_path: Path) -> None:
+    """Print a one-line summary of recommendation-verifier verdicts.
+
+    Reads the verdicts JSON written by ``phase_verify_recommendations`` and
+    emits a single dim line of the form ``Recommendation verification: N
+    findings \u00b7 M flagged (X contradicts, Y uncertain)``. Missing,
+    empty, or malformed files are treated as a no-op so the fix gate is
+    never blocked by verifier output.
+
+    Args:
+        console: Rich Console instance for output.
+        verdicts_path: Path to the ``recommendation-verdicts.json`` file.
+    """
+    try:
+        data = json.loads(Path(verdicts_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    verdicts = data.get("verdicts") if isinstance(data, dict) else None
+    if not isinstance(verdicts, list):
+        return
+    contradicts = sum(1 for v in verdicts if isinstance(v, dict) and v.get("verdict") == "contradicts")
+    uncertain = sum(1 for v in verdicts if isinstance(v, dict) and v.get("verdict") == "uncertain")
+    flagged = contradicts + uncertain
+    print_dim(
+        console,
+        f"Recommendation verification: {len(verdicts)} findings \u00b7 {flagged} flagged "
+        f"({contradicts} contradicts, {uncertain} uncertain)",
+    )
 
 
 def print_preflight_notice(
