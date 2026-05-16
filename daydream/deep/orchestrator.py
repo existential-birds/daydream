@@ -254,12 +254,17 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """
     # Late imports to avoid circular dependency with runner.
     from daydream import git_ops
+    from daydream.backends import Backend
     from daydream.git_ops import GitError
     from daydream.phases import _git_branch, _git_log
     from daydream.runner import _compute_diff_ref, _make_archive_callback, _resolve_backend
     from daydream.ui import phase_subtitle, print_dim, print_phase_hero
 
-    backend = _resolve_backend(config, "review")
+    # Per-phase backends are resolved on demand via `_resolve_backend(config,
+    # phase, backend_cache)`. The cache reuses one Backend instance per
+    # (backend_name, resolved_model) tuple so identical phases share an
+    # instance while phases that resolve to different models stay isolated.
+    backend_cache: dict[tuple[str, str | None], Backend] = {}
 
     target_dir = work.repo
 
@@ -290,7 +295,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.DEEP,
         target_dir=target_dir,
-        agent_model_name=config.model or "",
+        agent_model_name="",
         session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
@@ -300,7 +305,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
-        print_info(console, f"Model: {backend.model}")
+        print_info(console, f"Default backend: {config.backend}")
         console.print()
 
         # ------ Resume gate (D-34, D-36, D-37) ------
@@ -322,12 +327,16 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
 
         # ------ Pre-flight notice (D-30, D-31) ------
         stack_lines = [_stack_preflight_line(s) for s in stacks]
+        # Review-centric preflight: the cost_usd=None caveat fires when the
+        # review-phase backend is Codex. Other per-phase backends may differ
+        # but the notice is anchored on the review stage.
+        review_backend_for_preflight = _resolve_backend(config, "review", backend_cache)
         print_preflight_notice(
             console,
             stages=_PIPELINE_STAGE_NAMES,
             stack_lines=stack_lines,
             agent_count=total_agent_count(len(stacks)),
-            codex_in_use=isinstance(backend, CodexBackend),
+            codex_in_use=isinstance(review_backend_for_preflight, CodexBackend),
             exploration_available=EXPLORATION_AVAILABLE,
         )
 
@@ -370,7 +379,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             if config.start_at not in ("per-stack", "merge", "fix"):
                 print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
                 intent_summary = await phase_understand_intent(
-                    backend,
+                    _resolve_backend(config, "intent", backend_cache),
                     work,
                     diff_path,
                     log,
@@ -380,7 +389,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
 
                 print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
                 alt_issues = await phase_alternative_review(
-                    backend,
+                    _resolve_backend(config, "wonder", backend_cache),
                     work,
                     diff_path,
                     intent_summary,
@@ -396,7 +405,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             if config.start_at not in ("merge", "fix"):
                 print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
                 per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
-                    backend,
+                    _resolve_backend(config, "review", backend_cache),
                     work,
                     stacks,
                     diff_path=diff_path,
@@ -476,7 +485,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     # global issue numbering reproducible across runs.
                     for stack_name, output_path in sorted(per_stack_outputs.items()):
                         records = await phase_parse_feedback(
-                            backend, work, input_path=output_path
+                            _resolve_backend(config, "parse", backend_cache),
+                            work,
+                            input_path=output_path,
                         )
                         records_path = per_stack_records_path(dd, stack_name)
                         records_path.write_text(json.dumps(records, indent=2))
@@ -503,7 +514,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
 
                 # Cross-stack merge (D-23..D-26).
                 await phase_cross_stack_merge(
-                    backend,
+                    _resolve_backend(config, "merge", backend_cache),
                     work,
                     per_stack_records_paths=per_stack_records_paths,
                     intent_path=intent_p,
@@ -551,20 +562,34 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 print_success(console, f"Report written to {merged_report}. Exiting.")
                 return 0
 
-            items = await phase_parse_feedback(backend, work)
+            items = await phase_parse_feedback(
+                _resolve_backend(config, "parse", backend_cache), work
+            )
             if not items:
                 print_success(console, "No actionable items after parse -- done.")
                 return 0
 
             for idx, item in enumerate(items, start=1):
-                await phase_fix(backend, work, item, idx, len(items))
+                await phase_fix(
+                    _resolve_backend(config, "fix", backend_cache),
+                    work,
+                    item,
+                    idx,
+                    len(items),
+                )
 
-            passed, _retries = await phase_test_and_heal(backend, work)
+            passed, _retries = await phase_test_and_heal(
+                _resolve_backend(config, "test", backend_cache), work
+            )
             if not passed:
                 print_warning(console, "Tests failed after fix attempt.")
                 return 1
 
-            await phase_commit_push(backend, work)
+            # phase_commit_push runs as part of the fix/commit cycle — reuse
+            # the fix backend (no separate "commit" phase identifier).
+            await phase_commit_push(
+                _resolve_backend(config, "fix", backend_cache), work
+            )
             return 0
 
         finally:
