@@ -8,6 +8,7 @@ import pytest
 
 from daydream.cli import _parse_args
 from daydream.config import SKILL_MAP
+from daydream.runner import RunConfig
 
 
 def test_default_backend_is_claude(monkeypatch):
@@ -26,18 +27,6 @@ def test_backend_short_flag(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "-b", "codex"])
     config = _parse_args()
     assert config.backend == "codex"
-
-
-def test_model_default_is_none(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project"])
-    config = _parse_args()
-    assert config.model is None
-
-
-def test_model_explicit(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--model", "sonnet"])
-    config = _parse_args()
-    assert config.model == "sonnet"
 
 
 def test_invalid_backend_rejected(monkeypatch):
@@ -328,3 +317,28 @@ def test_no_per_phase_model_flag_leaves_field_none(tmp_path):
 def test_existing_exploration_model_flag_unchanged(tmp_path):
     config = _parse_args(["--exploration-model", "claude-haiku-4-5", str(tmp_path)])
     assert config.exploration_model == "claude-haiku-4-5"
+
+
+# ---------------------------------------------------------------------------
+# Removed --model flag (Task 5 of per-phase-model-overrides — breaking change)
+# ---------------------------------------------------------------------------
+
+
+def test_removed_model_flag_emits_curated_error(capsys, tmp_path):
+    with pytest.raises(SystemExit) as exc_info:
+        _parse_args(["--model", "claude-opus-4-6", str(tmp_path)])
+    assert exc_info.value.code != 0
+    err = capsys.readouterr().err
+    assert "--model has been removed" in err
+    assert "--review-model" in err
+    assert "--parse-model" in err
+    assert "--fix-model" in err
+    assert "--test-model" in err
+    assert "--exploration-model" in err
+
+
+def test_runconfig_has_no_model_field():
+    config = RunConfig(backend="claude")
+    assert not hasattr(config, "model"), (
+        "RunConfig.model was supposed to be removed in favor of per-phase fields"
+    )

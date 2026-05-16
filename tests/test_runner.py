@@ -279,7 +279,6 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
         target=str(tmp_path),
         pr_number=42,
         bot="botname",
-        model=None,
     )
 
     exit_code = await runner._run_pr_feedback(work, config)

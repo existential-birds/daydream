@@ -95,8 +95,6 @@ class RunConfig:
         target: Target directory path for the review. If None, prompts user.
         skill: Review skill to use ("python", "react", "elixir", "go", "rust",
             or "ios"). If None and shallow, prompts user.
-        model: CLI override for the model id. ``None`` means "use the
-            per-backend default from :mod:`daydream.config`".
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
         start_at: Phase to start at ("review", "parse", "fix", "test", "ttt",
@@ -143,7 +141,6 @@ class RunConfig:
 
     target: str | None = None
     skill: str | None = None  # "python", "react", "elixir", "go", "rust", "ios"
-    model: str | None = None
     cleanup: bool | None = None
     quiet: bool = True
     start_at: str = "review"
@@ -469,7 +466,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.PR,
         target_dir=target_dir,
-        agent_model_name=config.model or "",
+        agent_model_name="",
         session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
@@ -623,7 +620,7 @@ async def _run_review_or_comment(
         path=trajectory_path,
         run_flow=flow,
         target_dir=target_dir,
-        agent_model_name=config.model or "",
+        agent_model_name="",
         session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
@@ -780,7 +777,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=target_dir,
-        agent_model_name=config.model or "",
+        agent_model_name="",
         session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,

@@ -44,7 +44,6 @@ class _MockRecorder:
 @dataclass
 class _MockConfig:
     skill: str | None = "python"
-    model: str | None = "opus"
     backend: str = "claude"
     review_backend: str | None = None
     fix_backend: str | None = None
@@ -134,7 +133,9 @@ def test_build_manifest_basic(tmp_path: Path):
     assert m.session_id == recorder.session_id
     assert m.run_flow == "normal"
     assert m.skill == "python"
-    assert m.model == "opus"
+    # Manifest.model is no longer populated from config (per-phase models replaced
+    # the single config.model field); build_manifest stamps it as None.
+    assert m.model is None
     assert m.backend == "claude"
     assert m.total_cost_usd == 0.05
     assert m.total_prompt_tokens == 100

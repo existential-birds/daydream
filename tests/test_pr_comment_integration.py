@@ -168,14 +168,15 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch):
 
 
 def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
-    """Mirror runner.py: ``agent_model_name`` defaults to the BACKEND alias."""
+    """Mirror runner.py: ``agent_model_name`` is stamped per-step, not at recorder init."""
     return TrajectoryRecorder(
         path=tmp_path / ".daydream" / "trajectory.json",
         run_flow=DaydreamRunFlow.TTT,
         target_dir=tmp_path,
-        # Production runner does ``config.model or config.backend or "claude"``.
-        # When --model isn't set, the recorder gets the backend NAME — which
-        # is exactly the value Bug A leaves in every Step.model_name.
+        # Production runner now passes ``agent_model_name=""`` — the single
+        # config.model field was removed in favor of per-phase model fields.
+        # The recorder gets the backend alias only as a fallback for legacy
+        # callers; daydream stamps the resolved model on each Step explicitly.
         agent_model_name="claude",
         session_id="test",
     )
