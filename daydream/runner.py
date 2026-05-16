@@ -31,7 +31,14 @@ from daydream.agent import (
     set_quiet_mode,
 )
 from daydream.backends import Backend, create_backend
-from daydream.config import DEFAULT_EXPLORATION_MODEL, REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
+from daydream.config import (
+    DEFAULT_EXPLORATION_MODEL,
+    PHASE_DEFAULT_MODELS,
+    REVIEW_OUTPUT_FILE,
+    REVIEW_SKILLS,
+    SKILL_MAP,
+    ReviewSkillChoice,
+)
 from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
 from daydream.git_ops import GitError
@@ -100,6 +107,15 @@ class RunConfig:
         review_backend: Override backend for the review phase. If None, uses backend.
         fix_backend: Override backend for the fix phase. If None, uses backend.
         test_backend: Override backend for the test phase. If None, uses backend.
+        review_model: Model override for the review phase. When None, the
+            resolver falls back to ``PHASE_DEFAULT_MODELS[backend_name]["review"]``
+            and then to the backend's own default.
+        parse_model: Model override for the parse phase. When None, resolves via
+            ``PHASE_DEFAULT_MODELS[backend_name]["parse"]`` then backend default.
+        fix_model: Model override for the fix phase. When None, resolves via
+            ``PHASE_DEFAULT_MODELS[backend_name]["fix"]`` then backend default.
+        test_model: Model override for the test phase. When None, resolves via
+            ``PHASE_DEFAULT_MODELS[backend_name]["test"]`` then backend default.
         loop: Enable continuous review/fix/test iterations. Default is False.
         max_iterations: Maximum number of loop iterations before exiting. Default is 5.
         exploration_model: Model override for exploration subagents. When set, a separate
@@ -137,6 +153,10 @@ class RunConfig:
     review_backend: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
+    review_model: str | None = None
+    parse_model: str | None = None
+    fix_model: str | None = None
+    test_model: str | None = None
     loop: bool = False
     max_iterations: int = 5
     exploration_context: ExplorationContext | None = None
@@ -202,29 +222,50 @@ def _make_archive_callback(
 
 
 def _resolve_backend(
-    config: RunConfig, phase: str, cache: dict[str, Backend] | None = None
+    config: RunConfig,
+    phase: str,
+    cache: dict[tuple[str, str | None], Backend] | None = None,
 ) -> Backend:
     """Get or create the backend for a given phase, respecting per-phase overrides.
 
+    Resolution order for the model:
+        1. ``getattr(config, f"{phase}_model", None)`` — explicit per-phase flag.
+        2. ``PHASE_DEFAULT_MODELS[backend_name].get(phase)`` — per-backend phase
+           default table.
+        3. ``None`` — let :func:`create_backend` apply its own backend default.
+
+    The backend kind is resolved first via
+    ``getattr(config, f"{phase}_backend", None) or config.backend``; the model
+    lookup then keys into that backend name's table.
+
     Args:
-        config: Run configuration with backend settings.
-        phase: Phase name ("review", "fix", or "test").
-        cache: Optional dict to cache backends by name. When provided, backends
-               are reused if the same backend name is requested multiple times.
+        config: Run configuration with backend and per-phase model settings.
+        phase: Phase name (e.g. ``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
+            ``"intent"``, ``"wonder"``, ``"envision"``, ``"merge"``,
+            ``"exploration"``, ``"pr_feedback"``).
+        cache: Optional dict to cache backends by ``(backend_name, model)``.
+            When provided, backends are reused only when both the backend kind
+            and the resolved model match — so the same backend kind with two
+            different models yields two distinct instances.
 
     Returns:
         Backend instance for the phase.
 
     """
-    override = getattr(config, f"{phase}_backend", None)
-    backend_name = override or config.backend
+    backend_override = getattr(config, f"{phase}_backend", None)
+    backend_name = backend_override or config.backend
 
+    phase_flag = getattr(config, f"{phase}_model", None)
+    table_default = PHASE_DEFAULT_MODELS.get(backend_name, {}).get(phase)
+    resolved_model = phase_flag or table_default  # ``None`` falls through to backend default
+
+    cache_key = (backend_name, resolved_model)
     if cache is not None:
-        if backend_name not in cache:
-            cache[backend_name] = create_backend(backend_name, model=config.model)
-        return cache[backend_name]
+        if cache_key not in cache:
+            cache[cache_key] = create_backend(backend_name, model=resolved_model)
+        return cache[cache_key]
 
-    return create_backend(backend_name, model=config.model)
+    return create_backend(backend_name, model=resolved_model)
 
 
 def _compute_diff_ref(cwd: Path) -> str:
@@ -418,7 +459,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
     bot = config.bot
     target_dir = work.repo
 
-    backend_cache: dict[str, Backend] = {}
+    backend_cache: dict[tuple[str, str | None], Backend] = {}
     review_backend = _resolve_backend(config, "review", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
 
@@ -728,7 +769,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         cleanup_enabled = cleanup_response.lower() in ("y", "yes")
 
     # Backends (per-phase overrides).
-    backend_cache: dict[str, Backend] = {}
+    backend_cache: dict[tuple[str, str | None], Backend] = {}
     review_backend = _resolve_backend(config, "review", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
     test_backend = _resolve_backend(config, "test", backend_cache)

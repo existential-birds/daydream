@@ -287,3 +287,52 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
     assert f"Model: {chosen_model}" in captured, (
         f"Banner did not echo backend.model; got {captured!r}"
     )
+
+
+# --- Per-phase model resolution tests (Task 2) -----------------------------
+
+
+class TestResolveBackendPhaseModel:
+    def test_explicit_phase_flag_wins_over_table(self):
+        config = RunConfig(backend="claude", review_model="claude-haiku-4-5")
+        backend = runner._resolve_backend(config, "review")
+        assert backend.model == "claude-haiku-4-5"
+
+    def test_table_default_used_when_no_flag(self):
+        config = RunConfig(backend="claude")  # no review_model override
+        backend = runner._resolve_backend(config, "review")
+        assert backend.model == "claude-opus-4-6"  # claude REVIEW default
+
+    def test_table_default_for_phase_without_flag(self):
+        # WONDER has no override flag but should still get the table default.
+        config = RunConfig(backend="claude")
+        backend = runner._resolve_backend(config, "wonder")
+        assert backend.model == "claude-opus-4-6"
+
+    def test_codex_table_default(self):
+        config = RunConfig(backend="codex")
+        backend = runner._resolve_backend(config, "parse")
+        assert backend.model == "gpt-5.5"
+
+    def test_backend_override_uses_overridden_backends_table(self):
+        # --review-backend codex while default is claude: resolver should look up
+        # the codex table for review, not the claude one.
+        config = RunConfig(backend="claude", review_backend="codex")
+        backend = runner._resolve_backend(config, "review")
+        assert backend.model == "gpt-5.5"  # codex REVIEW default (v1)
+
+    def test_cache_returns_same_instance_for_same_phase_and_backend(self):
+        cache: dict = {}
+        config = RunConfig(backend="claude")
+        b1 = runner._resolve_backend(config, "review", cache)
+        b2 = runner._resolve_backend(config, "review", cache)
+        assert b1 is b2
+
+    def test_cache_returns_distinct_instances_for_different_phases(self):
+        # Different models -> different backends, even on the same backend kind.
+        cache: dict = {}
+        config = RunConfig(backend="claude")
+        review_backend = runner._resolve_backend(config, "review", cache)
+        parse_backend = runner._resolve_backend(config, "parse", cache)
+        assert review_backend is not parse_backend
+        assert review_backend.model != parse_backend.model
