@@ -133,7 +133,7 @@ daydream --trajectory /tmp/run.json /path/to/project
 | `--parse-model` | Override model for the PARSE phase (default: per-backend table; see README). | Per-backend table (see below) |
 | `--fix-model` | Override model for the FIX phase (default: per-backend table; see README). | Per-backend table (see below) |
 | `--test-model` | Override model for the TEST phase (default: per-backend table; see README). | Per-backend table (see below) |
-| `--exploration-model` | Model for exploration subagents (default: claude-sonnet-4-6). Use a smaller model to save cost. | Per-backend table (see below) |
+| `--exploration-model` | Model for exploration subagents. Use a smaller model to save cost. | Per-backend table (see below) |
 | `--comment` | Review and post inline PR comments, then exit | |
 | `--review` | Review and write a report to terminal/markdown, then exit | |
 | `--shallow` | Single-stack review (skip multi-stack auto-detection) | |

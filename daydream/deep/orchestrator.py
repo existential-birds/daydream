@@ -24,8 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daydream.agent import console
-from daydream.backends import create_backend
-from daydream.config import DEFAULT_EXPLORATION_MODEL, REVIEW_OUTPUT_FILE, SKILL_MAP
+from daydream.config import REVIEW_OUTPUT_FILE, SKILL_MAP
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
 )
@@ -355,8 +354,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 config.exploration_context = ExplorationContext()
             else:
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                explore_model = config.exploration_model or DEFAULT_EXPLORATION_MODEL
-                explore_backend = create_backend(config.backend, model=explore_model)
+                explore_backend = _resolve_backend(config, "exploration", backend_cache)
                 print_dim(console, f"Exploration model: {explore_backend.model}")
                 config.exploration_context = await safe_explore(
                     pre_scan,

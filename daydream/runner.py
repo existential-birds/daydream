@@ -32,7 +32,6 @@ from daydream.agent import (
 )
 from daydream.backends import Backend, create_backend
 from daydream.config import (
-    DEFAULT_EXPLORATION_MODEL,
     PHASE_DEFAULT_MODELS,
     REVIEW_OUTPUT_FILE,
     REVIEW_SKILLS,
@@ -458,6 +457,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
 
     backend_cache: dict[tuple[str, str | None], Backend] = {}
     review_backend = _resolve_backend(config, "review", backend_cache)
+    parse_backend = _resolve_backend(config, "parse", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
 
     session_id = str(uuid.uuid4())
@@ -485,7 +485,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
 
         # Phase 2: Parse feedback (reused from normal flow)
         try:
-            feedback_items = await phase_parse_feedback(review_backend, work)
+            feedback_items = await phase_parse_feedback(parse_backend, work)
         except ValueError:
             print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
             return 1
@@ -588,7 +588,8 @@ async def _run_review_or_comment(
     two modes is whether the alternative-review issues are posted to the PR
     via :func:`daydream.pr_review.post_review_to_pr_from_alt_issues`.
     """
-    backend = _resolve_backend(config, "review")
+    backend_cache: dict[tuple[str, str | None], Backend] = {}
+    backend = _resolve_backend(config, "review", backend_cache)
     target_dir = work.repo
 
     # Gather git context using the resolved base branch from work (no
@@ -642,8 +643,7 @@ async def _run_review_or_comment(
                 config.exploration_context = ExplorationContext()
             else:
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                explore_model = config.exploration_model or DEFAULT_EXPLORATION_MODEL
-                explore_backend = create_backend(config.backend, model=explore_model)
+                explore_backend = _resolve_backend(config, "exploration", backend_cache)
                 print_dim(console, f"Exploration model: {explore_backend.model}")
                 config.exploration_context = await safe_explore(
                     pre_scan,
@@ -768,6 +768,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
     # Backends (per-phase overrides).
     backend_cache: dict[tuple[str, str | None], Backend] = {}
     review_backend = _resolve_backend(config, "review", backend_cache)
+    parse_backend = _resolve_backend(config, "parse", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
     test_backend = _resolve_backend(config, "test", backend_cache)
 
@@ -804,8 +805,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 config.exploration_context = ExplorationContext()
             else:
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                explore_model = config.exploration_model or DEFAULT_EXPLORATION_MODEL
-                explore_backend = create_backend(config.backend, model=explore_model)
+                explore_backend = _resolve_backend(config, "exploration", backend_cache)
                 print_dim(console, f"Exploration model: {explore_backend.model}")
                 config.exploration_context = await safe_explore(
                     pre_scan,
@@ -846,7 +846,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             )
 
             # Phase 2: Parse feedback
-            items = await phase_parse_feedback(review_backend, work)
+            items = await phase_parse_feedback(parse_backend, work)
 
             if not items:
                 print_info(console, f"Clean review on iteration {iteration}")
@@ -966,7 +966,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             # Phase 2: Parse feedback
             if config.start_at in ("review", "parse", "fix"):
                 try:
-                    feedback_items = await phase_parse_feedback(review_backend, work)
+                    feedback_items = await phase_parse_feedback(parse_backend, work)
                 except ValueError as exc:
                     print_error(console, "Phase 2 Error", str(exc))
                     print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")

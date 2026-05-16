@@ -366,6 +366,7 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
 
     backends_by_phase = {
         "review": _StubBackend("review-model-xyz"),
+        "parse": _StubBackend("parse-model-xyz"),
         "fix": _StubBackend("fix-model-xyz"),
         "test": _StubBackend("test-model-xyz"),
     }
