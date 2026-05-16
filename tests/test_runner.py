@@ -335,3 +335,105 @@ class TestResolveBackendPhaseModel:
         parse_backend = runner._resolve_backend(config, "parse", cache)
         assert review_backend is not parse_backend
         assert review_backend.model != parse_backend.model
+
+
+# --- Task 6: HEAL hero is followed by Model: dim line ----------------------
+
+
+@pytest.mark.asyncio
+async def test_run_loop_shallow_heal_hero_followed_by_model_line(
+    monkeypatch, tmp_path
+):
+    """The HEAL phase hero in ``_run_loop_shallow`` must be followed by a dim
+    ``Model: <name>`` line scoped to the fix backend.
+
+    Drives single-pass shallow loop with ``start_at="fix"`` to skip review,
+    exploration, and skill resolution. Only the fix and test phases run, and
+    HEAL renders before phase_fix. Asserts hero + dim call ordering.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    # Pre-create the review file so the check_review_file_exists guard passes.
+    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - Bug\n")
+
+    work = _fake_work(tmp_path)
+
+    # Stub backends to carry distinct phase-specific models so the dim line's
+    # source is unambiguous.
+    class _StubBackend:
+        def __init__(self, model: str):
+            self.model = model
+
+    backends_by_phase = {
+        "review": _StubBackend("review-model-xyz"),
+        "fix": _StubBackend("fix-model-xyz"),
+        "test": _StubBackend("test-model-xyz"),
+    }
+
+    monkeypatch.setattr(
+        "daydream.runner._resolve_backend",
+        lambda _config, phase, _cache=None: backends_by_phase[phase],
+    )
+
+    async def _stub_phase_parse_feedback(_backend, _work):
+        return [{"id": 1, "description": "Bug", "file": "foo.py", "line": 1}]
+
+    async def _stub_phase_fix(*_args, **_kwargs):
+        return None
+
+    async def _stub_phase_test_and_heal(*_args, **_kwargs):
+        return (True, 0)
+
+    async def _stub_phase_commit_push(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.runner.phase_fix", _stub_phase_fix)
+    monkeypatch.setattr("daydream.runner.phase_test_and_heal", _stub_phase_test_and_heal)
+    monkeypatch.setattr("daydream.runner.phase_commit_push", _stub_phase_commit_push)
+
+    # Capture hero + dim calls in order.
+    calls: list[tuple[str, str]] = []  # (kind, payload)
+
+    def _hero_spy(_console, title, _description):
+        calls.append(("hero", title))
+
+    def _dim_spy(_console, message):
+        calls.append(("dim", message))
+
+    monkeypatch.setattr("daydream.runner.print_phase_hero", _hero_spy)
+    monkeypatch.setattr("daydream.runner.print_dim", _dim_spy)
+
+    # Silence misc UI noise.
+    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
+
+    config = RunConfig(
+        target=str(tmp_path),
+        start_at="fix",
+        cleanup=False,
+        loop=False,
+        shallow=True,
+    )
+
+    exit_code = await runner._run_loop_shallow(work, config)
+    assert exit_code == 0
+
+    # Find the HEAL hero in call order.
+    heal_idx = next(
+        (i for i, (kind, payload) in enumerate(calls) if kind == "hero" and payload == "HEAL"),
+        None,
+    )
+    assert heal_idx is not None, f"HEAL hero never rendered; calls={calls!r}"
+    # The very next call must be a dim Model: line carrying the fix backend's id.
+    assert heal_idx + 1 < len(calls), "HEAL hero has no following call"
+    next_kind, next_payload = calls[heal_idx + 1]
+    assert next_kind == "dim", (
+        f"Call after HEAL hero was not a dim line; got {(next_kind, next_payload)!r}"
+    )
+    assert next_payload == "Model: fix-model-xyz", (
+        f"Dim line after HEAL hero did not echo the fix backend's model; got {next_payload!r}"
+    )

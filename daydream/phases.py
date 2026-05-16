@@ -1158,6 +1158,7 @@ async def phase_review(
 
     """
     print_phase_hero(console, "BREATHE", "\"Be guided by beauty\" —Jim Simons")
+    print_dim(console, f"Model: {backend.model}")
 
     # Use absolute path to prevent model hallucination of paths from training data
     review_output_path = work.repo / REVIEW_OUTPUT_FILE
@@ -1232,6 +1233,7 @@ async def phase_parse_feedback(
 
     """
     print_phase_hero(console, "REFLECT", phase_subtitle("REFLECT"))
+    print_dim(console, f"Model: {backend.model}")
 
     # Use absolute path to prevent model hallucination of paths from training data
     review_output_path = input_path if input_path is not None else work.repo / REVIEW_OUTPUT_FILE
@@ -1322,6 +1324,7 @@ async def phase_test_and_heal(
 
     """
     print_phase_hero(console, "AWAKEN", phase_subtitle("AWAKEN"))
+    print_dim(console, f"Model: {backend.model}")
 
     retries_used = 0
     continuation: ContinuationToken | None = None
@@ -1625,6 +1628,7 @@ async def phase_fetch_pr_feedback(
 
     """
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
+    print_dim(console, f"Model: {backend.model}")
 
     skill_invocation = backend.format_skill_invocation(
         "beagle-core:fetch-pr-feedback", f"--pr {pr_number} --bot {bot}"
@@ -1820,6 +1824,7 @@ async def phase_understand_intent(
 
     """
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
+    print_dim(console, f"Model: {backend.model}")
 
     prompt = build_intent_prompt(
         diff_path=str(diff_path),
@@ -1887,6 +1892,7 @@ async def phase_alternative_review(
 
     """
     print_phase_hero(console, "WONDER", phase_subtitle("WONDER"))
+    print_dim(console, f"Model: {backend.model}")
 
     prompt = build_alternative_review_prompt(
         intent_summary=intent_summary,
@@ -2005,6 +2011,7 @@ async def phase_generate_plan(
 
     """
     print_phase_hero(console, "ENVISION", phase_subtitle("ENVISION"))
+    print_dim(console, f"Model: {backend.model}")
 
     if auto_select_all:
         selected_ids: list[int] = [i["id"] for i in issues]
@@ -2233,6 +2240,7 @@ async def phase_cross_stack_merge(
         failed_stacks=failed_stacks,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
+    print_dim(console, f"Model: {backend.model}")
     await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.DEEP)
 
     # Copy from deep artifact dir to canonical location. The agent writes

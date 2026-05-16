@@ -827,6 +827,8 @@ async def test_exploration_enriched_output_both_flows(tmp_path, make_work):
     }
 
     class _MB:
+        model = "test-model"
+
         def __init__(self, payload):
             self.payload = payload
 

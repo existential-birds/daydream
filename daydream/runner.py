@@ -854,6 +854,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
 
             # Phase 3: Fix
             print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+            print_dim(console, f"Model: {fix_backend.model}")
             fixes_count = 0
             for i, item in enumerate(items, 1):
                 await phase_fix(fix_backend, work, item, i, len(items))
@@ -975,6 +976,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             if config.start_at in ("review", "parse", "fix"):
                 if feedback_items:
                     print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+                    print_dim(console, f"Model: {fix_backend.model}")
                     for i, item in enumerate(feedback_items, 1):
                         await phase_fix(fix_backend, work, item, i, len(feedback_items))
                         fixes_applied += 1
