@@ -7,9 +7,11 @@ prompts. Per-stack agents only see their own stack's files + TTT context (D-10).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from daydream.phases import (
+    RECOMMENDATION_VERDICTS_SCHEMA,
     _confidence_and_convention_instructions,
     _dependency_impact_instructions,
     _exploration_pointer,
@@ -309,28 +311,8 @@ def build_verification_prompt(
         "Output JSON conforming EXACTLY to this schema. Every verdict entry "
         "MUST include all four required fields, even when "
         "`unverified_assumptions` is an empty array.\n\n"
-        "RECOMMENDATION_VERDICTS_SCHEMA = {\n"
-        '    "type": "object",\n'
-        '    "properties": {\n'
-        '        "verdicts": {\n'
-        '            "type": "array",\n'
-        '            "items": {\n'
-        '                "type": "object",\n'
-        '                "properties": {\n'
-        '                    "issue_id": {"type": "integer"},\n'
-        '                    "verdict": {"type": "string",\n'
-        '                                "enum": ["consistent", "contradicts", "uncertain"]},\n'
-        '                    "evidence": {"type": "string"},\n'
-        '                    "unverified_assumptions": {"type": "array",\n'
-        '                                               "items": {"type": "string"}},\n'
-        "                },\n"
-        '                "required": ["issue_id", "verdict", "evidence",\n'
-        '                             "unverified_assumptions"],\n'
-        "            },\n"
-        "        },\n"
-        "    },\n"
-        '    "required": ["verdicts"],\n'
-        "}"
+        "RECOMMENDATION_VERDICTS_SCHEMA = "
+        + json.dumps(RECOMMENDATION_VERDICTS_SCHEMA, indent=4)
     )
     parts.append(f"Write your JSON verdicts to {output_path}.")
     return "\n\n".join(parts)

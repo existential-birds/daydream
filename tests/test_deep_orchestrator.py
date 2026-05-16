@@ -140,12 +140,14 @@ class _StubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # Recommendation verifier (issue #83). Discriminator: the verifier
-        # prompt is the only one that calls the agent "the recommendation-verifier".
-        # phase_verify_recommendations persists the structured output to
-        # `.daydream/deep/recommendation-verdicts.json` itself, so the stub
+        # Recommendation verifier (issue #83). Discriminator: build_verification_prompt
+        # always embeds the schema constant name "RECOMMENDATION_VERDICTS_SCHEMA" in
+        # the prompt text (via json.dumps). This is structural — tied to the schema
+        # constant, not to agent-role wording — so prompt rewording won't silently
+        # break this branch. phase_verify_recommendations persists the structured
+        # output to `.daydream/deep/recommendation-verdicts.json` itself, so the stub
         # only needs to emit a well-formed payload.
-        if "recommendation-verifier" in pl:
+        if "RECOMMENDATION_VERDICTS_SCHEMA" in prompt:
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output={
@@ -1041,7 +1043,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    expected_phases = {"intent", "wonder", "review", "parse", "merge", "fix", "test"}
+    expected_phases = {"intent", "wonder", "review", "parse", "merge", "fix", "test", "verify"}
     captured = set(seen_phases)
     missing = expected_phases - captured
     assert not missing, (

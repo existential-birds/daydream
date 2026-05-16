@@ -3381,7 +3381,7 @@ def print_verification_summary(console: Console, verdicts_path: Path) -> None:
         verdicts_path: Path to the ``recommendation-verdicts.json`` file.
     """
     try:
-        data = json.loads(Path(verdicts_path).read_text())
+        data = json.loads(verdicts_path.read_text())
     except (OSError, json.JSONDecodeError):
         return
     verdicts = data.get("verdicts") if isinstance(data, dict) else None

@@ -552,7 +552,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # writes `recommendation-verdicts.json` inside `dd`. Must precede
             # both `post_review_to_pr_from_report` and the y/N gate so verdicts
             # are available regardless of resume entry point.
-            verdicts_file = await phase_verify_recommendations(
+            verdicts_file, verdicts_payload = await phase_verify_recommendations(
                 _resolve_backend(config, "verify", backend_cache),
                 work,
                 merged_report_path=merged_report,
@@ -587,10 +587,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # already reads `verifier_verdict` / `evidence` keys (advisory) and
             # augments its prompt when present; items without a matching
             # verdict are left untouched.
-            try:
-                verdicts_payload = json.loads(verdicts_file.read_text())
-            except (OSError, json.JSONDecodeError):
-                verdicts_payload = {"verdicts": []}
+            verdicts_payload = verdicts_payload if isinstance(verdicts_payload, dict) else {"verdicts": []}
             verdict_lookup: dict[int, dict[str, str]] = {}
             for entry in verdicts_payload.get("verdicts", []) or []:
                 if not isinstance(entry, dict):
@@ -601,7 +598,10 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 verdict_lookup[issue_id] = {
                     "verdict": entry.get("verdict", ""),
                     "evidence": entry.get("evidence", ""),
+                    "unverified_assumptions": entry.get("unverified_assumptions", ""),
                 }
+            matched_ids: list[int] = []
+            unmatched_ids: list[int] = []
             for item in items:
                 item_id = item.get("id")
                 if not isinstance(item_id, int):
@@ -610,6 +610,16 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 if match is not None:
                     item["verifier_verdict"] = match["verdict"]
                     item["evidence"] = match["evidence"]
+                    item["unverified_assumptions"] = match["unverified_assumptions"]
+                    matched_ids.append(item_id)
+                else:
+                    unmatched_ids.append(item_id)
+            print_info(
+                console,
+                f"Verdict join: {len(matched_ids)}/{len(matched_ids) + len(unmatched_ids)} "
+                f"feedback items matched a verifier verdict "
+                f"(matched={matched_ids}, unmatched={unmatched_ids})",
+            )
 
             for idx, item in enumerate(items, start=1):
                 await phase_fix(

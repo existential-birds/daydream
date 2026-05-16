@@ -1296,7 +1296,7 @@ async def phase_verify_recommendations(
     *,
     merged_report_path: Path,
     deep_dir: Path,
-) -> Path:
+) -> tuple[Path, dict[str, Any]]:
     """Audit each merged-report issue's recommendation against the codebase.
 
     Runs a read-only verifier subagent that decides, for every numbered issue
@@ -1324,7 +1324,8 @@ async def phase_verify_recommendations(
             The verdicts JSON is written inside it via ``verdicts_path``.
 
     Returns:
-        Path to the verdicts JSON file written inside ``deep_dir``. The file
+        Tuple of (path, payload) where path is the verdicts JSON file written
+        inside ``deep_dir`` and payload is the already-parsed dict. The file
         always exists on successful return; on parse failure or missing
         agent output, ``{"verdicts": []}`` is written so downstream code
         does not need to handle a missing file.
@@ -1372,7 +1373,7 @@ async def phase_verify_recommendations(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2))
-    return output_path
+    return output_path, payload
 
 
 async def phase_fix(
@@ -1419,6 +1420,12 @@ handling strategy is wrong for that code path.
                 "\nDo NOT apply the recommendation literally if it contradicts the cited spec.\n"
                 "Explain the conflict in your commit message and choose a fix that preserves\n"
                 "the spec, or stop and report inability to fix.\n"
+            )
+        elif verifier_verdict == "uncertain":
+            prompt += (
+                "\nThe verifier could not confirm whether this recommendation is correct.\n"
+                "Proceed cautiously: apply the minimal fix and note the uncertainty in your\n"
+                "commit message.\n"
             )
 
     await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
