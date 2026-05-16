@@ -163,6 +163,38 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
             "Use a smaller model to save cost."
         ),
     )
+    parser.add_argument(
+        "--review-model",
+        default=None,
+        type=str,
+        dest="review_model",
+        metavar="MODEL",
+        help="Override model for the REVIEW phase (default: per-backend table; see README).",
+    )
+    parser.add_argument(
+        "--parse-model",
+        default=None,
+        type=str,
+        dest="parse_model",
+        metavar="MODEL",
+        help="Override model for the PARSE phase (default: per-backend table; see README).",
+    )
+    parser.add_argument(
+        "--fix-model",
+        default=None,
+        type=str,
+        dest="fix_model",
+        metavar="MODEL",
+        help="Override model for the FIX phase (default: per-backend table; see README).",
+    )
+    parser.add_argument(
+        "--test-model",
+        default=None,
+        type=str,
+        dest="test_model",
+        metavar="MODEL",
+        help="Override model for the TEST phase (default: per-backend table; see README).",
+    )
 
 
 def _build_summarize_parser() -> argparse.ArgumentParser:
@@ -456,6 +488,10 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         skill=args.skill,
         model=args.model,
         exploration_model=args.exploration_model,
+        review_model=args.review_model,
+        parse_model=args.parse_model,
+        fix_model=args.fix_model,
+        test_model=args.test_model,
         cleanup=args.cleanup,
         quiet=True,
         start_at=args.start_at,
@@ -501,6 +537,10 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         skill=None,
         model=args.model,
         exploration_model=None,
+        review_model=args.review_model,
+        parse_model=args.parse_model,
+        fix_model=args.fix_model,
+        test_model=args.test_model,
         cleanup=None,
         quiet=True,
         start_at="review",

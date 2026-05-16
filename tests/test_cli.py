@@ -296,3 +296,35 @@ def test_print_issues_table_renders():
     output = test_console.file.getvalue()
     assert "Bad pattern" in output
     assert "Missing test" in output
+
+
+# ---------------------------------------------------------------------------
+# Per-phase model override flags (Task 3 of per-phase-model-overrides)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "flag,attr,value",
+    [
+        ("--review-model", "review_model", "claude-haiku-4-5"),
+        ("--parse-model", "parse_model", "claude-haiku-4-5"),
+        ("--fix-model", "fix_model", "claude-opus-4-6"),
+        ("--test-model", "test_model", "gpt-5.5"),
+    ],
+)
+def test_per_phase_model_flags_set_runconfig_field(flag, attr, value, tmp_path):
+    config = _parse_args([flag, value, str(tmp_path)])
+    assert getattr(config, attr) == value
+
+
+def test_no_per_phase_model_flag_leaves_field_none(tmp_path):
+    config = _parse_args([str(tmp_path)])
+    assert config.review_model is None
+    assert config.parse_model is None
+    assert config.fix_model is None
+    assert config.test_model is None
+
+
+def test_existing_exploration_model_flag_unchanged(tmp_path):
+    config = _parse_args(["--exploration-model", "claude-haiku-4-5", str(tmp_path)])
+    assert config.exploration_model == "claude-haiku-4-5"
