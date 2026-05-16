@@ -10,6 +10,8 @@ from daydream.phases import phase_parse_feedback
 
 
 class _SpyBackend:
+    model = "test-model"
+
     def __init__(self) -> None:
         self.last_prompt: str = ""
 

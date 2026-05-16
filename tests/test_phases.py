@@ -33,6 +33,8 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
     captured_continuations: list[ContinuationToken | None] = []
 
     class FreshContextBackend:
+        model = "test-model"
+
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             nonlocal call_count
             call_count += 1
@@ -103,6 +105,8 @@ async def test_phase_parse_feedback_empty_response_returns_empty_list(tmp_path, 
     class EmptyResponseBackend:
         """Simulates a schema miss: no structured output, no text."""
 
+        model = "test-model"
+
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             # Only yield a result with no structured output (schema miss)
             yield ResultEvent(structured_output=None, continuation=None)
@@ -131,6 +135,8 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch, make_wo
 
     class JsonTextBackend:
         """Simulates a schema miss where the model outputs JSON as plain text."""
+
+        model = "test-model"
 
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text='{"issues": [{"id": 1, "description": "Bug", "file": "foo.py", "line": 10}]}')
@@ -352,6 +358,8 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
 
     class IntentBackend:
+        model = "test-model"
+
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text="This PR adds a login page with email/password authentication.")
             yield ResultEvent(structured_output=None, continuation=None)
@@ -390,6 +398,8 @@ async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeyp
     call_count = 0
 
     class IntentBackend:
+        model = "test-model"
+
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             nonlocal call_count
             call_count += 1
@@ -494,6 +504,8 @@ async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch, ma
     }
 
     class ReviewBackend:
+        model = "test-model"
+
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text="Found 2 issues.")
             yield ResultEvent(structured_output=structured_issues, continuation=None)
@@ -529,6 +541,8 @@ async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch, make_wo
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
 
     class NoIssuesBackend:
+        model = "test-model"
+
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text="Implementation looks good.")
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
@@ -577,6 +591,8 @@ async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch, make_w
     }
 
     class PlanBackend:
+        model = "test-model"
+
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             yield TextEvent(text="Here's the plan.")
             yield ResultEvent(structured_output=structured_plan, continuation=None)
@@ -628,6 +644,8 @@ async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch, make_work
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
 
     class NeverCalledBackend:
+        model = "test-model"
+
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
             raise AssertionError("Should not be called when user selects 'none'")
             yield  # make it an async generator
@@ -866,6 +884,11 @@ def _silence_phase_io(monkeypatch) -> None:
 
 class _ScriptedBackend:
     """Base mock backend with shared init, cancel, and format_skill_invocation."""
+
+    # Surface a model so phases can render ``Model: <name>`` dim lines after
+    # their heros (Task 6). Tests don't assert this value — they just need the
+    # attribute to exist on the duck-typed Backend.
+    model = "test-model"
 
     def __init__(self, script: list) -> None:
         self.script = list(script)
@@ -1818,3 +1841,331 @@ async def test_option4_calls_write_partial_before_summarizer(
     # write_partial must be called exactly once on the abort path so the
     # trajectory data is on disk while the handoff is being displayed.
     assert fake.partial_writes == 1
+
+
+# ============================================================================
+# Task 6: every phase hero is followed by a dim ``Model: <name>`` line.
+# ============================================================================
+#
+# Each test installs spies on ``print_phase_hero`` and ``print_dim`` so call
+# order can be asserted without parsing styled Rich output. The phase functions
+# stub or reuse the same ``Backend`` test doubles as the surrounding tests in
+# this module — no new fixtures are introduced.
+
+
+def _install_hero_dim_spies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Capture every ``print_phase_hero`` and ``print_dim`` call.
+
+    Returns (heroes, dim_messages) where ``heroes`` is a list of
+    ``(title, description)`` tuples and ``dim_messages`` is a list of dim
+    message strings, both ordered by call order.
+    """
+    heroes: list[tuple[str, str]] = []
+    dim_messages: list[str] = []
+
+    def _hero_spy(_console, title, description):
+        heroes.append((title, description))
+
+    def _dim_spy(_console, message):
+        dim_messages.append(message)
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", _hero_spy)
+    monkeypatch.setattr("daydream.phases.print_dim", _dim_spy)
+    return heroes, dim_messages
+
+
+@pytest.mark.asyncio
+async def test_phase_review_prints_model_line_after_hero(
+    tmp_path, monkeypatch, make_work
+):
+    from daydream.phases import phase_review
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
+
+    class _Backend:
+        model = "claude-opus-4-6"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    await phase_review(_Backend(), make_work(tmp_path), skill="beagle-python:review-python")
+
+    assert any(title == "BREATHE" for title, _ in heroes)
+    assert "Model: claude-opus-4-6" in dim_messages
+
+
+@pytest.mark.asyncio
+async def test_phase_parse_feedback_prints_model_line_after_hero(
+    tmp_path, monkeypatch, make_work
+):
+    from daydream.phases import phase_parse_feedback
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
+
+    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Verdict\n\nReady: Yes\n")
+
+    class _Backend:
+        model = "claude-haiku-4-5"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            yield ResultEvent(structured_output={"issues": []}, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    await phase_parse_feedback(_Backend(), make_work(tmp_path))
+
+    assert any(title == "REFLECT" for title, _ in heroes)
+    assert "Model: claude-haiku-4-5" in dim_messages
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_prints_model_line_after_hero(
+    tmp_path, monkeypatch, make_work
+):
+    from daydream.phases import phase_test_and_heal
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_menu", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_error", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
+
+    class _Backend:
+        model = "claude-sonnet-4-6"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            yield TextEvent(text="All tests passed")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    await phase_test_and_heal(_Backend(), make_work(tmp_path))
+
+    assert any(title == "AWAKEN" for title, _ in heroes)
+    assert "Model: claude-sonnet-4-6" in dim_messages
+
+
+@pytest.mark.asyncio
+async def test_phase_fetch_pr_feedback_prints_model_line_after_hero(
+    tmp_path, monkeypatch, make_work
+):
+    from daydream.phases import phase_fetch_pr_feedback
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
+
+    class _Backend:
+        model = "claude-opus-4-6"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    await phase_fetch_pr_feedback(_Backend(), make_work(tmp_path), pr_number=42, bot="botname")
+
+    assert any(title == "LISTEN" for title, _ in heroes)
+    assert "Model: claude-opus-4-6" in dim_messages
+
+
+@pytest.mark.asyncio
+async def test_phase_understand_intent_prints_model_line_after_hero(
+    tmp_path, monkeypatch, make_work
+):
+    from daydream.phases import phase_understand_intent
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
+
+    class _Backend:
+        model = "claude-opus-4-6"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            yield TextEvent(text="This PR adds a login page.")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git ...")
+
+    await phase_understand_intent(
+        _Backend(), make_work(tmp_path),
+        diff_path=diff_file,
+        log="abc1234 add login",
+        branch="feat/login",
+    )
+
+    assert any(title == "LISTEN" for title, _ in heroes)
+    assert "Model: claude-opus-4-6" in dim_messages
+
+
+@pytest.mark.asyncio
+async def test_phase_alternative_review_prints_model_line_after_hero(
+    tmp_path, monkeypatch, make_work
+):
+    from daydream.phases import phase_alternative_review
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_issues_table", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
+
+    class _Backend:
+        model = "claude-opus-4-6"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            yield ResultEvent(structured_output={"issues": []}, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff ...")
+
+    await phase_alternative_review(
+        _Backend(), make_work(tmp_path),
+        diff_path=diff_file,
+        intent_summary="Adds a login page.",
+    )
+
+    assert any(title == "WONDER" for title, _ in heroes)
+    assert "Model: claude-opus-4-6" in dim_messages
+
+
+@pytest.mark.asyncio
+async def test_phase_generate_plan_prints_model_line_after_hero(
+    tmp_path, monkeypatch, make_work
+):
+    from daydream.phases import phase_generate_plan
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
+
+    structured_plan = {
+        "plan": {
+            "summary": "Refactor auth",
+            "issues": [
+                {
+                    "id": 1,
+                    "title": "Use DI",
+                    "changes": [
+                        {"file": "src/service.py", "description": "Extract iface", "action": "modify"},
+                    ],
+                },
+            ],
+        }
+    }
+
+    class _Backend:
+        model = "claude-opus-4-6"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            yield ResultEvent(structured_output=structured_plan, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    issues = [
+        {"id": 1, "title": "Use DI", "description": "Hard-coded deps",
+         "recommendation": "Inject", "severity": "high", "files": ["src/service.py"]},
+    ]
+
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
+
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff ...")
+
+    await phase_generate_plan(
+        _Backend(), make_work(tmp_path),
+        diff_path=diff_file,
+        intent_summary="Adds auth",
+        issues=issues,
+    )
+
+    assert any(title == "ENVISION" for title, _ in heroes)
+    assert "Model: claude-opus-4-6" in dim_messages
+
+
+@pytest.mark.asyncio
+async def test_phase_cross_stack_merge_prints_model_line_after_hero(
+    tmp_path, monkeypatch, make_work
+):
+    from daydream.phases import phase_cross_stack_merge
+
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+    heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
+
+    class _Backend:
+        model = "claude-opus-4-6"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            # phase_cross_stack_merge expects the merge agent to have written
+            # the deep artifact before the copy step runs.
+            deep_out = cwd / ".daydream" / "deep" / "review-output.md"
+            deep_out.parent.mkdir(parents=True, exist_ok=True)
+            deep_out.write_text("merged")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    await phase_cross_stack_merge(
+        _Backend(), make_work(tmp_path),
+        per_stack_records_paths=[tmp_path / "r.json"],
+        intent_path=tmp_path / "i.md",
+        alternatives_path=tmp_path / "a.json",
+        dedup_candidates_path=tmp_path / "d.json",
+    )
+
+    assert any(title == "MERGE" for title, _ in heroes)
+    assert "Model: claude-opus-4-6" in dim_messages

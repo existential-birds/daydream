@@ -78,6 +78,8 @@ def test_merge_prompt_mentions_dedup_candidates(tmp_path: Path) -> None:
 class _RecordingBackend:
     """Records every execute call; verifies no `agents` kwarg was passed."""
 
+    model = "test-model"
+
     def __init__(self) -> None:
         self.agents_seen: list[Any] = []
         self.prompts: list[str] = []

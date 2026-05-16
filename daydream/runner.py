@@ -31,7 +31,13 @@ from daydream.agent import (
     set_quiet_mode,
 )
 from daydream.backends import Backend, create_backend
-from daydream.config import DEFAULT_EXPLORATION_MODEL, REVIEW_OUTPUT_FILE, REVIEW_SKILLS, SKILL_MAP, ReviewSkillChoice
+from daydream.config import (
+    PHASE_DEFAULT_MODELS,
+    REVIEW_OUTPUT_FILE,
+    REVIEW_SKILLS,
+    SKILL_MAP,
+    ReviewSkillChoice,
+)
 from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
 from daydream.git_ops import GitError
@@ -88,8 +94,6 @@ class RunConfig:
         target: Target directory path for the review. If None, prompts user.
         skill: Review skill to use ("python", "react", "elixir", "go", "rust",
             or "ios"). If None and shallow, prompts user.
-        model: CLI override for the model id. ``None`` means "use the
-            per-backend default from :mod:`daydream.config`".
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
         start_at: Phase to start at ("review", "parse", "fix", "test", "ttt",
@@ -100,6 +104,15 @@ class RunConfig:
         review_backend: Override backend for the review phase. If None, uses backend.
         fix_backend: Override backend for the fix phase. If None, uses backend.
         test_backend: Override backend for the test phase. If None, uses backend.
+        review_model: Model override for the review phase. When None, the
+            resolver falls back to ``PHASE_DEFAULT_MODELS[backend_name]["review"]``
+            and then to the backend's own default.
+        parse_model: Model override for the parse phase. When None, resolves via
+            ``PHASE_DEFAULT_MODELS[backend_name]["parse"]`` then backend default.
+        fix_model: Model override for the fix phase. When None, resolves via
+            ``PHASE_DEFAULT_MODELS[backend_name]["fix"]`` then backend default.
+        test_model: Model override for the test phase. When None, resolves via
+            ``PHASE_DEFAULT_MODELS[backend_name]["test"]`` then backend default.
         loop: Enable continuous review/fix/test iterations. Default is False.
         max_iterations: Maximum number of loop iterations before exiting. Default is 5.
         exploration_model: Model override for exploration subagents. When set, a separate
@@ -127,7 +140,6 @@ class RunConfig:
 
     target: str | None = None
     skill: str | None = None  # "python", "react", "elixir", "go", "rust", "ios"
-    model: str | None = None
     cleanup: bool | None = None
     quiet: bool = True
     start_at: str = "review"
@@ -137,6 +149,10 @@ class RunConfig:
     review_backend: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
+    review_model: str | None = None
+    parse_model: str | None = None
+    fix_model: str | None = None
+    test_model: str | None = None
     loop: bool = False
     max_iterations: int = 5
     exploration_context: ExplorationContext | None = None
@@ -202,29 +218,50 @@ def _make_archive_callback(
 
 
 def _resolve_backend(
-    config: RunConfig, phase: str, cache: dict[str, Backend] | None = None
+    config: RunConfig,
+    phase: str,
+    cache: dict[tuple[str, str | None], Backend] | None = None,
 ) -> Backend:
     """Get or create the backend for a given phase, respecting per-phase overrides.
 
+    Resolution order for the model:
+        1. ``getattr(config, f"{phase}_model", None)`` — explicit per-phase flag.
+        2. ``PHASE_DEFAULT_MODELS[backend_name].get(phase)`` — per-backend phase
+           default table.
+        3. ``None`` — let :func:`create_backend` apply its own backend default.
+
+    The backend kind is resolved first via
+    ``getattr(config, f"{phase}_backend", None) or config.backend``; the model
+    lookup then keys into that backend name's table.
+
     Args:
-        config: Run configuration with backend settings.
-        phase: Phase name ("review", "fix", or "test").
-        cache: Optional dict to cache backends by name. When provided, backends
-               are reused if the same backend name is requested multiple times.
+        config: Run configuration with backend and per-phase model settings.
+        phase: Phase name (e.g. ``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
+            ``"intent"``, ``"wonder"``, ``"envision"``, ``"merge"``,
+            ``"exploration"``, ``"pr_feedback"``).
+        cache: Optional dict to cache backends by ``(backend_name, model)``.
+            When provided, backends are reused only when both the backend kind
+            and the resolved model match — so the same backend kind with two
+            different models yields two distinct instances.
 
     Returns:
         Backend instance for the phase.
 
     """
-    override = getattr(config, f"{phase}_backend", None)
-    backend_name = override or config.backend
+    backend_override = getattr(config, f"{phase}_backend", None)
+    backend_name = backend_override or config.backend
 
+    phase_flag = getattr(config, f"{phase}_model", None)
+    table_default = PHASE_DEFAULT_MODELS.get(backend_name, {}).get(phase)
+    resolved_model = phase_flag or table_default  # ``None`` falls through to backend default
+
+    cache_key = (backend_name, resolved_model)
     if cache is not None:
-        if backend_name not in cache:
-            cache[backend_name] = create_backend(backend_name, model=config.model)
-        return cache[backend_name]
+        if cache_key not in cache:
+            cache[cache_key] = create_backend(backend_name, model=resolved_model)
+        return cache[cache_key]
 
-    return create_backend(backend_name, model=config.model)
+    return create_backend(backend_name, model=resolved_model)
 
 
 def _compute_diff_ref(cwd: Path) -> str:
@@ -418,8 +455,9 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
     bot = config.bot
     target_dir = work.repo
 
-    backend_cache: dict[str, Backend] = {}
+    backend_cache: dict[tuple[str, str | None], Backend] = {}
     review_backend = _resolve_backend(config, "review", backend_cache)
+    parse_backend = _resolve_backend(config, "parse", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
 
     session_id = str(uuid.uuid4())
@@ -428,7 +466,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.PR,
         target_dir=target_dir,
-        agent_model_name=config.model or "",
+        agent_model_name="",
         session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
@@ -447,7 +485,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
 
         # Phase 2: Parse feedback (reused from normal flow)
         try:
-            feedback_items = await phase_parse_feedback(review_backend, work)
+            feedback_items = await phase_parse_feedback(parse_backend, work)
         except ValueError:
             print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
             return 1
@@ -550,7 +588,8 @@ async def _run_review_or_comment(
     two modes is whether the alternative-review issues are posted to the PR
     via :func:`daydream.pr_review.post_review_to_pr_from_alt_issues`.
     """
-    backend = _resolve_backend(config, "review")
+    backend_cache: dict[tuple[str, str | None], Backend] = {}
+    backend = _resolve_backend(config, "review", backend_cache)
     target_dir = work.repo
 
     # Gather git context using the resolved base branch from work (no
@@ -582,7 +621,7 @@ async def _run_review_or_comment(
         path=trajectory_path,
         run_flow=flow,
         target_dir=target_dir,
-        agent_model_name=config.model or "",
+        agent_model_name="",
         session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
@@ -604,8 +643,7 @@ async def _run_review_or_comment(
                 config.exploration_context = ExplorationContext()
             else:
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                explore_model = config.exploration_model or DEFAULT_EXPLORATION_MODEL
-                explore_backend = create_backend(config.backend, model=explore_model)
+                explore_backend = _resolve_backend(config, "exploration", backend_cache)
                 print_dim(console, f"Exploration model: {explore_backend.model}")
                 config.exploration_context = await safe_explore(
                     pre_scan,
@@ -728,8 +766,9 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         cleanup_enabled = cleanup_response.lower() in ("y", "yes")
 
     # Backends (per-phase overrides).
-    backend_cache: dict[str, Backend] = {}
+    backend_cache: dict[tuple[str, str | None], Backend] = {}
     review_backend = _resolve_backend(config, "review", backend_cache)
+    parse_backend = _resolve_backend(config, "parse", backend_cache)
     fix_backend = _resolve_backend(config, "fix", backend_cache)
     test_backend = _resolve_backend(config, "test", backend_cache)
 
@@ -739,7 +778,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         path=trajectory_path,
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=target_dir,
-        agent_model_name=config.model or "",
+        agent_model_name="",
         session_id=session_id,
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
@@ -766,8 +805,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 config.exploration_context = ExplorationContext()
             else:
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                explore_model = config.exploration_model or DEFAULT_EXPLORATION_MODEL
-                explore_backend = create_backend(config.backend, model=explore_model)
+                explore_backend = _resolve_backend(config, "exploration", backend_cache)
                 print_dim(console, f"Exploration model: {explore_backend.model}")
                 config.exploration_context = await safe_explore(
                     pre_scan,
@@ -808,7 +846,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             )
 
             # Phase 2: Parse feedback
-            items = await phase_parse_feedback(review_backend, work)
+            items = await phase_parse_feedback(parse_backend, work)
 
             if not items:
                 print_info(console, f"Clean review on iteration {iteration}")
@@ -816,6 +854,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
 
             # Phase 3: Fix
             print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+            print_dim(console, f"Model: {fix_backend.model}")
             fixes_count = 0
             for i, item in enumerate(items, 1):
                 await phase_fix(fix_backend, work, item, i, len(items))
@@ -927,7 +966,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             # Phase 2: Parse feedback
             if config.start_at in ("review", "parse", "fix"):
                 try:
-                    feedback_items = await phase_parse_feedback(review_backend, work)
+                    feedback_items = await phase_parse_feedback(parse_backend, work)
                 except ValueError as exc:
                     print_error(console, "Phase 2 Error", str(exc))
                     print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
@@ -937,6 +976,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             if config.start_at in ("review", "parse", "fix"):
                 if feedback_items:
                     print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
+                    print_dim(console, f"Model: {fix_backend.model}")
                     for i, item in enumerate(feedback_items, 1):
                         await phase_fix(fix_backend, work, item, i, len(feedback_items))
                         fixes_applied += 1

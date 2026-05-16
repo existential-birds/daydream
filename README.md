@@ -100,8 +100,8 @@ daydream --start-at per-stack /path/to/project
 # Mix backends per phase
 daydream --backend codex --fix-backend claude /path/to/project
 
-# Select model explicitly
-daydream --model sonnet /path/to/project
+# Override models per phase (defaults come from the per-backend table)
+daydream --review-model claude-opus-4-6 --parse-model claude-haiku-4-5 /path/to/project
 
 # Force ephemeral worktree even without --branch
 daydream --worktree /path/to/project
@@ -129,7 +129,11 @@ daydream --trajectory /tmp/run.json /path/to/project
 | `--review-backend` | Override backend for the review phase | `--backend` value |
 | `--fix-backend` | Override backend for the fix phase | `--backend` value |
 | `--test-backend` | Override backend for the test phase | `--backend` value |
-| `--model` | Model name (`opus` for Claude, `gpt-5.3-codex` for Codex) | Backend-specific |
+| `--review-model` | Override model for the REVIEW phase (default: per-backend table; see README). | Per-backend table (see below) |
+| `--parse-model` | Override model for the PARSE phase (default: per-backend table; see README). | Per-backend table (see below) |
+| `--fix-model` | Override model for the FIX phase (default: per-backend table; see README). | Per-backend table (see below) |
+| `--test-model` | Override model for the TEST phase (default: per-backend table; see README). | Per-backend table (see below) |
+| `--exploration-model` | Model for exploration subagents. Use a smaller model to save cost. | Per-backend table (see below) |
 | `--comment` | Review and post inline PR comments, then exit | |
 | `--review` | Review and write a report to terminal/markdown, then exit | |
 | `--shallow` | Single-stack review (skip multi-stack auto-detection) | |
@@ -150,6 +154,42 @@ daydream --trajectory /tmp/run.json /path/to/project
 
 \* `parse` and `test` are valid only with `--shallow`.
 † `ttt`, `per-stack`, `merge` are valid only in deep (default) mode.
+
+### Per-phase model defaults
+
+Each phase resolves its model in this order: explicit per-phase flag → per-backend phase default (below) → backend default. Phases without an override flag (WONDER, ENVISION, MERGE, INTENT, PR_FEEDBACK) still resolve through the per-backend table — they get phase-appropriate models without a knob.
+
+**Claude backend:**
+
+| Phase | Default model |
+|-------|---------------|
+| `parse` | `claude-haiku-4-5` |
+| `fix` | `claude-sonnet-4-6` |
+| `test` | `claude-sonnet-4-6` |
+| `exploration` | `claude-sonnet-4-6` |
+| `review` | `claude-opus-4-6` |
+| `wonder` | `claude-opus-4-6` |
+| `envision` | `claude-opus-4-6` |
+| `merge` | `claude-opus-4-6` |
+| `intent` | `claude-opus-4-6` |
+| `pr_feedback` | `claude-opus-4-6` |
+
+**Codex backend:**
+
+| Phase | Default model |
+|-------|---------------|
+| `parse` | `gpt-5.5` |
+| `fix` | `gpt-5.5` |
+| `test` | `gpt-5.5` |
+| `exploration` | `gpt-5.5` |
+| `review` | `gpt-5.5` |
+| `wonder` | `gpt-5.5` |
+| `envision` | `gpt-5.5` |
+| `merge` | `gpt-5.5` |
+| `intent` | `gpt-5.5` |
+| `pr_feedback` | `gpt-5.5` |
+
+The codex table uses `gpt-5.5` for every phase in v1; per-phase tiering for codex is deferred to a future release once concrete model picks across the codex lineup are settled.
 
 ### Subcommands
 

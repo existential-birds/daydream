@@ -118,7 +118,6 @@ async def test_full_archive_round_trip(tmp_path: Path, monkeypatch: pytest.Monke
     config = RunConfig(
         target=str(target_dir),
         skill="python",
-        model="opus",
         backend="claude",
         archive=True,
         run_eval=False,

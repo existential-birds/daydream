@@ -94,11 +94,33 @@ def _detect_repo_slug() -> str | None:
     return f"{owner}/{name}"
 
 
+_REMOVED_MODEL_FLAG_MESSAGE = (
+    "--model has been removed. Use per-phase flags: "
+    "--review-model, --parse-model, --fix-model, --test-model, --exploration-model. "
+    "See README for the per-backend default table."
+)
+
+
+def _reject_removed_model_flag(parser: argparse.ArgumentParser, argv: list[str]) -> None:
+    """Surface a curated error before argparse runs when ``--model`` is passed.
+
+    Argparse would otherwise reject ``--model`` with a generic "unrecognized
+    arguments" message that gives users no path forward. Catching both
+    ``--model X`` and ``--model=X`` shapes here points users at the new
+    per-phase flags before any parsing happens.
+    """
+    for token in argv:
+        if token == "--model" or token.startswith("--model="):
+            parser.error(_REMOVED_MODEL_FLAG_MESSAGE)
+
+
 def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the shared (non-output-mode) arguments to a parser or subparser.
 
     Used by both the top-level parser and the ``feedback`` subparser so flags
-    like ``--backend``, ``--model``, ``--trajectory`` work in both places.
+    like ``--backend``, ``--trajectory`` work in both places. ``--model`` is
+    intentionally absent — see :func:`_reject_removed_model_flag` for the
+    curated error surfaced when a user passes the removed flag.
     """
     parser.add_argument(
         "--trajectory",
@@ -150,11 +172,6 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         help="Override backend for test phase",
     )
     parser.add_argument(
-        "--model",
-        default=None,
-        help="Model to use (default: backend-specific). Examples: opus, sonnet, haiku, gpt-5.3-codex",
-    )
-    parser.add_argument(
         "--exploration-model",
         default=None,
         dest="exploration_model",
@@ -162,6 +179,38 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
             "Model for exploration subagents (default: claude-sonnet-4-6). "
             "Use a smaller model to save cost."
         ),
+    )
+    parser.add_argument(
+        "--review-model",
+        default=None,
+        type=str,
+        dest="review_model",
+        metavar="MODEL",
+        help="Override model for the REVIEW phase (default: per-backend table; see README).",
+    )
+    parser.add_argument(
+        "--parse-model",
+        default=None,
+        type=str,
+        dest="parse_model",
+        metavar="MODEL",
+        help="Override model for the PARSE phase (default: per-backend table; see README).",
+    )
+    parser.add_argument(
+        "--fix-model",
+        default=None,
+        type=str,
+        dest="fix_model",
+        metavar="MODEL",
+        help="Override model for the FIX phase (default: per-backend table; see README).",
+    )
+    parser.add_argument(
+        "--test-model",
+        default=None,
+        type=str,
+        dest="test_model",
+        metavar="MODEL",
+        help="Override model for the TEST phase (default: per-backend table; see README).",
     )
 
 
@@ -399,6 +448,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # front ourselves and route to a dedicated parser.
     if raw_argv and raw_argv[0] == "feedback":
         feedback_parser = _build_feedback_parser()
+        _reject_removed_model_flag(feedback_parser, raw_argv[1:])
         feedback_args = feedback_parser.parse_args(raw_argv[1:])
         return _build_feedback_config(feedback_args)
 
@@ -407,6 +457,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # a guard for callers that hand crafted-argv to _parse_args directly.
 
     parser = _build_main_parser()
+    _reject_removed_model_flag(parser, raw_argv)
     args = parser.parse_args(raw_argv)
 
     # ----- Reject purely numeric TARGET (likely meant `daydream feedback N`) -----
@@ -454,8 +505,11 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     return RunConfig(
         target=args.target,
         skill=args.skill,
-        model=args.model,
         exploration_model=args.exploration_model,
+        review_model=args.review_model,
+        parse_model=args.parse_model,
+        fix_model=args.fix_model,
+        test_model=args.test_model,
         cleanup=args.cleanup,
         quiet=True,
         start_at=args.start_at,
@@ -499,8 +553,11 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
     return RunConfig(
         target=args.target,
         skill=None,
-        model=args.model,
         exploration_model=None,
+        review_model=args.review_model,
+        parse_model=args.parse_model,
+        fix_model=args.fix_model,
+        test_model=args.test_model,
         cleanup=None,
         quiet=True,
         start_at="review",

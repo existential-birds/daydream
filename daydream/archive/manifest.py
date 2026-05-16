@@ -195,7 +195,7 @@ def build_manifest(
         status=status,
         run_flow=recorder.run_flow.value,
         skill=config.skill,
-        model=config.model,
+        model=None,
         backend=config.backend,
         review_backend=config.review_backend,
         fix_backend=config.fix_backend,

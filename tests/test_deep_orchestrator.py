@@ -956,3 +956,68 @@ async def test_resume_fix_skips_pr_post(
     assert post_calls == [], (
         f"post_review_to_pr_from_report should be skipped on --start-at fix, got {len(post_calls)} call(s)"
     )
+
+
+async def test_resolve_backend_called_with_each_phase_in_deep_flow(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deep orchestrator must call _resolve_backend with each spec phase,
+    not just 'review'. This is a wiring test, not a model-value test.
+
+    Drives a full deep flow (TTT -> per-stack -> parse -> merge -> fix gate
+    accepted -> fix-loop -> test -> commit) with the stub backend, and asserts
+    every expected phase string appears in the captured call list.
+    """
+    from daydream import runner as _runner
+
+    seen_phases: list[str] = []
+    original = _runner._resolve_backend
+
+    def spy(config, phase, cache=None):
+        seen_phases.append(phase)
+        return original(config, phase, cache)
+
+    # The deep orchestrator does `from daydream.runner import _resolve_backend`
+    # inside run_deep, so patching daydream.runner._resolve_backend intercepts
+    # every call site once the orchestrator is wired to per-phase resolution.
+    monkeypatch.setattr("daydream.runner._resolve_backend", spy)
+
+    # Silence interactive UI but accept the fix gate so fix/test/commit run.
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    # Suppress the PR post side effect.
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    # Stub the fix, test_and_heal, and commit_push phases so they don't try to
+    # mutate the workspace / run tests, but still trigger their resolver call.
+    async def _stub_fix(backend, work, item, idx, total):  # noqa: ARG001
+        return None
+
+    async def _stub_test(backend, work):  # noqa: ARG001
+        return (True, 0)
+
+    async def _stub_commit(backend, work):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _stub_fix)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    expected_phases = {"intent", "wonder", "review", "parse", "merge", "fix", "test"}
+    captured = set(seen_phases)
+    missing = expected_phases - captured
+    assert not missing, (
+        f"Deep orchestrator missing per-phase resolver calls for {missing}; "
+        f"got {sorted(captured)}"
+    )
