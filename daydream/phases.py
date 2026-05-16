@@ -691,6 +691,29 @@ ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+RECOMMENDATION_VERDICTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "issue_id": {"type": "integer"},
+                    "verdict": {"type": "string",
+                                "enum": ["consistent", "contradicts", "uncertain"]},
+                    "evidence": {"type": "string"},
+                    "unverified_assumptions": {"type": "array",
+                                               "items": {"type": "string"}},
+                },
+                "required": ["issue_id", "verdict", "evidence",
+                             "unverified_assumptions"],
+            },
+        },
+    },
+    "required": ["verdicts"],
+}
+
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1267,6 +1290,91 @@ If there are no actionable issues, return: {{"issues": []}}
     return feedback_items
 
 
+async def phase_verify_recommendations(
+    backend: Backend,
+    work: WorkContext,
+    *,
+    merged_report_path: Path,
+    deep_dir: Path,
+) -> Path:
+    """Audit each merged-report issue's recommendation against the codebase.
+
+    Runs a read-only verifier subagent that decides, for every numbered issue
+    in the merged cross-stack report, whether the recommendation is
+    ``consistent`` with trait/interface specs and sibling implementations,
+    ``contradicts`` them, or is ``uncertain`` from the codebase alone.
+    Writes the result as ``recommendation-verdicts.json`` inside
+    ``deep_dir``. The fix gate reads the file and inlines per-item verdicts
+    into the ``phase_fix`` prompt; verdicts are advisory.
+
+    Mirrors ``_run_setup_investigator`` in shape: small read-only contract
+    encoded in the verifier prompt, compact JSON schema, single ``run_agent``
+    call. Trajectory observability is handled by ``run_agent``'s recorder
+    integration via ``phase=DaydreamPhase.VERIFY``; no explicit ``fork`` at
+    this layer.
+
+    Args:
+        backend: The Backend to execute against.
+        work: Workspace context; ``work.repo`` is the verifier's cwd and the
+            repository root passed into the prompt.
+        merged_report_path: Path on disk to the merged cross-stack report.
+            The verifier opens it itself via Read; the contents are not
+            embedded in the prompt.
+        deep_dir: The ``.daydream/deep/`` artifacts directory for this run.
+            The verdicts JSON is written inside it via ``verdicts_path``.
+
+    Returns:
+        Path to the verdicts JSON file written inside ``deep_dir``. The file
+        always exists on successful return; on parse failure or missing
+        agent output, ``{"verdicts": []}`` is written so downstream code
+        does not need to handle a missing file.
+
+    """
+    # Late imports avoid circular dependency with daydream.deep (which imports
+    # from daydream.phases). Same pattern used by phase_per_stack_reviews and
+    # phase_cross_stack_merge above.
+    import json
+
+    from daydream.deep.artifacts import verdicts_path
+    from daydream.deep.prompts import build_verification_prompt
+
+    output_path = verdicts_path(deep_dir)
+    prompt = build_verification_prompt(
+        merged_report_path=merged_report_path,
+        target_dir=work.repo,
+        output_path=output_path,
+    )
+
+    result, _ = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=RECOMMENDATION_VERDICTS_SCHEMA,
+        max_turns=25,
+        phase=DaydreamPhase.VERIFY,
+    )
+
+    payload: dict[str, Any]
+    if isinstance(result, dict) and "verdicts" in result:
+        payload = result
+    elif isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+        except (json.JSONDecodeError, ValueError):
+            payload = {"verdicts": []}
+        else:
+            if isinstance(parsed, dict) and "verdicts" in parsed:
+                payload = parsed
+            else:
+                payload = {"verdicts": []}
+    else:
+        payload = {"verdicts": []}
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2))
+    return output_path
+
+
 async def phase_fix(
     backend: Backend, work: WorkContext, item: dict[str, Any], item_num: int, total: int,
 ) -> None:
@@ -1301,6 +1409,17 @@ Make the minimal change needed. Do NOT change error handling semantics
 unless the issue description specifically explains why the current error
 handling strategy is wrong for that code path.
 """
+
+    verifier_verdict = item.get("verifier_verdict")
+    if verifier_verdict:
+        evidence = item.get("evidence", "")
+        prompt += f"\nVerifier verdict: {verifier_verdict}. Evidence: {evidence}.\n"
+        if verifier_verdict == "contradicts":
+            prompt += (
+                "\nDo NOT apply the recommendation literally if it contradicts the cited spec.\n"
+                "Explain the conflict in your commit message and choose a fix that preserves\n"
+                "the spec, or stop and report inability to fix.\n"
+            )
 
     await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
     print_fix_complete(console, item_num, total)
