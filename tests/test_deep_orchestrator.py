@@ -32,6 +32,12 @@ class _StubBackend:
         self._target = target
         self._is_codex = is_codex
         self.calls: list[dict[str, Any]] = []
+        # Verdict the recommendation-verifier stub branch emits for issue_id=1.
+        # Default "consistent" keeps existing tests' behavior unchanged; tests
+        # exercising the contradicts path flip this to "contradicts" so the
+        # verdict propagates into the phase_fix prompt via the orchestrator.
+        self.verifier_verdict: str = "consistent"
+        self.verifier_unverified_assumptions: list[str] = []
 
     async def execute(
         self,
@@ -133,6 +139,30 @@ class _StubBackend:
                 )
             yield TextEvent(text="")
             yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        # Recommendation verifier (issue #83). Discriminator: build_verification_prompt
+        # always embeds the schema constant name "RECOMMENDATION_VERDICTS_SCHEMA" in
+        # the prompt text (via json.dumps). This is structural — tied to the schema
+        # constant, not to agent-role wording — so prompt rewording won't silently
+        # break this branch. phase_verify_recommendations persists the structured
+        # output to `.daydream/deep/recommendation-verdicts.json` itself, so the stub
+        # only needs to emit a well-formed payload.
+        if "RECOMMENDATION_VERDICTS_SCHEMA" in prompt:
+            yield TextEvent(text="")
+            yield ResultEvent(
+                structured_output={
+                    "verdicts": [
+                        {
+                            "issue_id": 1,
+                            "verdict": self.verifier_verdict,
+                            "evidence": "stub",
+                            "unverified_assumptions": list(self.verifier_unverified_assumptions),
+                        }
+                    ]
+                },
+                continuation=None,
+            )
             return
 
         # Default: empty text + no structured output.
@@ -1014,10 +1044,147 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    expected_phases = {"intent", "wonder", "review", "parse", "merge", "fix", "test"}
+    expected_phases = {"intent", "wonder", "review", "parse", "merge", "fix", "test", "verify"}
     captured = set(seen_phases)
     missing = expected_phases - captured
     assert not missing, (
         f"Deep orchestrator missing per-phase resolver calls for {missing}; "
         f"got {sorted(captured)}"
+    )
+
+
+async def test_verifier_runs_after_merge_before_fix(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recommendation verifier runs as a sub-step of the fix gate.
+
+    Asserts:
+      1. The verifier prompt was dispatched through the stub backend.
+      2. Ordering: merge call index < verifier call index < first fix call.
+      3. The verdicts JSON lands on disk at the expected artifacts path.
+
+    Requires the y/N gate to accept ("y") so the fix loop runs and the
+    fix-call index exists to compare against.
+    """
+    from daydream.deep.artifacts import verdicts_path
+
+    # Silence interactive UI but accept the fix gate so the fix loop runs.
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    # Suppress non-idempotent PR post and don't actually mutate the workspace
+    # in test_and_heal / commit_push. phase_fix is left REAL so the verdict
+    # propagation into the fix prompt is observable via stub.calls.
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    async def _stub_test(backend, work):  # noqa: ARG001
+        return (True, 0)
+
+    async def _stub_commit(backend, work):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    # Tag each call by stage (mirrors the test_pipeline_order pattern).
+    merge_idx: int | None = None
+    verifier_idx: int | None = None
+    first_fix_idx: int | None = None
+    for idx, call in enumerate(stub.calls):
+        pl = call["prompt"].lower()
+        if merge_idx is None and "cross-stack merge agent" in pl:
+            merge_idx = idx
+        elif verifier_idx is None and "recommendation-verifier" in pl:
+            verifier_idx = idx
+        elif first_fix_idx is None and pl.startswith("fix this issue:"):
+            first_fix_idx = idx
+
+    assert verifier_idx is not None, "verifier prompt was not dispatched"
+    assert merge_idx is not None, "merge prompt was not dispatched"
+    assert first_fix_idx is not None, "no fix prompt dispatched -- fix loop did not run"
+    assert merge_idx < verifier_idx < first_fix_idx, (
+        f"expected merge ({merge_idx}) < verifier ({verifier_idx}) < first fix "
+        f"({first_fix_idx})"
+    )
+
+    # Verdicts JSON lands on disk at the orchestrator-controlled path.
+    expected_path = verdicts_path(multi_stack_target / ".daydream" / "deep")
+    assert expected_path == multi_stack_target / ".daydream" / "deep" / "recommendation-verdicts.json"
+    assert expected_path.is_file(), f"verdicts file missing at {expected_path}"
+
+    import json as _json
+    payload = _json.loads(expected_path.read_text())
+    assert payload == {
+        "verdicts": [
+            {
+                "issue_id": 1,
+                "verdict": "consistent",
+                "evidence": "stub",
+                "unverified_assumptions": [],
+            }
+        ]
+    }
+
+
+async def test_verifier_contradicts_propagates_to_fix_prompt(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the verifier returns `contradicts` for an issue_id matching a parsed
+    feedback item, the orchestrator attaches the verdict and phase_fix inlines
+    `Verifier verdict: contradicts` into the fix-agent prompt.
+    """
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    # Flip the verdict the stub returns; parsed feedback uses id=1, so this
+    # entry matches and the orchestrator attaches verifier_verdict to it.
+    stub.verifier_verdict = "contradicts"
+    stub.verifier_unverified_assumptions = [
+        "assumes endpoint returns JSON",
+        "assumes caller is authenticated",
+    ]
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    async def _stub_test(backend, work):  # noqa: ARG001
+        return (True, 0)
+
+    async def _stub_commit(backend, work):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    fix_prompts = [c["prompt"] for c in stub.calls if c["prompt"].lower().startswith("fix this issue:")]
+    assert fix_prompts, "no fix prompt dispatched -- fix loop did not run"
+    assert any("Verifier verdict: contradicts" in p for p in fix_prompts), (
+        "contradicts verdict did not propagate into the fix prompt; "
+        f"fix prompts seen: {fix_prompts!r}"
+    )
+    assert any(
+        "Unverified assumptions: assumes endpoint returns JSON; "
+        "assumes caller is authenticated." in p
+        for p in fix_prompts
+    ), (
+        "unverified_assumptions did not propagate into the fix prompt; "
+        f"fix prompts seen: {fix_prompts!r}"
     )

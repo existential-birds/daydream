@@ -7,9 +7,11 @@ prompts. Per-stack agents only see their own stack's files + TTT context (D-10).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from daydream.phases import (
+    RECOMMENDATION_VERDICTS_SCHEMA,
     _confidence_and_convention_instructions,
     _dependency_impact_instructions,
     _exploration_pointer,
@@ -225,6 +227,94 @@ def build_merge_prompt(
         "`#N` to repository issues/PRs, which creates misleading links."
     )
     parts.append(f"Write the complete report to {output_path}.")
+    return "\n\n".join(parts)
+
+
+def build_verification_prompt(
+    *,
+    merged_report_path: Path,
+    target_dir: Path,
+    output_path: Path,
+) -> str:
+    """Assemble the recommendation-verifier prompt.
+
+    The verifier audits each numbered issue in the merged report against the
+    codebase: trait/interface specs, sibling implementations, and any transitive
+    properties the recommendation asserts about functions it does not modify.
+    Verdicts are advisory -- the verifier does not block fixes; it warns the fix
+    agent inline and surfaces a count to the user.
+
+    Hard contract:
+      - Read-only tools only: Read, Grep, Glob, and Bash restricted to
+        non-mutating commands (git, cat, ls).
+      - Bulk pass over the merged report; the verifier opens it itself.
+      - Empty issue list yields an empty verdict list (no error).
+
+    Args:
+        merged_report_path: Path to the merged cross-stack report on disk.
+            The verifier reads it directly; do NOT embed its contents.
+        target_dir: Repository root the verifier runs against.
+        output_path: Where the verifier must write its JSON verdicts file.
+
+    Returns:
+        Assembled prompt string.
+    """
+    parts: list[str] = []
+    parts.append(
+        "You are the recommendation-verifier agent. Your job is to audit each "
+        "numbered issue in the merged cross-stack review report against the "
+        "actual codebase and decide whether its recommendation is consistent "
+        "with trait/interface specs and sibling implementations.\n\n"
+        f"Merged report: {merged_report_path}\n"
+        f"Repository root: {target_dir}\n"
+        "Open the merged report yourself with Read. Do NOT re-run any reviews."
+    )
+    parts.append(
+        "Read-only contract (MANDATORY):\n"
+        "  - Allowed tools: Read, Grep, Glob, Bash.\n"
+        "  - Bash is restricted to non-mutating commands only: `git`, `cat`, `ls`.\n"
+        "  - Do NOT write, edit, or move files anywhere except the JSON output "
+        "path specified below. Do NOT run `git commit`, `git add`, `git checkout`, "
+        "`git reset`, `git stash`, or any other state-changing command."
+    )
+    parts.append(
+        "Turn budget: cap your investigation at 25 turns total. Prefer Grep/Glob "
+        "to narrow the search before opening files with Read."
+    )
+    parts.append(
+        "For EACH numbered issue in the merged report, perform these five steps:\n\n"
+        "  1. Locate the `impl` / interface / protocol declaration the changed "
+        "code participates in. If absent, set `verdict=consistent` only if no "
+        "sibling implementations exist.\n"
+        "  2. Locate every sibling implementation "
+        "(`grep -rn \"impl <Trait> for\"` / `class X(<Iface>)`).\n"
+        "  3. Locate the trait/interface doc-comment that specifies the behavior "
+        "being changed.\n"
+        "  4. Compare the recommendation against those. Verdicts:\n"
+        "     - `consistent` -- recommendation aligns with the trait doc and at "
+        "least one sibling. Cite one line of evidence.\n"
+        "     - `contradicts` -- recommendation would make this impl diverge "
+        "from the trait doc OR from a sibling that the trait doc agrees with. "
+        "Cite the conflicting line.\n"
+        "     - `uncertain` -- cannot decide from the codebase. List the "
+        "assumption that would need to hold.\n"
+        "  5. Additionally: list any *transitive properties* the recommendation "
+        "asserts about functions it does not modify (`unverified_assumptions`). "
+        'Example: "assumes `osprey_home()` always returns an absolute path."'
+    )
+    parts.append(
+        "Empty-input rule: if the merged report contains no numbered issues "
+        "under `## Issues` or `## Cross-Stack Issues`, emit an empty `verdicts` "
+        "array. This is NOT an error."
+    )
+    parts.append(
+        "Output JSON conforming EXACTLY to this schema. Every verdict entry "
+        "MUST include all four required fields, even when "
+        "`unverified_assumptions` is an empty array.\n\n"
+        "RECOMMENDATION_VERDICTS_SCHEMA = "
+        + json.dumps(RECOMMENDATION_VERDICTS_SCHEMA, indent=4)
+    )
+    parts.append(f"Write your JSON verdicts to {output_path}.")
     return "\n\n".join(parts)
 
 

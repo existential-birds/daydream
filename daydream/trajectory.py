@@ -179,6 +179,7 @@ class DaydreamPhase(str, Enum):
     PR_FEEDBACK = "pr_feedback"
     DEEP = "deep"
     EXPLORATION = "exploration"
+    VERIFY = "verify"
 
 
 class DaydreamRunFlow(str, Enum):

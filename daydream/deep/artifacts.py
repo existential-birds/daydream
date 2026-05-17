@@ -91,6 +91,11 @@ def per_stack_failures_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "per-stack-failures.json"
 
 
+def verdicts_path(deep_dir_path: Path) -> Path:
+    """Path to the recommendation-verifier verdicts artifact."""
+    return deep_dir_path / "recommendation-verdicts.json"
+
+
 def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
     """Validate predecessor artifacts exist for the given resume stage.
 

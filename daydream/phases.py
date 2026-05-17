@@ -691,6 +691,29 @@ ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+RECOMMENDATION_VERDICTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "issue_id": {"type": "integer"},
+                    "verdict": {"type": "string",
+                                "enum": ["consistent", "contradicts", "uncertain"]},
+                    "evidence": {"type": "string"},
+                    "unverified_assumptions": {"type": "array",
+                                               "items": {"type": "string"}},
+                },
+                "required": ["issue_id", "verdict", "evidence",
+                             "unverified_assumptions"],
+            },
+        },
+    },
+    "required": ["verdicts"],
+}
+
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1267,6 +1290,100 @@ If there are no actionable issues, return: {{"issues": []}}
     return feedback_items
 
 
+def _coerce_verdicts_payload(value: Any) -> dict[str, Any]:
+    """Normalize a raw verifier result into a ``{"verdicts": [dict, ...]}`` payload.
+
+    Accepts any candidate (dict, JSON-parsed value, or other) and returns a
+    payload whose ``verdicts`` key is guaranteed to be a list of dicts.
+    Non-dict entries inside the list are dropped rather than rejecting the
+    whole payload so partial agent output is still usable downstream.
+    """
+    if not isinstance(value, dict):
+        return {"verdicts": []}
+    raw = value.get("verdicts")
+    if not isinstance(raw, list):
+        return {"verdicts": []}
+    return {"verdicts": [entry for entry in raw if isinstance(entry, dict)]}
+
+
+async def phase_verify_recommendations(
+    backend: Backend,
+    work: WorkContext,
+    *,
+    merged_report_path: Path,
+    deep_dir: Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Audit each merged-report issue's recommendation against the codebase.
+
+    Runs a read-only verifier subagent that decides, for every numbered issue
+    in the merged cross-stack report, whether the recommendation is
+    ``consistent`` with trait/interface specs and sibling implementations,
+    ``contradicts`` them, or is ``uncertain`` from the codebase alone.
+    Writes the result as ``recommendation-verdicts.json`` inside
+    ``deep_dir``. The fix gate reads the file and inlines per-item verdicts
+    into the ``phase_fix`` prompt; verdicts are advisory.
+
+    Mirrors ``_run_setup_investigator`` in shape: small read-only contract
+    encoded in the verifier prompt, compact JSON schema, single ``run_agent``
+    call. Trajectory observability is handled by ``run_agent``'s recorder
+    integration via ``phase=DaydreamPhase.VERIFY``; no explicit ``fork`` at
+    this layer.
+
+    Args:
+        backend: The Backend to execute against.
+        work: Workspace context; ``work.repo`` is the verifier's cwd and the
+            repository root passed into the prompt.
+        merged_report_path: Path on disk to the merged cross-stack report.
+            The verifier opens it itself via Read; the contents are not
+            embedded in the prompt.
+        deep_dir: The ``.daydream/deep/`` artifacts directory for this run.
+            The verdicts JSON is written inside it via ``verdicts_path``.
+
+    Returns:
+        Tuple of (path, payload) where path is the verdicts JSON file written
+        inside ``deep_dir`` and payload is the already-parsed dict. The file
+        always exists on successful return; on parse failure or missing
+        agent output, ``{"verdicts": []}`` is written so downstream code
+        does not need to handle a missing file.
+
+    """
+    # Late imports avoid circular dependency with daydream.deep (which imports
+    # from daydream.phases). Same pattern used by phase_per_stack_reviews and
+    # phase_cross_stack_merge above.
+    import json
+
+    from daydream.deep.artifacts import verdicts_path
+    from daydream.deep.prompts import build_verification_prompt
+
+    output_path = verdicts_path(deep_dir)
+    prompt = build_verification_prompt(
+        merged_report_path=merged_report_path,
+        target_dir=work.repo,
+        output_path=output_path,
+    )
+
+    result, _ = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=RECOMMENDATION_VERDICTS_SCHEMA,
+        max_turns=25,
+        phase=DaydreamPhase.VERIFY,
+    )
+
+    candidate: Any = result
+    if isinstance(result, str):
+        try:
+            candidate = json.loads(result)
+        except (json.JSONDecodeError, ValueError):
+            candidate = None
+    payload = _coerce_verdicts_payload(candidate)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2))
+    return output_path, payload
+
+
 async def phase_fix(
     backend: Backend, work: WorkContext, item: dict[str, Any], item_num: int, total: int,
 ) -> None:
@@ -1301,6 +1418,27 @@ Make the minimal change needed. Do NOT change error handling semantics
 unless the issue description specifically explains why the current error
 handling strategy is wrong for that code path.
 """
+
+    verifier_verdict = item.get("verifier_verdict")
+    if verifier_verdict:
+        evidence = item.get("evidence", "")
+        prompt += f"\nVerifier verdict: {verifier_verdict}. Evidence: {evidence}.\n"
+        assumptions = item.get("unverified_assumptions") or []
+        if isinstance(assumptions, list) and assumptions:
+            joined = "; ".join(str(a) for a in assumptions)
+            prompt += f"Unverified assumptions: {joined}.\n"
+        if verifier_verdict == "contradicts":
+            prompt += (
+                "\nDo NOT apply the recommendation literally if it contradicts the cited spec.\n"
+                "Explain the conflict in your commit message and choose a fix that preserves\n"
+                "the spec, or stop and report inability to fix.\n"
+            )
+        elif verifier_verdict == "uncertain":
+            prompt += (
+                "\nThe verifier could not confirm whether this recommendation is correct.\n"
+                "Proceed cautiously: apply the minimal fix and note the uncertainty in your\n"
+                "commit message.\n"
+            )
 
     await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
     print_fix_complete(console, item_num, total)
