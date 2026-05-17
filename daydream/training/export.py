@@ -14,6 +14,8 @@ Builders (``_build_spans``, ``_build_record``) and the query pipeline
 from __future__ import annotations
 
 import json
+import math
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -325,3 +327,62 @@ def _query_index(archive_dir: Path, filters: ExportFilters) -> list[dict[str, An
 
     survivors.sort(key=lambda r: r["session_id"])
     return survivors
+
+
+# ---------------------------------------------------------------------------
+# Stratification (Wave 5)
+# ---------------------------------------------------------------------------
+
+
+def _stratify(records: list[dict], max_stack_share: float) -> list[dict]:
+    """Cap any single stack's share of the corpus at ``max_stack_share``.
+
+    Implements plan §6:
+
+    1. Group records by ``record["stack"]`` (preserving input order within
+       each group).
+    2. ``total = len(records)``.
+    3. ``cap_per_stack = max(1, floor(total * max_stack_share))`` — the
+       ``max(1, ...)`` guard is the degenerate-corpus rule from §6: when the
+       floor rounds to 0 for a small archive, keep at least one record per
+       stack so no group is fully erased.
+    4. For each stack: keep the first ``min(len(group), cap_per_stack)``
+       records, preserving the original within-group order.
+    5. Concatenate groups (iterating stack keys in deterministic order),
+       then sort the final list by ``session_id`` to restore global ordering
+       (AC #7).
+
+    Records whose ``stack`` is ``None`` form their own group. Mixing ``None``
+    and ``str`` in ``sorted()`` would raise ``TypeError`` on Python 3.12, so
+    the intermediate group iteration uses a ``key`` that maps ``None`` to the
+    empty string (sorts first); the final ``session_id`` sort makes this
+    cosmetic but keeps the intermediate trace deterministic.
+
+    Args:
+        records: List of records (each with ``"stack"`` and ``"session_id"``
+            keys). Records with ``stack=None`` group under the ``None`` key.
+            The input list is not mutated.
+        max_stack_share: Fraction in ``(0, 1]`` — typically ``0.6`` (the CLI
+            default). Validation of the range happens at the CLI layer; this
+            helper trusts its caller.
+
+    Returns:
+        A new list, sorted by ``session_id``. Empty when ``records`` is
+        empty.
+    """
+    if not records:
+        return []
+
+    groups: dict[str | None, list[dict]] = defaultdict(list)
+    for record in records:
+        groups[record.get("stack")].append(record)
+
+    total = len(records)
+    cap_per_stack = max(1, math.floor(total * max_stack_share))
+
+    out: list[dict] = []
+    for stack_key in sorted(groups.keys(), key=lambda k: "" if k is None else k):
+        group = groups[stack_key]
+        out.extend(group[:cap_per_stack])
+
+    return sorted(out, key=lambda r: r["session_id"])
