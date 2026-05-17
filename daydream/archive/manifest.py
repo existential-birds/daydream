@@ -52,6 +52,10 @@ class Manifest:
         branch: Git branch name at run time.
         base_branch: Default branch (main/master).
         head_sha: Git HEAD commit SHA.
+        base_sha: Merge-base SHA between ``base_branch`` and HEAD at archive
+            time. ``None`` when no merge-base could be resolved.
+        changed_files: Repo-relative paths changed between ``base_sha`` and
+            ``head_sha``. Empty list when ``base_sha`` is ``None``.
         pr_number: GitHub PR number if applicable.
         pr_repo: GitHub repo slug for PR.
         total_cost_usd: Total cost from trajectory final metrics.
@@ -91,6 +95,8 @@ class Manifest:
     branch: str | None = None
     base_branch: str | None = None
     head_sha: str | None = None
+    base_sha: str | None = None
+    changed_files: list[str] = field(default_factory=list)
 
     # PR context
     pr_number: int | None = None
@@ -141,6 +147,13 @@ class Manifest:
                 "branch": self.branch,
                 "base_branch": self.base_branch,
                 "head_sha": self.head_sha,
+            },
+            "code_context": {
+                "base_sha": self.base_sha,
+                "head_sha": self.head_sha,
+                "base_branch": self.base_branch,
+                "branch": self.branch,
+                "changed_files": list(self.changed_files),
             },
             "pr": {
                 "number": self.pr_number,
@@ -208,6 +221,8 @@ def build_manifest(
         branch=git_ctx.branch,
         base_branch=git_ctx.base_branch,
         head_sha=git_ctx.head_sha,
+        base_sha=git_ctx.base_sha,
+        changed_files=list(git_ctx.changed_files),
         pr_number=recorder.pr_number,
         pr_repo=recorder.pr_repo,
         total_cost_usd=totals["cost"] if totals.get("any_cost_seen") else None,

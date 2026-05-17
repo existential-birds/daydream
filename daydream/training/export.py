@@ -101,6 +101,7 @@ def _build_record(
     manifest_row: dict[str, Any],
     trajectory: dict[str, Any],
     stack: str | None,
+    manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble a training record matching ``schema/v1.json``.
 
@@ -109,9 +110,11 @@ def _build_record(
     small and downstream consumers materialize bytes from the archive on
     demand.
 
-    Fields that the R1 manifest does not yet populate (``base_sha``,
-    ``changed_files``, ``review_output``) are emitted as ``None`` / ``[]``;
-    the schema allows nullable values in those slots.
+    ``base_sha`` and ``changed_files`` are sourced from the on-disk
+    ``manifest.json`` (passed as ``manifest``) via its ``code_context`` block.
+    Older archives written before that block existed surface ``base_sha=None``
+    and ``changed_files=[]``. ``review_output`` is read from
+    ``<archive_path>/review-output.md`` when present.
 
     Args:
         manifest_row: Dict shaped like ``Manifest.to_dict()["manifest"]`` or a
@@ -123,6 +126,10 @@ def _build_record(
         stack: Routing label (e.g. ``"python"``, ``"react"``). The caller
             derives this from deep-stack detection; pass ``None`` when
             unavailable.
+        manifest: Parsed ``manifest.json`` dict for this run. ``None`` (the
+            default) is treated as "manifest unavailable" — ``code_context``
+            falls back to the row scalars with ``base_sha=None`` and
+            ``changed_files=[]``.
 
     Returns:
         A dict that validates against ``daydream/training/schema/v1.json``.
@@ -143,6 +150,18 @@ def _build_record(
     if not isinstance(labels, list):
         labels = []
 
+    code_ctx = (manifest or {}).get("code_context") or {}
+    base_sha = code_ctx.get("base_sha")
+    changed = code_ctx.get("changed_files") or []
+    if not isinstance(changed, list):
+        changed = []
+
+    review_output_path = archive_path / "review-output.md"
+    try:
+        review_output: str | None = review_output_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        review_output = None
+
     return {
         "schema_version": TRAINING_SCHEMA_VERSION,
         "session_id": manifest_row["session_id"],
@@ -150,13 +169,13 @@ def _build_record(
         "skill": manifest_row.get("skill"),
         "stack": stack,
         "code_context": {
-            "base_sha": None,  # not populated by R1 manifest
+            "base_sha": base_sha,
             "head_sha": manifest_row.get("head_sha"),
             "base_branch": manifest_row.get("base_branch"),
             "branch": manifest_row.get("branch"),
-            "changed_files": [],  # not populated by R1 manifest
+            "changed_files": [str(p) for p in changed],
         },
-        "review_output": None,  # not loaded from disk in R1
+        "review_output": review_output,
         "fix_diff_ref": fix_diff_ref,
         "test_outcome": manifest_row.get("test_outcome"),
         "outcome_label": labels[0] if labels else None,
@@ -327,11 +346,26 @@ def _query_index(archive_dir: Path, filters: ExportFilters) -> list[dict[str, An
     rows = query_runs(archive_dir, where, params)
 
     survivors: list[dict[str, Any]] = []
+    unknown_skills: set[str] = set()
     for row in rows:
         if is_copyleft(row.get("repo_slug"), filters.allow_copyleft):
             continue
-        row["stack"] = _stack_for_skill(row.get("skill"))
+        skill = row.get("skill")
+        stack = _stack_for_skill(skill)
+        if stack is None and isinstance(skill, str) and skill:
+            unknown_skills.add(skill)
+        row["stack"] = stack
         survivors.append(row)
+
+    if unknown_skills:
+        console = create_console()
+        for skill in sorted(unknown_skills):
+            print_warning(
+                console,
+                f"Skill {skill!r} is not in REVIEW_SKILLS — records will be "
+                f"stratified under stack=None. Add it to ReviewSkillChoice if "
+                f"it should route to its own stack.",
+            )
 
     survivors.sort(key=lambda r: r["session_id"])
     return survivors
@@ -497,11 +531,7 @@ def run_export(config: ExportConfig) -> dict[str, int]:
             continue
         try:
             trajectory = json.loads(traj_path.read_text(encoding="utf-8"))
-            # Manifest is loaded for parity / future fields, but _build_record
-            # consumes the SQL row directly so the manifest dict is unused
-            # here. Reading it still validates the file is parsable so we
-            # don't emit records that point at broken archives.
-            json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             print_warning(
                 console,
@@ -509,7 +539,7 @@ def run_export(config: ExportConfig) -> dict[str, int]:
                 f"trajectory.json at {archive_path}",
             )
             continue
-        records.append(_build_record(row, trajectory, row.get("stack")))
+        records.append(_build_record(row, trajectory, row.get("stack"), manifest))
 
     # 6. Stratification (optional).
     if config.stratify_by == "stack":

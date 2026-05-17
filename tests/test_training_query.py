@@ -97,3 +97,38 @@ def test_query_attaches_stack(archive: Path) -> None:
     by_id = {row["session_id"]: row for row in rows}
     assert by_id["aaa-python-accepted"]["stack"] == "python"
     assert by_id["bbb-react-rejected"]["stack"] == "react"
+
+
+def test_query_warns_on_unknown_skill(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A row whose skill isn't in REVIEW_SKILLS triggers a one-time warning."""
+    import json as _json
+
+    from daydream.archive.index import upsert_run
+    from daydream.archive.manifest import Manifest
+
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    session_dir = runs_dir / "zzz-mystery"
+    session_dir.mkdir()
+    manifest = Manifest(
+        session_id="zzz-mystery",
+        archived_at="2026-05-17T00:00:00+00:00",
+        status="complete",
+        skill="beagle-zig:review-zig",
+        repo_slug="someorg/zig-app",
+        branch="feat/x",
+        base_branch="main",
+        head_sha="abc",
+        grounding_rate=0.9,
+        outcome_labels=_json.dumps(["accepted"]),
+        archive_path=str(session_dir),
+    )
+    upsert_run(tmp_path, manifest)
+
+    rows = _query_index(tmp_path, ExportFilters())
+    captured = capsys.readouterr()
+
+    assert any(row["session_id"] == "zzz-mystery" and row["stack"] is None for row in rows)
+    assert "beagle-zig:review-zig" in captured.out

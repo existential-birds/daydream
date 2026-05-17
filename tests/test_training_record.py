@@ -153,3 +153,50 @@ def test_record_fix_diff_ref_reflects_archive_state(tmp_path: Path) -> None:
     (tmp_path / "diff.patch").write_text("diff --git a/x b/x\n", encoding="utf-8")
     record = _build_record(manifest_row, trajectory, stack="python")
     assert record["fix_diff_ref"]["available"] is True
+
+
+def test_record_code_context_sourced_from_manifest_dict(tmp_path: Path) -> None:
+    """``base_sha`` + ``changed_files`` are read from the manifest dict."""
+    manifest_row = _make_manifest_row(archive_path=str(tmp_path))
+    manifest = {
+        "code_context": {
+            "base_sha": "deadbeef" * 5,
+            "head_sha": manifest_row["head_sha"],
+            "base_branch": "main",
+            "branch": "feat/foo",
+            "changed_files": ["src/a.py", "src/b.py"],
+        }
+    }
+    trajectory: dict[str, Any] = {"steps": []}
+
+    record = _build_record(manifest_row, trajectory, stack="python", manifest=manifest)
+
+    assert record["code_context"]["base_sha"] == "deadbeef" * 5
+    assert record["code_context"]["changed_files"] == ["src/a.py", "src/b.py"]
+
+
+def test_record_code_context_falls_back_when_manifest_missing(tmp_path: Path) -> None:
+    """A manifest without ``code_context`` yields base_sha=None, changed_files=[]."""
+    manifest_row = _make_manifest_row(archive_path=str(tmp_path))
+    record = _build_record(manifest_row, {"steps": []}, stack=None, manifest={})
+
+    assert record["code_context"]["base_sha"] is None
+    assert record["code_context"]["changed_files"] == []
+    # Scalar fields still come from the row.
+    assert record["code_context"]["head_sha"] == manifest_row["head_sha"]
+    assert record["code_context"]["branch"] == manifest_row["branch"]
+
+
+def test_record_review_output_loaded_from_archive(tmp_path: Path) -> None:
+    """When ``review-output.md`` is present, its text lands in ``review_output``."""
+    (tmp_path / "review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
+    manifest_row = _make_manifest_row(archive_path=str(tmp_path))
+
+    record = _build_record(manifest_row, {"steps": []}, stack="python")
+    assert record["review_output"] == "# Review\nLooks good.\n"
+
+
+def test_record_review_output_none_when_file_absent(tmp_path: Path) -> None:
+    manifest_row = _make_manifest_row(archive_path=str(tmp_path))
+    record = _build_record(manifest_row, {"steps": []}, stack="python")
+    assert record["review_output"] is None
