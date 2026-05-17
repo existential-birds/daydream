@@ -1,21 +1,26 @@
 """Training-record and span builders for the JSONL exporter.
 
-This module owns ATIF-v1.6 trajectory → training-record conversion. Higher-level
-orchestration (SQLite query, filters, stratification, file emission) lands in
-later waves; this file is deliberately limited to the two pure-function
-builders so the record shape and span-derivation rule can be reviewed and
-tested in isolation.
+This module owns ATIF-v1.6 trajectory → training-record conversion plus the
+filter pipeline that selects which archived runs become training records.
+Higher-level orchestration (stratification, file emission, CLI surface) lands
+in later waves.
 
-Both helpers are private (underscore-prefixed): callers outside this package
-should depend on ``run_export`` once it lands in Wave 6, not on these helpers.
+Builders (``_build_spans``, ``_build_record``) and the query pipeline
+(``ExportFilters``, ``_build_query``, ``_query_index``) are private
+(underscore-prefixed): callers outside this package should depend on
+``run_export`` once it lands in Wave 6, not on these helpers.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from daydream.archive.index import query_runs
+from daydream.config import REVIEW_SKILLS
+from daydream.training.exclusion import is_copyleft, load_exclusion_list
 from daydream.training.schema import TRAINING_SCHEMA_VERSION
 
 
@@ -149,3 +154,174 @@ def _build_record(
         "spans": _build_spans(trajectory),
         "trajectory_ref": {"archive_relative_path": "trajectory.json"},
     }
+
+
+# ---------------------------------------------------------------------------
+# Filter + query pipeline (Wave 4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExportFilters:
+    """Post-exclusion filter knobs for ``_build_query`` / ``_query_index``.
+
+    The C5 exclusion list is appended to every query unconditionally — it is
+    not represented here because callers cannot disable it. C8 copyleft
+    handling is opt-in via ``allow_copyleft``: any slug in the frozenset is
+    re-admitted past the copyleft filter that ``_query_index`` applies
+    post-query (the copyleft list itself lives in
+    ``schema/copyleft.txt`` and is loaded by ``is_copyleft``).
+
+    Attributes:
+        skill: Optional exact-match filter on the ``skill`` column.
+        repos: Optional whitelist of ``owner/repo`` slugs (IN-clause).
+        labels: Outcome labels considered acceptable. Defaults to
+            ``("accepted",)`` per C9. Ignored when ``include_all_labels``
+            is ``True``.
+        min_grounding: Optional minimum ``grounding_rate`` (inclusive).
+        status: Exact-match filter on the ``status`` column. Defaults to
+            ``"complete"`` so partial / failed runs never enter training.
+        include_all_labels: When ``True``, suppresses the label IN-clause
+            so every label value passes the filter.
+        allow_copyleft: ``owner/repo`` slugs the caller has explicitly
+            opted in via ``--allow-copyleft``; bypasses the C8 skip.
+    """
+
+    skill: str | None = None
+    repos: tuple[str, ...] = ()
+    labels: tuple[str, ...] = ("accepted",)
+    min_grounding: float | None = None
+    status: str = "complete"
+    include_all_labels: bool = False
+    allow_copyleft: frozenset[str] = frozenset()
+
+
+# Inverse of REVIEW_SKILLS: full skill string → short stack label
+# (e.g. "beagle-python:review-python" → "python"). Built at import time
+# so ``_stack_for_skill`` is a single dict lookup.
+_SKILL_TO_STACK: dict[str, str] = {skill: choice.name.lower() for choice, skill in REVIEW_SKILLS.items()}
+
+
+def _stack_for_skill(skill: str | None) -> str | None:
+    """Return the stack label (e.g. ``"python"``, ``"react"``) for a skill.
+
+    Args:
+        skill: The full skill string from a manifest row
+            (e.g. ``"beagle-python:review-python"``) or ``None``.
+
+    Returns:
+        The lowercase stack label, or ``None`` when ``skill`` is ``None``
+        or not present in ``REVIEW_SKILLS``.
+    """
+    if skill is None:
+        return None
+    return _SKILL_TO_STACK.get(skill)
+
+
+def _build_query(filters: ExportFilters) -> tuple[str, tuple[Any, ...]]:
+    """Assemble the WHERE clause + bound params for ``query_runs``.
+
+    The returned ``where`` string is suitable for direct hand-off to
+    ``daydream.archive.index.query_runs`` (which prepends ``WHERE`` when
+    non-empty). ORDER BY is intentionally *not* emitted here — callers
+    sort the result list in Python (see ``_query_index``).
+
+    Clauses, in fixed order:
+
+    1. ``status = ?`` — always.
+    2. C5 exclusion: ``repo_slug IS NULL OR repo_slug NOT IN (...)`` — always
+       (when the exclusion list is non-empty; otherwise omitted to keep the
+       SQL clean). Placeholder count is derived from the loaded set size.
+    3. ``skill = ?`` — when ``filters.skill`` is set.
+    4. ``repo_slug IN (...)`` — when ``filters.repos`` is non-empty.
+    5. ``grounding_rate >= ?`` — when ``filters.min_grounding`` is set.
+    6. SQLite JSON1 label match against ``outcome_labels`` — unless
+       ``filters.include_all_labels`` is ``True``.
+
+    Args:
+        filters: Resolved filter knobs.
+
+    Returns:
+        ``(where_clause, params)`` where ``where_clause`` has no leading
+        ``WHERE`` keyword (per ``query_runs``'s contract) and ``params`` is
+        the tuple of bound values in left-to-right order.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    # 1. status — always
+    clauses.append("status = ?")
+    params.append(filters.status)
+
+    # 2. C5 exclusion — always (when list is non-empty)
+    exclusion = load_exclusion_list()
+    if exclusion:
+        # Stable ordering so the generated SQL is reproducible across runs.
+        ordered_exclusion = sorted(exclusion)
+        placeholders = ", ".join(["?"] * len(ordered_exclusion))
+        clauses.append(f"(repo_slug IS NULL OR repo_slug NOT IN ({placeholders}))")
+        params.extend(ordered_exclusion)
+
+    # 3. skill — optional
+    if filters.skill is not None:
+        clauses.append("skill = ?")
+        params.append(filters.skill)
+
+    # 4. repos — optional
+    if filters.repos:
+        placeholders = ", ".join(["?"] * len(filters.repos))
+        clauses.append(f"repo_slug IN ({placeholders})")
+        params.extend(filters.repos)
+
+    # 5. min_grounding — optional
+    if filters.min_grounding is not None:
+        clauses.append("grounding_rate >= ?")
+        params.append(filters.min_grounding)
+
+    # 6. labels — unless include_all_labels
+    if not filters.include_all_labels and filters.labels:
+        placeholders = ", ".join(["?"] * len(filters.labels))
+        # outcome_labels is a JSON-encoded string list; json_each unpacks it
+        # so we can run a normal IN match against the raw values.
+        clauses.append(
+            "EXISTS (SELECT 1 FROM json_each(outcome_labels) WHERE value IN (" + placeholders + "))"
+        )
+        params.extend(filters.labels)
+
+    where = " AND ".join(clauses)
+    return where, tuple(params)
+
+
+def _query_index(archive_dir: Path, filters: ExportFilters) -> list[dict[str, Any]]:
+    """Query the SQLite index, apply C8 copyleft skip, decorate, and sort.
+
+    Goes through the public ``query_runs`` helper (no direct SQLite
+    connection management here). The C8 copyleft check runs *after* the
+    SQL query because the copyleft list is small and pulling it into the
+    WHERE clause would duplicate logic that already lives in ``is_copyleft``.
+
+    Each surviving row is augmented with a derived ``"stack"`` key so
+    downstream stratification and record building can route on stack
+    without re-deriving from the skill string.
+
+    Args:
+        archive_dir: Path to the daydream archive root (e.g.
+            ``~/.daydream/archive``).
+        filters: Resolved filter knobs.
+
+    Returns:
+        Rows in lexicographic ``session_id`` order so emission is
+        reproducible across runs.
+    """
+    where, params = _build_query(filters)
+    rows = query_runs(archive_dir, where, params)
+
+    survivors: list[dict[str, Any]] = []
+    for row in rows:
+        if is_copyleft(row.get("repo_slug"), filters.allow_copyleft):
+            continue
+        row["stack"] = _stack_for_skill(row.get("skill"))
+        survivors.append(row)
+
+    survivors.sort(key=lambda r: r["session_id"])
+    return survivors
