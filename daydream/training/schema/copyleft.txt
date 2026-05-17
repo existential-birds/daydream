@@ -1,0 +1,1 @@
+# owner/repo per line — GPL/AGPL repos that require --allow-copyleft to opt in

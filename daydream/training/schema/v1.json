@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Daydream training-record (JSONL) schema v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "session_id",
+    "repo_slug",
+    "skill",
+    "stack",
+    "code_context",
+    "review_output",
+    "fix_diff_ref",
+    "test_outcome",
+    "outcome_label",
+    "grounding_score",
+    "spans",
+    "trajectory_ref"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "repo_slug": {
+      "type": ["string", "null"]
+    },
+    "skill": {
+      "type": ["string", "null"]
+    },
+    "stack": {
+      "type": ["string", "null"]
+    },
+    "code_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_sha",
+        "head_sha",
+        "base_branch",
+        "branch",
+        "changed_files"
+      ],
+      "properties": {
+        "base_sha": {
+          "type": ["string", "null"]
+        },
+        "head_sha": {
+          "type": ["string", "null"]
+        },
+        "base_branch": {
+          "type": ["string", "null"]
+        },
+        "branch": {
+          "type": ["string", "null"]
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "review_output": {
+      "type": ["string", "null"]
+    },
+    "fix_diff_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "available",
+        "archive_relative_path"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "archive_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    "test_outcome": {
+      "type": ["string", "null"]
+    },
+    "outcome_label": {
+      "type": ["string", "null"]
+    },
+    "grounding_score": {
+      "type": ["number", "null"]
+    },
+    "spans": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "step_id",
+          "kind",
+          "content_path"
+        ],
+        "properties": {
+          "step_id": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["REASON", "ACT"]
+          },
+          "content_path": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "trajectory_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive_relative_path"
+      ],
+      "properties": {
+        "archive_relative_path": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
