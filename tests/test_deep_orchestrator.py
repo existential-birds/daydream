@@ -37,6 +37,7 @@ class _StubBackend:
         # exercising the contradicts path flip this to "contradicts" so the
         # verdict propagates into the phase_fix prompt via the orchestrator.
         self.verifier_verdict: str = "consistent"
+        self.verifier_unverified_assumptions: list[str] = []
 
     async def execute(
         self,
@@ -156,7 +157,7 @@ class _StubBackend:
                             "issue_id": 1,
                             "verdict": self.verifier_verdict,
                             "evidence": "stub",
-                            "unverified_assumptions": [],
+                            "unverified_assumptions": list(self.verifier_unverified_assumptions),
                         }
                     ]
                 },
@@ -1152,6 +1153,10 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
     # Flip the verdict the stub returns; parsed feedback uses id=1, so this
     # entry matches and the orchestrator attaches verifier_verdict to it.
     stub.verifier_verdict = "contradicts"
+    stub.verifier_unverified_assumptions = [
+        "assumes endpoint returns JSON",
+        "assumes caller is authenticated",
+    ]
 
     async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
         return None
@@ -1173,5 +1178,13 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
     assert fix_prompts, "no fix prompt dispatched -- fix loop did not run"
     assert any("Verifier verdict: contradicts" in p for p in fix_prompts), (
         "contradicts verdict did not propagate into the fix prompt; "
+        f"fix prompts seen: {fix_prompts!r}"
+    )
+    assert any(
+        "Unverified assumptions: assumes endpoint returns JSON; "
+        "assumes caller is authenticated." in p
+        for p in fix_prompts
+    ), (
+        "unverified_assumptions did not propagate into the fix prompt; "
         f"fix prompts seen: {fix_prompts!r}"
     )

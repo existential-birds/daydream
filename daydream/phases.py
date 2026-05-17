@@ -1290,6 +1290,22 @@ If there are no actionable issues, return: {{"issues": []}}
     return feedback_items
 
 
+def _coerce_verdicts_payload(value: Any) -> dict[str, Any]:
+    """Normalize a raw verifier result into a ``{"verdicts": [dict, ...]}`` payload.
+
+    Accepts any candidate (dict, JSON-parsed value, or other) and returns a
+    payload whose ``verdicts`` key is guaranteed to be a list of dicts.
+    Non-dict entries inside the list are dropped rather than rejecting the
+    whole payload so partial agent output is still usable downstream.
+    """
+    if not isinstance(value, dict):
+        return {"verdicts": []}
+    raw = value.get("verdicts")
+    if not isinstance(raw, list):
+        return {"verdicts": []}
+    return {"verdicts": [entry for entry in raw if isinstance(entry, dict)]}
+
+
 async def phase_verify_recommendations(
     backend: Backend,
     work: WorkContext,
@@ -1355,21 +1371,13 @@ async def phase_verify_recommendations(
         phase=DaydreamPhase.VERIFY,
     )
 
-    payload: dict[str, Any]
-    if isinstance(result, dict) and "verdicts" in result:
-        payload = result
-    elif isinstance(result, str):
+    candidate: Any = result
+    if isinstance(result, str):
         try:
-            parsed = json.loads(result)
+            candidate = json.loads(result)
         except (json.JSONDecodeError, ValueError):
-            payload = {"verdicts": []}
-        else:
-            if isinstance(parsed, dict) and "verdicts" in parsed:
-                payload = parsed
-            else:
-                payload = {"verdicts": []}
-    else:
-        payload = {"verdicts": []}
+            candidate = None
+    payload = _coerce_verdicts_payload(candidate)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2))
@@ -1415,6 +1423,10 @@ handling strategy is wrong for that code path.
     if verifier_verdict:
         evidence = item.get("evidence", "")
         prompt += f"\nVerifier verdict: {verifier_verdict}. Evidence: {evidence}.\n"
+        assumptions = item.get("unverified_assumptions") or []
+        if isinstance(assumptions, list) and assumptions:
+            joined = "; ".join(str(a) for a in assumptions)
+            prompt += f"Unverified assumptions: {joined}.\n"
         if verifier_verdict == "contradicts":
             prompt += (
                 "\nDo NOT apply the recommendation literally if it contradicts the cited spec.\n"
