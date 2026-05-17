@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-05-16
+
+### Breaking
+
+- **cli:** Remove the single `--model` flag in favor of per-phase model overrides ([#82](https://github.com/existential-birds/daydream/pull/82)). Replace `--model <name>` with the per-phase flag(s) you actually want — `--review-model`, `--parse-model`, `--fix-model`, `--test-model`, or `--exploration-model`. Passing `--model` now exits early with a curated error pointing at the new flags (both `--model X` and `--model=X` shapes are caught before argparse runs). Each phase resolves its model in this order: explicit per-phase flag → per-backend phase default → backend default, so phases without an override knob (WONDER, ENVISION, MERGE, INTENT, PR_FEEDBACK) still get phase-appropriate models out of the box. Per-backend defaults are documented in the README's *Per-phase model defaults* section.
+
+### Added
+
+- **deep:** Add a read-only `phase_verify_recommendations` pass between cross-stack merge and the fix gate ([#84](https://github.com/existential-birds/daydream/pull/84)). The verifier audits each merged finding's *recommendation* (not just the finding) against trait/interface contracts and sibling implementations, emits structured `consistent` / `contradicts` / `uncertain` verdicts plus `unverified_assumptions` to `.daydream/deep/recommendation-verdicts.json`, and feeds those verdicts back into `phase_fix` so the fix agent has full verifier context when applying changes. Closes the gap where prior passes only validated *whether findings were real* — never whether the recommended fix itself was correct. Runs unconditionally in stage 5 so `--start-at fix` resumes still produce verdicts. UI prints a one-line summary: `Recommendation verification: N findings · M flagged (X contradicts, Y uncertain)`.
+
+- **cli:** Add per-phase model override flags `--review-model`, `--parse-model`, `--fix-model`, `--test-model` ([#82](https://github.com/existential-birds/daydream/pull/82)). Pairs with the existing `--exploration-model` so callers can tune cost vs. quality per phase — PARSE on haiku, FIX/TEST/EXPLORATION on sonnet, REVIEW/WONDER/ENVISION/MERGE/INTENT/PR_FEEDBACK on opus — without a single-knob compromise.
+
+- **config:** Add `PHASE_DEFAULT_MODELS` table mapping backend → phase → model id ([#82](https://github.com/existential-birds/daydream/pull/82)). `_resolve_backend(config, phase)` consults this table when no explicit per-phase flag is set, and the deep orchestrator resolves per-phase backends for intent / wonder / review / parse / merge / verify / fix / test. UI now prints a dim `Model: <name>` line after every phase hero so the effective per-phase model is visible at a glance.
+
 ## [0.16.0] - 2026-05-15
 
 ### Added
@@ -461,7 +475,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.16.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/existential-birds/daydream/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/existential-birds/daydream/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/existential-birds/daydream/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/existential-birds/daydream/compare/v0.13.1...v0.14.0
