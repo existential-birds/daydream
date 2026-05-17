@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive import get_archive_dir
-from daydream.archive.index import query_runs
+from daydream.archive.index import count_runs, query_runs
 from daydream.config import REVIEW_SKILLS
-from daydream.training.exclusion import is_copyleft, load_exclusion_list
+from daydream.training.exclusion import is_copyleft, load_copyleft_list, load_exclusion_list
 from daydream.training.schema import TRAINING_SCHEMA_VERSION
 from daydream.ui import create_console, print_info, print_warning
 
@@ -64,7 +64,7 @@ def _build_spans(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if step.get("is_copied_context") is True:
             continue
-        step_id = step.get("step_id", i + 1)
+        step_id = int(step.get("step_id", i + 1))
         # REASON: prefer explicit reasoning_content; fall back to text message.
         has_reasoning = bool(step.get("reasoning_content"))
         message = step.get("message")
@@ -151,7 +151,6 @@ def _build_record(
         labels = []
 
     code_ctx = (manifest or {}).get("code_context") or {}
-    base_sha = code_ctx.get("base_sha")
     changed = code_ctx.get("changed_files") or []
     if not isinstance(changed, list):
         changed = []
@@ -169,15 +168,14 @@ def _build_record(
         "skill": manifest_row.get("skill"),
         "stack": stack,
         "code_context": {
-            "base_sha": base_sha,
-            "head_sha": manifest_row.get("head_sha"),
-            "base_branch": manifest_row.get("base_branch"),
-            "branch": manifest_row.get("branch"),
+            "base_sha": code_ctx.get("base_sha"),
+            "head_sha": code_ctx.get("head_sha") or manifest_row.get("head_sha"),
+            "base_branch": code_ctx.get("base_branch") or manifest_row.get("base_branch"),
+            "branch": code_ctx.get("branch") or manifest_row.get("branch"),
             "changed_files": [str(p) for p in changed],
         },
         "review_output": review_output,
         "fix_diff_ref": fix_diff_ref,
-        "test_outcome": manifest_row.get("test_outcome"),
         "outcome_label": labels[0] if labels else None,
         "grounding_score": manifest_row.get("grounding_rate"),
         "spans": _build_spans(trajectory),
@@ -345,10 +343,11 @@ def _query_index(archive_dir: Path, filters: ExportFilters) -> list[dict[str, An
     where, params = _build_query(filters)
     rows = query_runs(archive_dir, where, params)
 
+    copyleft_list = load_copyleft_list()
     survivors: list[dict[str, Any]] = []
     unknown_skills: set[str] = set()
     for row in rows:
-        if is_copyleft(row.get("repo_slug"), filters.allow_copyleft):
+        if is_copyleft(row.get("repo_slug"), filters.allow_copyleft, copyleft_list=copyleft_list):
             continue
         skill = row.get("skill")
         stack = _stack_for_skill(skill)
@@ -377,7 +376,7 @@ def _query_index(archive_dir: Path, filters: ExportFilters) -> list[dict[str, An
 
 
 def _stratify(records: list[dict], max_stack_share: float) -> list[dict]:
-    """Cap any single stack's share of the corpus at ``max_stack_share``.
+    """Apply a rough dominance cap so no single stack floods the corpus.
 
     Implements plan §6:
 
@@ -393,6 +392,15 @@ def _stratify(records: list[dict], max_stack_share: float) -> list[dict]:
     5. Concatenate groups (iterating stack keys in deterministic order),
        then sort the final list by ``session_id`` to restore global ordering
        (AC #7).
+
+    **Important — input-corpus cap, not output-share guarantee.**
+    ``cap_per_stack`` is computed from the *input* corpus size, not the
+    output size.  When other stacks contribute fewer records than their cap
+    allows, the output share of a large stack can exceed ``max_stack_share``.
+    Example: 80 ``react`` + 20 ``python`` records with ``max_stack_share=0.6``
+    → ``cap=60``, ``react`` keeps 60, ``python`` keeps 20, output is 80
+    records, ``react`` share = 75 % > 60 %.  ``max_stack_share`` is therefore
+    a rough dominance guard, not a strict per-stack output-fraction cap.
 
     Records whose ``stack`` is ``None`` form their own group. Mixing ``None``
     and ``str`` in ``sorted()`` would raise ``TypeError`` on Python 3.12, so
@@ -510,7 +518,7 @@ def run_export(config: ExportConfig) -> dict[str, int]:
     archive_dir = config.archive_dir or get_archive_dir()
 
     # 3. Unfiltered count for the summary.
-    total_in_index = len(query_runs(archive_dir, "", ()))
+    total_in_index = count_runs(archive_dir)
 
     # 4. Apply filters.
     rows = _query_index(archive_dir, config.filters)
@@ -542,6 +550,13 @@ def run_export(config: ExportConfig) -> dict[str, int]:
         records.append(_build_record(row, trajectory, row.get("stack"), manifest))
 
     # 6. Stratification (optional).
+    none_stack_count = sum(1 for r in records if r.get("stack") is None)
+    if none_stack_count:
+        print_warning(
+            console,
+            f"{none_stack_count} record(s) have stack=None (unmapped skills) "
+            "and will be grouped together during stratification.",
+        )
     if config.stratify_by == "stack":
         records = _stratify(records, config.max_stack_share)
     after_stratify = len(records)

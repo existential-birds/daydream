@@ -76,13 +76,22 @@ def is_excluded(repo_slug: str | None) -> bool:
     return repo_slug in load_exclusion_list()
 
 
-def is_copyleft(repo_slug: str | None, allow_list: frozenset[str]) -> bool:
+def is_copyleft(
+    repo_slug: str | None,
+    allow_list: frozenset[str],
+    *,
+    copyleft_list: frozenset[str] | None = None,
+) -> bool:
     """Check whether a repo slug should be skipped under C8.
 
     Args:
         repo_slug: ``owner/repo`` to check, or ``None``.
         allow_list: Frozen set of slugs the caller has explicitly opted in
             via ``--allow-copyleft``.
+        copyleft_list: Pre-loaded copyleft set.  When ``None`` (the default)
+            the list is loaded from disk on every call (same as before).
+            Pass the result of ``load_copyleft_list()`` when checking many
+            rows in a loop to avoid O(N) redundant file opens.
 
     Returns:
         ``True`` only when ``repo_slug`` is on the copyleft list and is not
@@ -92,4 +101,5 @@ def is_copyleft(repo_slug: str | None, allow_list: frozenset[str]) -> bool:
         return False
     if repo_slug in allow_list:
         return False
-    return repo_slug in load_copyleft_list()
+    known = copyleft_list if copyleft_list is not None else load_copyleft_list()
+    return repo_slug in known
