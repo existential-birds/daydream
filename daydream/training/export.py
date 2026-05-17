@@ -15,15 +15,23 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from daydream.archive import get_archive_dir
 from daydream.archive.index import query_runs
 from daydream.config import REVIEW_SKILLS
 from daydream.training.exclusion import is_copyleft, load_exclusion_list
 from daydream.training.schema import TRAINING_SCHEMA_VERSION
+from daydream.ui import create_console, print_info, print_warning
+
+# Path to the on-disk JSON Schema describing emitted training records.
+# Resolves relative to ``__file__`` so the package works when installed.
+SCHEMA_V1_PATH: Path = Path(__file__).parent / "schema" / "v1.json"
 
 
 def _build_spans(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
@@ -386,3 +394,160 @@ def _stratify(records: list[dict], max_stack_share: float) -> list[dict]:
         out.extend(group[:cap_per_stack])
 
     return sorted(out, key=lambda r: r["session_id"])
+
+
+# ---------------------------------------------------------------------------
+# End-to-end orchestration (Wave 6)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExportConfig:
+    """Top-level config for :func:`run_export`.
+
+    ``filters`` is required (no default) — callers must construct an
+    :class:`ExportFilters` explicitly so the C9 ``("accepted",)`` default is
+    a deliberate choice, not a silent fall-through.
+
+    Attributes:
+        out_path: Destination JSONL file. Written atomically via tempfile +
+            ``Path.replace``; ``schema.json`` is emitted next to it.
+        filters: Resolved post-exclusion filter knobs.
+        archive_dir: Daydream archive root. ``None`` defers to
+            :func:`daydream.archive.get_archive_dir`.
+        stratify_by: ``"stack"`` to apply :func:`_stratify`; ``None`` to skip.
+        max_stack_share: Per-stack cap fraction passed to :func:`_stratify`.
+        dry_run: When ``True``, do not write the JSONL output; print a
+            summary table to stdout and return ``emitted=0``.
+        emit_schema_only: When ``True``, copy ``schema/v1.json`` next to
+            ``out_path`` and return immediately without querying the archive.
+    """
+
+    out_path: Path
+    filters: ExportFilters
+    archive_dir: Path | None = None
+    stratify_by: str | None = None
+    max_stack_share: float = 0.6
+    dry_run: bool = False
+    emit_schema_only: bool = False
+
+
+def run_export(config: ExportConfig) -> dict[str, int]:
+    """Top-level entry point for the JSONL exporter.
+
+    Pipeline (see plan §10 step 6):
+
+    1. ``emit_schema_only`` short-circuit — copy ``schema/v1.json`` next to
+       ``out_path`` and return.
+    2. Resolve archive dir (``config.archive_dir`` or :func:`get_archive_dir`).
+    3. Count the unfiltered index for the ``total_runs_in_index`` summary.
+    4. Apply :func:`_query_index` → ``after_filters`` rows.
+    5. For each row: load manifest + trajectory from disk, build a record via
+       :func:`_build_record`. Skip rows with missing/unreadable files (with a
+       warning).
+    6. Optionally stratify (when ``stratify_by == "stack"``).
+    7. Dry-run path prints a summary and returns ``emitted=0``.
+    8. Otherwise: write JSONL atomically (tempfile in same dir +
+       ``Path.replace``) and copy ``schema/v1.json`` alongside.
+
+    Args:
+        config: Resolved exporter config.
+
+    Returns:
+        Summary dict with keys ``total_runs_in_index``, ``after_filters``,
+        ``after_stratify``, ``emitted``. ``emitted`` is ``0`` for ``dry_run``
+        and ``emit_schema_only`` paths.
+    """
+    console = create_console()
+
+    # 1. Schema-only path — never touches the archive.
+    if config.emit_schema_only:
+        config.out_path.parent.mkdir(parents=True, exist_ok=True)
+        schema_dst = config.out_path.parent / "schema.json"
+        shutil.copyfile(SCHEMA_V1_PATH, schema_dst)
+        return {
+            "total_runs_in_index": 0,
+            "after_filters": 0,
+            "after_stratify": 0,
+            "emitted": 0,
+        }
+
+    # 2. Resolve archive dir.
+    archive_dir = config.archive_dir or get_archive_dir()
+
+    # 3. Unfiltered count for the summary.
+    total_in_index = len(query_runs(archive_dir, "", ()))
+
+    # 4. Apply filters.
+    rows = _query_index(archive_dir, config.filters)
+    after_filters = len(rows)
+
+    # 5. Build records, skipping rows whose on-disk files are missing.
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        archive_path = Path(row["archive_path"])
+        traj_path = archive_path / "trajectory.json"
+        manifest_path = archive_path / "manifest.json"
+        if not traj_path.exists() or not manifest_path.exists():
+            print_warning(
+                console,
+                f"Skipping {row['session_id']}: missing manifest.json or "
+                f"trajectory.json at {archive_path}",
+            )
+            continue
+        try:
+            trajectory = json.loads(traj_path.read_text(encoding="utf-8"))
+            # Manifest is loaded for parity / future fields, but _build_record
+            # consumes the SQL row directly so the manifest dict is unused
+            # here. Reading it still validates the file is parsable so we
+            # don't emit records that point at broken archives.
+            json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            print_warning(
+                console,
+                f"Skipping {row['session_id']}: missing manifest.json or "
+                f"trajectory.json at {archive_path}",
+            )
+            continue
+        records.append(_build_record(row, trajectory, row.get("stack")))
+
+    # 6. Stratification (optional).
+    if config.stratify_by == "stack":
+        records = _stratify(records, config.max_stack_share)
+    after_stratify = len(records)
+
+    # 7. Dry-run path — print summary, write nothing.
+    if config.dry_run:
+        print_info(console, f"Dry run — total_runs_in_index: {total_in_index}")
+        print_info(console, f"Dry run — after_filters: {after_filters}")
+        print_info(console, f"Dry run — after_stratify: {after_stratify}")
+        print_info(console, f"Dry run — would emit: {len(records)} records")
+        return {
+            "total_runs_in_index": total_in_index,
+            "after_filters": after_filters,
+            "after_stratify": after_stratify,
+            "emitted": 0,
+        }
+
+    # 8. Atomic write — tempfile in same dir + Path.replace.
+    config.out_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=config.out_path.parent,
+        delete=False,
+        suffix=".jsonl.tmp",
+    ) as fh:
+        tmp_name = fh.name
+        for record in records:
+            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+    Path(tmp_name).replace(config.out_path)
+    shutil.copyfile(SCHEMA_V1_PATH, config.out_path.parent / "schema.json")
+    print_info(console, f"Wrote {len(records)} records to {config.out_path}")
+
+    return {
+        "total_runs_in_index": total_in_index,
+        "after_filters": after_filters,
+        "after_stratify": after_stratify,
+        "emitted": len(records),
+    }
