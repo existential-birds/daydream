@@ -126,3 +126,69 @@ def test_export_emit_schema_only_writes_schema_no_records(tmp_path: Path) -> Non
         "after_stratify": 0,
         "emitted": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# CLI surface (Wave 7) — exercise the handler directly so we cover the same
+# code path the ``daydream export-jsonl`` subcommand uses without spawning a
+# subprocess.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_export_jsonl_end_to_end(tmp_path: Path, monkeypatch: Any) -> None:
+    """Handler exits 0, writes JSONL + schema.json, every line parses."""
+    from daydream.cli import _handle_export_command
+
+    build_fixture_archive(tmp_path)
+    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(tmp_path))
+
+    out_path = tmp_path / "out.jsonl"
+    rc = _handle_export_command(["--out", str(out_path)])
+
+    assert rc == 0
+    assert out_path.exists()
+    assert (out_path.parent / "schema.json").exists()
+    lines = out_path.read_text(encoding="utf-8").splitlines()
+    assert lines, "expected at least one emitted record"
+    for line in lines:
+        json.loads(line)  # raises on malformed JSON
+
+
+def test_cli_export_jsonl_dry_run_via_handler(tmp_path: Path, monkeypatch: Any) -> None:
+    """``--dry-run`` returns 0 but writes no JSONL file."""
+    from daydream.cli import _handle_export_command
+
+    build_fixture_archive(tmp_path)
+    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(tmp_path))
+
+    out_path = tmp_path / "out.jsonl"
+    rc = _handle_export_command(["--out", str(out_path), "--dry-run"])
+
+    assert rc == 0
+    assert out_path.exists() is False
+
+
+def test_cli_export_jsonl_allow_copyleft_flag_parsing() -> None:
+    """``--allow-copyleft`` accumulates into a list on the namespace."""
+    from daydream.cli import _build_export_jsonl_parser
+
+    parser = _build_export_jsonl_parser()
+    args = parser.parse_args(
+        [
+            "--out",
+            "/tmp/x.jsonl",
+            "--allow-copyleft",
+            "gnu/coreutils",
+            "--allow-copyleft",
+            "fsf/bash",
+        ]
+    )
+    assert args.allow_copyleft == ["gnu/coreutils", "fsf/bash"]
+
+
+def test_cli_export_jsonl_invalid_max_stack_share_returns_1() -> None:
+    """``--max-stack-share`` outside (0, 1] is rejected with exit code 1."""
+    from daydream.cli import _handle_export_command
+
+    rc = _handle_export_command(["--out", "/tmp/x.jsonl", "--max-stack-share", "1.5"])
+    assert rc == 1
