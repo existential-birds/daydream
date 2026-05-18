@@ -268,7 +268,7 @@ def _stack_for_skill(skill: str | None) -> str | None:
 def _build_query(
     filters: ExportFilters,
     *,
-    exclusion: set[str] | None = None,
+    exclusion: frozenset[str] | set[str] | None = None,
 ) -> tuple[str, tuple[Any, ...]]:
     """Assemble the WHERE clause + bound params for ``query_runs``.
 
