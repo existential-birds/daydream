@@ -17,6 +17,7 @@ import json
 import math
 import shutil
 import tempfile
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,6 +98,23 @@ def _build_spans(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
     return spans
 
 
+def _single_outcome_label(labels: list[str], session_id: str) -> str | None:
+    """Return the sole outcome label, warning when multiple are present.
+
+    The training schema (schema/v1.json) defines ``outcome_label`` as a single
+    string.  When a run carries more than one label only the first is exported;
+    a warning is emitted so the data loss is visible rather than silent.
+    """
+    if len(labels) > 1:
+        warnings.warn(
+            f"Session {session_id!r} has {len(labels)} outcome labels "
+            f"{labels!r}; exporting only the first ({labels[0]!r}). "
+            "Widen schema/v1.json `outcome_label` to an array to preserve all labels.",
+            stacklevel=3,
+        )
+    return labels[0] if labels else None
+
+
 def _build_record(
     manifest_row: dict[str, Any],
     trajectory: dict[str, Any],
@@ -150,7 +168,9 @@ def _build_record(
     if not isinstance(labels, list):
         labels = []
 
-    code_ctx = (manifest or {}).get("code_context") or {}
+    manifest_dict = manifest or {}
+    code_ctx = manifest_dict.get("code_context") or {}
+    git_block = manifest_dict.get("git") or {}
     changed = code_ctx.get("changed_files") or []
     if not isinstance(changed, list):
         changed = []
@@ -169,14 +189,14 @@ def _build_record(
         "stack": stack,
         "code_context": {
             "base_sha": code_ctx.get("base_sha"),
-            "head_sha": code_ctx.get("head_sha") or manifest_row.get("head_sha"),
-            "base_branch": code_ctx.get("base_branch") or manifest_row.get("base_branch"),
-            "branch": code_ctx.get("branch") or manifest_row.get("branch"),
+            "head_sha": git_block.get("head_sha") or manifest_row.get("head_sha"),
+            "base_branch": git_block.get("base_branch") or manifest_row.get("base_branch"),
+            "branch": git_block.get("branch") or manifest_row.get("branch"),
             "changed_files": [str(p) for p in changed],
         },
         "review_output": review_output,
         "fix_diff_ref": fix_diff_ref,
-        "outcome_label": labels[0] if labels else None,
+        "outcome_label": _single_outcome_label(labels, manifest_row["session_id"]),
         "grounding_score": manifest_row.get("grounding_rate"),
         "spans": _build_spans(trajectory),
         "trajectory_ref": {"archive_relative_path": "trajectory.json"},
@@ -245,7 +265,11 @@ def _stack_for_skill(skill: str | None) -> str | None:
     return _SKILL_TO_STACK.get(skill)
 
 
-def _build_query(filters: ExportFilters) -> tuple[str, tuple[Any, ...]]:
+def _build_query(
+    filters: ExportFilters,
+    *,
+    exclusion: set[str] | None = None,
+) -> tuple[str, tuple[Any, ...]]:
     """Assemble the WHERE clause + bound params for ``query_runs``.
 
     The returned ``where`` string is suitable for direct hand-off to
@@ -281,7 +305,8 @@ def _build_query(filters: ExportFilters) -> tuple[str, tuple[Any, ...]]:
     params.append(filters.status)
 
     # 2. C5 exclusion — always (when list is non-empty)
-    exclusion = load_exclusion_list()
+    if exclusion is None:
+        exclusion = load_exclusion_list()
     if exclusion:
         # Stable ordering so the generated SQL is reproducible across runs.
         ordered_exclusion = sorted(exclusion)
@@ -543,21 +568,21 @@ def run_export(config: ExportConfig) -> dict[str, int]:
         except (json.JSONDecodeError, OSError):
             print_warning(
                 console,
-                f"Skipping {row['session_id']}: missing manifest.json or "
+                f"Skipping {row['session_id']}: corrupt or unreadable manifest.json or "
                 f"trajectory.json at {archive_path}",
             )
             continue
         records.append(_build_record(row, trajectory, row.get("stack"), manifest))
 
     # 6. Stratification (optional).
-    none_stack_count = sum(1 for r in records if r.get("stack") is None)
-    if none_stack_count:
-        print_warning(
-            console,
-            f"{none_stack_count} record(s) have stack=None (unmapped skills) "
-            "and will be grouped together during stratification.",
-        )
     if config.stratify_by == "stack":
+        none_stack_count = sum(1 for r in records if r.get("stack") is None)
+        if none_stack_count:
+            print_warning(
+                console,
+                f"{none_stack_count} record(s) have stack=None (unmapped skills) "
+                "and will be grouped together during stratification.",
+            )
         records = _stratify(records, config.max_stack_share)
     after_stratify = len(records)
 
@@ -576,17 +601,23 @@ def run_export(config: ExportConfig) -> dict[str, int]:
 
     # 8. Atomic write — tempfile in same dir + Path.replace.
     config.out_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=config.out_path.parent,
-        delete=False,
-        suffix=".jsonl.tmp",
-    ) as fh:
-        tmp_name = fh.name
-        for record in records:
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
-    Path(tmp_name).replace(config.out_path)
+    tmp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=config.out_path.parent,
+            delete=False,
+            suffix=".jsonl.tmp",
+        ) as fh:
+            tmp_name = fh.name
+            for record in records:
+                fh.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
+        Path(tmp_name).replace(config.out_path)
+    except Exception:
+        if tmp_name is not None:
+            Path(tmp_name).unlink(missing_ok=True)
+        raise
     shutil.copyfile(SCHEMA_V1_PATH, config.out_path.parent / "schema.json")
     print_info(console, f"Wrote {len(records)} records to {config.out_path}")
 

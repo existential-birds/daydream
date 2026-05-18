@@ -149,10 +149,10 @@ class Manifest:
                 "head_sha": self.head_sha,
             },
             "code_context": {
-                "base_sha": self.base_sha,
                 "head_sha": self.head_sha,
                 "base_branch": self.base_branch,
                 "branch": self.branch,
+                "base_sha": self.base_sha,
                 "changed_files": list(self.changed_files),
             },
             "pr": {

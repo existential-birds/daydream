@@ -82,14 +82,14 @@ def test_parse_repo_slug_invalid():
 
 
 def test_capture_git_context_real_repo(tmp_path: Path):
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True,
     )
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True,
     )
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=True,
     )
 
@@ -110,29 +110,29 @@ def test_capture_git_context_no_repo(tmp_path: Path):
 
 def test_capture_git_context_populates_base_sha_and_changed_files(tmp_path: Path):
     """Real repo with a feature branch surfaces merge-base SHA + diff paths."""
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True,
     )
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True,
     )
     (tmp_path / "a.py").write_text("print('a')\n")
-    subprocess.run(["git", "add", "a.py"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(["git", "add", "a.py"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "commit", "-m", "base"], cwd=tmp_path, capture_output=True, check=True,
     )
-    base_sha = subprocess.run(  # noqa: S603, S607
+    base_sha = subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, check=True, text=True,
     ).stdout.strip()
 
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "checkout", "-b", "feat/x"], cwd=tmp_path, capture_output=True, check=True,
     )
     (tmp_path / "b.py").write_text("print('b')\n")
     (tmp_path / "a.py").write_text("print('a-changed')\n")
-    subprocess.run(["git", "add", "a.py", "b.py"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(["git", "add", "a.py", "b.py"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "commit", "-m", "feat"], cwd=tmp_path, capture_output=True, check=True,
     )
 
