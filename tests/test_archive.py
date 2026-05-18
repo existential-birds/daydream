@@ -82,14 +82,14 @@ def test_parse_repo_slug_invalid():
 
 
 def test_capture_git_context_real_repo(tmp_path: Path):
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True,
     )
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True,
     )
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=True,
     )
 
@@ -104,6 +104,41 @@ def test_capture_git_context_no_repo(tmp_path: Path):
     assert ctx.head_sha is None
     assert ctx.remote_url is None
     assert ctx.branch is None
+    assert ctx.base_sha is None
+    assert ctx.changed_files == []
+
+
+def test_capture_git_context_populates_base_sha_and_changed_files(tmp_path: Path):
+    """Real repo with a feature branch surfaces merge-base SHA + diff paths."""
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True,
+    )
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True,
+    )
+    (tmp_path / "a.py").write_text("print('a')\n")
+    subprocess.run(["git", "add", "a.py"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "commit", "-m", "base"], cwd=tmp_path, capture_output=True, check=True,
+    )
+    base_sha = subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, check=True, text=True,
+    ).stdout.strip()
+
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "checkout", "-b", "feat/x"], cwd=tmp_path, capture_output=True, check=True,
+    )
+    (tmp_path / "b.py").write_text("print('b')\n")
+    (tmp_path / "a.py").write_text("print('a-changed')\n")
+    subprocess.run(["git", "add", "a.py", "b.py"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "commit", "-m", "feat"], cwd=tmp_path, capture_output=True, check=True,
+    )
+
+    ctx = capture_git_context(tmp_path)
+    assert ctx.base_sha == base_sha
+    assert sorted(ctx.changed_files) == ["a.py", "b.py"]
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +202,42 @@ def test_manifest_to_dict_structure(tmp_path: Path):
     assert "metrics" in d
     assert "outcome" in d
     assert d["outcome"]["labels"] == []
+    assert d["code_context"] == {
+        "base_sha": None,
+        "head_sha": None,
+        "base_branch": None,
+        "branch": None,
+        "changed_files": [],
+    }
+
+
+def test_manifest_to_dict_code_context_carries_git_ctx_fields(tmp_path: Path):
+    recorder = _MockRecorder()
+    config = _MockConfig()
+    git_ctx = GitContext(
+        branch="feat/x",
+        base_branch="main",
+        head_sha="b" * 40,
+        base_sha="c" * 40,
+        changed_files=["a.py", "b.py"],
+    )
+
+    m = build_manifest(
+        recorder=recorder,
+        config=config,
+        git_ctx=git_ctx,
+        status="complete",
+        archive_path=tmp_path,
+    )
+
+    d = m.to_dict()
+    assert d["code_context"] == {
+        "base_sha": "c" * 40,
+        "head_sha": "b" * 40,
+        "base_branch": "main",
+        "branch": "feat/x",
+        "changed_files": ["a.py", "b.py"],
+    }
 
 
 def test_build_manifest_with_evaluation(tmp_path: Path):

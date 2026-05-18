@@ -253,3 +253,27 @@ def query_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> list[d
         return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
+
+
+def count_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> int:
+    """Return the number of runs matching an optional WHERE clause.
+
+    Uses ``SELECT COUNT(*)`` so no rows are materialised.
+
+    Args:
+        archive_dir: Path to the archive root.
+        where: Optional SQL WHERE clause (without the ``WHERE`` keyword).
+        params: Parameter tuple to bind to the WHERE clause placeholders.
+
+    Returns:
+        Integer count of matching rows.
+    """
+    conn = _get_connection(archive_dir)
+    try:
+        sql = "SELECT COUNT(*) FROM runs"
+        if where:
+            sql += f" WHERE {where}"
+        cursor = conn.execute(sql, params)
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()

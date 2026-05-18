@@ -247,6 +247,161 @@ def _run_summarize(args: argparse.Namespace) -> int:
     return summarize(args.path)
 
 
+def _build_export_jsonl_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream export-jsonl --out <path> [...]``.
+
+    Like ``summarize`` and ``feedback``, ``export-jsonl`` is dispatched manually
+    from ``main()`` before the main parser runs so its options don't collide
+    with the top-level ``TARGET`` positional.
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream export-jsonl",
+        description="Export archived runs as JSONL training records (one object per run).",
+    )
+
+    # Required output path.
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Output .jsonl path",
+    )
+
+    # ---- Filters (post-applied AFTER exclusion list) ----
+    parser.add_argument(
+        "--skill",
+        type=str,
+        default=None,
+        help="Match manifest.skill exactly",
+    )
+    parser.add_argument(
+        "--repo",
+        action="append",
+        default=[],
+        help="Repeatable; restrict to these repo slugs",
+    )
+    parser.add_argument(
+        "--label",
+        action="append",
+        default=None,
+        help="Repeatable; default is just 'accepted' unless --include-all-labels is set",
+    )
+    parser.add_argument(
+        "--min-grounding",
+        type=float,
+        default=None,
+        dest="min_grounding",
+        help="Drop runs below this grounding_rate",
+    )
+    parser.add_argument(
+        "--status",
+        type=str,
+        default="complete",
+        help="Match manifest.status exactly (default: 'complete')",
+    )
+
+    # ---- Stratification ----
+    parser.add_argument(
+        "--stratify-by",
+        type=str,
+        choices=["stack"],
+        default=None,
+        dest="stratify_by",
+        help="Stratify the corpus; currently only 'stack' is supported",
+    )
+    parser.add_argument(
+        "--max-stack-share",
+        type=float,
+        default=0.6,
+        dest="max_stack_share",
+        help="Per-stack cap fraction in (0, 1] (default: 0.6)",
+    )
+
+    # ---- Opt-ins ----
+    parser.add_argument(
+        "--allow-copyleft",
+        action="append",
+        default=[],
+        dest="allow_copyleft",
+        help="Repeatable; permit specific GPL/AGPL repos",
+    )
+    parser.add_argument(
+        "--include-all-labels",
+        action="store_true",
+        dest="include_all_labels",
+        help="Disable the C9 default of accepted-only label filtering",
+    )
+
+    # ---- Diagnostic ----
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Print summary table, write nothing",
+    )
+    parser.add_argument(
+        "--emit-schema-only",
+        action="store_true",
+        dest="emit_schema_only",
+        help="Write schema.json next to --out, skip records",
+    )
+
+    return parser
+
+
+def _handle_export_command(argv: list[str]) -> int:
+    """Handle ``daydream export-jsonl --out <path> [...]``.
+
+    Returns an exit code rather than calling :func:`sys.exit`; ``main()`` is
+    responsible for translating the code into a process exit. This keeps the
+    handler easy to drive from tests.
+    """
+    from daydream.training.export import ExportConfig, ExportFilters, run_export
+    from daydream.ui import create_console, print_error
+
+    parser = _build_export_jsonl_parser()
+    args = parser.parse_args(argv)
+
+    # Validate --max-stack-share is in (0, 1].
+    if not (0.0 < args.max_stack_share <= 1.0):
+        print_error(create_console(), "Invalid --max-stack-share", "Must be in (0, 1].")
+        return 1
+
+    # Validate --min-grounding is in [0, 1] when set.
+    if args.min_grounding is not None and not (0.0 <= args.min_grounding <= 1.0):
+        print_error(create_console(), "Invalid --min-grounding", "Must be in [0, 1].")
+        return 1
+
+    # Resolve labels: empty tuple disables the label filter when the caller
+    # passed --include-all-labels; otherwise honor --label or fall back to
+    # the C9 accepted-only default.
+    if args.include_all_labels:
+        labels: tuple[str, ...] = ()
+    else:
+        labels = tuple(args.label) if args.label else ("accepted",)
+
+    filters = ExportFilters(
+        skill=args.skill,
+        repos=tuple(args.repo),
+        labels=labels,
+        min_grounding=args.min_grounding,
+        status=args.status,
+        include_all_labels=args.include_all_labels,
+        allow_copyleft=frozenset(args.allow_copyleft),
+    )
+    config = ExportConfig(
+        out_path=args.out,
+        filters=filters,
+        stratify_by=args.stratify_by,
+        max_stack_share=args.max_stack_share,
+        dry_run=args.dry_run,
+        emit_schema_only=args.emit_schema_only,
+    )
+    run_export(config)
+    return 0
+
+
 def _build_feedback_parser() -> argparse.ArgumentParser:
     """Build the parser for the ``daydream feedback <pr#>`` subcommand.
 
@@ -697,6 +852,11 @@ def main() -> None:
             summarize_parser = _build_summarize_parser()
             summarize_args = summarize_parser.parse_args(argv[1:])
             sys.exit(_run_summarize(summarize_args))
+
+        # ``export-jsonl`` is also sync — no agent invocations, just SQLite +
+        # filesystem. Short-circuit before anyio.run.
+        if argv and argv[0] == "export-jsonl":
+            sys.exit(_handle_export_command(argv[1:]))
 
         is_feedback_subcommand = bool(argv) and argv[0] == "feedback"
         config = _parse_args()

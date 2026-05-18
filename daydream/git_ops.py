@@ -480,6 +480,31 @@ def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None
     return proc.stdout
 
 
+def diff_name_only(repo: Path, base: str, head: str = "HEAD") -> list[str]:
+    """Return the list of paths changed between *base* and *head*.
+
+    Uses ``git diff --name-only base..head`` (two-dot) so the result is the
+    direct set of files differing between the two refs at archive time.
+
+    Soft-failure semantics mirror :func:`merge_base`: returns an empty list
+    when either ref cannot be resolved or the subprocess fails. Callers in
+    archive paths should not propagate git transients into manifest failure.
+
+    Args:
+        repo: Repository working directory.
+        base: Base ref or SHA.
+        head: Comparison ref or SHA. Defaults to ``"HEAD"``.
+
+    Returns:
+        Repo-relative path strings in git output order. Empty list on any
+        soft failure.
+    """
+    proc = _run_git(repo, ["diff", "--name-only", f"{base}..{head}"], timeout=10)
+    if proc.returncode != 0:
+        return []
+    return [line for line in proc.stdout.splitlines() if line]
+
+
 def diff_paths(
     repo: Path,
     base: str,
