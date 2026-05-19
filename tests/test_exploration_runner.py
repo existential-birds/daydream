@@ -37,11 +37,9 @@ FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
 def test_pattern_scanner_prompt_includes_guideline_files():
     assert "CLAUDE.md" in PATTERN_SCANNER_SYSTEM_PROMPT
-    assert ".coderabbit.yaml" in PATTERN_SCANNER_SYSTEM_PROMPT
 
     dynamic = build_pattern_scanner_prompt(["daydream/foo.py"], "main...HEAD")
     assert "CLAUDE.md" in dynamic
-    assert ".coderabbit.yaml" in dynamic
     assert "main...HEAD" in dynamic
     assert "daydream/foo.py" in dynamic
     # Regression guard: raw diff text must never be embedded.

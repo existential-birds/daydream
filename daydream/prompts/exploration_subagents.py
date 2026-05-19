@@ -3,7 +3,7 @@
 Three specialist subagents power pre-scan exploration:
 
 - **pattern-scanner**: detects codebase conventions and reads guideline files
-  (CLAUDE.md, .coderabbit.yaml, ruff.toml, etc.) -- satisfies EXPL-04.
+  (CLAUDE.md, ruff.toml, etc.) -- satisfies EXPL-04.
 - **dependency-tracer**: extends the static-resolved import graph by grepping
   call sites and emits Dependency edges.
 - **test-mapper**: locates test files for each modified source file via
@@ -130,7 +130,6 @@ recommend changes that contradict existing patterns.
 
 Instructions:
 - Read CLAUDE.md at the repo root if it exists.
-- Read .coderabbit.yaml at the repo root if it exists.
 - Read any other house-style config files you find (ruff.toml, .editorconfig, tsconfig.json, go.mod, Cargo.toml).
 - Infer conventions from the code itself where config files are silent.
 
@@ -186,7 +185,6 @@ and read guideline files relevant to the changes below.
 
 Instructions:
 - Read CLAUDE.md at the repo root if it exists.
-- Read .coderabbit.yaml at the repo root if it exists.
 - Read any other house-style config files you find (ruff.toml, .editorconfig, tsconfig.json, go.mod, Cargo.toml).
 - Infer conventions from the code itself where config files are silent.
 
@@ -278,7 +276,7 @@ work file-by-file so your context stays small.
 
 EXPLORATION_AGENTS: dict[str, AgentDefinition] = {
     "pattern-scanner": AgentDefinition(
-        description="Detects codebase conventions and reads guideline files (CLAUDE.md, .coderabbit.yaml, etc).",
+        description="Detects codebase conventions and reads guideline files (CLAUDE.md, ruff.toml, etc).",
         prompt=PATTERN_SCANNER_SYSTEM_PROMPT,
         tools=["Bash", "Read", "Glob", "Grep"],
         model="inherit",
