@@ -65,7 +65,15 @@ def _build_spans(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if step.get("is_copied_context") is True:
             continue
-        step_id = int(step.get("step_id", i + 1))
+        raw_step_id = step.get("step_id", i + 1)
+        try:
+            step_id = int(raw_step_id)
+        except (TypeError, ValueError):
+            warnings.warn(
+                f"Invalid step_id {raw_step_id!r} at steps[{i}] — using fallback {i + 1}.",
+                stacklevel=2,
+            )
+            step_id = i + 1
         # REASON: prefer explicit reasoning_content; fall back to text message.
         has_reasoning = bool(step.get("reasoning_content"))
         message = step.get("message")
@@ -163,7 +171,11 @@ def _build_record(
     raw_labels = manifest_row.get("outcome_labels", "[]")
     try:
         labels = json.loads(raw_labels) if isinstance(raw_labels, str) else []
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as exc:
+        warnings.warn(
+            f"Session {manifest_row.get('session_id')!r} has invalid outcome_labels {raw_labels!r}: {exc}",
+            stacklevel=2,
+        )
         labels = []
     if not isinstance(labels, list):
         labels = []

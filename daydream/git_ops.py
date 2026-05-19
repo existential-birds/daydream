@@ -499,7 +499,10 @@ def diff_name_only(repo: Path, base: str, head: str = "HEAD") -> list[str]:
         Repo-relative path strings in git output order. Empty list on any
         soft failure.
     """
-    proc = _run_git(repo, ["diff", "--name-only", f"{base}..{head}"], timeout=10)
+    try:
+        proc = _run_git(repo, ["diff", "--name-only", f"{base}..{head}"], timeout=10)
+    except GitError:
+        return []
     if proc.returncode != 0:
         return []
     return [line for line in proc.stdout.splitlines() if line]

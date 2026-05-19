@@ -25,7 +25,17 @@ ARCHIVED_AT = "2026-05-17T00:00:00+00:00"
 
 @dataclass(frozen=True)
 class FixtureSession:
-    """One row of the §9 fixture matrix."""
+    """One row of the §9 fixture matrix.
+
+    Attributes:
+        session_id: Unique identifier for this fixture session.
+        repo_slug: GitHub-style ``org/repo`` slug.
+        skill: Beagle review skill invocation string.
+        grounding_rate: Fraction of findings grounded in actual code (0.0–1.0).
+        outcome_labels: Tuple of outcome tags applied to the session.
+        status: Archive status, e.g. ``"complete"``.
+        notes: Free-text annotation describing the fixture's purpose.
+    """
 
     session_id: str
     repo_slug: str

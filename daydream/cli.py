@@ -373,9 +373,10 @@ def _handle_export_command(argv: list[str]) -> int:
         print_error(create_console(), "Invalid --min-grounding", "Must be in [0, 1].")
         return 1
 
-    # Resolve labels: empty tuple disables the label filter when the caller
-    # passed --include-all-labels; otherwise honor --label or fall back to
-    # the C9 accepted-only default.
+    if args.include_all_labels and args.label:
+        print_error(create_console(), "Conflicting flags", "--include-all-labels and --label cannot be used together.")
+        return 1
+
     if args.include_all_labels:
         labels: tuple[str, ...] = ()
     else:
@@ -604,7 +605,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if raw_argv and raw_argv[0] == "feedback":
         feedback_parser = _build_feedback_parser()
         _reject_removed_model_flag(feedback_parser, raw_argv[1:])
-        feedback_args = feedback_parser.parse_args(raw_argv[1:])
+        feedback_args = feedback_parser.parse_intermixed_args(raw_argv[1:])
         return _build_feedback_config(feedback_args)
 
     # ``summarize`` is dispatched in main() before _parse_args is called, so
