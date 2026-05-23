@@ -101,12 +101,9 @@ async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
-async def test_full_archive_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_full_archive_round_trip(tmp_path: Path, archive_dir: Path) -> None:
     """_make_archive_callback wires archive_run through on_write, producing manifest + SQLite row."""
     from daydream.runner import RunConfig, _make_archive_callback
-
-    archive_dir = tmp_path / "archive"
-    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(archive_dir))
 
     # Set up a minimal .daydream/ structure the archive copier expects
     target_dir = tmp_path / "project"

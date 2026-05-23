@@ -135,12 +135,11 @@ def test_export_emit_schema_only_writes_schema_no_records(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_cli_export_jsonl_end_to_end(tmp_path: Path, monkeypatch: Any) -> None:
+def test_cli_export_jsonl_end_to_end(tmp_path: Path, archive_dir: Path) -> None:
     """Handler exits 0, writes JSONL + schema.json, every line parses."""
     from daydream.cli import _handle_export_command
 
-    build_fixture_archive(tmp_path)
-    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(tmp_path))
+    build_fixture_archive(archive_dir)
 
     out_path = tmp_path / "out.jsonl"
     rc = _handle_export_command(["--out", str(out_path)])
@@ -154,12 +153,11 @@ def test_cli_export_jsonl_end_to_end(tmp_path: Path, monkeypatch: Any) -> None:
         json.loads(line)  # raises on malformed JSON
 
 
-def test_cli_export_jsonl_dry_run_via_handler(tmp_path: Path, monkeypatch: Any) -> None:
+def test_cli_export_jsonl_dry_run_via_handler(tmp_path: Path, archive_dir: Path) -> None:
     """``--dry-run`` returns 0 but writes no JSONL file."""
     from daydream.cli import _handle_export_command
 
-    build_fixture_archive(tmp_path)
-    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(tmp_path))
+    build_fixture_archive(archive_dir)
 
     out_path = tmp_path / "out.jsonl"
     rc = _handle_export_command(["--out", str(out_path), "--dry-run"])

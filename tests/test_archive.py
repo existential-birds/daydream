@@ -5,6 +5,7 @@ Covers git_context, manifest, index, and the top-level archive_run flow.
 """
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -404,6 +405,13 @@ def test_get_archive_dir_default(monkeypatch, tmp_path: Path):
     assert expected.is_dir()
 
 
+def test_archive_dir_fixture_isolates_env(archive_dir: Path, tmp_path: Path):
+    """Verify the autouse archive_dir fixture's contract: env points at tmp_path/archive."""
+    assert os.environ.get("DAYDREAM_ARCHIVE_DIR") == str(archive_dir)
+    assert archive_dir == tmp_path / "archive"
+    assert str(archive_dir).startswith(str(tmp_path))
+
+
 # ---------------------------------------------------------------------------
 # __init__: _copy_bundle
 # ---------------------------------------------------------------------------
@@ -557,9 +565,8 @@ def test_copy_bundle_skips_missing(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_archive_run_round_trip(monkeypatch, tmp_path: Path):
-    archive_root = tmp_path / "archive"
-    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(archive_root))
+def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path):
+    archive_root = archive_dir
 
     session_id = "abcd1234-0000-0000-0000-000000000000"
     config = _MockConfig()
