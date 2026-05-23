@@ -14,7 +14,14 @@ import pytest
 
 from daydream.archive import _copy_bundle, archive_run, get_archive_dir
 from daydream.archive.git_context import GitContext, _parse_repo_slug, capture_git_context
-from daydream.archive.index import query_runs, update_labels, upsert_run
+from daydream.archive.index import (
+    append_label_observation,
+    label_observation_history,
+    latest_label_observation,
+    query_runs,
+    update_labels,
+    upsert_run,
+)
 from daydream.archive.manifest import Manifest, build_manifest
 
 # ---------------------------------------------------------------------------
@@ -575,3 +582,127 @@ def test_archive_run_round_trip(monkeypatch, tmp_path: Path):
     rows = query_runs(archive_root)
     assert len(rows) == 1
     assert rows[0]["session_id"] == session_id
+
+
+# ---------------------------------------------------------------------------
+# index: label_observations (Task 12)
+# ---------------------------------------------------------------------------
+
+
+def _seed_one_run(archive_dir: Path, session_id: str) -> None:
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id=session_id,
+            archived_at="2026-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            archive_path=str(archive_dir / session_id),
+        ),
+    )
+
+
+def test_append_label_observation_writes_history_row(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-1")
+    append_label_observation(
+        tmp_path,
+        "sess-1",
+        labels=["accepted"],
+        pr_state="merged",
+        labeler_version="2026.05.22",
+        evidence_sha="abc123",
+    )
+    hist = label_observation_history(tmp_path, "sess-1")
+    assert len(hist) == 1
+    assert json.loads(hist[0]["labels"]) == ["accepted"]
+    assert hist[0]["pr_state"] == "merged"
+
+
+def test_append_label_observation_writes_through_to_runs_cache(tmp_path: Path) -> None:
+    """The denormalized runs.outcome_labels cache is refreshed on append."""
+    _seed_one_run(tmp_path, "sess-2")
+    append_label_observation(
+        tmp_path,
+        "sess-2",
+        labels=["contested"],
+        pr_state="merged",
+        labeler_version="2026.05.22",
+        evidence_sha=None,
+    )
+    rows = query_runs(tmp_path, "session_id = ?", ("sess-2",))
+    assert json.loads(rows[0]["outcome_labels"]) == ["contested"]
+    assert rows[0]["labeled_at"] is not None
+
+
+def test_multiple_observations_preserve_history(tmp_path: Path) -> None:
+    """Same-session multiple observations all persist; latest wins for the cache."""
+    import time
+
+    _seed_one_run(tmp_path, "sess-3")
+    append_label_observation(
+        tmp_path,
+        "sess-3",
+        labels=["unknown"],
+        pr_state="open",
+        labeler_version="v1",
+        evidence_sha=None,
+    )
+    time.sleep(0.01)
+    append_label_observation(
+        tmp_path,
+        "sess-3",
+        labels=["accepted"],
+        pr_state="merged",
+        labeler_version="v1",
+        evidence_sha="def456",
+    )
+    hist = label_observation_history(tmp_path, "sess-3")
+    assert len(hist) == 2
+    assert [json.loads(r["labels"])[0] for r in hist] == ["unknown", "accepted"]
+    latest = latest_label_observation(tmp_path, "sess-3")
+    assert latest is not None
+    assert json.loads(latest["labels"]) == ["accepted"]
+    rows = query_runs(tmp_path, "session_id = ?", ("sess-3",))
+    assert json.loads(rows[0]["outcome_labels"]) == ["accepted"]
+
+
+def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
+    """Snapshot pinning: latest_label_observation(..., as_of=ts) returns the
+    latest observation whose observed_at <= as_of."""
+    import time
+
+    _seed_one_run(tmp_path, "sess-4")
+    append_label_observation(
+        tmp_path,
+        "sess-4",
+        labels=["unknown"],
+        pr_state="open",
+        labeler_version="v1",
+        evidence_sha=None,
+    )
+    early_row = latest_label_observation(tmp_path, "sess-4")
+    assert early_row is not None
+    early = early_row["observed_at"]
+    time.sleep(0.01)
+    append_label_observation(
+        tmp_path,
+        "sess-4",
+        labels=["accepted"],
+        pr_state="merged",
+        labeler_version="v1",
+        evidence_sha="def456",
+    )
+    pinned = latest_label_observation(tmp_path, "sess-4", as_of=early)
+    assert pinned is not None
+    assert json.loads(pinned["labels"]) == ["unknown"]
+
+
+def test_update_labels_is_backward_compat_thin_wrapper(tmp_path: Path) -> None:
+    """The legacy update_labels() now writes through append_label_observation
+    so existing callers continue to work without source changes."""
+    _seed_one_run(tmp_path, "sess-5")
+    assert update_labels(tmp_path, "sess-5", ["accepted"]) is True
+    hist = label_observation_history(tmp_path, "sess-5")
+    assert len(hist) == 1
+    rows = query_runs(tmp_path, "session_id = ?", ("sess-5",))
+    assert json.loads(rows[0]["outcome_labels"]) == ["accepted"]

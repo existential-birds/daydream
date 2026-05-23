@@ -9,6 +9,13 @@ Exports:
     upsert_run: Insert or replace a run from a Manifest.
     update_labels: Update outcome labels for a session (supports prefix matching).
     query_runs: Query runs with optional WHERE clause.
+    count_runs: Count rows matching an optional WHERE clause.
+    append_label_observation: Append a row to the immutable label_observations
+        history and refresh the denormalized runs cache.
+    latest_label_observation: Return the most recent label_observations row for
+        a session, optionally constrained by an ``as_of`` cutoff timestamp.
+    label_observation_history: Return the full label_observations history for
+        a session in chronological order.
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ from pathlib import Path
 
 from daydream.archive.manifest import Manifest
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -55,8 +62,22 @@ CREATE TABLE IF NOT EXISTS runs (
     total_cached_tokens INTEGER,
     outcome_labels TEXT NOT NULL DEFAULT '[]',
     labeled_at TEXT,
+    rubric_json TEXT,
     archive_path TEXT NOT NULL,
     schema_version INTEGER NOT NULL DEFAULT 1
+)
+"""
+
+_CREATE_LABEL_OBSERVATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS label_observations (
+    session_id      TEXT NOT NULL,
+    observed_at     TEXT NOT NULL,
+    labels          TEXT NOT NULL,
+    pr_state        TEXT,
+    labeler_version TEXT NOT NULL,
+    evidence_sha    TEXT,
+    rubric_json     TEXT,
+    PRIMARY KEY (session_id, observed_at)
 )
 """
 
@@ -64,6 +85,8 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_runs_repo_slug ON runs(repo_slug)",
     "CREATE INDEX IF NOT EXISTS idx_runs_archived_at ON runs(archived_at)",
     "CREATE INDEX IF NOT EXISTS idx_runs_outcome ON runs(outcome_labels)",
+    "CREATE INDEX IF NOT EXISTS idx_label_obs_observed_at ON label_observations(observed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_label_obs_session ON label_observations(session_id)",
 ]
 
 _UPSERT_SQL = """
@@ -94,11 +117,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("review_backend", "TEXT"),
         ("fix_backend", "TEXT"),
         ("test_backend", "TEXT"),
+        ("rubric_json", "TEXT"),
     ]
     for col, col_type in migrations:
         if col not in existing:
             try:
-                conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {col_type}")
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {col_type}")  # noqa: S608 - col/col_type are module-local constants
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
@@ -123,6 +147,7 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(_CREATE_TABLE)
+    conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
     _migrate_schema(conn)
     for idx_sql in _CREATE_INDEXES:
         conn.execute(idx_sql)
@@ -186,9 +211,135 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
         conn.close()
 
 
+def append_label_observation(
+    archive_dir: Path,
+    session_id: str,
+    *,
+    labels: list[str],
+    pr_state: str | None,
+    labeler_version: str,
+    evidence_sha: str | None,
+    rubric_json: str | None = None,
+) -> None:
+    """Append a row to the immutable ``label_observations`` history.
+
+    Writes a single ``(session_id, observed_at)`` row capturing the current
+    label decision and, in the same transaction, refreshes the denormalized
+    ``runs.outcome_labels`` / ``runs.labeled_at`` / ``runs.rubric_json`` cache.
+
+    Args:
+        archive_dir: Path to the archive root.
+        session_id: Full session UUID — must already exist in ``runs``.
+        labels: List of label strings; serialised as a JSON array.
+        pr_state: One of ``open``/``merged``/``closed``/``reverted`` or
+            ``None`` when not applicable (e.g. local-branch runs).
+        labeler_version: Free-form version tag of the labeler that produced
+            this observation (e.g. ``2026.05.22`` or ``legacy``).
+        evidence_sha: Optional commit SHA / artifact hash that grounds the
+            decision; ``None`` when no concrete evidence applies.
+        rubric_json: Optional JSON-serialised rubric (``Rubric.to_dict()``).
+
+    Raises:
+        ValueError: When ``session_id`` is not present in the ``runs`` table.
+    """
+    observed_at = datetime.now(timezone.utc).isoformat()
+    labels_json = json.dumps(labels)
+    conn = _get_connection(archive_dir)
+    try:
+        cursor = conn.execute(
+            "SELECT session_id FROM runs WHERE session_id = ?",
+            (session_id,),
+        )
+        if cursor.fetchone() is None:
+            msg = f"Unknown session {session_id!r}"
+            raise ValueError(msg)
+        conn.execute(
+            "INSERT INTO label_observations "
+            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                observed_at,
+                labels_json,
+                pr_state,
+                labeler_version,
+                evidence_sha,
+                rubric_json,
+            ),
+        )
+        conn.execute(
+            "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ? WHERE session_id = ?",
+            (labels_json, observed_at, rubric_json, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def latest_label_observation(
+    archive_dir: Path,
+    session_id: str,
+    *,
+    as_of: str | None = None,
+) -> dict | None:
+    """Return the most recent label observation for ``session_id``.
+
+    When ``as_of`` is provided, the result is the most recent observation
+    whose ``observed_at <= as_of`` — enabling reproducible corpus pinning.
+
+    Args:
+        archive_dir: Path to the archive root.
+        session_id: Full session UUID.
+        as_of: Optional ISO 8601 cutoff timestamp.
+
+    Returns:
+        The row as a dict, or ``None`` when no matching observation exists.
+    """
+    conn = _get_connection(archive_dir)
+    try:
+        if as_of is None:
+            cursor = conn.execute(
+                "SELECT * FROM label_observations WHERE session_id = ? "
+                "ORDER BY observed_at DESC LIMIT 1",
+                (session_id,),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT * FROM label_observations WHERE session_id = ? AND observed_at <= ? "
+                "ORDER BY observed_at DESC LIMIT 1",
+                (session_id, as_of),
+            )
+        row = cursor.fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def label_observation_history(archive_dir: Path, session_id: str) -> list[dict]:
+    """Return the full label history for ``session_id`` in chronological order.
+
+    Args:
+        archive_dir: Path to the archive root.
+        session_id: Full session UUID.
+
+    Returns:
+        List of row dicts ordered by ``observed_at`` ascending.
+    """
+    conn = _get_connection(archive_dir)
+    try:
+        cursor = conn.execute(
+            "SELECT * FROM label_observations WHERE session_id = ? ORDER BY observed_at ASC",
+            (session_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
 def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool:
     """Update outcome labels for a session, supporting prefix matching.
 
+    Backwards-compatible thin wrapper around :func:`append_label_observation`.
     The session_id can be a prefix (e.g. first 8 chars of the UUID). If the
     prefix matches exactly one row, that row is updated. If it matches
     multiple rows, a ValueError is raised asking for a longer prefix.
@@ -211,25 +362,27 @@ def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool
             (session_id,),
         )
         matches = cursor.fetchall()
-
-        if not matches:
-            return False
-
-        if len(matches) > 1:
-            matched_ids = [row["session_id"] for row in matches]
-            msg = f"Prefix '{session_id}' matches {len(matches)} sessions: {matched_ids}. Provide a longer prefix."
-            raise ValueError(msg)
-
-        full_id = matches[0]["session_id"]
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            "UPDATE runs SET outcome_labels = ?, labeled_at = ? WHERE session_id = ?",
-            (json.dumps(labels), now, full_id),
-        )
-        conn.commit()
-        return True
     finally:
         conn.close()
+
+    if not matches:
+        return False
+
+    if len(matches) > 1:
+        matched_ids = [row["session_id"] for row in matches]
+        msg = f"Prefix '{session_id}' matches {len(matches)} sessions: {matched_ids}. Provide a longer prefix."
+        raise ValueError(msg)
+
+    full_id = matches[0]["session_id"]
+    append_label_observation(
+        archive_dir,
+        full_id,
+        labels=labels,
+        pr_state=None,
+        labeler_version="legacy",
+        evidence_sha=None,
+    )
+    return True
 
 
 def query_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> list[dict]:
@@ -248,7 +401,7 @@ def query_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> list[d
     try:
         sql = "SELECT * FROM runs"
         if where:
-            sql += f" WHERE {where}"
+            sql += f" WHERE {where}"  # noqa: S608 - caller-supplied SQL fragment with bound params
         cursor = conn.execute(sql, params)
         return [dict(row) for row in cursor.fetchall()]
     finally:
@@ -272,7 +425,7 @@ def count_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> int:
     try:
         sql = "SELECT COUNT(*) FROM runs"
         if where:
-            sql += f" WHERE {where}"
+            sql += f" WHERE {where}"  # noqa: S608 - caller-supplied SQL fragment with bound params
         cursor = conn.execute(sql, params)
         return cursor.fetchone()[0]
     finally:
