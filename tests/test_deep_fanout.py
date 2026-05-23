@@ -147,6 +147,65 @@ async def test_fan_out_closure_capture(tmp_path: Path, make_work) -> None:
     assert any("generic-fallback" in p for p in prompts)
 
 
+async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stack(
+    tmp_path: Path, make_work, monkeypatch
+) -> None:
+    """Structural stack flows through build_structural_prompt; language stacks do not."""
+    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
+    from daydream.deep import prompts as _prompts
+    from daydream.phases import phase_per_stack_reviews as _phase
+
+    structural_calls: list[dict[str, Any]] = []
+    per_stack_calls: list[dict[str, Any]] = []
+
+    def _capture_structural(**kwargs: Any) -> str:
+        structural_calls.append(kwargs)
+        return "STRUCTURAL_PROMPT"
+
+    def _capture_per_stack(**kwargs: Any) -> str:
+        per_stack_calls.append(kwargs)
+        return "PER_STACK_PROMPT"
+
+    # phase_per_stack_reviews late-imports these symbols from daydream.deep.prompts;
+    # patch on the module so the late-import re-binding picks up the stubs.
+    monkeypatch.setattr(_prompts, "build_structural_prompt", _capture_structural)
+    monkeypatch.setattr(_prompts, "build_per_stack_prompt", _capture_per_stack)
+
+    backend = _RecordingBackend()
+    diff, intent, alts = _mk_context_files(tmp_path)
+
+    stacks = [
+        StackAssignment(
+            stack_name="python",
+            skill_invocation="/beagle-python:review-python",
+            files=["a.py"],
+            is_docs_only=False,
+        ),
+        StackAssignment(
+            stack_name=STRUCTURE_STACK_NAME,
+            skill_invocation=STRUCTURE_SKILL,
+            files=["a.py"],
+            is_docs_only=False,
+        ),
+    ]
+
+    await _phase(
+        backend,
+        make_work(tmp_path),
+        stacks,
+        diff_path=diff,
+        intent_path=intent,
+        alternatives_path=alts,
+    )
+
+    assert len(structural_calls) == 1
+    assert len(per_stack_calls) == 1
+    assert structural_calls[0]["files"] == ["a.py"]
+    assert "skill_invocation" not in structural_calls[0]
+    assert "stack_name" not in structural_calls[0]
+    assert per_stack_calls[0]["stack_name"] == "python"
+
+
 async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work) -> None:
     """A single stack failure does not abort the whole fan-out, and is reported."""
 

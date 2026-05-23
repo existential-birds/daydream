@@ -2252,12 +2252,10 @@ async def phase_per_stack_reviews(
             dropped.
 
     """
+    from daydream.config import STRUCTURE_STACK_NAME
+    from daydream.deep import prompts as _prompts
     from daydream.deep.artifacts import deep_dir as _deep_dir
     from daydream.deep.artifacts import per_stack_review_path
-    from daydream.deep.prompts import (
-        build_generic_fallback_prompt,
-        build_per_stack_prompt,
-    )
 
     deep_dir_path = _deep_dir(work.repo)
     recorder = get_current_recorder()
@@ -2269,8 +2267,18 @@ async def phase_per_stack_reviews(
     async with anyio.create_task_group() as tg:
         for stack in stacks:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
-            if stack.skill_invocation is None:
-                prompt = build_generic_fallback_prompt(
+            if stack.stack_name == STRUCTURE_STACK_NAME:
+                prompt = _prompts.build_structural_prompt(
+                    files=stack.files,
+                    diff_path=diff_path,
+                    intent_path=intent_path,
+                    alternatives_path=alternatives_path,
+                    output_path=output_path,
+                    exploration_dir=exploration_dir,
+                    prior_commits=prior_commits,
+                )
+            elif stack.skill_invocation is None:
+                prompt = _prompts.build_generic_fallback_prompt(
                     files=stack.files,
                     diff_path=diff_path,
                     intent_path=intent_path,
@@ -2281,7 +2289,7 @@ async def phase_per_stack_reviews(
                     prior_commits=prior_commits,
                 )
             else:
-                prompt = build_per_stack_prompt(
+                prompt = _prompts.build_per_stack_prompt(
                     skill_invocation=stack.skill_invocation,
                     stack_name=stack.stack_name,
                     files=stack.files,
