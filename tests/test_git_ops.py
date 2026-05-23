@@ -275,6 +275,49 @@ def test_diff_excludes_paths(tmp_path: Path) -> None:
     assert "drop.txt" not in out
 
 
+# --- diff_name_only ---------------------------------------------------------
+
+
+def test_diff_name_only_returns_changed_files(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "topic")
+    (repo / "added.txt").write_text("hello\n")
+    _git(repo, "add", "added.txt")
+    _commit(repo, "add file")
+    result = git_ops.diff_name_only(repo, "main", "HEAD")
+    assert result == ["added.txt"]
+
+
+def test_diff_name_only_returns_multiple_files_in_order(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "topic")
+    (repo / "alpha.txt").write_text("a\n")
+    (repo / "beta.txt").write_text("b\n")
+    _git(repo, "add", "alpha.txt", "beta.txt")
+    _commit(repo, "add two files")
+    result = git_ops.diff_name_only(repo, "main", "HEAD")
+    assert sorted(result) == ["alpha.txt", "beta.txt"]
+
+
+def test_diff_name_only_filters_empty_lines(tmp_path: Path) -> None:
+    """Ensure blank lines in git output are stripped (empty-line filtering)."""
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "topic")
+    (repo / "file.txt").write_text("x\n")
+    _git(repo, "add", "file.txt")
+    _commit(repo, "add file")
+    result = git_ops.diff_name_only(repo, "main", "HEAD")
+    assert all(line != "" for line in result)
+    assert "file.txt" in result
+
+
+def test_diff_name_only_returns_empty_list_on_bad_ref(tmp_path: Path) -> None:
+    """Soft-failure: unresolvable ref yields [] rather than raising."""
+    repo = _make_repo_with_main(tmp_path)
+    result = git_ops.diff_name_only(repo, "nonexistent-ref", "HEAD")
+    assert result == []
+
+
 def test_log_returns_oneline_commits(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     _git(repo, "checkout", "-b", "topic")

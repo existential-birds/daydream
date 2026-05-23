@@ -104,3 +104,15 @@ def test_metrics_event_in_all_export() -> None:
     from daydream import backends
 
     assert "MetricsEvent" in backends.__all__
+
+
+def test_turn_end_event_is_in_agent_event_union() -> None:
+    """TurnEndEvent is a recognized AgentEvent so trajectory.py can dispatch."""
+    from daydream.backends import AgentEvent, TurnEndEvent
+
+    ev = TurnEndEvent()
+    ev2 = TurnEndEvent(message_id="msg_abc123")
+    assert ev2.message_id == "msg_abc123"
+    assert isinstance(ev.timestamp, str) and ev.timestamp.endswith("Z")
+    # Runtime confirmation that TurnEndEvent is part of the AgentEvent union.
+    assert isinstance(ev, AgentEvent)

@@ -10,7 +10,7 @@ Exports:
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from daydream import git_ops
@@ -27,6 +27,11 @@ class GitContext:
         branch: Current branch name.
         base_branch: Default branch (main/master).
         head_sha: Full commit SHA of HEAD.
+        base_sha: Merge-base SHA between ``base_branch`` and HEAD; ``None``
+            when either side cannot be resolved.
+        changed_files: Repo-relative paths changed between ``base_sha`` and
+            ``head_sha``. Empty list when ``base_sha`` is ``None`` or the
+            diff cannot be computed.
     """
 
     remote_url: str | None = None
@@ -34,6 +39,8 @@ class GitContext:
     branch: str | None = None
     base_branch: str | None = None
     head_sha: str | None = None
+    base_sha: str | None = None
+    changed_files: list[str] = field(default_factory=list)
 
 
 _SSH_REMOTE_RE = re.compile(r"[^@]+@[^:]+:(.+?)(?:\.git)?$")
@@ -81,5 +88,17 @@ def capture_git_context(target_dir: Path) -> GitContext:
         ctx.base_branch = git_ops.default_branch(target_dir)
     except (BranchNotFoundError, GitError):
         ctx.base_branch = None
+
+    if ctx.base_branch and ctx.head_sha:
+        try:
+            ctx.base_sha = git_ops.merge_base(target_dir, ctx.base_branch, ctx.head_sha)
+        except GitError:
+            ctx.base_sha = None
+
+    if ctx.base_sha and ctx.head_sha:
+        try:
+            ctx.changed_files = git_ops.diff_name_only(target_dir, ctx.base_sha, ctx.head_sha)
+        except GitError:
+            ctx.changed_files = []
 
     return ctx

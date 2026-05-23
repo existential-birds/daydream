@@ -1,0 +1,65 @@
+"""Parallel-implementation gate: ClaudeBackend and CodexBackend MUST produce
+identical observable Step shapes for the same canonical agent script."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any, Callable
+
+import pytest
+
+from daydream.atif import Step
+from daydream.backends import AgentEvent
+from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+
+CANONICAL = Path(__file__).parent / "fixtures" / "canonical_script.json"
+
+BackendLoader = Callable[[dict[str, Any]], AsyncIterator[AgentEvent]]
+
+
+async def _run_backend_against_canonical(
+    backend_loader: BackendLoader, tmp_path: Path
+) -> list[Step]:
+    script = json.loads(CANONICAL.read_text())
+    recorder = TrajectoryRecorder(
+        path=tmp_path / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="test-model",
+        session_id="00000000-0000-0000-0000-0000000000ff",
+    )
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            async for event in backend_loader(script):
+                inv.observe(event)
+    return [s for s in recorder.steps if s.source == "agent"]
+
+
+def _compare_steps(left: list[Step], right: list[Step]) -> None:
+    assert len(left) == len(right), f"step count: claude={len(left)} codex={len(right)}"
+    for li, ri in zip(left, right, strict=True):
+        assert li.message == ri.message
+        assert li.reasoning_content == ri.reasoning_content
+        assert (li.tool_calls or []) == (ri.tool_calls or [])
+        l_obs = {
+            r.source_call_id: r.content
+            for r in (li.observation.results if li.observation else [])
+        }
+        r_obs = {
+            r.source_call_id: r.content
+            for r in (ri.observation.results if ri.observation else [])
+        }
+        assert l_obs == r_obs
+
+
+@pytest.mark.asyncio
+async def test_claude_and_codex_produce_identical_steps(tmp_path: Path) -> None:
+    """The canonical script must produce byte-identical message / reasoning /
+    tool_calls / observation results across both backends."""
+    from tests.contract._loaders import claude_loader, codex_loader
+
+    claude_steps = await _run_backend_against_canonical(claude_loader, tmp_path / "claude")
+    codex_steps = await _run_backend_against_canonical(codex_loader, tmp_path / "codex")
+    _compare_steps(claude_steps, codex_steps)

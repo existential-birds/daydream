@@ -14,6 +14,7 @@ from daydream.backends import (
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
+    TurnEndEvent,
 )
 from daydream.backends.codex import CodexBackend, CodexError, _unwrap_shell_command
 
@@ -278,6 +279,24 @@ async def test_turn_completed_cached_input_tokens():
     assert cost_events[0].input_tokens == 300
     assert cost_events[0].output_tokens == 150
     assert cost_events[0].cached_tokens == 200
+
+
+@pytest.mark.asyncio
+async def test_codex_backend_emits_turn_end_after_each_agent_message() -> None:
+    """One TurnEndEvent per item.completed of type agent_message."""
+    backend = CodexBackend(model="fixture-model")
+    mock_proc = _make_mock_process("two_agent_turns.jsonl")
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Two turns"):
+            events.append(event)
+
+    texts = [e for e in events if isinstance(e, TextEvent)]
+    turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
+    assert len(texts) == 2
+    assert len(turn_ends) == 2
+    assert all(e.message_id == "" for e in turn_ends)
 
 
 def test_format_skill_invocation():

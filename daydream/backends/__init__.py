@@ -4,6 +4,19 @@
 Defines the unified event stream, Backend protocol, and factory function.
 Backends yield AgentEvent instances that the UI layer consumes without
 knowing which backend produced them.
+
+Event vocabulary (members of the ``AgentEvent`` TypeAlias union):
+
+- ``TextEvent`` — agent text output.
+- ``ThinkingEvent`` — extended reasoning / thinking content.
+- ``ToolStartEvent`` — tool invocation started.
+- ``ToolResultEvent`` — tool invocation completed.
+- ``CostEvent`` — end-of-call cost/usage signal.
+- ``MetricsEvent`` — per-turn LLM token/cost usage.
+- ``TurnEndEvent`` — assistant-turn boundary; closes the recorder's open
+  Step so multi-turn invocations are not collapsed into one Step.
+- ``ResultEvent`` — final event in the stream; carries structured output
+  and any continuation token.
 """
 
 from __future__ import annotations
@@ -156,6 +169,29 @@ class MetricsEvent:
 
 
 @dataclass
+class TurnEndEvent:
+    """Assistant-turn boundary signal.
+
+    Emitted by each backend at the end of an assistant "turn" — for
+    Claude, once per ``AssistantMessage``; for Codex, once per
+    ``item.completed`` of type ``agent_message``. The trajectory
+    recorder uses this to close its open Step so multi-turn invocations
+    are recorded as one Step per turn (instead of collapsing into a
+    single Step at invocation finish).
+
+    Attributes:
+        message_id: Correlator matching the message that ended this turn
+            (e.g. Claude's ``AssistantMessage.message_id``). Empty string
+            when the backend cannot supply one (Codex has no per-message
+            id surface — D-04 correlator unused for Codex).
+        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
+    """
+
+    message_id: str = ""
+    timestamp: str = field(default_factory=now_iso)
+
+
+@dataclass
 class ContinuationToken:
     """Opaque token for multi-turn interactions."""
 
@@ -185,6 +221,7 @@ AgentEvent = (
     | ToolResultEvent
     | CostEvent
     | MetricsEvent
+    | TurnEndEvent
     | ResultEvent
 )
 
@@ -255,5 +292,6 @@ __all__ = [
     "ThinkingEvent",
     "ToolResultEvent",
     "ToolStartEvent",
+    "TurnEndEvent",
     "create_backend",
 ]

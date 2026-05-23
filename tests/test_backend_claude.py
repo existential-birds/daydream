@@ -317,3 +317,74 @@ def test_backend_protocol_agents_param_is_dict_typed():
     assert "dict[str, AgentDefinition]" in annotation_str
 
 
+# --- Helpers for TurnEndEvent tests (Task 6) ---
+
+
+def _assistant_message(*, text: str, message_id: str) -> MockAssistantMessage:
+    """Build a MockAssistantMessage carrying one TextBlock + a message_id."""
+    msg = MockAssistantMessage(content=[MockTextBlock(text=text)])
+    msg.message_id = message_id  # type: ignore[attr-defined]
+    return msg
+
+
+def _result_message(*, cost: float | None = 0.0) -> MockResultMessage:
+    return MockResultMessage(total_cost_usd=cost, structured_output=None)
+
+
+async def _drive_claude_backend_to_list(
+    *,
+    messages: list[Any],
+    patch_sdk_fn: Any,
+) -> list[Any]:
+    """Drive ClaudeBackend.execute with a scripted SDK message sequence."""
+
+    class _ScriptedClient:
+        def __init__(self, options: Any = None) -> None:
+            self.options = options
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def query(self, prompt: str) -> None:
+            return None
+
+        async def receive_response(self):
+            for m in messages:
+                yield m
+
+    patch_sdk_fn(_ScriptedClient)
+    backend = ClaudeBackend(model="opus")
+    events: list[Any] = []
+    async for event in backend.execute(Path("/tmp"), "go"):
+        events.append(event)
+    return events
+
+
+@pytest.mark.asyncio
+async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk) -> None:
+    """One TurnEndEvent per AssistantMessage, after that message's events."""
+    from daydream.backends import TurnEndEvent
+
+    events = await _drive_claude_backend_to_list(
+        messages=[
+            _assistant_message(text="turn-1", message_id="msg_1"),
+            _assistant_message(text="turn-2", message_id="msg_2"),
+            _result_message(cost=0.0),
+        ],
+        patch_sdk_fn=patch_sdk,
+    )
+    texts = [e for e in events if isinstance(e, TextEvent)]
+    turn_ends = [(i, e) for i, e in enumerate(events) if isinstance(e, TurnEndEvent)]
+    assert [e.text for e in texts] == ["turn-1", "turn-2"]
+    assert len(turn_ends) == 2
+    assert turn_ends[0][1].message_id == "msg_1"
+    assert turn_ends[1][1].message_id == "msg_2"
+    first_text_idx = events.index(texts[0])
+    second_text_idx = events.index(texts[1])
+    assert first_text_idx < turn_ends[0][0] < second_text_idx
+    assert second_text_idx < turn_ends[1][0]
+
+

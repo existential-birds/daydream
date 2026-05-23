@@ -1,0 +1,398 @@
+"""Posterior-signal extractors for the labeler.
+
+Each signal is a pure function over ``(manifest_row, fetcher)`` — no LLM,
+no I/O beyond the fetcher callables the caller injects. This module
+exposes four signals that the labeler orchestrator (Task 13) composes
+into outcome labels:
+
+* :func:`pr_merge_signal` — was the originating PR merged?
+* :func:`fix_applied_signal` — did the recommended diff land in the
+  upstream default branch within a configurable window? Implements the
+  layered cascade documented in ``/tmp/research-fix-applied.md``.
+* :func:`comment_resolution_signal` — did bot review comments get a
+  reply (proxy for "addressed")?
+* :func:`local_commit_applied_signal` — for PR-less runs (see
+  ``/tmp/research-no-pr.md``), did a later local commit on the same
+  branch carry the recommended diff content?
+
+Each signal returns a frozen dataclass so callers can hash / compare
+results across re-labels. Fetchers are passed as keyword-only callables
+to keep the functions testable without monkeypatching subprocess /
+HTTP calls.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Literal
+
+# ---------------------------------------------------------------------------
+# Result dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PRMergeSignal:
+    """Whether the originating PR was merged.
+
+    Attributes:
+        merged: ``True`` if the PR is marked merged on GitHub.
+        merged_at: ISO-8601 timestamp of merge, or ``None``.
+    """
+
+    merged: bool
+    merged_at: str | None
+
+
+@dataclass(frozen=True)
+class FixAppliedSignal:
+    """Result of the fix-applied layered cascade.
+
+    Attributes:
+        verdict: ``"applied"`` if ≥50% of recommended hunks landed in the
+            upstream default branch within the window; ``"not_applied"``
+            if the window was non-empty but no hunks landed; ``"unknown"``
+            if no window commits exist.
+        hunks_applied: Count of hunks whose added lines appear verbatim
+            in the post-window file content.
+        hunks_total: Total hunks parsed from the recommended ``diff.patch``.
+        window_commits: Ordered commit SHAs considered (oldest → newest).
+    """
+
+    verdict: Literal["applied", "not_applied", "unknown"]
+    hunks_applied: int
+    hunks_total: int
+    window_commits: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CommentResolutionSignal:
+    """PR review-comment resolution proxy.
+
+    Attributes:
+        total: Top-level bot comments on the PR.
+        replied: Top-level bot comments that received at least one reply.
+        unresolved: ``total - replied``.
+    """
+
+    total: int
+    replied: int
+    unresolved: int
+
+
+@dataclass(frozen=True)
+class LocalCommitAppliedSignal:
+    """Posterior signal for PR-less runs (local branch only).
+
+    Attributes:
+        verdict: ``"applied"`` if a later local commit contains the
+            recommended diff content; ``"rejected"`` if no qualifying
+            commit exists; ``"unknown"`` if the repo clone is missing.
+    """
+
+    verdict: Literal["applied", "rejected", "unknown"]
+
+
+# ---------------------------------------------------------------------------
+# Diff parsing helpers
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Hunk:
+    """One hunk parsed from a unified diff."""
+
+    file: str
+    added_lines: tuple[str, ...]
+
+
+_DIFF_FILE_HEADER = re.compile(r"^diff --git a/(?P<old>.+) b/(?P<new>.+)$")
+
+
+def _parse_diff_hunks(patch_text: str) -> list[_Hunk]:
+    """Parse a unified-diff text into a flat list of hunks.
+
+    Each ``@@`` block becomes one :class:`_Hunk` carrying the added lines
+    (without the leading ``+``). Lines that begin with ``+++`` are
+    treated as file headers, not additions.
+    """
+    hunks: list[_Hunk] = []
+    current_file: str | None = None
+    in_hunk = False
+    added: list[str] = []
+
+    def _flush() -> None:
+        nonlocal added
+        if current_file is not None and added:
+            hunks.append(_Hunk(file=current_file, added_lines=tuple(added)))
+        added = []
+
+    for line in patch_text.splitlines():
+        header = _DIFF_FILE_HEADER.match(line)
+        if header:
+            _flush()
+            current_file = header.group("new")
+            in_hunk = False
+            continue
+        if line.startswith("+++ "):
+            # File header inside a diff block — already captured via "diff --git".
+            in_hunk = False
+            continue
+        if line.startswith("--- "):
+            in_hunk = False
+            continue
+        if line.startswith("@@"):
+            _flush()
+            in_hunk = True
+            continue
+        if in_hunk and line.startswith("+"):
+            added.append(line[1:])
+    _flush()
+    return hunks
+
+
+def _hunk_lines_present(added_lines: tuple[str, ...], post_content: str) -> bool:
+    """Return ``True`` if every added line appears verbatim in ``post_content``."""
+    if not added_lines:
+        return False
+    haystack_lines = set(post_content.splitlines())
+    return all(line in haystack_lines for line in added_lines)
+
+
+# ---------------------------------------------------------------------------
+# Signal extractors
+# ---------------------------------------------------------------------------
+
+
+def pr_merge_signal(
+    row: dict[str, Any],
+    *,
+    gh_api: Callable[..., Any],
+) -> PRMergeSignal:
+    """Return whether the row's originating PR was merged.
+
+    Args:
+        row: Manifest row carrying ``pr_repo`` and ``pr_number``.
+        gh_api: Callable invoked as ``gh_api(repo, endpoint)`` returning
+            the parsed JSON body. Exceptions propagate to the caller.
+
+    Returns:
+        :class:`PRMergeSignal`. When ``pr_repo`` or ``pr_number`` is
+        ``None`` the signal is ``(False, None)`` without any API call.
+    """
+    repo = row.get("pr_repo")
+    number = row.get("pr_number")
+    if repo is None or number is None:
+        return PRMergeSignal(merged=False, merged_at=None)
+    payload = gh_api(repo, f"repos/{repo}/pulls/{number}")
+    return PRMergeSignal(
+        merged=bool(payload.get("merged", False)),
+        merged_at=payload.get("merged_at"),
+    )
+
+
+def fix_applied_signal(
+    row: dict[str, Any],
+    *,
+    changed_files: list[str],
+    repo_clone: Path,
+    diff_fetcher: Callable[[Path, str, str], list[str]],
+    commits_in_window_fetcher: Callable[[Path, str, str, int], list[str]],
+    file_at_fetcher: Callable[[Path, str, str], str],
+    window_days: int = 30,
+) -> FixAppliedSignal:
+    """Run the layered cascade for "did the recommended fix land upstream?".
+
+    Cascade (see ``/tmp/research-fix-applied.md``):
+
+    1. Compute the commit window via ``commits_in_window_fetcher``. If
+       empty → ``verdict="unknown"``.
+    2. Compute the file overlap between ``changed_files`` and the files
+       actually touched by ``diff_fetcher``. If empty → ``not_applied``
+       with ``hunks_applied=0`` and ``hunks_total = parsed hunks``.
+    3. Parse ``archive_path/diff.patch`` into hunks. For each hunk on a
+       file in the overlap, read ``file_at_fetcher(repo, file, window[-1])``
+       and check whether every added line appears verbatim.
+    4. Verdict: ``applied`` if ``hunks_applied / hunks_total >= 0.5``;
+       otherwise ``not_applied``.
+
+    Args:
+        row: Manifest row with ``head_sha``, ``base_branch``, ``archive_path``.
+        changed_files: Files the agent originally recommended changing.
+        repo_clone: Path to a local clone of the target repo.
+        diff_fetcher: Returns files touched between ``base`` and ``head``.
+        commits_in_window_fetcher: Returns ordered commit SHAs in the
+            review window. Called as ``(repo_clone, head_sha,
+            base_branch, window_days)``.
+        file_at_fetcher: Returns file content at a given SHA.
+        window_days: Lookback window for upstream commits.
+
+    Returns:
+        :class:`FixAppliedSignal` with ``verdict="unknown"`` when the
+        commit window is empty, ``"not_applied"`` when no recommended
+        files were touched or fewer than half of the parsed hunks
+        appear post-window, and ``"applied"`` otherwise.
+        ``hunks_applied``, ``hunks_total``, and ``window_commits`` are
+        always populated.
+
+    Raises:
+        KeyError: If ``row`` is missing ``head_sha``, ``base_branch``,
+            or ``archive_path``.
+        OSError: If ``archive_path/diff.patch`` cannot be read.
+        Exception: Any exception raised by ``diff_fetcher``,
+            ``commits_in_window_fetcher``, or ``file_at_fetcher`` is
+            propagated unchanged.
+    """
+    head_sha = row["head_sha"]
+    base_branch = row["base_branch"]
+    archive_path = Path(row["archive_path"])
+
+    diff_patch = (archive_path / "diff.patch").read_text()
+    hunks = _parse_diff_hunks(diff_patch)
+    hunks_total = len(hunks)
+
+    window = commits_in_window_fetcher(repo_clone, head_sha, base_branch, window_days)
+    if not window:
+        return FixAppliedSignal(
+            verdict="unknown",
+            hunks_applied=0,
+            hunks_total=hunks_total,
+            window_commits=[],
+        )
+
+    touched = diff_fetcher(repo_clone, head_sha, base_branch)
+    overlap = set(changed_files) & set(touched)
+    if not overlap:
+        return FixAppliedSignal(
+            verdict="not_applied",
+            hunks_applied=0,
+            hunks_total=hunks_total,
+            window_commits=list(window),
+        )
+
+    hunks_applied = 0
+    post_sha = window[-1]
+    file_content_cache: dict[str, str] = {}
+    for hunk in hunks:
+        if hunk.file not in overlap:
+            continue
+        post_content = file_content_cache.get(hunk.file)
+        if post_content is None:
+            post_content = file_at_fetcher(repo_clone, hunk.file, post_sha)
+            file_content_cache[hunk.file] = post_content
+        if _hunk_lines_present(hunk.added_lines, post_content):
+            hunks_applied += 1
+
+    if hunks_total > 0 and (hunks_applied / hunks_total) >= 0.5:
+        verdict: Literal["applied", "not_applied", "unknown"] = "applied"
+    else:
+        verdict = "not_applied"
+
+    return FixAppliedSignal(
+        verdict=verdict,
+        hunks_applied=hunks_applied,
+        hunks_total=hunks_total,
+        window_commits=list(window),
+    )
+
+
+def comment_resolution_signal(
+    row: dict[str, Any],
+    *,
+    gh_api: Callable[..., Any],
+) -> CommentResolutionSignal:
+    """Return a proxy for "review comments addressed".
+
+    Top-level review comments authored by bot users (login matching
+    ``*[bot]``) are treated as issues; any reply (regardless of author
+    or body) marks the issue resolved.
+
+    Args:
+        row: Manifest row carrying ``pr_repo`` and ``pr_number``.
+        gh_api: Callable returning the parsed comment list.
+
+    Returns:
+        :class:`CommentResolutionSignal` with ``(0, 0, 0)`` when the row
+        has no associated PR.
+    """
+    repo = row.get("pr_repo")
+    number = row.get("pr_number")
+    if repo is None or number is None:
+        return CommentResolutionSignal(total=0, replied=0, unresolved=0)
+
+    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments")
+    top_level_bot_ids: list[int] = []
+    replies_by_parent: dict[int, int] = {}
+
+    for comment in comments:
+        in_reply_to = comment.get("in_reply_to_id")
+        if in_reply_to is None:
+            user = comment.get("user") or {}
+            login = user.get("login", "")
+            if login.endswith("[bot]"):
+                top_level_bot_ids.append(comment["id"])
+        else:
+            replies_by_parent[in_reply_to] = replies_by_parent.get(in_reply_to, 0) + 1
+
+    total = len(top_level_bot_ids)
+    replied = sum(1 for cid in top_level_bot_ids if replies_by_parent.get(cid, 0) >= 1)
+    return CommentResolutionSignal(total=total, replied=replied, unresolved=total - replied)
+
+
+def local_commit_applied_signal(
+    row: dict[str, Any],
+    *,
+    repo_clone: Path,
+    commits_since_fetcher: Callable[[Path, str, str], list[str]],
+    file_at_fetcher: Callable[[Path, str, str], str],
+) -> LocalCommitAppliedSignal:
+    """Posterior signal for PR-less runs.
+
+    See ``/tmp/research-no-pr.md``. Walks the commits on ``row["branch"]``
+    that landed after ``row["head_sha"]`` and checks whether any commit
+    contains the added lines from the recommended ``diff.patch``.
+
+    Args:
+        row: Manifest row with ``branch``, ``head_sha``, ``archive_path``.
+        repo_clone: Path to local clone. ``"unknown"`` if not a directory.
+        commits_since_fetcher: Returns ordered commit SHAs on ``branch``
+            after ``since_sha``.
+        file_at_fetcher: Returns file content at a given SHA.
+
+    Returns:
+        :class:`LocalCommitAppliedSignal` with ``verdict="unknown"``
+        when ``repo_clone`` is not a directory, ``"rejected"`` when no
+        commits follow ``head_sha`` or none contain the recommended
+        hunk's added lines, and ``"applied"`` when at least one does.
+
+    Raises:
+        KeyError: If ``row`` is missing ``archive_path``, ``branch``,
+            or ``head_sha``.
+        OSError: If ``archive_path/diff.patch`` cannot be read.
+        Exception: Any exception raised by ``commits_since_fetcher`` or
+            ``file_at_fetcher`` is propagated unchanged.
+    """
+    if not repo_clone.is_dir():
+        return LocalCommitAppliedSignal(verdict="unknown")
+
+    archive_path = Path(row["archive_path"])
+    diff_patch = (archive_path / "diff.patch").read_text()
+    hunks = _parse_diff_hunks(diff_patch)
+
+    commits = commits_since_fetcher(repo_clone, row["branch"], row["head_sha"])
+    if not commits:
+        return LocalCommitAppliedSignal(verdict="rejected")
+
+    for commit in commits:
+        file_content_cache: dict[str, str] = {}
+        for hunk in hunks:
+            content = file_content_cache.get(hunk.file)
+            if content is None:
+                content = file_at_fetcher(repo_clone, hunk.file, commit)
+                file_content_cache[hunk.file] = content
+            if _hunk_lines_present(hunk.added_lines, content):
+                return LocalCommitAppliedSignal(verdict="applied")
+
+    return LocalCommitAppliedSignal(verdict="rejected")
