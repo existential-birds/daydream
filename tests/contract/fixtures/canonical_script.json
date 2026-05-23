@@ -1,0 +1,10 @@
+{
+  "turns": [
+    {"message_id": "msg_1", "text": "First reasoning", "thinking": "thinking-1",
+     "tool_calls": [{"id": "t1", "name": "Read", "input": {"path": "/x"}}]},
+    {"message_id": "msg_2", "text": "Second turn after tool result",
+     "tool_calls": []}
+  ],
+  "tool_results": [{"id": "t1", "output": "contents", "is_error": false}],
+  "final_usage": {"input_tokens": 10, "output_tokens": 5, "cached_tokens": null}
+}
