@@ -127,24 +127,42 @@ def _single_outcome_label(labels: list[str], session_id: str) -> str | None:
 def _resolve_repo_clone(repo_slug: str | None) -> Path | None:
     """Best-effort discovery of a local clone for ``repo_slug``.
 
-    Checks the standard locations a developer is likely to use, in order:
-    ``~/<repo>``, ``~/github/<repo>``, ``~/code/<repo>``. The first path
-    whose ``.git`` directory exists wins.
+    ``repo_slug`` must be a full ``owner/repo`` string; slugs that do not
+    split cleanly into two non-empty parts return ``None`` to avoid
+    materializing a ``base_sha`` from an ambiguous clone (e.g. two orgs
+    that share a repo name under ``~/<repo>``).
+
+    Probes the standard locations a developer is likely to use, in order:
+    ``~/<repo>``, ``~/github/<repo>``, ``~/code/<repo>``,
+    ``~/github/<owner>/<repo>``, ``~/code/<owner>/<repo>``. Bare-name
+    paths come first to preserve behaviour for layouts that do not nest
+    by owner; owner-qualified paths are checked as additional fallbacks.
+    The first path whose ``.git`` directory exists wins.
 
     Args:
         repo_slug: ``owner/repo`` string from the manifest row, or ``None``.
 
     Returns:
-        Path to a working tree containing ``.git``, or ``None`` when no
-        candidate is on disk.
+        Path to a working tree containing ``.git``, or ``None`` when
+        ``repo_slug`` is missing/malformed or no candidate is on disk.
     """
     if not isinstance(repo_slug, str) or not repo_slug:
         return None
-    repo_name = repo_slug.split("/")[-1]
-    if not repo_name:
+    parts = repo_slug.split("/", 1)
+    if len(parts) != 2:
+        return None
+    owner, repo_name = parts
+    if not owner or not repo_name:
         return None
     home = Path.home()
-    for candidate in (home / repo_name, home / "github" / repo_name, home / "code" / repo_name):
+    candidates = (
+        home / repo_name,
+        home / "github" / repo_name,
+        home / "code" / repo_name,
+        home / "github" / owner / repo_name,
+        home / "code" / owner / repo_name,
+    )
+    for candidate in candidates:
         if (candidate / ".git").exists():
             return candidate
     return None
@@ -169,9 +187,11 @@ def _build_record(
     Older archives written before that block existed surface ``base_sha=None``
     and ``changed_files=[]``. When ``base_sha`` is missing AND a local clone
     of ``repo_slug`` is discoverable under ``~/<repo>``, ``~/github/<repo>``,
-    or ``~/code/<repo>``, :func:`materialize_base_sha` is invoked to resolve
-    it via ``git merge-base`` and write it back into ``manifest.json``;
-    failures are silent (opportunistic) and leave ``base_sha=None``.
+    ``~/code/<repo>``, ``~/github/<owner>/<repo>``, or
+    ``~/code/<owner>/<repo>``, :func:`materialize_base_sha` is invoked to
+    resolve it via ``git merge-base`` and write it back into
+    ``manifest.json``; failures are silent (opportunistic) and leave
+    ``base_sha=None``.
     ``review_output`` is read from ``<archive_path>/review-output.md`` when
     present; deep-mode archives that only emit the file under
     ``<archive_path>/deep/review-output.md`` fall back to that path. Root

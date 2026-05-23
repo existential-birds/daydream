@@ -385,5 +385,6 @@ async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk) ->
     first_text_idx = events.index(texts[0])
     second_text_idx = events.index(texts[1])
     assert first_text_idx < turn_ends[0][0] < second_text_idx
+    assert second_text_idx < turn_ends[1][0]
 
 

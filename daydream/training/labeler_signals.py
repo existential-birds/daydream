@@ -228,6 +228,14 @@ def fix_applied_signal(
             base_branch, window_days)``.
         file_at_fetcher: Returns file content at a given SHA.
         window_days: Lookback window for upstream commits.
+
+    Returns:
+        :class:`FixAppliedSignal` with ``verdict="unknown"`` when the
+        commit window is empty, ``"not_applied"`` when no recommended
+        files were touched or fewer than half of the parsed hunks
+        appear post-window, and ``"applied"`` otherwise.
+        ``hunks_applied``, ``hunks_total``, and ``window_commits`` are
+        always populated.
     """
     head_sha = row["head_sha"]
     base_branch = row["base_branch"]
@@ -344,6 +352,12 @@ def local_commit_applied_signal(
         commits_since_fetcher: Returns ordered commit SHAs on ``branch``
             after ``since_sha``.
         file_at_fetcher: Returns file content at a given SHA.
+
+    Returns:
+        :class:`LocalCommitAppliedSignal` with ``verdict="unknown"``
+        when ``repo_clone`` is not a directory, ``"rejected"`` when no
+        commits follow ``head_sha`` or none contain the recommended
+        hunk's added lines, and ``"applied"`` when at least one does.
     """
     if not repo_clone.is_dir():
         return LocalCommitAppliedSignal(verdict="unknown")

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -474,8 +475,11 @@ def label_count_summary(
                     parsed = json.loads(labels_raw) if isinstance(labels_raw, str) else labels_raw
                     if isinstance(parsed, list) and parsed and parsed[0]:
                         label = str(parsed[0])
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as exc:
+                    warnings.warn(
+                        f"Invalid labels payload {labels_raw!r}: {exc}",
+                        stacklevel=2,
+                    )
             counts[label] = counts.get(label, 0) + 1
         return counts
     finally:
