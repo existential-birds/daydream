@@ -2339,6 +2339,7 @@ async def phase_cross_stack_merge(
     dedup_candidates_path: Path,
     exploration_dir: Path | None = None,
     failed_stacks: dict[str, str] | None = None,
+    structural_records_path: Path | None = None,
 ) -> Path:
     """Run the cross-stack merge agent and return the output-report path (D-23..D-27).
 
@@ -2353,6 +2354,8 @@ async def phase_cross_stack_merge(
         backend: The Backend to execute against.
         work: Workspace context; report is written under ``work.repo``.
         per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
+            Must NOT include the structural meta-stack records file -- callers
+            partition that out and pass it via ``structural_records_path``.
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
         dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
@@ -2360,6 +2363,12 @@ async def phase_cross_stack_merge(
         failed_stacks: Optional stack_name -> reason dict for per-stack agents
             that failed. Passed through to the merge prompt so the merged
             report can call out uncovered stacks explicitly.
+        structural_records_path: Optional path to the parsed structural
+            meta-stack records JSON. When provided, the merge prompt renders a
+            dedicated ``## Structural Review`` section above ``## Issues`` with
+            independent numbering and is excluded from dedup against the
+            language-stack records. ``None`` when the structural reviewer did
+            not run (docs-only diff, empty diff).
 
     Returns:
         Path to the merged report at ``work.repo / REVIEW_OUTPUT_FILE``.
@@ -2384,6 +2393,7 @@ async def phase_cross_stack_merge(
         output_path=agent_output_path,
         exploration_dir=exploration_dir,
         failed_stacks=failed_stacks,
+        structural_records_path=structural_records_path,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     print_dim(console, f"Model: {backend.model}")

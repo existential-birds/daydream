@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daydream.agent import console
-from daydream.config import REVIEW_OUTPUT_FILE, SKILL_MAP
+from daydream.config import REVIEW_OUTPUT_FILE, SKILL_MAP, STRUCTURE_STACK_NAME
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
 )
@@ -495,6 +495,33 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                         all_records.extend(records)
                         record_sources.extend(stack_name for _ in records)
 
+                # Partition out the structural meta-stack records BEFORE dedup.
+                # The structural lens carries different convictions than the
+                # language stacks (file-size budgets, layering, canonical-helper
+                # gaps); collapsing it into the language-stack dedup pool would
+                # silently demote those findings into the global ## Issues list.
+                # Resume populates record_sources with the records filename
+                # (e.g. "stack-structure-records.json"); fresh-run populates it
+                # with the stack_name ("structure"). Filter both forms together
+                # to preserve the record_sources[i] / all_records[i] index
+                # invariant.
+                structural_path_candidate = per_stack_records_path(dd, STRUCTURE_STACK_NAME)
+                if structural_path_candidate in per_stack_records_paths:
+                    structural_records_path: Path | None = structural_path_candidate
+                    structural_filename = structural_path_candidate.name
+                    per_stack_records_paths = [
+                        p for p in per_stack_records_paths if p != structural_path_candidate
+                    ]
+                    kept_pairs = [
+                        (rec, src)
+                        for rec, src in zip(all_records, record_sources, strict=True)
+                        if src != STRUCTURE_STACK_NAME and src != structural_filename
+                    ]
+                    all_records = [rec for rec, _ in kept_pairs]
+                    record_sources = [src for _, src in kept_pairs]
+                else:
+                    structural_records_path = None
+
                 # Dedup pre-filter (D-27).
                 alt_issues_for_dedup: list[dict[str, Any]] = (
                     json.loads(alts_p.read_text()) if alts_p.exists() else []
@@ -522,6 +549,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     dedup_candidates_path=dedup_p,
                     exploration_dir=exploration_dir,
                     failed_stacks=failed_stacks or None,
+                    structural_records_path=structural_records_path,
                 )
 
             # ------ Stage 5: optional fix gate (D-28, D-29) ------
