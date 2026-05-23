@@ -16,6 +16,8 @@ Exports:
         a session, optionally constrained by an ``as_of`` cutoff timestamp.
     label_observation_history: Return the full label_observations history for
         a session in chronological order.
+    label_count_summary: Return label counts for all runs in a single aggregate
+        query (replaces N+1 per-session lookups).
 """
 
 from __future__ import annotations
@@ -49,6 +51,8 @@ CREATE TABLE IF NOT EXISTS runs (
     branch TEXT,
     base_branch TEXT,
     head_sha TEXT,
+    base_sha TEXT,
+    changed_files TEXT,
     pr_number INTEGER,
     pr_repo TEXT,
     total_cost_usd REAL,
@@ -94,7 +98,7 @@ INSERT OR REPLACE INTO runs (
     session_id, archived_at, status, run_flow, skill, model, backend,
     review_backend, fix_backend, test_backend,
     review_only, deep, loop, remote_url, repo_slug, branch, base_branch,
-    head_sha, pr_number, pr_repo, total_cost_usd, total_findings,
+    head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
     grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
     total_prompt_tokens, total_completion_tokens, total_cached_tokens,
     outcome_labels, labeled_at, archive_path, schema_version
@@ -102,7 +106,7 @@ INSERT OR REPLACE INTO runs (
     :session_id, :archived_at, :status, :run_flow, :skill, :model, :backend,
     :review_backend, :fix_backend, :test_backend,
     :review_only, :deep, :loop, :remote_url, :repo_slug, :branch, :base_branch,
-    :head_sha, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
+    :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
     :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
     :total_prompt_tokens, :total_completion_tokens, :total_cached_tokens,
     :outcome_labels, :labeled_at, :archive_path, :schema_version
@@ -118,6 +122,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("fix_backend", "TEXT"),
         ("test_backend", "TEXT"),
         ("rubric_json", "TEXT"),
+        ("base_sha", "TEXT"),
+        ("changed_files", "TEXT"),
     ]
     for col, col_type in migrations:
         if col not in existing:
@@ -189,6 +195,8 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "branch": manifest.branch,
                 "base_branch": manifest.base_branch,
                 "head_sha": manifest.head_sha,
+                "base_sha": manifest.base_sha,
+                "changed_files": json.dumps(manifest.changed_files),
                 "pr_number": manifest.pr_number,
                 "pr_repo": manifest.pr_repo,
                 "total_cost_usd": manifest.total_cost_usd,
@@ -404,6 +412,72 @@ def query_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> list[d
             sql += f" WHERE {where}"  # noqa: S608 - caller-supplied SQL fragment with bound params
         cursor = conn.execute(sql, params)
         return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def label_count_summary(
+    archive_dir: Path,
+    as_of: str | None = None,
+) -> dict[str, int]:
+    """Return label counts for all runs in a single aggregate query.
+
+    For each run in ``runs``, finds the most recent ``label_observations`` row
+    whose ``observed_at <= as_of`` (or the most recent overall when ``as_of``
+    is ``None``), extracts the first label, and tallies counts.  Runs with no
+    qualifying observation are counted under ``"unlabeled"``.
+
+    This replaces the N+1 pattern of calling
+    :func:`latest_label_observation` once per run.
+
+    Args:
+        archive_dir: Path to the archive root.
+        as_of: Optional ISO 8601 cutoff timestamp. When ``None``, the
+            most recent observation for each session is used regardless of
+            ``observed_at``.
+
+    Returns:
+        Dict mapping label string → count.  Always includes at least one key
+        when the archive is non-empty.
+    """
+    conn = _get_connection(archive_dir)
+    try:
+        if as_of is None:
+            best_sql = (
+                "SELECT session_id, MAX(observed_at) AS max_at "
+                "FROM label_observations "
+                "GROUP BY session_id"
+            )
+            params: tuple = ()
+        else:
+            best_sql = (
+                "SELECT session_id, MAX(observed_at) AS max_at "
+                "FROM label_observations "
+                "WHERE observed_at <= ? "
+                "GROUP BY session_id"
+            )
+            params = (as_of,)
+
+        cursor = conn.execute(
+            f"SELECT lo.labels "  # noqa: S608
+            f"FROM runs r "
+            f"LEFT JOIN ({best_sql}) best ON r.session_id = best.session_id "
+            f"LEFT JOIN label_observations lo "
+            f"    ON lo.session_id = best.session_id AND lo.observed_at = best.max_at",
+            params,
+        )
+        counts: dict[str, int] = {}
+        for (labels_raw,) in cursor.fetchall():
+            label = "unlabeled"
+            if labels_raw:
+                try:
+                    parsed = json.loads(labels_raw) if isinstance(labels_raw, str) else labels_raw
+                    if isinstance(parsed, list) and parsed and parsed[0]:
+                        label = str(parsed[0])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            counts[label] = counts.get(label, 0) + 1
+        return counts
     finally:
         conn.close()
 

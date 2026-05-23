@@ -248,17 +248,21 @@ def _build_codex_jsonl(script: dict[str, Any]) -> list[str]:
             )
             tr = tool_results_by_id.get(tc["id"])
             output = "" if tr is None else tr.get("output", "")
+            is_error = False if tr is None else bool(tr.get("is_error", False))
+            completed_item: dict[str, Any] = {
+                "type": "mcp_tool_call",
+                "id": tc["id"],
+                "tool": tc["name"],
+                "arguments": tc.get("input") or {},
+                "result": {"content": output},
+            }
+            if is_error:
+                completed_item["error"] = output
             lines.append(
                 json.dumps(
                     {
                         "type": "item.completed",
-                        "item": {
-                            "type": "mcp_tool_call",
-                            "id": tc["id"],
-                            "tool": tc["name"],
-                            "arguments": tc.get("input") or {},
-                            "result": {"content": output},
-                        },
+                        "item": completed_item,
                     }
                 )
             )

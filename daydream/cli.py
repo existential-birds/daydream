@@ -843,7 +843,8 @@ def _handle_label_command(argv: list[str]) -> int:
         fix_applied_window_days=args.fix_applied_window_days,
         gh_request_spacing_sec=args.gh_spacing_sec,
     )
-    anyio.run(_labeler.run_label, config)
+    summary = anyio.run(_labeler.run_label, config)
+    print(summary)
     return 0
 
 

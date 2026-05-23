@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from daydream.archive.index import label_observation_history, query_runs, upsert_run
@@ -45,7 +46,6 @@ async def test_labeler_writes_accepted_for_merged_pr_clean_comments(tmp_path: Pa
     summary = await run_label(config)
 
     rows = query_runs(archive_dir, "session_id = ?", ("00000000-0000-0000-0000-000000000099",))
-    import json
     assert json.loads(rows[0]["outcome_labels"]) == ["accepted"]
     hist = label_observation_history(archive_dir, "00000000-0000-0000-0000-000000000099")
     assert len(hist) == 1
@@ -74,13 +74,11 @@ async def test_labeler_uses_local_branch_signal_for_no_pr_run(tmp_path: Path, mo
     config = LabelerConfig(archive_dir=archive_dir, dry_run=False, cache_dir=tmp_path / "cache")
     summary = await run_label(config)  # noqa: F841 - verbatim from plan; assertions below cover behavior
 
-    import json
     rows = query_runs(archive_dir, "session_id = ?", ("00000000-0000-0000-0000-0000000000aa",))
     assert json.loads(rows[0]["outcome_labels"]) == ["accepted"]
     hist = label_observation_history(archive_dir, "00000000-0000-0000-0000-0000000000aa")
     assert hist[0]["pr_state"] is None  # no PR
-    import json as _json
-    rub = _json.loads(hist[0]["rubric_json"])
+    rub = json.loads(hist[0]["rubric_json"])
     assert rub["posterior_source"] == "local_branch"
 
 
@@ -105,7 +103,6 @@ async def test_labeler_dry_run_does_not_write(tmp_path: Path, monkeypatch) -> No
     summary = await run_label(config)
 
     rows = query_runs(archive_dir, "session_id = ?", ("00000000-0000-0000-0000-000000000098",))
-    import json
     assert json.loads(rows[0]["outcome_labels"]) == []
     assert summary["would_label"] == 1
     assert summary["labeled"] == 0

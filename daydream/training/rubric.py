@@ -108,7 +108,10 @@ def derive_outcome_label(rubric: Rubric) -> str:
     if rubric.posterior_source == "local_branch":
         # Extractor invariant: posterior_source="local_branch" implies
         # local_commit_applied is not None.
-        assert rubric.local_commit_applied is not None
+        if rubric.local_commit_applied is None:
+            raise RuntimeError(
+                "Extractor invariant violated: posterior_source='local_branch' but local_commit_applied is None"
+            )
         verdict = rubric.local_commit_applied.verdict
         if verdict == "applied":
             return "accepted"

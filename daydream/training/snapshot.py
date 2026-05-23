@@ -39,13 +39,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from daydream.archive.index import latest_label_observation, query_runs
+from daydream.archive.index import label_count_summary, query_runs
 
 
 @dataclass(frozen=True)
@@ -79,21 +80,15 @@ def run_snapshot(config: SnapshotConfig) -> dict[str, Any]:
             not exist. Bubbles up to the caller unmodified.
     """
     index_path = config.archive_dir / "index.db"
+    with sqlite3.connect(index_path) as _wal_conn:
+        _wal_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     with open(index_path, "rb") as fp:
         archive_index_sha = hashlib.sha256(fp.read()).hexdigest()
 
     as_of_ts = config.as_of_ts or datetime.now(timezone.utc).isoformat()
 
     runs = query_runs(config.archive_dir)
-    label_counts: dict[str, int] = {}
-    for row in runs:
-        observation = latest_label_observation(
-            config.archive_dir,
-            row["session_id"],
-            as_of=as_of_ts,
-        )
-        label = _extract_label(observation)
-        label_counts[label] = label_counts.get(label, 0) + 1
+    label_counts = label_count_summary(config.archive_dir, as_of=as_of_ts)
 
     snapshot: dict[str, Any] = {
         "schema_version": "1",

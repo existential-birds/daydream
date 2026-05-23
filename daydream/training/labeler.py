@@ -70,6 +70,15 @@ def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
     for the shell-out. We adapt by using ``Path(".")`` — ``gh api``
     works from any cwd because it authenticates against the GitHub host
     configured in ``gh auth``, not the local repo.
+
+    Limitation: ``repo`` is accepted for API compatibility but is not used
+    to resolve the GitHub host.  This means all requests go to the single
+    host configured in ``gh auth`` (typically ``github.com``).  To support
+    GitHub Enterprise Server or other hosts, callers would need to parse the
+    hostname out of ``repo`` (e.g. ``"ghes.example.com/owner/name"``) and
+    pass it to ``git_ops.gh_api`` via ``gh api --hostname <host>``.  Until
+    that is implemented, mixing repos from different GitHub hosts in a single
+    labelling run will silently use the wrong host for every non-default repo.
     """
     return git_ops.gh_api(Path("."), endpoint, **kwargs)
 
@@ -82,23 +91,9 @@ def _diff_name_only(repo: Path, base: str, head: str) -> list[str]:
 def _commits_in_window(repo: Path, head: str, base: str, days: int) -> list[str]:
     """Return commits on ``base`` since ``head``'s ancestor, within ``days``.
 
-    Used by :func:`fix_applied_signal` to bound the upstream review
-    window. Implemented inline because ``git_ops`` does not expose a
-    direct equivalent; the labeler is the only consumer.
+    Used by :func:`fix_applied_signal` to bound the upstream review window.
     """
-    args = [
-        "log",
-        f"--since={days} days ago",
-        "--pretty=%H",
-        f"{head}..{base}",
-    ]
-    try:
-        proc = git_ops._run_git(repo, args, timeout=10)  # noqa: SLF001 - shared helper
-    except git_ops.GitError:
-        return []
-    if proc.returncode != 0:
-        return []
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return git_ops.log_shas_since(repo, head, base, since_days=days)
 
 
 def _commits_since(repo: Path, branch: str, since: str) -> list[str]:
@@ -107,14 +102,7 @@ def _commits_since(repo: Path, branch: str, since: str) -> list[str]:
     Used by the local-branch posterior path to walk commits the user
     pushed after the daydream-recorded ``head_sha``.
     """
-    args = ["log", "--pretty=%H", f"{since}..{branch}"]
-    try:
-        proc = git_ops._run_git(repo, args, timeout=10)  # noqa: SLF001 - shared helper
-    except git_ops.GitError:
-        return []
-    if proc.returncode != 0:
-        return []
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return git_ops.log_shas(repo, branch, since=since)
 
 
 def _file_at(repo: Path, path: str, sha: str) -> str:
@@ -219,7 +207,7 @@ def _local_branch_verdict(
     but none match; ``"unknown"`` when no commits to inspect.
     """
     if not commits:
-        return LocalCommitAppliedSignal(verdict="rejected")
+        return LocalCommitAppliedSignal(verdict="unknown")
     added = _added_lines(diff_text)
     if not added:
         return LocalCommitAppliedSignal(verdict="rejected")
