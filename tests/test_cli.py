@@ -371,3 +371,51 @@ def test_export_jsonl_exits_0_on_dry_run(tmp_path: Path) -> None:
     assert result.returncode == 0, (
         f"exit={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# label / snapshot subcommand wiring (Task 15 / training-ready-corpus)
+# ---------------------------------------------------------------------------
+
+
+def test_label_subcommand_dry_run_invokes_run_label(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+    async def fake_run_label(config):
+        captured["config"] = config
+        return {"considered": 0, "labeled": 0, "would_label": 0, "skipped": 0, "errors": 0}
+    monkeypatch.setattr("daydream.training.labeler.run_label", fake_run_label)
+    monkeypatch.setattr("daydream.archive.get_archive_dir", lambda: tmp_path / "archive")
+
+    from daydream.cli import _handle_label_command
+    code = _handle_label_command(["--dry-run"])
+    assert code == 0
+    assert captured["config"].dry_run is True
+
+
+def test_label_subcommand_accepts_window_days(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+    async def fake_run_label(config):
+        captured["config"] = config
+        return {"considered": 0, "labeled": 0, "would_label": 0, "skipped": 0, "errors": 0}
+    monkeypatch.setattr("daydream.training.labeler.run_label", fake_run_label)
+    monkeypatch.setattr("daydream.archive.get_archive_dir", lambda: tmp_path / "archive")
+
+    from daydream.cli import _handle_label_command
+    code = _handle_label_command(["--fix-applied-window-days", "60"])
+    assert code == 0
+    assert captured["config"].fix_applied_window_days == 60
+
+
+def test_snapshot_subcommand_calls_run_snapshot(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+    def fake_run_snapshot(config):
+        captured["config"] = config
+        return {"total_runs": 0, "label_counts": {}}
+    monkeypatch.setattr("daydream.training.snapshot.run_snapshot", fake_run_snapshot)
+    monkeypatch.setattr("daydream.archive.get_archive_dir", lambda: tmp_path / "archive")
+
+    out = tmp_path / "snap.json"
+    from daydream.cli import _handle_snapshot_command
+    code = _handle_snapshot_command(["--out", str(out)])
+    assert code == 0
+    assert captured["config"].out_path == out

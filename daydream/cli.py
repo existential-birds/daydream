@@ -1,4 +1,15 @@
-"""CLI entry point for daydream."""
+"""CLI entry point for daydream.
+
+Subcommands dispatched manually from :func:`main` before the main argparse
+parser runs (so their flags don't collide with the top-level ``TARGET``
+positional):
+
+- ``daydream feedback <pr#>`` — apply bot PR-review comments
+- ``daydream summarize <path>`` — print run-info markdown for a trajectory
+- ``daydream export-jsonl --out <path>`` — export archive to JSONL
+- ``daydream label`` — walk the archive and label each unlabeled run
+- ``daydream snapshot --out <path>`` — write a corpus snapshot JSON
+"""
 
 import argparse
 import signal
@@ -734,98 +745,162 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
     )
 
 
-def _handle_label_command(argv: list[str]) -> None:
-    """Handle ``daydream label <session_id> --accepted|--rejected|--mixed``."""
-    import argparse as _argparse
+def _build_label_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream label [...]``.
 
-    parser = _argparse.ArgumentParser(
+    Drives the labeler orchestrator from :mod:`daydream.training.labeler`.
+    Each unlabeled run in the archive gets a single label observation
+    derived from PR-state or local-branch signals.
+    """
+    parser = argparse.ArgumentParser(
         prog="daydream label",
-        description="Label a run outcome for RL/fine-tuning",
+        description=(
+            "Walk the archive and write a label observation for every "
+            "currently-unlabeled run (RL/fine-tuning corpus prep)."
+        ),
     )
-    parser.add_argument("session_id", help="Session ID (full or prefix) to label")
-    label_group = parser.add_mutually_exclusive_group(required=True)
-    label_group.add_argument("--accepted", action="store_const", const="accepted", dest="label")
-    label_group.add_argument("--rejected", action="store_const", const="rejected", dest="label")
-    label_group.add_argument("--mixed", action="store_const", const="mixed", dest="label")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Compute labels but do not write observations or the resume log.",
+    )
+    parser.add_argument(
+        "--session",
+        type=str,
+        default=None,
+        dest="session",
+        metavar="PREFIX",
+        help="Restrict the queue to session_ids starting with PREFIX.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("~/.daydream/labeler-cache/"),
+        dest="cache_dir",
+        metavar="PATH",
+        help="Directory backing the gh-api backfill cache (default: ~/.daydream/labeler-cache/).",
+    )
+    parser.add_argument(
+        "--archive-dir",
+        type=Path,
+        default=None,
+        dest="archive_dir",
+        metavar="PATH",
+        help="Override the archive root (default: daydream.archive.get_archive_dir()).",
+    )
+    parser.add_argument(
+        "--fix-applied-window-days",
+        type=int,
+        default=30,
+        dest="fix_applied_window_days",
+        metavar="N",
+        help="Upstream-commit lookback window for the fix-applied cascade (default: 30).",
+    )
+    parser.add_argument(
+        "--gh-spacing-sec",
+        type=float,
+        default=0.8,
+        dest="gh_spacing_sec",
+        metavar="SEC",
+        help="Sleep between rows to spread gh api calls (default: 0.8).",
+    )
+    return parser
 
+
+def _handle_label_command(argv: list[str]) -> int:
+    """Handle ``daydream label [...]``.
+
+    Drives :func:`daydream.training.labeler.run_label` (looked up via the
+    module attribute so test monkeypatches take effect). Returns an exit
+    code; ``main`` translates it to a process exit. Per-row labeler
+    errors do not escalate to a non-zero exit — the summary's ``errors``
+    counter surfaces them.
+    """
+    import daydream.archive as _archive
+    import daydream.training.labeler as _labeler
+    from daydream.ui import create_console
+
+    parser = _build_label_parser()
     args = parser.parse_args(argv)
 
-    from daydream.archive import get_archive_dir
-    from daydream.archive.index import update_labels
-    from daydream.ui import create_console, print_info, print_warning
-
     console = create_console()
-    archive_dir = get_archive_dir()
+    if args.fix_applied_window_days < 1:
+        print_error(console, "Invalid --fix-applied-window-days", "Must be >= 1.")
+        return 1
+    if args.gh_spacing_sec < 0.0:
+        print_error(console, "Invalid --gh-spacing-sec", "Must be >= 0.0.")
+        return 1
 
-    # Resolve session ID once so both stores target the same run.
-    resolved_id = _resolve_session_id(archive_dir, args.session_id)
-    if resolved_id is None:
-        console.print(f"[red]Session {args.session_id} not found in archive[/red]", highlight=False)
-        sys.exit(1)
+    archive_dir = args.archive_dir if args.archive_dir is not None else _archive.get_archive_dir()
+    cache_dir = args.cache_dir.expanduser() if args.cache_dir is not None else None
 
-    manifest_updated = _update_manifest_labels(archive_dir, resolved_id, args.label)
-
-    try:
-        success = update_labels(archive_dir, resolved_id, [args.label])
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]", highlight=False)
-        sys.exit(1)
-
-    if not success:
-        console.print(f"[red]Session {resolved_id} not found in index[/red]", highlight=False)
-        sys.exit(1)
-
-    if not manifest_updated:
-        print_warning(console, f"Index updated but manifest.json not found for {resolved_id}")
-    else:
-        print_info(console, f"Labeled {resolved_id} as {args.label}")
+    config = _labeler.LabelerConfig(
+        archive_dir=archive_dir,
+        dry_run=args.dry_run,
+        cache_dir=cache_dir,
+        session_filter=args.session,
+        fix_applied_window_days=args.fix_applied_window_days,
+        gh_request_spacing_sec=args.gh_spacing_sec,
+    )
+    anyio.run(_labeler.run_label, config)
+    return 0
 
 
-def _resolve_session_id(archive_dir: Path, session_id: str) -> str | None:
-    """Resolve a full or prefix session ID against the archive runs directory.
+def _build_snapshot_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream snapshot --out <path> [...]``."""
+    parser = argparse.ArgumentParser(
+        prog="daydream snapshot",
+        description="Write a corpus snapshot JSON file (archive hash + label counts).",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Destination snapshot JSON path.",
+    )
+    parser.add_argument(
+        "--archive-dir",
+        type=Path,
+        default=None,
+        dest="archive_dir",
+        metavar="PATH",
+        help="Override the archive root (default: daydream.archive.get_archive_dir()).",
+    )
+    parser.add_argument(
+        "--as-of",
+        type=str,
+        default=None,
+        dest="as_of",
+        metavar="ISO_TS",
+        help="ISO 8601 cutoff timestamp (default: now in UTC).",
+    )
+    return parser
 
-    Returns:
-        The full session ID if exactly one match is found, None otherwise.
+
+def _handle_snapshot_command(argv: list[str]) -> int:
+    """Handle ``daydream snapshot --out <path> [...]``.
+
+    Drives :func:`daydream.training.snapshot.run_snapshot` synchronously
+    (looked up via the module attribute so test monkeypatches take
+    effect).
     """
-    runs_dir = archive_dir / "runs"
-    if not runs_dir.is_dir():
-        return None
+    import daydream.archive as _archive
+    import daydream.training.snapshot as _snapshot
 
-    exact = runs_dir / session_id
-    if exact.is_dir():
-        return session_id
+    parser = _build_snapshot_parser()
+    args = parser.parse_args(argv)
 
-    candidates = [d.name for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith(session_id)]
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
+    archive_dir = args.archive_dir if args.archive_dir is not None else _archive.get_archive_dir()
 
-
-def _update_manifest_labels(archive_dir: Path, session_id: str, label: str) -> bool:
-    """Update manifest.json on disk with the new label.
-
-    Args:
-        session_id: Already-resolved full session ID.
-
-    Returns:
-        True if the manifest was found and updated, False otherwise.
-    """
-    import json as _json
-    from datetime import datetime, timezone
-
-    manifest_path = archive_dir / "runs" / session_id / "manifest.json"
-    if not manifest_path.is_file():
-        return False
-
-    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
-    now = datetime.now(timezone.utc).isoformat()
-    if "outcome" in manifest:
-        manifest["outcome"]["labels"] = [label]
-        manifest["outcome"]["labeled_at"] = now
-    else:
-        manifest["outcome"] = {"labels": [label], "labeled_at": now}
-    manifest_path.write_text(_json.dumps(manifest, indent=2), encoding="utf-8")
-    return True
+    config = _snapshot.SnapshotConfig(
+        archive_dir=archive_dir,
+        out_path=args.out,
+        as_of_ts=args.as_of,
+    )
+    _snapshot.run_snapshot(config)
+    return 0
 
 
 def main() -> None:
@@ -841,13 +916,11 @@ def main() -> None:
     """
     _install_signal_handlers()
 
-    # Route subcommands before main arg parse
+    # Route subcommands before main arg parse. Each handler returns an exit
+    # code; we translate via sys.exit. Supported subcommands: feedback,
+    # summarize, export-jsonl, label, snapshot.
     argv = sys.argv[1:]
     try:
-        if argv and argv[0] == "label":
-            _handle_label_command(argv[1:])
-            return
-
         # ``summarize`` is sync — short-circuit before anyio.run kicks in.
         if argv and argv[0] == "summarize":
             summarize_parser = _build_summarize_parser()
@@ -858,6 +931,14 @@ def main() -> None:
         # filesystem. Short-circuit before anyio.run.
         if argv and argv[0] == "export-jsonl":
             sys.exit(_handle_export_command(argv[1:]))
+
+        # ``label`` drives the labeler orchestrator via its own anyio.run.
+        if argv and argv[0] == "label":
+            sys.exit(_handle_label_command(argv[1:]))
+
+        # ``snapshot`` is sync — pure SQLite + JSON write.
+        if argv and argv[0] == "snapshot":
+            sys.exit(_handle_snapshot_command(argv[1:]))
 
         is_feedback_subcommand = bool(argv) and argv[0] == "feedback"
         config = _parse_args()
