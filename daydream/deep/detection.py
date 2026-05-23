@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
-from daydream.config import SKILL_MAP
+from daydream.config import SKILL_MAP, STRUCTURE_SKILL, STRUCTURE_STACK_NAME
 
 # Extension -> stack-key (lowercase, matches SKILL_MAP keys). Keep in sync with
 # SKILL_MAP; this table is about review-skill routing, not syntactic parsing
@@ -138,8 +138,14 @@ def detect_stacks(
             MissingSkillError would be handled separately).
 
     Returns:
-        One StackAssignment per distinct stack that received at least one file.
-        Ordering: non-generic stacks alphabetical, then generic last.
+        One StackAssignment per distinct stack that received at least one file,
+        plus a synthetic ``structure`` meta-stack appended last whenever the diff
+        contains at least one file and is not docs-only. The structure stack
+        carries the full set of changed files (union across languages) and
+        invokes ``STRUCTURE_SKILL`` for repo-wide structural-maintainability
+        review. Ordering: non-generic language stacks alphabetical, then generic,
+        then structure last. Ordering is informational only — the orchestrator
+        iterates the full list in parallel.
     """
     if skill_availability is None:
         skill_availability = set(SKILL_MAP.keys())
@@ -233,6 +239,19 @@ def detect_stacks(
                 skill_invocation=None,
                 files=files,
                 is_docs_only=diff_is_docs_only,
+            )
+        )
+
+    # Structural meta-stack: appended unconditionally for any non-docs-only diff
+    # with at least one changed file. Carries the union of all changed files so
+    # the structural reviewer judges the whole change across language boundaries.
+    if changed_files and not diff_is_docs_only:
+        results.append(
+            StackAssignment(
+                stack_name=STRUCTURE_STACK_NAME,
+                skill_invocation=STRUCTURE_SKILL,
+                files=sorted(changed_files),
+                is_docs_only=False,
             )
         )
     return results

@@ -54,3 +54,21 @@ def test_default_constants_still_exported():
     # Sanity: existing default constants remain importable for backend creation fallbacks.
     assert isinstance(DEFAULT_CLAUDE_MODEL, str)
     assert isinstance(DEFAULT_CODEX_MODEL, str)
+
+
+def test_structure_skill_constant_not_user_selectable() -> None:
+    """The structural reviewer is a meta-stack: invokable internally, never via CLI."""
+    from daydream.config import (
+        REVIEW_SKILLS,
+        SKILL_MAP,
+        STRUCTURE_SKILL,
+        STRUCTURE_STACK_NAME,
+        ReviewSkillChoice,
+    )
+
+    assert STRUCTURE_SKILL == "beagle-core:review-structure"
+    assert STRUCTURE_STACK_NAME == "structure"
+    assert STRUCTURE_SKILL not in SKILL_MAP.values()
+    assert STRUCTURE_STACK_NAME not in SKILL_MAP
+    assert STRUCTURE_SKILL not in REVIEW_SKILLS.values()
+    assert all(choice.name != "STRUCTURE" for choice in ReviewSkillChoice)

@@ -2252,12 +2252,10 @@ async def phase_per_stack_reviews(
             dropped.
 
     """
+    from daydream.config import STRUCTURE_STACK_NAME
+    from daydream.deep import prompts as _prompts
     from daydream.deep.artifacts import deep_dir as _deep_dir
     from daydream.deep.artifacts import per_stack_review_path
-    from daydream.deep.prompts import (
-        build_generic_fallback_prompt,
-        build_per_stack_prompt,
-    )
 
     deep_dir_path = _deep_dir(work.repo)
     recorder = get_current_recorder()
@@ -2269,8 +2267,18 @@ async def phase_per_stack_reviews(
     async with anyio.create_task_group() as tg:
         for stack in stacks:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
-            if stack.skill_invocation is None:
-                prompt = build_generic_fallback_prompt(
+            if stack.stack_name == STRUCTURE_STACK_NAME:
+                prompt = _prompts.build_structural_prompt(
+                    files=stack.files,
+                    diff_path=diff_path,
+                    intent_path=intent_path,
+                    alternatives_path=alternatives_path,
+                    output_path=output_path,
+                    exploration_dir=exploration_dir,
+                    prior_commits=prior_commits,
+                )
+            elif stack.skill_invocation is None:
+                prompt = _prompts.build_generic_fallback_prompt(
                     files=stack.files,
                     diff_path=diff_path,
                     intent_path=intent_path,
@@ -2281,7 +2289,7 @@ async def phase_per_stack_reviews(
                     prior_commits=prior_commits,
                 )
             else:
-                prompt = build_per_stack_prompt(
+                prompt = _prompts.build_per_stack_prompt(
                     skill_invocation=stack.skill_invocation,
                     stack_name=stack.stack_name,
                     files=stack.files,
@@ -2331,6 +2339,7 @@ async def phase_cross_stack_merge(
     dedup_candidates_path: Path,
     exploration_dir: Path | None = None,
     failed_stacks: dict[str, str] | None = None,
+    structural_records_path: Path | None = None,
 ) -> Path:
     """Run the cross-stack merge agent and return the output-report path (D-23..D-27).
 
@@ -2345,6 +2354,8 @@ async def phase_cross_stack_merge(
         backend: The Backend to execute against.
         work: Workspace context; report is written under ``work.repo``.
         per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
+            Must NOT include the structural meta-stack records file -- callers
+            partition that out and pass it via ``structural_records_path``.
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
         dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
@@ -2352,6 +2363,12 @@ async def phase_cross_stack_merge(
         failed_stacks: Optional stack_name -> reason dict for per-stack agents
             that failed. Passed through to the merge prompt so the merged
             report can call out uncovered stacks explicitly.
+        structural_records_path: Optional path to the parsed structural
+            meta-stack records JSON. When provided, the merge prompt renders a
+            dedicated ``## Structural Review`` section above ``## Issues`` with
+            independent numbering and is excluded from dedup against the
+            language-stack records. ``None`` when the structural reviewer did
+            not run (docs-only diff, empty diff).
 
     Returns:
         Path to the merged report at ``work.repo / REVIEW_OUTPUT_FILE``.
@@ -2376,6 +2393,7 @@ async def phase_cross_stack_merge(
         output_path=agent_output_path,
         exploration_dir=exploration_dir,
         failed_stacks=failed_stacks,
+        structural_records_path=structural_records_path,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     print_dim(console, f"Model: {backend.model}")

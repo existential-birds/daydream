@@ -3,6 +3,13 @@
 Pure keyword-only functions that assemble prompt strings from context pointers.
 All context passes via filesystem paths (D-09) -- no full file contents embedded in
 prompts. Per-stack agents only see their own stack's files + TTT context (D-10).
+
+Public builders:
+    - build_per_stack_prompt: per-language stack scoped review.
+    - build_structural_prompt: repo-wide structural-maintainability meta-stack.
+    - build_merge_prompt: cross-stack merge into a unified report.
+    - build_verification_prompt: recommendation-verifier agent prompt.
+    - build_generic_fallback_prompt: fallback for files without a dedicated stack.
 """
 
 from __future__ import annotations
@@ -10,6 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from daydream.config import STRUCTURE_SKILL
 from daydream.phases import (
     RECOMMENDATION_VERDICTS_SCHEMA,
     _confidence_and_convention_instructions,
@@ -109,6 +117,64 @@ def build_per_stack_prompt(
     return "\n\n".join(parts)
 
 
+def build_structural_prompt(
+    *,
+    files: list[str],
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    output_path: Path,
+    exploration_dir: Path | None = None,
+    prior_commits: str | None = None,
+) -> str:
+    """Assemble the structural-maintainability meta-stack prompt.
+
+    Mirrors ``build_per_stack_prompt`` but covers the full PR rather than a
+    single language's files. The structural rubric judges repo-wide concerns
+    (canonical helpers, file-size budgets, layering, branching shape), so the
+    reviewer must be free to read any file in the codebase via Read/Grep/Bash
+    instead of being scoped to a stack subset.
+
+    Args:
+        files: Full union of changed files across every stack. Used to anchor
+            the scope statement; the reviewer is still free to read beyond.
+        diff_path: Path to the full diff on disk.
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        output_path: Where the agent must write its review.
+        exploration_dir: Accepted for signature symmetry with
+            ``build_per_stack_prompt``; intentionally ignored in the prompt
+            body because the structural reviewer discovers context via tool
+            calls, not pre-injected pointers.
+        prior_commits: Oneline log of prior daydream commits on this branch.
+
+    Returns:
+        Assembled prompt string.
+    """
+    del exploration_dir  # accepted for signature symmetry; intentionally unused.
+    joined = ", ".join(files)
+    parts: list[str] = []
+    settled = _settled_decisions_block(prior_commits)
+    if settled:
+        parts.append(settled)
+    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts.append(
+        f"You are the structural reviewer. The full change spans: {joined}. "
+        f"The structural rubric applies repo-wide -- read any file in the "
+        f"codebase as needed (Read/Grep/Bash) to judge whether canonical "
+        f"helpers exist, file-size budgets are honored, and the change makes "
+        f"the codebase easier or harder to live with."
+    )
+    parts.append(
+        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
+        f"do NOT run `git diff` without a base ref -- on a clean branch that "
+        f"returns empty and hides committed changes."
+    )
+    parts.append(f"/{STRUCTURE_SKILL}")
+    parts.append(f"Write your full review to {output_path}.")
+    return "\n\n".join(parts)
+
+
 def build_merge_prompt(
     *,
     per_stack_records_paths: list[Path],
@@ -118,6 +184,7 @@ def build_merge_prompt(
     output_path: Path,
     exploration_dir: Path | None = None,
     failed_stacks: dict[str, str] | None = None,
+    structural_records_path: Path | None = None,
 ) -> str:
     """Assemble the cross-stack merge prompt (D-23..D-27).
 
@@ -127,6 +194,11 @@ def build_merge_prompt(
       - have a ## Cross-Stack Issues subsection that CONTINUES the numbering (D-25)
       - prefix every cross-stack title with the literal "[cross-stack]" (D-26, normative)
       - collapse duplicates per dedup candidate adjudication (D-27)
+      - when ``structural_records_path`` is provided, carry a ``## Structural
+        Review`` section between ``## Per-Stack Context`` and ``## Issues``
+        with independent (1..N) numbering, NOT merged into the global
+        ``## Issues`` list and NOT deduplicated against per-stack or
+        alternative-review findings
 
     Args:
         per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
@@ -139,6 +211,13 @@ def build_merge_prompt(
             per-stack agent raised. The merge prompt includes an explicit
             "Uncovered stacks" block so the merge report can call out missing
             coverage instead of silently pretending the run was complete.
+        structural_records_path: Optional path to the parsed structural-stack
+            records JSON. When provided, the merge prompt instructs the agent
+            to render a dedicated ``## Structural Review`` section above
+            ``## Issues`` with independent numbering and NO deduplication
+            against the other record sources. When ``None`` (docs-only diff,
+            empty diff, or no structure stack emitted) the merge prompt body
+            is unchanged and never mentions the structural lens.
 
     Returns:
         Assembled prompt string.
@@ -148,12 +227,31 @@ def build_merge_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
-    parts.append(
-        f"TTT intent summary: {intent_path}\n"
-        f"TTT alternative-review findings: {alternatives_path}\n"
-        f"Dedup pre-filter candidate pairs: {dedup_candidates_path}\n"
-        f"Per-stack parsed records:\n{records_block}"
-    )
+    context_lines = [
+        f"TTT intent summary: {intent_path}",
+        f"TTT alternative-review findings: {alternatives_path}",
+        f"Dedup pre-filter candidate pairs: {dedup_candidates_path}",
+    ]
+    if structural_records_path is not None:
+        context_lines.append(
+            f"Structural-stack parsed records: {structural_records_path}"
+        )
+    context_lines.append(f"Per-stack parsed records:\n{records_block}")
+    parts.append("\n".join(context_lines))
+    if structural_records_path is not None:
+        parts.append(
+            "Structural-stack handling:\n"
+            f"  - Read the records file at {structural_records_path} and render its "
+            "findings under a dedicated `## Structural Review` section in the "
+            "report (placement pinned below).\n"
+            "  - The `## Structural Review` section has independent numbering "
+            "(1..N) and lists findings parsed from the structural records. Do "
+            "NOT renumber these into the global `## Issues` list, and do NOT "
+            "deduplicate structural findings against per-stack or "
+            "alternative-review findings -- the structural lens carries "
+            "different convictions and merging them silently demotes that "
+            "prioritization."
+        )
     if failed_stacks:
         failed_block = "\n".join(
             f"  - {name}: {reason}" for name, reason in sorted(failed_stacks.items())
@@ -185,12 +283,23 @@ def build_merge_prompt(
         "  - Concerns that span multiple stacks (contract drift, shared-type "
         "mismatches, API-contract misalignment) go in ## Cross-Stack Issues."
     )
+    structural_section_template = (
+        "## Structural Review\n"
+        "<independent numbering 1..N -- do NOT merge into ## Issues>\n"
+        "1. [FILE:LINE] TITLE\n"
+        "   rationale / recommendation parsed from the structural records\n"
+        "2. [FILE:LINE] TITLE\n"
+        "   ...\n\n"
+        if structural_records_path is not None
+        else ""
+    )
     parts.append(
         "Report format (MANDATORY):\n\n"
         "# Review\n\n"
         "## Per-Stack Context\n"
         "(optional human-readable per-stack summaries; phase_parse_feedback ignores "
         "this section)\n\n"
+        f"{structural_section_template}"
         "## Issues\n"
         "1. [FILE:LINE] TITLE\n"
         "   rationale / recommendation\n"

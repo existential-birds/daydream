@@ -91,6 +91,14 @@ class _StubBackend:
         m = re.search(r"you are reviewing the (\S+) stack", pl)
         if m is None:
             m = re.search(r"you are reviewing the (generic-fallback) stack", pl)
+        if m is None and "you are the structural reviewer" in pl:
+            # Structural meta-stack: same review-file contract, no language label.
+            class _M:
+                @staticmethod
+                def group(_: int) -> str:
+                    return "structure"
+
+            m = _M()  # type: ignore[assignment]
         if m is not None:
             # Extract the output path the prompt asks the agent to write.
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
@@ -479,8 +487,10 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     notice = captured[0]
     # Exactly 5 stages.
     assert len(notice["stages"]) == 5
-    # Agent count: 2 TTT + N per-stack + N parse + 1 merge with N=3 -> 9.
-    assert notice["agent_count"] == 9
+    # Agent count: 2 TTT + N per-stack + N parse + 1 merge. The multi-stack
+    # fixture's diff yields N=4 (python + react + generic + structure
+    # meta-stack), so the formula 2 + 2*4 + 1 = 11.
+    assert notice["agent_count"] == 11
     # Stacks surfaced.
     assert len(notice["stack_lines"]) >= 1
     # No Codex caveat on Claude backend.
@@ -575,6 +585,12 @@ async def test_resume_merge_consumes_saved_records(
     # in failed_stacks) passes.
     (deep / "stack-generic-records.json").write_text(
         json.dumps([{"id": 1, "description": "docs issue", "file": "README.md", "line": 1}])
+    )
+    # Structure meta-stack also runs in production -- prime its records.
+    (deep / "stack-structure-records.json").write_text(
+        json.dumps(
+            [{"id": 1, "description": "structural issue", "file": "api.py", "line": 1}]
+        )
     )
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
@@ -938,6 +954,12 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
     (deep / "stack-react-records.json").write_text(
         json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1}])
     )
+    # Structure meta-stack also runs in production -- prime its records.
+    (deep / "stack-structure-records.json").write_text(
+        json.dumps(
+            [{"id": 1, "description": "structural issue", "file": "api.py", "line": 1}]
+        )
+    )
     # No records for the generic bucket, but it's listed as a prior failure.
     (deep / "per-stack-failures.json").write_text(
         json.dumps({"generic": "simulated generic failure"})
@@ -948,6 +970,185 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
 
     merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert len(merge_calls) == 1
+
+
+async def test_orchestrator_threads_structural_records_to_merge(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Structural records ride the merge prompt as a separate input and are
+    excluded from the dedup pre-filter so they don't get silently collapsed
+    against language-stack findings.
+
+    Drives the merge resume path (start_at="merge") with pre-written records
+    JSONs including a structure record carrying a sentinel description, then
+    asserts (a) the merge prompt receives structural_records_path pointing at
+    the structure records file, (b) the dedup input lists do NOT contain the
+    sentinel structural record.
+    """
+    import json as _json
+
+    from daydream.deep import dedup as _dedup
+    from daydream.deep import prompts as _prompts
+
+    _real_build_merge = _prompts.build_merge_prompt
+
+    captured_merge: dict = {}
+    captured_dedup_records: dict = {}
+    captured_record_dedup: dict = {}
+
+    real_build_dedup = _dedup.build_dedup_candidates
+    real_build_record_dedup = _dedup.build_record_dedup_candidates
+
+    def _capture_merge(**kwargs):
+        captured_merge.update(kwargs)
+        # Delegate to real builder so the merge agent still gets a usable prompt.
+        return _real_build_merge(**kwargs)
+
+    def _capture_dedup(records, alt_issues):
+        captured_dedup_records["records"] = list(records)
+        return real_build_dedup(records, alt_issues)
+
+    def _capture_record_dedup(records, sources):
+        captured_record_dedup["records"] = list(records)
+        captured_record_dedup["sources"] = list(sources)
+        return real_build_record_dedup(records, sources=sources)
+
+    monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _capture_merge)
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.build_dedup_candidates", _capture_dedup
+    )
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.build_record_dedup_candidates",
+        _capture_record_dedup,
+    )
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    (deep / "stack-python-records.json").write_text(
+        _json.dumps(
+            [{"id": "py-1", "description": "py issue", "file": "api.py", "line": 1}]
+        )
+    )
+    (deep / "stack-react-records.json").write_text(
+        _json.dumps(
+            [{"id": "react-1", "description": "tsx issue", "file": "App.tsx", "line": 1}]
+        )
+    )
+    (deep / "stack-generic-records.json").write_text(
+        _json.dumps(
+            [{"id": "generic-1", "description": "docs issue", "file": "README.md", "line": 1}]
+        )
+    )
+    # Structural record carries a sentinel id so we can verify it never lands
+    # in the dedup input lists.
+    (deep / "stack-structure-records.json").write_text(
+        _json.dumps(
+            [
+                {
+                    "id": "structure-1",
+                    "description": "1000-line file budget violated",
+                    "file": "api.py",
+                    "line": 1,
+                }
+            ]
+        )
+    )
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+
+    # (1) Merge prompt received structural_records_path pointing at the
+    #     structural records file inside the deep artifact dir.
+    assert captured_merge.get("structural_records_path") is not None
+    assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
+    # And the per_stack_records_paths kwarg must NOT include the structural file
+    # (it rides as its own argument now).
+    per_stack_paths = captured_merge["per_stack_records_paths"]
+    assert all(
+        p.name != "stack-structure-records.json" for p in per_stack_paths
+    ), f"structural records must be partitioned out: {per_stack_paths}"
+
+    # (2) The structural sentinel record must NOT appear in either dedup input.
+    def _has_structure(records: list) -> bool:
+        return any(str(r.get("id", "")).startswith("structure") for r in records)
+
+    assert not _has_structure(captured_dedup_records["records"]), (
+        f"structural records leaked into build_dedup_candidates: "
+        f"{captured_dedup_records['records']}"
+    )
+    assert not _has_structure(captured_record_dedup["records"]), (
+        f"structural records leaked into build_record_dedup_candidates: "
+        f"{captured_record_dedup['records']}"
+    )
+    # And the sources list must stay parallel to the filtered records list.
+    assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
+
+
+async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh-run path (no start_at) applies the same structural partition.
+
+    Mirrors ``test_orchestrator_threads_structural_records_to_merge`` but lets
+    the pipeline execute the pre-merge parse loop instead of the resume loop,
+    so a divergence between the two code paths would surface here.
+    """
+    from daydream.deep import dedup as _dedup
+    from daydream.deep import prompts as _prompts
+
+    _real_build_merge = _prompts.build_merge_prompt
+
+    captured_merge: dict = {}
+    captured_record_dedup: dict = {}
+
+    real_build_dedup = _dedup.build_dedup_candidates
+    real_build_record_dedup = _dedup.build_record_dedup_candidates
+
+    def _capture_merge(**kwargs):
+        captured_merge.update(kwargs)
+        return _real_build_merge(**kwargs)
+
+    def _capture_dedup(records, alt_issues):
+        return real_build_dedup(records, alt_issues)
+
+    def _capture_record_dedup(records, sources):
+        captured_record_dedup["records"] = list(records)
+        captured_record_dedup["sources"] = list(sources)
+        return real_build_record_dedup(records, sources=sources)
+
+    monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _capture_merge)
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.build_dedup_candidates", _capture_dedup
+    )
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.build_record_dedup_candidates",
+        _capture_record_dedup,
+    )
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    # Structural records file lives under the deep artifact dir.
+    assert captured_merge.get("structural_records_path") is not None
+    assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
+    per_stack_paths = captured_merge["per_stack_records_paths"]
+    assert all(
+        p.name != "stack-structure-records.json" for p in per_stack_paths
+    ), f"structural records must be partitioned out (fresh run): {per_stack_paths}"
+
+    # The fresh-run path populates record_sources with the stack_name string,
+    # so the partition removes every entry whose source == 'structure'.
+    assert "structure" not in captured_record_dedup["sources"]
+    # Sources stay parallel to records after filtering.
+    assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
 
 
 async def test_resume_fix_skips_pr_post(
