@@ -260,13 +260,21 @@ def _build_record(
         if repo_clone is not None:
             try:
                 resolved = materialize_base_sha(manifest_path, repo_clone=repo_clone)
-            except OSError:
+            except OSError as exc:
+                warnings.warn(
+                    f"Session {manifest_row.get('session_id')!r}: base_sha backfill failed for {manifest_path}: {exc}",
+                    stacklevel=2,
+                )
                 resolved = None
             if resolved is not None:
                 # Refresh code_ctx from the now-updated manifest on disk.
                 try:
                     refreshed = json.loads(manifest_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
+                except (OSError, json.JSONDecodeError) as exc:
+                    warnings.warn(
+                        f"Session {manifest_row.get('session_id')!r}: re-read of {manifest_path} failed: {exc}",
+                        stacklevel=2,
+                    )
                     refreshed = None
                 if isinstance(refreshed, dict):
                     code_ctx = refreshed.get("code_context") or code_ctx
@@ -274,17 +282,27 @@ def _build_record(
     # review-output.md lives at the archive root for shallow-loop runs but
     # only under deep/ for deep-mode runs. Try root first to preserve
     # back-compat; on FileNotFoundError fall back to the deep/ subdir.
-    # Non-FileNotFound OSErrors (e.g., PermissionError) still degrade to
-    # review_output = None at whichever path raised.
     review_output: str | None
     try:
         review_output = (archive_path / "review-output.md").read_text(encoding="utf-8")
     except FileNotFoundError:
         try:
             review_output = (archive_path / "deep" / "review-output.md").read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError):
+        except FileNotFoundError:
             review_output = None
-    except OSError:
+        except OSError as exc:
+            deep_path = archive_path / "deep" / "review-output.md"
+            warnings.warn(
+                f"Session {manifest_row.get('session_id')!r}: failed to read {deep_path}: {exc}",
+                stacklevel=2,
+            )
+            review_output = None
+    except OSError as exc:
+        root_path = archive_path / "review-output.md"
+        warnings.warn(
+            f"Session {manifest_row.get('session_id')!r}: failed to read {root_path}: {exc}",
+            stacklevel=2,
+        )
         review_output = None
 
     record: dict[str, Any] = {
@@ -316,7 +334,11 @@ def _build_record(
     if isinstance(raw_rubric, str) and raw_rubric:
         try:
             parsed_rubric = json.loads(raw_rubric)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            warnings.warn(
+                f"Session {manifest_row.get('session_id')!r}: malformed rubric_json: {exc}",
+                stacklevel=2,
+            )
             parsed_rubric = None
         if isinstance(parsed_rubric, dict):
             record["rubric"] = parsed_rubric

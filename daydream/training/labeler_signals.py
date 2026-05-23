@@ -236,6 +236,14 @@ def fix_applied_signal(
         appear post-window, and ``"applied"`` otherwise.
         ``hunks_applied``, ``hunks_total``, and ``window_commits`` are
         always populated.
+
+    Raises:
+        KeyError: If ``row`` is missing ``head_sha``, ``base_branch``,
+            or ``archive_path``.
+        OSError: If ``archive_path/diff.patch`` cannot be read.
+        Exception: Any exception raised by ``diff_fetcher``,
+            ``commits_in_window_fetcher``, or ``file_at_fetcher`` is
+            propagated unchanged.
     """
     head_sha = row["head_sha"]
     base_branch = row["base_branch"]
@@ -358,6 +366,13 @@ def local_commit_applied_signal(
         when ``repo_clone`` is not a directory, ``"rejected"`` when no
         commits follow ``head_sha`` or none contain the recommended
         hunk's added lines, and ``"applied"`` when at least one does.
+
+    Raises:
+        KeyError: If ``row`` is missing ``archive_path``, ``branch``,
+            or ``head_sha``.
+        OSError: If ``archive_path/diff.patch`` cannot be read.
+        Exception: Any exception raised by ``commits_since_fetcher`` or
+            ``file_at_fetcher`` is propagated unchanged.
     """
     if not repo_clone.is_dir():
         return LocalCommitAppliedSignal(verdict="unknown")
