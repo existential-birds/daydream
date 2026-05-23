@@ -281,3 +281,41 @@ def test_build_structural_prompt_omits_exploration_pointer(tmp_path: Path) -> No
         exploration_dir=tmp_path / "exploration",
     )
     assert "exploration" not in prompt.lower()
+
+
+def test_merge_prompt_emits_structural_section_above_issues(tmp_path: Path) -> None:
+    """When a structural-records path is given, the merge prompt instructs the agent
+    to render `## Structural Review` above `## Issues`."""
+    from daydream.deep.prompts import build_merge_prompt
+
+    structural_path = tmp_path / "stack-structure-records.json"
+    prompt = build_merge_prompt(
+        per_stack_records_paths=[tmp_path / "stack-python-records.json"],
+        intent_path=tmp_path / "intent.md",
+        alternatives_path=tmp_path / "alts.json",
+        dedup_candidates_path=tmp_path / "dedup.json",
+        output_path=tmp_path / "report.md",
+        structural_records_path=structural_path,
+    )
+    assert str(structural_path) in prompt
+    assert "## Structural Review" in prompt
+    structural_idx = prompt.index("## Structural Review")
+    issues_idx = prompt.index("## Issues")
+    assert structural_idx < issues_idx, "Structural Review section must appear above ## Issues"
+    assert "not deduplicat" in prompt.lower() or "do not dedup" in prompt.lower()
+
+
+def test_merge_prompt_omits_structural_section_when_path_is_none(tmp_path: Path) -> None:
+    """No structural section when the meta-stack did not run (docs-only, empty diff)."""
+    from daydream.deep.prompts import build_merge_prompt
+
+    prompt = build_merge_prompt(
+        per_stack_records_paths=[tmp_path / "stack-python-records.json"],
+        intent_path=tmp_path / "intent.md",
+        alternatives_path=tmp_path / "alts.json",
+        dedup_candidates_path=tmp_path / "dedup.json",
+        output_path=tmp_path / "report.md",
+        structural_records_path=None,
+    )
+    assert "## Structural Review" not in prompt
+    assert "structural" not in prompt.lower()

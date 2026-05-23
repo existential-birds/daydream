@@ -184,6 +184,7 @@ def build_merge_prompt(
     output_path: Path,
     exploration_dir: Path | None = None,
     failed_stacks: dict[str, str] | None = None,
+    structural_records_path: Path | None = None,
 ) -> str:
     """Assemble the cross-stack merge prompt (D-23..D-27).
 
@@ -193,6 +194,11 @@ def build_merge_prompt(
       - have a ## Cross-Stack Issues subsection that CONTINUES the numbering (D-25)
       - prefix every cross-stack title with the literal "[cross-stack]" (D-26, normative)
       - collapse duplicates per dedup candidate adjudication (D-27)
+      - when ``structural_records_path`` is provided, carry a ``## Structural
+        Review`` section between ``## Per-Stack Context`` and ``## Issues``
+        with independent (1..N) numbering, NOT merged into the global
+        ``## Issues`` list and NOT deduplicated against per-stack or
+        alternative-review findings
 
     Args:
         per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
@@ -205,6 +211,13 @@ def build_merge_prompt(
             per-stack agent raised. The merge prompt includes an explicit
             "Uncovered stacks" block so the merge report can call out missing
             coverage instead of silently pretending the run was complete.
+        structural_records_path: Optional path to the parsed structural-stack
+            records JSON. When provided, the merge prompt instructs the agent
+            to render a dedicated ``## Structural Review`` section above
+            ``## Issues`` with independent numbering and NO deduplication
+            against the other record sources. When ``None`` (docs-only diff,
+            empty diff, or no structure stack emitted) the merge prompt body
+            is unchanged and never mentions the structural lens.
 
     Returns:
         Assembled prompt string.
@@ -214,12 +227,31 @@ def build_merge_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
-    parts.append(
-        f"TTT intent summary: {intent_path}\n"
-        f"TTT alternative-review findings: {alternatives_path}\n"
-        f"Dedup pre-filter candidate pairs: {dedup_candidates_path}\n"
-        f"Per-stack parsed records:\n{records_block}"
-    )
+    context_lines = [
+        f"TTT intent summary: {intent_path}",
+        f"TTT alternative-review findings: {alternatives_path}",
+        f"Dedup pre-filter candidate pairs: {dedup_candidates_path}",
+    ]
+    if structural_records_path is not None:
+        context_lines.append(
+            f"Structural-stack parsed records: {structural_records_path}"
+        )
+    context_lines.append(f"Per-stack parsed records:\n{records_block}")
+    parts.append("\n".join(context_lines))
+    if structural_records_path is not None:
+        parts.append(
+            "Structural-stack handling:\n"
+            f"  - Read the records file at {structural_records_path} and render its "
+            "findings under a dedicated `## Structural Review` section in the "
+            "report (placement pinned below).\n"
+            "  - The `## Structural Review` section has independent numbering "
+            "(1..N) and lists findings parsed from the structural records. Do "
+            "NOT renumber these into the global `## Issues` list, and do NOT "
+            "deduplicate structural findings against per-stack or "
+            "alternative-review findings -- the structural lens carries "
+            "different convictions and merging them silently demotes that "
+            "prioritization."
+        )
     if failed_stacks:
         failed_block = "\n".join(
             f"  - {name}: {reason}" for name, reason in sorted(failed_stacks.items())
@@ -251,12 +283,23 @@ def build_merge_prompt(
         "  - Concerns that span multiple stacks (contract drift, shared-type "
         "mismatches, API-contract misalignment) go in ## Cross-Stack Issues."
     )
+    structural_section_template = (
+        "## Structural Review\n"
+        "<independent numbering 1..N -- do NOT merge into ## Issues>\n"
+        "1. [FILE:LINE] TITLE\n"
+        "   rationale / recommendation parsed from the structural records\n"
+        "2. [FILE:LINE] TITLE\n"
+        "   ...\n\n"
+        if structural_records_path is not None
+        else ""
+    )
     parts.append(
         "Report format (MANDATORY):\n\n"
         "# Review\n\n"
         "## Per-Stack Context\n"
         "(optional human-readable per-stack summaries; phase_parse_feedback ignores "
         "this section)\n\n"
+        f"{structural_section_template}"
         "## Issues\n"
         "1. [FILE:LINE] TITLE\n"
         "   rationale / recommendation\n"
