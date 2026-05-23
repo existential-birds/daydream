@@ -237,3 +237,27 @@ def test_build_record_prefers_root_review_output_over_deep(tmp_path: Path) -> No
     row = {"session_id": "abc", "archive_path": str(archive), "outcome_labels": "[]"}
     record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={})
     assert record["review_output"] == "# Root\n"
+
+
+def test_build_record_surfaces_rubric_when_present(tmp_path: Path) -> None:
+    row = {"session_id": "abc", "archive_path": str(tmp_path),
+           "outcome_labels": '["accepted"]',
+           "rubric_json": '{"pr_merge": {"merged": true}, "posterior_source": "pr_review"}'}
+    record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={})
+    assert record["rubric"] == {"pr_merge": {"merged": True}, "posterior_source": "pr_review"}
+    assert record["posterior_source"] == "pr_review"
+
+
+def test_build_record_omits_rubric_when_absent(tmp_path: Path) -> None:
+    row = {"session_id": "abc", "archive_path": str(tmp_path), "outcome_labels": "[]"}
+    record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={})
+    assert "rubric" not in record
+    assert "posterior_source" not in record
+
+
+def test_build_record_propagates_local_branch_source(tmp_path: Path) -> None:
+    row = {"session_id": "abc", "archive_path": str(tmp_path),
+           "outcome_labels": '["accepted"]',
+           "rubric_json": '{"posterior_source": "local_branch"}'}
+    record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={})
+    assert record["posterior_source"] == "local_branch"

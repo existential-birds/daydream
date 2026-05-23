@@ -177,6 +177,15 @@ def _build_record(
     ``<archive_path>/deep/review-output.md`` fall back to that path. Root
     wins when both exist.
 
+    Optional surfaced fields (additive — omitted when absent, never written
+    as ``None``):
+
+    - ``rubric``: the full parsed dict from ``manifest_row["rubric_json"]``
+      when that column holds a JSON object. Invalid JSON or non-dict values
+      are silently treated as missing.
+    - ``posterior_source``: copied from ``rubric["posterior_source"]`` when
+      that key is present in the parsed rubric. Omitted otherwise.
+
     Args:
         manifest_row: Dict shaped like ``Manifest.to_dict()["manifest"]`` or a
             flat row from the SQLite index. Must carry ``session_id``,
@@ -258,7 +267,7 @@ def _build_record(
     except OSError:
         review_output = None
 
-    return {
+    record: dict[str, Any] = {
         "schema_version": TRAINING_SCHEMA_VERSION,
         "session_id": manifest_row["session_id"],
         "repo_slug": manifest_row.get("repo_slug"),
@@ -278,6 +287,23 @@ def _build_record(
         "spans": _build_spans(trajectory),
         "trajectory_ref": {"archive_relative_path": "trajectory.json"},
     }
+
+    # Optional rubric + posterior_source surfacing. Both fields are additive:
+    # omit entirely when ``rubric_json`` is missing, unparseable, or not a
+    # JSON object — no ``None`` placeholders. ``posterior_source`` is only
+    # surfaced when the parsed rubric explicitly carries that key.
+    raw_rubric = manifest_row.get("rubric_json")
+    if isinstance(raw_rubric, str) and raw_rubric:
+        try:
+            parsed_rubric = json.loads(raw_rubric)
+        except json.JSONDecodeError:
+            parsed_rubric = None
+        if isinstance(parsed_rubric, dict):
+            record["rubric"] = parsed_rubric
+            if "posterior_source" in parsed_rubric:
+                record["posterior_source"] = parsed_rubric["posterior_source"]
+
+    return record
 
 
 # ---------------------------------------------------------------------------
