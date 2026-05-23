@@ -402,23 +402,33 @@ def _reset_recorder_for_tests() -> None:
 
 @dataclass
 class Invocation:
-    """Per-``run_agent()`` recording scope.
+    """Per-``run_agent()`` recording scope; closes one Step per assistant turn.
 
     Owns the Step buffer for one model conversation and the in-flight
-    ``tool_call_id -> open-step`` map (CORE-06). ``parent`` linkage lives on
+    ``tool_call_id -> host-step`` map (CORE-06). ``parent`` linkage lives on
     ``TrajectoryRecorder`` (Phase 3, D-02), not on ``Invocation``.
+
+    Each ``TurnEndEvent`` from the backend closes the open Step so multi-turn
+    invocations produce N Steps (not a single collapsed Step). ``ResultEvent``
+    also closes the open Step at the end of the invocation; ``finish()``
+    performs a final idempotent close so partial turns are not dropped.
+
+    Tool-result-after-close: a ``ToolStartEvent`` followed by a
+    ``TurnEndEvent`` and then a ``ToolResultEvent`` is legal — the result
+    lands on the closed Step (the one that hosts the ``ToolStartEvent``) via
+    ``model_copy`` so the observation stays attached to its originating turn.
 
     Attributes:
         recorder: Owning TrajectoryRecorder (shares step_id counter, Redactor).
         phase: DaydreamPhase label stamped on every Step (MAP-08, D-05).
         steps: Steps accumulated; flushed to ``recorder.steps`` at scope exit.
         _open_step_dict: In-progress agent-step state before flush.
-        _in_flight_tools: tool_call_id -> open-step-state, so a ToolResultEvent
-            always lands on the SAME step as its ToolStartEvent (Pitfall 3).
+        _in_flight_tools: tool_call_id -> ``{open_dict, closed_index}`` entry.
+            While the host Step is open, ``open_dict`` is the live in-progress
+            dict and ``closed_index`` is None; once closed, ``open_dict`` is
+            None and ``closed_index`` is the index in ``self.steps`` of the
+            closed Step. ToolResultEvents route to whichever is set.
     """
-    # TODO: message-id correlation (D-04) — wire _current_message_id from
-    # backend event stream (Claude AssistantMessage.message_id) so MetricsEvent
-    # attaches to the correct step in multi-turn invocations.
 
     recorder: "TrajectoryRecorder"
     phase: DaydreamPhase
@@ -473,6 +483,7 @@ class Invocation:
             ThinkingEvent,
             ToolResultEvent,
             ToolStartEvent,
+            TurnEndEvent,
         )
 
         if isinstance(event, TextEvent):
@@ -490,8 +501,13 @@ class Invocation:
                 ToolCall(tool_call_id=event.id, function_name=event.name, arguments=event.input or {})
             )
             # Map tool_call_id -> THIS open step so paired ToolResultEvent lands
-            # on the SAME step (CORE-06, Pitfall 3).
-            self._in_flight_tools[event.id] = self._open_step_dict
+            # on the SAME step (CORE-06, Pitfall 3). The closed_index slot is
+            # filled in by _close_open_step() if the host Step closes before
+            # the matching ToolResultEvent arrives.
+            self._in_flight_tools[event.id] = {
+                "open_dict": self._open_step_dict,
+                "closed_index": None,
+            }
         elif isinstance(event, ToolResultEvent):
             host = self._in_flight_tools.pop(event.id, None)
             if host is None:
@@ -502,9 +518,20 @@ class Invocation:
                 assert self._open_step_dict is not None
                 self._open_step_dict["_unmatched_tool_results"].append(event.id)
                 return
-            host["_observation_results"].append(
-                ObservationResult(source_call_id=event.id, content=event.output)
-            )
+            open_dict = host["open_dict"]
+            if open_dict is not None:
+                # Host Step is still open — append to its observation buffer.
+                open_dict["_observation_results"].append(
+                    ObservationResult(source_call_id=event.id, content=event.output)
+                )
+            else:
+                # Host Step was closed by an intervening TurnEndEvent. Patch the
+                # closed Step in-place via model_copy so the observation stays
+                # bound to its originating turn.
+                self._amend_closed_step_observation(
+                    closed_index=host["closed_index"],
+                    result=ObservationResult(source_call_id=event.id, content=event.output),
+                )
         elif isinstance(event, MetricsEvent):
             # EVNT-02 attribute names verbatim (D-15: cached_tokens is a
             # SUBSET of prompt_tokens, not added).
@@ -565,6 +592,11 @@ class Invocation:
             )
         elif isinstance(event, ResultEvent):
             self._close_open_step()
+        elif isinstance(event, TurnEndEvent):
+            # Per-turn close: a TurnEndEvent arriving while no Step is open is
+            # a no-op (never invent an empty Step just to close it).
+            if self._open_step_dict is not None:
+                self._close_open_step()
 
     def _ensure_open_step(self) -> None:
         """Open a new agent step if none currently in flight."""
@@ -581,7 +613,15 @@ class Invocation:
         }
 
     def _close_open_step(self) -> None:
-        """Finalize the current open step into a Pydantic Step + redact + append."""
+        """Finalize the current open step into a Pydantic Step + redact + append.
+
+        Called per ``TurnEndEvent`` (assistant-turn boundary), per
+        ``ResultEvent`` (end-of-call), and once more from ``finish()`` for an
+        idempotent final flush. After appending, any ``_in_flight_tools``
+        entry whose host was the just-closed dict is amended to reference the
+        closed Step by its index in ``self.steps`` so a ToolResultEvent
+        arriving after the close still lands on the right turn.
+        """
         if self._open_step_dict is None:
             return
         d = self._open_step_dict
@@ -615,6 +655,32 @@ class Invocation:
             extra=extra,
         )
         self.steps.append(self.recorder.redactor.redact_step(agent_step))
+        closed_index = len(self.steps) - 1
+        # Amend in-flight entries whose host Step just closed so a delayed
+        # ToolResultEvent can still find its host via closed_index.
+        for entry in self._in_flight_tools.values():
+            if entry["open_dict"] is d:
+                entry["open_dict"] = None
+                entry["closed_index"] = closed_index
+
+    def _amend_closed_step_observation(
+        self, *, closed_index: int, result: ObservationResult
+    ) -> None:
+        """Attach *result* to a closed Step via ``model_copy``.
+
+        Used when a ToolResultEvent arrives after a ``TurnEndEvent`` closed
+        the host Step. The replacement is redacted again because the new
+        ObservationResult content has not yet been run through the redactor.
+        """
+        existing = self.steps[closed_index]
+        if existing.observation is None:
+            new_observation = Observation(results=[result])
+        else:
+            new_observation = existing.observation.model_copy(
+                update={"results": [*existing.observation.results, result]}
+            )
+        updated = existing.model_copy(update={"observation": new_observation})
+        self.steps[closed_index] = self.recorder.redactor.redact_step(updated)
 
     def snapshot_steps(self, *, snapshot_step_id: int | None = None) -> list[Step]:
         """Return steps including a materialized copy of any open step (signal-safe, non-mutating).
