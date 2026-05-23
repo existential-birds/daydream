@@ -59,7 +59,8 @@ def test_config_default_generic() -> None:
     from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["config.yaml"], skill_availability=set())
-    assert {a.stack_name for a in result} == {"generic"}
+    language_names = {a.stack_name for a in result if a.stack_name != "structure"}
+    assert language_names == {"generic"}
 
 
 def test_config_promotion_pyproject() -> None:
@@ -77,7 +78,8 @@ def test_no_static_promotion_without_cochange() -> None:
 
     # pyproject.toml alone (no .py in diff) stays generic
     result = detect_stacks(["pyproject.toml"], skill_availability={"python"})
-    assert {a.stack_name for a in result} == {"generic"}
+    language_names = {a.stack_name for a in result if a.stack_name != "structure"}
+    assert language_names == {"generic"}
 
 
 def test_md_pinned_to_generic() -> None:
@@ -105,4 +107,45 @@ def test_missing_skill_routes_to_generic() -> None:
     from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(["src/lib.rs"], skill_availability=set())  # rust not installed
-    assert {a.stack_name for a in result} == {"generic"}
+    language_names = {a.stack_name for a in result if a.stack_name != "structure"}
+    assert language_names == {"generic"}
+
+
+def test_structure_stack_emitted_for_code_diff() -> None:
+    """Structure stack is unconditionally present on any non-docs-only code diff."""
+    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
+    from daydream.deep.detection import detect_stacks
+
+    result = detect_stacks(["src/main.py", "src/util.py"], skill_availability={"python"})
+    structure = next((a for a in result if a.stack_name == STRUCTURE_STACK_NAME), None)
+    assert structure is not None
+    assert structure.skill_invocation == STRUCTURE_SKILL
+    assert structure.files == ["src/main.py", "src/util.py"]
+    assert structure.is_docs_only is False
+
+
+def test_structure_stack_files_are_union_across_languages() -> None:
+    """Structure stack sees every changed file regardless of language."""
+    from daydream.config import STRUCTURE_STACK_NAME
+    from daydream.deep.detection import detect_stacks
+
+    files = ["api/main.py", "ui/App.tsx", "infra/Dockerfile"]
+    result = detect_stacks(files, skill_availability={"python", "react"})
+    structure = next(a for a in result if a.stack_name == STRUCTURE_STACK_NAME)
+    assert sorted(structure.files) == sorted(files)
+
+
+def test_structure_stack_skipped_for_docs_only_diff() -> None:
+    """Structural rubric does not apply when the entire diff is docs."""
+    from daydream.config import STRUCTURE_STACK_NAME
+    from daydream.deep.detection import detect_stacks
+
+    result = detect_stacks(["README.md", "CHANGELOG.md"], skill_availability=set())
+    assert all(a.stack_name != STRUCTURE_STACK_NAME for a in result)
+
+
+def test_structure_stack_skipped_for_empty_diff() -> None:
+    """Empty changed_files yields no stacks at all, including structure."""
+    from daydream.deep.detection import detect_stacks
+
+    assert detect_stacks([], skill_availability=set()) == []
