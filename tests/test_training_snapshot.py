@@ -12,7 +12,7 @@ from daydream.training.snapshot import SnapshotConfig, run_snapshot
 
 def test_snapshot_writes_corpus_snapshot_json(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
-    archive_dir.mkdir()
+    archive_dir.mkdir(exist_ok=True)
     upsert_run(
         archive_dir,
         Manifest(
@@ -47,7 +47,7 @@ def test_snapshot_writes_corpus_snapshot_json(tmp_path: Path) -> None:
 
 def test_snapshot_label_counts_aggregate_by_class(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
-    archive_dir.mkdir()
+    archive_dir.mkdir(exist_ok=True)
     for idx, label in enumerate(["accepted", "accepted", "rejected", "contested", None]):
         sess = f"s-{idx}"
         upsert_run(

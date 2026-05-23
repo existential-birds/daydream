@@ -409,7 +409,6 @@ def test_archive_dir_fixture_isolates_env(archive_dir: Path, tmp_path: Path):
     """Verify the autouse archive_dir fixture's contract: env points at tmp_path/archive."""
     assert os.environ.get("DAYDREAM_ARCHIVE_DIR") == str(archive_dir)
     assert archive_dir == tmp_path / "archive"
-    assert str(archive_dir).startswith(str(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -566,8 +565,6 @@ def test_copy_bundle_skips_missing(tmp_path: Path):
 
 
 def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path):
-    archive_root = archive_dir
-
     session_id = "abcd1234-0000-0000-0000-000000000000"
     config = _MockConfig()
 
@@ -576,7 +573,7 @@ def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path):
 
     archive_run(recorder=recorder, target_dir=target, config=config, status="complete")
 
-    run_dir = archive_root / "runs" / session_id
+    run_dir = archive_dir / "runs" / session_id
     assert run_dir.is_dir()
     assert (run_dir / "manifest.json").is_file()
     assert (run_dir / "trajectory.json").is_file()
@@ -586,7 +583,7 @@ def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path):
     assert manifest_data["run"]["flow"] == "normal"
     assert manifest_data["run"]["skill"] == "python"
 
-    rows = query_runs(archive_root)
+    rows = query_runs(archive_dir)
     assert len(rows) == 1
     assert rows[0]["session_id"] == session_id
 

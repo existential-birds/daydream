@@ -252,8 +252,9 @@ def _reset_trajectory_recorder():
 
 
 @pytest.fixture(autouse=True)
-def archive_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def archive_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate DAYDREAM_ARCHIVE_DIR to a per-test tmpdir so tests never touch ~/.daydream/archive/."""
     path = tmp_path / "archive"
+    path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(path))
     yield path

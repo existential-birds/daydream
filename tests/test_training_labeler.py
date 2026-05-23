@@ -20,7 +20,7 @@ from daydream.training.labeler import LabelerConfig, run_label
 
 async def test_labeler_writes_accepted_for_merged_pr_clean_comments(tmp_path: Path, monkeypatch) -> None:
     archive_dir = tmp_path / "archive"
-    archive_dir.mkdir()
+    archive_dir.mkdir(exist_ok=True)
     upsert_run(archive_dir, Manifest(
         session_id="00000000-0000-0000-0000-000000000099",
         archived_at="2026-01-01T00:00:00Z", run_flow="normal", backend="claude",
@@ -55,7 +55,7 @@ async def test_labeler_writes_accepted_for_merged_pr_clean_comments(tmp_path: Pa
 async def test_labeler_uses_local_branch_signal_for_no_pr_run(tmp_path: Path, monkeypatch) -> None:
     """No pr_repo/pr_number → labeler uses local_commit_applied_signal."""
     archive_dir = tmp_path / "archive"
-    archive_dir.mkdir()
+    archive_dir.mkdir(exist_ok=True)
     archive_path = tmp_path / "run-no-pr"
     archive_path.mkdir()
     (archive_path / "diff.patch").write_text("+ new_line\n")  # minimal valid patch
@@ -84,7 +84,7 @@ async def test_labeler_uses_local_branch_signal_for_no_pr_run(tmp_path: Path, mo
 
 async def test_labeler_dry_run_does_not_write(tmp_path: Path, monkeypatch) -> None:
     archive_dir = tmp_path / "archive"
-    archive_dir.mkdir()
+    archive_dir.mkdir(exist_ok=True)
     upsert_run(archive_dir, Manifest(
         session_id="00000000-0000-0000-0000-000000000098",
         archived_at="2026-01-01T00:00:00Z", run_flow="normal", backend="claude",
@@ -111,7 +111,7 @@ async def test_labeler_dry_run_does_not_write(tmp_path: Path, monkeypatch) -> No
 async def test_labeler_per_row_exception_does_not_derail_run(tmp_path: Path, monkeypatch) -> None:
     """One bad row counts in errors; subsequent rows still process."""
     archive_dir = tmp_path / "archive"
-    archive_dir.mkdir()
+    archive_dir.mkdir(exist_ok=True)
     for i, sess in enumerate(["s-bad", "s-good"]):
         upsert_run(archive_dir, Manifest(
             session_id=sess, archived_at="2026-01-01T00:00:00Z",
