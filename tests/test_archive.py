@@ -407,7 +407,7 @@ def test_get_archive_dir_default(monkeypatch, tmp_path: Path):
 
 def test_archive_dir_fixture_isolates_env(archive_dir: Path, tmp_path: Path):
     """Verify the autouse archive_dir fixture's contract: env points at tmp_path/archive."""
-    assert os.environ.get("DAYDREAM_ARCHIVE_DIR") == str(archive_dir)
+    assert get_archive_dir() == archive_dir
     assert archive_dir == tmp_path / "archive"
 
 
