@@ -66,7 +66,7 @@ def test_structure_skill_constant_not_user_selectable() -> None:
         ReviewSkillChoice,
     )
 
-    assert STRUCTURE_SKILL == "beagle-quality:review-structure"
+    assert STRUCTURE_SKILL == "beagle-core:review-structure"
     assert STRUCTURE_STACK_NAME == "structure"
     assert STRUCTURE_SKILL not in SKILL_MAP.values()
     assert STRUCTURE_STACK_NAME not in SKILL_MAP

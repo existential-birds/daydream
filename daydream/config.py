@@ -114,5 +114,5 @@ UNKNOWN_SKILL_PATTERN = r"Unknown skill: ([\w:-]+)"
 # alongside per-language reviewers. Intentionally NOT added to ``REVIEW_SKILLS``,
 # ``SKILL_MAP``, or ``ReviewSkillChoice`` — this skill is a meta-stack invoked by
 # the orchestrator, never selected from the CLI.
-STRUCTURE_SKILL: str = "beagle-quality:review-structure"
+STRUCTURE_SKILL: str = "beagle-core:review-structure"
 STRUCTURE_STACK_NAME: str = "structure"
