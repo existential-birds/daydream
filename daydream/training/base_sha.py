@@ -48,9 +48,11 @@ def materialize_base_sha(manifest_path: Path, *, repo_clone: Path) -> str | None
         manifest.
 
     Raises:
-        OSError: Propagated from file-write failures. ``git`` failures
-            are funneled through ``merge_base``'s ``None`` return per its
-            documented soft-failure contract; they do NOT raise.
+        OSError: Propagated from manifest read/write failures.
+        json.JSONDecodeError: Raised when the manifest is not valid JSON.
+        daydream.git_ops.GitError: Propagated from ``merge_base`` on
+            unexpected subprocess failures (e.g. timeout, missing ``git``
+            binary). Routine "no merge base" outcomes still return ``None``.
     """
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     code_ctx = manifest.get("code_context") or {}

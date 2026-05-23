@@ -26,6 +26,7 @@ from typing import Any
 from daydream.archive import get_archive_dir
 from daydream.archive.index import count_runs, query_runs
 from daydream.config import REVIEW_SKILLS
+from daydream.git_ops import GitError
 from daydream.training.base_sha import materialize_base_sha
 from daydream.training.exclusion import is_copyleft, load_copyleft_list, load_exclusion_list
 from daydream.training.schema import TRAINING_SCHEMA_VERSION
@@ -260,7 +261,7 @@ def _build_record(
         if repo_clone is not None:
             try:
                 resolved = materialize_base_sha(manifest_path, repo_clone=repo_clone)
-            except OSError as exc:
+            except (OSError, json.JSONDecodeError, GitError) as exc:
                 warnings.warn(
                     f"Session {manifest_row.get('session_id')!r}: base_sha backfill failed for {manifest_path}: {exc}",
                     stacklevel=2,
