@@ -29,6 +29,7 @@ from daydream.backends import (
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
+    TurnEndEvent,
 )
 
 
@@ -143,6 +144,8 @@ class ClaudeBackend:
                                 cost_usd=None,
                                 model_name=last_assistant_model,
                             )
+                        # TurnEndEvent closes the recorder's Step for THIS assistant turn.
+                        yield TurnEndEvent(message_id=getattr(msg, "message_id", "") or "")
 
                     elif isinstance(msg, UserMessage):
                         for user_block in msg.content:
