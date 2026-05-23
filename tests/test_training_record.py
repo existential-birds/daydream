@@ -12,6 +12,10 @@ from daydream.training.export import _build_record, _build_spans
 
 SCHEMA_PATH = Path(__file__).parent.parent / "daydream" / "training" / "schema" / "v1.json"
 
+# Minimal ATIF v1.6-shaped trajectory used by record builder tests that only
+# care about manifest-driven fields (review_output, code_context, etc.).
+_MIN_TRAJECTORY: dict[str, Any] = {"steps": []}
+
 
 def _make_manifest_row(**overrides: Any) -> dict[str, Any]:
     """Build a minimal manifest_row dict for _build_record tests."""
@@ -212,3 +216,24 @@ def test_stack_for_skill_resolves_short_name() -> None:
     assert _stack_for_skill("beagle-python:review-python") == "python"
     assert _stack_for_skill(None) is None
     assert _stack_for_skill("unknown-stack") is None
+
+
+def test_build_record_reads_review_output_from_deep_subdir(tmp_path: Path) -> None:
+    """Deep-mode archives only have review-output.md under deep/."""
+    archive = tmp_path / "archive"
+    (archive / "deep").mkdir(parents=True)
+    (archive / "deep" / "review-output.md").write_text("# Deep review\n")
+    row = {"session_id": "abc", "archive_path": str(archive), "outcome_labels": "[]"}
+    record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={})
+    assert record["review_output"] == "# Deep review\n"
+
+
+def test_build_record_prefers_root_review_output_over_deep(tmp_path: Path) -> None:
+    """When both exist, root wins (deep is the fallback)."""
+    archive = tmp_path / "archive"
+    (archive / "deep").mkdir(parents=True)
+    (archive / "review-output.md").write_text("# Root\n")
+    (archive / "deep" / "review-output.md").write_text("# Deep\n")
+    row = {"session_id": "abc", "archive_path": str(archive), "outcome_labels": "[]"}
+    record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={})
+    assert record["review_output"] == "# Root\n"

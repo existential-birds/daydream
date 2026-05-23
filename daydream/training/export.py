@@ -140,7 +140,9 @@ def _build_record(
     ``manifest.json`` (passed as ``manifest``) via its ``code_context`` block.
     Older archives written before that block existed surface ``base_sha=None``
     and ``changed_files=[]``. ``review_output`` is read from
-    ``<archive_path>/review-output.md`` when present.
+    ``<archive_path>/review-output.md`` when present; deep-mode archives that
+    only emit the file under ``<archive_path>/deep/review-output.md`` fall
+    back to that path. Root wins when both exist.
 
     Args:
         manifest_row: Dict shaped like ``Manifest.to_dict()["manifest"]`` or a
@@ -187,10 +189,20 @@ def _build_record(
     if not isinstance(changed, list):
         changed = []
 
-    review_output_path = archive_path / "review-output.md"
+    # review-output.md lives at the archive root for shallow-loop runs but
+    # only under deep/ for deep-mode runs. Try root first to preserve
+    # back-compat; on FileNotFoundError fall back to the deep/ subdir.
+    # Non-FileNotFound OSErrors (e.g., PermissionError) still degrade to
+    # review_output = None at whichever path raised.
+    review_output: str | None
     try:
-        review_output: str | None = review_output_path.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
+        review_output = (archive_path / "review-output.md").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        try:
+            review_output = (archive_path / "deep" / "review-output.md").read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError):
+            review_output = None
+    except OSError:
         review_output = None
 
     return {
