@@ -26,6 +26,7 @@ from typing import Any
 from daydream.archive import get_archive_dir
 from daydream.archive.index import count_runs, query_runs
 from daydream.config import REVIEW_SKILLS
+from daydream.training.base_sha import materialize_base_sha
 from daydream.training.exclusion import is_copyleft, load_copyleft_list, load_exclusion_list
 from daydream.training.schema import TRAINING_SCHEMA_VERSION
 from daydream.ui import create_console, print_info, print_warning
@@ -123,11 +124,38 @@ def _single_outcome_label(labels: list[str], session_id: str) -> str | None:
     return labels[0] if labels else None
 
 
+def _resolve_repo_clone(repo_slug: str | None) -> Path | None:
+    """Best-effort discovery of a local clone for ``repo_slug``.
+
+    Checks the standard locations a developer is likely to use, in order:
+    ``~/<repo>``, ``~/github/<repo>``, ``~/code/<repo>``. The first path
+    whose ``.git`` directory exists wins.
+
+    Args:
+        repo_slug: ``owner/repo`` string from the manifest row, or ``None``.
+
+    Returns:
+        Path to a working tree containing ``.git``, or ``None`` when no
+        candidate is on disk.
+    """
+    if not isinstance(repo_slug, str) or not repo_slug:
+        return None
+    repo_name = repo_slug.split("/")[-1]
+    if not repo_name:
+        return None
+    home = Path.home()
+    for candidate in (home / repo_name, home / "github" / repo_name, home / "code" / repo_name):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
 def _build_record(
     manifest_row: dict[str, Any],
     trajectory: dict[str, Any],
     stack: str | None,
     manifest: dict[str, Any] | None = None,
+    manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble a training record matching ``schema/v1.json``.
 
@@ -139,10 +167,15 @@ def _build_record(
     ``base_sha`` and ``changed_files`` are sourced from the on-disk
     ``manifest.json`` (passed as ``manifest``) via its ``code_context`` block.
     Older archives written before that block existed surface ``base_sha=None``
-    and ``changed_files=[]``. ``review_output`` is read from
-    ``<archive_path>/review-output.md`` when present; deep-mode archives that
-    only emit the file under ``<archive_path>/deep/review-output.md`` fall
-    back to that path. Root wins when both exist.
+    and ``changed_files=[]``. When ``base_sha`` is missing AND a local clone
+    of ``repo_slug`` is discoverable under ``~/<repo>``, ``~/github/<repo>``,
+    or ``~/code/<repo>``, :func:`materialize_base_sha` is invoked to resolve
+    it via ``git merge-base`` and write it back into ``manifest.json``;
+    failures are silent (opportunistic) and leave ``base_sha=None``.
+    ``review_output`` is read from ``<archive_path>/review-output.md`` when
+    present; deep-mode archives that only emit the file under
+    ``<archive_path>/deep/review-output.md`` fall back to that path. Root
+    wins when both exist.
 
     Args:
         manifest_row: Dict shaped like ``Manifest.to_dict()["manifest"]`` or a
@@ -188,6 +221,26 @@ def _build_record(
     changed = code_ctx.get("changed_files") or []
     if not isinstance(changed, list):
         changed = []
+
+    # Opportunistic base_sha materialization: only when missing on the
+    # manifest AND we have a manifest_path to write back to AND a local
+    # clone of repo_slug is discoverable. Any failure leaves base_sha
+    # as None — never raises, never blocks the export.
+    if not code_ctx.get("base_sha") and manifest_path is not None:
+        repo_clone = _resolve_repo_clone(manifest_row.get("repo_slug"))
+        if repo_clone is not None:
+            try:
+                resolved = materialize_base_sha(manifest_path, repo_clone=repo_clone)
+            except OSError:
+                resolved = None
+            if resolved is not None:
+                # Refresh code_ctx from the now-updated manifest on disk.
+                try:
+                    refreshed = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    refreshed = None
+                if isinstance(refreshed, dict):
+                    code_ctx = refreshed.get("code_context") or code_ctx
 
     # review-output.md lives at the archive root for shallow-loop runs but
     # only under deep/ for deep-mode runs. Try root first to preserve
@@ -606,7 +659,9 @@ def run_export(config: ExportConfig) -> dict[str, int]:
                 f"trajectory.json at {archive_path}",
             )
             continue
-        records.append(_build_record(row, trajectory, row.get("stack"), manifest))
+        records.append(
+            _build_record(row, trajectory, row.get("stack"), manifest, manifest_path=manifest_path)
+        )
 
     # 6. Stratification (optional).
     if config.stratify_by == "stack":
