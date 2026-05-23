@@ -248,3 +248,36 @@ def test_merge_prompt_requires_one_path_per_bracket(tmp_path: Path) -> None:
     out = build_merge_prompt(**_merge_paths(tmp_path))  # type: ignore[arg-type]
     assert "EXACTLY ONE file path" in out
     assert "separate numbered entry per file" in out
+
+
+def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) -> None:
+    """Structural reviewer sees the whole change — no 'Focus ONLY on these files' clause."""
+    from daydream.config import STRUCTURE_SKILL
+    from daydream.deep.prompts import build_structural_prompt
+
+    prompt = build_structural_prompt(
+        files=["api/main.py", "ui/App.tsx"],
+        diff_path=tmp_path / "diff.patch",
+        intent_path=tmp_path / "intent.md",
+        alternatives_path=tmp_path / "alternatives.json",
+        output_path=tmp_path / "out.md",
+    )
+    assert "Focus ONLY on these files" not in prompt
+    assert "Do NOT review files from other stacks" not in prompt
+    assert STRUCTURE_SKILL in prompt or "/" + STRUCTURE_SKILL in prompt
+    assert str(tmp_path / "out.md") in prompt
+
+
+def test_build_structural_prompt_omits_exploration_pointer(tmp_path: Path) -> None:
+    """Per spec: structural reviewer discovers via tool calls, not pre-injected context."""
+    from daydream.deep.prompts import build_structural_prompt
+
+    prompt = build_structural_prompt(
+        files=["main.py"],
+        diff_path=tmp_path / "diff.patch",
+        intent_path=tmp_path / "intent.md",
+        alternatives_path=tmp_path / "alternatives.json",
+        output_path=tmp_path / "out.md",
+        exploration_dir=tmp_path / "exploration",
+    )
+    assert "exploration" not in prompt.lower()

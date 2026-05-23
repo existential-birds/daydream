@@ -3,6 +3,13 @@
 Pure keyword-only functions that assemble prompt strings from context pointers.
 All context passes via filesystem paths (D-09) -- no full file contents embedded in
 prompts. Per-stack agents only see their own stack's files + TTT context (D-10).
+
+Public builders:
+    - build_per_stack_prompt: per-language stack scoped review.
+    - build_structural_prompt: repo-wide structural-maintainability meta-stack.
+    - build_merge_prompt: cross-stack merge into a unified report.
+    - build_verification_prompt: recommendation-verifier agent prompt.
+    - build_generic_fallback_prompt: fallback for files without a dedicated stack.
 """
 
 from __future__ import annotations
@@ -10,6 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from daydream.config import STRUCTURE_SKILL
 from daydream.phases import (
     RECOMMENDATION_VERDICTS_SCHEMA,
     _confidence_and_convention_instructions,
@@ -105,6 +113,64 @@ def build_per_stack_prompt(
     parts.append(_stack_scope_instruction(stack_name, files))
     parts.append(_diff_instruction(diff_path, files))
     parts.append(skill_invocation)
+    parts.append(f"Write your full review to {output_path}.")
+    return "\n\n".join(parts)
+
+
+def build_structural_prompt(
+    *,
+    files: list[str],
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    output_path: Path,
+    exploration_dir: Path | None = None,
+    prior_commits: str | None = None,
+) -> str:
+    """Assemble the structural-maintainability meta-stack prompt.
+
+    Mirrors ``build_per_stack_prompt`` but covers the full PR rather than a
+    single language's files. The structural rubric judges repo-wide concerns
+    (canonical helpers, file-size budgets, layering, branching shape), so the
+    reviewer must be free to read any file in the codebase via Read/Grep/Bash
+    instead of being scoped to a stack subset.
+
+    Args:
+        files: Full union of changed files across every stack. Used to anchor
+            the scope statement; the reviewer is still free to read beyond.
+        diff_path: Path to the full diff on disk.
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        output_path: Where the agent must write its review.
+        exploration_dir: Accepted for signature symmetry with
+            ``build_per_stack_prompt``; intentionally ignored in the prompt
+            body because the structural reviewer discovers context via tool
+            calls, not pre-injected pointers.
+        prior_commits: Oneline log of prior daydream commits on this branch.
+
+    Returns:
+        Assembled prompt string.
+    """
+    del exploration_dir  # accepted for signature symmetry; intentionally unused.
+    joined = ", ".join(files)
+    parts: list[str] = []
+    settled = _settled_decisions_block(prior_commits)
+    if settled:
+        parts.append(settled)
+    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts.append(
+        f"You are the structural reviewer. The full change spans: {joined}. "
+        f"The structural rubric applies repo-wide -- read any file in the "
+        f"codebase as needed (Read/Grep/Bash) to judge whether canonical "
+        f"helpers exist, file-size budgets are honored, and the change makes "
+        f"the codebase easier or harder to live with."
+    )
+    parts.append(
+        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
+        f"do NOT run `git diff` without a base ref -- on a clean branch that "
+        f"returns empty and hides committed changes."
+    )
+    parts.append(f"/{STRUCTURE_SKILL}")
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
 
