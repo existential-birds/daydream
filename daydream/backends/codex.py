@@ -26,6 +26,7 @@ from daydream.backends import (
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
+    TurnEndEvent,
 )
 
 _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
@@ -227,6 +228,9 @@ class CodexBackend:
                         if text:
                             last_agent_text = text
                             yield TextEvent(text=text)
+                            # Codex has no per-message id surface — message_id
+                            # stays empty (D-04 correlator unused for Codex).
+                            yield TurnEndEvent(message_id="")
 
                     elif item_type == "reasoning":
                         text = self._extract_text(item)

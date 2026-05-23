@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"th_two_turns"}
+{"type":"item.started","item":{"type":"agent_message","id":"msg_1","content":[]}}
+{"type":"item.completed","item":{"type":"agent_message","id":"msg_1","content":[{"type":"text","text":"First turn body"}]}}
+{"type":"item.started","item":{"type":"agent_message","id":"msg_2","content":[]}}
+{"type":"item.completed","item":{"type":"agent_message","id":"msg_2","content":[{"type":"text","text":"Second turn body"}]}}
+{"type":"turn.completed","usage":{"input_tokens":150,"output_tokens":75}}
