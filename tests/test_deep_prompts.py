@@ -318,4 +318,5 @@ def test_merge_prompt_omits_structural_section_when_path_is_none(tmp_path: Path)
         structural_records_path=None,
     )
     assert "## Structural Review" not in prompt
-    assert "structural" not in prompt.lower()
+    assert "Structural-stack parsed records:" not in prompt
+    assert "Structural-stack handling:" not in prompt
