@@ -61,6 +61,26 @@ class _DeepMockBackend:
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
             return
 
+        # Structural meta-stack prompt contains "you are the structural reviewer".
+        # Must be checked BEFORE the per-stack branch: the structural prompt does
+        # NOT contain "you are reviewing the ... stack" but DOES embed the
+        # `stack-structure-review.md` output path, so it would otherwise fall
+        # through to the "other" fallback and never produce a review artifact.
+        if "structural reviewer" in pl:
+            self.calls.append("structure")
+            m = re.search(r"stack-(\S+?)-review\.md", prompt)
+            if m:
+                name = m.group(1)
+                out = self.target_dir / ".daydream" / "deep" / f"stack-{name}-review.md"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(
+                    f"# Structural Review ({name})\n\n## Issues\n"
+                    "1. [api.py:1] hello() leaks a god-object boundary\n"
+                )
+            yield TextEvent(text="")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
         # Per-stack review prompt contains "You are reviewing the ... stack".
         if "you are reviewing the" in pl and "stack" in pl:
             self.calls.append("per-stack")
@@ -89,8 +109,19 @@ class _DeepMockBackend:
             # the caller (phase_cross_stack_merge) copies to canonical.
             deep = self.target_dir / ".daydream" / "deep" / "review-output.md"
             deep.parent.mkdir(parents=True, exist_ok=True)
+            # Mirror the real merge agent's compliance with the prompt: when the
+            # prompt carries the structural-records pointer, render a dedicated
+            # `## Structural Review` section above `## Issues`. When it does not
+            # (docs-only / empty diff), omit the section entirely.
+            structural = (
+                "## Structural Review\n"
+                "1. [api.py:1] hello() leaks a god-object boundary\n\n"
+                if "structural-stack parsed records" in pl
+                else ""
+            )
             deep.write_text(
-                "# Review\n\n## Issues\n\n## Cross-Stack Issues\n"
+                f"# Review\n\n## Per-Stack Context\n\n{structural}"
+                "## Issues\n\n## Cross-Stack Issues\n"
             )
             yield TextEvent(text="")
             yield ResultEvent(structured_output=None, continuation=None)
@@ -304,3 +335,90 @@ def test_existing_tests_still_collect() -> None:
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+
+
+async def test_structural_meta_stack_flows_end_to_end(
+    multi_stack_target: Path, monkeypatch
+) -> None:
+    """End-to-end smoke for the structural meta-stack pipeline (Tasks 2-7 composed).
+
+    Drives the deep orchestrator on a real multi-language diff (Python + TSX +
+    Markdown — a code diff, so NOT docs-only) and asserts the four observable
+    states the structural pipeline must produce:
+
+      1. ``detect_stacks`` returned ``structure`` as one of the stacks.
+      2. ``phase_per_stack_reviews`` produced a ``stack-structure-review.md``
+         artifact on disk.
+      3. The merge prompt received the ``stack-structure-records.json`` path
+         via ``structural_records_path``.
+      4. The final merged report on disk carries a ``## Structural Review``
+         header.
+
+    These are real observable side effects (files on disk, the path threaded
+    into the merge call, the rendered report header) — not dispatch bookkeeping.
+    If any wire in Tasks 2-7 were broken (structure stack not emitted, prompt
+    not routed, records not partitioned out and forwarded, section not
+    rendered) the corresponding assertion below fails.
+    """
+    from daydream.config import STRUCTURE_STACK_NAME
+    from daydream.deep import detection as _detection
+    from daydream.deep import prompts as _prompts
+    from daydream.deep.detection import StackAssignment
+
+    detected_stacks: list[StackAssignment] = []
+    real_detect = _detection.detect_stacks
+
+    def _spy_detect(changed_files, *, skill_availability):
+        result = real_detect(changed_files, skill_availability=skill_availability)
+        detected_stacks.extend(result)
+        return result
+
+    merge_kwargs: dict = {}
+    real_build_merge = _prompts.build_merge_prompt
+
+    def _spy_merge(**kwargs):
+        merge_kwargs.update(kwargs)
+        return real_build_merge(**kwargs)
+
+    # ``detect_stacks`` is imported into the orchestrator namespace; patch there.
+    monkeypatch.setattr("daydream.deep.orchestrator.detect_stacks", _spy_detect)
+    # ``build_merge_prompt`` is imported lazily inside phase_cross_stack_merge;
+    # patch the source module so the late import resolves to the spy.
+    monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _spy_merge)
+
+    backend = _ClaudeShape(multi_stack_target)
+    exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
+    assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
+
+    # (1) detect_stacks emitted the structure meta-stack for this code diff.
+    structure = next(
+        (a for a in detected_stacks if a.stack_name == STRUCTURE_STACK_NAME), None
+    )
+    assert structure is not None, (
+        f"structure stack not emitted; saw: {[a.stack_name for a in detected_stacks]}"
+    )
+
+    deep_dir = multi_stack_target / ".daydream" / "deep"
+
+    # (2) phase_per_stack_reviews produced the structural review artifact.
+    structural_review = deep_dir / "stack-structure-review.md"
+    assert structural_review.is_file(), (
+        "stack-structure-review.md missing -- structure stack was not routed "
+        "through build_structural_prompt or its agent never wrote the artifact"
+    )
+
+    # (3) The merge prompt received the structural records path.
+    structural_records_path = merge_kwargs.get("structural_records_path")
+    assert structural_records_path is not None, (
+        "merge prompt did not receive structural_records_path -- orchestrator "
+        "failed to partition + forward the structural records"
+    )
+    assert structural_records_path.name == "stack-structure-records.json", (
+        f"unexpected structural records filename: {structural_records_path.name}"
+    )
+
+    # (4) The merged report on disk carries the dedicated structural section.
+    merged_report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
+    assert "## Structural Review" in merged_report, (
+        "merged report is missing the ## Structural Review header"
+    )
