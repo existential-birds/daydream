@@ -255,22 +255,32 @@ class ExportFilters:
     allow_copyleft: frozenset[str] = frozenset()
 
 
-# Inverse of REVIEW_SKILLS: full skill string → short stack label
-# (e.g. "beagle-python:review-python" → "python"). Built at import time
-# so ``_stack_for_skill`` is a single dict lookup.
-_SKILL_TO_STACK: dict[str, str] = {skill: choice.name.lower() for choice, skill in REVIEW_SKILLS.items()}
+# Inverse of REVIEW_SKILLS with dual keys: both the full skill string
+# (e.g. "beagle-python:review-python") AND the short stack name
+# (e.g. "python") map to the lowercase stack label. Built at import time
+# from a single pass over ``REVIEW_SKILLS.items()`` so ``_stack_for_skill``
+# remains a single dict lookup regardless of which form the manifest
+# stored.
+_SKILL_TO_STACK: dict[str, str] = {}
+for _choice, _skill in REVIEW_SKILLS.items():
+    _short = _choice.name.lower()
+    _SKILL_TO_STACK[_skill] = _short
+    _SKILL_TO_STACK[_short] = _short
+del _choice, _skill, _short
 
 
 def _stack_for_skill(skill: str | None) -> str | None:
     """Return the stack label (e.g. ``"python"``, ``"react"``) for a skill.
 
     Args:
-        skill: The full skill string from a manifest row
-            (e.g. ``"beagle-python:review-python"``) or ``None``.
+        skill: The manifest's skill field, either the full skill string
+            (e.g. ``"beagle-python:review-python"``) or the short stack
+            name (e.g. ``"python"``); both are accepted. ``None`` is also
+            accepted.
 
     Returns:
         The lowercase stack label, or ``None`` when ``skill`` is ``None``
-        or not present in ``REVIEW_SKILLS``.
+        or not present in ``REVIEW_SKILLS`` under either form.
     """
     if skill is None:
         return None

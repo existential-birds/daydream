@@ -200,3 +200,15 @@ def test_record_review_output_none_when_file_absent(tmp_path: Path) -> None:
     manifest_row = _make_manifest_row(archive_path=str(tmp_path))
     record = _build_record(manifest_row, {"steps": []}, stack="python")
     assert record["review_output"] is None
+
+
+def test_stack_for_skill_resolves_short_name() -> None:
+    """Manifests store short skill names (e.g. 'python'); the stack
+    derivation must round-trip them."""
+    from daydream.training.export import _stack_for_skill
+
+    assert _stack_for_skill("python") == "python"
+    assert _stack_for_skill("react") == "react"
+    assert _stack_for_skill("beagle-python:review-python") == "python"
+    assert _stack_for_skill(None) is None
+    assert _stack_for_skill("unknown-stack") is None
