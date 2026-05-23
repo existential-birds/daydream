@@ -16,6 +16,11 @@ Exports:
         model mapping. Outer key is backend name ("claude" or "codex"), inner key is
         the phase name (lowercase, e.g. "review", "parse", "fix"), value is the
         concrete model id.
+    STRUCTURE_SKILL: str - Beagle skill name for the structural-maintainability
+        meta-stack reviewer. Invoked internally by deep mode; not user-selectable
+        (intentionally absent from REVIEW_SKILLS, SKILL_MAP, and ReviewSkillChoice).
+    STRUCTURE_STACK_NAME: str - Stack identifier emitted by detect_stacks for the
+        structural meta-stack assignment.
 """
 
 from enum import Enum
@@ -102,3 +107,12 @@ REVIEW_OUTPUT_FILE = ".review-output.md"
 
 # Pattern to detect unknown skill errors
 UNKNOWN_SKILL_PATTERN = r"Unknown skill: ([\w:-]+)"
+
+# Structural-maintainability meta-stack. Deep mode appends a synthetic
+# ``StackAssignment`` with ``stack_name=STRUCTURE_STACK_NAME`` and
+# ``skill_invocation=STRUCTURE_SKILL`` so the structural reviewer always runs
+# alongside per-language reviewers. Intentionally NOT added to ``REVIEW_SKILLS``,
+# ``SKILL_MAP``, or ``ReviewSkillChoice`` — this skill is a meta-stack invoked by
+# the orchestrator, never selected from the CLI.
+STRUCTURE_SKILL: str = "beagle-quality:review-structure"
+STRUCTURE_STACK_NAME: str = "structure"
