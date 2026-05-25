@@ -278,19 +278,19 @@ def test_unlabeled_run_at_as_of_is_dropped(tmp_path: Path, archive_dir: Path) ->
 
 
 # ---------------------------------------------------------------------------
-# CLI surface — exercise the existing export-jsonl handler (still wired to
-# run_build_corpus until Task 11 retires it) without spawning a subprocess.
+# CLI surface — exercise the build-corpus handler (wired to run_build_corpus)
+# without spawning a subprocess.
 # ---------------------------------------------------------------------------
 
 
-def test_cli_export_jsonl_end_to_end(tmp_path: Path, archive_dir: Path) -> None:
+def test_cli_build_corpus_end_to_end(tmp_path: Path, archive_dir: Path) -> None:
     """Handler exits 0, writes JSONL + schema.json, every line parses."""
-    from daydream.cli import _handle_export_command
+    from daydream.cli import _handle_build_corpus_command
 
     build_fixture_archive(archive_dir)
 
     out_path = tmp_path / "out.jsonl"
-    rc = _handle_export_command(["--out", str(out_path)])
+    rc = _handle_build_corpus_command(["--out", str(out_path)])
 
     assert rc == 0
     assert out_path.exists()
@@ -301,24 +301,24 @@ def test_cli_export_jsonl_end_to_end(tmp_path: Path, archive_dir: Path) -> None:
         json.loads(line)  # raises on malformed JSON
 
 
-def test_cli_export_jsonl_dry_run_via_handler(tmp_path: Path, archive_dir: Path) -> None:
+def test_cli_build_corpus_dry_run_via_handler(tmp_path: Path, archive_dir: Path) -> None:
     """``--dry-run`` returns 0 but writes no JSONL file."""
-    from daydream.cli import _handle_export_command
+    from daydream.cli import _handle_build_corpus_command
 
     build_fixture_archive(archive_dir)
 
     out_path = tmp_path / "out.jsonl"
-    rc = _handle_export_command(["--out", str(out_path), "--dry-run"])
+    rc = _handle_build_corpus_command(["--out", str(out_path), "--dry-run"])
 
     assert rc == 0
     assert out_path.exists() is False
 
 
-def test_cli_export_jsonl_allow_copyleft_flag_parsing() -> None:
+def test_cli_build_corpus_allow_copyleft_flag_parsing() -> None:
     """``--allow-copyleft`` accumulates into a list on the namespace."""
-    from daydream.cli import _build_export_jsonl_parser
+    from daydream.cli import _build_build_corpus_parser
 
-    parser = _build_export_jsonl_parser()
+    parser = _build_build_corpus_parser()
     args = parser.parse_args(
         [
             "--out",
@@ -332,9 +332,21 @@ def test_cli_export_jsonl_allow_copyleft_flag_parsing() -> None:
     assert args.allow_copyleft == ["gnu/coreutils", "fsf/bash"]
 
 
-def test_cli_export_jsonl_invalid_max_stack_share_returns_1() -> None:
+def test_cli_build_corpus_invalid_max_stack_share_returns_1() -> None:
     """``--max-stack-share`` outside (0, 1] is rejected with exit code 1."""
-    from daydream.cli import _handle_export_command
+    from daydream.cli import _handle_build_corpus_command
 
-    rc = _handle_export_command(["--out", "/tmp/x.jsonl", "--max-stack-share", "1.5"])
+    rc = _handle_build_corpus_command(["--out", "/tmp/x.jsonl", "--max-stack-share", "1.5"])
     assert rc == 1
+
+
+def test_cli_build_corpus_passes_as_of_and_min_reward(tmp_path: Path, archive_dir: Path) -> None:
+    """``--as-of`` and ``--min-reward`` thread through into the config."""
+    from daydream.cli import _build_build_corpus_parser
+
+    parser = _build_build_corpus_parser()
+    args = parser.parse_args(
+        ["--out", str(tmp_path / "x.jsonl"), "--as-of", "2026-04-01T00:00:00+00:00", "--min-reward", "0.5"]
+    )
+    assert args.as_of == "2026-04-01T00:00:00+00:00"
+    assert args.min_reward == 0.5
