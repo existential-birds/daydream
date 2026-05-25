@@ -69,6 +69,9 @@ class Manifest:
         cost_per_finding_usd: Cost per finding (from eval, if available).
         outcome_labels: JSON-encoded list of outcome labels.
         labeled_at: ISO 8601 timestamp of last label update.
+        composite_reward: Cached composite reward scalar mirrored from the
+            latest ``label_observations`` annotation; ``None`` until a
+            ``harvest`` pass scores the run.
         archive_path: Absolute path to the archive directory.
     """
 
@@ -115,9 +118,10 @@ class Manifest:
     coverage_ratio: float | None = None
     cost_per_finding_usd: float | None = None
 
-    # Outcome labels (populated via `daydream label`)
+    # Outcome labels (populated via `daydream harvest`)
     outcome_labels: str = field(default="[]")
     labeled_at: str | None = None
+    composite_reward: float | None = None
 
     # Archive location
     archive_path: str = ""
@@ -173,6 +177,7 @@ class Manifest:
             "outcome": {
                 "labels": json.loads(self.outcome_labels),
                 "labeled_at": self.labeled_at,
+                "composite_reward": self.composite_reward,
             },
             "archive_path": self.archive_path,
         }

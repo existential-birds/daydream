@@ -114,7 +114,7 @@ INSERT OR REPLACE INTO runs (
     head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
     grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
     total_prompt_tokens, total_completion_tokens, total_cached_tokens,
-    outcome_labels, labeled_at, archive_path, schema_version
+    outcome_labels, labeled_at, composite_reward, archive_path, schema_version
 ) VALUES (
     :session_id, :archived_at, :status, :run_flow, :skill, :model, :backend,
     :review_backend, :fix_backend, :test_backend,
@@ -122,7 +122,7 @@ INSERT OR REPLACE INTO runs (
     :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
     :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
     :total_prompt_tokens, :total_completion_tokens, :total_cached_tokens,
-    :outcome_labels, :labeled_at, :archive_path, :schema_version
+    :outcome_labels, :labeled_at, :composite_reward, :archive_path, :schema_version
 )
 """
 
@@ -244,6 +244,7 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "total_cached_tokens": manifest.total_cached_tokens,
                 "outcome_labels": manifest.outcome_labels,
                 "labeled_at": manifest.labeled_at,
+                "composite_reward": manifest.composite_reward,
                 "archive_path": manifest.archive_path,
                 "schema_version": SCHEMA_VERSION,
             },
@@ -262,12 +263,18 @@ def append_label_observation(
     labeler_version: str,
     evidence_sha: str | None,
     rubric_json: str | None = None,
+    valid_at: str | None = None,
+    reward_version: str | None = None,
+    reward_json: str | None = None,
+    composite_reward: float | None = None,
 ) -> None:
     """Append a row to the immutable ``label_observations`` history.
 
     Writes a single ``(session_id, observed_at)`` row capturing the current
-    label decision and, in the same transaction, refreshes the denormalized
-    ``runs.outcome_labels`` / ``runs.labeled_at`` / ``runs.rubric_json`` cache.
+    label decision plus the bitemporal valid time and reward breakdown, and in
+    the same transaction refreshes the denormalized
+    ``runs.outcome_labels`` / ``runs.labeled_at`` / ``runs.rubric_json`` /
+    ``runs.composite_reward`` cache.
 
     Args:
         archive_dir: Path to the archive root.
@@ -280,11 +287,24 @@ def append_label_observation(
         evidence_sha: Optional commit SHA / artifact hash that grounds the
             decision; ``None`` when no concrete evidence applies.
         rubric_json: Optional JSON-serialised rubric (``Rubric.to_dict()``).
+        valid_at: ISO 8601 valid time — when the outcome the annotation
+            describes became true (e.g. a PR merge timestamp). ``None`` for
+            non-PR/local runs, in which case it collapses to ``observed_at``
+            so an ``as_of``-pinned corpus never spuriously drops the run (Q2).
+        reward_version: Version tag of the reward reducer that produced
+            ``reward_json`` (``RewardBreakdown.reward_version``); ``None`` when
+            no reward was scored.
+        reward_json: Full ``RewardBreakdown.to_dict()`` serialised as JSON so a
+            corpus re-projection has every axis; ``None`` when unscored.
+        composite_reward: The cached composite reward scalar mirrored onto
+            ``runs.composite_reward`` for SQL thresholding; ``None`` when
+            uncomputable.
 
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table.
     """
     observed_at = datetime.now(timezone.utc).isoformat()
+    valid_at_value = valid_at if valid_at is not None else observed_at
     labels_json = json.dumps(labels)
     conn = _get_connection(archive_dir)
     try:
@@ -297,8 +317,9 @@ def append_label_observation(
             raise ValueError(msg)
         conn.execute(
             "INSERT INTO label_observations "
-            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
+            "valid_at, reward_version, reward_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 observed_at,
@@ -307,11 +328,15 @@ def append_label_observation(
                 labeler_version,
                 evidence_sha,
                 rubric_json,
+                valid_at_value,
+                reward_version,
+                reward_json,
             ),
         )
         conn.execute(
-            "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ? WHERE session_id = ?",
-            (labels_json, observed_at, rubric_json, session_id),
+            "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ?, composite_reward = ? "
+            "WHERE session_id = ?",
+            (labels_json, observed_at, rubric_json, composite_reward, session_id),
         )
         conn.commit()
     finally:
