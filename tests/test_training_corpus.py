@@ -149,6 +149,18 @@ def test_build_corpus_reads_as_of_annotation_and_embeds_reward(tmp_path, archive
     assert rec["composite_reward"] == 0.7 and rec["reward"]["composite"] == 0.7
 
 
+def test_record_with_reward_validates_against_schema(tmp_path, archive_dir):
+    import jsonschema
+    schema = json.loads(Path("daydream/training/schema/v1.json").read_text())
+    _seed_run_with_annotation(archive_dir, "s1", label="accepted",
+                              reward_json='{"composite":0.7,"axes_present":{}}', composite_reward=0.7,
+                              observed_at="2026-03-01T00:00:00+00:00", valid_at="2026-03-01T00:00:00+00:00")
+    out = tmp_path / "c.jsonl"
+    run_build_corpus(BuildCorpusConfig(out_path=out, archive_dir=archive_dir,
+                                       filters=CorpusFilters(), as_of="2026-04-01T00:00:00+00:00"))
+    jsonschema.validate(json.loads(out.read_text().splitlines()[0]), schema)
+
+
 # ---------------------------------------------------------------------------
 # Migrated from tests/test_training_export.py — the §9 fixture matrix drives
 # run_build_corpus end-to-end against a real SQLite index (now with silver

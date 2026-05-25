@@ -132,6 +132,13 @@
     "posterior_source": {
       "type": "string",
       "enum": ["pr_review", "local_branch", "none"]
+    },
+    "reward": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "composite_reward": {
+      "type": ["number", "null"]
     }
   }
 }
