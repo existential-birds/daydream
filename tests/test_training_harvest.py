@@ -6,7 +6,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from daydream.training.harvest import assemble_scoring_inputs, build_annotation
+from daydream.archive.index import label_observation_history, latest_label_observation, upsert_run
+from daydream.archive.manifest import Manifest
+from daydream.training.harvest import (
+    HarvestConfig,
+    assemble_scoring_inputs,
+    build_annotation,
+    run_harvest,
+)
 
 
 def _seed_deep_bronze(tmp_path: Path, *, verdict: str, grounding: float) -> Path:
@@ -104,3 +111,48 @@ def test_assemble_malformed_verdicts_flags_format_invalid(tmp_path: Path):
     (run_dir / "deep" / "recommendation-verdicts.json").write_text("{not json")
     inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 1.0})
     assert inputs.format_valid is False
+
+
+def _seed_archived_deep_run(archive_dir: Path, session_id: str, *, merged_at: str) -> Path:
+    """Seed a deep-run bronze bundle and index it under ``archive_dir``.
+
+    ``_seed_deep_bronze`` + ``upsert_run`` (plan note): writes the bronze
+    artifacts beside the archive and registers the indexed manifest row that
+    :func:`run_harvest` walks. Returns the run directory.
+    """
+    run_dir = _seed_deep_bronze(archive_dir, verdict="consistent", grounding=1.0)
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id=session_id,
+            archived_at="2026-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            pr_repo="org/repo",
+            pr_number=42,
+            head_sha="abc",
+            base_branch="main",
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(run_dir),
+        ),
+    )
+    return run_dir
+
+
+async def test_harvest_writes_one_annotation(tmp_path, archive_dir, monkeypatch):
+    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _fake_gh_merged("2026-02-01T00:00:00+00:00"))
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    obs = latest_label_observation(archive_dir, "s1")
+    assert summary["annotated"] == 1
+    assert obs["valid_at"] == "2026-02-01T00:00:00+00:00" and obs["composite_reward"] is not None
+
+
+async def test_re_harvest_appends_new_generation(tmp_path, archive_dir, monkeypatch):
+    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _fake_gh_merged("2026-02-01T00:00:00+00:00"))
+    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1"))
+    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
+    assert len(label_observation_history(archive_dir, "s1")) == 2  # append-only, re-runnable

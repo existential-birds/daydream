@@ -4,9 +4,12 @@ The harvest pass is the single deferred *annotate* step of the corpus
 pipeline: it reads an archived run's immutable bronze artifacts, reduces
 them to a :class:`~daydream.training.reward.ScoringInputs`, scores an
 intrinsic :class:`~daydream.training.reward.RewardBreakdown`, derives the
-outcome label, and appends one bitemporal annotation. This module carries
-the bronze-signal assembly step (plan Task 4) and the per-run annotation
-builder (plan Task 5); the orchestrator lands in a later task.
+outcome label, and appends one bitemporal annotation. There is no separate
+"labeling" step: a single annotate pass writes label + reward together.
+
+This module carries the bronze-signal assembly step, the per-run annotation
+builder, and the :func:`run_harvest` orchestrator that walks the archive index
+and appends one fresh annotation generation per run.
 
 Signal sources (all under the archived run directory):
 
@@ -41,6 +44,20 @@ Annotation builder:
 * ``valid_at`` is the PR merge timestamp for PR rows and ``None`` for
   non-PR/local rows (the write layer collapses ``None`` → ``observed_at``).
 
+Orchestrator (:func:`run_harvest`):
+
+* **Append-only and re-runnable:** every indexed run is considered on every
+  pass; rows that already carry an annotation are *not* skipped — a re-harvest
+  appends a fresh generation so a ``REWARD_VERSION`` bump can re-score the whole
+  archive while older ``as_of`` pins still resolve their original generation.
+  Only the ``cache``/``dry_run`` paths suppress writes.
+* **Per-row error isolation:** an exception on one row counts in ``errors`` and
+  does not derail subsequent rows. Configuration errors (missing
+  ``archive_dir``) raise before the loop begins.
+* **Capture-time ``base_sha``:** materialized into the manifest when missing
+  (the only fallible git I/O of the annotate pass lives here, not in the pure
+  build-corpus projection).
+
 The rubric-assembly helpers live here as harvest's own (the legacy
 ``labeler.py`` is retired in plan Task 13); the git/``gh`` wrappers are
 module-level so the orchestrator and tests can monkeypatch them as
@@ -54,8 +71,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from daydream import git_ops
+from daydream.archive.index import append_label_observation, query_runs
+from daydream.git_ops import GitError
 from daydream.training import reward
+from daydream.training.backfill_cache import BackfillCache
+from daydream.training.base_sha import materialize_base_sha
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
@@ -67,6 +90,7 @@ from daydream.training.labeler_signals import (
 )
 from daydream.training.reward import ScoringInputs, score_trajectory
 from daydream.training.rubric import Rubric, derive_outcome_label
+from daydream.ui import create_console, print_warning
 
 _VERDICTS_FILE = "recommendation-verdicts.json"
 """Bronze artifact (under ``deep/``) carrying the ``verdicts`` list."""
@@ -161,6 +185,24 @@ def assemble_scoring_inputs(run_dir: Path, row: dict[str, Any]) -> ScoringInputs
 # ---------------------------------------------------------------------------
 # git / gh wrappers — module-level so they double as monkeypatch seams.
 # ---------------------------------------------------------------------------
+
+
+def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
+    """Proxy to :func:`daydream.git_ops.gh_api` keyed by ``repo`` slug.
+
+    The PR posterior signal extractors call ``gh_api(repo, endpoint, **kwargs)``
+    with ``repo`` as a slug string (``"owner/name"``). :func:`git_ops.gh_api`
+    takes a ``Path`` as its first argument because it uses ``cwd=repo`` for the
+    shell-out. We adapt by using ``Path(".")`` — ``gh api`` works from any cwd
+    because it authenticates against the GitHub host configured in ``gh auth``,
+    not the local repo.
+
+    Limitation: ``repo`` is accepted for API compatibility but is not used to
+    resolve the GitHub host; all requests go to the single host configured in
+    ``gh auth`` (typically ``github.com``). Mixing repos from different GitHub
+    hosts in a single harvest run would silently use the wrong host.
+    """
+    return git_ops.gh_api(Path("."), endpoint, **kwargs)
 
 
 def _diff_name_only(repo: Path, base: str, head: str) -> list[str]:
@@ -481,3 +523,226 @@ def build_annotation(
         composite_reward=rb.composite,
         evidence_sha=row.get("head_sha"),
     )
+
+
+# ---------------------------------------------------------------------------
+# base_sha materialization — relocated from the exporter (plan Assumption 6).
+#
+# The only fallible git I/O that produces an immutable capture-time fact lives
+# in harvest, not build-corpus (which must be pure). build-corpus only *reads*
+# ``base_sha`` from the manifest. The exporter still calls ``materialize_base_sha``
+# until plan Task 7 retires that path, so this is a COPY of the call, not a move.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_repo_clone(repo_slug: str | None) -> Path | None:
+    """Best-effort discovery of a local clone for ``repo_slug``.
+
+    ``repo_slug`` must be a full ``owner/repo`` string; slugs that do not
+    split cleanly into two non-empty parts return ``None`` to avoid
+    materializing a ``base_sha`` from an ambiguous clone. Probes the standard
+    developer layouts in order (bare-name first, owner-qualified as fallback);
+    the first path whose ``.git`` directory exists wins.
+
+    Args:
+        repo_slug: ``owner/repo`` string from the manifest row, or ``None``.
+
+    Returns:
+        Path to a working tree containing ``.git``, or ``None`` when
+        ``repo_slug`` is missing/malformed or no candidate is on disk.
+    """
+    if not isinstance(repo_slug, str) or not repo_slug:
+        return None
+    parts = repo_slug.split("/", 1)
+    if len(parts) != 2:
+        return None
+    owner, repo_name = parts
+    if not owner or not repo_name:
+        return None
+    home = Path.home()
+    candidates = (
+        home / repo_name,
+        home / "github" / repo_name,
+        home / "code" / repo_name,
+        home / "github" / owner / repo_name,
+        home / "code" / owner / repo_name,
+    )
+    for candidate in candidates:
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _materialize_base_sha_if_missing(row: dict[str, Any], run_dir: Path) -> None:
+    """Opportunistically backfill ``code_context.base_sha`` into the manifest.
+
+    Mirrors the relocated exporter block: only when ``manifest.json`` exists
+    AND a clone of the row's ``repo_slug`` is discoverable on disk. Any failure
+    is swallowed (opportunistic), leaving ``base_sha`` as ``None``; it never
+    raises and never blocks the harvest of the row.
+
+    Args:
+        row: The indexed manifest row (supplies ``repo_slug``).
+        run_dir: The archived run directory (holds ``manifest.json``).
+    """
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.exists():
+        return
+    repo_clone = _resolve_repo_clone(row.get("repo_slug"))
+    if repo_clone is None:
+        return
+    try:
+        materialize_base_sha(manifest_path, repo_clone=repo_clone)
+    except (OSError, json.JSONDecodeError, GitError) as exc:
+        print_warning(
+            create_console(),
+            f"harvest: base_sha backfill failed for {manifest_path}: {type(exc).__name__}: {exc}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator — append-only, re-runnable, per-row isolation
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HarvestConfig:
+    """Configuration for a single :func:`run_harvest` invocation.
+
+    Mirrors the retired labeler's config shape (plan Task 6).
+
+    Attributes:
+        archive_dir: Path to the daydream archive root (contains ``index.db``).
+        dry_run: When ``True``, the loop builds annotations but suppresses the
+            write to ``label_observations`` and the resume log.
+        cache_dir: Optional directory backing
+            :class:`~daydream.training.backfill_cache.BackfillCache`. When
+            ``None``, ``gh_api`` calls hit the network on every row.
+        repo_clone_root: Optional root under which per-repo clones live (used
+            by the fix-applied / local-commit cascades). Falls back to the
+            archive root when unset.
+        session_filter: Optional ``session_id`` prefix to restrict the queue.
+        fix_applied_window_days: Lookback window for upstream commits
+            considered by the fix-applied cascade.
+        gh_request_spacing_sec: Sleep duration between rows to spread
+            ``gh api`` calls under GitHub's secondary rate limits.
+    """
+
+    archive_dir: Path
+    dry_run: bool = False
+    cache_dir: Path | None = None
+    repo_clone_root: Path | None = None
+    session_filter: str | None = None
+    fix_applied_window_days: int = 30
+    gh_request_spacing_sec: float = 0.8
+
+
+async def run_harvest(config: HarvestConfig) -> dict[str, int]:
+    """Walk the archive and append one fresh annotation per indexed run.
+
+    The single deferred annotate pass: for every indexed run, materialize the
+    capture-time ``base_sha`` (when missing), build the bitemporal annotation
+    (label + intrinsic reward + ``valid_at``) via :func:`build_annotation`, and
+    append it through :func:`daydream.archive.index.append_label_observation`.
+
+    **Append-only and re-runnable:** rows that already carry an annotation are
+    *not* skipped — a re-harvest appends a fresh generation, so a later
+    ``REWARD_VERSION`` bump can re-score the whole archive while older
+    ``as_of`` pins still resolve their original generation. Only the
+    ``cache``/``dry_run`` paths suppress writes.
+
+    Per-row error isolation: an exception on one row counts in ``errors`` and
+    does not derail subsequent rows. Configuration errors (missing
+    ``archive_dir``) raise before the loop begins.
+
+    Args:
+        config: A :class:`HarvestConfig` instance.
+
+    Returns:
+        Summary dict with keys ``considered``, ``annotated``,
+        ``would_annotate``, ``skipped``, ``errors``.
+
+    Raises:
+        FileNotFoundError: When ``config.archive_dir`` does not exist.
+            Configuration errors deliberately surface before the loop.
+    """
+    if not config.archive_dir.exists():
+        msg = f"archive_dir does not exist: {config.archive_dir}"
+        raise FileNotFoundError(msg)
+
+    # Build the queue: every indexed run, optionally prefix-filtered. Unlike
+    # the old labeler, we do NOT drop rows that already carry an annotation —
+    # harvest is append-only and re-runnable.
+    if config.session_filter:
+        queue = query_runs(
+            config.archive_dir,
+            "session_id LIKE ? || '%'",
+            (config.session_filter,),
+        )
+    else:
+        queue = query_runs(config.archive_dir)
+
+    # Cache + resume integration. The cache wraps the gh seam and tracks
+    # completed sessions so an interrupted run can resume without re-fetching.
+    cache: BackfillCache | None = None
+    gh_api_callable: Any = _gh_api
+    if config.cache_dir is not None:
+        cache = BackfillCache(cache_dir=config.cache_dir, inner=_gh_api)
+        gh_api_callable = cache
+        done = cache.completed_sessions()
+        queue = [row for row in queue if row["session_id"] not in done]
+
+    repo_clone = config.repo_clone_root or config.archive_dir
+
+    summary = {
+        "considered": len(queue),
+        "annotated": 0,
+        "would_annotate": 0,
+        "skipped": 0,
+        "errors": 0,
+    }
+
+    console = create_console()
+
+    for row in queue:
+        try:
+            run_dir = Path(row["archive_path"])
+            _materialize_base_sha_if_missing(row, run_dir)
+            payload = build_annotation(
+                row,
+                run_dir=run_dir,
+                gh_api=gh_api_callable,
+                repo_clone=repo_clone,
+                window_days=config.fix_applied_window_days,
+            )
+
+            if config.dry_run:
+                summary["would_annotate"] += 1
+            else:
+                append_label_observation(
+                    config.archive_dir,
+                    row["session_id"],
+                    labels=payload.labels,
+                    pr_state=payload.pr_state,
+                    labeler_version=reward.REWARD_VERSION,
+                    evidence_sha=payload.evidence_sha,
+                    valid_at=payload.valid_at,
+                    reward_version=payload.reward_version,
+                    reward_json=payload.reward_json,
+                    composite_reward=payload.composite_reward,
+                )
+                summary["annotated"] += 1
+                if cache is not None:
+                    cache.mark_session_done(row["session_id"])
+        except Exception as exc:  # noqa: BLE001 - per-row isolation by design
+            summary["errors"] += 1
+            print_warning(
+                console,
+                f"harvest: session {row.get('session_id', '<unknown>')} failed: "
+                f"{type(exc).__name__}: {exc}",
+            )
+            continue
+
+        await anyio.sleep(config.gh_request_spacing_sec)
+
+    return summary

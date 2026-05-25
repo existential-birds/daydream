@@ -79,21 +79,24 @@ CREATE TABLE IF NOT EXISTS runs (
 # Append-only bitemporal annotation history. ``observed_at`` is transaction
 # time (when the annotation was recorded); ``valid_at`` is valid time (when the
 # outcome the annotation describes became true, e.g. a PR merge timestamp). The
-# reward columns (``reward_version``, ``reward_json``) carry the full
-# ``RewardBreakdown`` so a corpus re-projection has every axis. See spec
-# ``corpus-pipeline-architecture`` (silver layer).
+# reward columns (``reward_version``, ``reward_json``, ``composite_reward``)
+# carry the full ``RewardBreakdown`` plus its cached composite scalar so a
+# corpus re-projection has every axis and each annotation generation is
+# self-describing (the ``runs.composite_reward`` mirror remains the SQL-threshold
+# cache). See spec ``corpus-pipeline-architecture`` (silver layer).
 _CREATE_LABEL_OBSERVATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS label_observations (
-    session_id      TEXT NOT NULL,
-    observed_at     TEXT NOT NULL,
-    labels          TEXT NOT NULL,
-    pr_state        TEXT,
-    labeler_version TEXT NOT NULL,
-    evidence_sha    TEXT,
-    rubric_json     TEXT,
-    valid_at        TEXT,
-    reward_version  TEXT,
-    reward_json     TEXT,
+    session_id       TEXT NOT NULL,
+    observed_at      TEXT NOT NULL,
+    labels           TEXT NOT NULL,
+    pr_state         TEXT,
+    labeler_version  TEXT NOT NULL,
+    evidence_sha     TEXT,
+    rubric_json      TEXT,
+    valid_at         TEXT,
+    reward_version   TEXT,
+    reward_json      TEXT,
+    composite_reward REAL,
     PRIMARY KEY (session_id, observed_at)
 )
 """
@@ -296,9 +299,10 @@ def append_label_observation(
             no reward was scored.
         reward_json: Full ``RewardBreakdown.to_dict()`` serialised as JSON so a
             corpus re-projection has every axis; ``None`` when unscored.
-        composite_reward: The cached composite reward scalar mirrored onto
-            ``runs.composite_reward`` for SQL thresholding; ``None`` when
-            uncomputable.
+        composite_reward: The cached composite reward scalar. Persisted on the
+            ``label_observations`` row (so each annotation generation is
+            self-describing) and mirrored onto ``runs.composite_reward`` for
+            SQL thresholding; ``None`` when uncomputable.
 
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table.
@@ -318,8 +322,8 @@ def append_label_observation(
         conn.execute(
             "INSERT INTO label_observations "
             "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
-            "valid_at, reward_version, reward_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "valid_at, reward_version, reward_json, composite_reward) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 observed_at,
@@ -331,6 +335,7 @@ def append_label_observation(
                 valid_at_value,
                 reward_version,
                 reward_json,
+                composite_reward,
             ),
         )
         conn.execute(
