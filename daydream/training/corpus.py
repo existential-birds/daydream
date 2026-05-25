@@ -18,6 +18,16 @@ admit the run via the ``min_reward`` path. The comparison is **lexical** on
 ISO-8601/UTC strings — no datetime parsing — mirroring the ``observed_at <=
 as_of`` SQL pin. When ``as_of`` is ``None`` no valid-time exclusion applies.
 
+Every snapshot writes a lineage manifest (``lineage.json``) beside the JSONL,
+pinning the snapshot's provenance: a content-addressed ``trajectory_set_hash``
+(``sha256`` of the sorted, newline-joined included ``session_id``s — Q3), the
+``labeler_version``/``reward_version`` observed on the included annotations (a
+scalar when uniform, the sorted distinct set when the corpus mixes versions),
+the ``as_of`` pin (echoed from config, or the resolved write-time when
+unpinned), and a wall-clock UTC ``created_at``. The manifest is written
+atomically (tempfile + ``os.replace``) and skipped on ``dry_run``; it subsumes
+the retired ``daydream snapshot`` verb's reproducibility role.
+
 The projection is pure: no git, no network, no manifest write-back.
 ``base_sha`` is *read* from the on-disk manifest (harvest materializes it);
 build-corpus never resolves it via ``git merge-base``.
@@ -30,13 +40,16 @@ Builders (``_build_spans``, ``_build_record``) and the query pipeline
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import shutil
 import tempfile
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -760,6 +773,78 @@ def _is_admitted(label: str | None, composite_reward: float | None, filters: Cor
     return False
 
 
+def _trajectory_set_hash(session_ids: list[str]) -> str:
+    """Content-address the set of included sessions (Q3).
+
+    The hash is ``sha256`` of the sorted, newline-joined ``session_id``s, so a
+    snapshot's identity is a deterministic function of which runs it contains
+    (order-independent). A single-session corpus collapses to
+    ``sha256(b"<session_id>")`` — there is no trailing newline or separator for
+    one id.
+
+    Args:
+        session_ids: The ``session_id`` of every record actually emitted.
+
+    Returns:
+        The hex SHA-256 digest of the sorted, newline-joined ids.
+    """
+    joined = "\n".join(sorted(session_ids)).encode("utf-8")
+    return hashlib.sha256(joined).hexdigest()
+
+
+def _collapse_versions(versions: list[str | None]) -> str | list[str] | None:
+    """Reduce observed version tags to a scalar, a sorted list, or ``None``.
+
+    A corpus whose included annotations all share one version records that
+    scalar; a corpus mixing versions records the sorted distinct set so the
+    lineage manifest is honest about heterogeneity. An empty corpus yields
+    ``None``.
+
+    Args:
+        versions: The version tag observed on each included annotation.
+
+    Returns:
+        The single version string when uniform, the sorted distinct list when
+        mixed, or ``None`` when no annotations were included.
+    """
+    distinct = sorted({v for v in versions if v is not None})
+    if not distinct:
+        return None
+    if len(distinct) == 1:
+        return distinct[0]
+    return distinct
+
+
+def _atomic_write_json(out_path: Path, payload: dict[str, Any]) -> None:
+    """Write ``payload`` to ``out_path`` atomically (tempfile + replace).
+
+    Mirrors the snapshot writer's pattern: a temp file in the destination
+    directory, an ``os.replace`` rename, and best-effort cleanup of the temp
+    file if writing fails. JSON is sorted and indented for stable diffs.
+
+    Args:
+        out_path: Destination path for the lineage manifest.
+        payload: The lineage dict to serialize.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=out_path.name + ".",
+        suffix=".tmp",
+        dir=str(out_path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            json.dump(payload, fp, indent=2, sort_keys=True)
+            fp.write("\n")
+        os.replace(tmp_path, out_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     """Top-level entry point for the build-corpus projection.
 
@@ -777,9 +862,13 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
        record via :func:`_build_record`. Skip rows with missing/unreadable
        files (with a warning).
     6. Optionally stratify (when ``stratify_by == "stack"``).
-    7. Dry-run path prints a summary and returns ``emitted=0``.
+    7. Dry-run path prints a summary and returns ``emitted=0`` (no JSONL,
+       no lineage manifest).
     8. Otherwise: write JSONL atomically (tempfile in same dir +
        ``Path.replace``) and copy ``schema/v1.json`` alongside.
+    9. Write ``lineage.json`` beside the JSONL pinning the snapshot's
+       provenance (``trajectory_set_hash``, labeler/reward versions, ``as_of``,
+       ``created_at``) so the snapshot is reproducible from immutable inputs.
 
     Args:
         config: Resolved build-corpus config.
@@ -817,6 +906,9 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     #    build records. The label/reward come from the silver annotation, never
     #    the denormalized runs.outcome_labels cache.
     records: list[dict[str, Any]] = []
+    # Map each emitted session to the labeler/reward versions on its pinned
+    # annotation so the lineage manifest reports the versions actually included.
+    session_versions: dict[str, tuple[str | None, str | None]] = {}
     after_filters = 0
     for row in rows:
         session_id = row["session_id"]
@@ -862,6 +954,10 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
                 row, trajectory, row.get("stack"), manifest,
                 annotation=annotation, drop_label=posterior_leak,
             )
+        )
+        session_versions[session_id] = (
+            annotation.get("labeler_version") if annotation is not None else None,
+            annotation.get("reward_version") if annotation is not None else None,
         )
 
     # 6. Stratification (optional).
@@ -909,6 +1005,23 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
             Path(tmp_name).unlink(missing_ok=True)
         raise
     shutil.copyfile(SCHEMA_V1_PATH, config.out_path.parent / "schema.json")
+
+    # 9. Lineage manifest — write ``lineage.json`` beside the JSONL pinning the
+    #    provenance of this snapshot. The included set drives the content-address
+    #    (``trajectory_set_hash``); versions reflect the annotations actually
+    #    emitted (post-stratify). ``as_of`` echoes the config pin, falling back to
+    #    the resolved write-time when unpinned. Skipped on dry_run (handled above).
+    included_session_ids = [r["session_id"] for r in records]
+    included_versions = [session_versions.get(sid, (None, None)) for sid in included_session_ids]
+    resolved_as_of = config.as_of or datetime.now(timezone.utc).isoformat()
+    lineage = {
+        "trajectory_set_hash": _trajectory_set_hash(included_session_ids),
+        "labeler_version": _collapse_versions([lv for lv, _ in included_versions]),
+        "reward_version": _collapse_versions([rv for _, rv in included_versions]),
+        "as_of": resolved_as_of,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _atomic_write_json(config.out_path.parent / "lineage.json", lineage)
     print_info(console, f"Wrote {len(records)} records to {config.out_path}")
 
     return {
