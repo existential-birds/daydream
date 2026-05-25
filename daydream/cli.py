@@ -368,7 +368,7 @@ def _handle_export_command(argv: list[str]) -> int:
     responsible for translating the code into a process exit. This keeps the
     handler easy to drive from tests.
     """
-    from daydream.training.export import ExportConfig, ExportFilters, run_export
+    from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, run_build_corpus
     from daydream.ui import create_console, print_error
 
     parser = _build_export_jsonl_parser()
@@ -393,7 +393,7 @@ def _handle_export_command(argv: list[str]) -> int:
     else:
         labels = tuple(args.label) if args.label else ("accepted",)
 
-    filters = ExportFilters(
+    filters = CorpusFilters(
         skill=args.skill,
         repos=tuple(args.repo),
         labels=labels,
@@ -402,7 +402,7 @@ def _handle_export_command(argv: list[str]) -> int:
         include_all_labels=args.include_all_labels,
         allow_copyleft=frozenset(args.allow_copyleft),
     )
-    config = ExportConfig(
+    config = BuildCorpusConfig(
         out_path=args.out,
         filters=filters,
         stratify_by=args.stratify_by,
@@ -410,7 +410,7 @@ def _handle_export_command(argv: list[str]) -> int:
         dry_run=args.dry_run,
         emit_schema_only=args.emit_schema_only,
     )
-    run_export(config)
+    run_build_corpus(config)
     return 0
 
 
