@@ -8,6 +8,16 @@ annotation (``label_observations``) — *not* the denormalized
 reproduces the corpus byte-for-byte even after a re-harvest appends newer
 annotation generations.
 
+A temporal-leakage guard (:func:`_is_posterior_leak`) protects the ``as_of``
+pin against posterior label leakage: an annotation may be *recorded* before
+``as_of`` yet describe an outcome whose valid time (``valid_at``, e.g. a PR
+merge timestamp) lands *after* the pin. When ``valid_at > as_of`` the
+posterior-derived ``outcome_label`` is dropped (the run is treated as
+unlabeled); the intrinsic, capture-time reward fields survive and may still
+admit the run via the ``min_reward`` path. The comparison is **lexical** on
+ISO-8601/UTC strings — no datetime parsing — mirroring the ``observed_at <=
+as_of`` SQL pin. When ``as_of`` is ``None`` no valid-time exclusion applies.
+
 The projection is pure: no git, no network, no manifest write-back.
 ``base_sha`` is *read* from the on-disk manifest (harvest materializes it);
 build-corpus never resolves it via ``git merge-base``.
@@ -202,6 +212,7 @@ def _build_record(
     manifest: dict[str, Any] | None = None,
     *,
     annotation: dict[str, Any] | None = None,
+    drop_label: bool = False,
 ) -> dict[str, Any]:
     """Assemble a training record matching ``schema/v1.json``.
 
@@ -226,6 +237,13 @@ def _build_record(
     the denormalized ``runs.outcome_labels`` cache. A run with no pinned
     annotation (``annotation is None``) is unlabeled (``outcome_label=None``,
     ``composite_reward=None``, no ``reward`` key).
+
+    The temporal-leakage guard sets ``drop_label=True`` when the pinned
+    annotation's ``valid_at`` is posterior to ``as_of`` (see
+    :func:`_is_posterior_leak`): ``outcome_label`` is forced to ``None``
+    (the posterior-derived label is excluded as future leakage) while the
+    intrinsic ``reward``/``composite_reward`` — capture-time fields — are
+    retained.
 
     Optional surfaced fields (additive — omitted when absent, never written
     as ``None`` unless the schema models a nullable scalar):
@@ -258,6 +276,9 @@ def _build_record(
         annotation: The ``as_of``-pinned ``label_observations`` row (silver) for
             this run, or ``None`` when the run has no in-time annotation. The
             label, reward breakdown and composite scalar are sourced from here.
+        drop_label: When ``True`` (temporal-leakage guard), emit
+            ``outcome_label=None`` regardless of the annotation's label; the
+            intrinsic reward fields are still sourced from ``annotation``.
 
     Returns:
         A dict that validates against ``daydream/training/schema/v1.json``.
@@ -271,7 +292,9 @@ def _build_record(
 
     # The label comes from the as_of-pinned silver annotation, NOT the
     # denormalized runs.outcome_labels cache. No annotation ⇒ unlabeled.
-    labels = _annotation_labels(annotation, manifest_row.get("session_id"))
+    # The leakage guard (drop_label) forces unlabeled when the annotation's
+    # outcome is posterior to as_of (future leakage); intrinsic reward stays.
+    labels = [] if drop_label else _annotation_labels(annotation, manifest_row.get("session_id"))
 
     manifest_dict = manifest or {}
     code_ctx = manifest_dict.get("code_context") or {}
@@ -678,6 +701,38 @@ class BuildCorpusConfig:
     as_of: str | None = None
 
 
+def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> bool:
+    """Return ``True`` when the annotation's outcome only became true after ``as_of``.
+
+    Temporal-leakage guard: an annotation may be *recorded* before the ``as_of``
+    pin (``observed_at <= as_of``, already enforced by
+    ``latest_label_observation``) yet describe an outcome whose valid time —
+    e.g. a PR merge timestamp — lands *after* the pin. Such posterior-derived
+    fields (the outcome label and posterior reward axes) would leak future
+    information into a corpus pinned to ``as_of``, so they are dropped.
+
+    The comparison is **lexical** on ISO-8601 strings. ``valid_at`` is written
+    in UTC (the per-run builder uses ``PRMergeSignal.merged_at``; local runs
+    collapse ``None`` to ``observed_at`` at write time, also UTC), so the
+    lexical ordering of the strings matches chronological order — no datetime
+    parsing is required, mirroring the ``observed_at <= as_of`` SQL pin in
+    :func:`daydream.archive.index.latest_label_observation`.
+
+    Args:
+        annotation: The ``as_of``-pinned ``label_observations`` row, or ``None``.
+        as_of: The transaction-time pin. When ``None`` no valid-time exclusion
+            applies (every recorded annotation is in-time).
+
+    Returns:
+        ``True`` when ``valid_at`` is non-null and lexically greater than
+        ``as_of`` — the outcome is posterior to the pin and must be excluded.
+    """
+    if annotation is None or as_of is None:
+        return False
+    valid_at = annotation.get("valid_at")
+    return valid_at is not None and valid_at > as_of
+
+
 def _is_admitted(label: str | None, composite_reward: float | None, filters: CorpusFilters) -> bool:
     """Decide whether a run is admitted into the corpus.
 
@@ -716,8 +771,10 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     3. Count the unfiltered index for the ``total_runs_in_index`` summary.
     4. Apply :func:`_query_index` (label-independent SQL filters only).
     5. For each row: resolve the ``as_of``-pinned silver annotation, apply the
-       Python label/reward admission gate, then load manifest + trajectory and
-       build a record via :func:`_build_record`. Skip rows with missing/unreadable
+       temporal-leakage guard (:func:`_is_posterior_leak` — drop the
+       posterior-derived label when ``valid_at > as_of``), apply the Python
+       label/reward admission gate, then load manifest + trajectory and build a
+       record via :func:`_build_record`. Skip rows with missing/unreadable
        files (with a warning).
     6. Optionally stratify (when ``stratify_by == "stack"``).
     7. Dry-run path prints a summary and returns ``emitted=0``.
@@ -764,8 +821,17 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     for row in rows:
         session_id = row["session_id"]
         annotation = latest_label_observation(archive_dir, session_id, as_of=config.as_of)
-        labels = _annotation_labels(annotation, session_id)
-        label = _single_outcome_label(labels, session_id)
+        # Temporal-leakage guard: when the pinned annotation's outcome only
+        # became true after ``as_of`` (``valid_at > as_of``), drop the
+        # posterior-derived label — the run is treated as unlabeled. Intrinsic
+        # reward/composite_reward are capture-time fields and survive (they may
+        # still admit the run via the min_reward path).
+        posterior_leak = _is_posterior_leak(annotation, config.as_of)
+        if posterior_leak:
+            label: str | None = None
+        else:
+            labels = _annotation_labels(annotation, session_id)
+            label = _single_outcome_label(labels, session_id)
         composite_reward = annotation.get("composite_reward") if annotation is not None else None
         if not _is_admitted(label, composite_reward, config.filters):
             continue
@@ -792,7 +858,10 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
             )
             continue
         records.append(
-            _build_record(row, trajectory, row.get("stack"), manifest, annotation=annotation)
+            _build_record(
+                row, trajectory, row.get("stack"), manifest,
+                annotation=annotation, drop_label=posterior_leak,
+            )
         )
 
     # 6. Stratification (optional).
