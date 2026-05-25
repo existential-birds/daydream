@@ -10,8 +10,10 @@ Exports:
     update_labels: Update outcome labels for a session (supports prefix matching).
     query_runs: Query runs with optional WHERE clause.
     count_runs: Count rows matching an optional WHERE clause.
-    append_label_observation: Append a row to the immutable label_observations
-        history and refresh the denormalized runs cache.
+    append_label_observation: Append a row to the immutable bitemporal
+        label_observations history (``observed_at`` transaction time,
+        ``valid_at`` valid time, plus reward columns) and refresh the
+        denormalized runs cache.
     latest_label_observation: Return the most recent label_observations row for
         a session, optionally constrained by an ``as_of`` cutoff timestamp.
     label_observation_history: Return the full label_observations history for
@@ -30,7 +32,7 @@ from pathlib import Path
 
 from daydream.archive.manifest import Manifest
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -68,11 +70,18 @@ CREATE TABLE IF NOT EXISTS runs (
     outcome_labels TEXT NOT NULL DEFAULT '[]',
     labeled_at TEXT,
     rubric_json TEXT,
+    composite_reward REAL,
     archive_path TEXT NOT NULL,
     schema_version INTEGER NOT NULL DEFAULT 1
 )
 """
 
+# Append-only bitemporal annotation history. ``observed_at`` is transaction
+# time (when the annotation was recorded); ``valid_at`` is valid time (when the
+# outcome the annotation describes became true, e.g. a PR merge timestamp). The
+# reward columns (``reward_version``, ``reward_json``) carry the full
+# ``RewardBreakdown`` so a corpus re-projection has every axis. See spec
+# ``corpus-pipeline-architecture`` (silver layer).
 _CREATE_LABEL_OBSERVATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS label_observations (
     session_id      TEXT NOT NULL,
@@ -82,6 +91,9 @@ CREATE TABLE IF NOT EXISTS label_observations (
     labeler_version TEXT NOT NULL,
     evidence_sha    TEXT,
     rubric_json     TEXT,
+    valid_at        TEXT,
+    reward_version  TEXT,
+    reward_json     TEXT,
     PRIMARY KEY (session_id, observed_at)
 )
 """
@@ -125,6 +137,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("rubric_json", "TEXT"),
         ("base_sha", "TEXT"),
         ("changed_files", "TEXT"),
+        ("composite_reward", "REAL"),
     ]
     for col, col_type in migrations:
         if col not in existing:
@@ -133,6 +146,25 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+
+
+def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
+    """Drop and recreate ``label_observations`` if it predates the bitemporal columns.
+
+    The bitemporal/reward columns are part of the table's primary structure, so
+    rather than `ALTER TABLE ADD COLUMN` (which cannot retrofit them cleanly for
+    the spec's clean-recreate guarantee), a stale table is dropped and rebuilt.
+    Dev label rows are discarded (spec-sanctioned — repopulate via ``harvest``).
+    The ``runs`` table is never touched. Idempotent: after a recreate the
+    ``valid_at`` column exists, so subsequent calls are a no-op.
+
+    Args:
+        conn: An open connection whose ``label_observations`` table exists.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
+    if existing and "valid_at" not in existing:
+        conn.execute("DROP TABLE label_observations")
+        conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
 
 
 def _get_connection(archive_dir: Path) -> sqlite3.Connection:
@@ -155,6 +187,7 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(_CREATE_TABLE)
     conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
+    _recreate_label_observations_if_stale(conn)
     _migrate_schema(conn)
     for idx_sql in _CREATE_INDEXES:
         conn.execute(idx_sql)

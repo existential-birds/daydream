@@ -5,7 +5,7 @@ Covers git_context, manifest, index, and the top-level archive_run flow.
 """
 
 import json
-import os
+import sqlite3
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -604,6 +604,16 @@ def _seed_one_run(archive_dir: Path, session_id: str) -> None:
             archive_path=str(archive_dir / session_id),
         ),
     )
+
+
+def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest())  # forces _get_connection to build schema
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    lo_cols = {r[1] for r in conn.execute("PRAGMA table_info(label_observations)")}
+    runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    conn.close()
+    assert {"valid_at", "reward_version", "reward_json"} <= lo_cols
+    assert "composite_reward" in runs_cols
 
 
 def test_append_label_observation_writes_history_row(tmp_path: Path) -> None:
