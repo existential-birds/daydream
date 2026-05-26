@@ -6,10 +6,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from daydream.archive.index import label_observation_history, latest_label_observation, upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.training.harvest import (
     HarvestConfig,
+    _resolve_repo_for_row,
     assemble_scoring_inputs,
     build_annotation,
     run_harvest,
@@ -156,3 +159,55 @@ async def test_re_harvest_appends_new_generation(tmp_path, archive_dir, monkeypa
     await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1"))
     await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
     assert len(label_observation_history(archive_dir, "s1")) == 2  # append-only, re-runnable
+
+
+# ---------------------------------------------------------------------------
+# _resolve_repo_for_row
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_repo_for_row_prefers_source_path(tmp_path: Path):
+    """source_path is preferred when it exists and contains .git."""
+    source = tmp_path / "source_repo"
+    source.mkdir()
+    (source / ".git").mkdir()
+    row = {"source_path": str(source), "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
+    result = _resolve_repo_for_row(row, clone_cache=tmp_path / "cache")
+    assert result == source
+
+
+def test_resolve_repo_for_row_clones_when_source_path_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Falls through to clone when source_path is absent."""
+    cache = tmp_path / "cache"
+
+    def fake_clone(url: str, target: Path) -> None:
+        target.mkdir(parents=True, exist_ok=True)
+        (target / ".git").mkdir()
+
+    monkeypatch.setattr("daydream.training.harvest.git_ops.clone", fake_clone)
+    row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
+    result = _resolve_repo_for_row(row, clone_cache=cache)
+    assert result == cache / "org" / "repo"
+
+
+def test_resolve_repo_for_row_fetches_existing_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """When the cache clone already exists, fetch instead of clone."""
+    cache = tmp_path / "cache"
+    cached_repo = cache / "org" / "repo"
+    cached_repo.mkdir(parents=True)
+    (cached_repo / ".git").mkdir()
+
+    fetched = []
+    monkeypatch.setattr("daydream.training.harvest.git_ops.fetch", lambda repo, remote="origin": fetched.append(repo))
+    monkeypatch.setattr("daydream.training.harvest.git_ops.clone", lambda *a, **k: pytest.fail("should not clone"))
+    row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
+    result = _resolve_repo_for_row(row, clone_cache=cache)
+    assert result == cached_repo
+    assert fetched == [cached_repo]
+
+
+def test_resolve_repo_for_row_returns_none_when_no_remote(tmp_path: Path):
+    """Returns None when neither source_path nor remote_url is available."""
+    row = {"source_path": None, "remote_url": None, "repo_slug": None}
+    result = _resolve_repo_for_row(row, clone_cache=tmp_path / "cache")
+    assert result is None

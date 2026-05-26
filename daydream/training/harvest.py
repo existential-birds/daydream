@@ -546,69 +546,70 @@ def build_annotation(
 
 
 # ---------------------------------------------------------------------------
-# base_sha materialization — relocated from the exporter (plan Assumption 6).
-#
-# The only fallible git I/O that produces an immutable capture-time fact lives
-# in harvest, not build-corpus (which must be pure). build-corpus only *reads*
-# ``base_sha`` from the manifest. The exporter still calls ``materialize_base_sha``
-# until plan Task 7 retires that path, so this is a COPY of the call, not a move.
+# Repo resolution — three-tier priority: source_path → clone cache → None
 # ---------------------------------------------------------------------------
 
 
-def _resolve_repo_clone(repo_slug: str | None) -> Path | None:
-    """Best-effort discovery of a local clone for ``repo_slug``.
+def _resolve_repo_for_row(row: dict[str, Any], clone_cache: Path | None) -> Path | None:
+    """Resolve a local repo working tree for a manifest row.
 
-    ``repo_slug`` must be a full ``owner/repo`` string; slugs that do not
-    split cleanly into two non-empty parts return ``None`` to avoid
-    materializing a ``base_sha`` from an ambiguous clone. Probes the standard
-    developer layouts in order (bare-name first, owner-qualified as fallback);
-    the first path whose ``.git`` directory exists wins.
+    Priority:
+        1. ``row["source_path"]`` when it exists on disk with a ``.git`` dir.
+        2. Clone cache: ``clone_cache/<owner>/<repo>/`` — fetch if present, clone if not.
+        3. ``None`` when no source is available.
+
+    Clone/fetch failures are caught and logged; they never block harvest.
 
     Args:
-        repo_slug: ``owner/repo`` string from the manifest row, or ``None``.
+        row: An indexed manifest row (supplies ``source_path``, ``remote_url``, ``repo_slug``).
+        clone_cache: Root directory for cached clones, or ``None`` to skip cloning.
 
     Returns:
-        Path to a working tree containing ``.git``, or ``None`` when
-        ``repo_slug`` is missing/malformed or no candidate is on disk.
+        Path to a usable working tree, or ``None``.
     """
-    if not isinstance(repo_slug, str) or not repo_slug:
+    source_path = row.get("source_path")
+    if source_path and (Path(source_path) / ".git").exists():
+        return Path(source_path)
+
+    remote_url = row.get("remote_url")
+    repo_slug = row.get("repo_slug")
+    if not remote_url or not repo_slug or clone_cache is None:
         return None
+
     parts = repo_slug.split("/", 1)
-    if len(parts) != 2:
+    if len(parts) != 2 or not parts[0] or not parts[1]:
         return None
-    owner, repo_name = parts
-    if not owner or not repo_name:
-        return None
-    home = Path.home()
-    candidates = (
-        home / repo_name,
-        home / "github" / repo_name,
-        home / "code" / repo_name,
-        home / "github" / owner / repo_name,
-        home / "code" / owner / repo_name,
-    )
-    for candidate in candidates:
-        if (candidate / ".git").exists():
-            return candidate
-    return None
+
+    cached_repo = clone_cache / parts[0] / parts[1]
+    try:
+        if (cached_repo / ".git").exists():
+            git_ops.fetch(cached_repo)
+        else:
+            git_ops.clone(remote_url, cached_repo)
+    except (GitError, OSError) as exc:
+        print_warning(
+            create_console(),
+            f"harvest: repo resolution failed for {repo_slug}: {type(exc).__name__}: {exc}",
+        )
+        if not (cached_repo / ".git").exists():
+            return None
+    return cached_repo
 
 
-def _materialize_base_sha_if_missing(row: dict[str, Any], run_dir: Path) -> None:
+def _materialize_base_sha_if_missing(row: dict[str, Any], run_dir: Path, repo_clone: Path | None) -> None:
     """Opportunistically backfill ``code_context.base_sha`` into the manifest.
 
-    Mirrors the relocated exporter block: only when ``manifest.json`` exists
-    AND a clone of the row's ``repo_slug`` is discoverable on disk. Any failure
-    is swallowed (opportunistic), leaving ``base_sha`` as ``None``; it never
-    raises and never blocks the harvest of the row.
+    Only acts when ``manifest.json`` exists AND ``repo_clone`` is available.
+    Any failure is swallowed (opportunistic), leaving ``base_sha`` as ``None``.
 
     Args:
-        row: The indexed manifest row (supplies ``repo_slug``).
+        row: The indexed manifest row.
         run_dir: The archived run directory (holds ``manifest.json``).
+        repo_clone: Resolved repo working tree, or ``None``.
     """
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.exists():
         return
-    repo_clone = _resolve_repo_clone(row.get("repo_slug"))
     if repo_clone is None:
         return
     try:
@@ -712,7 +713,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         done = cache.completed_sessions()
         queue = [row for row in queue if row["session_id"] not in done]
 
-    repo_clone_fallback = config.repo_clone_root or config.archive_dir
+    clone_cache = config.repo_clone_root or (config.cache_dir / "repos" if config.cache_dir else None)
 
     summary = {
         "considered": len(queue),
@@ -727,13 +728,13 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
     for row in queue:
         try:
             run_dir = Path(row["archive_path"])
-            _materialize_base_sha_if_missing(row, run_dir)
-            row_repo_clone = _resolve_repo_clone(row.get("repo_slug")) or repo_clone_fallback
+            row_repo_clone = _resolve_repo_for_row(row, clone_cache=clone_cache)
+            _materialize_base_sha_if_missing(row, run_dir, repo_clone=row_repo_clone)
             payload = build_annotation(
                 row,
                 run_dir=run_dir,
                 gh_api=gh_api_callable,
-                repo_clone=row_repo_clone,
+                repo_clone=row_repo_clone or config.archive_dir,
                 window_days=config.fix_applied_window_days,
             )
             if config.dry_run:
