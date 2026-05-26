@@ -831,22 +831,33 @@ def fetch(repo: Path, remote: str = "origin") -> None:
         raise GitError(f"git fetch {remote} failed in {repo}: {proc.stderr.strip()}")
 
 
-def clone(remote_url: str, target: Path) -> None:
-    """Run ``git clone <remote_url> <target>`` (full clone, no ``--depth``).
+def clone(remote_url: str, target: Path, *, blobless: bool = False) -> None:
+    """Run ``git clone <remote_url> <target>``.
 
     Args:
         remote_url: Remote URL or local path to clone from.
         target: Destination directory for the new working tree.
+        blobless: When ``True``, pass ``--filter=blob:none`` to perform a
+            partial clone that omits blobs until they are accessed.  Reduces
+            initial transfer and storage at the cost of lazy blob fetches on
+            first access.  Requires server-side partial-clone support.
 
     Raises:
         GitError: If the clone fails.
     """
-    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", "clone", remote_url, str(target)],  # noqa: S607 - git is a trusted command
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    cmd = ["git", "clone"]
+    if blobless:
+        cmd.append("--filter=blob:none")
+    cmd += [remote_url, str(target)]
+    try:
+        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            cmd,  # noqa: S607 - git is a trusted command
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise GitError(f"git clone {remote_url} failed: {type(exc).__name__}: {exc}") from exc
     if proc.returncode != 0:
         raise GitError(f"git clone {remote_url} failed: {proc.stderr.strip()}")
 

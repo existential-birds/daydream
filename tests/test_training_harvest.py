@@ -10,6 +10,7 @@ import pytest
 
 from daydream.archive.index import label_observation_history, latest_label_observation, upsert_run
 from daydream.archive.manifest import Manifest
+from daydream.git_ops import GitError
 from daydream.training.harvest import (
     HarvestConfig,
     _resolve_repo_for_row,
@@ -180,7 +181,7 @@ def test_resolve_repo_for_row_clones_when_source_path_missing(tmp_path: Path, mo
     """Falls through to clone when source_path is absent."""
     cache = tmp_path / "cache"
 
-    def fake_clone(url: str, target: Path) -> None:
+    def fake_clone(url: str, target: Path, **kwargs: object) -> None:
         target.mkdir(parents=True, exist_ok=True)
         (target / ".git").mkdir()
 
@@ -211,3 +212,32 @@ def test_resolve_repo_for_row_returns_none_when_no_remote(tmp_path: Path):
     row = {"source_path": None, "remote_url": None, "repo_slug": None}
     result = _resolve_repo_for_row(row, clone_cache=tmp_path / "cache")
     assert result is None
+
+
+def test_resolve_repo_for_row_clone_failure_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Clone failure is swallowed and None is returned (no .git left on disk)."""
+    cache = tmp_path / "cache"
+
+    monkeypatch.setattr(
+        "daydream.training.harvest.git_ops.clone",
+        lambda url, target, **kwargs: (_ for _ in ()).throw(GitError("network error")),
+    )
+    row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
+    result = _resolve_repo_for_row(row, clone_cache=cache)
+    assert result is None
+
+
+def test_resolve_repo_for_row_fetch_failure_returns_cached_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Fetch failure is swallowed and the existing cached repo path is returned."""
+    cache = tmp_path / "cache"
+    cached_repo = cache / "org" / "repo"
+    cached_repo.mkdir(parents=True)
+    (cached_repo / ".git").mkdir()
+
+    monkeypatch.setattr(
+        "daydream.training.harvest.git_ops.fetch",
+        lambda repo, remote="origin": (_ for _ in ()).throw(GitError("fetch failed")),
+    )
+    row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
+    result = _resolve_repo_for_row(row, clone_cache=cache)
+    assert result == cached_repo

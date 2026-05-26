@@ -91,6 +91,7 @@ from daydream.training.labeler_signals import (
 from daydream.training.reward import ScoringInputs, score_trajectory
 from daydream.training.rubric import Rubric, derive_outcome_label
 from daydream.ui import create_console, print_warning
+from rich.console import Console
 
 _VERDICTS_FILE = "recommendation-verdicts.json"
 """Bronze artifact (under ``deep/``) carrying the ``verdicts`` list."""
@@ -550,7 +551,13 @@ def build_annotation(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_repo_for_row(row: dict[str, Any], clone_cache: Path | None) -> Path | None:
+def _resolve_repo_for_row(
+    row: dict[str, Any],
+    clone_cache: Path | None,
+    *,
+    fetched_repos: set[Path] | None = None,
+    console: Console | None = None,
+) -> Path | None:
     """Resolve a local repo working tree for a manifest row.
 
     Priority:
@@ -583,12 +590,16 @@ def _resolve_repo_for_row(row: dict[str, Any], clone_cache: Path | None) -> Path
     cached_repo = clone_cache / parts[0] / parts[1]
     try:
         if (cached_repo / ".git").exists():
-            git_ops.fetch(cached_repo)
+            if fetched_repos is None or cached_repo not in fetched_repos:
+                git_ops.fetch(cached_repo)
+                if fetched_repos is not None:
+                    fetched_repos.add(cached_repo)
         else:
-            git_ops.clone(remote_url, cached_repo)
+            cached_repo.parent.mkdir(parents=True, exist_ok=True)
+            git_ops.clone(remote_url, cached_repo, blobless=True)
     except (GitError, OSError) as exc:
         print_warning(
-            create_console(),
+            console or create_console(),
             f"harvest: repo resolution failed for {repo_slug}: {type(exc).__name__}: {exc}",
         )
         if not (cached_repo / ".git").exists():
@@ -596,7 +607,7 @@ def _resolve_repo_for_row(row: dict[str, Any], clone_cache: Path | None) -> Path
     return cached_repo
 
 
-def _materialize_base_sha_if_missing(row: dict[str, Any], run_dir: Path, repo_clone: Path | None) -> None:
+def _materialize_base_sha_if_missing(row: dict[str, Any], run_dir: Path, repo_clone: Path | None, *, console: Console | None = None) -> None:
     """Opportunistically backfill ``code_context.base_sha`` into the manifest.
 
     Only acts when ``manifest.json`` exists AND ``repo_clone`` is available.
@@ -616,7 +627,7 @@ def _materialize_base_sha_if_missing(row: dict[str, Any], run_dir: Path, repo_cl
         materialize_base_sha(manifest_path, repo_clone=repo_clone)
     except (OSError, json.JSONDecodeError, GitError) as exc:
         print_warning(
-            create_console(),
+            console or create_console(),
             f"harvest: base_sha backfill failed for {manifest_path}: {type(exc).__name__}: {exc}",
         )
 
@@ -640,8 +651,9 @@ class HarvestConfig:
             :class:`~daydream.training.backfill_cache.BackfillCache`. When
             ``None``, ``gh_api`` calls hit the network on every row.
         repo_clone_root: Optional root under which per-repo clones live (used
-            by the fix-applied / local-commit cascades). Falls back to the
-            archive root when unset.
+            by the fix-applied / local-commit cascades). Falls back to
+            ``cache_dir / 'repos'`` when unset (or ``None`` if ``cache_dir``
+            is also unset).
         session_filter: Optional ``session_id`` prefix to restrict the queue.
         fix_applied_window_days: Lookback window for upstream commits
             considered by the fix-applied cascade.
@@ -714,6 +726,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         queue = [row for row in queue if row["session_id"] not in done]
 
     clone_cache = config.repo_clone_root or (config.cache_dir / "repos" if config.cache_dir else None)
+    fetched_repos: set[Path] = set()
 
     summary = {
         "considered": len(queue),
@@ -728,8 +741,8 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
     for row in queue:
         try:
             run_dir = Path(row["archive_path"])
-            row_repo_clone = _resolve_repo_for_row(row, clone_cache=clone_cache)
-            _materialize_base_sha_if_missing(row, run_dir, repo_clone=row_repo_clone)
+            row_repo_clone = _resolve_repo_for_row(row, clone_cache=clone_cache, fetched_repos=fetched_repos, console=console)
+            _materialize_base_sha_if_missing(row, run_dir, repo_clone=row_repo_clone, console=console)
             payload = build_annotation(
                 row,
                 run_dir=run_dir,
