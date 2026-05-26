@@ -82,6 +82,7 @@ def _build_fix_prompt(
     parts.append("\nAnalyze the failures and fix them.")
     if feedback_items:
         parts.append("Focus on the files listed above.")
+        parts.append("Edit only the files listed above; do not expand scope to other files.")
 
     return "\n".join(parts)
 
@@ -1417,6 +1418,17 @@ Make the minimal change needed. Do NOT change error handling semantics
 (e.g., converting warn-and-continue to error propagation, or vice versa)
 unless the issue description specifically explains why the current error
 handling strategy is wrong for that code path.
+
+Edit only what this finding names — the file/symbol/line above. Do NOT change
+adjacent fields, keys, functions, or files the finding did not mention. If a
+correct fix seems to require touching something the finding didn't name, stop
+and report it instead of expanding the change.
+
+If this finding conflicts with an explicit in-code contract — a JSON schema, a
+type signature, or a comment documenting intent — the contract wins. Do not
+override documented intent to satisfy the finding; note the conflict in your
+commit message (or report inability to fix). Treat low/medium-confidence
+findings with extra skepticism here.
 """
 
     verifier_verdict = item.get("verifier_verdict")
