@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.ui import (
-    ParallelFixPanel,
     phase_subtitle,
     print_dim,
     print_error,
@@ -1799,90 +1798,6 @@ async def phase_fetch_pr_feedback(
         print_warning(console, "PR feedback file was not created")
 
 
-async def phase_fix_parallel(
-    backend: Backend, work: WorkContext, feedback_items: list[dict[str, Any]]
-) -> list[FixResult]:
-    """Apply fixes for all feedback items concurrently using parallel agents.
-
-    Launches one agent per feedback item in a task group. Each agent runs
-    independently; individual failures are captured without aborting others.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context for the fixes; ``work.repo`` is the agent cwd.
-        feedback_items: List of feedback items, each with description, file, line
-
-    Returns:
-        List of (item, success, error) tuples for each feedback item
-
-    """
-    recorder = get_current_recorder()
-    results: list[FixResult] = []
-    limiter = anyio.CapacityLimiter(4)
-    panel = ParallelFixPanel(console, feedback_items)
-    panel.start()
-
-    async with anyio.create_task_group() as tg:
-        for index, item in enumerate(feedback_items):
-            description = item.get("description", "No description")
-            file_path = item.get("file", "Unknown file")
-            line = item.get("line", "Unknown")
-
-            prompt = f"""Fix this issue:
-{description}
-
-File: {file_path}
-Line: {line}
-
-Make the minimal change needed. Do NOT change error handling semantics
-(e.g., converting warn-and-continue to error propagation, or vice versa)
-unless the issue description specifically explains why the current error
-handling strategy is wrong for that code path.
-"""
-
-            # Default arguments capture loop variables by value, avoiding late-binding
-            # closure issues where all tasks would reference the final loop iteration.
-            async def _fix_task(
-                task_index: int = index,
-                task_item: dict[str, Any] = item,
-                task_prompt: str = prompt,
-            ) -> None:
-                def callback(message: str, i: int = task_index) -> None:
-                    panel.update_row(i, message)
-
-                async with maybe_fork(recorder, f"fix-{task_index}"):
-                    try:
-                        async with limiter:
-                            await run_agent(
-                                backend, work.repo, task_prompt, progress_callback=callback, phase=DaydreamPhase.FIX,
-                            )
-                        panel.complete_row(task_index)
-                        results.append((task_item, True, None))
-                    except Exception as e:
-                        error_msg = f"{type(e).__name__}: {e}"
-                        panel.fail_row(task_index, error_msg)
-                        results.append((task_item, False, error_msg))
-
-            tg.start_soon(_fix_task)
-
-    if recorder is not None:
-        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
-
-    panel.finish()
-
-    succeeded = sum(1 for _, ok, _ in results if ok)
-    failed = sum(1 for _, ok, _ in results if not ok)
-
-    if succeeded > 0:
-        print_success(console, f"{succeeded} fix(es) applied successfully")
-    if failed > 0:
-        print_warning(console, f"{failed} fix(es) failed")
-    if succeeded == 0 and failed > 0:
-        print_error(console, "All fixes failed", "No changes were applied")
-
-    return results
-
-
 async def phase_commit_iteration(backend: Backend, work: WorkContext, iteration: int) -> None:
     """Commit all changes from the current loop iteration.
 
@@ -1931,7 +1846,7 @@ async def phase_respond_pr_feedback(
         work: Workspace context; ``work.repo`` is the agent cwd.
         pr_number: Pull request number to respond to
         bot: Bot username to respond as
-        results: List of (item, success, error) tuples from phase_fix_parallel
+        results: List of (item, success, error) tuples, one per applied fix
 
     Returns:
         None
@@ -2247,9 +2162,9 @@ async def phase_per_stack_reviews(
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run one review agent per detected stack concurrently (D-17).
 
-    Mirrors phase_fix_parallel's capacity-limiter + task-group + default-arg closure
-    capture pattern. Per D-38, uses orchestrator-level parallelism -- never passes
-    the ``agents`` kwarg (Codex does not support SDK-level sub-agent spawning).
+    Uses a capacity-limiter + task-group + default-arg closure capture pattern.
+    Per D-38, uses orchestrator-level parallelism -- never passes the ``agents``
+    kwarg (Codex does not support SDK-level sub-agent spawning).
 
     Args:
         backend: The Backend to execute against.

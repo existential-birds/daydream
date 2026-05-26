@@ -1,9 +1,9 @@
 """TEST-07: Subagent trajectory shape validation.
 
-Uses MockBackend to drive the recorder's fork() path for the three parallel
-fan-out scenarios: phase_fix_parallel, deep-mode per-stack reviews, and
-exploration pre_scan specialists. Validates the resulting root + sibling
-trajectory file sets against the vendored ATIF validator.
+Uses MockBackend to drive the recorder's fork() path across the parallel
+fan-out phases it must support: a FIX-phase fan-out, deep-mode per-stack
+reviews, and exploration pre_scan specialists. Validates the resulting root +
+sibling trajectory file sets against the vendored ATIF validator.
 
 Per D-03, these tests exercise the real recorder code with fake backends.
 No pre-recorded fixture files.
