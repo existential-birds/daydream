@@ -27,7 +27,7 @@ After merge, an optional fix gate applies fixes one-by-one and validates with th
 
 ### Trajectory Recording
 
-Every run produces an ATIF v1.6 trajectory at `<target>/.daydream/runs/<id>/trajectory.json` capturing prompts, responses, tool calls, observations, and per-step token/cost metrics. Parallel fan-outs (per-stack reviews, parallel fixes) produce sibling trajectories via `recorder.fork()` under `.daydream/trajectories/`. Sensitive content (API keys, JWTs, URL credentials, `.env` values) is automatically redacted before writing. Interrupted runs flush a `.partial` file with `extra.partial=true`.
+Every run produces an ATIF v1.6 trajectory at `<target>/.daydream/runs/<id>/trajectory.json` capturing prompts, responses, tool calls, observations, and per-step token/cost metrics. Parallel fan-outs (per-stack reviews, parallel fixes) produce sibling trajectories via `recorder.fork()` under `.daydream/runs/<id>/trajectories/`. Sensitive content (API keys, JWTs, URL credentials, `.env` values) is automatically redacted before writing. Interrupted runs flush a `.partial` file with `extra.partial=true`.
 
 ### Corpus Pipeline
 
@@ -144,7 +144,7 @@ Per-phase backend and model overrides: `--review-backend`, `--fix-backend`, `--t
 | Path | Description |
 |------|-------------|
 | `.daydream/runs/<id>/trajectory.json` | ATIF v1.6 trajectory (customize with `--trajectory`) |
-| `.daydream/trajectories/` | Forked sub-trajectories from parallel fan-outs |
+| `.daydream/runs/<id>/trajectories/` | Forked sub-trajectories from parallel fan-outs |
 | `.daydream/diff.patch` | Unified diff captured at run start |
 | `.daydream/deep/` | Deep pipeline artifacts: intent, per-stack reviews, merged report |
 | `.review-output.md` | Review findings (removed with `--cleanup`) |
