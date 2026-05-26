@@ -684,7 +684,7 @@ def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
     # Per-phase row: Input (cached) cell reads "10 (100%)" — clamped.
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     cells = [c.strip() for c in review_row.split("|")]
-    # Columns: ['', 'Review', model, tools, input(cached), output, cost, '']
+    # Columns: ['', 'Review', model, tools, input(cached), output, cost, latency, '']
     assert cells[4] == "10 (100%)"
 
 
@@ -777,7 +777,7 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
     # Per-phase Model cell also shows the fallback model.
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     cells = [c.strip() for c in review_row.split("|")]
-    # Columns: ['', 'Review', model, tools, input(cached), output, cost, '']
+    # Columns: ['', 'Review', model, tools, input(cached), output, cost, latency, '']
     assert cells[2] == "gpt-5.5"
     # No 'unknown model' footnote, since the fallback resolved to a priced model.
     assert "not in the price table" not in out

@@ -245,9 +245,9 @@ def _aggregate(trajectories: list[Trajectory]) -> _RunAgg:
             phase = _ensure_phase(agg, phase_key)
             # Track timestamps from ALL sources (user + agent) for latency.
             if step.timestamp:
-                if phase.first_timestamp is None or step.timestamp < phase.first_timestamp:
+                if phase.first_timestamp is None or _parse_ts(step.timestamp) < _parse_ts(phase.first_timestamp):
                     phase.first_timestamp = step.timestamp
-                if phase.last_timestamp is None or step.timestamp > phase.last_timestamp:
+                if phase.last_timestamp is None or _parse_ts(step.timestamp) > _parse_ts(phase.last_timestamp):
                     phase.last_timestamp = step.timestamp
             if step.source != "agent":
                 continue
