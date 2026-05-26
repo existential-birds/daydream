@@ -835,6 +835,14 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
         help="Override the archive root (default: daydream.archive.get_archive_dir()).",
     )
     parser.add_argument(
+        "--repo-clone-root",
+        type=Path,
+        default=None,
+        dest="repo_clone_root",
+        metavar="PATH",
+        help="Directory for cached repo clones (default: <cache-dir>/repos/).",
+    )
+    parser.add_argument(
         "--fix-applied-window-days",
         type=int,
         default=30,
@@ -888,10 +896,13 @@ def _handle_harvest_command(argv: list[str]) -> int:
     archive_dir = args.archive_dir if args.archive_dir is not None else _archive.get_archive_dir()
     cache_dir = args.cache_dir.expanduser() if args.cache_dir is not None else None
 
+    repo_clone_root = args.repo_clone_root.expanduser() if args.repo_clone_root is not None else None
+
     config = _harvest.HarvestConfig(
         archive_dir=archive_dir,
         dry_run=args.dry_run,
         cache_dir=cache_dir,
+        repo_clone_root=repo_clone_root,
         session_filter=args.session,
         fix_applied_window_days=args.fix_applied_window_days,
         gh_request_spacing_sec=args.gh_spacing_sec,

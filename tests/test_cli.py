@@ -387,6 +387,24 @@ def test_harvest_and_build_corpus_dispatch(monkeypatch, tmp_path):
     assert "harvest" in called
 
 
+def test_harvest_parser_accepts_repo_clone_root():
+    """--repo-clone-root is parsed and forwarded to HarvestConfig."""
+    from daydream.cli import _build_harvest_parser
+
+    parser = _build_harvest_parser()
+    args = parser.parse_args(["--repo-clone-root", "/tmp/clones"])
+    assert args.repo_clone_root == Path("/tmp/clones")
+
+
+def test_harvest_parser_repo_clone_root_defaults_to_none():
+    """--repo-clone-root defaults to None (derived from cache_dir at runtime)."""
+    from daydream.cli import _build_harvest_parser
+
+    parser = _build_harvest_parser()
+    args = parser.parse_args([])
+    assert args.repo_clone_root is None
+
+
 def test_removed_verbs_no_longer_dispatch():
     from daydream import cli
     # label / export-jsonl / snapshot handlers are gone
