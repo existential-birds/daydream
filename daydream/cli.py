@@ -884,10 +884,15 @@ def _handle_harvest_command(argv: list[str]) -> int:
         fix_applied_window_days=args.fix_applied_window_days,
         gh_request_spacing_sec=args.gh_spacing_sec,
     )
-    # run_harvest is async in production (driven via anyio); a sync test double
-    # returns the summary directly, so only await when the result is awaitable.
-    result = _harvest.run_harvest(config)
-    summary = anyio.run(lambda: result) if inspect.isawaitable(result) else result
+    run_harvest = _harvest.run_harvest
+    summary: dict[str, int]
+    if inspect.iscoroutinefunction(run_harvest):
+        summary = anyio.run(run_harvest, config)
+    else:
+        # A synchronous test double (monkeypatched stub) is driven directly —
+        # anyio.run rejects non-coroutine callables. Production run_harvest is
+        # always async, so mypy only sees the coroutine type here.
+        summary = run_harvest(config)  # type: ignore[assignment]
     print_info(console, str(summary))
     return 0
 

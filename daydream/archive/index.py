@@ -16,6 +16,9 @@ Exports:
         denormalized runs cache.
     latest_label_observation: Return the most recent label_observations row for
         a session, optionally constrained by an ``as_of`` cutoff timestamp.
+    bulk_latest_label_observations: Return the most recent label_observations
+        row for each session in a collection — single round-trip alternative to
+        calling ``latest_label_observation`` in a loop.
     label_observation_history: Return the full label_observations history for
         a session in chronological order.
     label_count_summary: Return label counts for all runs in a single aggregate
@@ -166,6 +169,11 @@ def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
     if existing and "valid_at" not in existing:
+        warnings.warn(
+            "label_observations table predates bitemporal columns and will be dropped "
+            "and recreated. Existing label rows will be lost — repopulate via `harvest`.",
+            stacklevel=2,
+        )
         conn.execute("DROP TABLE label_observations")
         conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
 
@@ -383,6 +391,76 @@ def latest_label_observation(
             )
         row = cursor.fetchone()
         return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def bulk_latest_label_observations(
+    archive_dir: Path,
+    session_ids: list[str],
+    *,
+    as_of: str | None = None,
+) -> dict[str, dict]:
+    """Return the most recent label observation for each session in *session_ids*.
+
+    Fetches all matching rows in a single SQL query instead of one query per
+    session, eliminating the N+1 pattern when building a corpus.
+
+    When ``as_of`` is provided, only observations whose ``observed_at <= as_of``
+    are considered — the same temporal constraint applied by
+    :func:`latest_label_observation`.
+
+    Args:
+        archive_dir: Path to the archive root.
+        session_ids: Collection of session UUIDs to look up.
+        as_of: Optional ISO 8601 cutoff timestamp.
+
+    Returns:
+        Mapping of ``session_id`` → row dict for every session that has at
+        least one qualifying observation.  Sessions with no observation are
+        absent from the returned dict (callers should treat them as ``None``).
+    """
+    if not session_ids:
+        return {}
+    placeholders = ",".join("?" * len(session_ids))
+    conn = _get_connection(archive_dir)
+    try:
+        if as_of is None:
+            cursor = conn.execute(
+                f"""
+                SELECT *
+                FROM (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY session_id
+                               ORDER BY observed_at DESC
+                           ) AS _rn
+                    FROM label_observations
+                    WHERE session_id IN ({placeholders})
+                )
+                WHERE _rn = 1
+                """,
+                session_ids,
+            )
+        else:
+            cursor = conn.execute(
+                f"""
+                SELECT *
+                FROM (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY session_id
+                               ORDER BY observed_at DESC
+                           ) AS _rn
+                    FROM label_observations
+                    WHERE session_id IN ({placeholders})
+                      AND observed_at <= ?
+                )
+                WHERE _rn = 1
+                """,
+                [*session_ids, as_of],
+            )
+        return {row["session_id"]: dict(row) for row in cursor.fetchall()}
     finally:
         conn.close()
 

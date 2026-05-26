@@ -102,8 +102,8 @@ _REVIEW_OUTPUT_FILE = "review-output.md"
 """Length-proxy artifact; at the run root for shallow runs, under ``deep/`` for deep runs."""
 
 
-def _read_review_output_length(run_dir: Path) -> int | None:
-    """Return the review-output char count, or ``None`` when absent.
+def _read_review_output(run_dir: Path) -> str | None:
+    r"""Return the review-output text, or ``None`` when absent.
 
     Tries ``review-output.md`` at the run root first (shallow-loop layout),
     then ``deep/review-output.md`` (deep-mode layout), mirroring the former
@@ -113,15 +113,33 @@ def _read_review_output_length(run_dir: Path) -> int | None:
         run_dir: The archived run directory.
 
     Returns:
-        The character count of the first review-output file found, or
-        ``None`` when neither location exists.
+        The text of the first review-output file found, or ``None`` when
+        neither location exists. Non-``FileNotFoundError`` ``OSError``\s
+        propagate to the caller.
     """
     for candidate in (run_dir / _REVIEW_OUTPUT_FILE, run_dir / "deep" / _REVIEW_OUTPUT_FILE):
         try:
-            return len(candidate.read_text(encoding="utf-8"))
+            return candidate.read_text(encoding="utf-8")
         except FileNotFoundError:
             continue
     return None
+
+
+def _read_review_output_length(run_dir: Path) -> int | None:
+    """Return the review-output char count, or ``None`` when absent.
+
+    Delegates to :func:`_read_review_output`; see that function for the
+    fallback order and error semantics.
+
+    Args:
+        run_dir: The archived run directory.
+
+    Returns:
+        The character count of the first review-output file found, or
+        ``None`` when neither location exists.
+    """
+    text = _read_review_output(run_dir)
+    return len(text) if text is not None else None
 
 
 def assemble_scoring_inputs(run_dir: Path, row: dict[str, Any]) -> ScoringInputs:
@@ -458,6 +476,7 @@ class AnnotationPayload:
     reward_json: str
     composite_reward: float | None
     evidence_sha: str | None
+    rubric_json: str | None
 
 
 def build_annotation(
@@ -522,6 +541,7 @@ def build_annotation(
         reward_json=json.dumps(rb.to_dict()),
         composite_reward=rb.composite,
         evidence_sha=row.get("head_sha"),
+        rubric_json=json.dumps(rubric.to_dict()),
     )
 
 
@@ -708,17 +728,16 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         try:
             run_dir = Path(row["archive_path"])
             _materialize_base_sha_if_missing(row, run_dir)
-            payload = build_annotation(
-                row,
-                run_dir=run_dir,
-                gh_api=gh_api_callable,
-                repo_clone=repo_clone,
-                window_days=config.fix_applied_window_days,
-            )
-
             if config.dry_run:
                 summary["would_annotate"] += 1
             else:
+                payload = build_annotation(
+                    row,
+                    run_dir=run_dir,
+                    gh_api=gh_api_callable,
+                    repo_clone=repo_clone,
+                    window_days=config.fix_applied_window_days,
+                )
                 append_label_observation(
                     config.archive_dir,
                     row["session_id"],
@@ -726,6 +745,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                     pr_state=payload.pr_state,
                     labeler_version=reward.REWARD_VERSION,
                     evidence_sha=payload.evidence_sha,
+                    rubric_json=payload.rubric_json,
                     valid_at=payload.valid_at,
                     reward_version=payload.reward_version,
                     reward_json=payload.reward_json,
@@ -743,6 +763,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
             )
             continue
 
-        await anyio.sleep(config.gh_request_spacing_sec)
+        if not config.dry_run:
+            await anyio.sleep(config.gh_request_spacing_sec)
 
     return summary

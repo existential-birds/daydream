@@ -54,9 +54,10 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive import get_archive_dir
-from daydream.archive.index import count_runs, latest_label_observation, query_runs
+from daydream.archive.index import bulk_latest_label_observations, count_runs, query_runs
 from daydream.config import REVIEW_SKILLS
 from daydream.training.exclusion import is_copyleft, load_copyleft_list, load_exclusion_list
+from daydream.training.harvest import _read_review_output
 from daydream.training.schema import TRAINING_SCHEMA_VERSION
 from daydream.ui import create_console, print_info, print_warning
 
@@ -264,9 +265,10 @@ def _build_record(
     - ``reward``: the parsed ``annotation["reward_json"]`` dict (full
       ``RewardBreakdown.to_dict()``); omitted when the annotation has no
       ``reward_json`` or it is unparseable.
-    - ``composite_reward``: ``annotation["composite_reward"]`` scalar; omitted
-      when ``None`` (uncomputable / unscored) so the record stays valid against
-      ``schema/v1.json`` until the additive reward fields land (Task 12).
+    - ``composite_reward``: ``annotation["composite_reward"]`` scalar; written
+      unconditionally (``null`` when uncomputable / unscored). The schema models
+      it as a nullable scalar (``["number", "null"]``), so the ``None``
+      placeholder is valid and every record carries the key uniformly.
     - ``rubric``: the full parsed dict from ``manifest_row["rubric_json"]``
       when that column holds a JSON object. Invalid JSON or non-dict values
       are silently treated as missing.
@@ -320,27 +322,15 @@ def _build_record(
     # build-corpus performs no git and no write-back (pure projection).
 
     # review-output.md lives at the archive root for shallow-loop runs but
-    # only under deep/ for deep-mode runs. Try root first to preserve
-    # back-compat; on FileNotFoundError fall back to the deep/ subdir.
+    # only under deep/ for deep-mode runs. _read_review_output tries root
+    # first (back-compat), then deep/; OSError (non-missing I/O failure) is
+    # preserved as a warn-and-continue here.
     review_output: str | None
     try:
-        review_output = (archive_path / "review-output.md").read_text(encoding="utf-8")
-    except FileNotFoundError:
-        try:
-            review_output = (archive_path / "deep" / "review-output.md").read_text(encoding="utf-8")
-        except FileNotFoundError:
-            review_output = None
-        except OSError as exc:
-            deep_path = archive_path / "deep" / "review-output.md"
-            warnings.warn(
-                f"Session {manifest_row.get('session_id')!r}: failed to read {deep_path}: {exc}",
-                stacklevel=2,
-            )
-            review_output = None
+        review_output = _read_review_output(archive_path)
     except OSError as exc:
-        root_path = archive_path / "review-output.md"
         warnings.warn(
-            f"Session {manifest_row.get('session_id')!r}: failed to read {root_path}: {exc}",
+            f"Session {manifest_row.get('session_id')!r}: failed to read review-output.md: {exc}",
             stacklevel=2,
         )
         review_output = None
@@ -366,22 +356,23 @@ def _build_record(
         "trajectory_ref": {"archive_relative_path": "trajectory.json"},
     }
 
-    # Reward fields from the pinned annotation (additive). Both are omitted
-    # when absent — ``reward`` when the annotation carries no parseable
-    # ``reward_json``, ``composite_reward`` when the scalar is unset — so the
-    # record stays valid against schema/v1.json before the additive reward
-    # fields land (Task 12) and never emits ``null`` placeholders.
+    # Optional reward fields from the pinned annotation. The schema models
+    # ``composite_reward`` as ``["number", "null"]`` (nullable), so it is
+    # written unconditionally; ``reward`` is ``type: object`` (not nullable),
+    # so the key is omitted entirely when absent rather than written as
+    # ``None``. additionalProperties is false, so additive-field discipline —
+    # only insert optional keys when present — is what keeps every record valid
+    # against schema/v1.json.
     reward, composite_reward = _annotation_reward(annotation, manifest_row.get("session_id"))
-    if composite_reward is not None:
-        record["composite_reward"] = composite_reward
+    record["composite_reward"] = composite_reward
     if reward is not None:
         record["reward"] = reward
 
-    # Optional rubric + posterior_source surfacing. Both fields are additive:
-    # omit entirely when ``rubric_json`` is missing, unparseable, or not a
-    # JSON object — no ``None`` placeholders. ``posterior_source`` is only
-    # surfaced when the parsed rubric explicitly carries that key.
+    # Rubric + posterior_source are additive optional fields. The schema models
+    # ``rubric`` as ``type: object`` and ``posterior_source`` as an enum string
+    # — neither nullable — so each key is written only when a value is present.
     raw_rubric = manifest_row.get("rubric_json")
+    parsed_rubric: dict | None = None
     if isinstance(raw_rubric, str) and raw_rubric:
         try:
             parsed_rubric = json.loads(raw_rubric)
@@ -391,10 +382,13 @@ def _build_record(
                 stacklevel=2,
             )
             parsed_rubric = None
-        if isinstance(parsed_rubric, dict):
-            record["rubric"] = parsed_rubric
-            if "posterior_source" in parsed_rubric:
-                record["posterior_source"] = parsed_rubric["posterior_source"]
+        if not isinstance(parsed_rubric, dict):
+            parsed_rubric = None
+    if parsed_rubric is not None:
+        record["rubric"] = parsed_rubric
+        posterior_source = parsed_rubric.get("posterior_source")
+        if posterior_source is not None:
+            record["posterior_source"] = posterior_source
 
     return record
 
@@ -731,6 +725,9 @@ def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> 
     parsing is required, mirroring the ``observed_at <= as_of`` SQL pin in
     :func:`daydream.archive.index.latest_label_observation`.
 
+    Both strings are normalised to the ``+00:00`` suffix before comparison so
+    that the ``Z`` and ``+00:00`` UTC spellings sort identically.
+
     Args:
         annotation: The ``as_of``-pinned ``label_observations`` row, or ``None``.
         as_of: The transaction-time pin. When ``None`` no valid-time exclusion
@@ -743,7 +740,13 @@ def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> 
     if annotation is None or as_of is None:
         return False
     valid_at = annotation.get("valid_at")
-    return valid_at is not None and valid_at > as_of
+    if valid_at is None:
+        return False
+    # Normalise the UTC suffix so "Z" and "+00:00" compare identically.
+    def _norm(s: str) -> str:
+        return s.replace("Z", "+00:00") if s.endswith("Z") else s
+
+    return _norm(valid_at) > _norm(as_of)
 
 
 def _is_admitted(label: str | None, composite_reward: float | None, filters: CorpusFilters) -> bool:
@@ -910,9 +913,14 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     # annotation so the lineage manifest reports the versions actually included.
     session_versions: dict[str, tuple[str | None, str | None]] = {}
     after_filters = 0
+    # Pre-fetch all annotations in a single query to avoid N+1 round-trips.
+    all_session_ids = [row["session_id"] for row in rows]
+    annotations_by_session = bulk_latest_label_observations(
+        archive_dir, all_session_ids, as_of=config.as_of
+    )
     for row in rows:
         session_id = row["session_id"]
-        annotation = latest_label_observation(archive_dir, session_id, as_of=config.as_of)
+        annotation = annotations_by_session.get(session_id)
         # Temporal-leakage guard: when the pinned annotation's outcome only
         # became true after ``as_of`` (``valid_at > as_of``), drop the
         # posterior-derived label — the run is treated as unlabeled. Intrinsic
@@ -927,7 +935,6 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
         composite_reward = annotation.get("composite_reward") if annotation is not None else None
         if not _is_admitted(label, composite_reward, config.filters):
             continue
-        after_filters += 1
 
         archive_path = Path(row["archive_path"])
         traj_path = archive_path / "trajectory.json"
@@ -949,6 +956,7 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
                 f"trajectory.json at {archive_path}",
             )
             continue
+        after_filters += 1
         records.append(
             _build_record(
                 row, trajectory, row.get("stack"), manifest,
@@ -1011,6 +1019,15 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     #    (``trajectory_set_hash``); versions reflect the annotations actually
     #    emitted (post-stratify). ``as_of`` echoes the config pin, falling back to
     #    the resolved write-time when unpinned. Skipped on dry_run (handled above).
+    #    Also skipped when the corpus is empty — an empty-set hash is misleading.
+    if not records:
+        print_info(console, f"Wrote 0 records to {config.out_path} — skipping lineage manifest")
+        return {
+            "total_runs_in_index": total_in_index,
+            "after_filters": after_filters,
+            "after_stratify": after_stratify,
+            "emitted": 0,
+        }
     included_session_ids = [r["session_id"] for r in records]
     included_versions = [session_versions.get(sid, (None, None)) for sid in included_session_ids]
     resolved_as_of = config.as_of or datetime.now(timezone.utc).isoformat()
