@@ -98,6 +98,10 @@ class _PhaseAgg:
     true if any step in this phase ran on a model we cannot price (no
     ``cost_usd`` from the backend AND not in MODEL_PRICES); the table cell
     then renders ``—`` per M6.
+
+    Attributes:
+        first_timestamp: ISO-8601 timestamp of the earliest step in this phase.
+        last_timestamp: ISO-8601 timestamp of the latest step in this phase.
     """
 
     phase_key: str
