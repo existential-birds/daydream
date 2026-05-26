@@ -153,6 +153,42 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch, make_wo
     assert result[0]["file"] == "foo.py"
 
 
+@pytest.mark.asyncio
+async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(tmp_path, monkeypatch, make_work):
+    """phase_fix must hand the agent the SCOPE and PRECEDENCE guardrails."""
+    from daydream.phases import phase_fix
+
+    monkeypatch.setattr("daydream.phases.print_fix_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_fix_complete", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    captured_prompts: list[str] = []
+
+    class CapturingBackend:
+        model = "test-model"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            captured_prompts.append(prompt)
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    item = {"id": 1, "description": "Off-by-one in loop bound", "file": "src/handler.py", "line": 42}
+
+    await phase_fix(CapturingBackend(), make_work(tmp_path), item, 1, 1)
+
+    assert len(captured_prompts) == 1
+    fix_prompt = captured_prompts[0]
+    assert "Anchor the change to what this finding names" in fix_prompt
+    # Necessary expansion is allowed but must be declared, not silent.
+    assert "justify each out-of-scope edit in your commit message" in fix_prompt
+    assert "the contract wins" in fix_prompt
+
+
 class TestBuildFixPrompt:
     """Tests for _build_fix_prompt helper."""
 
@@ -195,6 +231,7 @@ class TestBuildFixPrompt:
         assert "- src/bar.py" in result
         assert "- src/foo.py" in result
         assert "Focus on the files listed above" in result
+        assert "if a correct fix needs another file, edit it and say which and why" in result
         # Deduplication: foo.py should appear only once
         assert result.count("- src/foo.py") == 1
 
@@ -205,6 +242,7 @@ class TestBuildFixPrompt:
 
         assert "Files modified" not in result
         assert "Focus on the files" not in result
+        assert "if a correct fix needs another file" not in result
         assert "Analyze the failures and fix them" in result
 
     def test_empty_feedback_items_omits_file_section(self):
