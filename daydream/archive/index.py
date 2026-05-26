@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS runs (
     loop INTEGER NOT NULL DEFAULT 0,
     remote_url TEXT,
     repo_slug TEXT,
+    source_path TEXT,
     branch TEXT,
     base_branch TEXT,
     head_sha TEXT,
@@ -116,7 +117,7 @@ _UPSERT_SQL = """
 INSERT OR REPLACE INTO runs (
     session_id, archived_at, status, run_flow, skill, model, backend,
     review_backend, fix_backend, test_backend,
-    review_only, deep, loop, remote_url, repo_slug, branch, base_branch,
+    review_only, deep, loop, remote_url, repo_slug, source_path, branch, base_branch,
     head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
     grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
     total_prompt_tokens, total_completion_tokens, total_cached_tokens,
@@ -124,7 +125,7 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (
     :session_id, :archived_at, :status, :run_flow, :skill, :model, :backend,
     :review_backend, :fix_backend, :test_backend,
-    :review_only, :deep, :loop, :remote_url, :repo_slug, :branch, :base_branch,
+    :review_only, :deep, :loop, :remote_url, :repo_slug, :source_path, :branch, :base_branch,
     :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
     :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
     :total_prompt_tokens, :total_completion_tokens, :total_cached_tokens,
@@ -144,6 +145,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("base_sha", "TEXT"),
         ("changed_files", "TEXT"),
         ("composite_reward", "REAL"),
+        ("source_path", "TEXT"),
     ]
     for col, col_type in migrations:
         if col not in existing:
@@ -237,6 +239,7 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "loop": int(manifest.loop),
                 "remote_url": manifest.remote_url,
                 "repo_slug": manifest.repo_slug,
+                "source_path": manifest.source_path,
                 "branch": manifest.branch,
                 "base_branch": manifest.base_branch,
                 "head_sha": manifest.head_sha,

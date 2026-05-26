@@ -138,6 +138,7 @@ def _archive_run_inner(
         evaluation = _run_eval(target_dir, recorder.session_id, run_dir)
 
     # 4. Build and write manifest
+    source_path = str(work.source) if work is not None else str(target_dir)
     manifest = build_manifest(
         recorder=recorder,
         config=config,
@@ -145,6 +146,7 @@ def _archive_run_inner(
         status=status,
         archive_path=run_dir,
         evaluation=evaluation,
+        source_path=source_path,
     )
     manifest_path = run_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")

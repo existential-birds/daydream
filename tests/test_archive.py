@@ -733,6 +733,42 @@ def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
     assert json.loads(pinned["labels"]) == ["unknown"]
 
 
+def test_manifest_includes_source_path():
+    """source_path appears in manifest dict under git section."""
+    m = Manifest(
+        session_id="test-session",
+        source_path="/home/user/code/myrepo",
+        remote_url="git@github.com:org/repo.git",
+        repo_slug="org/repo",
+    )
+    d = m.to_dict()
+    assert d["git"]["source_path"] == "/home/user/code/myrepo"
+
+
+def test_source_path_indexed_in_sqlite(tmp_path: Path):
+    """source_path round-trips through upsert_run → query_runs."""
+    idx_dir = tmp_path / "idx"
+    idx_dir.mkdir()
+    m = Manifest(
+        session_id="sp-test",
+        archived_at="2026-01-01T00:00:00Z",
+        run_flow="normal",
+        backend="claude",
+        source_path="/original/repo/path",
+        archive_path=str(tmp_path),
+    )
+    upsert_run(idx_dir, m)
+    rows = query_runs(idx_dir)
+    assert rows[0]["source_path"] == "/original/repo/path"
+
+
+def test_source_path_defaults_to_none():
+    """Old manifests without source_path still work."""
+    m = Manifest(session_id="old")
+    assert m.source_path is None
+    assert m.to_dict()["git"]["source_path"] is None
+
+
 def test_update_labels_is_backward_compat_thin_wrapper(tmp_path: Path) -> None:
     """The legacy update_labels() now writes through append_label_observation
     so existing callers continue to work without source changes."""
