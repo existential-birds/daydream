@@ -72,6 +72,7 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+from rich.console import Console
 
 from daydream import git_ops
 from daydream.archive.index import append_label_observation, query_runs
@@ -91,7 +92,6 @@ from daydream.training.labeler_signals import (
 from daydream.training.reward import ScoringInputs, score_trajectory
 from daydream.training.rubric import Rubric, derive_outcome_label
 from daydream.ui import create_console, print_warning
-from rich.console import Console
 
 _VERDICTS_FILE = "recommendation-verdicts.json"
 """Bronze artifact (under ``deep/``) carrying the ``verdicts`` list."""
@@ -607,7 +607,9 @@ def _resolve_repo_for_row(
     return cached_repo
 
 
-def _materialize_base_sha_if_missing(row: dict[str, Any], run_dir: Path, repo_clone: Path | None, *, console: Console | None = None) -> None:
+def _materialize_base_sha_if_missing(
+    row: dict[str, Any], run_dir: Path, repo_clone: Path | None, *, console: Console | None = None
+) -> None:
     """Opportunistically backfill ``code_context.base_sha`` into the manifest.
 
     Only acts when ``manifest.json`` exists AND ``repo_clone`` is available.
@@ -741,7 +743,9 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
     for row in queue:
         try:
             run_dir = Path(row["archive_path"])
-            row_repo_clone = _resolve_repo_for_row(row, clone_cache=clone_cache, fetched_repos=fetched_repos, console=console)
+            row_repo_clone = _resolve_repo_for_row(
+                row, clone_cache=clone_cache, fetched_repos=fetched_repos, console=console
+            )
             _materialize_base_sha_if_missing(row, run_dir, repo_clone=row_repo_clone, console=console)
             payload = build_annotation(
                 row,
