@@ -47,6 +47,7 @@ class Manifest:
         review_only: Whether the run was review-only.
         deep: Whether deep review mode was used.
         loop: Whether loop mode was enabled.
+        source_path: Absolute path to the source repository at archive time.
         remote_url: Git remote origin URL.
         repo_slug: ``owner/repo`` extracted from remote URL.
         branch: Git branch name at run time.
@@ -93,6 +94,7 @@ class Manifest:
     loop: bool = False
 
     # Git context
+    source_path: str | None = None
     remote_url: str | None = None
     repo_slug: str | None = None
     branch: str | None = None
@@ -146,6 +148,7 @@ class Manifest:
                 "loop": self.loop,
             },
             "git": {
+                "source_path": self.source_path,
                 "remote_url": self.remote_url,
                 "repo_slug": self.repo_slug,
                 "branch": self.branch,
@@ -191,6 +194,7 @@ def build_manifest(
     status: str,
     archive_path: Path,
     evaluation: dict[str, Any] | None = None,
+    source_path: str | None = None,
 ) -> Manifest:
     """Construct a Manifest from run context.
 
@@ -201,6 +205,7 @@ def build_manifest(
         status: Run status (``complete``, ``partial``, ``failed``).
         archive_path: Absolute path to the archive directory for this run.
         evaluation: Optional ``analyze_session()`` result dict.
+        source_path: Absolute path to the source repository at archive time.
 
     Returns:
         A fully populated Manifest.
@@ -221,6 +226,7 @@ def build_manifest(
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         loop=config.loop,
+        source_path=source_path,
         remote_url=git_ctx.remote_url,
         repo_slug=git_ctx.repo_slug,
         branch=git_ctx.branch,

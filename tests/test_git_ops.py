@@ -731,3 +731,58 @@ def test_gh_pr_view_includes_pr_arg_when_given(
     assert result == {"number": 42}
     cmd = captured["cmd"]
     assert cmd[:4] == ["gh", "pr", "view", "42"]
+
+
+# --- clone -------------------------------------------------------------------
+
+
+def _make_bare_remote(tmp_path: Path) -> Path:
+    """Create a bare remote repo with one committed file."""
+    repo = _make_repo_with_main(tmp_path / "src")
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "clone", "--bare", str(repo), str(bare)], check=True, capture_output=True)  # noqa: S603, S607 - arguments are not user-controlled
+    return bare
+
+
+def test_clone_creates_working_tree(tmp_path: Path) -> None:
+    """clone() creates a functional git working tree from a bare remote."""
+    bare = _make_bare_remote(tmp_path)
+    target = tmp_path / "cloned"
+    git_ops.clone(str(bare), target)
+    assert (target / ".git").is_dir()
+    assert (target / "base.txt").read_text() == "base\n"
+
+
+def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:
+    """clone() raises GitError when the remote URL is invalid."""
+    target = tmp_path / "nope"
+    with pytest.raises(git_ops.GitError, match="git clone .* failed"):
+        git_ops.clone("file:///nonexistent/repo.git", target)
+
+
+def test_clone_blobless_passes_filter_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """clone(blobless=True) includes --filter=blob:none in the git invocation."""
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    git_ops.clone("https://example.com/repo.git", tmp_path / "out", blobless=True)
+    assert "--filter=blob:none" in captured["cmd"]
+
+
+def test_clone_default_no_filter_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """clone() without blobless does not pass --filter."""
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    git_ops.clone("https://example.com/repo.git", tmp_path / "out")
+    assert "--filter=blob:none" not in captured["cmd"]
