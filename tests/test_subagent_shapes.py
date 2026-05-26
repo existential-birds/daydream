@@ -1,9 +1,9 @@
 """TEST-07: Subagent trajectory shape validation.
 
 Uses MockBackend to drive the recorder's fork() path across the parallel
-fan-out phases it must support: a FIX-phase fan-out, deep-mode per-stack
-reviews, and exploration pre_scan specialists. Validates the resulting root +
-sibling trajectory file sets against the vendored ATIF validator.
+fan-out phases it must support: deep-mode per-stack reviews and exploration
+pre_scan specialists. Validates the resulting root + sibling trajectory file
+sets against the vendored ATIF validator.
 
 Per D-03, these tests exercise the real recorder code with fake backends.
 No pre-recorded fixture files.
@@ -91,56 +91,6 @@ def _observe_text_and_result(inv: Invocation, text: str = "output") -> None:
     inv.observe(ResultEvent(structured_output=None, continuation=None))
 
 
-async def test_fix_parallel_produces_n_sibling_files(tmp_path: Path) -> None:
-    """Fix-parallel fork: 3 children produce 3 sibling files with valid trajectories."""
-    recorder = _make_recorder(tmp_path)
-    children: list[TrajectoryRecorder] = []
-
-    async with recorder:
-        for i in range(3):
-            async with recorder.fork(f"fix-{i}") as child:
-                children.append(child)
-                async with child.invocation(phase=DaydreamPhase.FIX) as inv:
-                    _observe_text_and_result(inv, f"fix-{i}-output")
-        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            _observe_text_and_result(inv, "parent-review")
-
-    parent_traj = _read_trajectory(recorder.path)
-    assert atif_validate(parent_traj) is True
-
-    # Dispatch step has 3 ObservationResult entries with subagent_trajectory_ref
-    dispatch_steps = [
-        s for s in parent_traj["steps"]
-        if s["source"] == "agent" and "Dispatching" in s.get("message", "")
-    ]
-    assert len(dispatch_steps) == 1
-    results = dispatch_steps[0]["observation"]["results"]
-    assert len(results) == 3
-    descriptors_found = set()
-    for r in results:
-        refs = r["subagent_trajectory_ref"]
-        assert len(refs) == 1
-        path_str = refs[0]["trajectory_path"]
-        for desc in ("fix-0", "fix-1", "fix-2"):
-            if desc in path_str:
-                descriptors_found.add(desc)
-    assert descriptors_found == {"fix-0", "fix-1", "fix-2"}
-
-    # 3 sibling files exist under the per-run trajectories/ subdir.
-    traj_dir = (
-        tmp_path / ".daydream" / "runs" / recorder.session_id / "trajectories"
-    )
-    sibling_files = sorted(traj_dir.iterdir())
-    assert len(sibling_files) == 3
-
-    # Each child passes validation and shares session_id with parent
-    for child in children:
-        child_traj = _read_trajectory(child.path)
-        assert atif_validate(child_traj) is True
-        assert child_traj["session_id"] == parent_traj["session_id"]
-
-
 async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
     """Deep-mode fork: 2 per-stack children with run_flow=DEEP."""
     recorder = _make_recorder(tmp_path, run_flow=DaydreamRunFlow.DEEP)
@@ -180,7 +130,12 @@ async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
 
 
 async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> None:
-    """Exploration fork: 3 specialist children produce valid sibling trajectories."""
+    """Exploration fork: 3 specialist children produce 3 valid sibling files.
+
+    Also covers what the deleted fix-parallel test uniquely asserted: sibling
+    trajectory files land in the per-run trajectories/ subdir, and each child
+    inherits the parent's session_id.
+    """
     recorder = _make_recorder(tmp_path)
     children: list[TrajectoryRecorder] = []
     descriptors = ("explore-pattern-scanner", "explore-dependency-tracer", "explore-test-mapper")
@@ -204,11 +159,27 @@ async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> N
     assert len(dispatch_steps) == 1
     results = dispatch_steps[0]["observation"]["results"]
     assert len(results) == 3
+    # Each result carries exactly one sibling trajectory ref naming its child.
+    descriptors_found = set()
+    for r in results:
+        refs = r["subagent_trajectory_ref"]
+        assert len(refs) == 1
+        path_str = refs[0]["trajectory_path"]
+        for desc in descriptors:
+            if desc in path_str:
+                descriptors_found.add(desc)
+    assert descriptors_found == set(descriptors)
 
-    # All 3 children pass validation
+    # All 3 children pass validation and inherit the parent's session_id.
     for child in children:
         child_traj = _read_trajectory(child.path)
         assert atif_validate(child_traj) is True
+        assert child_traj["session_id"] == parent_traj["session_id"]
+
+    # The 3 sibling files land in the per-run trajectories/ subdir.
+    traj_dir = tmp_path / ".daydream" / "runs" / recorder.session_id / "trajectories"
+    sibling_files = sorted(traj_dir.iterdir())
+    assert len(sibling_files) == 3
 
 
 async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> None:
