@@ -51,8 +51,7 @@ def _ids(rows: list[dict]) -> list[str]:
 
 
 def _emitted_ids(out_path: Path) -> list[str]:
-    if not out_path.exists():
-        return []
+    assert out_path.exists(), f"Expected corpus output at {out_path}"
     return [json.loads(line)["session_id"] for line in out_path.read_text(encoding="utf-8").splitlines()]
 
 

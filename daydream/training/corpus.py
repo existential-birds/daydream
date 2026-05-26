@@ -935,6 +935,7 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
         composite_reward = annotation.get("composite_reward") if annotation is not None else None
         if not _is_admitted(label, composite_reward, config.filters):
             continue
+        after_filters += 1
 
         archive_path = Path(row["archive_path"])
         traj_path = archive_path / "trajectory.json"
@@ -956,7 +957,6 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
                 f"trajectory.json at {archive_path}",
             )
             continue
-        after_filters += 1
         records.append(
             _build_record(
                 row, trajectory, row.get("stack"), manifest,

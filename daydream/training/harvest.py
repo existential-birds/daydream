@@ -349,7 +349,7 @@ def _safe_fix_applied(
             file_at_fetcher=_file_at,
             window_days=window_days,
         )
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, GitError):
         return _FIX_APPLIED_STUB
 
 
@@ -712,7 +712,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         done = cache.completed_sessions()
         queue = [row for row in queue if row["session_id"] not in done]
 
-    repo_clone = config.repo_clone_root or config.archive_dir
+    repo_clone_fallback = config.repo_clone_root or config.archive_dir
 
     summary = {
         "considered": len(queue),
@@ -728,16 +728,17 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         try:
             run_dir = Path(row["archive_path"])
             _materialize_base_sha_if_missing(row, run_dir)
+            row_repo_clone = _resolve_repo_clone(row.get("repo_slug")) or repo_clone_fallback
+            payload = build_annotation(
+                row,
+                run_dir=run_dir,
+                gh_api=gh_api_callable,
+                repo_clone=row_repo_clone,
+                window_days=config.fix_applied_window_days,
+            )
             if config.dry_run:
                 summary["would_annotate"] += 1
             else:
-                payload = build_annotation(
-                    row,
-                    run_dir=run_dir,
-                    gh_api=gh_api_callable,
-                    repo_clone=repo_clone,
-                    window_days=config.fix_applied_window_days,
-                )
                 append_label_observation(
                     config.archive_dir,
                     row["session_id"],

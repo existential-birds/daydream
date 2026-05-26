@@ -27,7 +27,8 @@ def test_posterior_dated_after_pin_is_excluded(tmp_path, archive_dir):
                               valid_at="2026-09-01T00:00:00+00:00")  # valid_at > as_of
     out = tmp_path / "c.jsonl"
     run_build_corpus(BuildCorpusConfig(out_path=out, archive_dir=archive_dir,
-                                       filters=CorpusFilters(), as_of="2026-04-01T00:00:00+00:00"))
+                                       filters=CorpusFilters(include_all_labels=True),
+                                       as_of="2026-04-01T00:00:00+00:00"))
     recs = [json.loads(line) for line in out.read_text().splitlines()]
-    # posterior label leaked from the future is not admitted
-    assert all(r["outcome_label"] != "accepted" for r in recs)
+    assert len(recs) == 1
+    assert recs[0]["outcome_label"] is None

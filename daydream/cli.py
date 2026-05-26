@@ -17,6 +17,7 @@ import inspect
 import signal
 import sys
 import warnings
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import anyio
@@ -421,6 +422,18 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
         labels: tuple[str, ...] = ()
     else:
         labels = tuple(args.label) if args.label else ("accepted",)
+
+    if args.as_of is not None:
+        raw = args.as_of.replace("Z", "+00:00") if args.as_of.endswith("Z") else args.as_of
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            print_error(create_console(), "Invalid --as-of", "Must be an ISO-8601 timestamp.")
+            return 1
+        if dt.tzinfo is None or dt.utcoffset() != timedelta(0):
+            print_error(create_console(), "Invalid --as-of", "Must be a UTC timestamp (ending in Z or +00:00).")
+            return 1
+        args.as_of = dt.astimezone(timezone.utc).isoformat()
 
     filters = CorpusFilters(
         skill=args.skill,
