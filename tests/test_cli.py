@@ -347,21 +347,21 @@ def test_runconfig_has_no_model_field():
 
 
 # ---------------------------------------------------------------------------
-# export-jsonl exit-code regression guard (Task 2 / training-ready-corpus)
+# build-corpus exit-code regression guard (Task 11 / corpus-pipeline-architecture)
 # ---------------------------------------------------------------------------
 # Tier-3 subprocess test: drives the real CLI entry point through `uv run`
 # against an empty archive directory and asserts a clean exit 0. This catches
-# regressions where post-export cleanup paths (signal handlers, atexit hooks,
-# warnings escalation) leak a non-zero exit even though `_handle_export_command`
-# itself returned 0.
+# regressions where post-projection cleanup paths (signal handlers, atexit
+# hooks, warnings escalation) leak a non-zero exit even though
+# `_handle_build_corpus_command` itself returned 0.
 
 
-def test_export_jsonl_exits_0_on_dry_run(tmp_path: Path) -> None:
+def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
     """Production entrypoint must exit 0 on successful dry-run."""
     out = tmp_path / "out.jsonl"
     result = subprocess.run(  # noqa: S603 - args are not user-controlled
         [  # noqa: S607 - hardcoded uv/daydream entrypoint
-            "uv", "run", "daydream", "export-jsonl",
+            "uv", "run", "daydream", "build-corpus",
             "--out", str(out), "--include-all-labels", "--dry-run",
         ],
         capture_output=True,
@@ -374,48 +374,22 @@ def test_export_jsonl_exits_0_on_dry_run(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# label / snapshot subcommand wiring (Task 15 / training-ready-corpus)
+# harvest / build-corpus subcommand wiring (Task 11 / corpus-pipeline-architecture)
 # ---------------------------------------------------------------------------
 
 
-def test_label_subcommand_dry_run_invokes_run_label(monkeypatch, tmp_path: Path) -> None:
-    captured: dict = {}
-    async def fake_run_label(config):
-        captured["config"] = config
-        return {"considered": 0, "labeled": 0, "would_label": 0, "skipped": 0, "errors": 0}
-    monkeypatch.setattr("daydream.training.labeler.run_label", fake_run_label)
-    monkeypatch.setattr("daydream.archive.get_archive_dir", lambda: tmp_path / "archive")
-
-    from daydream.cli import _handle_label_command
-    code = _handle_label_command(["--dry-run"])
-    assert code == 0
-    assert captured["config"].dry_run is True
+def test_harvest_and_build_corpus_dispatch(monkeypatch, tmp_path):
+    from daydream import cli
+    called = {}
+    monkeypatch.setattr("daydream.training.harvest.run_harvest",
+                        lambda cfg: called.setdefault("harvest", cfg) or {"annotated": 0})
+    assert cli._handle_harvest_command(["--archive-dir", str(tmp_path)]) == 0
+    assert "harvest" in called
 
 
-def test_label_subcommand_accepts_window_days(monkeypatch, tmp_path: Path) -> None:
-    captured: dict = {}
-    async def fake_run_label(config):
-        captured["config"] = config
-        return {"considered": 0, "labeled": 0, "would_label": 0, "skipped": 0, "errors": 0}
-    monkeypatch.setattr("daydream.training.labeler.run_label", fake_run_label)
-    monkeypatch.setattr("daydream.archive.get_archive_dir", lambda: tmp_path / "archive")
-
-    from daydream.cli import _handle_label_command
-    code = _handle_label_command(["--fix-applied-window-days", "60"])
-    assert code == 0
-    assert captured["config"].fix_applied_window_days == 60
-
-
-def test_snapshot_subcommand_calls_run_snapshot(monkeypatch, tmp_path: Path) -> None:
-    captured: dict = {}
-    def fake_run_snapshot(config):
-        captured["config"] = config
-        return {"total_runs": 0, "label_counts": {}}
-    monkeypatch.setattr("daydream.training.snapshot.run_snapshot", fake_run_snapshot)
-    monkeypatch.setattr("daydream.archive.get_archive_dir", lambda: tmp_path / "archive")
-
-    out = tmp_path / "snap.json"
-    from daydream.cli import _handle_snapshot_command
-    code = _handle_snapshot_command(["--out", str(out)])
-    assert code == 0
-    assert captured["config"].out_path == out
+def test_removed_verbs_no_longer_dispatch():
+    from daydream import cli
+    # label / export-jsonl / snapshot handlers are gone
+    assert not hasattr(cli, "_handle_label_command")
+    assert not hasattr(cli, "_handle_export_command")
+    assert not hasattr(cli, "_handle_snapshot_command")

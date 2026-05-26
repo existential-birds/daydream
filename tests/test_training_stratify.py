@@ -1,4 +1,4 @@
-"""Tests for daydream.training.export ``_stratify`` (Wave 5).
+"""Tests for daydream.training.corpus ``_stratify`` (Wave 5).
 
 Stratification caps any one stack's share of the corpus at
 ``max_stack_share`` while preserving within-stack input order and emitting
@@ -10,7 +10,7 @@ small corpus (the ``max(1, ...)`` guard), and global session_id ordering.
 
 from __future__ import annotations
 
-from daydream.training.export import _stratify
+from daydream.training.corpus import _stratify
 
 
 def test_stratify_caps_dominant_stack() -> None:

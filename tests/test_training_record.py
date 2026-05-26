@@ -1,4 +1,4 @@
-"""Tests for daydream.training.export record and span builders."""
+"""Tests for daydream.training.corpus record and span builders."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 import jsonschema
 
-from daydream.training.export import _build_record, _build_spans
+from daydream.training.corpus import _build_record, _build_spans
 
 SCHEMA_PATH = Path(__file__).parent.parent / "daydream" / "training" / "schema" / "v1.json"
 
@@ -209,7 +209,7 @@ def test_record_review_output_none_when_file_absent(tmp_path: Path) -> None:
 def test_stack_for_skill_resolves_short_name() -> None:
     """Manifests store short skill names (e.g. 'python'); the stack
     derivation must round-trip them."""
-    from daydream.training.export import _stack_for_skill
+    from daydream.training.corpus import _stack_for_skill
 
     assert _stack_for_skill("python") == "python"
     assert _stack_for_skill("react") == "react"

@@ -38,6 +38,14 @@ class _StubBackend:
         # verdict propagates into the phase_fix prompt via the orchestrator.
         self.verifier_verdict: str = "consistent"
         self.verifier_unverified_assumptions: list[str] = []
+        # Counts test-suite invocations so a test can make the FIRST run report
+        # a failure (driving the heal loop into choice "2") and the SECOND run
+        # report a pass. Default 0 keeps existing tests unchanged.
+        self.test_suite_calls: int = 0
+        # When True, the default test-suite branch reports failure on the first
+        # call and success thereafter. Off by default so existing tests (which
+        # never reach the real test-and-heal loop) are unaffected.
+        self.fail_first_test_run: bool = False
 
     async def execute(
         self,
@@ -171,6 +179,20 @@ class _StubBackend:
                 },
                 continuation=None,
             )
+            return
+
+        # Test-and-heal test-suite run. The prompt is constant
+        # ("Run the project's test suite. Report if tests pass or fail."), so a
+        # call counter drives the result: when fail_first_test_run is set, the
+        # FIRST run reports a failure (so detect_test_success() is False and the
+        # heal loop reaches choice "2") and subsequent runs report a pass.
+        if "run the project's test suite" in pl:
+            self.test_suite_calls += 1
+            if self.fail_first_test_run and self.test_suite_calls == 1:
+                yield TextEvent(text="1 failed, 0 passed")
+            else:
+                yield TextEvent(text="2 passed, 0 failed")
+            yield ResultEvent(structured_output=None, continuation=None)
             return
 
         # Default: empty text + no structured output.
@@ -1232,7 +1254,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     async def _stub_fix(backend, work, item, idx, total):  # noqa: ARG001
         return None
 
-    async def _stub_test(backend, work):  # noqa: ARG001
+    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
         return (True, 0)
 
     async def _stub_commit(backend, work):  # noqa: ARG001
@@ -1284,7 +1306,7 @@ async def test_verifier_runs_after_merge_before_fix(
     async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
         return None
 
-    async def _stub_test(backend, work):  # noqa: ARG001
+    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
         return (True, 0)
 
     async def _stub_commit(backend, work):  # noqa: ARG001
@@ -1362,7 +1384,7 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
     async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
         return None
 
-    async def _stub_test(backend, work):  # noqa: ARG001
+    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
         return (True, 0)
 
     async def _stub_commit(backend, work):  # noqa: ARG001
@@ -1388,4 +1410,70 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
     ), (
         "unverified_assumptions did not propagate into the fix prompt; "
         f"fix prompts seen: {fix_prompts!r}"
+    )
+
+
+async def test_heal_loop_receives_feedback_items_in_fix_prompt(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deep mode threads parsed feedback_items into phase_test_and_heal so the
+    heal loop's fix prompt names the changed files.
+
+    Drives the REAL phase_test_and_heal: the first test-suite run reports a
+    failure (so detect_test_success() is False), the heal menu reaches choice
+    "2", _build_fix_prompt() runs with the feedback_items, and the second
+    test-suite run reports a pass so the run completes. Asserts the resulting
+    heal fix prompt (the one starting with "The tests failed.") names the
+    feedback file "api.py" and carries the "Focus on the files listed above."
+    scope instruction -- the observable consequence of feedback_items flowing
+    parse -> orchestrator -> phase_test_and_heal -> _build_fix_prompt.
+    """
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    # Apply-fixes gate (orchestrator) -> "y".
+    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
+
+    # phases.prompt_user is shared: intent-confirmation needs "y"; the
+    # test-and-heal menu ("Choice") needs "2" (fix-and-retry). Dispatch on the
+    # message arg (second positional: prompt_user(console, message, default)).
+    def _phases_prompt(console: Any, message: str, default: str = "") -> str:  # noqa: ARG001
+        return "2" if "Choice" in message else "y"
+
+    monkeypatch.setattr("daydream.phases.prompt_user", _phases_prompt)
+
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    # Make the FIRST test-suite run fail and the SECOND pass.
+    stub.fail_first_test_run = True
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    async def _stub_commit(backend, work):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    # phase_test_and_heal is left REAL so feedback_items must flow through it.
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0, "deep run did not complete -- heal loop should pass on the second test run"
+
+    # The heal fix prompt is the one _build_fix_prompt produces. Without the
+    # orchestrator threading feedback_items, it would lack "api.py" and the
+    # scope instruction -- this is the regression-distinguishing assertion.
+    heal_prompts = [c["prompt"] for c in stub.calls if c["prompt"].startswith("The tests failed.")]
+    assert heal_prompts, "heal loop did not dispatch a fix prompt -- choice '2' path not reached"
+    heal_prompt = heal_prompts[0]
+    assert "api.py" in heal_prompt, (
+        "feedback file 'api.py' missing from heal fix prompt -- feedback_items "
+        f"did not reach _build_fix_prompt; prompt was: {heal_prompt!r}"
+    )
+    assert "Focus on the files listed above." in heal_prompt, (
+        "scope instruction missing from heal fix prompt -- feedback_items not "
+        f"honored; prompt was: {heal_prompt!r}"
+    )
+    # The first test-suite call failed, the second passed: exactly two runs.
+    assert stub.test_suite_calls == 2, (
+        f"expected 2 test-suite runs (fail then pass), saw {stub.test_suite_calls}"
     )

@@ -197,7 +197,7 @@ def _print_missing_skill_error(skill_name: str) -> None:
 
 
 def _make_archive_callback(
-    config: RunConfig, target_dir: Path,
+    config: RunConfig, target_dir: Path, work: WorkContext | None = None,
 ) -> Callable[[TrajectoryRecorder, str], None] | None:
     """Build the on_write archive callback, or None if archiving is disabled."""
     if not config.archive:
@@ -212,6 +212,7 @@ def _make_archive_callback(
             config=config,
             status=status,
             run_eval=config.run_eval,
+            work=work,
         )
 
     return _cb
@@ -471,7 +472,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir),
+        on_write=_make_archive_callback(config, target_dir, work),
     ):
         console.print()
         print_info(console, f"PR feedback mode: PR #{pr_number}")
@@ -626,7 +627,7 @@ async def _run_review_or_comment(
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir),
+        on_write=_make_archive_callback(config, target_dir, work),
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")
@@ -783,7 +784,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir),
+        on_write=_make_archive_callback(config, target_dir, work),
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")

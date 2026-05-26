@@ -17,7 +17,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from daydream.archive.index import upsert_run
+from daydream.archive.index import append_label_observation, upsert_run
 from daydream.archive.manifest import Manifest
 
 ARCHIVED_AT = "2026-05-17T00:00:00+00:00"
@@ -144,8 +144,15 @@ def build_fixture_archive(root: Path) -> None:
 
     Creates ``root/runs/<session_id>/`` for every entry of
     ``FIXTURE_SESSIONS``, writes ``manifest.json`` + a minimal
-    ``trajectory.json`` to each, and upserts the row into
-    ``root/index.db`` via the production ``upsert_run`` helper.
+    ``trajectory.json`` to each, upserts the row into ``root/index.db`` via the
+    production ``upsert_run`` helper, and appends one ``label_observation``
+    (silver) per session mirroring its ``outcome_labels``.
+
+    The annotation append is required because the build-corpus projection reads
+    each run's label/reward from the ``as_of``-pinned silver row rather than the
+    denormalized ``runs.outcome_labels`` cache. Without it every fixture run
+    would be treated as unlabeled and the accepted-only filter would emit
+    nothing.
 
     Args:
         root: Directory that will play the role of the daydream archive
@@ -168,3 +175,12 @@ def build_fixture_archive(root: Path) -> None:
             encoding="utf-8",
         )
         upsert_run(root, manifest)
+        append_label_observation(
+            root,
+            session.session_id,
+            labels=list(session.outcome_labels),
+            pr_state=None,
+            labeler_version="fixture",
+            evidence_sha=None,
+            valid_at=None,
+        )

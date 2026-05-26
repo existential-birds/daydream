@@ -10,10 +10,15 @@ Exports:
     update_labels: Update outcome labels for a session (supports prefix matching).
     query_runs: Query runs with optional WHERE clause.
     count_runs: Count rows matching an optional WHERE clause.
-    append_label_observation: Append a row to the immutable label_observations
-        history and refresh the denormalized runs cache.
+    append_label_observation: Append a row to the immutable bitemporal
+        label_observations history (``observed_at`` transaction time,
+        ``valid_at`` valid time, plus reward columns) and refresh the
+        denormalized runs cache.
     latest_label_observation: Return the most recent label_observations row for
         a session, optionally constrained by an ``as_of`` cutoff timestamp.
+    bulk_latest_label_observations: Return the most recent label_observations
+        row for each session in a collection — single round-trip alternative to
+        calling ``latest_label_observation`` in a loop.
     label_observation_history: Return the full label_observations history for
         a session in chronological order.
     label_count_summary: Return label counts for all runs in a single aggregate
@@ -30,7 +35,7 @@ from pathlib import Path
 
 from daydream.archive.manifest import Manifest
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -68,20 +73,33 @@ CREATE TABLE IF NOT EXISTS runs (
     outcome_labels TEXT NOT NULL DEFAULT '[]',
     labeled_at TEXT,
     rubric_json TEXT,
+    composite_reward REAL,
     archive_path TEXT NOT NULL,
     schema_version INTEGER NOT NULL DEFAULT 1
 )
 """
 
+# Append-only bitemporal annotation history. ``observed_at`` is transaction
+# time (when the annotation was recorded); ``valid_at`` is valid time (when the
+# outcome the annotation describes became true, e.g. a PR merge timestamp). The
+# reward columns (``reward_version``, ``reward_json``, ``composite_reward``)
+# carry the full ``RewardBreakdown`` plus its cached composite scalar so a
+# corpus re-projection has every axis and each annotation generation is
+# self-describing (the ``runs.composite_reward`` mirror remains the SQL-threshold
+# cache). See spec ``corpus-pipeline-architecture`` (silver layer).
 _CREATE_LABEL_OBSERVATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS label_observations (
-    session_id      TEXT NOT NULL,
-    observed_at     TEXT NOT NULL,
-    labels          TEXT NOT NULL,
-    pr_state        TEXT,
-    labeler_version TEXT NOT NULL,
-    evidence_sha    TEXT,
-    rubric_json     TEXT,
+    session_id       TEXT NOT NULL,
+    observed_at      TEXT NOT NULL,
+    labels           TEXT NOT NULL,
+    pr_state         TEXT,
+    labeler_version  TEXT NOT NULL,
+    evidence_sha     TEXT,
+    rubric_json      TEXT,
+    valid_at         TEXT,
+    reward_version   TEXT,
+    reward_json      TEXT,
+    composite_reward REAL,
     PRIMARY KEY (session_id, observed_at)
 )
 """
@@ -102,7 +120,7 @@ INSERT OR REPLACE INTO runs (
     head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
     grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
     total_prompt_tokens, total_completion_tokens, total_cached_tokens,
-    outcome_labels, labeled_at, archive_path, schema_version
+    outcome_labels, labeled_at, composite_reward, archive_path, schema_version
 ) VALUES (
     :session_id, :archived_at, :status, :run_flow, :skill, :model, :backend,
     :review_backend, :fix_backend, :test_backend,
@@ -110,7 +128,7 @@ INSERT OR REPLACE INTO runs (
     :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
     :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
     :total_prompt_tokens, :total_completion_tokens, :total_cached_tokens,
-    :outcome_labels, :labeled_at, :archive_path, :schema_version
+    :outcome_labels, :labeled_at, :composite_reward, :archive_path, :schema_version
 )
 """
 
@@ -125,6 +143,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("rubric_json", "TEXT"),
         ("base_sha", "TEXT"),
         ("changed_files", "TEXT"),
+        ("composite_reward", "REAL"),
     ]
     for col, col_type in migrations:
         if col not in existing:
@@ -133,6 +152,30 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+
+
+def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
+    """Drop and recreate ``label_observations`` if it predates the bitemporal columns.
+
+    The bitemporal/reward columns are part of the table's primary structure, so
+    rather than `ALTER TABLE ADD COLUMN` (which cannot retrofit them cleanly for
+    the spec's clean-recreate guarantee), a stale table is dropped and rebuilt.
+    Dev label rows are discarded (spec-sanctioned — repopulate via ``harvest``).
+    The ``runs`` table is never touched. Idempotent: after a recreate the
+    ``valid_at`` column exists, so subsequent calls are a no-op.
+
+    Args:
+        conn: An open connection whose ``label_observations`` table exists.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
+    if existing and "valid_at" not in existing:
+        warnings.warn(
+            "label_observations table predates bitemporal columns and will be dropped "
+            "and recreated. Existing label rows will be lost — repopulate via `harvest`.",
+            stacklevel=2,
+        )
+        conn.execute("DROP TABLE label_observations")
+        conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
 
 
 def _get_connection(archive_dir: Path) -> sqlite3.Connection:
@@ -155,6 +198,7 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(_CREATE_TABLE)
     conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
+    _recreate_label_observations_if_stale(conn)
     _migrate_schema(conn)
     for idx_sql in _CREATE_INDEXES:
         conn.execute(idx_sql)
@@ -211,6 +255,7 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "total_cached_tokens": manifest.total_cached_tokens,
                 "outcome_labels": manifest.outcome_labels,
                 "labeled_at": manifest.labeled_at,
+                "composite_reward": manifest.composite_reward,
                 "archive_path": manifest.archive_path,
                 "schema_version": SCHEMA_VERSION,
             },
@@ -229,12 +274,18 @@ def append_label_observation(
     labeler_version: str,
     evidence_sha: str | None,
     rubric_json: str | None = None,
+    valid_at: str | None = None,
+    reward_version: str | None = None,
+    reward_json: str | None = None,
+    composite_reward: float | None = None,
 ) -> None:
     """Append a row to the immutable ``label_observations`` history.
 
     Writes a single ``(session_id, observed_at)`` row capturing the current
-    label decision and, in the same transaction, refreshes the denormalized
-    ``runs.outcome_labels`` / ``runs.labeled_at`` / ``runs.rubric_json`` cache.
+    label decision plus the bitemporal valid time and reward breakdown, and in
+    the same transaction refreshes the denormalized
+    ``runs.outcome_labels`` / ``runs.labeled_at`` / ``runs.rubric_json`` /
+    ``runs.composite_reward`` cache.
 
     Args:
         archive_dir: Path to the archive root.
@@ -247,11 +298,25 @@ def append_label_observation(
         evidence_sha: Optional commit SHA / artifact hash that grounds the
             decision; ``None`` when no concrete evidence applies.
         rubric_json: Optional JSON-serialised rubric (``Rubric.to_dict()``).
+        valid_at: ISO 8601 valid time — when the outcome the annotation
+            describes became true (e.g. a PR merge timestamp). ``None`` for
+            non-PR/local runs, in which case it collapses to ``observed_at``
+            so an ``as_of``-pinned corpus never spuriously drops the run (Q2).
+        reward_version: Version tag of the reward reducer that produced
+            ``reward_json`` (``RewardBreakdown.reward_version``); ``None`` when
+            no reward was scored.
+        reward_json: Full ``RewardBreakdown.to_dict()`` serialised as JSON so a
+            corpus re-projection has every axis; ``None`` when unscored.
+        composite_reward: The cached composite reward scalar. Persisted on the
+            ``label_observations`` row (so each annotation generation is
+            self-describing) and mirrored onto ``runs.composite_reward`` for
+            SQL thresholding; ``None`` when uncomputable.
 
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table.
     """
     observed_at = datetime.now(timezone.utc).isoformat()
+    valid_at_value = valid_at if valid_at is not None else observed_at
     labels_json = json.dumps(labels)
     conn = _get_connection(archive_dir)
     try:
@@ -264,8 +329,9 @@ def append_label_observation(
             raise ValueError(msg)
         conn.execute(
             "INSERT INTO label_observations "
-            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
+            "valid_at, reward_version, reward_json, composite_reward) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 observed_at,
@@ -274,11 +340,16 @@ def append_label_observation(
                 labeler_version,
                 evidence_sha,
                 rubric_json,
+                valid_at_value,
+                reward_version,
+                reward_json,
+                composite_reward,
             ),
         )
         conn.execute(
-            "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ? WHERE session_id = ?",
-            (labels_json, observed_at, rubric_json, session_id),
+            "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ?, composite_reward = ? "
+            "WHERE session_id = ?",
+            (labels_json, observed_at, rubric_json, composite_reward, session_id),
         )
         conn.commit()
     finally:
@@ -320,6 +391,76 @@ def latest_label_observation(
             )
         row = cursor.fetchone()
         return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def bulk_latest_label_observations(
+    archive_dir: Path,
+    session_ids: list[str],
+    *,
+    as_of: str | None = None,
+) -> dict[str, dict]:
+    """Return the most recent label observation for each session in *session_ids*.
+
+    Fetches all matching rows in a single SQL query instead of one query per
+    session, eliminating the N+1 pattern when building a corpus.
+
+    When ``as_of`` is provided, only observations whose ``observed_at <= as_of``
+    are considered — the same temporal constraint applied by
+    :func:`latest_label_observation`.
+
+    Args:
+        archive_dir: Path to the archive root.
+        session_ids: Collection of session UUIDs to look up.
+        as_of: Optional ISO 8601 cutoff timestamp.
+
+    Returns:
+        Mapping of ``session_id`` → row dict for every session that has at
+        least one qualifying observation.  Sessions with no observation are
+        absent from the returned dict (callers should treat them as ``None``).
+    """
+    if not session_ids:
+        return {}
+    placeholders = ",".join("?" * len(session_ids))
+    conn = _get_connection(archive_dir)
+    try:
+        if as_of is None:
+            cursor = conn.execute(
+                f"""
+                SELECT *
+                FROM (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY session_id
+                               ORDER BY observed_at DESC
+                           ) AS _rn
+                    FROM label_observations
+                    WHERE session_id IN ({placeholders})
+                )
+                WHERE _rn = 1
+                """,
+                session_ids,
+            )
+        else:
+            cursor = conn.execute(
+                f"""
+                SELECT *
+                FROM (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY session_id
+                               ORDER BY observed_at DESC
+                           ) AS _rn
+                    FROM label_observations
+                    WHERE session_id IN ({placeholders})
+                      AND observed_at <= ?
+                )
+                WHERE _rn = 1
+                """,
+                [*session_ids, as_of],
+            )
+        return {row["session_id"]: dict(row) for row in cursor.fetchall()}
     finally:
         conn.close()
 

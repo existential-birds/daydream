@@ -6,15 +6,18 @@ positional):
 
 - ``daydream feedback <pr#>`` — apply bot PR-review comments
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
-- ``daydream export-jsonl --out <path>`` — export archive to JSONL
-- ``daydream label`` — walk the archive and label each unlabeled run
-- ``daydream snapshot --out <path>`` — write a corpus snapshot JSON
+- ``daydream harvest`` — walk the archive and append one bitemporal
+  annotation (outcome label + intrinsic reward) per indexed run
+- ``daydream build-corpus --out <path>`` — project the as-of-pinned
+  annotations into a JSONL training corpus plus a lineage manifest
 """
 
 import argparse
+import inspect
 import signal
 import sys
 import warnings
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import anyio
@@ -258,16 +261,16 @@ def _run_summarize(args: argparse.Namespace) -> int:
     return summarize(args.path)
 
 
-def _build_export_jsonl_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream export-jsonl --out <path> [...]``.
+def _build_build_corpus_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream build-corpus --out <path> [...]``.
 
-    Like ``summarize`` and ``feedback``, ``export-jsonl`` is dispatched manually
+    Like ``summarize`` and ``feedback``, ``build-corpus`` is dispatched manually
     from ``main()`` before the main parser runs so its options don't collide
     with the top-level ``TARGET`` positional.
     """
     parser = argparse.ArgumentParser(
-        prog="daydream export-jsonl",
-        description="Export archived runs as JSONL training records (one object per run).",
+        prog="daydream build-corpus",
+        description="Project as-of-pinned annotations into JSONL training records (one object per run).",
     )
 
     # Required output path.
@@ -304,6 +307,14 @@ def _build_export_jsonl_parser() -> argparse.ArgumentParser:
         default=None,
         dest="min_grounding",
         help="Drop runs below this grounding_rate",
+    )
+    parser.add_argument(
+        "--min-reward",
+        type=float,
+        default=None,
+        dest="min_reward",
+        help="Alternative admission path: admit runs whose pinned annotation has "
+             "composite_reward >= this threshold, even if not 'accepted'",
     )
     parser.add_argument(
         "--status",
@@ -358,20 +369,39 @@ def _build_export_jsonl_parser() -> argparse.ArgumentParser:
         help="Write schema.json next to --out, skip records",
     )
 
+    # ---- Bitemporal pin ----
+    parser.add_argument(
+        "--as-of",
+        type=str,
+        default=None,
+        dest="as_of",
+        metavar="ISO_TS",
+        help="ISO-8601 transaction-time pin; resolve each run's annotation "
+             "as of this instant for reproducible corpora (default: latest)",
+    )
+
     return parser
 
 
-def _handle_export_command(argv: list[str]) -> int:
-    """Handle ``daydream export-jsonl --out <path> [...]``.
+def _handle_build_corpus_command(argv: list[str]) -> int:
+    """Handle ``daydream build-corpus --out <path> [...]``.
 
-    Returns an exit code rather than calling :func:`sys.exit`; ``main()`` is
-    responsible for translating the code into a process exit. This keeps the
-    handler easy to drive from tests.
+    Drives :func:`daydream.training.corpus.run_build_corpus` synchronously
+    (``build-corpus`` does no agent work — just SQLite reads and a JSONL +
+    lineage-manifest write). Returns an exit code rather than calling
+    :func:`sys.exit`; ``main()`` is responsible for translating the code into a
+    process exit. This keeps the handler easy to drive from tests.
+
+    Args:
+        argv: The argument vector after the ``build-corpus`` verb.
+
+    Returns:
+        ``0`` on success; ``1`` on a validation error.
     """
-    from daydream.training.export import ExportConfig, ExportFilters, run_export
+    from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, run_build_corpus
     from daydream.ui import create_console, print_error
 
-    parser = _build_export_jsonl_parser()
+    parser = _build_build_corpus_parser()
     args = parser.parse_args(argv)
 
     # Validate --max-stack-share is in (0, 1].
@@ -393,7 +423,19 @@ def _handle_export_command(argv: list[str]) -> int:
     else:
         labels = tuple(args.label) if args.label else ("accepted",)
 
-    filters = ExportFilters(
+    if args.as_of is not None:
+        raw = args.as_of.replace("Z", "+00:00") if args.as_of.endswith("Z") else args.as_of
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            print_error(create_console(), "Invalid --as-of", "Must be an ISO-8601 timestamp.")
+            return 1
+        if dt.tzinfo is None or dt.utcoffset() != timedelta(0):
+            print_error(create_console(), "Invalid --as-of", "Must be a UTC timestamp (ending in Z or +00:00).")
+            return 1
+        args.as_of = dt.astimezone(timezone.utc).isoformat()
+
+    filters = CorpusFilters(
         skill=args.skill,
         repos=tuple(args.repo),
         labels=labels,
@@ -401,16 +443,18 @@ def _handle_export_command(argv: list[str]) -> int:
         status=args.status,
         include_all_labels=args.include_all_labels,
         allow_copyleft=frozenset(args.allow_copyleft),
+        min_reward=args.min_reward,
     )
-    config = ExportConfig(
+    config = BuildCorpusConfig(
         out_path=args.out,
         filters=filters,
         stratify_by=args.stratify_by,
         max_stack_share=args.max_stack_share,
         dry_run=args.dry_run,
         emit_schema_only=args.emit_schema_only,
+        as_of=args.as_of,
     )
-    run_export(config)
+    run_build_corpus(config)
     return 0
 
 
@@ -664,10 +708,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.max_iterations != 5 and not args.loop:
         warnings.warn("--max-iterations has no effect without --loop", stacklevel=2)
 
-    # Detect repo slug for trajectory metadata in deep (default) mode
-    pr_repo: str | None = None
-    if not args.shallow:
-        pr_repo = _detect_repo_slug()
+    # Detect repo slug and PR number for trajectory/archive metadata
+    pr_repo = _detect_repo_slug()
+    pr_number = _auto_detect_pr_number()
 
     return RunConfig(
         target=args.target,
@@ -680,7 +723,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         cleanup=args.cleanup,
         quiet=True,
         start_at=args.start_at,
-        pr_number=None,
+        pr_number=pr_number,
         bot=None,
         backend=args.backend,
         review_backend=args.review_backend,
@@ -745,25 +788,27 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
     )
 
 
-def _build_label_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream label [...]``.
+def _build_harvest_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream harvest [...]``.
 
-    Drives the labeler orchestrator from :mod:`daydream.training.labeler`.
-    Each unlabeled run in the archive gets a single label observation
-    derived from PR-state or local-branch signals.
+    Drives the single deferred annotate pass from
+    :mod:`daydream.training.harvest`. Every indexed run gets one fresh
+    bitemporal annotation (outcome label + intrinsic reward + ``valid_at``);
+    re-running appends a new generation rather than skipping annotated rows.
     """
     parser = argparse.ArgumentParser(
-        prog="daydream label",
+        prog="daydream harvest",
         description=(
-            "Walk the archive and write a label observation for every "
-            "currently-unlabeled run (RL/fine-tuning corpus prep)."
+            "Walk the archive and append one bitemporal annotation "
+            "(outcome label + intrinsic reward) for every indexed run "
+            "(RL/fine-tuning corpus prep)."
         ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         dest="dry_run",
-        help="Compute labels but do not write observations or the resume log.",
+        help="Build annotations but do not write observations or the resume log.",
     )
     parser.add_argument(
         "--session",
@@ -776,10 +821,10 @@ def _build_label_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cache-dir",
         type=Path,
-        default=Path("~/.daydream/labeler-cache/"),
+        default=Path("~/.daydream/harvest-cache/"),
         dest="cache_dir",
         metavar="PATH",
-        help="Directory backing the gh-api backfill cache (default: ~/.daydream/labeler-cache/).",
+        help="Directory backing the gh-api backfill cache (default: ~/.daydream/harvest-cache/).",
     )
     parser.add_argument(
         "--archive-dir",
@@ -808,20 +853,28 @@ def _build_label_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _handle_label_command(argv: list[str]) -> int:
-    """Handle ``daydream label [...]``.
+def _handle_harvest_command(argv: list[str]) -> int:
+    """Handle ``daydream harvest [...]``.
 
-    Drives :func:`daydream.training.labeler.run_label` (looked up via the
-    module attribute so test monkeypatches take effect). Returns an exit
-    code; ``main`` translates it to a process exit. Per-row labeler
-    errors do not escalate to a non-zero exit — the summary's ``errors``
-    counter surfaces them.
+    Drives :func:`daydream.training.harvest.run_harvest` (looked up via the
+    module attribute so test monkeypatches take effect). ``run_harvest`` is a
+    coroutine in production, so it is driven through :func:`anyio.run`; a
+    synchronous test double that returns a summary directly is used as-is.
+    Returns an exit code; ``main`` translates it to a process exit. Per-row
+    harvest errors do not escalate to a non-zero exit — the summary's
+    ``errors`` counter surfaces them.
+
+    Args:
+        argv: The argument vector after the ``harvest`` verb.
+
+    Returns:
+        ``0`` on success; ``1`` on a validation error.
     """
     import daydream.archive as _archive
-    import daydream.training.labeler as _labeler
-    from daydream.ui import create_console
+    import daydream.training.harvest as _harvest
+    from daydream.ui import create_console, print_info
 
-    parser = _build_label_parser()
+    parser = _build_harvest_parser()
     args = parser.parse_args(argv)
 
     console = create_console()
@@ -835,7 +888,7 @@ def _handle_label_command(argv: list[str]) -> int:
     archive_dir = args.archive_dir if args.archive_dir is not None else _archive.get_archive_dir()
     cache_dir = args.cache_dir.expanduser() if args.cache_dir is not None else None
 
-    config = _labeler.LabelerConfig(
+    config = _harvest.HarvestConfig(
         archive_dir=archive_dir,
         dry_run=args.dry_run,
         cache_dir=cache_dir,
@@ -843,64 +896,16 @@ def _handle_label_command(argv: list[str]) -> int:
         fix_applied_window_days=args.fix_applied_window_days,
         gh_request_spacing_sec=args.gh_spacing_sec,
     )
-    summary = anyio.run(_labeler.run_label, config)
-    print(summary)
-    return 0
-
-
-def _build_snapshot_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream snapshot --out <path> [...]``."""
-    parser = argparse.ArgumentParser(
-        prog="daydream snapshot",
-        description="Write a corpus snapshot JSON file (archive hash + label counts).",
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        required=True,
-        metavar="PATH",
-        help="Destination snapshot JSON path.",
-    )
-    parser.add_argument(
-        "--archive-dir",
-        type=Path,
-        default=None,
-        dest="archive_dir",
-        metavar="PATH",
-        help="Override the archive root (default: daydream.archive.get_archive_dir()).",
-    )
-    parser.add_argument(
-        "--as-of",
-        type=str,
-        default=None,
-        dest="as_of",
-        metavar="ISO_TS",
-        help="ISO 8601 cutoff timestamp (default: now in UTC).",
-    )
-    return parser
-
-
-def _handle_snapshot_command(argv: list[str]) -> int:
-    """Handle ``daydream snapshot --out <path> [...]``.
-
-    Drives :func:`daydream.training.snapshot.run_snapshot` synchronously
-    (looked up via the module attribute so test monkeypatches take
-    effect).
-    """
-    import daydream.archive as _archive
-    import daydream.training.snapshot as _snapshot
-
-    parser = _build_snapshot_parser()
-    args = parser.parse_args(argv)
-
-    archive_dir = args.archive_dir if args.archive_dir is not None else _archive.get_archive_dir()
-
-    config = _snapshot.SnapshotConfig(
-        archive_dir=archive_dir,
-        out_path=args.out,
-        as_of_ts=args.as_of,
-    )
-    _snapshot.run_snapshot(config)
+    run_harvest = _harvest.run_harvest
+    summary: dict[str, int]
+    if inspect.iscoroutinefunction(run_harvest):
+        summary = anyio.run(run_harvest, config)
+    else:
+        # A synchronous test double (monkeypatched stub) is driven directly —
+        # anyio.run rejects non-coroutine callables. Production run_harvest is
+        # always async, so mypy only sees the coroutine type here.
+        summary = run_harvest(config)  # type: ignore[assignment]
+    print_info(console, str(summary))
     return 0
 
 
@@ -919,7 +924,7 @@ def main() -> None:
 
     # Route subcommands before main arg parse. Each handler returns an exit
     # code; we translate via sys.exit. Supported subcommands: feedback,
-    # summarize, export-jsonl, label, snapshot.
+    # summarize, harvest, build-corpus.
     argv = sys.argv[1:]
     try:
         # ``summarize`` is sync — short-circuit before anyio.run kicks in.
@@ -928,18 +933,14 @@ def main() -> None:
             summarize_args = summarize_parser.parse_args(argv[1:])
             sys.exit(_run_summarize(summarize_args))
 
-        # ``export-jsonl`` is also sync — no agent invocations, just SQLite +
+        # ``build-corpus`` is sync — no agent invocations, just SQLite +
         # filesystem. Short-circuit before anyio.run.
-        if argv and argv[0] == "export-jsonl":
-            sys.exit(_handle_export_command(argv[1:]))
+        if argv and argv[0] == "build-corpus":
+            sys.exit(_handle_build_corpus_command(argv[1:]))
 
-        # ``label`` drives the labeler orchestrator via its own anyio.run.
-        if argv and argv[0] == "label":
-            sys.exit(_handle_label_command(argv[1:]))
-
-        # ``snapshot`` is sync — pure SQLite + JSON write.
-        if argv and argv[0] == "snapshot":
-            sys.exit(_handle_snapshot_command(argv[1:]))
+        # ``harvest`` drives the annotate-pass orchestrator via its own anyio.run.
+        if argv and argv[0] == "harvest":
+            sys.exit(_handle_harvest_command(argv[1:]))
 
         is_feedback_subcommand = bool(argv) and argv[0] == "feedback"
         config = _parse_args()

@@ -28,6 +28,7 @@ from daydream.config import REVIEW_OUTPUT_FILE
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
     from daydream.trajectory import TrajectoryRecorder
+    from daydream.workspace import WorkContext
 
 
 def get_archive_dir() -> Path:
@@ -55,6 +56,7 @@ def archive_run(
     config: RunConfig,
     status: str = "complete",
     run_eval: bool = False,
+    work: WorkContext | None = None,
 ) -> None:
     """Copy artifact bundle to archive and index in SQLite.
 
@@ -68,6 +70,11 @@ def archive_run(
         config: The RunConfig for this run.
         status: Run status (``complete``, ``partial``, ``failed``).
         run_eval: Whether to run deterministic evaluation analysis.
+        work: Optional WorkContext with pre-resolved git metadata. When
+            provided, ``base_branch`` and ``base_sha`` are taken from the
+            workspace snapshot instead of re-deriving them (which can fail
+            when the default-branch probe or merge-base computation fails
+            at archive time).
     """
     try:
         _archive_run_inner(
@@ -76,6 +83,7 @@ def archive_run(
             config=config,
             status=status,
             run_eval=run_eval,
+            work=work,
         )
     except Exception:  # noqa: BLE001 - archive failure must never affect the run
         # Import lazily to avoid circular imports at module level
@@ -94,6 +102,7 @@ def _archive_run_inner(
     config: RunConfig,
     status: str,
     run_eval: bool,
+    work: WorkContext | None = None,
 ) -> None:
     """Core archive logic, not exception-wrapped."""
     archive_dir = get_archive_dir()
@@ -103,8 +112,25 @@ def _archive_run_inner(
     # 1. Copy artifact bundle
     _copy_bundle(target_dir, run_dir, recorder)
 
-    # 2. Capture git context
+    # 2. Capture git context — prefer pre-resolved WorkContext values
+    #    over re-deriving from disk (HEAD may have moved, base branch
+    #    detection can fail in ephemeral worktrees, etc.).
     git_ctx = capture_git_context(target_dir)
+    if work is not None:
+        git_ctx.base_branch = work.base_branch
+        if git_ctx.base_sha is None:
+            git_ctx.base_sha = work.base_sha
+            # Backfill changed_files when base_sha was injected from WorkContext
+            if git_ctx.base_sha and git_ctx.head_sha and not git_ctx.changed_files:
+                from daydream import git_ops
+                from daydream.git_ops import GitError
+
+                try:
+                    git_ctx.changed_files = git_ops.diff_name_only(
+                        target_dir, git_ctx.base_sha, git_ctx.head_sha,
+                    )
+                except GitError:
+                    git_ctx.changed_files = []
 
     # 3. Optionally run deterministic evaluation
     evaluation: dict[str, Any] | None = None

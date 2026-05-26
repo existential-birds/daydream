@@ -301,7 +301,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir),
+        on_write=_make_archive_callback(config, target_dir, work),
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")
@@ -659,7 +659,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 )
 
             passed, _retries = await phase_test_and_heal(
-                _resolve_backend(config, "test", backend_cache), work
+                _resolve_backend(config, "test", backend_cache), work, feedback_items=items
             )
             if not passed:
                 print_warning(console, "Tests failed after fix attempt.")
