@@ -708,10 +708,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.max_iterations != 5 and not args.loop:
         warnings.warn("--max-iterations has no effect without --loop", stacklevel=2)
 
-    # Detect repo slug for trajectory metadata in deep (default) mode
-    pr_repo: str | None = None
-    if not args.shallow:
-        pr_repo = _detect_repo_slug()
+    # Detect repo slug and PR number for trajectory/archive metadata
+    pr_repo = _detect_repo_slug()
+    pr_number = _auto_detect_pr_number()
 
     return RunConfig(
         target=args.target,
@@ -724,7 +723,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         cleanup=args.cleanup,
         quiet=True,
         start_at=args.start_at,
-        pr_number=None,
+        pr_number=pr_number,
         bot=None,
         backend=args.backend,
         review_backend=args.review_backend,
