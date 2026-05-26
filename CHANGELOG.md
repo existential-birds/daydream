@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-05-26
+
+### Added
+
+- **training:** Corpus pipeline architecture — harvest, reward, bitemporal projection ([#104](https://github.com/existential-birds/daydream/pull/104))
+
+  Introduces the `daydream/training/` package with three pipeline stages: `harvest` collects ATIF trajectory runs from the archive into labeled training corpora, `reward` scores trajectory steps against configurable reward signals (cost efficiency, grounding accuracy, finding acceptance rate), and `bitemporal` projects reward labels back onto trajectory steps using both wall-clock and agent-logical timestamps. Designed for offline RL/RLHF fine-tuning loops over daydream's own review traces.
+
+- **training:** JSONL exporter for ATIF trajectories ([#95](https://github.com/existential-birds/daydream/pull/95))
+
+  Adds `daydream training export` subcommand to convert archived ATIF trajectory files into newline-delimited JSON suitable for ML training pipelines. Each trajectory step becomes one JSONL record with flattened token counts, cost, tool I/O, and phase labels.
+
+- **deep:** Language-agnostic structural review meta-stack ([#101](https://github.com/existential-birds/daydream/pull/101))
+
+  Adds a structural review pass that runs independently of per-language Beagle skills, analyzing cross-cutting concerns (API contract consistency, error propagation patterns, dependency direction violations) using tree-sitter parse trees. Activates automatically in deep mode when multiple stacks are detected.
+
+- **archive:** Capture `source_path` in manifest and add harvest clone cache ([#106](https://github.com/existential-birds/daydream/pull/106))
+
+  The archive manifest now records the absolute `source_path` of the reviewed repository, enabling corpus harvest to trace runs back to their origin repo. Adds a clone cache under `~/.daydream/harvest/clones/` so repeated harvests against the same repo skip redundant clones.
+
+### Changed
+
+- **docs:** Rewrite README for research/ML audience ([#107](https://github.com/existential-birds/daydream/pull/107))
+
+### Fixed
+
+- **tests:** Isolate `DAYDREAM_ARCHIVE_DIR` to stop polluting `~/.daydream/archive` ([#100](https://github.com/existential-birds/daydream/pull/100))
+
+  Tests that exercise archive functionality now use a temporary directory instead of the user's real archive, preventing test runs from creating stale entries in the production archive index.
+
+- **explore:** Remove `.coderabbit.yaml` from pattern-scanner prompts ([#96](https://github.com/existential-birds/daydream/pull/96))
+
+### Security
+
+- **deps:** Bump `idna` in the uv group ([#97](https://github.com/existential-birds/daydream/pull/97))
+
 ## [0.17.0] - 2026-05-16
 
 ### Breaking
@@ -475,7 +511,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.17.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/existential-birds/daydream/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/existential-birds/daydream/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/existential-birds/daydream/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/existential-birds/daydream/compare/v0.14.0...v0.15.0
