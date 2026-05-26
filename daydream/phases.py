@@ -82,7 +82,10 @@ def _build_fix_prompt(
     parts.append("\nAnalyze the failures and fix them.")
     if feedback_items:
         parts.append("Focus on the files listed above.")
-        parts.append("Edit only the files listed above; do not expand scope to other files.")
+        parts.append(
+            "Start with the files listed above; if a correct fix needs "
+            "another file, edit it and say which and why."
+        )
 
     return "\n".join(parts)
 
@@ -1419,10 +1422,13 @@ Make the minimal change needed. Do NOT change error handling semantics
 unless the issue description specifically explains why the current error
 handling strategy is wrong for that code path.
 
-Edit only what this finding names — the file/symbol/line above. Do NOT change
-adjacent fields, keys, functions, or files the finding did not mention. If a
-correct fix seems to require touching something the finding didn't name, stop
-and report it instead of expanding the change.
+Anchor the change to what this finding names — the file/symbol/line above. Do
+NOT make gratuitous edits to adjacent fields, keys, or functions the fix does
+not require; naming one issue is not license to "tidy" its neighbours. If a
+correct fix genuinely requires an edit the finding didn't name — a caller that
+must change in step, or a file the review step missed — make it, but name and
+justify each out-of-scope edit in your commit message rather than expanding
+silently. If the change balloons far beyond the named site, stop and report.
 
 If this finding conflicts with an explicit in-code contract — a JSON schema, a
 type signature, or a comment documenting intent — the contract wins. Do not

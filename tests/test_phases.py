@@ -183,7 +183,9 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(tmp_pa
 
     assert len(captured_prompts) == 1
     fix_prompt = captured_prompts[0]
-    assert "Edit only what this finding names" in fix_prompt
+    assert "Anchor the change to what this finding names" in fix_prompt
+    # Necessary expansion is allowed but must be declared, not silent.
+    assert "justify each out-of-scope edit in your commit message" in fix_prompt
     assert "the contract wins" in fix_prompt
 
 
@@ -229,7 +231,7 @@ class TestBuildFixPrompt:
         assert "- src/bar.py" in result
         assert "- src/foo.py" in result
         assert "Focus on the files listed above" in result
-        assert "Edit only the files listed above; do not expand scope to other files." in result
+        assert "if a correct fix needs another file, edit it and say which and why" in result
         # Deduplication: foo.py should appear only once
         assert result.count("- src/foo.py") == 1
 
@@ -240,7 +242,7 @@ class TestBuildFixPrompt:
 
         assert "Files modified" not in result
         assert "Focus on the files" not in result
-        assert "Edit only the files listed above" not in result
+        assert "if a correct fix needs another file" not in result
         assert "Analyze the failures and fix them" in result
 
     def test_empty_feedback_items_omits_file_section(self):
