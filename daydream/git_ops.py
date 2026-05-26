@@ -831,6 +831,26 @@ def fetch(repo: Path, remote: str = "origin") -> None:
         raise GitError(f"git fetch {remote} failed in {repo}: {proc.stderr.strip()}")
 
 
+def clone(remote_url: str, target: Path) -> None:
+    """Run ``git clone <remote_url> <target>`` (full clone, no ``--depth``).
+
+    Args:
+        remote_url: Remote URL or local path to clone from.
+        target: Destination directory for the new working tree.
+
+    Raises:
+        GitError: If the clone fails.
+    """
+    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", "clone", remote_url, str(target)],  # noqa: S607 - git is a trusted command
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git clone {remote_url} failed: {proc.stderr.strip()}")
+
+
 def checkout_paths(repo: Path, paths: list[Path]) -> None:
     """Run ``git checkout -- <paths>`` to discard local changes for *paths*.
 
