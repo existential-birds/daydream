@@ -659,7 +659,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 )
 
             passed, _retries = await phase_test_and_heal(
-                _resolve_backend(config, "test", backend_cache), work
+                _resolve_backend(config, "test", backend_cache), work, feedback_items=items
             )
             if not passed:
                 print_warning(console, "Tests failed after fix attempt.")
