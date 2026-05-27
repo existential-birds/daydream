@@ -93,6 +93,12 @@ class ClaudeBackend:
         # the trailing CostEvent. The trajectory recorder uses this to
         # upgrade the generic ``"claude"`` backend label to the actual id.
         last_assistant_model: str | None = None
+        # StructuredOutput ToolUseBlocks are intentionally skipped (the
+        # structured result is captured via ResultMessage.structured_output
+        # instead).  Track their IDs so the corresponding ToolResultBlocks
+        # in the subsequent UserMessage are also skipped — otherwise the
+        # trajectory recorder logs them as unmatched_tool_results.
+        skipped_tool_ids: set[str] = set()
 
         async with ClaudeSDKClient(options=options) as client:
             self._client = client
@@ -112,6 +118,7 @@ class ClaudeBackend:
                                 yield ThinkingEvent(text=block.thinking)
                             elif isinstance(block, ToolUseBlock):
                                 if block.name == "StructuredOutput":
+                                    skipped_tool_ids.add(block.id)
                                     continue
                                 yield ToolStartEvent(
                                     id=block.id,
@@ -150,6 +157,9 @@ class ClaudeBackend:
                     elif isinstance(msg, UserMessage):
                         for user_block in msg.content:
                             if isinstance(user_block, ToolResultBlock):
+                                if user_block.tool_use_id in skipped_tool_ids:
+                                    skipped_tool_ids.discard(user_block.tool_use_id)
+                                    continue
                                 content_str = str(user_block.content) if user_block.content else ""
                                 yield ToolResultEvent(
                                     id=user_block.tool_use_id,
