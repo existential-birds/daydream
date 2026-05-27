@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from daydream.pr_comment_renderer import _PHASE_LABELS, render_run_info_block
+from daydream.pr_comment_renderer import _PHASE_LABELS, _format_duration, render_run_info_block
 from daydream.trajectory import DaydreamPhase
 
 # Fixture trajectory files committed under tests/fixtures/trajectories/.
@@ -577,7 +577,9 @@ def test_e2e_unknown_model_emits_named_footnote() -> None:
     rows = [line for line in out.splitlines() if line.startswith("| ") and "|" in line[2:]]
     phase_rows = [r for r in rows if not r.startswith("| Phase |") and not r.startswith("|---")]
     for row in phase_rows:
-        assert row.rstrip().endswith("| — |")
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        # Columns: Phase, Model, Tools, Input (cached), Output, Cost, Latency
+        assert cells[5] == "—", f"Cost cell should be '—' for unknown model: {row!r}"
     # Footnote names the unknown model with backticks.
     assert "<sub>Cost unavailable: model `gpt-6.0-experimental` is not in the price table.</sub>" in out
 
@@ -682,7 +684,7 @@ def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
     # Per-phase row: Input (cached) cell reads "10 (100%)" — clamped.
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     cells = [c.strip() for c in review_row.split("|")]
-    # Columns: ['', 'Review', model, tools, input(cached), output, cost, '']
+    # Columns: ['', 'Review', model, tools, input(cached), output, cost, latency, '']
     assert cells[4] == "10 (100%)"
 
 
@@ -775,10 +777,109 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
     # Per-phase Model cell also shows the fallback model.
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     cells = [c.strip() for c in review_row.split("|")]
-    # Columns: ['', 'Review', model, tools, input(cached), output, cost, '']
+    # Columns: ['', 'Review', model, tools, input(cached), output, cost, latency, '']
     assert cells[2] == "gpt-5.5"
     # No 'unknown model' footnote, since the fallback resolved to a priced model.
     assert "not in the price table" not in out
+
+
+# ---------------------------------------------------------------------------
+# Duration formatting
+# ---------------------------------------------------------------------------
+def test_format_duration_none_renders_dash() -> None:
+    assert _format_duration(None) == "—"
+
+
+def test_format_duration_sub_second() -> None:
+    assert _format_duration(0.0) == "<1s"
+    assert _format_duration(0.5) == "<1s"
+    assert _format_duration(0.999) == "<1s"
+
+
+def test_format_duration_seconds() -> None:
+    assert _format_duration(1.0) == "1s"
+    assert _format_duration(30.0) == "30s"
+    assert _format_duration(59.9) == "59s"
+
+
+def test_format_duration_minutes() -> None:
+    assert _format_duration(60.0) == "1m"
+    assert _format_duration(61.0) == "1m 1s"
+    assert _format_duration(150.0) == "2m 30s"
+    assert _format_duration(3599.0) == "59m 59s"
+
+
+def test_format_duration_hours() -> None:
+    assert _format_duration(3600.0) == "1h"
+    assert _format_duration(3660.0) == "1h 1m"
+    assert _format_duration(7200.0) == "2h"
+    assert _format_duration(7380.0) == "2h 3m"
+
+
+# ---------------------------------------------------------------------------
+# Duration in rollup and phase table
+# ---------------------------------------------------------------------------
+def test_duration_in_rollup() -> None:
+    """Rollup must include a Duration line derived from step timestamps."""
+    out = render_run_info_block([_SINGLE_PHASE])
+    assert "- **Duration:** 1s" in out
+
+
+def test_latency_column_in_phase_table() -> None:
+    """Per-phase breakdown must include a Latency column with per-phase durations."""
+    out = render_run_info_block([_MULTI_PHASE_CLAUDE])
+    assert "| Latency |" in out
+    # Each phase spans exactly 1 second in the fixture.
+    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
+    assert review_row.rstrip().endswith("| 1s |")
+    fix_row = next(line for line in out.splitlines() if line.startswith("| Fix |"))
+    assert fix_row.rstrip().endswith("| 1s |")
+    # Total duration across all 4 phases: 00:00:00 to 00:00:07 = 7s.
+    assert "- **Duration:** 7s" in out
+
+
+def test_duration_degrades_gracefully(tmp_path: Path) -> None:
+    """Duration renders '—' when step timestamps are absent."""
+    p = _write_trajectory(
+        tmp_path,
+        steps=[
+            {
+                "step_id": 1,
+                "timestamp": None,
+                "source": "user",
+                "message": "go",
+                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
+            },
+            {
+                "step_id": 2,
+                "timestamp": None,
+                "source": "agent",
+                "message": "ok",
+                "model_name": "gpt-5.5",
+                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
+                "metrics": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                    "cached_tokens": 0,
+                    "cost_usd": 0.01,
+                },
+            },
+        ],
+    )
+    out = render_run_info_block([p])
+    assert "- **Duration:** —" in out
+    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
+    assert review_row.rstrip().endswith("| — |")
+
+
+def test_deep_mode_latency_aggregates_across_forks() -> None:
+    """Fix phase latency spans across fork trajectory files."""
+    out = render_run_info_block([_DEEP_PARENT, _DEEP_FORK_A, _DEEP_FORK_B])
+    # Fix phase: fork A starts at 01:00, fork B ends at 02:01 -> 61s.
+    fix_row = next(line for line in out.splitlines() if line.startswith("| Fix |"))
+    assert fix_row.rstrip().endswith("| 1m 1s |")
+    # Total run: 00:00:00 to 02:00:01 -> 121s.
+    assert "- **Duration:** 2m 1s" in out
 
 
 # ---------------------------------------------------------------------------

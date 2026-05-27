@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import daydream
@@ -63,6 +64,31 @@ FALLBACK_NOTE = "*run details unavailable*"
 _GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", ""})
 
 
+def _parse_ts(ts: str) -> datetime:
+    """Parse an ATIF ISO 8601 timestamp (Z-suffix) to a timezone-aware datetime."""
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+def _format_duration(seconds: float | None) -> str:
+    """Format a duration for display in the PR comment.
+
+    Returns '—' when timing data is unavailable.
+    """
+    if seconds is None:
+        return "—"
+    if seconds < 1:
+        return "<1s"
+    total = int(seconds)
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        m, s = divmod(total, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    h, remainder = divmod(total, 3600)
+    m = remainder // 60
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
 @dataclass
 class _PhaseAgg:
     """Per-phase running totals.
@@ -72,6 +98,19 @@ class _PhaseAgg:
     true if any step in this phase ran on a model we cannot price (no
     ``cost_usd`` from the backend AND not in MODEL_PRICES); the table cell
     then renders ``—`` per M6.
+
+    Attributes:
+        phase_key: Identifier for the phase these totals belong to.
+        steps: Number of steps recorded in this phase.
+        tool_calls: Number of tool calls made during this phase.
+        input_tokens: Total input tokens consumed by this phase.
+        cached_tokens: Total cached input tokens consumed by this phase.
+        output_tokens: Total output tokens produced by this phase.
+        cost_usd: Accumulated cost in USD for this phase.
+        cost_unknown: True if any step ran on a model that cannot be priced.
+        models: Set of model names that ran steps in this phase.
+        first_timestamp: ISO-8601 timestamp of the earliest step in this phase.
+        last_timestamp: ISO-8601 timestamp of the latest step in this phase.
     """
 
     phase_key: str
@@ -83,6 +122,14 @@ class _PhaseAgg:
     cost_usd: float = 0.0
     cost_unknown: bool = False
     models: set[str] = field(default_factory=set)
+    first_timestamp: str | None = None
+    last_timestamp: str | None = None
+
+    @property
+    def duration_s(self) -> float | None:
+        if self.first_timestamp is None or self.last_timestamp is None:
+            return None
+        return (_parse_ts(self.last_timestamp) - _parse_ts(self.first_timestamp)).total_seconds()
 
 
 @dataclass
@@ -126,6 +173,14 @@ class _RunAgg:
         for p in self.phases.values():
             all_m.update(p.models)
         return all_m
+
+    @property
+    def total_duration_s(self) -> float | None:
+        firsts = [p.first_timestamp for p in self.phases.values() if p.first_timestamp]
+        lasts = [p.last_timestamp for p in self.phases.values() if p.last_timestamp]
+        if not firsts or not lasts:
+            return None
+        return (_parse_ts(max(lasts)) - _parse_ts(min(firsts))).total_seconds()
 
 
 def render_run_info_block(trajectory_paths: list[Path]) -> str:
@@ -197,12 +252,18 @@ def _aggregate(trajectories: list[Trajectory]) -> _RunAgg:
     for traj in trajectories:
         agent_default_model = traj.agent.model_name
         for step in traj.steps:
-            if step.source != "agent":
-                continue
             phase_key = _phase_key_of(step)
             if phase_key is None:
                 continue
             phase = _ensure_phase(agg, phase_key)
+            # Track timestamps from ALL sources (user + agent) for latency.
+            if step.timestamp:
+                if phase.first_timestamp is None or _parse_ts(step.timestamp) < _parse_ts(phase.first_timestamp):
+                    phase.first_timestamp = step.timestamp
+                if phase.last_timestamp is None or _parse_ts(step.timestamp) > _parse_ts(phase.last_timestamp):
+                    phase.last_timestamp = step.timestamp
+            if step.source != "agent":
+                continue
             phase.steps += 1
             phase.tool_calls += len(step.tool_calls or [])
             effective_model = step.model_name or agent_default_model
@@ -309,6 +370,7 @@ def _render_rollup(agg: _RunAgg) -> list[str]:
         f"- **Cost:** {_rollup_cost(agg)}",
         f"- **Tokens:** {_rollup_tokens(agg)}",
         f"- **Steps / tool calls:** {_format_int(agg.total_steps)} / {_format_int(agg.total_tools)}",
+        f"- **Duration:** {_format_duration(agg.total_duration_s)}",
     ]
 
 
@@ -362,8 +424,8 @@ def _render_phase_table(agg: _RunAgg) -> list[str]:
     rows: list[str] = [
         "<details><summary>Per-phase breakdown</summary>",
         "",
-        "| Phase | Model | Tools | Input (cached) | Output | Cost |",
-        "|---|---|---|---|---|---|",
+        "| Phase | Model | Tools | Input (cached) | Output | Cost | Latency |",
+        "|---|---|---|---|---|---|---|",
     ]
     # Preserve dict insertion order: _ensure_phase inserts each phase on
     # first encounter, so dict order already matches traversal order. Per-
@@ -392,10 +454,11 @@ def _render_phase_row(phase: _PhaseAgg) -> str:
         input_cell = f"{_format_int(phase.input_tokens)} ({pct})"
     else:
         input_cell = _format_int(phase.input_tokens)
+    latency_cell = _format_duration(phase.duration_s)
     return (
         f"| {label} | {model_cell} | {_format_int(phase.tool_calls)} | "
         f"{input_cell} | {_format_int(phase.output_tokens)} | "
-        f"{cost_cell} |"
+        f"{cost_cell} | {latency_cell} |"
     )
 
 
