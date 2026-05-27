@@ -91,6 +91,30 @@ async def test_run_dispatches_to_pr_feedback_when_pr_number_set(
 
 
 @pytest.mark.asyncio
+async def test_run_does_not_dispatch_to_pr_feedback_when_only_pr_number_set(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    """Auto-detected pr_number (no bot) must NOT route to _run_pr_feedback."""
+    pr_feedback_called = False
+
+    async def pr_stub(work, config):
+        nonlocal pr_feedback_called
+        pr_feedback_called = True
+        return 0
+
+    async def deep_stub(work, config):
+        return 0
+
+    monkeypatch.setattr("daydream.runner._run_pr_feedback", pr_stub)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", deep_stub)
+    config = RunConfig(target=str(tmp_path), pr_number=42, bot=None)
+
+    exit_code = await runner.run(config)
+    assert exit_code == 0
+    assert not pr_feedback_called
+
+
+@pytest.mark.asyncio
 async def test_run_dispatches_to_comment_mode(
     monkeypatch, patch_workspace, silence_runner_ui, tmp_path
 ):
