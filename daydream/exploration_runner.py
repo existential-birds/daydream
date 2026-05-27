@@ -254,25 +254,39 @@ async def pre_scan(
             except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
                 pass
 
-    file_paths = [f.path for f in static_files]
+    # Only pass actually-changed file paths to the test-mapper and
+    # pattern-scanner.  The full import-expanded list (static_files) is
+    # correct for the dependency-tracer (it needs the import graph), but
+    # the other two specialists interpret the list as "files to process"
+    # and will attempt per-file tool calls for every entry.  On large
+    # monorepos the import-expanded list can be 10K+ files, causing the
+    # test-mapper to run for 50+ minutes instead of 2.
+    changed_paths = sorted({m.group(1) for m in _DIFF_HEADER_RE.finditer(diff_text)})
 
-    async with anyio.create_task_group() as tg:
-        if tier == "single":
-            dep_prompt = build_dependency_tracer_prompt(static_files, diff_ref)
-            tg.start_soon(_run_specialist, "dependency_tracer", dep_prompt, DEPENDENCY_TRACER_SCHEMA)
-        else:  # parallel
-            tg.start_soon(
-                _run_specialist, "pattern_scanner",
-                build_pattern_scanner_prompt(file_paths, diff_ref), PATTERN_SCANNER_SCHEMA,
-            )
-            tg.start_soon(
-                _run_specialist, "dependency_tracer",
-                build_dependency_tracer_prompt(static_files, diff_ref), DEPENDENCY_TRACER_SCHEMA,
-            )
-            tg.start_soon(
-                _run_specialist, "test_mapper",
-                build_test_mapper_prompt(file_paths, diff_ref), TEST_MAPPER_SCHEMA,
-            )
+    # Wall-clock timeout for the entire exploration task group.  Individual
+    # specialists are already best-effort (except Exception: pass), so if
+    # one hangs past this deadline anyio cancels it and we proceed with
+    # whatever partial results we have.
+    _SPECIALIST_TIMEOUT_SECONDS = 300  # 5 minutes
+
+    with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS):
+        async with anyio.create_task_group() as tg:
+            if tier == "single":
+                dep_prompt = build_dependency_tracer_prompt(static_files, diff_ref)
+                tg.start_soon(_run_specialist, "dependency_tracer", dep_prompt, DEPENDENCY_TRACER_SCHEMA)
+            else:  # parallel
+                tg.start_soon(
+                    _run_specialist, "pattern_scanner",
+                    build_pattern_scanner_prompt(changed_paths, diff_ref), PATTERN_SCANNER_SCHEMA,
+                )
+                tg.start_soon(
+                    _run_specialist, "dependency_tracer",
+                    build_dependency_tracer_prompt(static_files, diff_ref), DEPENDENCY_TRACER_SCHEMA,
+                )
+                tg.start_soon(
+                    _run_specialist, "test_mapper",
+                    build_test_mapper_prompt(changed_paths, diff_ref), TEST_MAPPER_SCHEMA,
+                )
 
     if recorder is not None:
         recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
