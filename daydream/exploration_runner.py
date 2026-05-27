@@ -46,6 +46,8 @@ Tier: TypeAlias = Literal["skip", "single", "parallel"]
 # regex is the right tool here per D-04 (no tree-sitter for non-source text).
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+) b/", re.MULTILINE)
 
+_SPECIALIST_TIMEOUT_SECONDS = 300  # 5 minutes
+
 
 EXPLORATION_ENVELOPE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -262,12 +264,6 @@ async def pre_scan(
     # monorepos the import-expanded list can be 10K+ files, causing the
     # test-mapper to run for 50+ minutes instead of 2.
     changed_paths = sorted({m.group(1) for m in _DIFF_HEADER_RE.finditer(diff_text)})
-
-    # Wall-clock timeout for the entire exploration task group.  Individual
-    # specialists are already best-effort (except Exception: pass), so if
-    # one hangs past this deadline anyio cancels it and we proceed with
-    # whatever partial results we have.
-    _SPECIALIST_TIMEOUT_SECONDS = 300  # 5 minutes
 
     with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS):
         async with anyio.create_task_group() as tg:
