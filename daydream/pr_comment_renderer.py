@@ -100,6 +100,15 @@ class _PhaseAgg:
     then renders ``—`` per M6.
 
     Attributes:
+        phase_key: Identifier for the phase these totals belong to.
+        steps: Number of steps recorded in this phase.
+        tool_calls: Number of tool calls made during this phase.
+        input_tokens: Total input tokens consumed by this phase.
+        cached_tokens: Total cached input tokens consumed by this phase.
+        output_tokens: Total output tokens produced by this phase.
+        cost_usd: Accumulated cost in USD for this phase.
+        cost_unknown: True if any step ran on a model that cannot be priced.
+        models: Set of model names that ran steps in this phase.
         first_timestamp: ISO-8601 timestamp of the earliest step in this phase.
         last_timestamp: ISO-8601 timestamp of the latest step in this phase.
     """
