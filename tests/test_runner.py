@@ -91,27 +91,22 @@ async def test_run_dispatches_to_pr_feedback_when_pr_number_set(
 
 
 @pytest.mark.asyncio
-async def test_run_does_not_dispatch_to_pr_feedback_when_only_pr_number_set(
+async def test_auto_detected_pr_number_dispatches_to_deep_loop(
     monkeypatch, patch_workspace, silence_runner_ui, tmp_path
 ):
-    """Auto-detected pr_number (no bot) must NOT route to _run_pr_feedback."""
-    pr_feedback_called = False
+    """Auto-detected pr_number (no bot) routes to the deep loop, not PR feedback."""
+    called: dict[str, Any] = {}
 
-    async def pr_stub(work, config):
-        nonlocal pr_feedback_called
-        pr_feedback_called = True
+    async def stub(work, config):
+        called["pr_number"] = config.pr_number
         return 0
 
-    async def deep_stub(work, config):
-        return 0
-
-    monkeypatch.setattr("daydream.runner._run_pr_feedback", pr_stub)
-    monkeypatch.setattr("daydream.runner._run_loop_deep", deep_stub)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", stub)
     config = RunConfig(target=str(tmp_path), pr_number=42, bot=None)
 
     exit_code = await runner.run(config)
     assert exit_code == 0
-    assert not pr_feedback_called
+    assert called["pr_number"] == 42
 
 
 @pytest.mark.asyncio
