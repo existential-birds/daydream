@@ -2,10 +2,10 @@
 
 The runner is unified around a single :func:`run` entry point. ``run`` opens
 the workspace via :func:`daydream.workspace.open_workspace` and then dispatches
-to a private helper based on ``config.pr_number`` / ``config.output_mode`` /
+to a private helper based on ``config.bot`` / ``config.output_mode`` /
 ``config.shallow``::
 
-    pr_number set            -> _run_pr_feedback (PR feedback flow)
+    bot set (feedback mode)  -> _run_pr_feedback (PR feedback flow)
     output_mode == "comment" -> _run_comment    (review + post inline PR comments)
     output_mode == "review"  -> _run_review     (review report only, no posting)
     output_mode == "loop":
@@ -297,7 +297,7 @@ async def run(config: RunConfig | None = None) -> int:
     """Execute a daydream run end-to-end.
 
     Opens the workspace via :func:`open_workspace` and dispatches to the
-    appropriate flow helper based on ``config.pr_number`` / ``config.output_mode``
+    appropriate flow helper based on ``config.bot`` / ``config.output_mode``
     / ``config.shallow``. Centralising workspace lifecycle means every flow gets
     a real :class:`WorkContext` (in-place or ephemeral) with consistent
     base/branch resolution.
@@ -393,12 +393,15 @@ async def run_feedback(config: RunConfig, pr: int) -> int:
 async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     """Pick the flow helper for the resolved workspace + config.
 
-    Order matters: ``pr_number`` overrides everything (set by the
+    Order matters: ``bot`` signals PR feedback mode (set only by the
     ``daydream feedback <pr#>`` subcommand). Then output_mode picks comment vs
     review vs loop. Inside loop, ``config.shallow`` selects the single-stack
     pipeline; otherwise the deep multi-stack pipeline runs (default).
+
+    Note: ``config.pr_number`` can be auto-detected from the current branch
+    for metadata (trajectory/archive) without implying feedback mode.
     """
-    if config.pr_number is not None:
+    if config.bot is not None:
         return await _run_pr_feedback(work, config)
 
     if config.output_mode == "comment":
