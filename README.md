@@ -3,7 +3,7 @@
 
 Daydream is a code-review agent that produces structured training data from its own runs. It reviews diffs using stack-specific [Beagle](https://github.com/existential-birds/beagle) skills, applies fixes, validates via test suite, and records every agent interaction as an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus pipeline then scores, labels, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
 
-The goal is an open-weight code-review model (Qwen2.5-Coder-7B, QLoRA) trained on daydream's own trajectory archive, independently benchmarked against CodeRabbit and Greptile on a held-out PR replay corpus. See [Milestone 1](https://github.com/existential-birds/daydream/issues/86) for the current training roadmap.
+The goal is an open-weight code-review model (Qwen2.5-Coder-7B, QLoRA) trained on daydream's own trajectory archive, independently benchmarked against leading commercial code-review bots on a held-out PR replay corpus. See [Milestone 1](https://github.com/existential-birds/daydream/issues/86) for the current training roadmap.
 
 ![demo](https://github.com/user-attachments/assets/60a80645-36de-410e-afa7-7a96efef3f57)
 
@@ -96,7 +96,7 @@ daydream /path/to/project                     # deep multi-stack review-fix-test
 daydream --shallow /path/to/project           # single-stack loop
 daydream --review /path/to/project            # report only, no fixes
 daydream --comment --branch feat/x /path/to/project  # post inline PR comments
-daydream feedback 42 --bot "coderabbitai[bot]" /path/to/project  # fix bot PR comments
+daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # fix bot PR comments
 ```
 
 To update: `git pull && uv sync`

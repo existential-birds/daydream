@@ -24,7 +24,7 @@ daydream /path/to/project                          # Default: deep multi-stack l
 daydream --shallow -s python /path/to/project      # Shallow Python review-fix-test loop
 daydream --review /path/to/project                 # Review only, skip fixes
 daydream --comment --branch feat/x /path/to/project  # Post inline PR comments
-daydream feedback 42 --bot "coderabbitai[bot]" /path/to/project  # Bot PR comments
+daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # Bot PR comments
 daydream --trajectory /tmp/out.json /path/to/project  # Custom trajectory path
 
 # Development
