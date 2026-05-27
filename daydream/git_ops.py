@@ -451,11 +451,31 @@ def _resolve_upstream_if_remote_ahead(repo: Path, branch: str) -> str | None:
     return upstream if right > 0 else None
 
 
+def _prefer_remote_base(repo: Path, base: str) -> str:
+    """Return ``origin/<base>`` when it exists, otherwise *base* unchanged.
+
+    For diff operations the remote tracking branch is the correct comparison
+    target — it reflects what the default branch looks like on the remote,
+    not the (potentially stale or identical-to-HEAD) local copy.  This is
+    especially important when the user is working directly on ``main``:
+    ``git diff main...HEAD`` is always empty, but
+    ``git diff origin/main...HEAD`` shows the unpushed changes.
+    """
+    remote_ref = f"origin/{base}"
+    check = _run_git(repo, ["rev-parse", "--verify", f"refs/remotes/{remote_ref}"], timeout=5)
+    if check.returncode == 0:
+        return remote_ref
+    return base
+
+
 def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None = None) -> str:
     """Return the unified diff between *base* and *head*.
 
     Uses three-dot syntax (``base...head``) so the diff reflects changes on
-    *head* since it diverged from *base*.
+    *head* since it diverged from *base*.  When ``origin/<base>`` exists the
+    function prefers it via :func:`_prefer_remote_base` so the diff is
+    computed against the remote default branch — not a potentially stale
+    (or identical-to-HEAD) local copy.
 
     Args:
         repo: Repository working directory.
@@ -469,7 +489,8 @@ def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None
     Raises:
         GitError: If ``git diff`` fails.
     """
-    args = ["diff", f"{base}...{head}"]
+    preferred_base = _prefer_remote_base(repo, base)
+    args = ["diff", f"{preferred_base}...{head}"]
     if exclude:
         args.append("--")
         args.append(".")
