@@ -37,8 +37,11 @@ values cited below are :class:`RewardWeights` fields.
 * **false_positive_penalty** — the posterior axis, derived from the
   maintainer accept/reject outcome (``rejected → 1.0``, ``contested → 0.5``,
   ``accepted → 0.0`` via :attr:`RewardWeights.fp_penalty_map`) and subtracted
-  after the credit mean with weight :attr:`RewardWeights.w_fp` ``= 0.3``. It
-  sits strictly below the grounding weight, so a rejected outcome deducts but
+  after the credit mean with weight :attr:`RewardWeights.w_fp` ``= 0.3``.
+  ``0.3`` follows the May-2026 report's published penalty-ordering
+  ``w_a=0.5 > w_s=0.3`` (arXiv:2509.15557, ``w_b=1.0 > w_a=0.5 > w_s=0.3``):
+  a penalty term strictly smaller than every credit weight. It sits strictly
+  below the grounding weight (``0.4``), so a rejected outcome deducts but
   never swamps a genuinely good review (KD2 drown-out guard). Absent at
   capture time and for ``"unknown"``/unmapped labels — then the axis stays
   ``None`` and the composite is byte-identical to the intrinsic-only score.
@@ -54,6 +57,13 @@ for a missing axis, never raise. If no credit axis is present while
 
 Changing any default weight is a deliberate golden-update: it requires
 re-pinning the golden test values *and* bumping :data:`REWARD_VERSION`.
+
+:data:`REWARD_VERSION` fully identifies the formula *only* under
+:data:`DEFAULT_WEIGHTS`. Passing a custom :class:`RewardWeights` is an
+analysis-time override (e.g. sensitivity sweeps); its output is **not** the
+canonical corpus reward and must not be stored as such — only scores produced
+under :data:`DEFAULT_WEIGHTS` carry the meaning stamped by
+:data:`REWARD_VERSION`.
 """
 
 from __future__ import annotations

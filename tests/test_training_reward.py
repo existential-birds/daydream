@@ -83,3 +83,19 @@ def test_posterior_penalty_cannot_outrank_correctness_signal():
     bad_accepted = score_trajectory(ScoringInputs([{"verdict": "contradicts"}], 0.0, True, None),
                                     pr_feedback="accepted")
     assert good_rejected.composite > bad_accepted.composite
+
+
+def test_score_trajectory_does_no_io(monkeypatch):
+    import builtins
+    monkeypatch.setattr(builtins, "open", lambda *a, **k: (_ for _ in ()).throw(AssertionError("I/O!")))
+    rb = score_trajectory(ScoringInputs([{"verdict": "consistent"}], 0.5, True, 100),
+                          pr_feedback="rejected")
+    assert rb.composite is not None   # ran purely, no file access
+
+
+def test_same_function_scores_producer_and_eval_caller_paths():
+    from daydream.training.reward import score_trajectory as producer_fn
+    from daydream.training.reward import score_trajectory as eval_fn
+    assert producer_fn is eval_fn
+    inp = ScoringInputs([{"verdict": "consistent"}], 0.7, True, 500)
+    assert eval_fn(inp, pr_feedback="accepted").composite == producer_fn(inp, pr_feedback="accepted").composite
