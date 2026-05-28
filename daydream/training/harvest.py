@@ -2,9 +2,10 @@
 
 The harvest pass is the single deferred *annotate* step of the corpus
 pipeline: it reads an archived run's immutable bronze artifacts, reduces
-them to a :class:`~daydream.training.reward.ScoringInputs`, scores an
-intrinsic :class:`~daydream.training.reward.RewardBreakdown`, derives the
-outcome label, and appends one bitemporal annotation. There is no separate
+them to a :class:`~daydream.training.reward.ScoringInputs`, derives the
+outcome label, scores a :class:`~daydream.training.reward.RewardBreakdown`
+(intrinsic axes plus the posterior reject-penalty fed from that label), and
+appends one bitemporal annotation. There is no separate
 "labeling" step: a single annotate pass writes label + reward together.
 
 This module carries the bronze-signal assembly step, the per-run annotation
@@ -38,7 +39,8 @@ Annotation builder:
 
 * :func:`build_annotation` composes the posterior rubric (PR vs local-branch,
   mirroring the former labeler's assembly), derives the outcome label, scores
-  the intrinsic reward, and returns a frozen :class:`AnnotationPayload`. It is
+  the reward (intrinsic axes plus the posterior reject-penalty fed from the
+  outcome label), and returns a frozen :class:`AnnotationPayload`. It is
   *pure of DB writes* — the orchestrator persists the payload. Posterior-fetch
   and git errors propagate to the caller, which isolates per-row.
 * ``valid_at`` is the PR merge timestamp for PR rows and ``None`` for
@@ -493,9 +495,11 @@ def build_annotation(
     Composes the posterior rubric (PR vs local-branch, mirroring the former
     labeler's assembly), derives the outcome label, assembles the intrinsic
     :class:`ScoringInputs` from bronze, and scores a
-    :class:`~daydream.training.reward.RewardBreakdown`. Returns a frozen
-    :class:`AnnotationPayload`; the orchestrator persists it. Posterior-fetch
-    and git errors propagate to the caller (the orchestrator isolates per-row).
+    :class:`~daydream.training.reward.RewardBreakdown` with that outcome label
+    fed in as the posterior reject-penalty axis (``"unknown"`` leaves the axis
+    ``None``). Returns a frozen :class:`AnnotationPayload`; the orchestrator
+    persists it. Posterior-fetch and git errors propagate to the caller (the
+    orchestrator isolates per-row).
 
     Args:
         row: The indexed manifest row (carries ``session_id``, the PR
@@ -532,7 +536,7 @@ def build_annotation(
     labels = [outcome_label] if outcome_label != "unknown" else []
 
     inputs = assemble_scoring_inputs(run_dir, row)
-    rb = score_trajectory(inputs)
+    rb = score_trajectory(inputs, pr_feedback=outcome_label)
 
     return AnnotationPayload(
         labels=labels,

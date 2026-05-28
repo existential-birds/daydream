@@ -18,6 +18,7 @@ from daydream.training.harvest import (
     build_annotation,
     run_harvest,
 )
+from daydream.training.reward import score_trajectory
 
 
 def _seed_deep_bronze(tmp_path: Path, *, verdict: str, grounding: float) -> Path:
@@ -60,6 +61,21 @@ def _fake_gh_merged(merged_at: str):
     return responder
 
 
+def _fake_gh_not_merged():
+    """Return a ``gh_api`` responder for an unmerged (closed) PR.
+
+    The ``pulls/<n>`` endpoint reports ``merged: False`` so
+    :func:`derive_outcome_label` yields ``"rejected"``; ``comments`` is empty.
+    """
+
+    def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/comments"):
+            return []
+        return {"merged": False, "merged_at": None}
+
+    return responder
+
+
 def _unused_gh(repo: str, endpoint: str, **kwargs: Any) -> Any:
     """A ``gh_api`` responder the local-branch path must never call."""
     raise AssertionError(f"gh_api should not be called for a local row (endpoint={endpoint})")
@@ -76,6 +92,29 @@ def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_pat
     assert ann.labels == ["accepted"]
     assert ann.valid_at == "2026-02-01T00:00:00+00:00"        # PR merge time (Q2)
     assert ann.composite_reward == json.loads(ann.reward_json)["composite"]
+
+
+def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
+    # A not-merged PR row → derive_outcome_label == "rejected". Its bronze
+    # (consistent verdict, full grounding) yields a positive intrinsic composite;
+    # the posterior reject penalty must deduct from the stored composite.
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir),
+           "grounding_rate": 1.0, "changed_files": "[]"}
+
+    # Intrinsic-only baseline: same production inputs scored with no posterior.
+    intrinsic_inputs = assemble_scoring_inputs(run_dir, row)
+    intrinsic_only_composite = score_trajectory(intrinsic_inputs).composite
+
+    payload = build_annotation(row, run_dir=run_dir,
+                               gh_api=_fake_gh_not_merged(),
+                               repo_clone=tmp_path, window_days=30)
+
+    assert payload.labels == ["rejected"]
+    breakdown = json.loads(payload.reward_json)
+    assert breakdown["false_positive_penalty"] == 1.0
+    assert payload.composite_reward < intrinsic_only_composite
 
 
 def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path):
