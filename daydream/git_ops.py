@@ -452,15 +452,7 @@ def _resolve_upstream_if_remote_ahead(repo: Path, branch: str) -> str | None:
 
 
 def _prefer_remote_base(repo: Path, base: str) -> str:
-    """Return ``origin/<base>`` when it exists, otherwise *base* unchanged.
-
-    For diff operations the remote tracking branch is the correct comparison
-    target — it reflects what the default branch looks like on the remote,
-    not the (potentially stale or identical-to-HEAD) local copy.  This is
-    especially important when the user is working directly on ``main``:
-    ``git diff main...HEAD`` is always empty, but
-    ``git diff origin/main...HEAD`` shows the unpushed changes.
-    """
+    """Return ``origin/<base>`` when it exists, otherwise *base* unchanged."""
     remote_ref = f"origin/{base}"
     check = _run_git(repo, ["rev-parse", "--verify", f"refs/remotes/{remote_ref}"], timeout=5)
     if check.returncode == 0:
