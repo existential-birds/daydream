@@ -11,23 +11,29 @@ Formula (golden-locked; full justification + citations in
 
 Axes and their rules:
 
+All weights and ramp parameters live on :class:`RewardWeights`; scoring under
+:data:`DEFAULT_WEIGHTS` reproduces the golden-locked formula. The default
+values cited below are :class:`RewardWeights` fields.
+
 * **correctness** — mean over per-finding verifier verdicts mapped by
-  :data:`VERDICT_MAP` (``consistent → 1.0``, ``uncertain → 0.5``,
-  ``contradicts → 0.0``). A positive credit axis. Default weight
-  ``w_correctness = 0.6`` (correctness-dominant). Source: arXiv:2509.15557
-  ``+1/0/−1`` ternary, rescaled to ``[0, 1]``.
+  :attr:`RewardWeights.verdict_map` (``consistent → 1.0``,
+  ``uncertain → 0.5``, ``contradicts → 0.0``). A positive credit axis.
+  Default weight :attr:`RewardWeights.w_correctness` ``= 0.6``
+  (correctness-dominant). Source: arXiv:2509.15557 ``+1/0/−1`` ternary,
+  rescaled to ``[0, 1]``.
 * **grounding** — ``grounding_rate ∈ [0, 1]`` passed through unchanged. A
-  positive credit axis. Default weight ``w_grounding = 0.4`` (secondary
-  guardrail). Source: HalluJudge reference-free grounding (F1 0.85).
+  positive credit axis. Default weight :attr:`RewardWeights.w_grounding`
+  ``= 0.4`` (secondary guardrail). Source: HalluJudge reference-free
+  grounding (F1 0.85).
 * **format_valid** — a *dominating* gate, not an additive term. When
   ``False`` the composite floors to ``0.0`` regardless of every other axis.
   Source: arXiv:2509.15557 "improper format … maximum penalty regardless of
   correctness".
 * **length** — a bounded saturating ramp over the char-count proxy:
-  ``len_norm = clip((length − TAU) / SCALE, 0, 1)`` subtracted after the
-  credit mean with weight ``w_len = 0.2`` (strictly smaller than every
-  credit weight, so verbosity can shave but never dominate). Source:
-  A-DLP / Leash bounded length penalty.
+  ``len_norm = clip((length − len_tau) / len_scale, 0, 1)`` subtracted after
+  the credit mean with weight :attr:`RewardWeights.w_len` ``= 0.2`` (strictly
+  smaller than every credit weight, so verbosity can shave but never
+  dominate). Source: A-DLP / Leash bounded length penalty.
 * **false_positive_penalty** — the posterior axis. Structurally absent at
   capture time; always ``None`` in this minimal reducer.
 
@@ -45,7 +51,7 @@ re-pinning the golden test values *and* bumping :data:`REWARD_VERSION`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 REWARD_VERSION = "2026.05.25-1"
@@ -59,23 +65,44 @@ monkeypatch ``daydream.training.reward.REWARD_VERSION`` and have
 VERDICT_MAP: dict[str, float] = {"consistent": 1.0, "uncertain": 0.5, "contradicts": 0.0}
 """Per-finding verdict → ``[0, 1]`` correctness sub-score (rescaled ternary)."""
 
-W_CORRECTNESS = 0.6
-"""Default credit weight for the correctness axis (correctness-dominant)."""
-
-W_GROUNDING = 0.4
-"""Default credit weight for the grounding axis (secondary guardrail)."""
-
-W_LEN = 0.2
-"""Default length-penalty weight; strictly smaller than every credit weight."""
-
-LEN_TAU = 2000.0
-"""Length-ramp baseline (chars): no penalty at or below this proxy value."""
-
-LEN_SCALE = 8000.0
-"""Length-ramp scale (chars): the penalty saturates at ``TAU + SCALE``."""
-
 FLOOR = 0.0
 """Composite floor — the ``[0, 1]`` range minimum, the format-gate override."""
+
+
+@dataclass(frozen=True)
+class RewardWeights:
+    """Tunable weights and ramp parameters for :func:`score_trajectory`.
+
+    Defaults reproduce the golden-locked formula exactly; overriding any
+    field is an analysis-time choice, not a change to the canonical corpus
+    reward (which is defined by :data:`REWARD_VERSION` under
+    :data:`DEFAULT_WEIGHTS`).
+
+    Attributes:
+        w_correctness: Credit weight for the correctness axis
+            (correctness-dominant).
+        w_grounding: Credit weight for the grounding axis (secondary
+            guardrail).
+        w_len: Length-penalty weight; strictly smaller than every credit
+            weight, so verbosity can shave but never dominate.
+        len_tau: Length-ramp baseline (chars): no penalty at or below this
+            proxy value.
+        len_scale: Length-ramp scale (chars): the penalty saturates at
+            ``len_tau + len_scale``.
+        verdict_map: Per-finding verdict → ``[0, 1]`` correctness sub-score.
+    """
+
+    w_correctness: float = 0.6
+    w_grounding: float = 0.4
+    w_len: float = 0.2
+    len_tau: float = 2000.0
+    len_scale: float = 8000.0
+    verdict_map: dict[str, float] = field(default_factory=lambda: dict(VERDICT_MAP))
+
+
+DEFAULT_WEIGHTS = RewardWeights()
+"""The golden-locked weights; scoring under these is byte-identical to the
+canonical corpus reward stamped by :data:`REWARD_VERSION`."""
 
 
 def _clip(value: float, low: float, high: float) -> float:
@@ -150,7 +177,12 @@ class RewardBreakdown:
         }
 
 
-def score_trajectory(inputs: ScoringInputs, *, pr_feedback: Any | None = None) -> RewardBreakdown:
+def score_trajectory(
+    inputs: ScoringInputs,
+    *,
+    pr_feedback: Any | None = None,
+    weights: RewardWeights = DEFAULT_WEIGHTS,
+) -> RewardBreakdown:
     """Reduce intrinsic signals to a :class:`RewardBreakdown`.
 
     Pure: no filesystem, network, or subprocess access; identical inputs
@@ -161,6 +193,8 @@ def score_trajectory(inputs: ScoringInputs, *, pr_feedback: Any | None = None) -
     Args:
         inputs: The intrinsic, capture-time signals to score.
         pr_feedback: Reserved posterior signal; unused here.
+        weights: The :class:`RewardWeights` to score under; defaults to
+            :data:`DEFAULT_WEIGHTS` (the golden-locked, canonical weights).
 
     Returns:
         A frozen :class:`RewardBreakdown` stamped with :data:`REWARD_VERSION`
@@ -174,7 +208,7 @@ def score_trajectory(inputs: ScoringInputs, *, pr_feedback: Any | None = None) -
     correctness_per_finding: list[float] | None = None
     correctness: float | None = None
     if inputs.verifier_verdicts:
-        scores = [VERDICT_MAP.get(str(v.get("verdict")), 0.0) for v in inputs.verifier_verdicts]
+        scores = [weights.verdict_map.get(str(v.get("verdict")), 0.0) for v in inputs.verifier_verdicts]
         correctness_per_finding = scores
         correctness = sum(scores) / len(scores)
 
@@ -184,7 +218,7 @@ def score_trajectory(inputs: ScoringInputs, *, pr_feedback: Any | None = None) -
     # Length penalty: bounded ramp; absent when no length proxy.
     length_penalty: float | None = None
     if inputs.length is not None:
-        length_penalty = _clip((inputs.length - LEN_TAU) / LEN_SCALE, 0.0, 1.0)
+        length_penalty = _clip((inputs.length - weights.len_tau) / weights.len_scale, 0.0, 1.0)
 
     axes_present = {
         "correctness": correctness is not None,
@@ -209,10 +243,10 @@ def score_trajectory(inputs: ScoringInputs, *, pr_feedback: Any | None = None) -
     present_weights: dict[str, float] = {}
     present_values: dict[str, float] = {}
     if correctness is not None:
-        present_weights["correctness"] = W_CORRECTNESS
+        present_weights["correctness"] = weights.w_correctness
         present_values["correctness"] = correctness
     if grounding is not None:
-        present_weights["grounding"] = W_GROUNDING
+        present_weights["grounding"] = weights.w_grounding
         present_values["grounding"] = grounding
 
     composite: float | None
@@ -223,7 +257,7 @@ def score_trajectory(inputs: ScoringInputs, *, pr_feedback: Any | None = None) -
         weight_sum = sum(present_weights.values())
         credit = sum((w / weight_sum) * present_values[axis] for axis, w in present_weights.items())
         ramp = length_penalty if length_penalty is not None else 0.0
-        composite = round(_clip(credit - W_LEN * ramp, FLOOR, 1.0), 4)
+        composite = round(_clip(credit - weights.w_len * ramp, FLOOR, 1.0), 4)
 
     return RewardBreakdown(
         correctness_per_finding=correctness_per_finding,

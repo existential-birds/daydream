@@ -36,3 +36,12 @@ def test_missing_correctness_axis_renormalizes_over_grounding():
     assert rb.correctness_per_finding is None
     assert rb.axes_present["correctness"] is False
     assert rb.composite == 0.8  # renormalized: grounding alone, NOT 0.4·0.8=0.32
+
+
+def test_weights_are_overridable_and_change_composite_predictably():
+    from daydream.training.reward import RewardWeights
+    base_len = ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}],
+                             grounding_rate=None, format_valid=True, length=10000)
+    # length=10000 → len_norm saturates at 1.0; only w_len differs between calls.
+    assert score_trajectory(base_len).composite == 0.8                          # default w_len=0.2
+    assert score_trajectory(base_len, weights=RewardWeights(w_len=0.5)).composite == 0.5
