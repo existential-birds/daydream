@@ -1,10 +1,11 @@
-"""Pure intrinsic (capture-time) reward reducer for code-review trajectories.
+"""Reward reducer for code-review trajectories.
 
-This module scores a *single* run from intrinsic axes only — the signals
-that are observable at capture time, before any posterior accept/reject
-outcome is known. It is the minimal reducer described in the corpus-pipeline
-plan (Task 3); #88 owns empirical calibration of the defaults and the
-posterior axis, behind this same interface plus a :data:`REWARD_VERSION` bump.
+This module scores a *single* run across both intrinsic (capture-time)
+axes and the posterior false-positive axis derived from maintainer
+accept/reject outcomes. It implements the reducer described in the
+corpus-pipeline plan (Task 3), including the posterior axis introduced
+alongside it; #88 owns empirical calibration of the defaults, behind
+this same interface plus a :data:`REWARD_VERSION` bump.
 
 Formula (golden-locked; full justification + citations in
 ``.beagle/concepts/corpus-pipeline-architecture/research/reward-formula-recommendation.md``):
@@ -68,6 +69,7 @@ under :data:`DEFAULT_WEIGHTS` carry the meaning stamped by
 
 from __future__ import annotations
 
+import types
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -79,8 +81,11 @@ monkeypatch ``daydream.training.reward.REWARD_VERSION`` and have
 :func:`score_trajectory` observe the override.
 """
 
-VERDICT_MAP: dict[str, float] = {"consistent": 1.0, "uncertain": 0.5, "contradicts": 0.0}
+_VERDICT_MAP: dict[str, float] = {"consistent": 1.0, "uncertain": 0.5, "contradicts": 0.0}
 """Per-finding verdict → ``[0, 1]`` correctness sub-score (rescaled ternary)."""
+
+_FP_PENALTY_MAP: dict[str, float] = {"accepted": 0.0, "contested": 0.5, "rejected": 1.0}
+"""Maintainer outcome label → posterior false-positive penalty."""
 
 FLOOR = 0.0
 """Composite floor — the ``[0, 1]`` range minimum, the format-gate override."""
@@ -121,10 +126,19 @@ class RewardWeights:
     w_fp: float = 0.3
     len_tau: float = 2000.0
     len_scale: float = 8000.0
-    verdict_map: dict[str, float] = field(default_factory=lambda: dict(VERDICT_MAP))
-    fp_penalty_map: dict[str, float] = field(
-        default_factory=lambda: {"accepted": 0.0, "contested": 0.5, "rejected": 1.0}
+    verdict_map: types.MappingProxyType = field(
+        default_factory=lambda: types.MappingProxyType(dict(_VERDICT_MAP))
     )
+    fp_penalty_map: types.MappingProxyType = field(
+        default_factory=lambda: types.MappingProxyType(dict(_FP_PENALTY_MAP))
+    )
+
+    def __post_init__(self) -> None:
+        if self.len_scale <= 0:
+            raise ValueError(
+                f"len_scale must be > 0 (got {self.len_scale!r}); "
+                "a zero or negative value causes ZeroDivisionError at the length-ramp computation."
+            )
 
 
 DEFAULT_WEIGHTS = RewardWeights()

@@ -466,8 +466,8 @@ class AnnotationPayload:
         reward_json: ``json.dumps`` of the full
             :class:`~daydream.training.reward.RewardBreakdown.to_dict` so
             re-projection has every axis.
-        composite_reward: The cached intrinsic composite scalar (or ``None``
-            when uncomputable).
+        composite_reward: The cached composite scalar, including any posterior
+            penalty deductions (or ``None`` when uncomputable).
         evidence_sha: The run's ``head_sha`` (the evidence anchor for the
             posterior signals), or ``None``.
     """

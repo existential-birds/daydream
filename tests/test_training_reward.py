@@ -1,4 +1,4 @@
-"""Tests for the pure intrinsic reward reducer (golden-locked formula)."""
+"""Tests for the intrinsic reward reducer — covers golden-locked formula, posterior false-positive axis, and weight overrides."""
 
 from __future__ import annotations
 
@@ -57,6 +57,16 @@ def test_rejected_outcome_applies_posterior_penalty_golden():
     assert rb.composite == 0.30   # 0.65 credit − 0.2·0.25 len − 0.3·1.0 fp
 
 
+def test_contested_outcome_applies_intermediate_penalty_golden():
+    rb = score_trajectory(
+        ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],
+                      grounding_rate=0.5, format_valid=True, length=4000),
+        pr_feedback="contested")
+    assert rb.false_positive_penalty == 0.5
+    assert rb.axes_present["false_positive"] is True
+    assert rb.composite == 0.45   # 0.65 credit − 0.2·0.25 len − 0.3·0.5 fp
+
+
 def test_accepted_outcome_has_zero_penalty_and_all_six_fields():
     rb = score_trajectory(
         ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}],
@@ -94,8 +104,10 @@ def test_score_trajectory_does_no_io(monkeypatch):
 
 
 def test_same_function_scores_producer_and_eval_caller_paths():
-    from daydream.training.reward import score_trajectory as producer_fn
-    from daydream.training.reward import score_trajectory as eval_fn
-    assert producer_fn is eval_fn
+    # Guard that harvest.py's bound score_trajectory is the same object as the
+    # canonical one from daydream.training.reward — not a stale copy or wrapper.
+    import daydream.training.harvest as harvest_mod
+    from daydream.training.reward import score_trajectory as canonical_fn
+    assert harvest_mod.score_trajectory is canonical_fn
     inp = ScoringInputs([{"verdict": "consistent"}], 0.7, True, 500)
-    assert eval_fn(inp, pr_feedback="accepted").composite == producer_fn(inp, pr_feedback="accepted").composite
+    assert canonical_fn(inp, pr_feedback="accepted").composite == harvest_mod.score_trajectory(inp, pr_feedback="accepted").composite
