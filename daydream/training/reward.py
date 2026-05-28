@@ -310,6 +310,11 @@ def score_trajectory(
         composite = None
     else:
         weight_sum = sum(present_weights.values())
+        if weight_sum <= 0:
+            raise ValueError(
+                "Invalid RewardWeights for present credit axes: "
+                f"sum of present credit weights must be > 0 (got {weight_sum!r})."
+            )
         credit = sum((w / weight_sum) * present_values[axis] for axis, w in present_weights.items())
         ramp = length_penalty if length_penalty is not None else 0.0
         fp = fp_penalty if fp_penalty is not None else 0.0

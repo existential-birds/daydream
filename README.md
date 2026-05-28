@@ -43,7 +43,7 @@ The training data pipeline converts archived trajectories into fine-tuning datas
 - **length**: bounded saturating penalty (w=0.2), subtracted from credit mean
 - **false_positive_penalty** (w=0.3): posterior axis derived from maintainer accept/reject outcome (`rejected→1.0`, `contested→0.5`, `accepted→0.0` via `fp_penalty_map`), subtracted after the credit mean; absent at capture time and for unknown labels — stays `None`, composite falls back to intrinsic-only score
 
-Composite = `clip(credit − w_len·len_norm − w_fp·fp_penalty, 0, 1)` where credit is the weighted mean over present axes, renormalized. Missing signals become `None`, never imputed as 0.
+Composite = `round(clip(credit − w_len·len_norm − w_fp·fp_penalty, 0, 1), 4)` where credit is the weighted mean over present credit axes, renormalized. Missing signals become `None`, never imputed as 0.
 
 **Build corpus** (`daydream build-corpus`): Projects the `as_of`-pinned silver annotations into JSONL training records. Filters by outcome label (default: `accepted` only), reward threshold, stack stratification, exclusion list (benchmark repos), and copyleft license opt-in. Writes a `lineage.json` manifest with content-addressed `trajectory_set_hash`, labeler/reward versions, and the `as_of` pin for byte-for-byte reproducibility. A temporal-leakage guard drops annotations whose `valid_at` (e.g., PR merge timestamp) is posterior to the `as_of` pin.
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from daydream.training.reward import REWARD_VERSION, ScoringInputs, score_trajectory
 
 
@@ -101,6 +103,19 @@ def test_score_trajectory_does_no_io(monkeypatch):
     rb = score_trajectory(ScoringInputs([{"verdict": "consistent"}], 0.5, True, 100),
                           pr_feedback="rejected")
     assert rb.composite is not None   # ran purely, no file access
+
+
+def test_zero_sum_present_credit_weights_raises_value_error():
+    from daydream.training.reward import RewardWeights
+    weights = RewardWeights(w_correctness=0.0, w_grounding=0.0)
+    inputs = ScoringInputs(
+        verifier_verdicts=[{"verdict": "consistent"}],
+        grounding_rate=0.5,
+        format_valid=True,
+        length=None,
+    )
+    with pytest.raises(ValueError, match="sum of present credit weights"):
+        score_trajectory(inputs, weights=weights)
 
 
 def test_same_function_scores_producer_and_eval_caller_paths():
