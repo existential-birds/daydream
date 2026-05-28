@@ -45,3 +45,41 @@ def test_weights_are_overridable_and_change_composite_predictably():
     # length=10000 → len_norm saturates at 1.0; only w_len differs between calls.
     assert score_trajectory(base_len).composite == 0.8                          # default w_len=0.2
     assert score_trajectory(base_len, weights=RewardWeights(w_len=0.5)).composite == 0.5
+
+
+def test_rejected_outcome_applies_posterior_penalty_golden():
+    rb = score_trajectory(
+        ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],
+                      grounding_rate=0.5, format_valid=True, length=4000),
+        pr_feedback="rejected")
+    assert rb.false_positive_penalty == 1.0
+    assert rb.axes_present["false_positive"] is True
+    assert rb.composite == 0.30   # 0.65 credit − 0.2·0.25 len − 0.3·1.0 fp
+
+
+def test_accepted_outcome_has_zero_penalty_and_all_six_fields():
+    rb = score_trajectory(
+        ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}],
+                      grounding_rate=0.8, format_valid=True, length=3000),
+        pr_feedback="accepted")
+    assert rb.false_positive_penalty == 0.0
+    assert all(v is not None for v in
+               (rb.correctness_per_finding, rb.grounding, rb.length_penalty,
+                rb.false_positive_penalty, rb.composite)) and rb.format_valid is True
+
+
+def test_unknown_or_absent_posterior_leaves_axis_none_and_score_unchanged():
+    args = ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}],
+                         grounding_rate=0.5, format_valid=True, length=4000)
+    assert score_trajectory(args, pr_feedback="unknown").false_positive_penalty is None
+    assert score_trajectory(args, pr_feedback="unknown").composite == score_trajectory(args).composite
+
+
+def test_posterior_penalty_cannot_outrank_correctness_signal():
+    # KD2 drown-out guard: a high-correctness REJECTED run still scores above a
+    # zero-correctness ACCEPTED run — reject deducts but never inverts the order.
+    good_rejected = score_trajectory(ScoringInputs([{"verdict": "consistent"}], 0.9, True, None),
+                                     pr_feedback="rejected")
+    bad_accepted = score_trajectory(ScoringInputs([{"verdict": "contradicts"}], 0.0, True, None),
+                                    pr_feedback="accepted")
+    assert good_rejected.composite > bad_accepted.composite
