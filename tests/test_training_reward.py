@@ -1,4 +1,7 @@
-"""Tests for the intrinsic reward reducer — covers golden-locked formula, posterior false-positive axis, and weight overrides."""
+"""Tests for the intrinsic reward reducer.
+
+Covers golden-locked formula, posterior false-positive axis, and weight overrides.
+"""
 
 from __future__ import annotations
 
@@ -163,7 +166,10 @@ def test_same_function_scores_producer_and_eval_caller_paths():
     from daydream.training.reward import score_trajectory as canonical_fn
     assert harvest_mod.score_trajectory is canonical_fn
     inp = ScoringInputs([{"verdict": "consistent"}], 0.7, True, 500)
-    assert canonical_fn(inp, pr_feedback="accepted").composite == harvest_mod.score_trajectory(inp, pr_feedback="accepted").composite
+    assert (
+        canonical_fn(inp, pr_feedback="accepted").composite
+        == harvest_mod.score_trajectory(inp, pr_feedback="accepted").composite
+    )
 
 
 def test_default_weights_flagged_and_overrides_fingerprint_stably():
@@ -191,7 +197,7 @@ def test_posterior_cost_penalizes_only_surprise_above_prior():
 
 
 def test_reward_version_stamp_default_vs_custom():
-    from daydream.training.reward import RewardWeights, REWARD_VERSION, _weights_fingerprint
+    from daydream.training.reward import REWARD_VERSION, RewardWeights, _weights_fingerprint
     inp = ScoringInputs([{"verdict": "consistent"}], 0.5, True, 4000)
     assert score_trajectory(inp).reward_version == REWARD_VERSION
     custom = RewardWeights(w_fp=0.5)
