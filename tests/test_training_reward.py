@@ -188,3 +188,13 @@ def test_posterior_cost_penalizes_only_surprise_above_prior():
     none_prior = score_trajectory(inp, pr_feedback="rejected")
     assert none_prior.outcome_prior is None                # audit shows uncalibrated
     assert none_prior.posterior_cost == 0.5                # falls back to 0.5 default
+
+
+def test_reward_version_stamp_default_vs_custom():
+    from daydream.training.reward import RewardWeights, REWARD_VERSION, _weights_fingerprint
+    inp = ScoringInputs([{"verdict": "consistent"}], 0.5, True, 4000)
+    assert score_trajectory(inp).reward_version == REWARD_VERSION
+    custom = RewardWeights(w_fp=0.5)
+    rb = score_trajectory(inp, weights=custom)
+    assert rb.reward_version == f"{REWARD_VERSION}+custom-{_weights_fingerprint(custom)}"
+    assert rb.to_dict()["reward_version"].startswith(f"{REWARD_VERSION}+custom-")

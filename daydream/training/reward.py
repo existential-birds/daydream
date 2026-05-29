@@ -88,6 +88,13 @@ REWARD_VERSION = "2026.05.28-1"
 Read at call time (not captured in a default argument) so a test can
 monkeypatch ``daydream.training.reward.REWARD_VERSION`` and have
 :func:`score_trajectory` observe the override.
+
+Stamped verbatim on breakdowns scored under :data:`DEFAULT_WEIGHTS`. Scoring
+under a custom :class:`RewardWeights` stamps a
+``f"{REWARD_VERSION}+custom-{_weights_fingerprint(weights)}"`` suffix instead,
+so a non-default (analysis-time override) score can never be mistaken for the
+canonical corpus reward (OpenAI Evals / lm-eval-harness convention: a
+scoring-config change forces a version bump).
 """
 
 _VERDICT_MAP: dict[str, float] = {"consistent": 1.0, "uncertain": 0.5, "contradicts": 0.0}
@@ -347,7 +354,7 @@ def score_trajectory(
         when ``format_valid`` is ``False``, ``None`` when no credit axis is
         present, else the rounded ``[0, 1]`` pure-intrinsic composite.
     """
-    version = REWARD_VERSION
+    version = REWARD_VERSION if weights.is_default else f"{REWARD_VERSION}+custom-{_weights_fingerprint(weights)}"
 
     # Correctness axis: present only when verdicts parse to a non-empty list.
     correctness_per_finding: list[float] | None = None
