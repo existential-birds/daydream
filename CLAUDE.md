@@ -76,7 +76,6 @@ cli.py → runner.py → phases.py → agent.py
 
 Requires the Beagle plugin for Claude Code to be installed. The review skills (`beagle-python:review-python`, `beagle-react:review-frontend`, `beagle-elixir:review-elixir`) are provided by Beagle.
 
-<!-- GSD:project-start source:PROJECT.md -->
 ## Project
 
 **Daydream**
@@ -95,9 +94,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - **Schema version**: Pinned to ATIF-v1.6 (emission). No multi-version emission support.
 - **Recorder placement**: `TrajectoryRecorder` lives in new `daydream/trajectory.py` module, propagated via `ContextVar` (not `AgentState`). Test isolation via autouse `_reset_trajectory_recorder` fixture in `conftest.py` mirroring the existing `reset_state()` pattern.
 - **Module-bloat ban**: No `Step()`, `ToolCall()`, or `Trajectory()` construction inside `phases.py` or `ui.py` — all ATIF model construction stays in `daydream/trajectory.py`.
-<!-- GSD:project-end -->
 
-<!-- GSD:stack-start source:codebase/STACK.md -->
 ## Technology Stack
 
 ## Languages
@@ -148,9 +145,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - No server deployment; purely a CLI tool executed locally
 - Console script entrypoint: `daydream = "daydream.cli:main"` declared in `pyproject.toml`
 - Can also run as module: `python -m daydream` via `daydream/__main__.py`
-<!-- GSD:stack-end -->
 
-<!-- GSD:conventions-start source:CONVENTIONS.md -->
 ## Conventions
 
 ## Naming Patterns
@@ -234,9 +229,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - `anyio.create_task_group()` used for parallel operations in `daydream/phases.py`
 - `asyncio_mode = "auto"` in pytest means `async def test_*` functions run automatically without explicit `@pytest.mark.asyncio` in most files (though explicit marks are also used)
 - Async generators used for backend `execute()` — callers use `async for event in backend.execute(...)`
-<!-- GSD:conventions-end -->
 
-<!-- GSD:architecture-start source:ARCHITECTURE.md -->
 ## Architecture
 
 ## System Overview
@@ -379,30 +372,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - JSON/external errors caught narrowly: `except (json.JSONDecodeError, FileNotFoundError):`
 - All unhandled exceptions caught in `cli.main()` → `sys.exit(1)`
 ## Cross-Cutting Concerns
-<!-- GSD:architecture-end -->
 
-<!-- GSD:workflow-start source:GSD defaults -->
-## GSD Workflow Enforcement
-
-Before using Edit, Write, or other file-changing tools, start work through a GSD command so planning artifacts and execution context stay in sync.
-
-Use these entry points:
-- `/gsd-quick` for small fixes, doc updates, and ad-hoc tasks
-- `/gsd-debug` for investigation and bug fixing
-- `/gsd-execute-phase` for planned phase work
-
-Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.
-<!-- GSD:workflow-end -->
-
-<!-- GSD:profile-start -->
-## Developer Profile
-
-> Profile not yet configured. Run `/gsd:profile-user` to generate your developer profile.
-> This section is managed by `generate-claude-profile` -- do not edit manually.
-<!-- GSD:profile-end -->
-
-<!-- GSD:skills-start source:skills/ -->
 ## Project Skills
 
 No project skills found. Add skills to any of: `.claude/skills/`, `.agents/skills/`, `.cursor/skills/`, `.github/skills/`, or `.codex/skills/` with a `SKILL.md` index file.
-<!-- GSD:skills-end -->
