@@ -173,3 +173,18 @@ def test_default_weights_flagged_and_overrides_fingerprint_stably():
     assert _weights_fingerprint(RewardWeights(w_fp=0.5)) == _weights_fingerprint(RewardWeights(w_fp=0.5))
     assert _weights_fingerprint(RewardWeights(w_fp=0.5)) != _weights_fingerprint(RewardWeights(w_fp=0.6))
     assert len(_weights_fingerprint(RewardWeights(w_fp=0.5))) == 8
+
+
+def test_posterior_cost_penalizes_only_surprise_above_prior():
+    inp = ScoringInputs([{"verdict": "consistent"}], 0.5, True, 4000)
+    chronic = score_trajectory(inp, pr_feedback="rejected", outcome_prior=0.8, outcome_prior_n=12)
+    generous = score_trajectory(inp, pr_feedback="rejected", outcome_prior=0.2, outcome_prior_n=12)
+    assert chronic.posterior_cost == pytest.approx(0.2)   # max(0, 1.0 − 0.8)
+    assert generous.posterior_cost == pytest.approx(0.8)  # max(0, 1.0 − 0.2)
+    assert generous.posterior_cost > chronic.posterior_cost          # de-bias direction
+    assert chronic.outcome_prior == 0.8 and chronic.outcome_prior_n == 12
+    acc = score_trajectory(inp, pr_feedback="accepted", outcome_prior=0.5, outcome_prior_n=10)
+    assert acc.posterior_cost == 0.0                       # accepted below prior clamps to 0
+    none_prior = score_trajectory(inp, pr_feedback="rejected")
+    assert none_prior.outcome_prior is None                # audit shows uncalibrated
+    assert none_prior.posterior_cost == 0.5                # falls back to 0.5 default

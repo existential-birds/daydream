@@ -37,15 +37,21 @@ values cited below are :class:`RewardWeights` fields.
   dominate). Source: A-DLP / Leash bounded length penalty.
 * **false_positive_penalty** — the posterior axis, derived from the
   maintainer accept/reject outcome (``rejected → 1.0``, ``contested → 0.5``,
-  ``accepted → 0.0`` via :attr:`RewardWeights.fp_penalty_map`). It is a
-  *sibling* of the composite, carried on :class:`PosteriorBreakdown`, and is
-  **never** subtracted inside the composite (C5: Safe-RLHF documents a
-  safety-compensation pathology for fixed-weight subtractive scalarization of
-  constraint-style signals — arXiv:2509.15557 is a subtractive composite, not
-  a gate, and does not establish a "penalty < credit" rule). The posterior is
-  present only when a mapped maintainer label is supplied; absent at capture
-  time and for ``"unknown"``/unmapped labels — then the result is a plain
-  :class:`RewardBreakdown` with no posterior fields.
+  ``accepted → 0.0`` via :attr:`RewardWeights.fp_penalty_map`). The reported
+  ``posterior_cost`` is the *calibrated surprise* ``max(0.0, observed − prior)``
+  on the ``[0, 1]`` penalty scale: only the deviation above the reviewers'
+  mean observed penalty (``outcome_prior``) is penalized, retaining the
+  non-negative clamp. An uncalibrated prior falls back to the ``0.5``
+  maximum-entropy midpoint. It is a *sibling* of the composite, carried on
+  :class:`PosteriorBreakdown`, and is **never** subtracted inside the composite
+  (C5: Safe-RLHF documents a safety-compensation pathology for fixed-weight
+  subtractive scalarization of constraint-style signals — arXiv:2509.15557 is a
+  subtractive composite, not a gate, and does not establish a "penalty < credit"
+  rule). :attr:`RewardWeights.w_fp` is **not** applied here — it survives as a
+  documented training-time combination weight (pending recalibration #114). The
+  posterior is present only when a mapped maintainer label is supplied; absent
+  at capture time and for ``"unknown"``/unmapped labels — then the result is a
+  plain :class:`RewardBreakdown` with no posterior fields.
 
 Composite = ``round(clip(credit − w_len·len_norm, 0, 1), 4)`` — a pure
 intrinsic score. ``credit`` is the weighted mean over the *present* credit
@@ -299,6 +305,8 @@ def score_trajectory(
     inputs: ScoringInputs,
     *,
     pr_feedback: Any | None = None,
+    outcome_prior: float | None = None,
+    outcome_prior_n: int = 0,
     weights: RewardWeights = DEFAULT_WEIGHTS,
 ) -> RewardBreakdown | PosteriorBreakdown:
     """Reduce intrinsic (+ optional posterior) signals to a breakdown.
@@ -320,6 +328,15 @@ def score_trajectory(
             ``rejected``); mapped via :attr:`RewardWeights.fp_penalty_map`.
             ``None``/``"unknown"``/unmapped yields a base
             :class:`RewardBreakdown`.
+        outcome_prior: The reviewers' mean observed penalty on the ``[0, 1]``
+            penalty scale, used as the prior the posterior surprise is measured
+            against. ``None`` (uncalibrated) falls back to the ``0.5``
+            maximum-entropy default for the cost, and is stored verbatim on the
+            breakdown as the audit trail of calibration status. Meaningful only
+            on the mapped-label (:class:`PosteriorBreakdown`) path.
+        outcome_prior_n: The pooled count of prior outcomes behind
+            ``outcome_prior`` (audit only; stored verbatim). Meaningful only on
+            the mapped-label path.
         weights: The :class:`RewardWeights` to score under; defaults to
             :data:`DEFAULT_WEIGHTS` (the golden-locked, canonical weights).
 
@@ -393,8 +410,11 @@ def score_trajectory(
 
     # Mapped maintainer label ⇒ PosteriorBreakdown carrying the sibling axis.
     if fp_penalty is not None:
-        outcome_prior = 0.5  # NOW: max-entropy default; Task 3 plumbs the real prior.
-        posterior_cost = max(0.0, fp_penalty - outcome_prior)
+        # Calibrated surprise: penalize only the deviation above the reviewers'
+        # prior. An uncalibrated (None) prior falls back to the 0.5 max-entropy
+        # midpoint for the cost, but is stored verbatim as the audit trail.
+        effective_prior = outcome_prior if outcome_prior is not None else 0.5
+        posterior_cost = max(0.0, fp_penalty - effective_prior)
         return PosteriorBreakdown(
             correctness_per_finding=correctness_per_finding,
             grounding=grounding,
@@ -406,7 +426,7 @@ def score_trajectory(
             false_positive_penalty=fp_penalty,
             posterior_cost=posterior_cost,
             outcome_prior=outcome_prior,
-            outcome_prior_n=0,
+            outcome_prior_n=outcome_prior_n,
         )
 
     return RewardBreakdown(
