@@ -7,7 +7,7 @@ fetches_run: 4
 
 # Posterior accept/reject mapping — hard-coded ternary vs calibrated
 
-Daydream's `reward.py` uses a fixed ternary mapping: `accepted=0.0`, `contested=0.5`, `rejected=1.0`, multiplied by `w_fp=0.3`. This note checks that scheme against published practice.
+Daydream's `reward.py` uses a fixed ternary mapping: `accepted=0.0`, `contested=0.5`, `rejected=1.0`. This maps to the raw false-positive penalty; `w_fp=0.3` is a documented training-time combination weight that is **not** applied inside the intrinsic composite (the posterior is a sibling axis, not a subtracted term). This note checks that scheme against published practice.
 
 ## 1. Practice in code-review agent training
 
@@ -57,7 +57,7 @@ Both establish that **per-reviewer weighting exists in the SE literature**, but 
 - *Contested* aspects: (a) the specific `1.0 / 0.5 / 0.0` scalars are not anchored in any cited published scheme — the DPO-ties work models ties as a *probability* with a learnable tendency parameter θ, not a fixed midpoint penalty; (b) absence of per-maintainer base-rate normalization is a documented failure mode in the RLHF calibration literature (raw scalars deteriorate, post-hoc calibration recovers ~3 points on RewardBench).
 - *Unsupported* aspect of the critique: there is no published evidence that a learned mapping outperforms a hand-set ternary mapping *for the specific case of bot-PR-comment outcomes*; everyone in disclosed code-agent RL uses test-pass signals instead.
 
-**Practical implication:** the ternary is not wrong, but it's a stopgap. The two highest-leverage upgrades would be (a) per-maintainer base-rate normalization (subtract or divide by the maintainer's empirical accept rate before applying `w_fp`) and (b) replacing `0.5` for `contested` with the empirical fraction of contested → eventual-merge in the harvested corpus.
+**Practical implication:** the ternary is not wrong, but it's a stopgap. The two highest-leverage upgrades would be (a) per-maintainer base-rate normalization (subtract or divide by the maintainer's empirical accept rate when deriving the posterior axis) and (b) replacing `0.5` for `contested` with the empirical fraction of contested → eventual-merge in the harvested corpus.
 
 ## 6. Strongest single citation
 

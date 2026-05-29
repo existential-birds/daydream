@@ -227,7 +227,7 @@ def _write_ttt_artifacts(
     return intent_p, alts_p
 
 
-def attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Attach verifier verdicts to feedback items by matching `id` to `issue_id`.
 
     `phase_fix` reads the `verifier_verdict` / `evidence` / `unverified_assumptions`
@@ -253,10 +253,11 @@ def attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> lis
         issue_id = entry.get("issue_id")
         if not isinstance(issue_id, int):
             continue
+        assumptions = entry.get("unverified_assumptions")
         verdict_lookup[issue_id] = {
             "verdict": entry.get("verdict", ""),
             "evidence": entry.get("evidence", ""),
-            "unverified_assumptions": entry.get("unverified_assumptions", ""),
+            "unverified_assumptions": assumptions if isinstance(assumptions, list) else [],
         }
     for item in items:
         item_id = item.get("id")
@@ -681,7 +682,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # augments its prompt when present; items without a matching
             # verdict are left untouched.
             verdicts_payload = verdicts_payload if isinstance(verdicts_payload, dict) else {"verdicts": []}
-            items = attach_verdicts(items, verdicts_payload)
+            items = _attach_verdicts(items, verdicts_payload)
             matched_ids = [i["id"] for i in items if i.get("verifier_verdict") is not None]
             unmatched_ids = [
                 i["id"]
@@ -690,12 +691,33 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 and i.get("verifier_verdict") is None
                 and i.get("lens") != "structural"
             ]
-            print_info(
-                console,
-                f"Verdict join: {len(matched_ids)}/{len(matched_ids) + len(unmatched_ids)} "
-                f"feedback items matched a verifier verdict "
-                f"(matched={matched_ids}, unmatched={unmatched_ids})",
+            # Structural-lens findings are deterministic and verdict-exempt: the
+            # verifier never issues a verdict for them, so they appear in neither
+            # `matched_ids` nor `unmatched_ids`. They are still fixed, so itemize
+            # them here -- otherwise the "X/Y matched" ratio reads as a total and
+            # silently under-counts the items the fix loop below iterates.
+            structural_ids = [i.get("id") for i in items if i.get("lens") == "structural"]
+            # Leftovers (no verdict, non-structural, missing/non-int id) so the
+            # buckets always reconcile to len(items); surfaced only when present.
+            other_ids = [
+                i.get("id")
+                for i in items
+                if i.get("verifier_verdict") is None
+                and i.get("lens") != "structural"
+                and not isinstance(i.get("id"), int)
+            ]
+            eligible = len(matched_ids) + len(unmatched_ids)
+            summary = (
+                f"Verdict join: {len(matched_ids)}/{eligible} verdict-eligible items "
+                f"matched a verifier verdict; {len(structural_ids)} structural "
+                f"verdict-exempt; {len(items)} total to fix "
+                f"(matched={matched_ids}, unmatched={unmatched_ids}, "
+                f"structural={structural_ids}"
             )
+            if other_ids:
+                summary += f", other={other_ids}"
+            summary += ")"
+            print_info(console, summary)
 
             for idx, item in enumerate(items, start=1):
                 await phase_fix(

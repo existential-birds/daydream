@@ -2450,7 +2450,14 @@ async def phase_cross_stack_merge(
     # high-conviction by construction and must not be demoted at sort time.
     structural_items: list[dict[str, Any]] = []
     if structural_records_path is not None and structural_records_path.is_file():
-        for rec in json.loads(structural_records_path.read_text()):
+        try:
+            structural_records = json.loads(structural_records_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            # Structural records come from a prior agent run that may have emitted
+            # malformed output; degrade to none rather than crash the merge.
+            print_warning(console, f"Skipping malformed structural records: {type(exc).__name__}: {exc}")
+            structural_records = []
+        for rec in structural_records:
             structural_items.append(
                 {
                     **rec,

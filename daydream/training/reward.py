@@ -139,10 +139,13 @@ class RewardWeights:
         fp_penalty_map: Maintainer outcome label → posterior penalty
             (``accepted → 0.0``, ``contested → 0.5``, ``rejected → 1.0``).
             An unmapped/``"unknown"`` label leaves the axis absent.
-        is_default: Identity flag, ``True`` only on :data:`DEFAULT_WEIGHTS`.
-            Set at construction, never mutated; excluded from
-            :func:`_weights_fingerprint` (it is identity metadata, not a
-            scoring parameter).
+        is_default: Identity marker set ``True`` on :data:`DEFAULT_WEIGHTS`.
+            Advisory metadata only — the canonical-vs-custom version stamp in
+            :func:`score_trajectory` keys off object identity
+            (``weights is DEFAULT_WEIGHTS``), not this flag, so setting it on
+            another instance cannot forge the canonical :data:`REWARD_VERSION`.
+            Excluded from :func:`_weights_fingerprint` (identity metadata, not
+            a scoring parameter).
     """
 
     w_correctness: float = 0.6
@@ -169,8 +172,9 @@ class RewardWeights:
 
 DEFAULT_WEIGHTS = RewardWeights(is_default=True)
 """The golden-locked weights; scoring under these is byte-identical to the
-canonical corpus reward stamped by :data:`REWARD_VERSION`. The only
-:class:`RewardWeights` instance with ``is_default=True``."""
+canonical corpus reward stamped by :data:`REWARD_VERSION`. Only this instance
+earns the canonical stamp, keyed by object identity in
+:func:`score_trajectory`."""
 
 
 def _weights_fingerprint(weights: RewardWeights) -> str:
@@ -358,7 +362,11 @@ def score_trajectory(
         when ``format_valid`` is ``False``, ``None`` when no credit axis is
         present, else the rounded ``[0, 1]`` pure-intrinsic composite.
     """
-    version = REWARD_VERSION if weights.is_default else f"{REWARD_VERSION}+custom-{_weights_fingerprint(weights)}"
+    version = (
+        REWARD_VERSION
+        if weights is DEFAULT_WEIGHTS
+        else f"{REWARD_VERSION}+custom-{_weights_fingerprint(weights)}"
+    )
 
     # Correctness axis: present only when verdicts parse to a non-empty list.
     correctness_per_finding: list[float] | None = None

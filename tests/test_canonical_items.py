@@ -22,7 +22,7 @@ def test_normalize_assigns_unique_ids_across_lenses():
 
 
 def test_verdict_join_matches_after_collision_resolution():
-    from daydream.deep.orchestrator import attach_verdicts
+    from daydream.deep.orchestrator import _attach_verdicts
 
     items = normalize_items([
         {"id": 1, "lens": "structural", "file": "b.py", "line": 1, "description": "y",
@@ -31,6 +31,6 @@ def test_verdict_join_matches_after_collision_resolution():
          "confidence": "HIGH", "rationale": "r", "severity": "low"}])
     payload = {"verdicts": [{"issue_id": items[1]["id"], "verdict": "contradicts",
                              "evidence": "e", "unverified_assumptions": []}]}
-    joined = attach_verdicts(items, payload)
+    joined = _attach_verdicts(items, payload)
     assert joined[0].get("verifier_verdict") is None       # structural NOT mismatched
     assert joined[1]["verifier_verdict"] == "contradicts"  # right item got the verdict
