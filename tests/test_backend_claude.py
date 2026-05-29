@@ -364,6 +364,41 @@ async def _drive_claude_backend_to_list(
 
 
 @pytest.mark.asyncio
+async def test_structured_output_tool_result_is_suppressed(patch_sdk) -> None:
+    """StructuredOutput ToolUseBlocks are skipped, and the corresponding
+    ToolResultBlock in the next UserMessage must also be skipped — otherwise
+    the trajectory recorder logs it as an unmatched_tool_result."""
+    events = await _drive_claude_backend_to_list(
+        messages=[
+            MockAssistantMessage(content=[
+                MockToolUseBlock(id="tool-real", name="Read", input={"file": "a.py"}),
+                MockToolUseBlock(id="tool-so", name="StructuredOutput", input={"result": "{}"}),
+            ]),
+            MockUserMessage(content=[
+                MockToolResultBlock(tool_use_id="tool-real", content="file contents"),
+                MockToolResultBlock(tool_use_id="tool-so", content='{"data": 1}'),
+            ]),
+            MockResultMessage(total_cost_usd=0.01, structured_output={"data": 1}),
+        ],
+        patch_sdk_fn=patch_sdk,
+    )
+
+    tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+
+    assert len(tool_starts) == 1
+    assert tool_starts[0].name == "Read"
+    assert tool_starts[0].id == "tool-real"
+
+    assert len(tool_results) == 1
+    assert tool_results[0].id == "tool-real"
+    assert tool_results[0].output == "file contents"
+
+    result_events = [e for e in events if isinstance(e, ResultEvent)]
+    assert result_events[0].structured_output == {"data": 1}
+
+
+@pytest.mark.asyncio
 async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk) -> None:
     """One TurnEndEvent per AssistantMessage, after that message's events."""
     from daydream.backends import TurnEndEvent

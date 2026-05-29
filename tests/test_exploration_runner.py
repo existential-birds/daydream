@@ -225,6 +225,38 @@ def test_parallel_tier_launches_three_agents(tmp_path):
     assert "use type hints" in ctx.guidelines
 
 
+def test_parallel_tier_routes_correct_file_lists(tmp_path):
+    py = (FIXTURES / "python_multifile.diff").read_text()
+    ts = (FIXTURES / "typescript_multifile.diff").read_text()
+    diff_text = py + ts
+
+    backend = _SpecialistMockBackend()
+    anyio.run(pre_scan, backend, tmp_path, diff_text)
+
+    diff_changed = {"daydream_demo/api.py", "daydream_demo/models.py", "src/api.ts", "src/models.ts"}
+
+    calls_by_schema = {}
+    for call in backend.execute_calls:
+        if call["schema"] == PATTERN_SCANNER_SCHEMA:
+            calls_by_schema["pattern_scanner"] = call
+        elif call["schema"] == DEPENDENCY_TRACER_SCHEMA:
+            calls_by_schema["dependency_tracer"] = call
+        elif call["schema"] == TEST_MAPPER_SCHEMA:
+            calls_by_schema["test_mapper"] = call
+
+    assert set(calls_by_schema.keys()) == {"pattern_scanner", "dependency_tracer", "test_mapper"}
+
+    for name in ("pattern_scanner", "test_mapper"):
+        prompt = calls_by_schema[name]["prompt"]
+        for path in diff_changed:
+            assert f"- {path}" in prompt
+        assert "(modified)" not in prompt
+
+    dep_prompt = calls_by_schema["dependency_tracer"]["prompt"]
+    for path in diff_changed:
+        assert f"- {path} (modified)" in dep_prompt
+
+
 def test_parse_envelope_handles_missing_keys(tmp_path):
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
     envelope = {

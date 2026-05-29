@@ -275,6 +275,25 @@ def test_diff_excludes_paths(tmp_path: Path) -> None:
     assert "drop.txt" not in out
 
 
+def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path) -> None:
+    """When HEAD is on main, diff against origin/main shows unpushed commits."""
+    remote_dir = tmp_path / "remote.git"
+    remote_dir.mkdir()
+    _git(remote_dir, "init", "--bare", "-b", "main")
+
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "remote", "add", "origin", str(remote_dir))
+    _git(repo, "push", "-u", "origin", "main")
+
+    # Local commit on main — not pushed.
+    (repo / "local.txt").write_text("local change\n")
+    _git(repo, "add", "local.txt")
+    _commit(repo, "local only")
+
+    out = git_ops.diff(repo, "main")
+    assert "local.txt" in out, "diff should show unpushed changes vs origin/main"
+
+
 # --- diff_name_only ---------------------------------------------------------
 
 
