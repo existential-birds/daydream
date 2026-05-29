@@ -77,6 +77,7 @@ injection seams.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,7 +88,7 @@ from rich.console import Console
 
 from daydream import git_ops
 from daydream.archive.index import append_label_observation, query_runs, reviewer_set_penalty_prior
-from daydream.git_ops import GitError
+from daydream.git_ops import GitError, RateLimitError
 from daydream.training import reward
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.base_sha import materialize_base_sha
@@ -224,6 +225,19 @@ def assemble_scoring_inputs(run_dir: Path, row: dict[str, Any]) -> ScoringInputs
 # git / gh wrappers — module-level so they double as monkeypatch seams.
 # ---------------------------------------------------------------------------
 
+# Bounded rate-limit backoff for the gh seam. When GitHub returns a rate-limit
+# error, ``_gh_api`` sleeps and retries up to ``_MAX_RATE_LIMIT_RETRIES`` times,
+# honoring a parsed ``Retry-After`` (capped at ``_MAX_BACKOFF_SEC``) and falling
+# back to ``_DEFAULT_BACKOFF_SEC`` when none is supplied.
+_DEFAULT_BACKOFF_SEC = 30.0
+_MAX_BACKOFF_SEC = 120.0
+_MAX_RATE_LIMIT_RETRIES = 5
+
+
+def _rate_limit_sleep(seconds: float) -> None:
+    """Sleep ``seconds`` between rate-limit retries (seam for tests to stub)."""
+    time.sleep(seconds)
+
 
 def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
     """Proxy to :func:`daydream.git_ops.gh_api` keyed by ``repo`` slug.
@@ -235,12 +249,27 @@ def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
     because it authenticates against the GitHub host configured in ``gh auth``,
     not the local repo.
 
+    On a :class:`~daydream.git_ops.RateLimitError`, we sleep with bounded
+    backoff (``min(retry_after or _DEFAULT_BACKOFF_SEC, _MAX_BACKOFF_SEC)``) and
+    retry up to ``_MAX_RATE_LIMIT_RETRIES`` times; if the limit is still
+    exhausted, the :class:`RateLimitError` propagates so the orchestrator can
+    abort cleanly while preserving its resume marker.
+
     Limitation: ``repo`` is accepted for API compatibility but is not used to
     resolve the GitHub host; all requests go to the single host configured in
     ``gh auth`` (typically ``github.com``). Mixing repos from different GitHub
     hosts in a single harvest run would silently use the wrong host.
     """
-    return git_ops.gh_api(Path("."), endpoint, **kwargs)
+    for attempt in range(_MAX_RATE_LIMIT_RETRIES):
+        try:
+            return git_ops.gh_api(Path("."), endpoint, **kwargs)
+        except RateLimitError as exc:
+            if attempt == _MAX_RATE_LIMIT_RETRIES - 1:
+                raise
+            backoff = min(exc.retry_after or _DEFAULT_BACKOFF_SEC, _MAX_BACKOFF_SEC)
+            _rate_limit_sleep(backoff)
+    # Unreachable: the loop either returns or raises on the final attempt.
+    raise RuntimeError("rate-limit retry loop exited without returning")  # pragma: no cover
 
 
 def _diff_name_only(repo: Path, base: str, head: str) -> list[str]:
@@ -718,7 +747,8 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
 
     Returns:
         Summary dict with keys ``considered``, ``annotated``,
-        ``would_annotate``, ``skipped``, ``errors``.
+        ``would_annotate``, ``skipped``, ``errors``, and ``aborted`` (``1`` when
+        the sweep stopped early on an exhausted GitHub rate limit, else ``0``).
 
     Raises:
         FileNotFoundError: When ``config.archive_dir`` does not exist.
@@ -760,6 +790,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         "would_annotate": 0,
         "skipped": 0,
         "errors": 0,
+        "aborted": 0,
     }
 
     console = create_console()
@@ -805,6 +836,20 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                 # Either way the row is "done" for resume — re-running must not re-fetch it.
                 if cache is not None:
                     cache.mark_session_done(row["session_id"])
+        except RateLimitError:
+            # Rate limit exhausted after bounded backoff: abort the whole sweep
+            # cleanly. The failed row is NOT marked done, so its resume marker is
+            # preserved and a later re-run picks up exactly where we stopped.
+            summary["aborted"] = 1
+            resume_marker = (config.cache_dir / "progress.jsonl") if config.cache_dir else None
+            print_warning(
+                console,
+                "harvest: GitHub rate limit exhausted; aborting cleanly. "
+                f"Resume from {resume_marker} by re-running with the same --cache-dir."
+                if resume_marker is not None
+                else "harvest: GitHub rate limit exhausted; aborting cleanly.",
+            )
+            break
         except Exception as exc:  # noqa: BLE001 - per-row isolation by design
             summary["errors"] += 1
             print_warning(

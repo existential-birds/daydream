@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from daydream import git_ops
 from daydream.archive.index import (
     append_label_observation,
     label_observation_history,
@@ -17,6 +18,7 @@ from daydream.archive.index import (
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
 from daydream.training import harvest
+from daydream.training.backfill_cache import BackfillCache
 from daydream.training.harvest import (
     HarvestConfig,
     _resolve_repo_for_row,
@@ -410,6 +412,62 @@ async def test_re_harvest_appends_on_version_bump(tmp_path, archive_dir, monkeyp
     monkeypatch.setattr("daydream.training.harvest.reward.REWARD_VERSION", "9999.99.99-bump")
     await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
     assert len(label_observation_history(archive_dir, "s1")) == 2
+
+
+async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(tmp_path, archive_dir, monkeypatch):
+    # Two distinct sessions with distinct PR numbers (so the gh endpoint identifies
+    # the session), each with its own bronze run dir so the index has two rows.
+    for sid, pr_number in (("s1", 1), ("s2", 2)):
+        run_dir = _seed_deep_bronze(tmp_path / sid, verdict="consistent", grounding=1.0)
+        upsert_run(
+            archive_dir,
+            Manifest(
+                session_id=sid,
+                archived_at="2026-01-01T00:00:00Z",
+                run_flow="normal",
+                backend="claude",
+                repo_slug="org/repo",
+                pr_repo="org/repo",
+                pr_number=pr_number,
+                head_sha="abc",
+                base_branch="main",
+                grounding_rate=1.0,
+                changed_files=["app.py"],
+                archive_path=str(run_dir),
+            ),
+        )
+    # The first row (PR 1) fully succeeds; the second (PR 2) triggers an exhausted
+    # rate-limit on every gh call so the harvest loop must abort cleanly.
+    merged = _fake_gh_merged("2026-02-01T00:00:00+00:00")
+
+    def _gh(repo, endpoint, **kw):
+        if "/pulls/2" in endpoint or "/2/" in endpoint or endpoint.endswith("/2"):
+            raise git_ops.RateLimitError("exhausted")
+        return merged(repo, endpoint, **kw)
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh)
+    cache_dir = tmp_path / "c"
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir))
+    assert summary["aborted"] == 1
+    # The completed session is preserved for resume; the failed one is not:
+    done = BackfillCache(cache_dir=cache_dir, inner=_gh).completed_sessions()
+    assert "s1" in done and "s2" not in done
+
+
+def test_gh_api_backoff_retries_then_succeeds(monkeypatch):
+    slept = []
+    monkeypatch.setattr(harvest, "_rate_limit_sleep", lambda s: slept.append(s))
+    seq = [git_ops.RateLimitError("x"), git_ops.RateLimitError("x"), {"ok": True}]
+
+    def _inner(*a, **k):
+        v = seq.pop(0)
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    monkeypatch.setattr(harvest.git_ops, "gh_api", _inner)
+    assert harvest._gh_api("o/r", "endpoint") == {"ok": True}
+    assert len(slept) == 2
 
 
 # ---------------------------------------------------------------------------
