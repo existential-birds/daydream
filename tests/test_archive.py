@@ -17,6 +17,8 @@ from daydream.archive import _copy_bundle, archive_run, get_archive_dir
 from daydream.archive.git_context import GitContext, _parse_repo_slug, capture_git_context
 from daydream.archive.index import (
     append_label_observation,
+    bulk_latest_label_observations,
+    label_count_summary,
     label_observation_history,
     latest_label_observation,
     query_runs,
@@ -676,6 +678,20 @@ def test_label_observations_source_column_migrates(tmp_path: Path):
     assert "source" in cols
     rows = label_observation_history(tmp_path, "s-mig")
     assert rows and rows[0]["source"] == "auto"  # existing row defaulted, non-destructive
+
+
+def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s-prec"))
+    append_label_observation(tmp_path, "s-prec", labels=["rejected"], pr_state="closed",
+                             labeler_version="auto-v1", evidence_sha="sha1", source="auto")
+    append_label_observation(tmp_path, "s-prec", labels=["accepted"], pr_state=None,
+                             labeler_version="human", evidence_sha=None, source="human")
+    # A NEWER auto observation must NOT dethrone the human label:
+    append_label_observation(tmp_path, "s-prec", labels=["rejected"], pr_state="closed",
+                             labeler_version="auto-v2", evidence_sha="sha2", source="auto")
+    assert latest_label_observation(tmp_path, "s-prec")["labels"] == '["accepted"]'
+    assert bulk_latest_label_observations(tmp_path, ["s-prec"])["s-prec"]["labels"] == '["accepted"]'
+    assert label_count_summary(tmp_path) == {"accepted": 1}
 
 
 def test_append_observation_persists_valid_at_and_reward(tmp_path: Path):

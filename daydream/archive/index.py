@@ -437,10 +437,12 @@ def latest_label_observation(
     *,
     as_of: str | None = None,
 ) -> dict | None:
-    """Return the most recent label observation for ``session_id``.
+    """Return the highest-precedence (human-first, then most recent) label observation for ``session_id``.
 
-    When ``as_of`` is provided, the result is the most recent observation
-    whose ``observed_at <= as_of`` — enabling reproducible corpus pinning.
+    Human-sourced observations win over automated ones regardless of timing;
+    ties broken by recency. When ``as_of`` is provided, the result is the
+    highest-precedence observation whose ``observed_at <= as_of`` — enabling
+    reproducible corpus pinning.
 
     Args:
         archive_dir: Path to the archive root.
@@ -455,13 +457,13 @@ def latest_label_observation(
         if as_of is None:
             cursor = conn.execute(
                 "SELECT * FROM label_observations WHERE session_id = ? "
-                "ORDER BY observed_at DESC LIMIT 1",
+                "ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC LIMIT 1",
                 (session_id,),
             )
         else:
             cursor = conn.execute(
                 "SELECT * FROM label_observations WHERE session_id = ? AND observed_at <= ? "
-                "ORDER BY observed_at DESC LIMIT 1",
+                "ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC LIMIT 1",
                 (session_id, as_of),
             )
         row = cursor.fetchone()
@@ -476,10 +478,12 @@ def bulk_latest_label_observations(
     *,
     as_of: str | None = None,
 ) -> dict[str, dict]:
-    """Return the most recent label observation for each session in *session_ids*.
+    """Return the highest-precedence (human-first, then most recent) label observation for each session.
 
-    Fetches all matching rows in a single SQL query instead of one query per
-    session, eliminating the N+1 pattern when building a corpus.
+    Human-sourced observations win over automated ones regardless of timing;
+    ties broken by recency. Fetches all matching rows in a single SQL query
+    instead of one query per session, eliminating the N+1 pattern when building
+    a corpus.
 
     When ``as_of`` is provided, only observations whose ``observed_at <= as_of``
     are considered — the same temporal constraint applied by
@@ -508,7 +512,8 @@ def bulk_latest_label_observations(
                     SELECT *,
                            ROW_NUMBER() OVER (
                                PARTITION BY session_id
-                               ORDER BY observed_at DESC
+                               ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC,
+                                        observed_at DESC
                            ) AS _rn
                     FROM label_observations
                     WHERE session_id IN ({placeholders})
@@ -525,7 +530,8 @@ def bulk_latest_label_observations(
                     SELECT *,
                            ROW_NUMBER() OVER (
                                PARTITION BY session_id
-                               ORDER BY observed_at DESC
+                               ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC,
+                                        observed_at DESC
                            ) AS _rn
                     FROM label_observations
                     WHERE session_id IN ({placeholders})
@@ -774,10 +780,11 @@ def label_count_summary(
 ) -> dict[str, int]:
     """Return label counts for all runs in a single aggregate query.
 
-    For each run in ``runs``, finds the most recent ``label_observations`` row
-    whose ``observed_at <= as_of`` (or the most recent overall when ``as_of``
-    is ``None``), extracts the first label, and tallies counts.  Runs with no
-    qualifying observation are counted under ``"unlabeled"``.
+    For each run in ``runs``, finds the highest-precedence (human-first, then
+    most recent) ``label_observations`` row whose ``observed_at <= as_of`` (or
+    overall when ``as_of`` is ``None``), extracts the first label, and tallies
+    counts.  Runs with no qualifying observation are counted under
+    ``"unlabeled"``.
 
     This replaces the N+1 pattern of calling
     :func:`latest_label_observation` once per run.
@@ -796,26 +803,36 @@ def label_count_summary(
     try:
         if as_of is None:
             best_sql = (
-                "SELECT session_id, MAX(observed_at) AS max_at "
-                "FROM label_observations "
-                "GROUP BY session_id"
+                "SELECT session_id, labels FROM ("
+                "  SELECT session_id, labels, "
+                "         ROW_NUMBER() OVER ("
+                "             PARTITION BY session_id "
+                "             ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, "
+                "                      observed_at DESC"
+                "         ) AS _rn "
+                "  FROM label_observations"
+                ") WHERE _rn = 1"
             )
             params: tuple = ()
         else:
             best_sql = (
-                "SELECT session_id, MAX(observed_at) AS max_at "
-                "FROM label_observations "
-                "WHERE observed_at <= ? "
-                "GROUP BY session_id"
+                "SELECT session_id, labels FROM ("
+                "  SELECT session_id, labels, "
+                "         ROW_NUMBER() OVER ("
+                "             PARTITION BY session_id "
+                "             ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, "
+                "                      observed_at DESC"
+                "         ) AS _rn "
+                "  FROM label_observations "
+                "  WHERE observed_at <= ?"
+                ") WHERE _rn = 1"
             )
             params = (as_of,)
 
         cursor = conn.execute(
-            f"SELECT lo.labels "  # noqa: S608
+            f"SELECT best.labels "  # noqa: S608
             f"FROM runs r "
-            f"LEFT JOIN ({best_sql}) best ON r.session_id = best.session_id "
-            f"LEFT JOIN label_observations lo "
-            f"    ON lo.session_id = best.session_id AND lo.observed_at = best.max_at",
+            f"LEFT JOIN ({best_sql}) best ON r.session_id = best.session_id",
             params,
         )
         counts: dict[str, int] = {}
