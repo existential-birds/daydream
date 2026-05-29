@@ -340,7 +340,7 @@ def append_label_observation(
     reviewer_logins: list[str] | None = None,
     has_posterior: bool = False,
     source: str = "auto",
-) -> None:
+) -> bool:
     """Append a row to the immutable ``label_observations`` history.
 
     Writes a single ``(session_id, observed_at)`` row capturing the current
@@ -394,6 +394,16 @@ def append_label_observation(
             of timing, which is why the cache is written from the winning row
             rather than the inserted one.
 
+    Returns:
+        ``True`` when a new observation row was inserted; ``False`` when the
+        append was a deduped no-op. Dedup is **auto-only**: an automated
+        (``source="auto"``) append whose ``(evidence_sha, reward_version)``
+        matches the latest existing *auto* observation for the session is
+        skipped without inserting and without touching the cache. Human
+        (``source != "auto"``) appends are never deduped and always return
+        ``True``; a reward-version bump on otherwise-identical evidence also
+        appends a fresh generation.
+
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table.
     """
@@ -411,6 +421,22 @@ def append_label_observation(
         if cursor.fetchone() is None:
             msg = f"Unknown session {session_id!r}"
             raise ValueError(msg)
+        # Idempotency: an automated re-score with identical evidence is a no-op.
+        # Compare against the latest *auto* row specifically so a human override
+        # appended in between cannot mask a genuine automated re-score.
+        if source == "auto":
+            latest_auto = conn.execute(
+                "SELECT evidence_sha, reward_version FROM label_observations "
+                "WHERE session_id = ? AND source = 'auto' "
+                "ORDER BY observed_at DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if (
+                latest_auto is not None
+                and latest_auto["evidence_sha"] == evidence_sha
+                and latest_auto["reward_version"] == reward_version
+            ):
+                return False
         conn.execute(
             "INSERT INTO label_observations "
             "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
@@ -457,6 +483,7 @@ def append_label_observation(
             ),
         )
         conn.commit()
+        return True
     finally:
         conn.close()
 

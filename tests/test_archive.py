@@ -707,6 +707,31 @@ def test_append_cache_reflects_winning_human_label(tmp_path: Path):
     assert row["outcome_labels"] == '["accepted"]'
 
 
+def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s-dedup"))
+    first = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
+                                     labeler_version="rv1", evidence_sha="shaA", source="auto")
+    second = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
+                                      labeler_version="rv1", evidence_sha="shaA", source="auto")
+    assert first is True and second is False
+    assert len(label_observation_history(tmp_path, "s-dedup")) == 1
+    # A reward_version change DOES append:
+    third = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
+                                     labeler_version="rv2", evidence_sha="shaA",
+                                     reward_version="rv2", source="auto")
+    assert third is True
+    assert len(label_observation_history(tmp_path, "s-dedup")) == 2
+
+
+def test_human_append_never_dedups(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s-h"))
+    append_label_observation(tmp_path, "s-h", labels=["accepted"], pr_state=None,
+                             labeler_version="human", evidence_sha=None, source="human")
+    append_label_observation(tmp_path, "s-h", labels=["accepted"], pr_state=None,
+                             labeler_version="human", evidence_sha=None, source="human")
+    assert len(label_observation_history(tmp_path, "s-h")) == 2
+
+
 def test_append_observation_persists_valid_at_and_reward(tmp_path: Path):
     upsert_run(tmp_path, _make_manifest(session_id="s1"))
     append_label_observation(
