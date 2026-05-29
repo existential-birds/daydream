@@ -20,6 +20,9 @@ Exports:
     bulk_latest_label_observations: Return the most recent label_observations
         row for each session in a collection — single round-trip alternative to
         calling ``latest_label_observation`` in a loop.
+    reviewer_set_penalty_prior: Pooled mean false-positive penalty over prior
+        runs sharing a reviewer (strict ``valid_at`` cutoff), for the posterior
+        outcome prior (C4).
     label_observation_history: Return the full label_observations history for
         a session in chronological order.
     label_count_summary: Return label counts for all runs in a single aggregate
@@ -494,6 +497,97 @@ def bulk_latest_label_observations(
         return {row["session_id"]: dict(row) for row in cursor.fetchall()}
     finally:
         conn.close()
+
+
+def reviewer_set_penalty_prior(
+    archive_dir: Path,
+    logins: list[str],
+    *,
+    before_valid_at: str,
+    exclude_session: str,
+) -> tuple[float | None, int]:
+    """Return the pooled mean penalty over prior runs sharing a reviewer (C4).
+
+    Pools ``label_observations`` rows whose ``reviewer_logins`` JSON intersects
+    *logins*, restricted to ``session_id != exclude_session`` and
+    ``valid_at < before_valid_at`` (strict). One outcome is taken per session
+    (latest ``observed_at``); its first label is mapped to a false-positive
+    penalty via the canonical :attr:`reward.DEFAULT_WEIGHTS.fp_penalty_map`
+    single source. The raw pooled mean and count are returned — the ``>=10``
+    sufficiency threshold and the ``0.5`` default fallback are the caller's
+    responsibility (Task 8 / spec C4).
+
+    Rows with malformed ``reviewer_logins`` / ``labels`` JSON are skipped with a
+    :func:`warnings.warn` (mirroring ``corpus._annotation_reward``) so a single
+    bad row never crashes the aggregate.
+
+    Args:
+        archive_dir: Path to the archive root.
+        logins: The current run's reviewer set. Empty → no pool.
+        before_valid_at: ISO 8601 strict upper bound on ``valid_at``.
+        exclude_session: Session id to exclude (the current run).
+
+    Returns:
+        ``(mean_penalty, count)`` over the pooled sessions, or ``(None, 0)``
+        when *logins* is empty or the pool is empty.
+    """
+    from daydream.training.reward import DEFAULT_WEIGHTS
+
+    if not logins:
+        return None, 0
+    login_set = set(logins)
+    penalty_map = DEFAULT_WEIGHTS.fp_penalty_map
+
+    conn = _get_connection(archive_dir)
+    try:
+        cursor = conn.execute(
+            """
+            SELECT reviewer_logins, labels
+            FROM (
+                SELECT reviewer_logins, labels,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY session_id
+                           ORDER BY observed_at DESC
+                       ) AS _rn
+                FROM label_observations
+                WHERE session_id != ?
+                  AND valid_at < ?
+            )
+            WHERE _rn = 1
+            """,
+            (exclude_session, before_valid_at),
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    penalties: list[float] = []
+    for row in rows:
+        raw_logins = row["reviewer_logins"]
+        if not raw_logins:
+            continue
+        try:
+            row_logins = json.loads(raw_logins)
+        except (json.JSONDecodeError, TypeError) as exc:
+            warnings.warn(f"Invalid reviewer_logins payload {raw_logins!r}: {exc}", stacklevel=2)
+            continue
+        if not isinstance(row_logins, list) or login_set.isdisjoint(row_logins):
+            continue
+        try:
+            row_labels = json.loads(row["labels"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            warnings.warn(f"Invalid labels payload {row['labels']!r}: {exc}", stacklevel=2)
+            continue
+        if not isinstance(row_labels, list) or not row_labels:
+            continue
+        penalty = penalty_map.get(str(row_labels[0]))
+        if penalty is None:
+            continue
+        penalties.append(penalty)
+
+    if not penalties:
+        return None, 0
+    return sum(penalties) / len(penalties), len(penalties)
 
 
 def label_observation_history(archive_dir: Path, session_id: str) -> list[dict]:

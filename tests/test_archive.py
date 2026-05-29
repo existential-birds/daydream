@@ -20,6 +20,7 @@ from daydream.archive.index import (
     label_observation_history,
     latest_label_observation,
     query_runs,
+    reviewer_set_penalty_prior,
     update_labels,
     upsert_run,
 )
@@ -811,6 +812,55 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     assert json.loads(obs["reviewer_logins"]) == ["bob"]
     assert obs["has_posterior"] == 1
     assert query_runs(tmp_path, "session_id = ?", ("mig-1",))[0]["has_posterior"] == 1
+
+
+# ISO 8601 valid times stored verbatim in label_observations.valid_at and
+# compared lexically with a strict ``<`` cutoff; T1 < T2 < T3 lexically.
+T1 = "2026-01-01T00:00:00+00:00"
+T2 = "2026-02-01T00:00:00+00:00"
+T3 = "2026-03-01T00:00:00+00:00"
+
+
+def _seed_reviewed_outcomes(archive_dir: Path) -> None:
+    """Seed three prior runs (one reviewed outcome each) plus a current run.
+
+    - s_a: reviewers=[alice], rejected (penalty 1.0) @ T1
+    - s_b: reviewers=[bob],   accepted (penalty 0.0) @ T2
+    - s_c: reviewers=[alice, carol], contested (penalty 0.5) @ T3
+    - cur: the current session (excluded from its own prior pool)
+    """
+    for sid in ("s_a", "s_b", "s_c", "cur"):
+        _seed_one_run(archive_dir, sid)
+    append_label_observation(
+        archive_dir, "s_a", labels=["rejected"], pr_state="closed",
+        labeler_version="2026.05.28-1", evidence_sha=None,
+        valid_at=T1, reviewer_logins=["alice"], has_posterior=True,
+    )
+    append_label_observation(
+        archive_dir, "s_b", labels=["accepted"], pr_state="merged",
+        labeler_version="2026.05.28-1", evidence_sha=None,
+        valid_at=T2, reviewer_logins=["bob"], has_posterior=True,
+    )
+    append_label_observation(
+        archive_dir, "s_c", labels=["contested"], pr_state="merged",
+        labeler_version="2026.05.28-1", evidence_sha=None,
+        valid_at=T3, reviewer_logins=["alice", "carol"], has_posterior=True,
+    )
+
+
+def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp_path):
+    # Prior runs (one label_observation each): s_a(reviewers=[alice], rejected,1.0 @ t1),
+    #   s_b(reviewers=[bob], accepted,0.0 @ t2), s_c(reviewers=[alice,carol], contested,0.5 @ t3).
+    # Current row reviewers={alice}, valid_at == t3 -> pool = runs sharing alice, valid_at < t3, != current:
+    #   s_a only (s_c is @ t3, excluded by strict <). bob's run does not share a reviewer -> excluded.
+    _seed_reviewed_outcomes(tmp_path)
+    prior, n = reviewer_set_penalty_prior(tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur")
+    assert prior == pytest.approx(1.0) and n == 1
+    # widen the set to {alice,bob}: pool now includes s_a(1.0) + s_b(0.0) -> mean 0.5, n=2
+    prior2, n2 = reviewer_set_penalty_prior(tmp_path, ["alice", "bob"], before_valid_at=T3, exclude_session="cur")
+    assert prior2 == pytest.approx(0.5) and n2 == 2
+    # empty reviewer set -> no pool
+    assert reviewer_set_penalty_prior(tmp_path, [], before_valid_at=T3, exclude_session="cur") == (None, 0)
 
 
 def test_manifest_includes_source_path():
