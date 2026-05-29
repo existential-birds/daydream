@@ -55,11 +55,12 @@ Annotation builder:
 
 Orchestrator (:func:`run_harvest`):
 
-* **Append-only and re-runnable:** every indexed run is considered on every
-  pass; rows that already carry an annotation are *not* skipped — a re-harvest
-  appends a fresh generation so a ``REWARD_VERSION`` bump can re-score the whole
-  archive while older ``as_of`` pins still resolve their original generation.
-  Only the ``cache``/``dry_run`` paths suppress writes.
+* **Idempotent and re-runnable:** every indexed run is considered on every
+  pass, but the write layer dedups on ``(evidence_sha, reward_version)`` — a
+  re-harvest with unchanged evidence is a no-op (counted in ``skipped``). A
+  ``REWARD_VERSION`` bump changes the dedup key and so appends a fresh
+  generation, letting older ``as_of`` pins still resolve their original
+  generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
 * **Per-row error isolation:** an exception on one row counts in ``errors`` and
   does not derail subsequent rows. Configuration errors (missing
   ``archive_dir``) raise before the loop begins.
@@ -701,11 +702,12 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
     :func:`daydream.archive.index.append_label_observation` (which persists
     ``reviewer_logins`` and the ``has_posterior`` population discriminator).
 
-    **Append-only and re-runnable:** rows that already carry an annotation are
-    *not* skipped — a re-harvest appends a fresh generation, so a later
-    ``REWARD_VERSION`` bump can re-score the whole archive while older
-    ``as_of`` pins still resolve their original generation. Only the
-    ``cache``/``dry_run`` paths suppress writes.
+    **Idempotent and re-runnable:** every indexed run is considered, but the
+    write layer dedups on ``(evidence_sha, reward_version)`` — a re-harvest with
+    unchanged evidence is a no-op counted in ``skipped``. A later
+    ``REWARD_VERSION`` bump changes the dedup key and so appends a fresh
+    generation, letting older ``as_of`` pins still resolve their original
+    generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
 
     Per-row error isolation: an exception on one row counts in ``errors`` and
     does not derail subsequent rows. Configuration errors (missing
@@ -726,9 +728,10 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         msg = f"archive_dir does not exist: {config.archive_dir}"
         raise FileNotFoundError(msg)
 
-    # Build the queue: every indexed run, optionally prefix-filtered. Unlike
-    # the old labeler, we do NOT drop rows that already carry an annotation —
-    # harvest is append-only and re-runnable.
+    # Build the queue: every indexed run, optionally prefix-filtered. We do not
+    # pre-drop annotated rows — the write layer makes re-harvest idempotent by
+    # deduping on unchanged ``(evidence_sha, reward_version)`` (a version bump
+    # still appends a new generation).
     if config.session_filter:
         queue = query_runs(
             config.archive_dir,
@@ -779,7 +782,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
             if config.dry_run:
                 summary["would_annotate"] += 1
             else:
-                append_label_observation(
+                appended = append_label_observation(
                     config.archive_dir,
                     row["session_id"],
                     labels=payload.labels,
@@ -794,7 +797,12 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                     reviewer_logins=payload.reviewer_logins,
                     has_posterior=payload.has_posterior,
                 )
-                summary["annotated"] += 1
+                if appended:
+                    summary["annotated"] += 1
+                else:
+                    # Deduped: unchanged evidence/reward-version is a no-op re-run.
+                    summary["skipped"] += 1
+                # Either way the row is "done" for resume — re-running must not re-fetch it.
                 if cache is not None:
                     cache.mark_session_done(row["session_id"])
         except Exception as exc:  # noqa: BLE001 - per-row isolation by design

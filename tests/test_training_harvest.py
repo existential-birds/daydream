@@ -8,7 +8,12 @@ from typing import Any
 
 import pytest
 
-from daydream.archive.index import append_label_observation, label_observation_history, latest_label_observation, upsert_run
+from daydream.archive.index import (
+    append_label_observation,
+    label_observation_history,
+    latest_label_observation,
+    upsert_run,
+)
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
 from daydream.training import harvest
@@ -389,12 +394,22 @@ async def test_harvest_writes_one_annotation(tmp_path, archive_dir, monkeypatch)
     assert obs["valid_at"] == "2026-02-01T00:00:00+00:00" and obs["composite_reward"] is not None
 
 
-async def test_re_harvest_appends_new_generation(tmp_path, archive_dir, monkeypatch):
+async def test_re_harvest_is_idempotent(tmp_path, archive_dir, monkeypatch):
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
     monkeypatch.setattr("daydream.training.harvest._gh_api", _fake_gh_merged("2026-02-01T00:00:00+00:00"))
     await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1"))
+    second = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
+    assert len(label_observation_history(archive_dir, "s1")) == 1  # deduped
+    assert second["skipped"] == 1 and second["annotated"] == 0
+
+
+async def test_re_harvest_appends_on_version_bump(tmp_path, archive_dir, monkeypatch):
+    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _fake_gh_merged("2026-02-01T00:00:00+00:00"))
+    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1"))
+    monkeypatch.setattr("daydream.training.harvest.reward.REWARD_VERSION", "9999.99.99-bump")
     await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
-    assert len(label_observation_history(archive_dir, "s1")) == 2  # append-only, re-runnable
+    assert len(label_observation_history(archive_dir, "s1")) == 2
 
 
 # ---------------------------------------------------------------------------
