@@ -835,6 +835,62 @@ def query_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> list[d
         conn.close()
 
 
+def pr_attached_label_coverage(
+    archive_dir: Path,
+    *,
+    as_of: str | None = None,
+) -> dict[str, float | int]:
+    """Return the fraction of PR-attached runs with a decisive automated label.
+
+    "PR-attached" means the run carries a ``pr_number`` (``pr_number IS NOT
+    NULL``). A run is "decisive" when its winning label — under the same
+    human-first, then-recency precedence projection used by
+    :func:`bulk_latest_label_observations` — is one of ``"accepted"``,
+    ``"contested"``, or ``"rejected"``. Runs whose winning label is
+    ``"unknown"`` (or that have no qualifying observation at all) are not
+    decisive.
+
+    This is a pure read; it never writes. An archive with zero PR-attached runs
+    yields ``coverage`` ``0.0`` rather than raising ``ZeroDivisionError``.
+
+    Args:
+        archive_dir: Path to the archive root.
+        as_of: Optional ISO 8601 cutoff; threaded through to
+            :func:`bulk_latest_label_observations` so only observations whose
+            ``observed_at <= as_of`` are considered (reproducible pinning).
+
+    Returns:
+        ``{"pr_attached": N, "decisive": M, "coverage": M / N}`` with
+        ``coverage`` as ``0.0`` when ``N == 0``.
+    """
+    rows = query_runs(archive_dir, where="pr_number IS NOT NULL")
+    pr_attached = len(rows)
+    if pr_attached == 0:
+        return {"pr_attached": 0, "decisive": 0, "coverage": 0.0}
+
+    session_ids = [row["session_id"] for row in rows]
+    winners = bulk_latest_label_observations(archive_dir, session_ids, as_of=as_of)
+
+    decisive_labels = {"accepted", "contested", "rejected"}
+    decisive = 0
+    for session_id in session_ids:
+        observation = winners.get(session_id)
+        if observation is None:
+            continue
+        try:
+            labels = json.loads(observation["labels"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(labels, list) and labels and str(labels[0]) in decisive_labels:
+            decisive += 1
+
+    return {
+        "pr_attached": pr_attached,
+        "decisive": decisive,
+        "coverage": decisive / pr_attached,
+    }
+
+
 def label_count_summary(
     archive_dir: Path,
     as_of: str | None = None,
