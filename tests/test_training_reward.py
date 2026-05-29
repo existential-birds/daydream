@@ -86,7 +86,7 @@ def test_accepted_outcome_has_zero_penalty_and_all_six_fields():
         pr_feedback="accepted")
     assert isinstance(rb, PosteriorBreakdown)
     assert rb.false_positive_penalty == 0.0
-    assert rb.posterior_cost == 0.0   # max(0, 0.0 − 0.5) clamps to 0.0
+    assert rb.posterior_cost == pytest.approx(0.5)   # abs(0.0 − 0.5 default prior)
     assert all(v is not None for v in
                (rb.correctness_per_finding, rb.grounding, rb.length_penalty,
                 rb.false_positive_penalty, rb.composite)) and rb.format_valid is True
@@ -181,19 +181,20 @@ def test_default_weights_flagged_and_overrides_fingerprint_stably():
     assert len(_weights_fingerprint(RewardWeights(w_fp=0.5))) == 8
 
 
-def test_posterior_cost_penalizes_only_surprise_above_prior():
+def test_posterior_cost_is_absolute_surprise_from_prior():
     inp = ScoringInputs([{"verdict": "consistent"}], 0.5, True, 4000)
     chronic = score_trajectory(inp, pr_feedback="rejected", outcome_prior=0.8, outcome_prior_n=12)
     generous = score_trajectory(inp, pr_feedback="rejected", outcome_prior=0.2, outcome_prior_n=12)
-    assert chronic.posterior_cost == pytest.approx(0.2)   # max(0, 1.0 − 0.8)
-    assert generous.posterior_cost == pytest.approx(0.8)  # max(0, 1.0 − 0.2)
+    assert chronic.posterior_cost == pytest.approx(0.2)   # abs(1.0 − 0.8)
+    assert generous.posterior_cost == pytest.approx(0.8)  # abs(1.0 − 0.2)
     assert generous.posterior_cost > chronic.posterior_cost          # de-bias direction
     assert chronic.outcome_prior == 0.8 and chronic.outcome_prior_n == 12
+    # Two-sided: accepted (0.0) with prior 0.5 is also a surprise — harsh reviewer being lenient
     acc = score_trajectory(inp, pr_feedback="accepted", outcome_prior=0.5, outcome_prior_n=10)
-    assert acc.posterior_cost == 0.0                       # accepted below prior clamps to 0
+    assert acc.posterior_cost == pytest.approx(0.5)        # abs(0.0 − 0.5)
     none_prior = score_trajectory(inp, pr_feedback="rejected")
     assert none_prior.outcome_prior is None                # audit shows uncalibrated
-    assert none_prior.posterior_cost == 0.5                # falls back to 0.5 default
+    assert none_prior.posterior_cost == pytest.approx(0.5) # abs(1.0 − 0.5 default prior)
 
 
 def test_reward_version_stamp_default_vs_custom():

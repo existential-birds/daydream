@@ -863,6 +863,63 @@ def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp
     assert reviewer_set_penalty_prior(tmp_path, [], before_valid_at=T3, exclude_session="cur") == (None, 0)
 
 
+def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path):
+    # Seed the same three outcomes as _seed_reviewed_outcomes, but give s_a and
+    # s_b distinct repo_slugs so we can verify per-repo filtering.
+    #   s_a: repo=org/repo-A, reviewers=[alice], rejected (1.0) @ T1
+    #   s_b: repo=org/repo-B, reviewers=[alice], accepted (0.0) @ T2
+    #   cur: (no repo_slug, excluded by session_id)
+    for sid, slug in (("s_a", "org/repo-A"), ("s_b", "org/repo-B"), ("cur", None)):
+        upsert_run(
+            tmp_path,
+            Manifest(
+                session_id=sid,
+                archived_at="2026-01-01T00:00:00Z",
+                run_flow="normal",
+                backend="claude",
+                repo_slug=slug,
+                archive_path=str(tmp_path / sid),
+            ),
+        )
+    append_label_observation(
+        tmp_path, "s_a", labels=["rejected"], pr_state="closed",
+        labeler_version="2026.05.28-1", evidence_sha=None,
+        valid_at=T1, reviewer_logins=["alice"], has_posterior=True,
+    )
+    append_label_observation(
+        tmp_path, "s_b", labels=["accepted"], pr_state="merged",
+        labeler_version="2026.05.28-1", evidence_sha=None,
+        valid_at=T2, reviewer_logins=["alice"], has_posterior=True,
+    )
+
+    # Without repo scoping both alice rows are pooled: mean(1.0, 0.0) = 0.5, n=2
+    prior_all, n_all = reviewer_set_penalty_prior(
+        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur"
+    )
+    assert prior_all == pytest.approx(0.5) and n_all == 2
+
+    # Scoped to org/repo-A: only s_a(rejected,1.0) qualifies
+    prior_a, n_a = reviewer_set_penalty_prior(
+        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur",
+        repo_slug="org/repo-A",
+    )
+    assert prior_a == pytest.approx(1.0) and n_a == 1
+
+    # Scoped to org/repo-B: only s_b(accepted,0.0) qualifies
+    prior_b, n_b = reviewer_set_penalty_prior(
+        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur",
+        repo_slug="org/repo-B",
+    )
+    assert prior_b == pytest.approx(0.0) and n_b == 1
+
+    # Scoped to an unknown repo: empty pool
+    prior_x, n_x = reviewer_set_penalty_prior(
+        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur",
+        repo_slug="org/other",
+    )
+    assert (prior_x, n_x) == (None, 0)
+
+
 def test_manifest_includes_source_path():
     """source_path appears in manifest dict under git section."""
     m = Manifest(

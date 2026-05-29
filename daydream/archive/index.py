@@ -514,14 +514,18 @@ def reviewer_set_penalty_prior(
     *,
     before_valid_at: str,
     exclude_session: str,
+    repo_slug: str | None = None,
 ) -> tuple[float | None, int]:
     """Return the pooled mean penalty over prior runs sharing a reviewer (C4).
 
     Pools ``label_observations`` rows whose ``reviewer_logins`` JSON intersects
     *logins*, restricted to ``session_id != exclude_session`` and
-    ``valid_at < before_valid_at`` (strict). One outcome is taken per session
-    (latest ``observed_at``); its first label is mapped to a false-positive
-    penalty via ``_REVIEWER_PENALTY_MAP`` (``accepted→0.0``, ``contested→0.5``,
+    ``valid_at < before_valid_at`` (strict). When *repo_slug* is provided the
+    pool is further restricted to rows whose parent ``runs.repo_slug`` matches —
+    preventing cross-repo reviewer history from inflating or deflating the prior
+    (C4 per-repo scoping). One outcome is taken per session (latest
+    ``observed_at``); its first label is mapped to a false-positive penalty via
+    ``_REVIEWER_PENALTY_MAP`` (``accepted→0.0``, ``contested→0.5``,
     ``rejected→1.0``). The raw pooled mean and count are returned — the ``>=10``
     sufficiency threshold and the ``0.5`` default fallback are the caller's
     responsibility (Task 8 / spec C4).
@@ -535,6 +539,9 @@ def reviewer_set_penalty_prior(
         logins: The current run's reviewer set. Empty → no pool.
         before_valid_at: ISO 8601 strict upper bound on ``valid_at``.
         exclude_session: Session id to exclude (the current run).
+        repo_slug: When provided, restrict the pool to observations whose
+            parent run shares this ``repo_slug`` (joined via ``runs``).
+            ``None`` disables per-repo filtering (backward-compatible).
 
     Returns:
         ``(mean_penalty, count)`` over the pooled sessions, or ``(None, 0)``
@@ -549,10 +556,36 @@ def reviewer_set_penalty_prior(
     # inside the query, avoiding a full-table fetch followed by Python-side
     # isdisjoint() for every archived row.
     placeholders = ",".join("?" * len(logins))
-    conn = _get_connection(archive_dir)
-    try:
-        cursor = conn.execute(
-            f"""
+
+    if repo_slug is not None:
+        # Join to runs to scope the pool to the current repo only.
+        inner_where = (
+            "WHERE lo.session_id != ?"
+            "  AND lo.valid_at < ?"
+            "  AND lo.reviewer_logins IS NOT NULL"
+            "  AND EXISTS ("
+            f"      SELECT 1 FROM json_each(lo.reviewer_logins) WHERE value IN ({placeholders})"
+            "  )"
+            "  AND r.repo_slug = ?"
+        )
+        params: tuple = (exclude_session, before_valid_at, *logins, repo_slug)
+        sql = f"""
+            SELECT reviewer_logins, labels
+            FROM (
+                SELECT lo.reviewer_logins, lo.labels,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY lo.session_id
+                           ORDER BY lo.observed_at DESC
+                       ) AS _rn
+                FROM label_observations lo
+                JOIN runs r ON r.session_id = lo.session_id
+                {inner_where}
+            )
+            WHERE _rn = 1
+            """
+    else:
+        params = (exclude_session, before_valid_at, *logins)
+        sql = f"""
             SELECT reviewer_logins, labels
             FROM (
                 SELECT reviewer_logins, labels,
@@ -570,9 +603,11 @@ def reviewer_set_penalty_prior(
                   )
             )
             WHERE _rn = 1
-            """,
-            (exclude_session, before_valid_at, *logins),
-        )
+            """
+
+    conn = _get_connection(archive_dir)
+    try:
+        cursor = conn.execute(sql, params)
         rows = cursor.fetchall()
     finally:
         conn.close()

@@ -61,6 +61,7 @@ from daydream.phases import (
     phase_test_and_heal,
     phase_understand_intent,
     revert_uncommitted_changes,
+    severity_sorted,
 )
 from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
 from daydream.ui import (
@@ -91,7 +92,6 @@ OutputMode = Literal["loop", "comment", "review"]
 # way the deep pipeline does, without changing shallow reviewers or
 # ``FEEDBACK_SCHEMA``.
 _CONFIDENCE_TO_SEVERITY = {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}
-_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
 
 
 def to_canonical_shallow(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -113,11 +113,6 @@ def to_canonical_shallow(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         confidence = item.get("confidence") or ""
         item["severity"] = _CONFIDENCE_TO_SEVERITY.get(confidence, "medium")
     return items
-
-
-def _severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Stable-sort canonical items by severity (high < medium < low)."""
-    return sorted(items, key=lambda it: _SEVERITY_RANK.get(it.get("severity") or "", 1))
 
 
 @dataclass
@@ -891,7 +886,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 return [], 0, 0, True, False  # should_continue=False (clean)
 
             # Canonicalize onto the lens/severity axes, then fix high→low.
-            items = _severity_sorted(to_canonical_shallow(items))
+            items = severity_sorted(to_canonical_shallow(items))
 
             # Phase 3: Fix
             print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
@@ -1013,7 +1008,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                     print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                     return 1
                 # Canonicalize onto the lens/severity axes, then fix high→low.
-                feedback_items = _severity_sorted(to_canonical_shallow(feedback_items))
+                feedback_items = severity_sorted(to_canonical_shallow(feedback_items))
 
             # Phase 3: Fix
             if config.start_at in ("review", "parse", "fix"):

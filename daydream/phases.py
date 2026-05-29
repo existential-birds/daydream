@@ -757,6 +757,17 @@ def normalize_items(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
+# Canonical severity ordering shared by the deep fix loop and the shallow fix
+# loop. Defined here (next to normalize_items / MERGED_ITEMS_SCHEMA) so both
+# callers can import a single helper rather than duplicate the map.
+_SEVERITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
+
+
+def severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stable-sort canonical items by severity (high < medium < low)."""
+    return sorted(items, key=lambda it: _SEVERITY_RANK.get(it.get("severity") or "", 1))
+
+
 RECOMMENDATION_VERDICTS_SCHEMA = {
     "type": "object",
     "properties": {

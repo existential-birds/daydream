@@ -51,6 +51,7 @@ from daydream.phases import (
     phase_test_and_heal,
     phase_understand_intent,
     phase_verify_recommendations,
+    severity_sorted,
 )
 from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
 from daydream.ui import (
@@ -673,8 +674,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
 
             # Severity-ordered (high before medium before low), stable within a
             # tier so equal-severity items keep their canonical merge order.
-            _severity_rank = {"high": 0, "medium": 1, "low": 2}
-            items.sort(key=lambda i: _severity_rank.get(i.get("severity", "medium"), 1))
+            items = severity_sorted(items)
 
             # Attach verifier verdicts to feedback items by `id`. `phase_fix`
             # already reads `verifier_verdict` / `evidence` keys (advisory) and
@@ -684,7 +684,11 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             items = attach_verdicts(items, verdicts_payload)
             matched_ids = [i["id"] for i in items if i.get("verifier_verdict") is not None]
             unmatched_ids = [
-                i["id"] for i in items if isinstance(i.get("id"), int) and i.get("verifier_verdict") is None
+                i["id"]
+                for i in items
+                if isinstance(i.get("id"), int)
+                and i.get("verifier_verdict") is None
+                and i.get("lens") != "structural"
             ]
             print_info(
                 console,

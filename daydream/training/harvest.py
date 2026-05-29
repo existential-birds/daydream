@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -521,8 +522,9 @@ def build_annotation(
         pooled, prior_n = reviewer_set_penalty_prior(
             archive_dir,
             reviewer_logins,
-            before_valid_at=valid_at or "",
+            before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             exclude_session=row["session_id"],
+            repo_slug=row.get("repo_slug"),
         )
         outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
     else:
@@ -543,9 +545,11 @@ def build_annotation(
         outcome_prior_n=prior_n,
     )
 
-    assert rb.reward_version == reward.REWARD_VERSION, (
-        "non-canonical reward_version cannot be written to canonical storage"
-    )
+    if rb.reward_version != reward.REWARD_VERSION:
+        raise RuntimeError(
+            f"non-canonical reward_version {rb.reward_version!r} cannot be written to canonical storage"
+            f" (expected {reward.REWARD_VERSION!r})"
+        )
 
     return AnnotationPayload(
         labels=labels,

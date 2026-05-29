@@ -41,11 +41,12 @@ values cited below are :class:`RewardWeights` fields.
 * **false_positive_penalty** — the posterior axis, derived from the
   maintainer accept/reject outcome (``rejected → 1.0``, ``contested → 0.5``,
   ``accepted → 0.0`` via :attr:`RewardWeights.fp_penalty_map`). The reported
-  ``posterior_cost`` is the *calibrated surprise* ``max(0.0, observed − prior)``
-  on the ``[0, 1]`` penalty scale: only the deviation above the reviewers'
-  mean observed penalty (``outcome_prior``) is penalized, retaining the
-  non-negative clamp. An uncalibrated prior falls back to the ``0.5``
-  maximum-entropy midpoint. It is a *sibling* of the composite, carried on
+  ``posterior_cost`` is the *calibrated surprise* ``abs(observed − prior)``
+  on the ``[0, 1]`` penalty scale: the absolute deviation from the reviewers'
+  mean observed penalty (``outcome_prior``) is penalized in both directions,
+  so a harsh-but-correct reviewer's below-prior acceptance is visible alongside
+  a chronic false-positive rejecter's above-prior rejection. An uncalibrated
+  prior falls back to the ``0.5`` maximum-entropy midpoint. It is a *sibling* of the composite, carried on
   :class:`PosteriorBreakdown`, and is **never** subtracted inside the composite
   (C5: Safe-RLHF documents a safety-compensation pathology for fixed-weight
   subtractive scalarization of constraint-style signals — arXiv:2509.15557 is a
@@ -85,7 +86,7 @@ import types
 from dataclasses import dataclass, field
 from typing import Any
 
-REWARD_VERSION = "2026.05.28-1"
+REWARD_VERSION = "2026.05.28-2"
 """Bump on any change to axis weights, verdict map, gate, or composite shape.
 
 Read at call time (not captured in a default argument) so a test can
@@ -150,13 +151,13 @@ class RewardWeights:
     w_fp: float = 0.3
     len_tau: float = 2000.0
     len_scale: float = 8000.0
-    verdict_map: types.MappingProxyType = field(
+    verdict_map: types.MappingProxyType[str, float] = field(
         default_factory=lambda: types.MappingProxyType(dict(_VERDICT_MAP))
     )
-    fp_penalty_map: types.MappingProxyType = field(
+    fp_penalty_map: types.MappingProxyType[str, float] = field(
         default_factory=lambda: types.MappingProxyType(dict(_FP_PENALTY_MAP))
     )
-    is_default: bool = False
+    is_default: bool = field(default=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.len_scale <= 0:
@@ -286,9 +287,9 @@ class PosteriorBreakdown(RewardBreakdown):
         false_positive_penalty: Raw observed maintainer outcome mapped via
             :attr:`RewardWeights.fp_penalty_map` (``accepted → 0.0``,
             ``contested → 0.5``, ``rejected → 1.0``).
-        posterior_cost: The surprise component ``max(0.0, observed − prior)``
-            on the ``[0, 1]`` penalty scale — only the deviation above the
-            reviewers' prior is penalized.
+        posterior_cost: The surprise component ``abs(observed − prior)``
+            on the ``[0, 1]`` penalty scale — the absolute deviation from the
+            reviewers' prior is penalized in both directions.
         outcome_prior: The reviewers' mean observed penalty used as the prior,
             or ``None`` when uncalibrated (the reducer then applies the ``0.5``
             maximum-entropy default).
@@ -420,11 +421,11 @@ def score_trajectory(
 
     # Mapped maintainer label ⇒ PosteriorBreakdown carrying the sibling axis.
     if fp_penalty is not None:
-        # Calibrated surprise: penalize only the deviation above the reviewers'
-        # prior. An uncalibrated (None) prior falls back to the 0.5 max-entropy
-        # midpoint for the cost, but is stored verbatim as the audit trail.
+        # Calibrated surprise: penalize the absolute deviation from the reviewers'
+        # prior (both under- and over-rejection). An uncalibrated (None) prior
+        # falls back to the 0.5 max-entropy midpoint; stored verbatim as audit trail.
         effective_prior = outcome_prior if outcome_prior is not None else 0.5
-        posterior_cost = max(0.0, fp_penalty - effective_prior)
+        posterior_cost = abs(fp_penalty - effective_prior)
         return PosteriorBreakdown(
             correctness_per_finding=correctness_per_finding,
             grounding=grounding,

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from daydream.archive.index import label_observation_history, latest_label_observation, upsert_run
+from daydream.archive.index import append_label_observation, label_observation_history, latest_label_observation, upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
 from daydream.training import harvest
@@ -180,6 +180,77 @@ def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_pat
     assert rb["axes_present"]["correctness"] is False         # shallow: no verdicts
 
 
+def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path, archive_dir):
+    # End-to-end: seed a prior label_observation for "alice" in the archive
+    # (past valid_at) then call build_annotation for a rejected PR whose reviewer
+    # is "alice".  The production reviewer_set_penalty_prior DB query must find
+    # the seeded row, so prior_n >= 1 (pool is non-empty) even though n < 10
+    # (below the sufficiency threshold).  This exercises the before_valid_at
+    # filtering path against a non-empty archive — the gap identified in the
+    # cross-stack finding where the existing empty-pool test cannot detect a
+    # before_valid_at='' bug.
+    prior_session_id = "s_prior_alice"
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id=prior_session_id,
+            archived_at="2025-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            pr_repo="org/repo",
+            pr_number=1,
+            head_sha="aaa",
+            base_branch="main",
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(tmp_path),
+        ),
+    )
+    append_label_observation(
+        archive_dir,
+        prior_session_id,
+        labels=["rejected"],
+        pr_state="closed",
+        labeler_version="test",
+        evidence_sha=None,
+        valid_at="2025-06-01T00:00:00Z",   # strictly in the past
+        reviewer_logins=["alice"],
+        has_posterior=True,
+    )
+
+    run_dir = _seed_deep_bronze(tmp_path / "current_run", verdict="consistent", grounding=1.0)
+    row = {
+        "session_id": "s_rej_populated",
+        "pr_repo": "o/r",
+        "pr_number": 9,
+        "head_sha": "h",
+        "base_branch": "main",
+        "archive_path": str(run_dir),
+        "grounding_rate": 1.0,
+        "changed_files": "[]",
+    }
+    payload = build_annotation(
+        row,
+        run_dir=run_dir,
+        archive_dir=archive_dir,
+        gh_api=_fake_gh_not_merged_with_reviewer("alice"),
+        repo_clone=tmp_path,
+        window_days=30,
+    )
+    assert payload.labels == ["rejected"]
+    rb = json.loads(payload.reward_json)
+    # The seeded prior row is found: pool is non-empty (prior_n >= 1).
+    # n < 10 (sufficiency threshold) so outcome_prior is None, but
+    # prior_n must reflect the pool count — proving the DB query ran
+    # against real history rather than an empty archive.
+    assert rb["outcome_prior_n"] >= 1, (
+        f"expected prior_n >= 1 from seeded archive, got {rb['outcome_prior_n']}"
+    )
+    assert rb["outcome_prior"] is None   # n < 10 threshold → fallback to default
+    assert rb["posterior_cost"] == 0.5   # default prior applied
+
+
 def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(tmp_path, monkeypatch):
     monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.8, 12))  # >=10 -> empirical
     monkeypatch.setattr(harvest, "reviewer_logins_signal", lambda *a, **k: ["alice", "carol"])
@@ -250,7 +321,7 @@ def test_build_annotation_asserts_canonical_version(tmp_path, monkeypatch):
     row = {"session_id": "s_custom", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
            "changed_files": "[]"}
-    with pytest.raises(AssertionError, match="canonical"):
+    with pytest.raises((AssertionError, RuntimeError), match="canonical"):
         build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                          gh_api=_fake_gh_not_merged(), repo_clone=tmp_path, window_days=30)
 
