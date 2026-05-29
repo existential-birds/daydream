@@ -300,13 +300,13 @@ class TestResolveBackendPhaseModel:
     def test_table_default_used_when_no_flag(self):
         config = RunConfig(backend="claude")  # no review_model override
         backend = runner._resolve_backend(config, "review")
-        assert backend.model == "claude-opus-4-6"  # claude REVIEW default
+        assert backend.model == "claude-opus-4-8"  # claude REVIEW default
 
     def test_table_default_for_phase_without_flag(self):
         # WONDER has no override flag but should still get the table default.
         config = RunConfig(backend="claude")
         backend = runner._resolve_backend(config, "wonder")
-        assert backend.model == "claude-opus-4-6"
+        assert backend.model == "claude-opus-4-8"
 
     def test_codex_table_default(self):
         config = RunConfig(backend="codex")
