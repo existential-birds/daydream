@@ -126,3 +126,12 @@ def test_same_function_scores_producer_and_eval_caller_paths():
     assert harvest_mod.score_trajectory is canonical_fn
     inp = ScoringInputs([{"verdict": "consistent"}], 0.7, True, 500)
     assert canonical_fn(inp, pr_feedback="accepted").composite == harvest_mod.score_trajectory(inp, pr_feedback="accepted").composite
+
+
+def test_default_weights_flagged_and_overrides_fingerprint_stably():
+    from daydream.training.reward import DEFAULT_WEIGHTS, RewardWeights, _weights_fingerprint
+    assert DEFAULT_WEIGHTS.is_default is True
+    assert RewardWeights(w_fp=0.5).is_default is False
+    assert _weights_fingerprint(RewardWeights(w_fp=0.5)) == _weights_fingerprint(RewardWeights(w_fp=0.5))
+    assert _weights_fingerprint(RewardWeights(w_fp=0.5)) != _weights_fingerprint(RewardWeights(w_fp=0.6))
+    assert len(_weights_fingerprint(RewardWeights(w_fp=0.5))) == 8

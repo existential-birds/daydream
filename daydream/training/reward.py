@@ -69,6 +69,8 @@ under :data:`DEFAULT_WEIGHTS` carry the meaning stamped by
 
 from __future__ import annotations
 
+import hashlib
+import json
 import types
 from dataclasses import dataclass, field
 from typing import Any
@@ -118,6 +120,10 @@ class RewardWeights:
         fp_penalty_map: Maintainer outcome label → posterior penalty
             (``accepted → 0.0``, ``contested → 0.5``, ``rejected → 1.0``).
             An unmapped/``"unknown"`` label leaves the axis absent.
+        is_default: Identity flag, ``True`` only on :data:`DEFAULT_WEIGHTS`.
+            Set at construction, never mutated; excluded from
+            :func:`_weights_fingerprint` (it is identity metadata, not a
+            scoring parameter).
     """
 
     w_correctness: float = 0.6
@@ -132,6 +138,7 @@ class RewardWeights:
     fp_penalty_map: types.MappingProxyType = field(
         default_factory=lambda: types.MappingProxyType(dict(_FP_PENALTY_MAP))
     )
+    is_default: bool = False
 
     def __post_init__(self) -> None:
         if self.len_scale <= 0:
@@ -141,9 +148,38 @@ class RewardWeights:
             )
 
 
-DEFAULT_WEIGHTS = RewardWeights()
+DEFAULT_WEIGHTS = RewardWeights(is_default=True)
 """The golden-locked weights; scoring under these is byte-identical to the
-canonical corpus reward stamped by :data:`REWARD_VERSION`."""
+canonical corpus reward stamped by :data:`REWARD_VERSION`. The only
+:class:`RewardWeights` instance with ``is_default=True``."""
+
+
+def _weights_fingerprint(weights: RewardWeights) -> str:
+    """Return a stable 8-char fingerprint of a :class:`RewardWeights`.
+
+    Serializes the six scalar fields plus the two map fields (as plain
+    ``dict``) via sorted-key JSON, then takes the leading 8 hex chars of the
+    SHA-256 digest. ``is_default`` is excluded — it is identity metadata, not
+    a scoring parameter. Pure; no I/O.
+
+    Args:
+        weights: The weights to fingerprint.
+
+    Returns:
+        The first 8 hex characters of the SHA-256 digest of the canonical
+        JSON serialization of the scoring parameters.
+    """
+    payload = {
+        "w_correctness": weights.w_correctness,
+        "w_grounding": weights.w_grounding,
+        "w_len": weights.w_len,
+        "w_fp": weights.w_fp,
+        "len_tau": weights.len_tau,
+        "len_scale": weights.len_scale,
+        "verdict_map": dict(weights.verdict_map),
+        "fp_penalty_map": dict(weights.fp_penalty_map),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:8]
 
 
 def _clip(value: float, low: float, high: float) -> float:
