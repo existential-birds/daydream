@@ -99,32 +99,37 @@ class _DeepMockBackend:
         if "read the review output file" in pl or "extract only actionable issues" in pl:
             self.calls.append("parse")
             yield TextEvent(text="")
-            yield ResultEvent(structured_output={"issues": []}, continuation=None)
+            # When parsing the STRUCTURAL review file, return a structural
+            # finding. The merge phase appends these (tagged lens="structural")
+            # to the canonical item list, which renders the ## Structural Review
+            # section. Other stacks yield no actionable issues.
+            if "stack-structure-review.md" in prompt:
+                yield ResultEvent(
+                    structured_output={
+                        "issues": [
+                            {
+                                "id": 1,
+                                "description": "hello() leaks a god-object boundary",
+                                "file": "api.py",
+                                "line": 1,
+                            }
+                        ]
+                    },
+                    continuation=None,
+                )
+            else:
+                yield ResultEvent(structured_output={"issues": []}, continuation=None)
             return
 
-        # Cross-stack merge prompt contains "cross-stack merge agent".
+        # Cross-stack merge prompt contains "cross-stack merge agent". Return a
+        # schema item list; the host appends structural findings and renders the
+        # report. Per-stack/cross-stack lenses are empty here (no language-stack
+        # issues in this fixture) so the canonical report carries only the
+        # Python-appended structural section.
         if "cross-stack merge agent" in pl:
             self.calls.append("merge")
-            # Write to the deep artifact path (matching real agent behavior);
-            # the caller (phase_cross_stack_merge) copies to canonical.
-            deep = self.target_dir / ".daydream" / "deep" / "review-output.md"
-            deep.parent.mkdir(parents=True, exist_ok=True)
-            # Mirror the real merge agent's compliance with the prompt: when the
-            # prompt carries the structural-records pointer, render a dedicated
-            # `## Structural Review` section above `## Issues`. When it does not
-            # (docs-only / empty diff), omit the section entirely.
-            structural = (
-                "## Structural Review\n"
-                "1. [api.py:1] hello() leaks a god-object boundary\n\n"
-                if "structural-stack parsed records" in pl
-                else ""
-            )
-            deep.write_text(
-                f"# Review\n\n## Per-Stack Context\n\n{structural}"
-                "## Issues\n\n## Cross-Stack Issues\n"
-            )
             yield TextEvent(text="")
-            yield ResultEvent(structured_output=None, continuation=None)
+            yield ResultEvent(structured_output={"items": []}, continuation=None)
             return
 
         # Fallback -- unexpected prompt, but keep the pipeline alive.

@@ -18,7 +18,7 @@ from daydream.pr_review import (
     build_payload,
     classify,
     extract_anchors,
-    parse_report,
+    parsed_issues_from_items,
     snap_to_hunk,
 )
 
@@ -39,53 +39,12 @@ def _git(repo: Path, *args: str) -> str:
     )
     return proc.stdout.strip()
 
-REPORT_FIXTURE = """\
-# Review
-
-## Per-Stack Context
-
-Some prose.
-
-## Issues
-1. [src/foo.py:42] **Null check missing**
-   The function `compute_total` dereferences `items` without a guard.
-   **Severity:** high
-   **Confidence:** HIGH
-2. [src/bar.ts:10] **Type mismatch**
-   Variable `count` is typed `string` but assigned a number.
-   Severity: medium
-   Confidence: MEDIUM
-3. [docs/README.md] File-level note
-   No line hint; general doc feedback.
-
-## Cross-Stack Issues
-4. [cross-stack] [src/api.py:5] **Contract drift**
-   Python payload shape diverges from TS `ApiResponse` definition.
-"""
-
-
-def test_parse_report_extracts_all_sections() -> None:
-    issues = parse_report(REPORT_FIXTURE)
-    assert len(issues) == 4
-    assert issues[0].path == "src/foo.py"
-    assert issues[0].line == 42
-    assert issues[0].title == "**Null check missing**"
-    assert not issues[0].is_cross_stack
-    assert issues[0].severity == "high"
-    assert issues[0].confidence == "HIGH"
-
-    # Parsing also picks up un-bolded `Severity: medium` form.
-    assert issues[1].severity == "medium"
-    assert issues[1].confidence == "MEDIUM"
-
-    assert issues[2].path == "docs/README.md"
-    assert issues[2].line is None
-    assert issues[2].severity is None
-    assert issues[2].confidence is None
-
-    assert issues[3].is_cross_stack
-    assert issues[3].path == "src/api.py"
-    assert issues[3].line == 5
+def test_structural_item_becomes_parsed_issue():
+    items = [{"id": 1, "lens": "structural", "file": "big.py", "line": 1,
+              "description": "1k-line file", "severity": "high",
+              "confidence": "HIGH", "rationale": "r"}]
+    issues = parsed_issues_from_items(items)
+    assert [(i.path, i.line) for i in issues] == [("big.py", 1)]   # structural posts
 
 
 def test_inline_body_has_footer_and_tags() -> None:
@@ -108,64 +67,6 @@ def test_inline_body_has_footer_and_tags() -> None:
     # Collapsible AI agent prompt.
     assert "🔮 Prompt for AI Agents" in body
     assert "<details>" in body
-
-
-def test_parse_report_handles_no_issues_section() -> None:
-    assert parse_report("# Nothing here") == []
-
-
-BOLD_HEAD_REPORT = """\
-# Review
-
-## Issues
-1. **[admin-dashboard/middleware.ts:30] Missing audit logging for admin denials**
-   When a non-admin is rejected the middleware silently redirects.
-   **Severity:** medium
-2. __[src/bar.ts:12] Italic-bold wrapper form__
-   Parser must accept `__...__` the same as `**...**`.
-
-## Cross-Stack Issues
-3. **[cross-stack] [admin-dashboard/lib/auth.ts:1, book-service/admin_auth.go:41, backend/deps.py:48]
-    Inconsistent auth source**
-   Frontend reads the JWT claim, backends query the database.
-   **Confidence:** HIGH
-"""
-
-
-def test_parse_report_strips_bold_wrapper_from_head() -> None:
-    """`** [path] title **` used to drop the whole issue; now it parses cleanly."""
-    issues = parse_report(BOLD_HEAD_REPORT)
-    # 2 regular + 3 fan-out from cross-stack multi-path
-    assert len(issues) == 5
-    first = issues[0]
-    assert first.path == "admin-dashboard/middleware.ts"
-    assert first.line == 30
-    # Title no longer carries leading/trailing `**` markers.
-    assert first.title == "Missing audit logging for admin denials"
-    assert first.severity == "medium"
-
-
-def test_parse_report_accepts_underscore_bold() -> None:
-    issues = parse_report(BOLD_HEAD_REPORT)
-    second = issues[1]
-    assert second.path == "src/bar.ts"
-    assert second.line == 12
-    assert second.title == "Italic-bold wrapper form"
-
-
-def test_parse_report_fans_out_multi_path_cross_stack() -> None:
-    issues = parse_report(BOLD_HEAD_REPORT)
-    xstack = [i for i in issues if i.is_cross_stack]
-    assert [i.path for i in xstack] == [
-        "admin-dashboard/lib/auth.ts",
-        "book-service/admin_auth.go",
-        "backend/deps.py",
-    ]
-    assert [i.line for i in xstack] == [1, 41, 48]
-    # All share title, body, severity/confidence from the single source entry.
-    assert len({i.title for i in xstack}) == 1
-    assert xstack[0].title == "Inconsistent auth source"
-    assert all(i.confidence == "HIGH" for i in xstack)
 
 
 def test_alt_issues_to_parsed_produces_one_per_file() -> None:

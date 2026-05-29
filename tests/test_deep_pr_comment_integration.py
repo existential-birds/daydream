@@ -308,8 +308,42 @@ class _FakeSDKClient:
                 ),
             ]
 
-        # phase_per_stack_reviews + phase_cross_stack_merge: free-form text;
-        # report files are written by _maybe_write_artifact via prompt scan.
+        # phase_cross_stack_merge uses MERGED_ITEMS_SCHEMA: the ResultMessage
+        # MUST carry a structured item list. The host renders review-output.md
+        # from it (no agent file-write step). One per-stack item keeps the
+        # rendered report (and thus the PR comment) non-empty.
+        if "cross-stack merge agent" in pl:
+            return [
+                FakeAssistantMessage(
+                    content=[FakeTextBlock(text="merging")],
+                    model=FIXTURE_MODEL_ID,
+                ),
+                FakeResultMessage(
+                    structured_output={
+                        "items": [
+                            {
+                                "id": 1,
+                                "lens": "per-stack",
+                                "file": "foo.py",
+                                "line": 1,
+                                "severity": "medium",
+                                "description": "Use a more descriptive function name",
+                                "confidence": "MEDIUM",
+                                "rationale": "The current name is ambiguous.",
+                            }
+                        ]
+                    },
+                    total_cost_usd=0.20,
+                    usage={
+                        "input_tokens": 4000,
+                        "output_tokens": 600,
+                        "cache_read_input_tokens": 1500,
+                    },
+                ),
+            ]
+
+        # phase_per_stack_reviews: free-form text; report files are written by
+        # _maybe_write_artifact via prompt scan.
         return [
             FakeAssistantMessage(
                 content=[FakeTextBlock(text="ok, wrote the review")],

@@ -32,6 +32,7 @@ from daydream.deep.artifacts import (
     check_deep_artifacts,
     dedup_candidates_path,
     deep_dir,
+    merged_items_path,
     per_stack_failures_path,
     per_stack_records_path,
 )
@@ -223,6 +224,49 @@ def _write_ttt_artifacts(
     intent_p.write_text(intent_summary)
     alts_p.write_text(json.dumps(alt_issues, indent=2))
     return intent_p, alts_p
+
+
+def attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Attach verifier verdicts to feedback items by matching `id` to `issue_id`.
+
+    `phase_fix` reads the `verifier_verdict` / `evidence` / `unverified_assumptions`
+    keys (advisory) and augments its prompt when present; items without a matching
+    verdict are left untouched. Correctness rests on `normalize_items` having made
+    item ids unique, so structural and per-stack findings can no longer collide on
+    the same id.
+
+    Args:
+        items: Canonical feedback items, each with an integer `id`.
+        payload: Verifier output; `payload["verdicts"]` is a list of entries each
+            carrying `issue_id`, `verdict`, `evidence`, `unverified_assumptions`.
+
+    Returns:
+        The same `items` list (mutated in place) with verdict keys attached to any
+        item whose `id` matched a verdict's `issue_id`.
+    """
+    payload = payload if isinstance(payload, dict) else {"verdicts": []}
+    verdict_lookup: dict[int, dict[str, Any]] = {}
+    for entry in payload.get("verdicts", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        issue_id = entry.get("issue_id")
+        if not isinstance(issue_id, int):
+            continue
+        verdict_lookup[issue_id] = {
+            "verdict": entry.get("verdict", ""),
+            "evidence": entry.get("evidence", ""),
+            "unverified_assumptions": entry.get("unverified_assumptions", ""),
+        }
+    for item in items:
+        item_id = item.get("id")
+        if not isinstance(item_id, int):
+            continue
+        match = verdict_lookup.get(item_id)
+        if match is not None:
+            item["verifier_verdict"] = match["verdict"]
+            item["evidence"] = match["evidence"]
+            item["unverified_assumptions"] = match["unverified_assumptions"]
+    return items
 
 
 def _candidate_pair_to_json(pair: Any) -> dict[str, Any]:
@@ -556,23 +600,32 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
             merged_report = target_dir / REVIEW_OUTPUT_FILE
 
-            # Recover from deep-dir artifact when the canonical file is absent
-            # (e.g. agent wrote to .daydream/deep/ but Python copy didn't run
-            # during a --start-at fix resume).
+            # The canonical source of truth is merged-items.json (the fix gate,
+            # verifier, and PR posting all read it). The markdown review-output.md
+            # is render-only. So the missing-input guard keys on the JSON, not the
+            # markdown: "no JSON at all" -> fail loudly; "markdown absent but JSON
+            # present" -> proceed (a --start-at fix resume where the deep-dir JSON
+            # survived but the canonical-markdown copy never ran must NOT bail).
+            items_file = merged_items_path(dd)
+            if not items_file.is_file():
+                print_error(
+                    console,
+                    "Missing Merged Items",
+                    f"Expected canonical merged items at {items_file}",
+                )
+                return 1
+
+            # Best-effort recover the human-readable markdown for the exit message
+            # below (render-only). Recover from the deep-dir copy when the canonical
+            # file is absent (e.g. phase_cross_stack_merge rendered into
+            # .daydream/deep/ but the copy to the canonical path didn't run during a
+            # --start-at fix resume). Its absence is non-fatal.
             if not merged_report.exists():
                 from daydream.deep.artifacts import merged_report_path
 
                 deep_copy = merged_report_path(dd)
                 if deep_copy.exists():
                     merged_report.write_text(deep_copy.read_text())
-
-            if not merged_report.exists():
-                print_error(
-                    console,
-                    "Missing Merged Report",
-                    f"Expected merged report at {merged_report}",
-                )
-                return 1
 
             # Recommendation verification (issue #83). Runs unconditionally as
             # a sub-step of the fix gate, so a `--start-at fix` resume still
@@ -583,7 +636,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             verdicts_file, verdicts_payload = await phase_verify_recommendations(
                 _resolve_backend(config, "verify", backend_cache),
                 work,
-                merged_report_path=merged_report,
+                merged_items_path=merged_items_path(dd),
                 deep_dir=dd,
             )
             print_verification_summary(console, verdicts_file)
@@ -596,7 +649,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 from daydream.pr_review import post_review_to_pr_from_report
 
                 await post_review_to_pr_from_report(
-                    target_dir, merged_report, console=console
+                    target_dir, merged_items_path(dd), console=console
                 )
 
             answer = prompt_user(console, "Apply fixes now? [y/N]", "n")
@@ -604,44 +657,35 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 print_success(console, f"Report written to {merged_report}. Exiting.")
                 return 0
 
-            items = await phase_parse_feedback(
-                _resolve_backend(config, "parse", backend_cache), work
-            )
+            # Read the canonical merged items directly -- the single source of
+            # truth produced by the cross-stack merge. This replaces an LLM
+            # re-parse of the markdown report, which silently dropped structural
+            # findings (they live under ## Structural Review, which the
+            # FEEDBACK_SCHEMA parse never extracted). Structural findings are
+            # ordinary tagged items here, so they reach phase_fix like any other.
+            # Presence of `items_file` was already validated by the missing-input
+            # guard above (the canonical JSON is the source of truth, not the
+            # render-only markdown).
+            items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
             if not items:
-                print_success(console, "No actionable items after parse -- done.")
+                print_success(console, "No actionable items -- done.")
                 return 0
+
+            # Severity-ordered (high before medium before low), stable within a
+            # tier so equal-severity items keep their canonical merge order.
+            _severity_rank = {"high": 0, "medium": 1, "low": 2}
+            items.sort(key=lambda i: _severity_rank.get(i.get("severity", "medium"), 1))
 
             # Attach verifier verdicts to feedback items by `id`. `phase_fix`
             # already reads `verifier_verdict` / `evidence` keys (advisory) and
             # augments its prompt when present; items without a matching
             # verdict are left untouched.
             verdicts_payload = verdicts_payload if isinstance(verdicts_payload, dict) else {"verdicts": []}
-            verdict_lookup: dict[int, dict[str, str]] = {}
-            for entry in verdicts_payload.get("verdicts", []) or []:
-                if not isinstance(entry, dict):
-                    continue
-                issue_id = entry.get("issue_id")
-                if not isinstance(issue_id, int):
-                    continue
-                verdict_lookup[issue_id] = {
-                    "verdict": entry.get("verdict", ""),
-                    "evidence": entry.get("evidence", ""),
-                    "unverified_assumptions": entry.get("unverified_assumptions", ""),
-                }
-            matched_ids: list[int] = []
-            unmatched_ids: list[int] = []
-            for item in items:
-                item_id = item.get("id")
-                if not isinstance(item_id, int):
-                    continue
-                match = verdict_lookup.get(item_id)
-                if match is not None:
-                    item["verifier_verdict"] = match["verdict"]
-                    item["evidence"] = match["evidence"]
-                    item["unverified_assumptions"] = match["unverified_assumptions"]
-                    matched_ids.append(item_id)
-                else:
-                    unmatched_ids.append(item_id)
+            items = attach_verdicts(items, verdicts_payload)
+            matched_ids = [i["id"] for i in items if i.get("verifier_verdict") is not None]
+            unmatched_ids = [
+                i["id"] for i in items if isinstance(i.get("id"), int) and i.get("verifier_verdict") is None
+            ]
             print_info(
                 console,
                 f"Verdict join: {len(matched_ids)}/{len(matched_ids) + len(unmatched_ids)} "

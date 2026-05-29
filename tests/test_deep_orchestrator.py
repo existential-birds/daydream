@@ -9,6 +9,7 @@ simulate the full review pipeline without talking to a real SDK.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,10 @@ class _StubBackend:
         # call and success thereafter. Off by default so existing tests (which
         # never reach the real test-and-heal loop) are unaffected.
         self.fail_first_test_run: bool = False
+        # Optional override for the cross-stack merge agent's structured item
+        # list. When None the default three-item payload is emitted; tests that
+        # need a controlled severity mix set this to their own item list.
+        self.merge_items: list[dict[str, Any]] | None = None
 
     async def execute(
         self,
@@ -135,26 +140,54 @@ class _StubBackend:
             )
             return
 
-        # Cross-stack merge -> write the report to REVIEW_OUTPUT_FILE.
+        # Cross-stack merge -> return a schema-validated item list. The host
+        # (phase_cross_stack_merge) appends structural findings, normalizes ids,
+        # writes merged-items.json, and renders review-output.md from it.
         if "cross-stack merge agent" in pl:
-            out_match = re.search(r"write the complete report to (\S+)", prompt, flags=re.IGNORECASE)
-            if out_match is not None:
-                raw = out_match.group(1).rstrip(".")
-                out_path = Path(raw)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(
-                    "# Review\n\n"
-                    "## Issues\n\n"
-                    "1. [api.py:1] Python issue\n"
-                    "   rationale\n"
-                    "2. [App.tsx:1] React issue\n"
-                    "   rationale\n\n"
-                    "## Cross-Stack Issues\n\n"
-                    "3. [cross-stack] [api.py:1] Contract drift between Python handler and React caller\n"
-                    "   rationale\n"
-                )
             yield TextEvent(text="")
-            yield ResultEvent(structured_output=None, continuation=None)
+            if self.merge_items is not None:
+                yield ResultEvent(
+                    structured_output={"items": self.merge_items},
+                    continuation=None,
+                )
+                return
+            yield ResultEvent(
+                structured_output={
+                    "items": [
+                        {
+                            "id": 1,
+                            "lens": "per-stack",
+                            "file": "api.py",
+                            "line": 1,
+                            "severity": "medium",
+                            "description": "Python issue",
+                            "confidence": "MEDIUM",
+                            "rationale": "rationale",
+                        },
+                        {
+                            "id": 2,
+                            "lens": "per-stack",
+                            "file": "App.tsx",
+                            "line": 1,
+                            "severity": "medium",
+                            "description": "React issue",
+                            "confidence": "MEDIUM",
+                            "rationale": "rationale",
+                        },
+                        {
+                            "id": 3,
+                            "lens": "cross-stack",
+                            "file": "api.py",
+                            "line": 1,
+                            "severity": "high",
+                            "description": "Contract drift between Python handler and React caller",
+                            "confidence": "HIGH",
+                            "rationale": "rationale",
+                        },
+                    ]
+                },
+                continuation=None,
+            )
             return
 
         # Recommendation verifier (issue #83). Discriminator: build_verification_prompt
@@ -1195,13 +1228,33 @@ async def test_resume_fix_skips_pr_post(
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _spy)
 
-    # Prime every artifact the fix-resume gate needs.
+    # Prime every artifact the fix-resume gate needs. The verifier and fix gate
+    # both read the canonical merged-items.json, so prime it alongside the
+    # human-readable markdown report.
     deep = multi_stack_target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "intent.md").write_text("primed intent")
     (deep / "alternatives.json").write_text("[]")
     (multi_stack_target / REVIEW_OUTPUT_FILE).write_text(
         "# Review\n\n## Issues\n\n1. [api.py:1] primed issue\n   rationale\n"
+    )
+    (deep / "merged-items.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": 1,
+                        "lens": "per-stack",
+                        "file": "api.py",
+                        "line": 1,
+                        "severity": "medium",
+                        "description": "primed issue",
+                        "confidence": "MEDIUM",
+                        "rationale": "rationale",
+                    }
+                ]
+            }
+        )
     )
 
     exit_code = await _run_deep(multi_stack_target, start_at="fix")
@@ -1476,4 +1529,167 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
     # The first test-suite call failed, the second passed: exactly two runs.
     assert stub.test_suite_calls == 2, (
         f"expected 2 test-suite runs (fail then pass), saw {stub.test_suite_calls}"
+    )
+
+
+async def test_structural_finding_reaches_fix_loop(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix gate feeds the canonical merged-items.json (structural included),
+    severity-ordered, into phase_fix -- never the LLM re-parse that dropped
+    structural findings.
+
+    Observable consequence: every item that reaches phase_fix is captured. The
+    structural item (lens="structural") MUST appear (not silently dropped by a
+    markdown re-parse), and items MUST arrive severity-ordered (high before low,
+    stable within a tier).
+    """
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    # Accept the apply-fixes gate so the fix loop runs.
+    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    # Controlled merge output: one per-stack(high), one per-stack(low). The
+    # structure meta-stack's parsed records get appended by
+    # phase_cross_stack_merge as lens="structural", severity="high" -- giving the
+    # plan's required mix of one structural(high), one per-stack(high), one
+    # per-stack(low).
+    stub.merge_items = [
+        {
+            "id": 1,
+            "lens": "per-stack",
+            "file": "api.py",
+            "line": 1,
+            "severity": "high",
+            "description": "High-severity per-stack issue",
+            "confidence": "HIGH",
+            "rationale": "rationale",
+        },
+        {
+            "id": 2,
+            "lens": "per-stack",
+            "file": "App.tsx",
+            "line": 1,
+            "severity": "low",
+            "description": "Low-severity per-stack issue",
+            "confidence": "LOW",
+            "rationale": "rationale",
+        },
+    ]
+
+    fixed: list[dict[str, Any]] = []
+
+    async def _capture_fix(backend, work, item, idx, total):  # noqa: ARG001
+        fixed.append(item)
+
+    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
+        return (True, 0)
+
+    async def _stub_commit(backend, work):  # noqa: ARG001
+        return None
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _capture_fix)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    assert any(i.get("lens") == "structural" for i in fixed), (
+        "structural finding never reached phase_fix -- it was dropped before the "
+        f"fix loop; items fixed: {[(i.get('lens'), i.get('severity')) for i in fixed]!r}"
+    )
+    assert [i.get("severity") for i in fixed] == ["high", "high", "low"], (
+        "fix loop received items out of severity order; expected ['high', 'high', "
+        f"'low'], got {[i.get('severity') for i in fixed]!r}"
+    )
+
+
+async def test_start_at_fix_recovers_merged_items(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--start-at fix with ONLY the deep-dir merged-items.json present (canonical
+    repo review-output.md ABSENT) still loads items and reaches phase_fix.
+
+    The fix gate reads merged_items_path(dd) directly -- the canonical markdown
+    is render-only. The missing-input guard must distinguish "no JSON at all"
+    (fail loudly) from "canonical markdown absent but JSON present" (proceed).
+    This test pins the proceed case: the recovered item must reach phase_fix
+    even though no review-output.md exists in the repo or the deep dir.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    # Accept the apply-fixes gate so the fix loop runs.
+    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    fixed: list[dict[str, Any]] = []
+
+    async def _capture_fix(backend, work, item, idx, total):  # noqa: ARG001
+        fixed.append(item)
+
+    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
+        return (True, 0)
+
+    async def _stub_commit(backend, work):  # noqa: ARG001
+        return None
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _capture_fix)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    # Prime the fix-resume prerequisites EXCEPT the canonical markdown report.
+    # Only the deep-dir merged-items.json exists -- no review-output.md anywhere
+    # (neither target_dir/.review-output.md nor deep/review-output.md).
+    deep = multi_stack_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    (deep / "merged-items.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": 1,
+                        "lens": "per-stack",
+                        "file": "api.py",
+                        "line": 1,
+                        "severity": "high",
+                        "description": "recovered issue",
+                        "confidence": "HIGH",
+                        "rationale": "rationale",
+                    }
+                ]
+            }
+        )
+    )
+    assert not (multi_stack_target / REVIEW_OUTPUT_FILE).exists()
+    assert not (deep / "review-output.md").exists()
+
+    exit_code = await _run_deep(multi_stack_target, start_at="fix")
+    assert exit_code == 0
+    assert len(fixed) >= 1, (
+        "no items reached phase_fix on --start-at fix; the recovery guard bailed "
+        "on the missing canonical markdown instead of loading the deep-dir "
+        f"merged-items.json; items fixed: {fixed!r}"
+    )
+    assert fixed[0].get("description") == "recovered issue", (
+        "phase_fix received an item that did not originate from the deep-dir "
+        f"merged-items.json; got {fixed!r}"
     )
