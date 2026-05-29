@@ -97,7 +97,8 @@ def test_max_iterations_without_loop_accepted(monkeypatch):
     monkeypatch.setattr(sys, "argv", [
         "daydream", "/tmp/project", "--max-iterations", "3",
     ])
-    config = _parse_args()
+    with pytest.warns(UserWarning, match="no effect without --loop"):
+        config = _parse_args()
     assert config.max_iterations == 3
     assert config.loop is False
 

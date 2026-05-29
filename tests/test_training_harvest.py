@@ -8,9 +8,10 @@ from typing import Any
 
 import pytest
 
-from daydream.archive.index import label_observation_history, latest_label_observation, upsert_run
+from daydream.archive.index import append_label_observation, label_observation_history, latest_label_observation, upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
+from daydream.training import harvest
 from daydream.training.harvest import (
     HarvestConfig,
     _resolve_repo_for_row,
@@ -18,6 +19,7 @@ from daydream.training.harvest import (
     build_annotation,
     run_harvest,
 )
+from daydream.training.reward import score_trajectory
 
 
 def _seed_deep_bronze(tmp_path: Path, *, verdict: str, grounding: float) -> Path:
@@ -53,9 +55,44 @@ def _fake_gh_merged(merged_at: str):
     """
 
     def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
-        if endpoint.endswith("/comments"):
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
             return []
         return {"merged": True, "merged_at": merged_at}
+
+    return responder
+
+
+def _fake_gh_not_merged():
+    """Return a ``gh_api`` responder for an unmerged (closed) PR.
+
+    The ``pulls/<n>`` endpoint reports ``merged: False`` so
+    :func:`derive_outcome_label` yields ``"rejected"``; ``comments`` is empty.
+    """
+
+    def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
+            return []
+        return {"merged": False, "merged_at": None}
+
+    return responder
+
+
+def _fake_gh_not_merged_with_reviewer(login: str = "alice"):
+    """Return a ``gh_api`` responder for an unmerged PR with one human reviewer.
+
+    The ``pulls/<n>`` endpoint reports ``merged: False``; the ``reviews``
+    endpoint returns a single review authored by *login* so that
+    :func:`reviewer_logins_signal` yields a non-empty list.  This lets
+    tests drive the production :func:`reviewer_set_penalty_prior` DB query
+    (rather than monkeypatching it) to exercise the empty-pool path.
+    """
+
+    def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/reviews"):
+            return [{"user": {"login": login}}]
+        if endpoint.endswith("/comments"):
+            return []
+        return {"merged": False, "merged_at": None}
 
     return responder
 
@@ -70,12 +107,64 @@ def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_pat
     row = {"session_id": "s1", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
-    ann = build_annotation(row, run_dir=run_dir,
+    ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                            gh_api=_fake_gh_merged("2026-02-01T00:00:00+00:00"),
                            repo_clone=tmp_path, window_days=30)
     assert ann.labels == ["accepted"]
     assert ann.valid_at == "2026-02-01T00:00:00+00:00"        # PR merge time (Q2)
     assert ann.composite_reward == json.loads(ann.reward_json)["composite"]
+
+
+def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
+    # A not-merged PR row → derive_outcome_label == "rejected". Its bronze
+    # (consistent verdict, full grounding) yields a positive intrinsic composite.
+    # Under C5 the posterior reject penalty is a SIBLING field — it does NOT
+    # deduct from the stored composite, which stays pure intrinsic. The penalty
+    # surfaces via false_positive_penalty / posterior_cost in reward_json.
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir),
+           "grounding_rate": 1.0, "changed_files": "[]"}
+
+    # Intrinsic-only baseline: same production inputs scored with no posterior.
+    intrinsic_inputs = assemble_scoring_inputs(run_dir, row)
+    intrinsic_only_composite = score_trajectory(intrinsic_inputs).composite
+
+    payload = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
+                               gh_api=_fake_gh_not_merged(),
+                               repo_clone=tmp_path, window_days=30)
+
+    assert payload.labels == ["rejected"]
+    assert payload.has_posterior is True
+    breakdown = json.loads(payload.reward_json)
+    assert breakdown["false_positive_penalty"] == 1.0
+    assert breakdown["posterior_cost"] == 0.5  # sibling: max(0, 1.0 − 0.5 default prior)
+    # Composite is pure intrinsic — the reject label does not fold into it.
+    assert payload.composite_reward == intrinsic_only_composite
+
+
+def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path, archive_dir):
+    # Exercises the production wiring of reviewer_set_penalty_prior (not monkeypatched).
+    # The gh responder returns a real reviewer login ("alice") so reviewer_logins_signal
+    # yields ["alice"] and the DB query runs.  The archive is fresh (no prior history),
+    # so reviewer_set_penalty_prior returns (None, 0) — the empty-pool path — and the
+    # reducer applies the 0.5 default prior.
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_rej_prod", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir),
+           "grounding_rate": 1.0, "changed_files": "[]"}
+    payload = build_annotation(row, run_dir=run_dir, archive_dir=archive_dir,
+                               gh_api=_fake_gh_not_merged_with_reviewer("alice"),
+                               repo_clone=tmp_path, window_days=30)
+    assert payload.labels == ["rejected"]
+    assert payload.has_posterior is True
+    rb = json.loads(payload.reward_json)
+    # Empty pool → reviewer_set_penalty_prior returns (None, 0) → outcome_prior stays None,
+    # prior_n == 0, and the 0.5 default is used: posterior_cost == max(0, 1.0 − 0.5) == 0.5.
+    assert rb["outcome_prior"] is None
+    assert rb["outcome_prior_n"] == 0
+    assert rb["posterior_cost"] == 0.5
+    assert payload.reviewer_logins == ["alice"]
 
 
 def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path):
@@ -84,11 +173,157 @@ def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_pat
     row = {"session_id": "s2", "pr_repo": None, "pr_number": None, "branch": "feat",
            "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": None,
            "changed_files": "[]"}
-    ann = build_annotation(row, run_dir=run_dir, gh_api=_unused_gh,
+    ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
                            repo_clone=tmp_path, window_days=30)
     assert ann.valid_at is None                               # collapses to observed_at on write
     rb = json.loads(ann.reward_json)
     assert rb["axes_present"]["correctness"] is False         # shallow: no verdicts
+
+
+def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path, archive_dir):
+    # End-to-end: seed a prior label_observation for "alice" in the archive
+    # (past valid_at) then call build_annotation for a rejected PR whose reviewer
+    # is "alice".  The production reviewer_set_penalty_prior DB query must find
+    # the seeded row, so prior_n >= 1 (pool is non-empty) even though n < 10
+    # (below the sufficiency threshold).  This exercises the before_valid_at
+    # filtering path against a non-empty archive — the gap identified in the
+    # cross-stack finding where the existing empty-pool test cannot detect a
+    # before_valid_at='' bug.
+    prior_session_id = "s_prior_alice"
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id=prior_session_id,
+            archived_at="2025-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            pr_repo="org/repo",
+            pr_number=1,
+            head_sha="aaa",
+            base_branch="main",
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(tmp_path),
+        ),
+    )
+    append_label_observation(
+        archive_dir,
+        prior_session_id,
+        labels=["rejected"],
+        pr_state="closed",
+        labeler_version="test",
+        evidence_sha=None,
+        valid_at="2025-06-01T00:00:00Z",   # strictly in the past
+        reviewer_logins=["alice"],
+        has_posterior=True,
+    )
+
+    run_dir = _seed_deep_bronze(tmp_path / "current_run", verdict="consistent", grounding=1.0)
+    row = {
+        "session_id": "s_rej_populated",
+        "pr_repo": "o/r",
+        "pr_number": 9,
+        "head_sha": "h",
+        "base_branch": "main",
+        "archive_path": str(run_dir),
+        "grounding_rate": 1.0,
+        "changed_files": "[]",
+    }
+    payload = build_annotation(
+        row,
+        run_dir=run_dir,
+        archive_dir=archive_dir,
+        gh_api=_fake_gh_not_merged_with_reviewer("alice"),
+        repo_clone=tmp_path,
+        window_days=30,
+    )
+    assert payload.labels == ["rejected"]
+    rb = json.loads(payload.reward_json)
+    # The seeded prior row is found: pool is non-empty (prior_n >= 1).
+    # n < 10 (sufficiency threshold) so outcome_prior is None, but
+    # prior_n must reflect the pool count — proving the DB query ran
+    # against real history rather than an empty archive.
+    assert rb["outcome_prior_n"] >= 1, (
+        f"expected prior_n >= 1 from seeded archive, got {rb['outcome_prior_n']}"
+    )
+    assert rb["outcome_prior"] is None   # n < 10 threshold → fallback to default
+    assert rb["posterior_cost"] == 0.5   # default prior applied
+
+
+def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(tmp_path, monkeypatch):
+    monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.8, 12))  # >=10 -> empirical
+    monkeypatch.setattr(harvest, "reviewer_logins_signal", lambda *a, **k: ["alice", "carol"])
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
+           "changed_files": "[]"}
+    p = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
+                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path, window_days=30)
+    rb = json.loads(p.reward_json)
+    assert rb["posterior_cost"] == pytest.approx(0.2)   # max(0, 1.0 - 0.8)
+    assert rb["outcome_prior"] == 0.8 and rb["outcome_prior_n"] == 12
+    assert p.composite_reward == rb["composite"]        # stored composite is pure intrinsic (C5)
+    assert p.has_posterior is True and p.reviewer_logins == ["alice", "carol"]
+
+
+def test_build_annotation_below_threshold_falls_back_to_default_prior(tmp_path, monkeypatch):
+    monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.9, 4))  # n<10
+    monkeypatch.setattr(harvest, "reviewer_logins_signal", lambda *a, **k: ["alice"])
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
+           "changed_files": "[]"}
+    rb = json.loads(
+        build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
+                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path, window_days=30).reward_json
+    )
+    assert rb["outcome_prior"] is None and rb["outcome_prior_n"] == 4  # n recorded; prior None -> 0.5
+    assert rb["posterior_cost"] == 0.5
+
+
+def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path, monkeypatch):
+    # PR-less row -> reviewer_logins == [], outcome_prior None, prior query never
+    # consulted; still a PosteriorBreakdown when the local verdict maps to a label.
+    from daydream.training.labeler_signals import LocalCommitAppliedSignal
+
+    # Force a mapped local verdict ("rejected") so the posterior axis is present.
+    monkeypatch.setattr(
+        harvest, "local_commit_applied_signal", lambda *a, **k: LocalCommitAppliedSignal(verdict="rejected")
+    )
+    # The pooled-prior query must never run for a PR-less row.
+    monkeypatch.setattr(
+        harvest, "reviewer_set_penalty_prior",
+        lambda *a, **k: pytest.fail("reviewer_set_penalty_prior must not be called for a local row"),
+    )
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_local", "pr_repo": None, "pr_number": None, "branch": "feat",
+           "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": 1.0,
+           "changed_files": "[]"}
+    p = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
+                         repo_clone=tmp_path, window_days=30)
+    assert p.reviewer_logins == []
+    assert p.labels == ["rejected"]
+    assert p.has_posterior is True
+    rb = json.loads(p.reward_json)
+    assert rb["outcome_prior"] is None and rb["outcome_prior_n"] == 0
+    assert rb["posterior_cost"] == 0.5  # max(0, 1.0 - 0.5 default prior)
+
+
+def test_build_annotation_asserts_canonical_version(tmp_path, monkeypatch):
+    # Force a non-canonical reward_version into the breakdown -> write must be refused.
+    def _custom_version_score(*args, **kwargs):
+        from daydream.training.reward import RewardWeights
+        return score_trajectory(*args, **{**kwargs, "weights": RewardWeights(w_correctness=0.99)})
+
+    monkeypatch.setattr(harvest, "score_trajectory", _custom_version_score)
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_custom", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
+           "changed_files": "[]"}
+    with pytest.raises((AssertionError, RuntimeError), match="canonical"):
+        build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
+                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path, window_days=30)
 
 
 def test_assemble_reads_verdicts_and_grounding_from_bronze(tmp_path: Path):

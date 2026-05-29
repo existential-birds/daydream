@@ -1,11 +1,11 @@
 """Post daydream review findings as inline comments on the current branch's PR.
 
-Shared by deep-review mode (parses `.review-output.md`) and
+Shared by deep-review mode (reads canonical `merged-items.json`) and
 comment mode (`--comment`) (consumes alt-review issues directly).
 
 Flow:
     1. Locate the open PR for the current branch via `gh pr list`.
-    2. Parse issues (from report markdown or alt-issue dicts).
+    2. Parse issues (from canonical merged items or alt-issue dicts).
     3. Resolve each issue to a real head-SHA line via anchor grep.
     4. Classify into inline (line within a diff hunk) vs body-only.
     5. Build a single review payload, show a summary, ask y/n.
@@ -88,21 +88,26 @@ class _ClassifiedIssues:
 
 async def post_review_to_pr_from_report(
     target_dir: Path,
-    report_path: Path,
+    merged_items_path: Path,
     *,
     console: Console,
 ) -> None:
-    """Parse a deep-mode `.review-output.md` and offer to post to the PR.
+    """Read canonical `merged-items.json` and offer to post to the PR.
+
+    Builds issues from the canonical item list (every lens, including
+    structural) via :func:`parsed_issues_from_items` rather than re-parsing
+    the rendered markdown — the regex parser silently dropped structural
+    findings, which live under ``## Structural Review``.
 
     Args:
         target_dir: Repo root.
-        report_path: Path to the merged review report.
+        merged_items_path: Path to the canonical ``merged-items.json``.
         console: Rich console for user-facing output.
     """
-    if not report_path.exists():
+    if not merged_items_path.exists():
         return
-    text = report_path.read_text()
-    issues = parse_report(text)
+    items = json.loads(merged_items_path.read_text()).get("items", [])
+    issues = parsed_issues_from_items(items)
     if not issues:
         print_info(console, "No parseable issues in review output; skipping PR post.")
         return
@@ -135,123 +140,10 @@ async def post_review_to_pr_from_alt_issues(
 # --- Parsers ---------------------------------------------------------------
 
 
-_ISSUES_HEADER = re.compile(r"^## (?:Cross-Stack Issues|Issues)\s*$", re.MULTILINE)
-_XSTACK_HEADER = re.compile(r"^## Cross-Stack Issues\s*$", re.MULTILINE)
-# Tolerates bold markers in either position: "**Confidence:** HIGH",
-# "**Confidence**: HIGH", or bare "Confidence: HIGH".
-_CONFIDENCE_LINE = re.compile(
-    r"[Cc]onfidence[:*\s]+(HIGH|MEDIUM|LOW|High|Medium|Low|high|medium|low)"
-)
-_SEVERITY_LINE = re.compile(
-    r"[Ss]everity[:*\s]+(high|medium|low|HIGH|MEDIUM|LOW|High|Medium|Low)"
-)
-
 DAYDREAM_REPO_URL = "https://github.com/existential-birds/daydream"
 DAYDREAM_FOOTER = (
     f"<sub>🧙 Posted by [daydream v{daydream.__version__}]({DAYDREAM_REPO_URL})</sub>"
 )
-_NEXT_SECTION = re.compile(r"^## ", re.MULTILINE)
-# Matches "N. [path:line] Title" or "N. [path] Title" with optional leading
-# `[cross-stack]` marker. Tolerates Markdown bold/italic wrapping the whole
-# head (`N. **[path] title**`) and multiple comma-separated paths in the
-# bracket. The closing `**`/`__` is only stripped when an opening marker was
-# matched (conditional backref on `bold`), so bold inside the title is
-# preserved when the head itself isn't wrapped.
-_ISSUE_HEAD = re.compile(
-    r"^(?P<num>\d+)\.\s+"
-    r"(?P<bold>\*\*|__)?"
-    r"(?:\[cross-stack\]\s+)?"
-    r"\[(?P<paths>[^\]]+)\]\s+"
-    r"(?P<title>.+?)"
-    r"(?(bold)(?P=bold)|)"
-    r"\s*$",
-    re.MULTILINE,
-)
-
-
-def _split_paths(paths: str) -> list[tuple[str, int | None]]:
-    """Parse the bracket contents into (path, line) pairs.
-
-    Accepts either a single `path[:line]` or a comma-separated list, so
-    `a.ts:1, b.go:41, c.py:48` fans out into three pairs.
-    """
-    out: list[tuple[str, int | None]] = []
-    for chunk in paths.split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        path, sep, line_str = chunk.partition(":")
-        path = path.strip()
-        line: int | None = None
-        if sep:
-            try:
-                line = int(line_str.strip())
-            except ValueError:
-                # Malformed line hint -- keep the raw chunk as the path.
-                path = chunk
-        out.append((path, line))
-    return out
-
-
-def parse_report(text: str) -> list[ParsedIssue]:
-    """Extract issues from a deep-mode merged review report.
-
-    Recognises the `## Issues` and `## Cross-Stack Issues` sections and
-    reads each numbered entry. Cross-stack entries (or entries whose
-    title starts with `[cross-stack]`) are tagged accordingly.
-    """
-    issues: list[ParsedIssue] = []
-    xstack_match = _XSTACK_HEADER.search(text)
-    xstack_start = xstack_match.start() if xstack_match else -1
-
-    for header_match in _ISSUES_HEADER.finditer(text):
-        section_start = header_match.end()
-        # Find where this section ends (next "## " or EOF).
-        rest = text[section_start:]
-        next_section = _NEXT_SECTION.search(rest)
-        section_end = (
-            section_start + next_section.start() if next_section else len(text)
-        )
-        section_text = text[section_start:section_end]
-        section_is_xstack = header_match.start() == xstack_start
-
-        matches = list(_ISSUE_HEAD.finditer(section_text))
-        for i, m in enumerate(matches):
-            body_start = m.end()
-            body_end = (
-                matches[i + 1].start() if i + 1 < len(matches) else len(section_text)
-            )
-            body = section_text[body_start:body_end].strip()
-            title = m.group("title").strip()
-            is_xstack = section_is_xstack or title.lower().startswith("[cross-stack]")
-            confidence = _extract_confidence(body)
-            severity = _extract_severity(body)
-            # Fan out multi-path brackets into one ParsedIssue per file, mirroring
-            # alt_issues_to_parsed. Single-path entries produce a single issue.
-            for path, line in _split_paths(m.group("paths")):
-                issues.append(
-                    ParsedIssue(
-                        path=path,
-                        line=line,
-                        title=title,
-                        body=body,
-                        is_cross_stack=is_xstack,
-                        confidence=confidence,
-                        severity=severity,
-                    )
-                )
-
-    return issues
-
-
-def _extract_confidence(text: str) -> str | None:
-    m = _CONFIDENCE_LINE.search(text)
-    return m.group(1).upper() if m else None
-
-
-def _extract_severity(text: str) -> str | None:
-    m = _SEVERITY_LINE.search(text)
-    return m.group(1).lower() if m else None
 
 
 def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
@@ -292,6 +184,55 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
                     severity=severity,
                 )
             )
+    return out
+
+
+def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
+    """Convert canonical merged items into ParsedIssue objects.
+
+    Maps every lens — per-stack, cross-stack, and structural — to a postable
+    ParsedIssue, carrying ``severity`` (and ``confidence`` when present)
+    through to the tag/emoji rendering path. Unlike :func:`parse_report`,
+    nothing is filtered by section, so structural findings post too.
+
+    Each item is one canonical finding with ``file``/``line`` already
+    resolved, so (unlike :func:`alt_issues_to_parsed`) there is no multi-file
+    fan-out.
+    """
+    out: list[ParsedIssue] = []
+    for raw in items:
+        path = str(raw.get("file", "")).strip()
+        if not path:
+            continue
+        line = raw.get("line")
+        line_int = int(line) if isinstance(line, int) else None
+        description = str(raw.get("description", "")).strip()
+        rationale = str(raw.get("rationale", "")).strip()
+        severity = str(raw.get("severity", "")).strip().lower() or None
+        confidence = str(raw.get("confidence", "")).strip().upper() or None
+        is_cross_stack = str(raw.get("lens", "")).strip() == "cross-stack"
+        # Title is the description; rationale (when present and distinct)
+        # becomes the body so the agent prompt has context.
+        title = description
+        body_parts: list[str] = []
+        if severity:
+            body_parts.append(f"**Severity:** {severity}")
+        if confidence:
+            body_parts.append(f"**Confidence:** {confidence}")
+        if rationale and rationale != description:
+            body_parts.append(rationale)
+        body = "\n\n".join(body_parts)
+        out.append(
+            ParsedIssue(
+                path=path,
+                line=line_int,
+                title=title,
+                body=body,
+                is_cross_stack=is_cross_stack,
+                confidence=confidence,
+                severity=severity,
+            )
+        )
     return out
 
 

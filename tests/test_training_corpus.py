@@ -19,7 +19,14 @@ import jsonschema
 
 from daydream.archive.index import append_label_observation, upsert_run
 from daydream.archive.manifest import Manifest
-from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, run_build_corpus
+from daydream.training.corpus import (
+    BuildCorpusConfig,
+    CorpusFilters,
+    _build_record,
+    _is_admitted,
+    run_build_corpus,
+)
+from daydream.training.reward import PosteriorBreakdown, RewardBreakdown
 from tests.fixtures.training.build_archive import build_fixture_archive
 
 SCHEMA_PATH = Path(__file__).parent.parent / "daydream" / "training" / "schema" / "v1.json"
@@ -362,3 +369,121 @@ def test_cli_build_corpus_passes_as_of_and_min_reward(tmp_path: Path, archive_di
     )
     assert args.as_of == "2026-04-01T00:00:00+00:00"
     assert args.min_reward == 0.5
+
+
+# ---------------------------------------------------------------------------
+# C3 — typed population separation: pin the intrinsic-only comparison and the
+# posterior_cost discriminator. These are invariants of the post-C5 storage
+# contract (the stored composite_reward IS the pure intrinsic composite; the
+# posterior rides along as a sibling field), pinned here so a future change to
+# either contract fails loudly rather than silently mixing populations.
+# ---------------------------------------------------------------------------
+
+
+def _ann_with_posterior_reward_json() -> dict[str, Any]:
+    """Annotation row for a labeled (PR-outcome) run.
+
+    ``reward_json`` is a real ``PosteriorBreakdown.to_dict()`` — it carries
+    ``posterior_cost`` (the population discriminator), while ``composite`` /
+    ``composite_reward`` remain the pure intrinsic score (C5: the posterior is
+    a sibling, never folded into the composite).
+    """
+    breakdown = PosteriorBreakdown(
+        correctness_per_finding=[1.0],
+        grounding=0.9,
+        format_valid=True,
+        length_penalty=0.1,
+        composite=0.6,
+        axes_present={"correctness": True, "grounding": True, "length": True},
+        reward_version="2026.05.28-1",
+        false_positive_penalty=1.0,
+        posterior_cost=0.5,
+        outcome_prior=0.5,
+        outcome_prior_n=12,
+    )
+    reward_dict = breakdown.to_dict()
+    return {
+        "session_id": "s-labeled",
+        "labels": json.dumps(["rejected"]),
+        "reward_json": json.dumps(reward_dict),
+        "composite_reward": reward_dict["composite"],
+        "valid_at": "2026-04-01T00:00:00+00:00",
+    }
+
+
+def _ann_with_intrinsic_reward_json() -> dict[str, Any]:
+    """Annotation row for an unlabeled (no PR-outcome) run.
+
+    ``reward_json`` is a real ``RewardBreakdown.to_dict()`` — it has no
+    ``posterior_cost`` key, so the absence of that key on the emitted record is
+    what marks the row as intrinsic-only.
+    """
+    breakdown = RewardBreakdown(
+        correctness_per_finding=[1.0],
+        grounding=0.9,
+        format_valid=True,
+        length_penalty=0.1,
+        composite=0.6,
+        axes_present={"correctness": True, "grounding": True, "length": True},
+        reward_version="2026.05.28-1",
+    )
+    reward_dict = breakdown.to_dict()
+    return {
+        "session_id": "s-intrinsic",
+        "labels": json.dumps([]),
+        "reward_json": json.dumps(reward_dict),
+        "composite_reward": reward_dict["composite"],
+        "valid_at": "2026-04-01T00:00:00+00:00",
+    }
+
+
+def test_is_admitted_min_reward_compares_intrinsic_only() -> None:
+    """``min_reward`` compares against the stored intrinsic composite (C5).
+
+    The labeled row carries a ``posterior_cost`` of 0.5 in its breakdown, yet
+    its stored ``composite_reward`` is the pure intrinsic 0.6 (the posterior is
+    never folded in). So ``min_reward=0.6`` admits it on the intrinsic threshold
+    even though its label (``rejected``) is not in ``labels``. If the stored
+    scalar were intrinsic-minus-posterior (0.1), this would NOT admit — that is
+    the mixing bug C5 prevents and this test pins.
+    """
+    assert (
+        _is_admitted(
+            label="rejected",
+            composite_reward=0.6,
+            filters=CorpusFilters(min_reward=0.6, include_all_labels=False, labels=()),
+        )
+        is True
+    )
+
+
+def test_build_record_emits_posterior_discriminator_only_for_labeled(tmp_path: Path) -> None:
+    """``posterior_cost`` in ``record["reward"]`` is the population discriminator.
+
+    ``_build_record`` parses ``reward_json`` verbatim (no transform), so a
+    labeled annotation built from ``PosteriorBreakdown.to_dict()`` carries
+    ``posterior_cost`` while an unlabeled one built from
+    ``RewardBreakdown.to_dict()`` does not.
+    """
+    manifest_row = {"session_id": "s", "archive_path": str(tmp_path)}
+
+    rec_labeled = _build_record(
+        manifest_row,
+        trajectory={},
+        stack=None,
+        manifest=None,
+        annotation=_ann_with_posterior_reward_json(),
+    )
+    rec_intrinsic = _build_record(
+        manifest_row,
+        trajectory={},
+        stack=None,
+        manifest=None,
+        annotation=_ann_with_intrinsic_reward_json(),
+    )
+
+    assert "posterior_cost" in rec_labeled["reward"]
+    assert "posterior_cost" not in rec_intrinsic.get("reward", {})
+    # The discriminator does not leak into the intrinsic composite scalar.
+    assert rec_labeled["composite_reward"] == 0.6
+    assert rec_intrinsic["composite_reward"] == 0.6

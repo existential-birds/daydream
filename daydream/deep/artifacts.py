@@ -11,17 +11,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from daydream.config import REVIEW_OUTPUT_FILE
-
 # Stage prerequisites -- single source of truth.
 # Value is a list of file names (relative to deep_dir) that must exist before the
 # given stage can run. Special handling for "merge" (needs at least one glob match)
-# and "fix" (checks REVIEW_OUTPUT_FILE in target_dir, not deep_dir).
+# and "fix" (checks merged-items.json in deep_dir -- the canonical source of truth).
 _DEEP_STAGE_PREREQS: dict[str, list[str]] = {
     "ttt": [],
     "per-stack": ["intent.md", "alternatives.json"],
     "merge": ["intent.md", "alternatives.json"],  # + at least one stack-*-records.json
-    "fix": [],  # special-cased: needs REVIEW_OUTPUT_FILE in target_dir
+    "fix": [],  # special-cased: needs merged-items.json in deep_dir
 }
 
 # Which --start-at to suggest when a stage's prerequisites are missing.
@@ -72,13 +70,27 @@ def dedup_candidates_path(deep_dir_path: Path) -> Path:
 
 
 def merged_report_path(deep_dir_path: Path) -> Path:
-    """Merged review report inside the deep artifact directory.
+    """Rendered human review report inside the deep artifact directory.
 
-    The merge agent writes here first (same directory as per-stack artifacts,
-    which avoids sandbox write restrictions). The orchestrator then copies the
-    result to ``target / REVIEW_OUTPUT_FILE`` for downstream consumers.
+    ``phase_cross_stack_merge`` renders this markdown *from* the canonical
+    ``merged-items.json`` (the merge agent no longer emits markdown) into the
+    deep dir -- which avoids sandbox write restrictions on repo-root dotfiles --
+    then copies it to ``target / REVIEW_OUTPUT_FILE`` for downstream consumers.
     """
     return deep_dir_path / "review-output.md"
+
+
+def merged_items_path(deep_dir_path: Path) -> Path:
+    """Canonical merged finding items (JSON) inside the deep artifact directory.
+
+    This is the single source of truth produced by the cross-stack merge: a
+    schema-validated item list (``{"items": [...]}``) carrying per-stack,
+    cross-stack, and structural findings, each tagged with ``lens`` and
+    ``severity``. The human ``review-output.md`` is rendered *from* this file;
+    downstream consumers (fix gate, PR posting, verifier) read it rather than
+    re-parsing prose.
+    """
+    return deep_dir_path / "merged-items.json"
 
 
 def per_stack_failures_path(deep_dir_path: Path) -> Path:
@@ -127,16 +139,15 @@ def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
         if not records:
             missing.append(deep_dir_path / "stack-*-records.json")
 
-    # Fix stage needs the merged report. Check both the canonical location
-    # (target_dir / .review-output.md) and the deep artifact copy
-    # (deep_dir / review-output.md) so resume works even when the agent
-    # could only write to the deep directory.
+    # Fix stage needs the canonical merged items (merged-items.json) -- the
+    # single source of truth the fix gate reads. The markdown review-output.md
+    # is render-only (the fix gate, verifier, and PR posting all read the JSON),
+    # so its absence must NOT block a --start-at fix resume when the JSON is
+    # present. Only the JSON's absence is fatal here.
     if stage == "fix":
-        target_dir = deep_dir_path.parent.parent
-        canonical = target_dir / REVIEW_OUTPUT_FILE
-        deep_copy = merged_report_path(deep_dir_path)
-        if not canonical.is_file() and not deep_copy.is_file():
-            missing.append(canonical)
+        items_file = merged_items_path(deep_dir_path)
+        if not items_file.is_file():
+            missing.append(items_file)
 
     if missing:
         expected_block = "\n".join(f"  - {p}" for p in missing)

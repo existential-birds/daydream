@@ -39,11 +39,14 @@ The training data pipeline converts archived trajectories into fine-tuning datas
 
 - **correctness** (w=0.6): mean over per-finding verifier verdicts (`consistent→1.0`, `uncertain→0.5`, `contradicts→0.0`)
 - **grounding** (w=0.4): `grounding_rate ∈ [0,1]` passed through
-- **format_valid**: dominating gate; `False` floors composite to 0.0
+- **format_valid**: dominating gate; `False` floors composite to 0.0 (an internal design choice, in the spirit of the DeepSeek-R1 accuracy+format reward — arXiv:2501.12948)
 - **length**: bounded saturating penalty (w=0.2), subtracted from credit mean
-- **false_positive_penalty**: posterior axis, structurally absent at capture time
 
-Composite = `clip(credit − w_len·len_norm, 0, 1)` where credit is the weighted mean over present axes, renormalized. Missing signals become `None`, never imputed as 0.
+Composite = `round(clip(credit − w_len·len_norm, 0, 1), 4)` — a **pure intrinsic** score, where credit is the weighted mean over present credit axes, renormalized. Missing signals become `None`, never imputed as 0.
+
+The posterior false-positive axis is **not** folded into the composite. When a mapped maintainer accept/reject label is supplied, `score_trajectory` returns a `PosteriorBreakdown` (a subclass of `RewardBreakdown`) carrying `posterior_cost` as a **sibling field** of `composite` — `posterior_cost = max(0.0, observed_penalty − outcome_prior)`, the calibrated surprise above the reviewers' mean observed penalty on the `[0,1]` penalty scale (`rejected→1.0`, `contested→0.5`, `accepted→0.0` — see `_FP_PENALTY_MAP` in `daydream/training/reward.py`; `outcome_prior` defaults to the `0.5` max-entropy midpoint when uncalibrated). The `composite` field is identical whether or not the posterior is present. `w_fp` (default 0.3) survives on `RewardWeights` as a documented training-time combination weight pending recalibration (#114) — it is **never** applied inside the composite.
+
+`has_posterior` is the population discriminator: intrinsic-only runs return a plain `RewardBreakdown` (no posterior fields), labeled runs return a `PosteriorBreakdown`. The two populations require different treatment, so aggregate consumers in `training/` must filter on `has_posterior` (the `runs` index mirrors it as an `INTEGER` (0/1) column) rather than mixing labeled and unlabeled rows (C3).
 
 **Build corpus** (`daydream build-corpus`): Projects the `as_of`-pinned silver annotations into JSONL training records. Filters by outcome label (default: `accepted` only), reward threshold, stack stratification, exclusion list (benchmark repos), and copyleft license opt-in. Writes a `lineage.json` manifest with content-addressed `trajectory_set_hash`, labeler/reward versions, and the `as_of` pin for byte-for-byte reproducibility. A temporal-leakage guard drops annotations whose `valid_at` (e.g., PR merge timestamp) is posterior to the `as_of` pin.
 

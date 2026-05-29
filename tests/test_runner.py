@@ -319,13 +319,13 @@ class TestResolveBackendPhaseModel:
     def test_table_default_used_when_no_flag(self):
         config = RunConfig(backend="claude")  # no review_model override
         backend = runner._resolve_backend(config, "review")
-        assert backend.model == "claude-opus-4-6"  # claude REVIEW default
+        assert backend.model == "claude-opus-4-8"  # claude REVIEW default
 
     def test_table_default_for_phase_without_flag(self):
         # WONDER has no override flag but should still get the table default.
         config = RunConfig(backend="claude")
         backend = runner._resolve_backend(config, "wonder")
-        assert backend.model == "claude-opus-4-6"
+        assert backend.model == "claude-opus-4-8"
 
     def test_codex_table_default(self):
         config = RunConfig(backend="codex")
@@ -457,3 +457,73 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
     assert next_payload == "Model: fix-model-xyz", (
         f"Dim line after HEAL hero did not echo the fix backend's model; got {next_payload!r}"
     )
+
+
+async def test_shallow_items_canonicalized_and_severity_ordered(monkeypatch, tmp_path):
+    """Shallow items carry ``lens="per-stack"`` + a ``severity`` derived from
+    confidence, and ``phase_fix`` receives them severity-sorted.
+
+    parse_feedback returns confidence-tagged items in order [LOW, HIGH]. After
+    canonicalization + severity-sort, the HIGH-confidence item must be fixed
+    first. Asserts on the severity ``phase_fix`` actually receives (observable
+    consequence), never on dispatch.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    # Pre-create the review file so the check_review_file_exists guard passes.
+    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. low.py:1 - L\n2. high.py:2 - H\n")
+
+    work = _fake_work(tmp_path)
+
+    class _StubBackend:
+        def __init__(self, model: str):
+            self.model = model
+
+    monkeypatch.setattr(
+        "daydream.runner._resolve_backend",
+        lambda _config, _phase, _cache=None: _StubBackend("stub-model"),
+    )
+
+    async def _stub_phase_parse_feedback(_backend, _work):
+        # Intentionally out of severity order: LOW then HIGH.
+        return [
+            {"id": 1, "description": "L", "file": "low.py", "line": 1, "confidence": "LOW"},
+            {"id": 2, "description": "H", "file": "high.py", "line": 2, "confidence": "HIGH"},
+        ]
+
+    order: list[str] = []
+
+    async def _spy_phase_fix(_b, _w, item, _n, _t):
+        order.append(item["severity"])
+
+    async def _stub_phase_test_and_heal(*_args, **_kwargs):
+        return (True, 0)
+
+    async def _stub_phase_commit_push(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.runner.phase_fix", _spy_phase_fix)
+    monkeypatch.setattr("daydream.runner.phase_test_and_heal", _stub_phase_test_and_heal)
+    monkeypatch.setattr("daydream.runner.phase_commit_push", _stub_phase_commit_push)
+
+    # Silence UI noise.
+    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
+
+    config = RunConfig(
+        target=str(tmp_path),
+        start_at="fix",
+        cleanup=False,
+        loop=False,
+        shallow=True,
+    )
+
+    exit_code = await runner._run_loop_shallow(work, config)
+    assert exit_code == 0
+    assert order == ["high", "low"], f"phase_fix did not receive severity-ordered items; got {order!r}"

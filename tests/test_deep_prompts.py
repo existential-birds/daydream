@@ -231,23 +231,23 @@ def test_generic_fallback_prompt_omits_prior_commits_when_empty(tmp_path: Path) 
     assert "Prior automated-review commits" not in out
 
 
-def test_merge_prompt_forbids_bold_wrapper_on_numbered_head(tmp_path: Path) -> None:
-    """The prompt must tell the merge agent not to bold-wrap `N. [FILE] TITLE`.
-
-    This is the contract the pr_review parser relies on. A drifted output like
-    `1. **[foo.py:1] Title**` was bypassing the old regex, producing zero
-    parseable issues.
+def test_merge_prompt_requires_structured_item_fields(tmp_path: Path) -> None:
+    """The merge agent emits a structured item list; markdown formatting rules
+    (bold-wrapping, head-line layout) no longer apply — Python renders the report.
     """
     out = build_merge_prompt(**_merge_paths(tmp_path))  # type: ignore[arg-type]
-    assert "do NOT wrap it in `**...**`" in out
-    assert "unbolded" in out
+    assert '{"items": [' in out
+    assert "Item fields (MANDATORY):" in out
+    # No markdown write-to-file or bold-wrapping directive survives.
+    assert "do NOT wrap it in `**...**`" not in out
+    assert "write the complete report to" not in out.lower()
 
 
-def test_merge_prompt_requires_one_path_per_bracket(tmp_path: Path) -> None:
-    """Multi-file issues must become multiple numbered entries, not a comma list."""
+def test_merge_prompt_requires_one_path_per_item(tmp_path: Path) -> None:
+    """Multi-file concerns must become multiple items, not a comma list in one file field."""
     out = build_merge_prompt(**_merge_paths(tmp_path))  # type: ignore[arg-type]
-    assert "EXACTLY ONE file path" in out
-    assert "separate numbered entry per file" in out
+    assert "EXACTLY ONE path" in out
+    assert "separate item per file" in out
 
 
 def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) -> None:
@@ -283,9 +283,10 @@ def test_build_structural_prompt_omits_exploration_pointer(tmp_path: Path) -> No
     assert "exploration" not in prompt.lower()
 
 
-def test_merge_prompt_emits_structural_section_above_issues(tmp_path: Path) -> None:
-    """When a structural-records path is given, the merge prompt instructs the agent
-    to render `## Structural Review` above `## Issues`."""
+def test_merge_prompt_does_not_request_structural_findings(tmp_path: Path) -> None:
+    """Structural findings are appended by the host (phase_cross_stack_merge) in
+    Python, NOT requested via prose. The agent is never pointed at the structural
+    records file and is told not to emit structural items itself."""
     from daydream.deep.prompts import build_merge_prompt
 
     structural_path = tmp_path / "stack-structure-records.json"
@@ -297,12 +298,9 @@ def test_merge_prompt_emits_structural_section_above_issues(tmp_path: Path) -> N
         output_path=tmp_path / "report.md",
         structural_records_path=structural_path,
     )
-    assert str(structural_path) in prompt
-    assert "## Structural Review" in prompt
-    structural_idx = prompt.index("## Structural Review")
-    issues_idx = prompt.index("## Issues")
-    assert structural_idx < issues_idx, "Structural Review section must appear above ## Issues"
-    assert "not deduplicat" in prompt.lower() or "do not dedup" in prompt.lower()
+    assert str(structural_path) not in prompt  # agent not pointed at structural records
+    assert "## Structural Review" not in prompt
+    assert "do NOT emit them yourself" in prompt
 
 
 def test_merge_prompt_omits_structural_section_when_path_is_none(tmp_path: Path) -> None:

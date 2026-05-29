@@ -80,15 +80,47 @@ def test_check_deep_artifacts_merge_ignores_directory_records(tmp_path: Path) ->
     assert "stack-*-records.json" in str(excinfo.value)
 
 
-def test_check_deep_artifacts_fix_rejects_directory_merged_report(tmp_path: Path) -> None:
-    """A directory named like REVIEW_OUTPUT_FILE must not satisfy the fix gate."""
+def test_check_deep_artifacts_fix_rejects_directory_merged_items(tmp_path: Path) -> None:
+    """A directory named merged-items.json must not satisfy the fix gate.
+
+    The fix gate keys on the canonical merged-items.json (the source of truth the
+    fix loop reads), not the render-only review-output.md markdown.
+    """
+    from daydream.deep.artifacts import check_deep_artifacts
+
+    deep_dir = tmp_path / ".daydream" / "deep"
+    deep_dir.mkdir(parents=True)
+    (deep_dir / "merged-items.json").mkdir()  # directory, not a file
+    with pytest.raises(FileNotFoundError) as excinfo:
+        check_deep_artifacts("fix", deep_dir)
+    assert "merged-items.json" in str(excinfo.value)
+
+
+def test_check_deep_artifacts_fix_passes_with_json_only(tmp_path: Path) -> None:
+    """--start-at fix proceeds when merged-items.json is present even if the
+    render-only review-output.md markdown is absent (canonical JSON is the gate).
+    """
+    from daydream.deep.artifacts import check_deep_artifacts
+
+    deep_dir = tmp_path / ".daydream" / "deep"
+    deep_dir.mkdir(parents=True)
+    (deep_dir / "merged-items.json").write_text('{"items": []}')
+    # No review-output.md anywhere -- must not raise.
+    check_deep_artifacts("fix", deep_dir)
+
+
+def test_check_deep_artifacts_fix_fails_without_json(tmp_path: Path) -> None:
+    """--start-at fix fails loudly when no merged-items.json exists, even if the
+    markdown report is present (markdown alone is not the source of truth).
+    """
     from daydream.config import REVIEW_OUTPUT_FILE
     from daydream.deep.artifacts import check_deep_artifacts
 
     target = tmp_path
     deep_dir = target / ".daydream" / "deep"
     deep_dir.mkdir(parents=True)
-    (target / REVIEW_OUTPUT_FILE).mkdir()  # directory, not a file
+    (target / REVIEW_OUTPUT_FILE).write_text("# Review\n")  # markdown present
+    (deep_dir / "review-output.md").write_text("# Review\n")  # deep-dir markdown too
     with pytest.raises(FileNotFoundError) as excinfo:
         check_deep_artifacts("fix", deep_dir)
-    assert REVIEW_OUTPUT_FILE in str(excinfo.value)
+    assert "merged-items.json" in str(excinfo.value)

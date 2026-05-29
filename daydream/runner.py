@@ -61,6 +61,7 @@ from daydream.phases import (
     phase_test_and_heal,
     phase_understand_intent,
     revert_uncommitted_changes,
+    severity_sorted,
 )
 from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
 from daydream.ui import (
@@ -84,6 +85,34 @@ from daydream.workspace import WorkContext, open_workspace
 # full review→fix→test cycle, ``comment`` posts inline PR comments and exits,
 # ``review`` writes a report to terminal/markdown and exits.
 OutputMode = Literal["loop", "comment", "review"]
+
+
+# Shallow reviews emit ``confidence`` (not ``severity``). Map it onto the
+# canonical ``severity`` axis so the shallow fix loop orders findings the same
+# way the deep pipeline does, without changing shallow reviewers or
+# ``FEEDBACK_SCHEMA``.
+_CONFIDENCE_TO_SEVERITY = {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}
+
+
+def to_canonical_shallow(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Tag shallow parse items with the canonical ``lens``/``severity`` axes.
+
+    Sets ``lens="per-stack"`` on every item and derives ``severity`` from the
+    item's ``confidence`` (HIGH→high, MEDIUM→medium, LOW→low), defaulting to
+    ``"medium"`` when ``confidence`` is absent. Items are mutated in place and
+    returned for convenience.
+
+    Args:
+        items: Raw feedback items from ``phase_parse_feedback``.
+
+    Returns:
+        The same list, each item carrying ``lens`` and ``severity``.
+    """
+    for item in items:
+        item["lens"] = "per-stack"
+        confidence = item.get("confidence") or ""
+        item["severity"] = _CONFIDENCE_TO_SEVERITY.get(confidence, "medium")
+    return items
 
 
 @dataclass
@@ -856,6 +885,9 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 print_info(console, f"Clean review on iteration {iteration}")
                 return [], 0, 0, True, False  # should_continue=False (clean)
 
+            # Canonicalize onto the lens/severity axes, then fix high→low.
+            items = severity_sorted(to_canonical_shallow(items))
+
             # Phase 3: Fix
             print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
             print_dim(console, f"Model: {fix_backend.model}")
@@ -975,6 +1007,8 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                     print_error(console, "Phase 2 Error", str(exc))
                     print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
                     return 1
+                # Canonicalize onto the lens/severity axes, then fix high→low.
+                feedback_items = severity_sorted(to_canonical_shallow(feedback_items))
 
             # Phase 3: Fix
             if config.start_at in ("review", "parse", "fix"):

@@ -28,7 +28,7 @@ from enum import Enum
 # Default model ids — single source of truth. Resolved by ``create_backend`` only
 # when no explicit override is supplied. Every other layer takes ``model: str``
 # as required and does no fallback of its own.
-DEFAULT_CLAUDE_MODEL = "claude-opus-4-6"
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 DEFAULT_EXPLORATION_MODEL = "claude-sonnet-4-6"
 
@@ -55,12 +55,12 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "test": "claude-sonnet-4-6",
         "verify": "claude-sonnet-4-6",
         "exploration": "claude-sonnet-4-6",
-        "review": "claude-opus-4-6",
-        "wonder": "claude-opus-4-6",
-        "envision": "claude-opus-4-6",
-        "merge": "claude-opus-4-6",
-        "intent": "claude-opus-4-6",
-        "pr_feedback": "claude-opus-4-6",
+        "review": "claude-opus-4-8",
+        "wonder": "claude-opus-4-8",
+        "envision": "claude-opus-4-8",
+        "merge": "claude-opus-4-8",
+        "intent": "claude-opus-4-8",
+        "pr_feedback": "claude-opus-4-8",
     },
     "codex": {
         "parse": "gpt-5.5",

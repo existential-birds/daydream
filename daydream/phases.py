@@ -1,5 +1,6 @@
 """Phase functions for the review and fix loop."""
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -694,6 +695,79 @@ ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+MERGED_ITEMS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "description": {"type": "string"},
+                    "file": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "rationale": {"type": "string"},
+                    "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural"]},
+                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "source": {"type": "string"},
+                },
+                "required": [
+                    "id",
+                    "description",
+                    "file",
+                    "line",
+                    "confidence",
+                    "rationale",
+                    "lens",
+                    "severity",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
+
+
+def normalize_items(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assign fresh contiguous unique integer ids to every item.
+
+    Reassigns each item's ``id`` to a contiguous 1-based sequence regardless of
+    incoming numbering, so per-stack, cross-stack, and structural items that
+    collide on their original ids end up uniquely keyed. Order and the ``lens``
+    field are preserved.
+
+    Args:
+        raw: The incoming list of item dicts.
+
+    Returns:
+        A new list of item dicts with reassigned ``id`` values.
+
+    Raises:
+        ValueError: If ``raw`` is not a list.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(f"normalize_items expected a list, got {type(raw).__name__}")
+    normalized: list[dict[str, Any]] = []
+    for new_id, item in enumerate(raw, start=1):
+        normalized.append({**item, "id": new_id})
+    return normalized
+
+
+# Canonical severity ordering shared by the deep fix loop and the shallow fix
+# loop. Defined here (next to normalize_items / MERGED_ITEMS_SCHEMA) so both
+# callers can import a single helper rather than duplicate the map.
+_SEVERITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
+
+
+def severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stable-sort canonical items by severity (high < medium < low)."""
+    return sorted(items, key=lambda it: _SEVERITY_RANK.get(it.get("severity") or "", 1))
+
+
 RECOMMENDATION_VERDICTS_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1313,18 +1387,21 @@ async def phase_verify_recommendations(
     backend: Backend,
     work: WorkContext,
     *,
-    merged_report_path: Path,
+    merged_items_path: Path,
     deep_dir: Path,
 ) -> tuple[Path, dict[str, Any]]:
-    """Audit each merged-report issue's recommendation against the codebase.
+    """Audit each non-structural item's recommendation against the codebase.
 
-    Runs a read-only verifier subagent that decides, for every numbered issue
-    in the merged cross-stack report, whether the recommendation is
+    Loads the canonical merged item list (the single source of truth produced
+    by the cross-stack merge), filters to the language lenses
+    (``per-stack`` / ``cross-stack``), and runs a read-only verifier subagent
+    that decides, for every such item, whether the recommendation is
     ``consistent`` with trait/interface specs and sibling implementations,
     ``contradicts`` them, or is ``uncertain`` from the codebase alone.
     Writes the result as ``recommendation-verdicts.json`` inside
     ``deep_dir``. The fix gate reads the file and inlines per-item verdicts
-    into the ``phase_fix`` prompt; verdicts are advisory.
+    into the ``phase_fix`` prompt; verdicts are advisory and keyed by the
+    canonical ``issue_id``.
 
     Mirrors ``_run_setup_investigator`` in shape: small read-only contract
     encoded in the verifier prompt, compact JSON schema, single ``run_agent``
@@ -1336,31 +1413,44 @@ async def phase_verify_recommendations(
         backend: The Backend to execute against.
         work: Workspace context; ``work.repo`` is the verifier's cwd and the
             repository root passed into the prompt.
-        merged_report_path: Path on disk to the merged cross-stack report.
-            The verifier opens it itself via Read; the contents are not
-            embedded in the prompt.
+        merged_items_path: Path on disk to the canonical ``merged-items.json``.
+            Items tagged ``lens="structural"`` are filtered out in Python
+            before the prompt is built (see filter site below); only the
+            language-lens items are rendered for the verifier.
         deep_dir: The ``.daydream/deep/`` artifacts directory for this run.
             The verdicts JSON is written inside it via ``verdicts_path``.
 
     Returns:
         Tuple of (path, payload) where path is the verdicts JSON file written
         inside ``deep_dir`` and payload is the already-parsed dict. The file
-        always exists on successful return; on parse failure or missing
-        agent output, ``{"verdicts": []}`` is written so downstream code
-        does not need to handle a missing file.
+        always exists on successful return; on parse failure, missing agent
+        output, or an empty filtered item list, ``{"verdicts": []}`` is
+        written so downstream code does not need to handle a missing file.
 
     """
     # Late imports avoid circular dependency with daydream.deep (which imports
     # from daydream.phases). Same pattern used by phase_per_stack_reviews and
     # phase_cross_stack_merge above.
-    import json
-
     from daydream.deep.artifacts import verdicts_path
     from daydream.deep.prompts import build_verification_prompt
 
     output_path = verdicts_path(deep_dir)
+
+    items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
+    # DELIBERATE: structural items get no verifier verdict (plan Assumption 2 --
+    # structural is validated at review time by review-structure's G3 evidence
+    # gates and protected at fix time by the contract-wins guard, so the
+    # interface-conformance verifier does not apply to it).
+    verifiable = [i for i in items if i.get("lens") in ("per-stack", "cross-stack")]
+
+    if not verifiable:
+        empty_payload: dict[str, Any] = {"verdicts": []}
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(empty_payload, indent=2))
+        return output_path, empty_payload
+
     prompt = build_verification_prompt(
-        merged_report_path=merged_report_path,
+        items=verifiable,
         target_dir=work.repo,
         output_path=output_path,
     )
@@ -2274,12 +2364,18 @@ async def phase_cross_stack_merge(
     failed_stacks: dict[str, str] | None = None,
     structural_records_path: Path | None = None,
 ) -> Path:
-    """Run the cross-stack merge agent and return the output-report path (D-23..D-27).
+    """Run the cross-stack merge agent and return the merged-report path (D-23..D-27).
 
-    The agent writes the report to ``.daydream/deep/review-output.md`` (same
-    directory as per-stack artifacts, which avoids sandbox write restrictions
-    that block dotfiles at the repo root). This function then copies the result
-    to ``work.repo / REVIEW_OUTPUT_FILE`` for downstream consumers.
+    The merge agent returns a schema-validated item list (``MERGED_ITEMS_SCHEMA``)
+    covering per-stack and cross-stack findings, each tagged with ``lens``.
+    Structural records (from ``structural_records_path``) are appended to that
+    list in Python, tagged ``lens="structural"`` -- never requested via prose,
+    so the structural lens cannot be silently dropped by the agent. The combined
+    list is normalized (fresh unique ids), written as the canonical
+    ``merged-items.json``, and rendered to ``review-output.md`` (single source of
+    truth → markdown). The markdown is written inside ``.daydream/deep/`` (which
+    avoids sandbox write restrictions that block dotfiles at the repo root) and
+    then copied to ``work.repo / REVIEW_OUTPUT_FILE`` for downstream consumers.
 
     Per D-38, never passes the ``agents`` kwarg (Codex parity).
 
@@ -2297,45 +2393,86 @@ async def phase_cross_stack_merge(
             that failed. Passed through to the merge prompt so the merged
             report can call out uncovered stacks explicitly.
         structural_records_path: Optional path to the parsed structural
-            meta-stack records JSON. When provided, the merge prompt renders a
-            dedicated ``## Structural Review`` section above ``## Issues`` with
-            independent numbering and is excluded from dedup against the
-            language-stack records. ``None`` when the structural reviewer did
-            not run (docs-only diff, empty diff).
+            meta-stack records JSON. When provided, its findings are appended to
+            the canonical item list tagged ``lens="structural"`` (high severity
+            by construction -- the structural lens carries different convictions
+            and is not deduplicated against the language stacks). ``None`` when
+            the structural reviewer did not run (docs-only diff, empty diff).
 
     Returns:
-        Path to the merged report at ``work.repo / REVIEW_OUTPUT_FILE``.
+        Path to the rendered merged report at ``work.repo / REVIEW_OUTPUT_FILE``.
+
+    Raises:
+        ValueError: If the merge agent returns empty or schema-invalid output
+            (no silent ``[]`` fallback that would mask a broken merge).
 
     """
-    from daydream.deep.artifacts import deep_dir, merged_report_path
+    from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path
     from daydream.deep.prompts import build_merge_prompt
+    from daydream.deep.render import render_report
 
+    dd = deep_dir(work.repo)
     canonical_path = work.repo / REVIEW_OUTPUT_FILE
-    agent_output_path = merged_report_path(deep_dir(work.repo))
+    report_path = merged_report_path(dd)
+    items_path = merged_items_path(dd)
 
     # Clear stale outputs so a failed merge agent can't leave behind
     # outdated content that downstream stages would silently consume.
     canonical_path.unlink(missing_ok=True)
-    agent_output_path.unlink(missing_ok=True)
+    report_path.unlink(missing_ok=True)
+    items_path.unlink(missing_ok=True)
 
     prompt = build_merge_prompt(
         per_stack_records_paths=per_stack_records_paths,
         intent_path=intent_path,
         alternatives_path=alternatives_path,
         dedup_candidates_path=dedup_candidates_path,
-        output_path=agent_output_path,
+        output_path=report_path,
         exploration_dir=exploration_dir,
         failed_stacks=failed_stacks,
         structural_records_path=structural_records_path,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     print_dim(console, f"Model: {backend.model}")
-    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.DEEP)
+    result, _ = await run_agent(
+        backend, work.repo, prompt, output_schema=MERGED_ITEMS_SCHEMA, phase=DaydreamPhase.DEEP
+    )
 
-    # Copy from deep artifact dir to canonical location. The agent writes
-    # inside .daydream/deep/ where sandbox restrictions don't apply; Python
-    # handles the copy to work.repo/.review-output.md.
-    if not agent_output_path.is_file():
-        raise FileNotFoundError(f"Expected merged report at {agent_output_path}")
-    canonical_path.write_text(agent_output_path.read_text())
+    # Fail loudly on empty/invalid output -- a silent [] would hide a broken
+    # merge and ship an empty report downstream.
+    if not isinstance(result, dict) or not isinstance(result.get("items"), list):
+        raise ValueError(f"Cross-stack merge returned no item list (got {type(result).__name__})")
+    agent_items: list[dict[str, Any]] = result["items"]
+
+    # Append structural findings in Python, tagged lens="structural". They are
+    # parsed FEEDBACK_SCHEMA records ({id, description, file, line}) and carry no
+    # confidence/severity, so default both to HIGH/high -- the structural lens is
+    # high-conviction by construction and must not be demoted at sort time.
+    structural_items: list[dict[str, Any]] = []
+    if structural_records_path is not None and structural_records_path.is_file():
+        try:
+            structural_records = json.loads(structural_records_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            # Structural records come from a prior agent run that may have emitted
+            # malformed output; degrade to none rather than crash the merge.
+            print_warning(console, f"Skipping malformed structural records: {type(exc).__name__}: {exc}")
+            structural_records = []
+        for rec in structural_records:
+            structural_items.append(
+                {
+                    **rec,
+                    "lens": "structural",
+                    "confidence": rec.get("confidence", "HIGH"),
+                    "severity": rec.get("severity", "high"),
+                }
+            )
+
+    items = normalize_items(agent_items + structural_items)
+    items_path.write_text(json.dumps({"items": items}, indent=2))
+
+    # Render the human report FROM the canonical items, then copy from the deep
+    # artifact dir to the canonical location (the deep dir avoids sandbox write
+    # restrictions on repo-root dotfiles).
+    report_path.write_text(render_report(items))
+    canonical_path.write_text(report_path.read_text())
     return canonical_path

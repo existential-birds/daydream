@@ -20,6 +20,7 @@ from daydream.archive.index import (
     label_observation_history,
     latest_label_observation,
     query_runs,
+    reviewer_set_penalty_prior,
     update_labels,
     upsert_run,
 )
@@ -731,6 +732,195 @@ def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
     pinned = latest_label_observation(tmp_path, "sess-4", as_of=early)
     assert pinned is not None
     assert json.loads(pinned["labels"]) == ["unknown"]
+
+
+def test_append_label_observation_persists_reviewer_and_posterior_flag(tmp_path: Path) -> None:
+    """reviewer_logins + has_posterior persist on the observation row and mirror onto runs."""
+    _seed_one_run(tmp_path, "s1")
+    append_label_observation(
+        tmp_path,
+        "s1",
+        labels=["rejected"],
+        pr_state="closed",
+        labeler_version="2026.05.28-1",
+        evidence_sha="h",
+        reviewer_logins=["alice"],
+        has_posterior=True,
+    )
+    obs = latest_label_observation(tmp_path, "s1")
+    assert obs is not None
+    assert json.loads(obs["reviewer_logins"]) == ["alice"]
+    assert obs["has_posterior"] == 1
+    runs_row = query_runs(tmp_path, "session_id = ?", ("s1",))[0]
+    assert runs_row["has_posterior"] == 1  # SQL consumers split populations without parsing reward_json
+
+
+def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
+    """A pre-v4 index.db (runs + label_observations lacking the posterior columns)
+    is migrated/recreated on the next connection: runs gains has_posterior via
+    ALTER, the stale label_observations is dropped+recreated with both new
+    columns, and PRAGMA user_version reaches SCHEMA_VERSION (4)."""
+    from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
+
+    db_path = tmp_path / "index.db"
+    conn = sqlite3.connect(str(db_path))
+    # Real pre-v4 runs schema (full DDL minus the new has_posterior column);
+    # label_observations bitemporal-but-no-posterior.
+    pre_v4_runs_ddl = _CREATE_TABLE.replace(
+        "    has_posterior INTEGER NOT NULL DEFAULT 0,\n", ""
+    )
+    assert "has_posterior" not in pre_v4_runs_ddl
+    conn.execute(pre_v4_runs_ddl)
+    conn.execute(
+        "CREATE TABLE label_observations ("
+        "session_id TEXT NOT NULL, observed_at TEXT NOT NULL, labels TEXT NOT NULL, "
+        "pr_state TEXT, labeler_version TEXT NOT NULL, evidence_sha TEXT, rubric_json TEXT, "
+        "valid_at TEXT, reward_version TEXT, reward_json TEXT, composite_reward REAL, "
+        "PRIMARY KEY (session_id, observed_at))"
+    )
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+        ("mig-1", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "mig-1")),
+    )
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
+
+    # First write through the real path triggers _migrate_schema + recreate.
+    # The stale label_observations table must emit the spec-sanctioned
+    # drop-and-recreate warning (existing label rows lost, repopulate via harvest).
+    with pytest.warns(UserWarning, match="predates bitemporal/posterior columns"):
+        append_label_observation(
+            tmp_path,
+            "mig-1",
+            labels=["accepted"],
+            pr_state="merged",
+            labeler_version="2026.05.28-1",
+            evidence_sha=None,
+            reviewer_logins=["bob"],
+            has_posterior=True,
+        )
+
+    conn = sqlite3.connect(str(db_path))
+    runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    lo_cols = {r[1] for r in conn.execute("PRAGMA table_info(label_observations)")}
+    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert "has_posterior" in runs_cols
+    assert {"reviewer_logins", "has_posterior"} <= lo_cols
+    assert user_version == SCHEMA_VERSION == 4
+
+    obs = latest_label_observation(tmp_path, "mig-1")
+    assert obs is not None
+    assert json.loads(obs["reviewer_logins"]) == ["bob"]
+    assert obs["has_posterior"] == 1
+    assert query_runs(tmp_path, "session_id = ?", ("mig-1",))[0]["has_posterior"] == 1
+
+
+# ISO 8601 valid times stored verbatim in label_observations.valid_at and
+# compared lexically with a strict ``<`` cutoff; T1 < T2 < T3 lexically.
+T1 = "2026-01-01T00:00:00+00:00"
+T2 = "2026-02-01T00:00:00+00:00"
+T3 = "2026-03-01T00:00:00+00:00"
+
+
+def _seed_reviewed_outcomes(archive_dir: Path) -> None:
+    """Seed three prior runs (one reviewed outcome each) plus a current run.
+
+    - s_a: reviewers=[alice], rejected (penalty 1.0) @ T1
+    - s_b: reviewers=[bob],   accepted (penalty 0.0) @ T2
+    - s_c: reviewers=[alice, carol], contested (penalty 0.5) @ T3
+    - cur: the current session (excluded from its own prior pool)
+    """
+    for sid in ("s_a", "s_b", "s_c", "cur"):
+        _seed_one_run(archive_dir, sid)
+    append_label_observation(
+        archive_dir, "s_a", labels=["rejected"], pr_state="closed",
+        labeler_version="2026.05.28-1", evidence_sha=None,
+        valid_at=T1, reviewer_logins=["alice"], has_posterior=True,
+    )
+    append_label_observation(
+        archive_dir, "s_b", labels=["accepted"], pr_state="merged",
+        labeler_version="2026.05.28-1", evidence_sha=None,
+        valid_at=T2, reviewer_logins=["bob"], has_posterior=True,
+    )
+    append_label_observation(
+        archive_dir, "s_c", labels=["contested"], pr_state="merged",
+        labeler_version="2026.05.28-1", evidence_sha=None,
+        valid_at=T3, reviewer_logins=["alice", "carol"], has_posterior=True,
+    )
+
+
+def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp_path):
+    # Prior runs (one label_observation each): s_a(reviewers=[alice], rejected,1.0 @ t1),
+    #   s_b(reviewers=[bob], accepted,0.0 @ t2), s_c(reviewers=[alice,carol], contested,0.5 @ t3).
+    # Current row reviewers={alice}, valid_at == t3 -> pool = runs sharing alice, valid_at < t3, != current:
+    #   s_a only (s_c is @ t3, excluded by strict <). bob's run does not share a reviewer -> excluded.
+    _seed_reviewed_outcomes(tmp_path)
+    prior, n = reviewer_set_penalty_prior(tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur")
+    assert prior == pytest.approx(1.0) and n == 1
+    # widen the set to {alice,bob}: pool now includes s_a(1.0) + s_b(0.0) -> mean 0.5, n=2
+    prior2, n2 = reviewer_set_penalty_prior(tmp_path, ["alice", "bob"], before_valid_at=T3, exclude_session="cur")
+    assert prior2 == pytest.approx(0.5) and n2 == 2
+    # empty reviewer set -> no pool
+    assert reviewer_set_penalty_prior(tmp_path, [], before_valid_at=T3, exclude_session="cur") == (None, 0)
+
+
+def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path):
+    # Seed the same three outcomes as _seed_reviewed_outcomes, but give s_a and
+    # s_b distinct repo_slugs so we can verify per-repo filtering.
+    #   s_a: repo=org/repo-A, reviewers=[alice], rejected (1.0) @ T1
+    #   s_b: repo=org/repo-B, reviewers=[alice], accepted (0.0) @ T2
+    #   cur: (no repo_slug, excluded by session_id)
+    for sid, slug in (("s_a", "org/repo-A"), ("s_b", "org/repo-B"), ("cur", None)):
+        upsert_run(
+            tmp_path,
+            Manifest(
+                session_id=sid,
+                archived_at="2026-01-01T00:00:00Z",
+                run_flow="normal",
+                backend="claude",
+                repo_slug=slug,
+                archive_path=str(tmp_path / sid),
+            ),
+        )
+    append_label_observation(
+        tmp_path, "s_a", labels=["rejected"], pr_state="closed",
+        labeler_version="2026.05.28-1", evidence_sha=None,
+        valid_at=T1, reviewer_logins=["alice"], has_posterior=True,
+    )
+    append_label_observation(
+        tmp_path, "s_b", labels=["accepted"], pr_state="merged",
+        labeler_version="2026.05.28-1", evidence_sha=None,
+        valid_at=T2, reviewer_logins=["alice"], has_posterior=True,
+    )
+
+    # Without repo scoping both alice rows are pooled: mean(1.0, 0.0) = 0.5, n=2
+    prior_all, n_all = reviewer_set_penalty_prior(
+        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur"
+    )
+    assert prior_all == pytest.approx(0.5) and n_all == 2
+
+    # Scoped to org/repo-A: only s_a(rejected,1.0) qualifies
+    prior_a, n_a = reviewer_set_penalty_prior(
+        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur",
+        repo_slug="org/repo-A",
+    )
+    assert prior_a == pytest.approx(1.0) and n_a == 1
+
+    # Scoped to org/repo-B: only s_b(accepted,0.0) qualifies
+    prior_b, n_b = reviewer_set_penalty_prior(
+        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur",
+        repo_slug="org/repo-B",
+    )
+    assert prior_b == pytest.approx(0.0) and n_b == 1
+
+    # Scoped to an unknown repo: empty pool
+    prior_x, n_x = reviewer_set_penalty_prior(
+        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur",
+        repo_slug="org/other",
+    )
+    assert (prior_x, n_x) == (None, 0)
 
 
 def test_manifest_includes_source_path():

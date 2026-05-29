@@ -12,13 +12,17 @@ Exports:
     count_runs: Count rows matching an optional WHERE clause.
     append_label_observation: Append a row to the immutable bitemporal
         label_observations history (``observed_at`` transaction time,
-        ``valid_at`` valid time, plus reward columns) and refresh the
-        denormalized runs cache.
+        ``valid_at`` valid time, reward columns, plus ``reviewer_logins`` and
+        the ``has_posterior`` population discriminator) and refresh the
+        denormalized runs cache (including the ``has_posterior`` mirror).
     latest_label_observation: Return the most recent label_observations row for
         a session, optionally constrained by an ``as_of`` cutoff timestamp.
     bulk_latest_label_observations: Return the most recent label_observations
         row for each session in a collection — single round-trip alternative to
         calling ``latest_label_observation`` in a loop.
+    reviewer_set_penalty_prior: Pooled mean false-positive penalty over prior
+        runs sharing a reviewer (strict ``valid_at`` cutoff), for the posterior
+        outcome prior (C4).
     label_observation_history: Return the full label_observations history for
         a session in chronological order.
     label_count_summary: Return label counts for all runs in a single aggregate
@@ -35,7 +39,16 @@ from pathlib import Path
 
 from daydream.archive.manifest import Manifest
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+_REVIEWER_PENALTY_MAP: dict[str, float] = {
+    "accepted": 0.0,
+    "contested": 0.5,
+    "rejected": 1.0,
+}
+"""Maintainer outcome label → false-positive penalty, mirroring
+``daydream.training.reward._FP_PENALTY_MAP``.  Defined here so the archive
+layer does not depend on the training layer."""
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -75,6 +88,7 @@ CREATE TABLE IF NOT EXISTS runs (
     labeled_at TEXT,
     rubric_json TEXT,
     composite_reward REAL,
+    has_posterior INTEGER NOT NULL DEFAULT 0,
     archive_path TEXT NOT NULL,
     schema_version INTEGER NOT NULL DEFAULT 1
 )
@@ -87,7 +101,12 @@ CREATE TABLE IF NOT EXISTS runs (
 # carry the full ``RewardBreakdown`` plus its cached composite scalar so a
 # corpus re-projection has every axis and each annotation generation is
 # self-describing (the ``runs.composite_reward`` mirror remains the SQL-threshold
-# cache). See spec ``corpus-pipeline-architecture`` (silver layer).
+# cache). ``reviewer_logins`` is a JSON array of the human GitHub accounts whose
+# review/reply outcomes seeded the posterior axis (empty/``None`` for non-PR
+# runs); ``has_posterior`` is the population discriminator (1 when the row
+# carries a ``PosteriorBreakdown``, mirrored onto ``runs`` so SQL consumers can
+# split labeled/unlabeled populations without parsing ``reward_json``). See spec
+# ``corpus-pipeline-architecture`` (silver layer) and ``reward-posterior-corrections`` (C3).
 _CREATE_LABEL_OBSERVATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS label_observations (
     session_id       TEXT NOT NULL,
@@ -101,6 +120,8 @@ CREATE TABLE IF NOT EXISTS label_observations (
     reward_version   TEXT,
     reward_json      TEXT,
     composite_reward REAL,
+    reviewer_logins  TEXT,
+    has_posterior    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (session_id, observed_at)
 )
 """
@@ -146,6 +167,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("changed_files", "TEXT"),
         ("composite_reward", "REAL"),
         ("source_path", "TEXT"),
+        ("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
     ]
     for col, col_type in migrations:
         if col not in existing:
@@ -157,22 +179,24 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
 
 def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
-    """Drop and recreate ``label_observations`` if it predates the bitemporal columns.
+    """Drop and recreate ``label_observations`` if it predates the bitemporal/posterior columns.
 
-    The bitemporal/reward columns are part of the table's primary structure, so
-    rather than `ALTER TABLE ADD COLUMN` (which cannot retrofit them cleanly for
-    the spec's clean-recreate guarantee), a stale table is dropped and rebuilt.
-    Dev label rows are discarded (spec-sanctioned — repopulate via ``harvest``).
-    The ``runs`` table is never touched. Idempotent: after a recreate the
-    ``valid_at`` column exists, so subsequent calls are a no-op.
+    The bitemporal/reward/posterior columns are part of the table's primary
+    structure, so rather than `ALTER TABLE ADD COLUMN` (which cannot retrofit
+    them cleanly for the spec's clean-recreate guarantee), a stale table is
+    dropped and rebuilt. A table missing either ``valid_at`` (pre-bitemporal) or
+    ``has_posterior`` (pre-reward-posterior-corrections) is considered stale. Dev
+    label rows are discarded (spec-sanctioned — repopulate via ``harvest``). The
+    ``runs`` table is never touched. Idempotent: after a recreate both columns
+    exist, so subsequent calls are a no-op.
 
     Args:
         conn: An open connection whose ``label_observations`` table exists.
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
-    if existing and "valid_at" not in existing:
+    if existing and ("valid_at" not in existing or "has_posterior" not in existing):
         warnings.warn(
-            "label_observations table predates bitemporal columns and will be dropped "
+            "label_observations table predates bitemporal/posterior columns and will be dropped "
             "and recreated. Existing label rows will be lost — repopulate via `harvest`.",
             stacklevel=2,
         )
@@ -281,6 +305,8 @@ def append_label_observation(
     reward_version: str | None = None,
     reward_json: str | None = None,
     composite_reward: float | None = None,
+    reviewer_logins: list[str] | None = None,
+    has_posterior: bool = False,
 ) -> None:
     """Append a row to the immutable ``label_observations`` history.
 
@@ -314,6 +340,15 @@ def append_label_observation(
             ``label_observations`` row (so each annotation generation is
             self-describing) and mirrored onto ``runs.composite_reward`` for
             SQL thresholding; ``None`` when uncomputable.
+        reviewer_logins: Human GitHub accounts whose review/reply outcomes
+            seeded the posterior axis. Serialised as a JSON array on the
+            ``label_observations`` row; ``None`` (stored as SQL ``NULL``) for
+            non-PR/local runs with no reviewer set.
+        has_posterior: Population discriminator. ``True`` when the row carries a
+            ``PosteriorBreakdown`` (a mapped PR-outcome label was scored).
+            Coerced to ``int`` and written to ``label_observations.has_posterior``
+            and mirrored onto ``runs.has_posterior`` so SQL consumers can split
+            labeled/unlabeled populations without parsing ``reward_json``.
 
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table.
@@ -321,6 +356,8 @@ def append_label_observation(
     observed_at = datetime.now(timezone.utc).isoformat()
     valid_at_value = valid_at if valid_at is not None else observed_at
     labels_json = json.dumps(labels)
+    reviewer_logins_json = json.dumps(reviewer_logins) if reviewer_logins is not None else None
+    has_posterior_int = int(has_posterior)
     conn = _get_connection(archive_dir)
     try:
         cursor = conn.execute(
@@ -333,8 +370,8 @@ def append_label_observation(
         conn.execute(
             "INSERT INTO label_observations "
             "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
-            "valid_at, reward_version, reward_json, composite_reward) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 observed_at,
@@ -347,12 +384,15 @@ def append_label_observation(
                 reward_version,
                 reward_json,
                 composite_reward,
+                reviewer_logins_json,
+                has_posterior_int,
             ),
         )
         conn.execute(
-            "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ?, composite_reward = ? "
+            "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ?, composite_reward = ?, "
+            "has_posterior = ? "
             "WHERE session_id = ?",
-            (labels_json, observed_at, rubric_json, composite_reward, session_id),
+            (labels_json, observed_at, rubric_json, composite_reward, has_posterior_int, session_id),
         )
         conn.commit()
     finally:
@@ -466,6 +506,141 @@ def bulk_latest_label_observations(
         return {row["session_id"]: dict(row) for row in cursor.fetchall()}
     finally:
         conn.close()
+
+
+def reviewer_set_penalty_prior(
+    archive_dir: Path,
+    logins: list[str],
+    *,
+    before_valid_at: str,
+    exclude_session: str,
+    repo_slug: str | None = None,
+) -> tuple[float | None, int]:
+    """Return the pooled mean penalty over prior runs sharing a reviewer (C4).
+
+    Pools ``label_observations`` rows whose ``reviewer_logins`` JSON intersects
+    *logins*, restricted to ``session_id != exclude_session`` and
+    ``valid_at < before_valid_at`` (strict). When *repo_slug* is provided the
+    pool is further restricted to rows whose parent ``runs.repo_slug`` matches —
+    preventing cross-repo reviewer history from inflating or deflating the prior
+    (C4 per-repo scoping). One outcome is taken per session (latest
+    ``observed_at``); its first label is mapped to a false-positive penalty via
+    ``_REVIEWER_PENALTY_MAP`` (``accepted→0.0``, ``contested→0.5``,
+    ``rejected→1.0``). The raw pooled mean and count are returned — the ``>=10``
+    sufficiency threshold and the ``0.5`` default fallback are the caller's
+    responsibility (Task 8 / spec C4).
+
+    Rows with malformed ``reviewer_logins`` / ``labels`` JSON are skipped with a
+    :func:`warnings.warn` (mirroring ``corpus._annotation_reward``) so a single
+    bad row never crashes the aggregate.
+
+    Args:
+        archive_dir: Path to the archive root.
+        logins: The current run's reviewer set. Empty → no pool.
+        before_valid_at: ISO 8601 strict upper bound on ``valid_at``.
+        exclude_session: Session id to exclude (the current run).
+        repo_slug: When provided, restrict the pool to observations whose
+            parent run shares this ``repo_slug`` (joined via ``runs``).
+            ``None`` disables per-repo filtering (backward-compatible).
+
+    Returns:
+        ``(mean_penalty, count)`` over the pooled sessions, or ``(None, 0)``
+        when *logins* is empty or the pool is empty.
+    """
+    if not logins:
+        return None, 0
+    login_set = set(logins)
+    penalty_map = _REVIEWER_PENALTY_MAP
+
+    # Build an IN-list so SQLite's json_each() can filter reviewer intersection
+    # inside the query, avoiding a full-table fetch followed by Python-side
+    # isdisjoint() for every archived row.
+    placeholders = ",".join("?" * len(logins))
+
+    if repo_slug is not None:
+        # Join to runs to scope the pool to the current repo only.
+        inner_where = (
+            "WHERE lo.session_id != ?"
+            "  AND lo.valid_at < ?"
+            "  AND lo.reviewer_logins IS NOT NULL"
+            "  AND EXISTS ("
+            f"      SELECT 1 FROM json_each(lo.reviewer_logins) WHERE value IN ({placeholders})"
+            "  )"
+            "  AND r.repo_slug = ?"
+        )
+        params: tuple = (exclude_session, before_valid_at, *logins, repo_slug)
+        sql = f"""
+            SELECT reviewer_logins, labels
+            FROM (
+                SELECT lo.reviewer_logins, lo.labels,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY lo.session_id
+                           ORDER BY lo.observed_at DESC
+                       ) AS _rn
+                FROM label_observations lo
+                JOIN runs r ON r.session_id = lo.session_id
+                {inner_where}
+            )
+            WHERE _rn = 1
+            """
+    else:
+        params = (exclude_session, before_valid_at, *logins)
+        sql = f"""
+            SELECT reviewer_logins, labels
+            FROM (
+                SELECT reviewer_logins, labels,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY session_id
+                           ORDER BY observed_at DESC
+                       ) AS _rn
+                FROM label_observations
+                WHERE session_id != ?
+                  AND valid_at < ?
+                  AND reviewer_logins IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM json_each(reviewer_logins)
+                      WHERE value IN ({placeholders})
+                  )
+            )
+            WHERE _rn = 1
+            """
+
+    conn = _get_connection(archive_dir)
+    try:
+        cursor = conn.execute(sql, params)
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    penalties: list[float] = []
+    for row in rows:
+        raw_logins = row["reviewer_logins"]
+        # reviewer_logins IS NOT NULL is enforced in SQL; guard retained for
+        # safety in case the column somehow carries an empty string.
+        if not raw_logins:
+            continue
+        try:
+            row_logins = json.loads(raw_logins)
+        except (json.JSONDecodeError, TypeError) as exc:
+            warnings.warn(f"Invalid reviewer_logins payload {raw_logins!r}: {exc}", stacklevel=2)
+            continue
+        if not isinstance(row_logins, list) or login_set.isdisjoint(row_logins):
+            continue
+        try:
+            row_labels = json.loads(row["labels"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            warnings.warn(f"Invalid labels payload {row['labels']!r}: {exc}", stacklevel=2)
+            continue
+        if not isinstance(row_labels, list) or not row_labels:
+            continue
+        penalty = penalty_map.get(str(row_labels[0]))
+        if penalty is None:
+            continue
+        penalties.append(penalty)
+
+    if not penalties:
+        return None, 0
+    return sum(penalties) / len(penalties), len(penalties)
 
 
 def label_observation_history(archive_dir: Path, session_id: str) -> list[dict]:

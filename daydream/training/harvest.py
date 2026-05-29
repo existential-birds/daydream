@@ -2,10 +2,14 @@
 
 The harvest pass is the single deferred *annotate* step of the corpus
 pipeline: it reads an archived run's immutable bronze artifacts, reduces
-them to a :class:`~daydream.training.reward.ScoringInputs`, scores an
-intrinsic :class:`~daydream.training.reward.RewardBreakdown`, derives the
-outcome label, and appends one bitemporal annotation. There is no separate
-"labeling" step: a single annotate pass writes label + reward together.
+them to a :class:`~daydream.training.reward.ScoringInputs`, derives the
+outcome label, scores a :class:`~daydream.training.reward.RewardBreakdown`
+or :class:`~daydream.training.reward.PosteriorBreakdown`, and appends one
+bitemporal annotation. The stored ``composite_reward`` is the *pure intrinsic*
+composite (C5): the posterior false-positive axis is a sibling field carried on
+:class:`~daydream.training.reward.PosteriorBreakdown`, never folded into the
+composite. There is no separate "labeling" step: a single annotate pass writes
+label + reward together.
 
 This module carries the bronze-signal assembly step, the per-run annotation
 builder, and the :func:`run_harvest` orchestrator that walks the archive index
@@ -37,10 +41,15 @@ Failure-propagation rules:
 Annotation builder:
 
 * :func:`build_annotation` composes the posterior rubric (PR vs local-branch,
-  mirroring the former labeler's assembly), derives the outcome label, scores
-  the intrinsic reward, and returns a frozen :class:`AnnotationPayload`. It is
-  *pure of DB writes* — the orchestrator persists the payload. Posterior-fetch
-  and git errors propagate to the caller, which isolates per-row.
+  mirroring the former labeler's assembly), derives the outcome label, captures
+  the human reviewer set and its pooled prior penalty (PR rows only), scores the
+  reward (intrinsic composite plus the calibrated posterior sibling axis fed
+  from the outcome label + prior), asserts the breakdown carries the canonical
+  :data:`~daydream.training.reward.REWARD_VERSION` before it can be written to
+  canonical storage, and returns a frozen :class:`AnnotationPayload`. It is
+  *pure of DB writes* — the orchestrator persists the payload. Reviewer-signal,
+  prior-query, posterior-fetch, and git errors propagate to the caller, which
+  isolates per-row.
 * ``valid_at`` is the PR merge timestamp for PR rows and ``None`` for
   non-PR/local rows (the write layer collapses ``None`` → ``observed_at``).
 
@@ -68,6 +77,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +85,7 @@ import anyio
 from rich.console import Console
 
 from daydream import git_ops
-from daydream.archive.index import append_label_observation, query_runs
+from daydream.archive.index import append_label_observation, query_runs, reviewer_set_penalty_prior
 from daydream.git_ops import GitError
 from daydream.training import reward
 from daydream.training.backfill_cache import BackfillCache
@@ -87,7 +97,9 @@ from daydream.training.labeler_signals import (
     PRMergeSignal,
     comment_resolution_signal,
     fix_applied_signal,
+    local_commit_applied_signal,
     pr_merge_signal,
+    reviewer_logins_signal,
 )
 from daydream.training.reward import ScoringInputs, score_trajectory
 from daydream.training.rubric import Rubric, derive_outcome_label
@@ -101,6 +113,12 @@ _RECORDS_GLOB = "stack-*-records.json"
 
 _REVIEW_OUTPUT_FILE = "review-output.md"
 """Length-proxy artifact; at the run root for shallow runs, under ``deep/`` for deep runs."""
+
+_PRIOR_SUFFICIENCY_THRESHOLD = 10
+"""Minimum pooled prior-run count for the empirical reviewer-set mean penalty to
+graduate from the ``0.5`` maximum-entropy default to the observed pooled mean
+(spec C4). Below this, ``outcome_prior`` is left ``None`` (the reducer applies the
+``0.5`` default), though ``outcome_prior_n`` still records the pooled count for audit."""
 
 
 def _read_review_output(run_dir: Path) -> str | None:
@@ -271,60 +289,6 @@ the field for schema stability; outcome derivation does not depend on it
 for the PR-review path."""
 
 
-def _added_lines(diff_text: str) -> list[str]:
-    """Extract the content of ``+`` lines from a unified-diff blob.
-
-    Strips the leading ``+`` and any single leading space (the conventional
-    unified-diff content marker). Excludes ``+++`` file headers. Whitespace-
-    only lines are dropped so they don't poison the substring check.
-    """
-    out: list[str] = []
-    for line in diff_text.splitlines():
-        if line.startswith("+++"):
-            continue
-        if not line.startswith("+"):
-            continue
-        content = line[1:]
-        if content.startswith(" "):
-            content = content[1:]
-        content = content.strip()
-        if content:
-            out.append(content)
-    return out
-
-
-def _local_branch_verdict(
-    *,
-    diff_text: str,
-    commits: list[str],
-    repo_clone: Path,
-    changed_files: list[str],
-    file_at_fetcher: Any,
-) -> LocalCommitAppliedSignal:
-    """Lenient posterior signal for PR-less runs.
-
-    Returns ``"applied"`` if any commit in ``commits`` yields file content
-    (via ``file_at_fetcher``) that contains every added line from
-    ``diff_text`` as a substring. ``"rejected"`` if commits exist but none
-    match; ``"unknown"`` when there are no commits to inspect.
-    """
-    if not commits:
-        return LocalCommitAppliedSignal(verdict="unknown")
-    added = _added_lines(diff_text)
-    if not added:
-        return LocalCommitAppliedSignal(verdict="rejected")
-    paths = changed_files if changed_files else [""]
-    for commit in commits:
-        for path in paths:
-            try:
-                content = file_at_fetcher(repo_clone, path, commit)
-            except Exception:  # noqa: BLE001 - extractor isolation
-                continue
-            if all(needle in content for needle in added):
-                return LocalCommitAppliedSignal(verdict="applied")
-    return LocalCommitAppliedSignal(verdict="rejected")
-
-
 def _safe_fix_applied(
     row: dict[str, Any],
     *,
@@ -406,20 +370,15 @@ def _build_rubric_local(
     repo_clone: Path,
 ) -> Rubric:
     """Compose signals for a PR-less row (local-branch posterior)."""
-    archive_path = Path(row["archive_path"])
-    diff_text = ""
     try:
-        diff_text = (archive_path / "diff.patch").read_text()
+        local = local_commit_applied_signal(
+            row,
+            repo_clone=repo_clone,
+            commits_since_fetcher=_commits_since,
+            file_at_fetcher=_file_at,
+        )
     except (FileNotFoundError, OSError):
-        diff_text = ""
-    commits = _commits_since(repo_clone, row.get("branch") or "HEAD", row.get("head_sha") or "")
-    local = _local_branch_verdict(
-        diff_text=diff_text,
-        commits=commits,
-        repo_clone=repo_clone,
-        changed_files=_row_changed_files(row),
-        file_at_fetcher=_file_at,
-    )
+        local = LocalCommitAppliedSignal(verdict="unknown")
     pr_merge = PRMergeSignal(merged=False, merged_at=None)
     comments = CommentResolutionSignal(total=0, replied=0, unresolved=0)
     return Rubric(
@@ -462,12 +421,22 @@ class AnnotationPayload:
         reward_version: The :data:`daydream.training.reward.REWARD_VERSION`
             observed at scoring time.
         reward_json: ``json.dumps`` of the full
-            :class:`~daydream.training.reward.RewardBreakdown.to_dict` so
-            re-projection has every axis.
-        composite_reward: The cached intrinsic composite scalar (or ``None``
-            when uncomputable).
+            :meth:`~daydream.training.reward.RewardBreakdown.to_dict` (the
+            :class:`~daydream.training.reward.PosteriorBreakdown` variant on the
+            mapped-label path) so re-projection has every axis, including the
+            posterior sibling fields when present.
+        composite_reward: The cached *pure intrinsic* composite scalar
+            (correctness + grounding − length penalty); the posterior penalty is
+            never folded in (C5). ``None`` when uncomputable.
         evidence_sha: The run's ``head_sha`` (the evidence anchor for the
             posterior signals), or ``None``.
+        rubric_json: ``json.dumps`` of the posterior rubric, or ``None``.
+        reviewer_logins: The human GitHub accounts whose review/reply outcomes
+            seeded the posterior axis — captured at harvest time (irreproducible
+            later) and persisted. ``[]`` for local/non-PR rows.
+        has_posterior: Population discriminator — ``True`` when the scored
+            breakdown is a :class:`~daydream.training.reward.PosteriorBreakdown`
+            (a mapped maintainer outcome label was supplied).
     """
 
     labels: list[str]
@@ -478,12 +447,15 @@ class AnnotationPayload:
     composite_reward: float | None
     evidence_sha: str | None
     rubric_json: str | None
+    reviewer_logins: list[str]
+    has_posterior: bool
 
 
 def build_annotation(
     row: dict[str, Any],
     *,
     run_dir: Path,
+    archive_dir: Path,
     gh_api: Any,
     repo_clone: Path,
     window_days: int,
@@ -491,19 +463,38 @@ def build_annotation(
     """Build one run's bitemporal annotation payload (pure of DB writes).
 
     Composes the posterior rubric (PR vs local-branch, mirroring the former
-    labeler's assembly), derives the outcome label, assembles the intrinsic
-    :class:`ScoringInputs` from bronze, and scores a
-    :class:`~daydream.training.reward.RewardBreakdown`. Returns a frozen
-    :class:`AnnotationPayload`; the orchestrator persists it. Posterior-fetch
-    and git errors propagate to the caller (the orchestrator isolates per-row).
+    labeler's assembly), derives the outcome label, and assembles the intrinsic
+    :class:`ScoringInputs` from bronze.
+
+    For PR rows it additionally captures the human reviewer set
+    (:func:`~daydream.training.labeler_signals.reviewer_logins_signal`) and the
+    pooled prior penalty over prior runs sharing a reviewer
+    (:func:`~daydream.archive.index.reviewer_set_penalty_prior`). The pooled
+    mean graduates to the empirical ``outcome_prior`` only when the pooled count
+    reaches :data:`_PRIOR_SUFFICIENCY_THRESHOLD`; below threshold the prior is
+    left ``None`` (the reducer applies the ``0.5`` default), but
+    ``outcome_prior_n`` always records the pooled count for audit. Local/non-PR
+    rows have no reviewer set (``reviewer_logins=[]``, ``outcome_prior=None``,
+    ``outcome_prior_n=0``).
+
+    Scores the reward via :func:`~daydream.training.reward.score_trajectory` with
+    the outcome label + prior; a mapped label yields a
+    :class:`~daydream.training.reward.PosteriorBreakdown` whose ``composite`` is
+    the pure intrinsic score (C5 — the posterior penalty is a sibling, never
+    folded in). Asserts the breakdown carries the canonical
+    :data:`~daydream.training.reward.REWARD_VERSION` before returning, so a
+    non-canonical (analysis-time override) score can never reach canonical
+    storage. Returns a frozen :class:`AnnotationPayload`; the orchestrator
+    persists it.
 
     Args:
         row: The indexed manifest row (carries ``session_id``, the PR
             discriminators, ``head_sha``, ``grounding_rate``, etc.).
         run_dir: The archived run directory (bronze bundle root) feeding the
             intrinsic reward signals.
+        archive_dir: The archive root, queried for the pooled reviewer-set prior.
         gh_api: Callable invoked as ``gh_api(repo, endpoint, **kwargs)`` by
-            the PR posterior signals; unused on the local-branch path.
+            the PR posterior + reviewer signals; unused on the local-branch path.
         repo_clone: Local clone root for the fix-applied / local-commit
             cascades.
         window_days: Lookback window for the fix-applied cascade.
@@ -513,8 +504,11 @@ def build_annotation(
         timestamp for PR rows and ``None`` for non-PR/local rows.
 
     Raises:
-        Exception: Any posterior-fetch (``gh_api``) or git error from the
-            rubric assembly propagates unchanged to the caller.
+        AssertionError: When the scored breakdown does not carry the canonical
+            ``REWARD_VERSION`` (a non-default-weights override leaked in).
+        Exception: Any reviewer-signal, prior-query, posterior-fetch
+            (``gh_api``), or git error propagates unchanged to the caller (the
+            orchestrator isolates per-row).
     """
     if _row_is_pr(row):
         rubric = _build_rubric_pr(
@@ -524,25 +518,50 @@ def build_annotation(
             window_days=window_days,
         )
         valid_at = rubric.pr_merge.merged_at
+        reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
+        pooled, prior_n = reviewer_set_penalty_prior(
+            archive_dir,
+            reviewer_logins,
+            before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            exclude_session=row["session_id"],
+            repo_slug=row.get("repo_slug"),
+        )
+        outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
     else:
         rubric = _build_rubric_local(row, repo_clone=repo_clone)
         valid_at = None
+        reviewer_logins = []
+        outcome_prior = None
+        prior_n = 0
 
     outcome_label = derive_outcome_label(rubric)
     labels = [outcome_label] if outcome_label != "unknown" else []
 
     inputs = assemble_scoring_inputs(run_dir, row)
-    rb = score_trajectory(inputs)
+    rb = score_trajectory(
+        inputs,
+        pr_feedback=outcome_label,
+        outcome_prior=outcome_prior,
+        outcome_prior_n=prior_n,
+    )
+
+    if rb.reward_version != reward.REWARD_VERSION:
+        raise RuntimeError(
+            f"non-canonical reward_version {rb.reward_version!r} cannot be written to canonical storage"
+            f" (expected {reward.REWARD_VERSION!r})"
+        )
 
     return AnnotationPayload(
         labels=labels,
         pr_state=_pr_state_for_rubric(rubric),
         valid_at=valid_at,
-        reward_version=reward.REWARD_VERSION,
+        reward_version=rb.reward_version,
         reward_json=json.dumps(rb.to_dict()),
         composite_reward=rb.composite,
         evidence_sha=row.get("head_sha"),
         rubric_json=json.dumps(rubric.to_dict()),
+        reviewer_logins=reviewer_logins,
+        has_posterior=isinstance(rb, reward.PosteriorBreakdown),
     )
 
 
@@ -677,8 +696,10 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
 
     The single deferred annotate pass: for every indexed run, materialize the
     capture-time ``base_sha`` (when missing), build the bitemporal annotation
-    (label + intrinsic reward + ``valid_at``) via :func:`build_annotation`, and
-    append it through :func:`daydream.archive.index.append_label_observation`.
+    (label + intrinsic reward + posterior sibling axis + captured reviewer set +
+    ``valid_at``) via :func:`build_annotation`, and append it through
+    :func:`daydream.archive.index.append_label_observation` (which persists
+    ``reviewer_logins`` and the ``has_posterior`` population discriminator).
 
     **Append-only and re-runnable:** rows that already carry an annotation are
     *not* skipped — a re-harvest appends a fresh generation, so a later
@@ -750,6 +771,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
             payload = build_annotation(
                 row,
                 run_dir=run_dir,
+                archive_dir=config.archive_dir,
                 gh_api=gh_api_callable,
                 repo_clone=row_repo_clone or config.archive_dir,
                 window_days=config.fix_applied_window_days,
@@ -769,6 +791,8 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                     reward_version=payload.reward_version,
                     reward_json=payload.reward_json,
                     composite_reward=payload.composite_reward,
+                    reviewer_logins=payload.reviewer_logins,
+                    has_posterior=payload.has_posterior,
                 )
                 summary["annotated"] += 1
                 if cache is not None:

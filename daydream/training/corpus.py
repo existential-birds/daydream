@@ -262,9 +262,14 @@ def _build_record(
     Optional surfaced fields (additive — omitted when absent, never written
     as ``None`` unless the schema models a nullable scalar):
 
-    - ``reward``: the parsed ``annotation["reward_json"]`` dict (full
-      ``RewardBreakdown.to_dict()``); omitted when the annotation has no
-      ``reward_json`` or it is unparseable.
+    - ``reward``: the parsed ``annotation["reward_json"]`` dict, written
+      verbatim with no transform. For an unlabeled run this is
+      ``RewardBreakdown.to_dict()``; for a labeled (PR-outcome) run it is
+      ``PosteriorBreakdown.to_dict()``, which additionally carries
+      ``posterior_cost``. Thus ``"posterior_cost" in record["reward"]`` is the
+      **population discriminator** — present only on labeled rows (C3). The key
+      is omitted entirely when the annotation has no ``reward_json`` or it is
+      unparseable.
     - ``composite_reward``: ``annotation["composite_reward"]`` scalar; written
       unconditionally (``null`` when uncomputable / unscored). The schema models
       it as a nullable scalar (``["number", "null"]``), so the ``None``
@@ -363,6 +368,11 @@ def _build_record(
     # ``None``. additionalProperties is false, so additive-field discipline —
     # only insert optional keys when present — is what keeps every record valid
     # against schema/v1.json.
+    # No transform: ``reward`` is ``reward_json`` parsed verbatim, so a labeled
+    # run's ``PosteriorBreakdown.to_dict()`` carries ``posterior_cost`` and an
+    # unlabeled run's ``RewardBreakdown.to_dict()`` does not. That presence/
+    # absence is the population discriminator (C3). ``composite_reward`` is the
+    # pure intrinsic composite either way (C5: posterior is a sibling field).
     reward, composite_reward = _annotation_reward(annotation, manifest_row.get("session_id"))
     record["composite_reward"] = composite_reward
     if reward is not None:
@@ -430,7 +440,11 @@ class CorpusFilters:
         min_reward: Optional intrinsic ``composite_reward`` threshold
             (inclusive). When set, a run whose pinned annotation has a
             ``composite_reward >= min_reward`` is admitted even if its label
-            is not in ``labels`` — an alternative admission path to C9.
+            is not in ``labels`` — an alternative admission path to C9. The
+            threshold is intrinsic-only by construction (C5): the stored
+            ``composite_reward`` is the pure intrinsic composite, with the
+            posterior false-positive axis kept as a sibling field
+            (``posterior_cost``), never subtracted into the composite.
     """
 
     skill: str | None = None
@@ -759,6 +773,16 @@ def _is_admitted(label: str | None, composite_reward: float | None, filters: Cor
       (C9 accepted-only), **OR** when ``filters.min_reward`` is set and the
       intrinsic ``composite_reward`` is present and ``>= min_reward``.
 
+    The ``min_reward`` comparison is intrinsic-only **by construction** (C5),
+    not by stripping a posterior term. Post-C5 the stored ``composite_reward``
+    *is* the pure intrinsic composite (correctness + grounding − length
+    penalty); the posterior false-positive axis lives as a sibling field
+    (``posterior_cost`` on :class:`PosteriorBreakdown`), never folded into the
+    composite. So even a labeled row carrying a posterior penalty is admitted
+    on its intrinsic score alone — there is no deduction to remove here. This
+    invariant is pinned by
+    ``test_is_admitted_min_reward_compares_intrinsic_only``.
+
     Args:
         label: The pinned annotation's outcome label, or ``None`` (unlabeled).
         composite_reward: The pinned annotation's composite reward scalar.
@@ -908,6 +932,17 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     # 5. Resolve the pinned annotation per row, apply the admission gate, and
     #    build records. The label/reward come from the silver annotation, never
     #    the denormalized runs.outcome_labels cache.
+    #
+    #    C3 population separation: this is a pure per-row projection. There is
+    #    NO cross-row aggregate over rewards/breakdowns here — each record's
+    #    reward dict is emitted independently and the only aggregate downstream
+    #    (``_stratify``) groups by ``stack``, never by reward. Labeled and
+    #    unlabeled populations are therefore never mixed into a single mean.
+    #    Future SQL consumers that DO aggregate over rewards must split the
+    #    populations first; the ``has_posterior`` boolean column on the ``runs``
+    #    mirror (archive/index.py) is the guard for that split, and within a
+    #    JSONL record ``"posterior_cost" in record["reward"]`` is the equivalent
+    #    discriminator.
     records: list[dict[str, Any]] = []
     # Map each emitted session to the labeler/reward versions on its pinned
     # annotation so the lineage manifest reports the versions actually included.

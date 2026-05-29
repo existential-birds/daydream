@@ -30,7 +30,7 @@ def test_phase_default_models_claude_tier_assignments():
     assert claude["parse"] == "claude-haiku-4-5"
     # Expensive tier: REVIEW, WONDER, ENVISION, MERGE, INTENT, PR_FEEDBACK
     for phase in ("review", "wonder", "envision", "merge", "intent", "pr_feedback"):
-        assert claude[phase] == "claude-opus-4-6"
+        assert claude[phase] == "claude-opus-4-8"
     # Mid tier: FIX, TEST, EXPLORATION
     for phase in ("fix", "test", "exploration"):
         assert claude[phase] == "claude-sonnet-4-6"

@@ -1,6 +1,7 @@
 # tests/test_phases.py
 """Tests for phase functions with backend abstraction."""
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -2184,12 +2185,25 @@ async def test_phase_cross_stack_merge_prints_model_line_after_hero(
         model = "claude-opus-4-6"
 
         async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
-            # phase_cross_stack_merge expects the merge agent to have written
-            # the deep artifact before the copy step runs.
-            deep_out = cwd / ".daydream" / "deep" / "review-output.md"
-            deep_out.parent.mkdir(parents=True, exist_ok=True)
-            deep_out.write_text("merged")
-            yield ResultEvent(structured_output=None, continuation=None)
+            # The merge agent returns a schema-validated item list; the host
+            # renders review-output.md from it (no agent file-write step).
+            yield ResultEvent(
+                structured_output={
+                    "items": [
+                        {
+                            "id": 1,
+                            "lens": "per-stack",
+                            "file": "a.py",
+                            "line": 1,
+                            "severity": "low",
+                            "description": "bug",
+                            "confidence": "HIGH",
+                            "rationale": "r",
+                        }
+                    ]
+                },
+                continuation=None,
+            )
 
         async def cancel(self):
             pass
@@ -2207,3 +2221,197 @@ async def test_phase_cross_stack_merge_prints_model_line_after_hero(
 
     assert any(title == "MERGE" for title, _ in heroes)
     assert "Model: claude-opus-4-6" in dim_messages
+
+
+async def test_merge_writes_canonical_json_and_renders_markdown(tmp_path, monkeypatch, make_work):
+    """Merge emits a schema item list; structural records are tagged in Python.
+
+    Observable consequences:
+      - ``merged-items.json`` on disk carries a ``lens="structural"`` item
+        (sourced from ``structural_records_path``, NOT from the agent's reply).
+      - The rendered ``review-output.md`` still has the ``## Structural Review``
+        section.
+    """
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+    from daydream.phases import phase_cross_stack_merge
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    # Agent returns ONLY language-lens items; structural is appended in Python.
+    structured = {
+        "items": [
+            {
+                "id": 2,
+                "lens": "per-stack",
+                "file": "a.py",
+                "line": 9,
+                "severity": "low",
+                "description": "bug",
+                "confidence": "HIGH",
+                "rationale": "r",
+            }
+        ]
+    }
+
+    class MergeBackend:
+        model = "test-model"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            yield ResultEvent(structured_output=structured, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    work = make_work(tmp_path)
+    # Structural records file: the parsed FEEDBACK_SCHEMA shape produced upstream.
+    struct_path = tmp_path / "stack-structure-records.json"
+    struct_path.write_text(
+        json.dumps([{"id": 1, "description": "1k-line file", "file": "big.py", "line": 1}])
+    )
+
+    report_path = await phase_cross_stack_merge(
+        MergeBackend(),
+        work,
+        per_stack_records_paths=[tmp_path / "r.json"],
+        intent_path=tmp_path / "i.md",
+        alternatives_path=tmp_path / "a.json",
+        dedup_candidates_path=tmp_path / "d.json",
+        structural_records_path=struct_path,
+    )
+
+    items = json.loads(merged_items_path(deep_dir(work.repo)).read_text())["items"]
+    assert any(i["lens"] == "structural" for i in items)  # structural survives into canonical
+    assert any(i["lens"] == "per-stack" for i in items)  # agent items kept too
+    assert len({i["id"] for i in items}) == len(items)  # ids unique after normalize
+    assert "## Structural Review" in report_path.read_text()  # rendered md still has it
+    # Canonical sandbox-safe copy preserved.
+    assert (work.repo / REVIEW_OUTPUT_FILE).read_text() == report_path.read_text()
+
+
+async def test_merge_raises_on_empty_agent_output(tmp_path, monkeypatch, make_work):
+    """Empty/invalid agent output raises ValueError -- no silent [] fallback."""
+    from daydream.phases import phase_cross_stack_merge
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    class EmptyBackend:
+        model = "test-model"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    with pytest.raises(ValueError):
+        await phase_cross_stack_merge(
+            EmptyBackend(),
+            make_work(tmp_path),
+            per_stack_records_paths=[tmp_path / "r.json"],
+            intent_path=tmp_path / "i.md",
+            alternatives_path=tmp_path / "a.json",
+            dedup_candidates_path=tmp_path / "d.json",
+        )
+
+
+async def test_verifier_excludes_structural_lens(tmp_path, monkeypatch, make_work):
+    """Verifier reads canonical items and filters structural out before the prompt.
+
+    Observable consequence: a structural item present in ``merged-items.json``
+    NEVER appears in the verifier's verdicts (it gets no verdict by design, per
+    Assumption 2 of the canonical-finding-pipeline plan). The per-stack item is
+    the only candidate the verifier can return a verdict for.
+    """
+    from daydream.deep.artifacts import deep_dir, merged_items_path, verdicts_path
+    from daydream.phases import phase_verify_recommendations
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    work = make_work(tmp_path)
+    dd = deep_dir(work.repo)
+    dd.mkdir(parents=True, exist_ok=True)
+
+    structural_id = 1
+    per_stack_id = 2
+    items = {
+        "items": [
+            {
+                "id": structural_id,
+                "lens": "structural",
+                "file": "big.py",
+                "line": 1,
+                "severity": "high",
+                "description": "1k-line file",
+                "confidence": "HIGH",
+                "rationale": "r",
+            },
+            {
+                "id": per_stack_id,
+                "lens": "per-stack",
+                "file": "a.py",
+                "line": 9,
+                "severity": "low",
+                "description": "bug",
+                "confidence": "HIGH",
+                "rationale": "r",
+            },
+        ]
+    }
+    items_path = merged_items_path(dd)
+    items_path.write_text(json.dumps(items))
+
+    # MockBackend returns a verdict ONLY for the per-stack id, mimicking an
+    # agent that was never shown the structural item.
+    structured = {
+        "verdicts": [
+            {
+                "issue_id": per_stack_id,
+                "verdict": "consistent",
+                "evidence": "e",
+                "unverified_assumptions": [],
+            }
+        ]
+    }
+
+    class VerifyBackend:
+        model = "test-model"
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+            self.prompt = prompt
+            yield ResultEvent(structured_output=structured, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    backend = VerifyBackend()
+    _, payload = await phase_verify_recommendations(
+        backend,
+        work,
+        merged_items_path=items_path,
+        deep_dir=dd,
+    )
+
+    verified_ids = {v["issue_id"] for v in payload["verdicts"]}
+    assert structural_id not in verified_ids  # structural deliberately not verified
+    assert per_stack_id in verified_ids  # the language-lens item was a candidate
+    # Filtering happens in Python BEFORE the prompt: the structural finding's
+    # text never reaches the agent.
+    assert "1k-line file" not in backend.prompt
+    assert "bug" in backend.prompt
+    # Verdicts file is written for downstream consumers.
+    assert verdicts_path(dd).is_file()

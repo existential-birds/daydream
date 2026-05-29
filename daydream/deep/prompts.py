@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from daydream.config import STRUCTURE_SKILL
 from daydream.phases import (
@@ -188,40 +189,43 @@ def build_merge_prompt(
 ) -> str:
     """Assemble the cross-stack merge prompt (D-23..D-27).
 
-    The merged report MUST:
-      - live at output_path (single-file contract, D-24/D-42)
-      - carry a flat globally-numbered ## Issues list (D-25)
-      - have a ## Cross-Stack Issues subsection that CONTINUES the numbering (D-25)
-      - prefix every cross-stack title with the literal "[cross-stack]" (D-26, normative)
+    The merge agent returns a schema-validated JSON item list
+    (``MERGED_ITEMS_SCHEMA``) -- NOT markdown. Each item is one actionable
+    finding tagged with ``lens`` (``per-stack`` | ``cross-stack``) and
+    ``severity``. The host (``phase_cross_stack_merge``) appends structural
+    findings tagged ``lens="structural"`` in Python, normalizes ids, writes the
+    canonical ``merged-items.json``, and renders ``review-output.md`` from it.
+    This prompt therefore does NOT ask the agent for markdown, a structural
+    section, or a write-to-file step.
+
+    Each emitted item MUST:
+      - carry a ``lens`` of ``per-stack`` or ``cross-stack`` (D-26 — cross-stack
+        for concerns spanning multiple stacks)
+      - carry a ``severity`` of ``high`` | ``medium`` | ``low`` (D-25 ordering)
       - collapse duplicates per dedup candidate adjudication (D-27)
-      - when ``structural_records_path`` is provided, carry a ``## Structural
-        Review`` section between ``## Per-Stack Context`` and ``## Issues``
-        with independent (1..N) numbering, NOT merged into the global
-        ``## Issues`` list and NOT deduplicated against per-stack or
-        alternative-review findings
 
     Args:
         per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
         dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
-        output_path: Where the merge agent must write the unified report (D-24).
+        output_path: Deep-dir report path. Retained for call-site compatibility;
+            the rendered report is written by ``phase_cross_stack_merge``, so the
+            prompt no longer instructs the agent to write a file here.
         exploration_dir: Pre-scan exploration directory (if available).
         failed_stacks: Optional stack_name -> failure reason for stacks whose
             per-stack agent raised. The merge prompt includes an explicit
-            "Uncovered stacks" block so the merge report can call out missing
-            coverage instead of silently pretending the run was complete.
+            "Uncovered stacks" block so missing coverage is surfaced instead of
+            silently pretending the run was complete.
         structural_records_path: Optional path to the parsed structural-stack
-            records JSON. When provided, the merge prompt instructs the agent
-            to render a dedicated ``## Structural Review`` section above
-            ``## Issues`` with independent numbering and NO deduplication
-            against the other record sources. When ``None`` (docs-only diff,
-            empty diff, or no structure stack emitted) the merge prompt body
-            is unchanged and never mentions the structural lens.
+            records JSON. Retained for call-site compatibility; structural
+            findings are appended by ``phase_cross_stack_merge`` in Python (not
+            via this prompt), so the agent is never pointed at this file.
 
     Returns:
         Assembled prompt string.
     """
+    del output_path, structural_records_path  # appended/rendered by the host, not the prompt
     records_block = "\n".join(f"  - {p}" for p in per_stack_records_paths)
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
@@ -232,26 +236,8 @@ def build_merge_prompt(
         f"TTT alternative-review findings: {alternatives_path}",
         f"Dedup pre-filter candidate pairs: {dedup_candidates_path}",
     ]
-    if structural_records_path is not None:
-        context_lines.append(
-            f"Structural-stack parsed records: {structural_records_path}"
-        )
     context_lines.append(f"Per-stack parsed records:\n{records_block}")
     parts.append("\n".join(context_lines))
-    if structural_records_path is not None:
-        parts.append(
-            "Structural-stack handling:\n"
-            f"  - Read the records file at {structural_records_path} and render its "
-            "findings under a dedicated `## Structural Review` section in the "
-            "report (placement pinned below).\n"
-            "  - The `## Structural Review` section has independent numbering "
-            "(1..N) and lists findings parsed from the structural records. Do "
-            "NOT renumber these into the global `## Issues` list, and do NOT "
-            "deduplicate structural findings against per-stack or "
-            "alternative-review findings -- the structural lens carries "
-            "different convictions and merging them silently demotes that "
-            "prioritization."
-        )
     if failed_stacks:
         failed_block = "\n".join(
             f"  - {name}: {reason}" for name, reason in sorted(failed_stacks.items())
@@ -259,124 +245,108 @@ def build_merge_prompt(
         parts.append(
             "Uncovered stacks (per-stack agent raised; no records available):\n"
             f"{failed_block}\n"
-            "In the merged report add a '## Uncovered Stacks' section listing each "
-            "stack above. Do NOT silently omit them -- downstream readers must be "
-            "able to tell 'no findings' apart from 'this stack never ran'."
+            "Note these uncovered stacks in your reasoning. Do NOT silently omit "
+            "them -- downstream readers must be able to tell 'no findings' apart "
+            "from 'this stack never ran'."
         )
     parts.append(
         "You are the cross-stack merge agent. Read every artifact above by path -- "
-        "do NOT re-run any reviews. Your only output is the merged markdown report."
+        "do NOT re-run any reviews. Return a single JSON object matching the "
+        "structured-output schema: {\"items\": [ ... ]}. Each item is one "
+        "actionable finding. Emit nothing else."
     )
     parts.append(
         "Dedup adjudication:\n"
         "  dedup-candidates.json has two sections:\n\n"
         "  record_alt_pairs (record ↔ TTT alt-review):\n"
         "  - For each candidate pair, decide whether the two findings describe the\n"
-        "    same concern. If yes, emit ONE entry citing both sources as combined\n"
-        "    evidence. If no, emit both entries independently.\n\n"
+        "    same concern. If yes, emit ONE item citing both sources as combined\n"
+        "    evidence. If no, emit both items independently.\n\n"
         "  record_duplicate_pairs (record ↔ record):\n"
         "  - These are per-stack records with near-identical descriptions across\n"
         "    different files (e.g. the same architectural concern reported once per\n"
         "    affected file). When two records describe the same conceptual finding,\n"
-        "    emit ONE entry listing all affected files rather than repeating the\n"
+        "    emit ONE item listing all affected files rather than repeating the\n"
         "    finding verbatim for each file.\n\n"
         "  - Concerns that span multiple stacks (contract drift, shared-type "
-        "mismatches, API-contract misalignment) go in ## Cross-Stack Issues."
-    )
-    structural_section_template = (
-        "## Structural Review\n"
-        "<independent numbering 1..N -- do NOT merge into ## Issues>\n"
-        "1. [FILE:LINE] TITLE\n"
-        "   rationale / recommendation parsed from the structural records\n"
-        "2. [FILE:LINE] TITLE\n"
-        "   ...\n\n"
-        if structural_records_path is not None
-        else ""
+        "mismatches, API-contract misalignment) are cross-stack findings."
     )
     parts.append(
-        "Report format (MANDATORY):\n\n"
-        "# Review\n\n"
-        "## Per-Stack Context\n"
-        "(optional human-readable per-stack summaries; phase_parse_feedback ignores "
-        "this section)\n\n"
-        f"{structural_section_template}"
-        "## Issues\n"
-        "1. [FILE:LINE] TITLE\n"
-        "   rationale / recommendation\n"
-        "2. [FILE:LINE] TITLE\n"
-        "   ...\n\n"
-        "## Cross-Stack Issues\n"
-        "<continues the SAME numbering -- do NOT reset to 1>\n"
-        "N. [cross-stack] [FILE:LINE] TITLE\n"
-        "   rationale citing each per-stack source that contributed\n\n"
-        "Rules:\n"
-        "  - Every cross-stack title MUST begin with the literal prefix [cross-stack].\n"
-        "  - Numbering is flat and global; cross-stack continues per-stack numbering.\n"
-        "  - The numbered head line is plain text -- do NOT wrap it in `**...**` or "
-        "`__...__` bold markers. Markdown emphasis is fine INSIDE the rationale, "
-        "but the `N. [FILE:LINE] TITLE` line itself stays unbolded.\n"
-        "  - Each `[FILE:LINE]` bracket contains EXACTLY ONE file path. For an issue "
-        "that spans multiple files AND was NOT flagged as a duplicate in "
-        "record_duplicate_pairs, emit a separate numbered entry per file (repeat "
-        "the title and rationale as needed) instead of listing paths comma-separated "
-        "inside one bracket. For deduplicated findings (same concern across files), "
-        "emit ONE entry with the primary file in the bracket and list the other "
-        "affected files in the rationale body.\n"
-        "  - FILE must be the FULL repo-relative path exactly as it appears in the "
-        "per-stack records (e.g. `services/my-svc/handler.py`, not just `handler.py`). "
+        "Item fields (MANDATORY):\n"
+        "  - id: integer; any value -- the host renumbers contiguously.\n"
+        "  - lens: \"per-stack\" for a single-stack finding, \"cross-stack\" for a "
+        "concern spanning multiple stacks. (Structural findings are appended by the "
+        "host -- do NOT emit them yourself.)\n"
+        "  - severity: \"high\" | \"medium\" | \"low\".\n"
+        "  - confidence: \"HIGH\" | \"MEDIUM\" | \"LOW\".\n"
+        "  - file: the FULL repo-relative path exactly as it appears in the per-stack "
+        "records (e.g. `services/my-svc/handler.py`, not just `handler.py`). "
         "Downstream tooling uses `git show <sha>:<FILE>` to resolve lines, so "
         "abbreviated paths will fail to post as inline comments.\n"
-        "  - Per-stack human-readable context may appear above ## Issues under "
-        "## Per-Stack Context, but all actionable issues live in the two lists above.\n"
-        "  - Do not invent issues not supported by the source records.\n"
-        "  - When citing source records in rationale text, use the actual "
-        "records filename or stack name — e.g. "
-        "`(Sources: python-records item 6, alternatives item 4)`. "
-        "NEVER use the `#N` notation (e.g. `#6`). GitHub auto-links "
-        "`#N` to repository issues/PRs, which creates misleading links."
+        "  - line: integer line number for the finding.\n"
+        "  - description: the finding title / one-line summary, plain text.\n"
+        "  - rationale: why it matters; cite the actual records filename or stack "
+        "name -- e.g. `(Sources: python-records item 6, alternatives item 4)`. "
+        "NEVER use the `#N` notation (e.g. `#6`); GitHub auto-links `#N` to "
+        "repository issues/PRs, creating misleading links.\n\n"
+        "Rules:\n"
+        "  - Each item's `file` contains EXACTLY ONE path. For a concern that spans "
+        "multiple files AND was NOT flagged as a duplicate in "
+        "record_duplicate_pairs, emit a separate item per file. For deduplicated "
+        "findings (same concern across files), emit ONE item with the primary file "
+        "and list the other affected files in the rationale.\n"
+        "  - Do not invent findings not supported by the source records."
     )
-    parts.append(f"Write the complete report to {output_path}.")
     return "\n\n".join(parts)
 
 
 def build_verification_prompt(
     *,
-    merged_report_path: Path,
+    items: list[dict[str, Any]],
     target_dir: Path,
     output_path: Path,
 ) -> str:
     """Assemble the recommendation-verifier prompt.
 
-    The verifier audits each numbered issue in the merged report against the
-    codebase: trait/interface specs, sibling implementations, and any transitive
+    The verifier audits each numbered language-lens item against the codebase:
+    trait/interface specs, sibling implementations, and any transitive
     properties the recommendation asserts about functions it does not modify.
     Verdicts are advisory -- the verifier does not block fixes; it warns the fix
     agent inline and surfaces a count to the user.
 
+    Structural items are filtered out by the caller
+    (``phase_verify_recommendations``) before this builder runs, so the rendered
+    item list embedded here is non-structural by construction.
+
     Hard contract:
       - Read-only tools only: Read, Grep, Glob, and Bash restricted to
         non-mutating commands (git, cat, ls).
-      - Bulk pass over the merged report; the verifier opens it itself.
+      - The non-structural finding list is rendered inline below.
       - Empty issue list yields an empty verdict list (no error).
 
     Args:
-        merged_report_path: Path to the merged cross-stack report on disk.
-            The verifier reads it directly; do NOT embed its contents.
+        items: The non-structural (per-stack / cross-stack) canonical items to
+            verify. Rendered inline into the prompt; verdicts are keyed by each
+            item's canonical ``id`` (the verdict ``issue_id``).
         target_dir: Repository root the verifier runs against.
         output_path: Where the verifier must write its JSON verdicts file.
 
     Returns:
         Assembled prompt string.
     """
+    from daydream.deep.render import render_report
+
     parts: list[str] = []
     parts.append(
         "You are the recommendation-verifier agent. Your job is to audit each "
-        "numbered issue in the merged cross-stack review report against the "
-        "actual codebase and decide whether its recommendation is consistent "
-        "with trait/interface specs and sibling implementations.\n\n"
-        f"Merged report: {merged_report_path}\n"
+        "numbered issue in the finding list below against the actual codebase "
+        "and decide whether its recommendation is consistent with trait/interface "
+        "specs and sibling implementations.\n\n"
         f"Repository root: {target_dir}\n"
-        "Open the merged report yourself with Read. Do NOT re-run any reviews."
+        "The numbered findings to verify (each `issue_id` in your output MUST "
+        "match the leading number `N.` of the finding it verifies):\n\n"
+        + render_report(items)
+        + "\nDo NOT re-run any reviews."
     )
     parts.append(
         "Read-only contract (MANDATORY):\n"
