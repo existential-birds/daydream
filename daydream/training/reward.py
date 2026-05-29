@@ -28,8 +28,11 @@ values cited below are :class:`RewardWeights` fields.
   grounding (F1 0.85).
 * **format_valid** — a *dominating* gate, not an additive term. When
   ``False`` the composite floors to ``0.0`` regardless of every other axis.
-  Source: arXiv:2509.15557 "improper format … maximum penalty regardless of
-  correctness".
+  This gate is an internal design choice; it is in the spirit of the
+  DeepSeek-R1 (arXiv:2501.12948) minimal rule-based accuracy+format reward,
+  which pairs a correctness signal with a format signal. (It is *not*
+  attributable to arXiv:2509.15557, which is a subtractive composite — see
+  the ``false_positive_penalty`` note below.)
 * **length** — a bounded saturating ramp over the char-count proxy:
   ``len_norm = clip((length − len_tau) / len_scale, 0, 1)`` subtracted after
   the credit mean with weight :attr:`RewardWeights.w_len` ``= 0.2`` (strictly
