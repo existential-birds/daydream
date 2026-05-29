@@ -12,7 +12,7 @@
 - **"Byte-identical on absent labels" is textbook MNAR zero-imputation and biases the policy gradient.** When `--comment` is run selectively on PRs the user expects to land, posting is *not* random with respect to trajectory quality. Theory (Berrevoets 2022[^berrevoets]; Yi 2019[^yi]) and RLHF practice (InstructGPT BT loss[^rlhfbook]; rejection-sampling FT[^rft]) both prefer "drop or reweight" over "zero-substitute."
 - **`REWARD_VERSION` as a default-pin is supported; the call-boundary override guarded only by a docstring is not.** lm-evaluation-harness and OpenAI Evals[^openai-evals] both put weights inside the versioned config so any change forces a rename; MLflow/W&B compensate by hashing actual params into run identity. Daydream's hybrid is the weakest combination of the two traditions.
 
-**Overall: keep the axis, fix the citation, and ship one runtime guard. Defer the structural changes (separate head, IPW, RULER) to a tracked follow-up so this PR can land.**
+**Overall: keep the axis. All five corrections (citation fix, runtime guard, absent-label contract, per-maintainer calibration, and structural-choice resolution) must land in this PR. See `recommendation.md` for the required fix list.**
 
 ## Findings
 
@@ -93,7 +93,7 @@ Concrete failure mode: nothing on the produced score (a float) carries the weigh
 - **No primary-source data on actual maintainer accept rates.** Per-maintainer base-rate normalization is recommended, but we have no Daydream-internal numbers on how skewed those rates actually are. The bias magnitude in (Subtopic 4) is therefore qualitative.
 - **CodeRabbit / Cursor composer / Copilot Workspace training details are proprietary.** Subtopic 3 surfaced no disclosed mapping from those systems to triangulate against.
 - **RULER (Subtopic 1) is benchmarked on 4 tasks**; none of them are code review. The "RULER beats hand-crafted" claim transfers by structural similarity, not direct evidence.
-- **The KD2 drown-out guard** referenced in the PR description is cited in the docstring as a self-evident property of the ordering, not against an external source. No external source was found that uses this term; it appears to be Daydream-internal terminology.
+- **The KD2 drown-out guard** referenced in the PR description was previously cited in the docstring as a self-evident property of the ordering, not against an external source. This gap is now resolved: the C5 update removed that wording from the `reward.py` docstring; the guard is structural under C5 and documented in `tests/test_training_reward.py` (line 107). No external source using this term was found; it remains Daydream-internal terminology.
 
 ## Sources
 
@@ -117,7 +117,7 @@ Concrete failure mode: nothing on the produced score (a float) carries the weigh
 
 [^cheap-signals]: *Calibrating "Cheap Signals" in Peer Review without a Prior*, arXiv:2312.07269. <https://arxiv.org/pdf/2312.07269>. "papers receiving identical quality in a clean setting may obtain different acceptance rates when reviews are noisy."
 
-[^calibration]: *Post-hoc Reward Calibration: A Case Study on Length Bias*, OpenReview. <https://openreview.net/pdf?id=Iu8RytBaji>. "preference scores initially calibrate well with win rates but deteriorate when scores exceed 0.8 … 3.11 average performance gain across 33 reward models on RewardBench."
+[^calibration]: *Reward Shaping to Mitigate Reward Hacking*, arXiv:2502.18770. <https://arxiv.org/html/2502.18770v3>. *Post-hoc Reward Calibration: A Case Study on Length Bias*, OpenReview. <https://openreview.net/pdf?id=Iu8RytBaji>. "preference scores initially calibrate well with win rates but deteriorate when scores exceed 0.8 … 3.11 average performance gain across 33 reward models on RewardBench."
 
 [^berrevoets]: Berrevoets, J. et al., *To Impute or not to Impute? Missing Data in Treatment Effect Estimation*, 2022. <https://arxiv.org/abs/2202.02096>. "Naively imputing all data leads to poor performing treatment effects models … no imputation at all also leads to biased estimates, as missingness determined by treatment introduces bias in covariates."
 
