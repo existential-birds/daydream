@@ -396,3 +396,75 @@ def local_commit_applied_signal(
                 return LocalCommitAppliedSignal(verdict="applied")
 
     return LocalCommitAppliedSignal(verdict="rejected")
+
+
+def reviewer_logins_signal(
+    row: dict[str, Any],
+    *,
+    gh_api: Callable[..., Any],
+) -> list[str]:
+    """Return the human reviewer logins associated with the row's PR.
+
+    A "reviewer" is a human GitHub account that either authored a PR
+    review (``/pulls/{n}/reviews``) or replied to one of daydream's
+    footer-marked top-level review comments (``/pulls/{n}/comments``).
+    The union is taken, then ``[bot]`` logins and any login that authored
+    a daydream-footer comment are excluded. ``merged_by`` is **not** used
+    (a merge author is not a reviewer).
+
+    Args:
+        row: Manifest row carrying ``pr_repo`` and ``pr_number``.
+        gh_api: Callable invoked as ``gh_api(repo, endpoint)`` returning
+            the parsed JSON body. Exceptions propagate to the caller.
+
+    Returns:
+        Sorted, deduped list of human reviewer logins. Empty list when
+        the row has no associated PR or no reviewers were found.
+
+    Raises:
+        Exception: Any exception raised by ``gh_api`` is propagated
+            unchanged; failures are never swallowed into ``[]``.
+    """
+    from daydream.pr_review import DAYDREAM_FOOTER
+
+    repo = row.get("pr_repo")
+    number = row.get("pr_number")
+    if repo is None or number is None:
+        return []
+
+    logins: set[str] = set()
+    excluded: set[str] = set()
+
+    # (a) Authors of PR reviews.
+    reviews = gh_api(repo, f"repos/{repo}/pulls/{number}/reviews")
+    for review in reviews:
+        user = review.get("user") or {}
+        login = user.get("login", "")
+        if login:
+            logins.add(login)
+
+    # (b) Authors of replies to daydream's footer-marked top-level comments.
+    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments")
+    daydream_comment_ids: set[int] = set()
+    replies_by_parent: dict[int, list[str]] = {}
+    for comment in comments:
+        in_reply_to = comment.get("in_reply_to_id")
+        user = comment.get("user") or {}
+        login = user.get("login", "")
+        if in_reply_to is None:
+            if DAYDREAM_FOOTER in (comment.get("body") or ""):
+                daydream_comment_ids.add(comment["id"])
+                if login:
+                    excluded.add(login)
+        else:
+            if login:
+                replies_by_parent.setdefault(in_reply_to, []).append(login)
+
+    for parent_id in daydream_comment_ids:
+        logins.update(replies_by_parent.get(parent_id, []))
+
+    # Exclude bots and any login that authored a daydream-footer comment.
+    humans = {
+        login for login in logins if not login.endswith("[bot]") and login not in excluded
+    }
+    return sorted(humans)

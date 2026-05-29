@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from daydream.pr_review import DAYDREAM_FOOTER
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
@@ -18,6 +19,7 @@ from daydream.training.labeler_signals import (
     fix_applied_signal,
     local_commit_applied_signal,
     pr_merge_signal,
+    reviewer_logins_signal,
 )
 
 
@@ -179,6 +181,47 @@ def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:
         file_at_fetcher=lambda repo, path, sha: "foo = 1\n",
     )
     assert sig == LocalCommitAppliedSignal(verdict="applied")
+
+
+def _fake_gh_reviews():
+    """gh_api stub mirroring the reviews + comments endpoints.
+
+    /reviews → alice (human, approved) + octobot[bot] (commented).
+    /comments → a daydream-runner top-level comment whose body carries
+    DAYDREAM_FOOTER, with bob replying to it (so bob is a reviewer).
+    """
+    responses = {
+        ("o/r", "repos/o/r/pulls/7/reviews"): [
+            {"user": {"login": "alice"}, "state": "APPROVED"},
+            {"user": {"login": "octobot[bot]"}, "state": "COMMENTED"},
+        ],
+        ("o/r", "repos/o/r/pulls/7/comments"): [
+            {
+                "id": 100,
+                "in_reply_to_id": None,
+                "user": {"login": "daydream-runner"},
+                "body": f"Some review finding.\n\n{DAYDREAM_FOOTER}",
+            },
+            {
+                "id": 101,
+                "in_reply_to_id": 100,
+                "user": {"login": "bob"},
+                "body": "Good catch, fixed.",
+            },
+        ],
+    }
+
+    def responder(repo, endpoint, **kwargs):
+        return responses[(repo, endpoint)]
+
+    return responder
+
+
+def test_reviewer_logins_signal_collects_humans_excludes_bots_and_daydream() -> None:
+    logins = reviewer_logins_signal({"pr_repo": "o/r", "pr_number": 7}, gh_api=_fake_gh_reviews())
+    assert logins == ["alice", "bob"]  # sorted, deduped, humans only
+    assert "octobot[bot]" not in logins  # [bot] excluded
+    assert "daydream-runner" not in logins  # author of the footer comment excluded
 
 
 def test_local_commit_applied_signal_no_local_commits_returns_rejected(tmp_path: Path) -> None:
