@@ -96,8 +96,10 @@ def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_pat
 
 def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
     # A not-merged PR row → derive_outcome_label == "rejected". Its bronze
-    # (consistent verdict, full grounding) yields a positive intrinsic composite;
-    # the posterior reject penalty must deduct from the stored composite.
+    # (consistent verdict, full grounding) yields a positive intrinsic composite.
+    # Under C5 the posterior reject penalty is a SIBLING field — it does NOT
+    # deduct from the stored composite, which stays pure intrinsic. The penalty
+    # surfaces via false_positive_penalty / posterior_cost in reward_json.
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
@@ -114,7 +116,9 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
     assert payload.labels == ["rejected"]
     breakdown = json.loads(payload.reward_json)
     assert breakdown["false_positive_penalty"] == 1.0
-    assert payload.composite_reward < intrinsic_only_composite
+    assert breakdown["posterior_cost"] == 0.5  # sibling: max(0, 1.0 − 0.5 default prior)
+    # Composite is pure intrinsic — the reject label does not fold into it.
+    assert payload.composite_reward == intrinsic_only_composite
 
 
 def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path):

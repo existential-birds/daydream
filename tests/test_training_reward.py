@@ -50,51 +50,89 @@ def test_weights_are_overridable_and_change_composite_predictably():
 
 
 def test_rejected_outcome_applies_posterior_penalty_golden():
+    from daydream.training.reward import PosteriorBreakdown
     rb = score_trajectory(
         ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],
                       grounding_rate=0.5, format_valid=True, length=4000),
         pr_feedback="rejected")
+    assert isinstance(rb, PosteriorBreakdown)
     assert rb.false_positive_penalty == 1.0
     assert rb.axes_present["false_positive"] is True
-    assert rb.composite == 0.30   # 0.65 credit − 0.2·0.25 len − 0.3·1.0 fp
+    assert rb.composite == 0.6        # pure intrinsic: 0.65 credit − 0.2·0.25 len; posterior NOT folded in
+    assert rb.posterior_cost == 0.5   # sibling field: max(0, 1.0 − 0.5 default prior)
 
 
 def test_contested_outcome_applies_intermediate_penalty_golden():
+    from daydream.training.reward import PosteriorBreakdown
     rb = score_trajectory(
         ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],
                       grounding_rate=0.5, format_valid=True, length=4000),
         pr_feedback="contested")
+    assert isinstance(rb, PosteriorBreakdown)
     assert rb.false_positive_penalty == 0.5
     assert rb.axes_present["false_positive"] is True
-    assert rb.composite == 0.45   # 0.65 credit − 0.2·0.25 len − 0.3·0.5 fp
+    assert rb.composite == 0.6        # pure intrinsic, unchanged by the posterior label
+    assert rb.posterior_cost == 0.0   # sibling field: max(0, 0.5 − 0.5 default prior)
 
 
 def test_accepted_outcome_has_zero_penalty_and_all_six_fields():
+    from daydream.training.reward import PosteriorBreakdown
     rb = score_trajectory(
         ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}],
                       grounding_rate=0.8, format_valid=True, length=3000),
         pr_feedback="accepted")
+    assert isinstance(rb, PosteriorBreakdown)
     assert rb.false_positive_penalty == 0.0
+    assert rb.posterior_cost == 0.0   # max(0, 0.0 − 0.5) clamps to 0.0
     assert all(v is not None for v in
                (rb.correctness_per_finding, rb.grounding, rb.length_penalty,
                 rb.false_positive_penalty, rb.composite)) and rb.format_valid is True
 
 
 def test_unknown_or_absent_posterior_leaves_axis_none_and_score_unchanged():
+    from daydream.training.reward import PosteriorBreakdown, RewardBreakdown
     args = ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}],
                          grounding_rate=0.5, format_valid=True, length=4000)
-    assert score_trajectory(args, pr_feedback="unknown").false_positive_penalty is None
-    assert score_trajectory(args, pr_feedback="unknown").composite == score_trajectory(args).composite
+    unknown = score_trajectory(args, pr_feedback="unknown")
+    # Unmapped label ⇒ base type, no posterior axis, composite unchanged.
+    assert type(unknown) is RewardBreakdown and not isinstance(unknown, PosteriorBreakdown)
+    assert "false_positive" not in unknown.axes_present
+    assert unknown.composite == score_trajectory(args).composite
 
 
 def test_posterior_penalty_cannot_outrank_correctness_signal():
-    # KD2 drown-out guard: a high-correctness REJECTED run still scores above a
-    # zero-correctness ACCEPTED run — reject deducts but never inverts the order.
+    # KD2 drown-out guard, now structural under C5: the composite is pure
+    # intrinsic, so the posterior label cannot perturb the ordering at all. A
+    # high-correctness REJECTED run still scores above a zero-correctness
+    # ACCEPTED run, and its composite is identical to the unlabeled score.
     good_rejected = score_trajectory(ScoringInputs([{"verdict": "consistent"}], 0.9, True, None),
                                      pr_feedback="rejected")
     bad_accepted = score_trajectory(ScoringInputs([{"verdict": "contradicts"}], 0.0, True, None),
                                     pr_feedback="accepted")
     assert good_rejected.composite > bad_accepted.composite
+    # Composite is unaffected by the posterior — sibling, not subtracted.
+    good_unlabeled = score_trajectory(ScoringInputs([{"verdict": "consistent"}], 0.9, True, None))
+    assert good_rejected.composite == good_unlabeled.composite
+    assert good_rejected.posterior_cost == 0.5  # max(0, 1.0 − 0.5); lives beside the composite
+
+
+def test_composite_is_pure_intrinsic_posterior_is_sibling():
+    from daydream.training.reward import PosteriorBreakdown, RewardBreakdown
+    inp = ScoringInputs([{"verdict": "consistent"}, {"verdict": "uncertain"}], 0.5, True, 4000)
+    base = score_trajectory(inp)                       # no label → intrinsic
+    labeled = score_trajectory(inp, pr_feedback="rejected")
+    assert type(base) is RewardBreakdown and not isinstance(base, PosteriorBreakdown)
+    assert isinstance(labeled, PosteriorBreakdown)
+    assert base.composite == 0.6                        # unchanged golden intrinsic (0.65 − 0.2·0.25)
+    assert labeled.composite == 0.6                     # composite IDENTICAL despite rejected label
+    assert labeled.posterior_cost == 0.5                # max(0, 1.0 − 0.5 default prior)
+    assert labeled.false_positive_penalty == 1.0        # raw observed penalty retained
+    assert "posterior_cost" in labeled.to_dict() and "posterior_cost" not in base.to_dict()
+
+
+def test_unmapped_label_returns_base_type():
+    inp = ScoringInputs([{"verdict": "consistent"}], 0.5, True, 4000)
+    assert type(score_trajectory(inp, pr_feedback="unknown")).__name__ == "RewardBreakdown"
 
 
 def test_score_trajectory_does_no_io(monkeypatch):
