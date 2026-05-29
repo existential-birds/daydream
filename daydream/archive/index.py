@@ -39,7 +39,7 @@ from pathlib import Path
 
 from daydream.archive.manifest import Manifest
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _REVIEWER_PENALTY_MAP: dict[str, float] = {
     "accepted": 0.0,
@@ -107,6 +107,10 @@ CREATE TABLE IF NOT EXISTS runs (
 # carries a ``PosteriorBreakdown``, mirrored onto ``runs`` so SQL consumers can
 # split labeled/unlabeled populations without parsing ``reward_json``). See spec
 # ``corpus-pipeline-architecture`` (silver layer) and ``reward-posterior-corrections`` (C3).
+# ``source`` is the precedence marker (``'auto'`` for automated rubric labels,
+# ``'human'`` for maintainer overrides) — human-sourced rows win in the "latest
+# label" projections regardless of recency. Pre-existing rows default to ``'auto'``
+# via the additive ``_migrate_label_observations_schema`` ALTER-ADD migration.
 _CREATE_LABEL_OBSERVATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS label_observations (
     session_id       TEXT NOT NULL,
@@ -122,6 +126,7 @@ CREATE TABLE IF NOT EXISTS label_observations (
     composite_reward REAL,
     reviewer_logins  TEXT,
     has_posterior    INTEGER NOT NULL DEFAULT 0,
+    source           TEXT NOT NULL DEFAULT 'auto',
     PRIMARY KEY (session_id, observed_at)
 )
 """
@@ -204,6 +209,32 @@ def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
         conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
 
 
+def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
+    """Additively ALTER-ADD columns missing from a live ``label_observations`` table.
+
+    Unlike ``_recreate_label_observations_if_stale`` (which drop-recreates for
+    structural bitemporal/posterior columns), this is non-destructive: the
+    ``source`` precedence marker is additive, so pre-existing rows are preserved
+    and default to ``'auto'``. Mirrors ``_migrate_schema`` (the runs migration).
+
+    Args:
+        conn: An open connection whose ``label_observations`` table exists.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
+    migrations: list[tuple[str, str]] = [
+        ("source", "TEXT NOT NULL DEFAULT 'auto'"),
+    ]
+    for col, col_type in migrations:
+        if col not in existing:
+            try:
+                conn.execute(
+                    f"ALTER TABLE label_observations ADD COLUMN {col} {col_type}"  # noqa: S608 - col/col_type are module-local constants
+                )
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
+
 def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     """Open the index database, creating schema if needed.
 
@@ -225,6 +256,7 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     conn.execute(_CREATE_TABLE)
     conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
     _recreate_label_observations_if_stale(conn)
+    _migrate_label_observations_schema(conn)
     _migrate_schema(conn)
     for idx_sql in _CREATE_INDEXES:
         conn.execute(idx_sql)

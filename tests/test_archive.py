@@ -617,6 +617,67 @@ def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path):
     assert "composite_reward" in runs_cols
 
 
+_OLD_LABEL_OBSERVATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS label_observations (
+    session_id       TEXT NOT NULL,
+    observed_at      TEXT NOT NULL,
+    labels           TEXT NOT NULL,
+    pr_state         TEXT,
+    labeler_version  TEXT NOT NULL,
+    evidence_sha     TEXT,
+    rubric_json      TEXT,
+    valid_at         TEXT,
+    reward_version   TEXT,
+    reward_json      TEXT,
+    composite_reward REAL,
+    reviewer_logins  TEXT,
+    has_posterior    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_id, observed_at)
+)
+"""
+
+
+def _label_obs_columns(archive_dir: Path) -> set[str]:
+    conn = sqlite3.connect(str(archive_dir / "index.db"))
+    try:
+        return {r[1] for r in conn.execute("PRAGMA table_info(label_observations)")}
+    finally:
+        conn.close()
+
+
+def _seed_legacy_label_observation(archive_dir: Path, session_id: str) -> None:
+    """Insert a label_observations row using the OLD DDL that lacks ``source``."""
+    conn = sqlite3.connect(str(archive_dir / "index.db"))
+    try:
+        conn.execute("DROP TABLE IF EXISTS label_observations")
+        conn.execute(_OLD_LABEL_OBSERVATIONS_DDL)
+        conn.execute(
+            "INSERT INTO label_observations "
+            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, "2026-01-01T00:00:00+00:00", '["accepted"]', "merged", "v1", "sha1"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_label_observations_source_column_migrates(tmp_path: Path):
+    # Build the schema, then simulate a pre-source DB by replacing the table with
+    # the OLD DDL (no `source`) and seeding a legacy row.
+    upsert_run(tmp_path, _make_manifest(session_id="s-mig"))
+    _seed_legacy_label_observation(tmp_path, "s-mig")
+    assert "source" not in _label_obs_columns(tmp_path)  # precondition: legacy shape
+
+    # Open via the production connection path, which must ALTER-ADD `source`.
+    upsert_run(tmp_path, _make_manifest(session_id="s-mig2"))
+
+    cols = _label_obs_columns(tmp_path)
+    assert "source" in cols
+    rows = label_observation_history(tmp_path, "s-mig")
+    assert rows and rows[0]["source"] == "auto"  # existing row defaulted, non-destructive
+
+
 def test_append_observation_persists_valid_at_and_reward(tmp_path: Path):
     upsert_run(tmp_path, _make_manifest(session_id="s1"))
     append_label_observation(
@@ -808,7 +869,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     conn.close()
     assert "has_posterior" in runs_cols
     assert {"reviewer_logins", "has_posterior"} <= lo_cols
-    assert user_version == SCHEMA_VERSION == 4
+    assert user_version == SCHEMA_VERSION == 5
 
     obs = latest_label_observation(tmp_path, "mig-1")
     assert obs is not None
