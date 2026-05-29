@@ -787,16 +787,19 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     conn.close()
 
     # First write through the real path triggers _migrate_schema + recreate.
-    append_label_observation(
-        tmp_path,
-        "mig-1",
-        labels=["accepted"],
-        pr_state="merged",
-        labeler_version="2026.05.28-1",
-        evidence_sha=None,
-        reviewer_logins=["bob"],
-        has_posterior=True,
-    )
+    # The stale label_observations table must emit the spec-sanctioned
+    # drop-and-recreate warning (existing label rows lost, repopulate via harvest).
+    with pytest.warns(UserWarning, match="predates bitemporal/posterior columns"):
+        append_label_observation(
+            tmp_path,
+            "mig-1",
+            labels=["accepted"],
+            pr_state="merged",
+            labeler_version="2026.05.28-1",
+            evidence_sha=None,
+            reviewer_logins=["bob"],
+            has_posterior=True,
+        )
 
     conn = sqlite3.connect(str(db_path))
     runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
