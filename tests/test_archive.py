@@ -733,6 +733,86 @@ def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
     assert json.loads(pinned["labels"]) == ["unknown"]
 
 
+def test_append_label_observation_persists_reviewer_and_posterior_flag(tmp_path: Path) -> None:
+    """reviewer_logins + has_posterior persist on the observation row and mirror onto runs."""
+    _seed_one_run(tmp_path, "s1")
+    append_label_observation(
+        tmp_path,
+        "s1",
+        labels=["rejected"],
+        pr_state="closed",
+        labeler_version="2026.05.28-1",
+        evidence_sha="h",
+        reviewer_logins=["alice"],
+        has_posterior=True,
+    )
+    obs = latest_label_observation(tmp_path, "s1")
+    assert obs is not None
+    assert json.loads(obs["reviewer_logins"]) == ["alice"]
+    assert obs["has_posterior"] == 1
+    runs_row = query_runs(tmp_path, "session_id = ?", ("s1",))[0]
+    assert runs_row["has_posterior"] == 1  # SQL consumers split populations without parsing reward_json
+
+
+def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
+    """A pre-v4 index.db (runs + label_observations lacking the posterior columns)
+    is migrated/recreated on the next connection: runs gains has_posterior via
+    ALTER, the stale label_observations is dropped+recreated with both new
+    columns, and PRAGMA user_version reaches SCHEMA_VERSION (4)."""
+    from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
+
+    db_path = tmp_path / "index.db"
+    conn = sqlite3.connect(str(db_path))
+    # Real pre-v4 runs schema (full DDL minus the new has_posterior column);
+    # label_observations bitemporal-but-no-posterior.
+    pre_v4_runs_ddl = _CREATE_TABLE.replace(
+        "    has_posterior INTEGER NOT NULL DEFAULT 0,\n", ""
+    )
+    assert "has_posterior" not in pre_v4_runs_ddl
+    conn.execute(pre_v4_runs_ddl)
+    conn.execute(
+        "CREATE TABLE label_observations ("
+        "session_id TEXT NOT NULL, observed_at TEXT NOT NULL, labels TEXT NOT NULL, "
+        "pr_state TEXT, labeler_version TEXT NOT NULL, evidence_sha TEXT, rubric_json TEXT, "
+        "valid_at TEXT, reward_version TEXT, reward_json TEXT, composite_reward REAL, "
+        "PRIMARY KEY (session_id, observed_at))"
+    )
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+        ("mig-1", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "mig-1")),
+    )
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
+
+    # First write through the real path triggers _migrate_schema + recreate.
+    append_label_observation(
+        tmp_path,
+        "mig-1",
+        labels=["accepted"],
+        pr_state="merged",
+        labeler_version="2026.05.28-1",
+        evidence_sha=None,
+        reviewer_logins=["bob"],
+        has_posterior=True,
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    lo_cols = {r[1] for r in conn.execute("PRAGMA table_info(label_observations)")}
+    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert "has_posterior" in runs_cols
+    assert {"reviewer_logins", "has_posterior"} <= lo_cols
+    assert user_version == SCHEMA_VERSION == 4
+
+    obs = latest_label_observation(tmp_path, "mig-1")
+    assert obs is not None
+    assert json.loads(obs["reviewer_logins"]) == ["bob"]
+    assert obs["has_posterior"] == 1
+    assert query_runs(tmp_path, "session_id = ?", ("mig-1",))[0]["has_posterior"] == 1
+
+
 def test_manifest_includes_source_path():
     """source_path appears in manifest dict under git section."""
     m = Manifest(

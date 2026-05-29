@@ -12,8 +12,9 @@ Exports:
     count_runs: Count rows matching an optional WHERE clause.
     append_label_observation: Append a row to the immutable bitemporal
         label_observations history (``observed_at`` transaction time,
-        ``valid_at`` valid time, plus reward columns) and refresh the
-        denormalized runs cache.
+        ``valid_at`` valid time, reward columns, plus ``reviewer_logins`` and
+        the ``has_posterior`` population discriminator) and refresh the
+        denormalized runs cache (including the ``has_posterior`` mirror).
     latest_label_observation: Return the most recent label_observations row for
         a session, optionally constrained by an ``as_of`` cutoff timestamp.
     bulk_latest_label_observations: Return the most recent label_observations
@@ -35,7 +36,7 @@ from pathlib import Path
 
 from daydream.archive.manifest import Manifest
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS runs (
     labeled_at TEXT,
     rubric_json TEXT,
     composite_reward REAL,
+    has_posterior INTEGER NOT NULL DEFAULT 0,
     archive_path TEXT NOT NULL,
     schema_version INTEGER NOT NULL DEFAULT 1
 )
@@ -87,7 +89,12 @@ CREATE TABLE IF NOT EXISTS runs (
 # carry the full ``RewardBreakdown`` plus its cached composite scalar so a
 # corpus re-projection has every axis and each annotation generation is
 # self-describing (the ``runs.composite_reward`` mirror remains the SQL-threshold
-# cache). See spec ``corpus-pipeline-architecture`` (silver layer).
+# cache). ``reviewer_logins`` is a JSON array of the human GitHub accounts whose
+# review/reply outcomes seeded the posterior axis (empty/``None`` for non-PR
+# runs); ``has_posterior`` is the population discriminator (1 when the row
+# carries a ``PosteriorBreakdown``, mirrored onto ``runs`` so SQL consumers can
+# split labeled/unlabeled populations without parsing ``reward_json``). See spec
+# ``corpus-pipeline-architecture`` (silver layer) and ``reward-posterior-corrections`` (C3).
 _CREATE_LABEL_OBSERVATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS label_observations (
     session_id       TEXT NOT NULL,
@@ -101,6 +108,8 @@ CREATE TABLE IF NOT EXISTS label_observations (
     reward_version   TEXT,
     reward_json      TEXT,
     composite_reward REAL,
+    reviewer_logins  TEXT,
+    has_posterior    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (session_id, observed_at)
 )
 """
@@ -146,6 +155,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("changed_files", "TEXT"),
         ("composite_reward", "REAL"),
         ("source_path", "TEXT"),
+        ("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
     ]
     for col, col_type in migrations:
         if col not in existing:
@@ -157,22 +167,24 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
 
 def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
-    """Drop and recreate ``label_observations`` if it predates the bitemporal columns.
+    """Drop and recreate ``label_observations`` if it predates the bitemporal/posterior columns.
 
-    The bitemporal/reward columns are part of the table's primary structure, so
-    rather than `ALTER TABLE ADD COLUMN` (which cannot retrofit them cleanly for
-    the spec's clean-recreate guarantee), a stale table is dropped and rebuilt.
-    Dev label rows are discarded (spec-sanctioned — repopulate via ``harvest``).
-    The ``runs`` table is never touched. Idempotent: after a recreate the
-    ``valid_at`` column exists, so subsequent calls are a no-op.
+    The bitemporal/reward/posterior columns are part of the table's primary
+    structure, so rather than `ALTER TABLE ADD COLUMN` (which cannot retrofit
+    them cleanly for the spec's clean-recreate guarantee), a stale table is
+    dropped and rebuilt. A table missing either ``valid_at`` (pre-bitemporal) or
+    ``has_posterior`` (pre-reward-posterior-corrections) is considered stale. Dev
+    label rows are discarded (spec-sanctioned — repopulate via ``harvest``). The
+    ``runs`` table is never touched. Idempotent: after a recreate both columns
+    exist, so subsequent calls are a no-op.
 
     Args:
         conn: An open connection whose ``label_observations`` table exists.
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
-    if existing and "valid_at" not in existing:
+    if existing and ("valid_at" not in existing or "has_posterior" not in existing):
         warnings.warn(
-            "label_observations table predates bitemporal columns and will be dropped "
+            "label_observations table predates bitemporal/posterior columns and will be dropped "
             "and recreated. Existing label rows will be lost — repopulate via `harvest`.",
             stacklevel=2,
         )
@@ -281,6 +293,8 @@ def append_label_observation(
     reward_version: str | None = None,
     reward_json: str | None = None,
     composite_reward: float | None = None,
+    reviewer_logins: list[str] | None = None,
+    has_posterior: bool = False,
 ) -> None:
     """Append a row to the immutable ``label_observations`` history.
 
@@ -314,6 +328,15 @@ def append_label_observation(
             ``label_observations`` row (so each annotation generation is
             self-describing) and mirrored onto ``runs.composite_reward`` for
             SQL thresholding; ``None`` when uncomputable.
+        reviewer_logins: Human GitHub accounts whose review/reply outcomes
+            seeded the posterior axis. Serialised as a JSON array on the
+            ``label_observations`` row; ``None`` (stored as SQL ``NULL``) for
+            non-PR/local runs with no reviewer set.
+        has_posterior: Population discriminator. ``True`` when the row carries a
+            ``PosteriorBreakdown`` (a mapped PR-outcome label was scored).
+            Coerced to ``int`` and written to ``label_observations.has_posterior``
+            and mirrored onto ``runs.has_posterior`` so SQL consumers can split
+            labeled/unlabeled populations without parsing ``reward_json``.
 
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table.
@@ -321,6 +344,8 @@ def append_label_observation(
     observed_at = datetime.now(timezone.utc).isoformat()
     valid_at_value = valid_at if valid_at is not None else observed_at
     labels_json = json.dumps(labels)
+    reviewer_logins_json = json.dumps(reviewer_logins) if reviewer_logins is not None else None
+    has_posterior_int = int(has_posterior)
     conn = _get_connection(archive_dir)
     try:
         cursor = conn.execute(
@@ -333,8 +358,8 @@ def append_label_observation(
         conn.execute(
             "INSERT INTO label_observations "
             "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
-            "valid_at, reward_version, reward_json, composite_reward) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 observed_at,
@@ -347,12 +372,15 @@ def append_label_observation(
                 reward_version,
                 reward_json,
                 composite_reward,
+                reviewer_logins_json,
+                has_posterior_int,
             ),
         )
         conn.execute(
-            "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ?, composite_reward = ? "
+            "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ?, composite_reward = ?, "
+            "has_posterior = ? "
             "WHERE session_id = ?",
-            (labels_json, observed_at, rubric_json, composite_reward, session_id),
+            (labels_json, observed_at, rubric_json, composite_reward, has_posterior_int, session_id),
         )
         conn.commit()
     finally:
