@@ -11,6 +11,7 @@ import pytest
 from daydream.archive.index import label_observation_history, latest_label_observation, upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
+from daydream.training import harvest
 from daydream.training.harvest import (
     HarvestConfig,
     _resolve_repo_for_row,
@@ -54,7 +55,7 @@ def _fake_gh_merged(merged_at: str):
     """
 
     def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
-        if endpoint.endswith("/comments"):
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
             return []
         return {"merged": True, "merged_at": merged_at}
 
@@ -69,7 +70,7 @@ def _fake_gh_not_merged():
     """
 
     def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
-        if endpoint.endswith("/comments"):
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
             return []
         return {"merged": False, "merged_at": None}
 
@@ -86,7 +87,7 @@ def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_pat
     row = {"session_id": "s1", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
-    ann = build_annotation(row, run_dir=run_dir,
+    ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                            gh_api=_fake_gh_merged("2026-02-01T00:00:00+00:00"),
                            repo_clone=tmp_path, window_days=30)
     assert ann.labels == ["accepted"]
@@ -109,11 +110,12 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
     intrinsic_inputs = assemble_scoring_inputs(run_dir, row)
     intrinsic_only_composite = score_trajectory(intrinsic_inputs).composite
 
-    payload = build_annotation(row, run_dir=run_dir,
+    payload = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                                gh_api=_fake_gh_not_merged(),
                                repo_clone=tmp_path, window_days=30)
 
     assert payload.labels == ["rejected"]
+    assert payload.has_posterior is True
     breakdown = json.loads(payload.reward_json)
     assert breakdown["false_positive_penalty"] == 1.0
     assert breakdown["posterior_cost"] == 0.5  # sibling: max(0, 1.0 − 0.5 default prior)
@@ -127,11 +129,86 @@ def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_pat
     row = {"session_id": "s2", "pr_repo": None, "pr_number": None, "branch": "feat",
            "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": None,
            "changed_files": "[]"}
-    ann = build_annotation(row, run_dir=run_dir, gh_api=_unused_gh,
+    ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
                            repo_clone=tmp_path, window_days=30)
     assert ann.valid_at is None                               # collapses to observed_at on write
     rb = json.loads(ann.reward_json)
     assert rb["axes_present"]["correctness"] is False         # shallow: no verdicts
+
+
+def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(tmp_path, monkeypatch):
+    monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.8, 12))  # >=10 -> empirical
+    monkeypatch.setattr(harvest, "reviewer_logins_signal", lambda *a, **k: ["alice", "carol"])
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
+           "changed_files": "[]"}
+    p = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
+                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path, window_days=30)
+    rb = json.loads(p.reward_json)
+    assert rb["posterior_cost"] == pytest.approx(0.2)   # max(0, 1.0 - 0.8)
+    assert rb["outcome_prior"] == 0.8 and rb["outcome_prior_n"] == 12
+    assert p.composite_reward == rb["composite"]        # stored composite is pure intrinsic (C5)
+    assert p.has_posterior is True and p.reviewer_logins == ["alice", "carol"]
+
+
+def test_build_annotation_below_threshold_falls_back_to_default_prior(tmp_path, monkeypatch):
+    monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.9, 4))  # n<10
+    monkeypatch.setattr(harvest, "reviewer_logins_signal", lambda *a, **k: ["alice"])
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
+           "changed_files": "[]"}
+    rb = json.loads(
+        build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
+                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path, window_days=30).reward_json
+    )
+    assert rb["outcome_prior"] is None and rb["outcome_prior_n"] == 4  # n recorded; prior None -> 0.5
+    assert rb["posterior_cost"] == 0.5
+
+
+def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path, monkeypatch):
+    # PR-less row -> reviewer_logins == [], outcome_prior None, prior query never
+    # consulted; still a PosteriorBreakdown when the local verdict maps to a label.
+    from daydream.training.labeler_signals import LocalCommitAppliedSignal
+
+    # Force a mapped local verdict ("rejected") so the posterior axis is present.
+    monkeypatch.setattr(
+        harvest, "_local_branch_verdict", lambda **k: LocalCommitAppliedSignal(verdict="rejected")
+    )
+    # The pooled-prior query must never run for a PR-less row.
+    monkeypatch.setattr(
+        harvest, "reviewer_set_penalty_prior",
+        lambda *a, **k: pytest.fail("reviewer_set_penalty_prior must not be called for a local row"),
+    )
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_local", "pr_repo": None, "pr_number": None, "branch": "feat",
+           "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": 1.0,
+           "changed_files": "[]"}
+    p = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
+                         repo_clone=tmp_path, window_days=30)
+    assert p.reviewer_logins == []
+    assert p.labels == ["rejected"]
+    assert p.has_posterior is True
+    rb = json.loads(p.reward_json)
+    assert rb["outcome_prior"] is None and rb["outcome_prior_n"] == 0
+    assert rb["posterior_cost"] == 0.5  # max(0, 1.0 - 0.5 default prior)
+
+
+def test_build_annotation_asserts_canonical_version(tmp_path, monkeypatch):
+    # Force a non-canonical reward_version into the breakdown -> write must be refused.
+    def _custom_version_score(*args, **kwargs):
+        from daydream.training.reward import RewardWeights
+        return score_trajectory(*args, **{**kwargs, "weights": RewardWeights(w_correctness=0.99)})
+
+    monkeypatch.setattr(harvest, "score_trajectory", _custom_version_score)
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_custom", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
+           "changed_files": "[]"}
+    with pytest.raises(AssertionError, match="canonical"):
+        build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
+                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path, window_days=30)
 
 
 def test_assemble_reads_verdicts_and_grounding_from_bronze(tmp_path: Path):
