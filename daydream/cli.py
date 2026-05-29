@@ -8,6 +8,8 @@ positional):
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
 - ``daydream harvest`` — walk the archive and append one bitemporal
   annotation (outcome label + intrinsic reward) per indexed run
+- ``daydream label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
+  — record an authoritative human outcome label that overrides automated ones
 - ``daydream build-corpus --out <path>`` — project the as-of-pinned
   annotations into a JSONL training corpus plus a lineage manifest
 """
@@ -920,6 +922,91 @@ def _handle_harvest_command(argv: list[str]) -> int:
     return 0
 
 
+def _build_label_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream label <session-prefix> --outcome ...``.
+
+    Records a human-sourced outcome label that wins over automated rubric
+    labels in every precedence projection (and is never deduped). ``unknown``
+    is an allowed human outcome (per spec) — a deliberate "I looked and can't
+    decide" signal distinct from an unlabeled run.
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream label",
+        description=(
+            "Set an authoritative human outcome label on an archived run "
+            "(overrides automated rubric labels)."
+        ),
+    )
+    parser.add_argument(
+        "session",
+        type=str,
+        metavar="SESSION_PREFIX",
+        help="Full or prefix session_id to label (must match exactly one run).",
+    )
+    parser.add_argument(
+        "--outcome",
+        type=str,
+        required=True,
+        dest="outcome",
+        choices=["accepted", "contested", "rejected", "unknown"],
+        help="Human outcome label to record.",
+    )
+    parser.add_argument(
+        "--archive-dir",
+        type=Path,
+        default=None,
+        dest="archive_dir",
+        metavar="PATH",
+        help="Override the archive root (default: daydream.archive.get_archive_dir()).",
+    )
+    return parser
+
+
+def _handle_label_command(argv: list[str]) -> int:
+    """Handle ``daydream label <session-prefix> --outcome {...}``.
+
+    Resolves the archive dir, echoes the label being overridden (the
+    "show what it's overriding" affordance), then writes a human-sourced
+    observation via :func:`daydream.archive.index.update_labels`. The runs
+    cache and every precedence projection settle on the human value.
+
+    Args:
+        argv: The argument vector after the ``label`` verb.
+
+    Returns:
+        ``0`` on success; ``1`` when no session matches the prefix or the
+        prefix is ambiguous.
+    """
+    import daydream.archive as _archive
+    from daydream.archive import index as _index
+    from daydream.ui import create_console, print_info
+
+    parser = _build_label_parser()
+    args = parser.parse_args(argv)
+
+    console = create_console()
+    archive_dir = args.archive_dir if args.archive_dir is not None else _archive.get_archive_dir()
+
+    prior = _index.latest_label_observation(archive_dir, args.session)
+    if prior is not None and prior.get("labels"):
+        print_info(console, f"Current label for {args.session}: {prior['labels']}")
+    else:
+        print_info(console, f"No prior label for {args.session}.")
+
+    try:
+        updated = _index.update_labels(archive_dir, args.session, [args.outcome])
+    except ValueError as exc:
+        print_error(console, "Ambiguous session prefix", str(exc))
+        return 1
+
+    if not updated:
+        print_error(console, "No matching session", f"No archived run matches prefix '{args.session}'.")
+        return 1
+
+    print_info(console, f"Set human label for {args.session}: {args.outcome}")
+    return 0
+
+
 def main() -> None:
     """Run the CLI entry point.
 
@@ -952,6 +1039,11 @@ def main() -> None:
         # ``harvest`` drives the annotate-pass orchestrator via its own anyio.run.
         if argv and argv[0] == "harvest":
             sys.exit(_handle_harvest_command(argv[1:]))
+
+        # ``label`` records an authoritative human outcome label — sync,
+        # SQLite-only. Short-circuit before anyio.run.
+        if argv and argv[0] == "label":
+            sys.exit(_handle_label_command(argv[1:]))
 
         is_feedback_subcommand = bool(argv) and argv[0] == "feedback"
         config = _parse_args()

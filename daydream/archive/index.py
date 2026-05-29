@@ -762,10 +762,13 @@ def label_observation_history(archive_dir: Path, session_id: str) -> list[dict]:
 def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool:
     """Update outcome labels for a session, supporting prefix matching.
 
-    Backwards-compatible thin wrapper around :func:`append_label_observation`.
-    The session_id can be a prefix (e.g. first 8 chars of the UUID). If the
-    prefix matches exactly one row, that row is updated. If it matches
-    multiple rows, a ValueError is raised asking for a longer prefix.
+    Thin wrapper around :func:`append_label_observation` that records a
+    **human-sourced** observation (``source="human"``, ``labeler_version="human"``).
+    Human labels win over automated ones in every precedence projection and are
+    never deduped, so this is the authoritative override surface backing
+    ``daydream label``. The session_id can be a prefix (e.g. first 8 chars of
+    the UUID). If the prefix matches exactly one row, that row is updated. If it
+    matches multiple rows, a ValueError is raised asking for a longer prefix.
 
     Args:
         archive_dir: Path to the archive root.
@@ -802,8 +805,9 @@ def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool
         full_id,
         labels=labels,
         pr_state=None,
-        labeler_version="legacy",
+        labeler_version="human",
         evidence_sha=None,
+        source="human",
     )
     return True
 

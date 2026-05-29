@@ -408,7 +408,8 @@ def test_harvest_parser_repo_clone_root_defaults_to_none():
 
 def test_removed_verbs_no_longer_dispatch():
     from daydream import cli
-    # label / export-jsonl / snapshot handlers are gone
-    assert not hasattr(cli, "_handle_label_command")
+    # export-jsonl / snapshot handlers are gone. ``label`` was reintroduced as
+    # the human-override surface (daydream label <prefix> --outcome ...).
     assert not hasattr(cli, "_handle_export_command")
     assert not hasattr(cli, "_handle_snapshot_command")
+    assert hasattr(cli, "_handle_label_command")
