@@ -77,6 +77,26 @@ def _fake_gh_not_merged():
     return responder
 
 
+def _fake_gh_not_merged_with_reviewer(login: str = "alice"):
+    """Return a ``gh_api`` responder for an unmerged PR with one human reviewer.
+
+    The ``pulls/<n>`` endpoint reports ``merged: False``; the ``reviews``
+    endpoint returns a single review authored by *login* so that
+    :func:`reviewer_logins_signal` yields a non-empty list.  This lets
+    tests drive the production :func:`reviewer_set_penalty_prior` DB query
+    (rather than monkeypatching it) to exercise the empty-pool path.
+    """
+
+    def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/reviews"):
+            return [{"user": {"login": login}}]
+        if endpoint.endswith("/comments"):
+            return []
+        return {"merged": False, "merged_at": None}
+
+    return responder
+
+
 def _unused_gh(repo: str, endpoint: str, **kwargs: Any) -> Any:
     """A ``gh_api`` responder the local-branch path must never call."""
     raise AssertionError(f"gh_api should not be called for a local row (endpoint={endpoint})")
@@ -121,6 +141,30 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
     assert breakdown["posterior_cost"] == 0.5  # sibling: max(0, 1.0 − 0.5 default prior)
     # Composite is pure intrinsic — the reject label does not fold into it.
     assert payload.composite_reward == intrinsic_only_composite
+
+
+def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path, archive_dir):
+    # Exercises the production wiring of reviewer_set_penalty_prior (not monkeypatched).
+    # The gh responder returns a real reviewer login ("alice") so reviewer_logins_signal
+    # yields ["alice"] and the DB query runs.  The archive is fresh (no prior history),
+    # so reviewer_set_penalty_prior returns (None, 0) — the empty-pool path — and the
+    # reducer applies the 0.5 default prior.
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    row = {"session_id": "s_rej_prod", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir),
+           "grounding_rate": 1.0, "changed_files": "[]"}
+    payload = build_annotation(row, run_dir=run_dir, archive_dir=archive_dir,
+                               gh_api=_fake_gh_not_merged_with_reviewer("alice"),
+                               repo_clone=tmp_path, window_days=30)
+    assert payload.labels == ["rejected"]
+    assert payload.has_posterior is True
+    rb = json.loads(payload.reward_json)
+    # Empty pool → reviewer_set_penalty_prior returns (None, 0) → outcome_prior stays None,
+    # prior_n == 0, and the 0.5 default is used: posterior_cost == max(0, 1.0 − 0.5) == 0.5.
+    assert rb["outcome_prior"] is None
+    assert rb["outcome_prior_n"] == 0
+    assert rb["posterior_cost"] == 0.5
+    assert payload.reviewer_logins == ["alice"]
 
 
 def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path):

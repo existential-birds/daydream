@@ -2,17 +2,17 @@
 
 Each signal is a pure function over ``(manifest_row, fetcher)`` — no LLM,
 no I/O beyond the fetcher callables the caller injects. This module
-exposes four signals that the labeler orchestrator (Task 13) composes
-into outcome labels:
+exposes four signals that the labeling pipeline composes into outcome
+labels:
 
 * :func:`pr_merge_signal` — was the originating PR merged?
 * :func:`fix_applied_signal` — did the recommended diff land in the
   upstream default branch within a configurable window? Implements the
-  layered cascade documented in ``/tmp/research-fix-applied.md``.
+  layered cascade documented in ``docs/signals/fix-applied.md``.
 * :func:`comment_resolution_signal` — did bot review comments get a
   reply (proxy for "addressed")?
 * :func:`local_commit_applied_signal` — for PR-less runs (see
-  ``/tmp/research-no-pr.md``), did a later local commit on the same
+  ``docs/signals/no-pr.md``), did a later local commit on the same
   branch carry the recommended diff content?
 
 Each signal returns a frozen dataclass so callers can hash / compare

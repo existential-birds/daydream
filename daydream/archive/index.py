@@ -41,6 +41,15 @@ from daydream.archive.manifest import Manifest
 
 SCHEMA_VERSION = 4
 
+_REVIEWER_PENALTY_MAP: dict[str, float] = {
+    "accepted": 0.0,
+    "contested": 0.5,
+    "rejected": 1.0,
+}
+"""Maintainer outcome label → false-positive penalty, mirroring
+``daydream.training.reward._FP_PENALTY_MAP``.  Defined here so the archive
+layer does not depend on the training layer."""
+
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS runs (
     session_id TEXT PRIMARY KEY,
@@ -512,8 +521,8 @@ def reviewer_set_penalty_prior(
     *logins*, restricted to ``session_id != exclude_session`` and
     ``valid_at < before_valid_at`` (strict). One outcome is taken per session
     (latest ``observed_at``); its first label is mapped to a false-positive
-    penalty via the canonical :attr:`reward.DEFAULT_WEIGHTS.fp_penalty_map`
-    single source. The raw pooled mean and count are returned — the ``>=10``
+    penalty via ``_REVIEWER_PENALTY_MAP`` (``accepted→0.0``, ``contested→0.5``,
+    ``rejected→1.0``). The raw pooled mean and count are returned — the ``>=10``
     sufficiency threshold and the ``0.5`` default fallback are the caller's
     responsibility (Task 8 / spec C4).
 
@@ -531,17 +540,19 @@ def reviewer_set_penalty_prior(
         ``(mean_penalty, count)`` over the pooled sessions, or ``(None, 0)``
         when *logins* is empty or the pool is empty.
     """
-    from daydream.training.reward import DEFAULT_WEIGHTS
-
     if not logins:
         return None, 0
     login_set = set(logins)
-    penalty_map = DEFAULT_WEIGHTS.fp_penalty_map
+    penalty_map = _REVIEWER_PENALTY_MAP
 
+    # Build an IN-list so SQLite's json_each() can filter reviewer intersection
+    # inside the query, avoiding a full-table fetch followed by Python-side
+    # isdisjoint() for every archived row.
+    placeholders = ",".join("?" * len(logins))
     conn = _get_connection(archive_dir)
     try:
         cursor = conn.execute(
-            """
+            f"""
             SELECT reviewer_logins, labels
             FROM (
                 SELECT reviewer_logins, labels,
@@ -552,10 +563,15 @@ def reviewer_set_penalty_prior(
                 FROM label_observations
                 WHERE session_id != ?
                   AND valid_at < ?
+                  AND reviewer_logins IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM json_each(reviewer_logins)
+                      WHERE value IN ({placeholders})
+                  )
             )
             WHERE _rn = 1
             """,
-            (exclude_session, before_valid_at),
+            (exclude_session, before_valid_at, *logins),
         )
         rows = cursor.fetchall()
     finally:
@@ -564,6 +580,8 @@ def reviewer_set_penalty_prior(
     penalties: list[float] = []
     for row in rows:
         raw_logins = row["reviewer_logins"]
+        # reviewer_logins IS NOT NULL is enforced in SQL; guard retained for
+        # safety in case the column somehow carries an empty string.
         if not raw_logins:
             continue
         try:
