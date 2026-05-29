@@ -684,7 +684,7 @@ def _materialize_base_sha_if_missing(
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator — append-only, re-runnable, per-row isolation
+# Orchestrator — idempotent (evidence-hash dedup), re-runnable, per-row isolation
 # ---------------------------------------------------------------------------
 
 

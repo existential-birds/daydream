@@ -15,11 +15,13 @@ Exports:
         ``valid_at`` valid time, reward columns, plus ``reviewer_logins`` and
         the ``has_posterior`` population discriminator) and refresh the
         denormalized runs cache (including the ``has_posterior`` mirror).
-    latest_label_observation: Return the most recent label_observations row for
-        a session, optionally constrained by an ``as_of`` cutoff timestamp.
-    bulk_latest_label_observations: Return the most recent label_observations
-        row for each session in a collection — single round-trip alternative to
-        calling ``latest_label_observation`` in a loop.
+    latest_label_observation: Return the highest-precedence (human-first, then
+        recency) label_observations row for a session, optionally constrained by
+        an ``as_of`` cutoff timestamp.
+    bulk_latest_label_observations: Return the highest-precedence (human-first,
+        then recency) label_observations row for each session in a collection —
+        single round-trip alternative to calling ``latest_label_observation`` in
+        a loop.
     reviewer_set_penalty_prior: Pooled mean false-positive penalty over prior
         runs sharing a reviewer (strict ``valid_at`` cutoff), for the posterior
         outcome prior (C4).
@@ -361,7 +363,8 @@ def append_label_observation(
         pr_state: One of ``open``/``merged``/``closed``/``reverted`` or
             ``None`` when not applicable (e.g. local-branch runs).
         labeler_version: Free-form version tag of the labeler that produced
-            this observation (e.g. ``2026.05.22`` or ``legacy``).
+            this observation (e.g. ``2026.05.22`` for an automated rubric, or
+            ``human`` for a maintainer override).
         evidence_sha: Optional commit SHA / artifact hash that grounds the
             decision; ``None`` when no concrete evidence applies.
         rubric_json: Optional JSON-serialised rubric (``Rubric.to_dict()``).
