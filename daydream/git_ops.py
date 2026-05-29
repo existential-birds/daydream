@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -45,6 +46,19 @@ _logger = logging.getLogger(__name__)
 
 class GitError(Exception):
     """Base class for all git/gh failures raised by :mod:`daydream.git_ops`."""
+
+
+class RateLimitError(GitError):
+    """Raised when a ``gh`` call fails due to a GitHub API rate limit.
+
+    Attributes:
+        retry_after: Suggested seconds to wait before retrying, parsed from the
+            ``gh`` stderr when available; ``None`` when no hint was present.
+    """
+
+    def __init__(self, *args: Any, retry_after: float | None = None) -> None:
+        super().__init__(*args)
+        self.retry_after = retry_after
 
 
 class NotAWorktreeError(GitError):
@@ -1064,6 +1078,31 @@ def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     return owner, name
 
 
+def _gh_error_for(message: str, stderr: str) -> GitError:
+    """Classify a ``gh`` failure into a rate-limit error or a plain GitError.
+
+    Detection is on the stderr string only: a case-insensitive match against
+    ``rate limit``, ``429``, ``secondary rate limit``, or ``403`` co-occurring
+    with ``rate`` yields a :class:`RateLimitError` (with ``retry_after`` parsed
+    from the stderr when an integer hint is present). Anything else returns a
+    plain :class:`GitError` so non-rate-limit failures are never swallowed.
+    """
+    lowered = stderr.lower()
+    is_rate_limit = (
+        "rate limit" in lowered
+        or "429" in lowered
+        or "secondary rate limit" in lowered
+        or ("403" in lowered and "rate" in lowered)
+    )
+    if not is_rate_limit:
+        return GitError(message)
+    retry_after: float | None = None
+    match = re.search(r"retry[- ]after[:\s]+(\d+)", lowered)
+    if match:
+        retry_after = float(match.group(1))
+    return RateLimitError(message, retry_after=retry_after)
+
+
 def gh_api(
     repo: Path,
     endpoint: str,
@@ -1090,7 +1129,9 @@ def gh_api(
         The parsed JSON value (object, list, or scalar).
 
     Raises:
-        GitError: If the call fails or returns invalid JSON.
+        RateLimitError: If the call fails due to a GitHub API rate limit
+            (detected from the ``gh`` stderr marker-set).
+        GitError: If the call fails for any other reason or returns invalid JSON.
     """
     if input_data is None:
         args = ["api"]
@@ -1101,7 +1142,7 @@ def gh_api(
         args.append(endpoint)
         proc = _run_gh(repo, args, timeout=60)
         if proc.returncode != 0:
-            raise GitError(f"gh api {endpoint} failed: {proc.stderr.strip()}")
+            raise _gh_error_for(f"gh api {endpoint} failed: {proc.stderr.strip()}", proc.stderr)
         try:
             return json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
@@ -1123,9 +1164,10 @@ def gh_api(
             args.append("--paginate")
         proc = _run_gh(repo, args, timeout=60)
         if proc.returncode != 0:
-            raise GitError(
+            raise _gh_error_for(
                 f"gh api {endpoint} failed: {proc.stderr.strip()} "
-                f"(request payload preserved at {tmp_path})"
+                f"(request payload preserved at {tmp_path})",
+                proc.stderr,
             )
         try:
             result = json.loads(proc.stdout)
