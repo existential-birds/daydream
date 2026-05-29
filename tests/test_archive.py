@@ -694,6 +694,19 @@ def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path):
     assert label_count_summary(tmp_path) == {"accepted": 1}
 
 
+def test_append_cache_reflects_winning_human_label(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s-cache"))
+    append_label_observation(tmp_path, "s-cache", labels=["rejected"], pr_state="closed",
+                             labeler_version="auto-v1", evidence_sha="sha1", source="auto")
+    append_label_observation(tmp_path, "s-cache", labels=["accepted"], pr_state=None,
+                             labeler_version="human", evidence_sha=None, source="human")
+    # A later auto append must leave the denormalized runs cache on the human label:
+    append_label_observation(tmp_path, "s-cache", labels=["rejected"], pr_state="closed",
+                             labeler_version="auto-v2", evidence_sha="sha2", source="auto")
+    row = query_runs(tmp_path, "session_id = ?", ("s-cache",))[0]
+    assert row["outcome_labels"] == '["accepted"]'
+
+
 def test_append_observation_persists_valid_at_and_reward(tmp_path: Path):
     upsert_run(tmp_path, _make_manifest(session_id="s1"))
     append_label_observation(

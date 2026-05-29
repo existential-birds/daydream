@@ -339,6 +339,7 @@ def append_label_observation(
     composite_reward: float | None = None,
     reviewer_logins: list[str] | None = None,
     has_posterior: bool = False,
+    source: str = "auto",
 ) -> None:
     """Append a row to the immutable ``label_observations`` history.
 
@@ -346,7 +347,12 @@ def append_label_observation(
     label decision plus the bitemporal valid time and reward breakdown, and in
     the same transaction refreshes the denormalized
     ``runs.outcome_labels`` / ``runs.labeled_at`` / ``runs.rubric_json`` /
-    ``runs.composite_reward`` cache.
+    ``runs.composite_reward`` / ``runs.has_posterior`` cache.
+
+    The cache is recomputed from the *winning* observation under the
+    precedence projection (human-first, then most recent) — **not** necessarily
+    the row just inserted. A newer automated append therefore cannot dethrone an
+    existing human label in the denormalized cache.
 
     Args:
         archive_dir: Path to the archive root.
@@ -381,6 +387,12 @@ def append_label_observation(
             Coerced to ``int`` and written to ``label_observations.has_posterior``
             and mirrored onto ``runs.has_posterior`` so SQL consumers can split
             labeled/unlabeled populations without parsing ``reward_json``.
+        source: Provenance of this observation — ``"auto"`` (automated rubric
+            labeler; the default that keeps existing harvest callers
+            unchanged) or ``"human"`` (operator override). Human-sourced rows
+            take precedence over automated ones in every projection regardless
+            of timing, which is why the cache is written from the winning row
+            rather than the inserted one.
 
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table.
@@ -402,8 +414,8 @@ def append_label_observation(
         conn.execute(
             "INSERT INTO label_observations "
             "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
-            "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 observed_at,
@@ -418,13 +430,31 @@ def append_label_observation(
                 composite_reward,
                 reviewer_logins_json,
                 has_posterior_int,
+                source,
             ),
         )
+        # Recompute the winning observation (human-first, then recency) so the
+        # denormalized runs cache mirrors the precedence projection — not
+        # necessarily the row just inserted (a newer auto must not dethrone a
+        # human label).
+        winner = conn.execute(
+            "SELECT labels, observed_at, rubric_json, composite_reward, has_posterior "
+            "FROM label_observations WHERE session_id = ? "
+            "ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
         conn.execute(
             "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ?, composite_reward = ?, "
             "has_posterior = ? "
             "WHERE session_id = ?",
-            (labels_json, observed_at, rubric_json, composite_reward, has_posterior_int, session_id),
+            (
+                winner["labels"],
+                winner["observed_at"],
+                winner["rubric_json"],
+                winner["composite_reward"],
+                winner["has_posterior"],
+                session_id,
+            ),
         )
         conn.commit()
     finally:
