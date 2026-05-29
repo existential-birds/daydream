@@ -96,6 +96,7 @@ from daydream.training.labeler_signals import (
     PRMergeSignal,
     comment_resolution_signal,
     fix_applied_signal,
+    local_commit_applied_signal,
     pr_merge_signal,
     reviewer_logins_signal,
 )
@@ -287,60 +288,6 @@ the field for schema stability; outcome derivation does not depend on it
 for the PR-review path."""
 
 
-def _added_lines(diff_text: str) -> list[str]:
-    """Extract the content of ``+`` lines from a unified-diff blob.
-
-    Strips the leading ``+`` and any single leading space (the conventional
-    unified-diff content marker). Excludes ``+++`` file headers. Whitespace-
-    only lines are dropped so they don't poison the substring check.
-    """
-    out: list[str] = []
-    for line in diff_text.splitlines():
-        if line.startswith("+++"):
-            continue
-        if not line.startswith("+"):
-            continue
-        content = line[1:]
-        if content.startswith(" "):
-            content = content[1:]
-        content = content.strip()
-        if content:
-            out.append(content)
-    return out
-
-
-def _local_branch_verdict(
-    *,
-    diff_text: str,
-    commits: list[str],
-    repo_clone: Path,
-    changed_files: list[str],
-    file_at_fetcher: Any,
-) -> LocalCommitAppliedSignal:
-    """Lenient posterior signal for PR-less runs.
-
-    Returns ``"applied"`` if any commit in ``commits`` yields file content
-    (via ``file_at_fetcher``) that contains every added line from
-    ``diff_text`` as a substring. ``"rejected"`` if commits exist but none
-    match; ``"unknown"`` when there are no commits to inspect.
-    """
-    if not commits:
-        return LocalCommitAppliedSignal(verdict="unknown")
-    added = _added_lines(diff_text)
-    if not added:
-        return LocalCommitAppliedSignal(verdict="rejected")
-    paths = changed_files if changed_files else [""]
-    for commit in commits:
-        for path in paths:
-            try:
-                content = file_at_fetcher(repo_clone, path, commit)
-            except Exception:  # noqa: BLE001 - extractor isolation
-                continue
-            if all(needle in content for needle in added):
-                return LocalCommitAppliedSignal(verdict="applied")
-    return LocalCommitAppliedSignal(verdict="rejected")
-
-
 def _safe_fix_applied(
     row: dict[str, Any],
     *,
@@ -422,20 +369,15 @@ def _build_rubric_local(
     repo_clone: Path,
 ) -> Rubric:
     """Compose signals for a PR-less row (local-branch posterior)."""
-    archive_path = Path(row["archive_path"])
-    diff_text = ""
     try:
-        diff_text = (archive_path / "diff.patch").read_text()
+        local = local_commit_applied_signal(
+            row,
+            repo_clone=repo_clone,
+            commits_since_fetcher=_commits_since,
+            file_at_fetcher=_file_at,
+        )
     except (FileNotFoundError, OSError):
-        diff_text = ""
-    commits = _commits_since(repo_clone, row.get("branch") or "HEAD", row.get("head_sha") or "")
-    local = _local_branch_verdict(
-        diff_text=diff_text,
-        commits=commits,
-        repo_clone=repo_clone,
-        changed_files=_row_changed_files(row),
-        file_at_fetcher=_file_at,
-    )
+        local = LocalCommitAppliedSignal(verdict="unknown")
     pr_merge = PRMergeSignal(merged=False, merged_at=None)
     comments = CommentResolutionSignal(total=0, replied=0, unresolved=0)
     return Rubric(

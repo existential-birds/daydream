@@ -174,7 +174,7 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path, monkeypatch)
 
     # Force a mapped local verdict ("rejected") so the posterior axis is present.
     monkeypatch.setattr(
-        harvest, "_local_branch_verdict", lambda **k: LocalCommitAppliedSignal(verdict="rejected")
+        harvest, "local_commit_applied_signal", lambda *a, **k: LocalCommitAppliedSignal(verdict="rejected")
     )
     # The pooled-prior query must never run for a PR-less row.
     monkeypatch.setattr(
