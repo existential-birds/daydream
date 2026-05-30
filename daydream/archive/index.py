@@ -35,9 +35,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import uuid
 import warnings
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from daydream.archive.manifest import Manifest
@@ -437,8 +436,7 @@ def append_label_observation(
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table.
     """
-    observed_at = datetime.now(timezone.utc).isoformat() + "~" + uuid.uuid4().hex[:8]
-    valid_at_value = valid_at if valid_at is not None else observed_at
+    observed_dt = datetime.now(timezone.utc)
     labels_json = json.dumps(labels)
     reviewer_logins_json = json.dumps(reviewer_logins) if reviewer_logins is not None else None
     has_posterior_int = int(has_posterior)
@@ -468,28 +466,37 @@ def append_label_observation(
                 and latest_auto["labels"] == labels_json
             ):
                 return False
-        conn.execute(
-            "INSERT INTO label_observations "
-            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
-            "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior, source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                session_id,
-                observed_at,
-                labels_json,
-                pr_state,
-                labeler_version,
-                evidence_sha,
-                rubric_json,
-                valid_at_value,
-                reward_version,
-                reward_json,
-                composite_reward,
-                reviewer_logins_json,
-                has_posterior_int,
-                source,
-            ),
-        )
+        # Bump observed_at by a microsecond and retry on a same-microsecond
+        # primary-key collision so the column stays a clean ISO 8601 timestamp.
+        while True:
+            observed_at = observed_dt.isoformat()
+            valid_at_value = valid_at if valid_at is not None else observed_at
+            try:
+                conn.execute(
+                    "INSERT INTO label_observations "
+                    "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
+                    "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        observed_at,
+                        labels_json,
+                        pr_state,
+                        labeler_version,
+                        evidence_sha,
+                        rubric_json,
+                        valid_at_value,
+                        reward_version,
+                        reward_json,
+                        composite_reward,
+                        reviewer_logins_json,
+                        has_posterior_int,
+                        source,
+                    ),
+                )
+                break
+            except sqlite3.IntegrityError:
+                observed_dt += timedelta(microseconds=1)
         # Recompute the winning observation (human-first, then recency) so the
         # denormalized runs cache mirrors the precedence projection — not
         # necessarily the row just inserted (a newer auto must not dethrone a
@@ -889,13 +896,13 @@ def pr_attached_label_coverage(
             ``observed_at <= as_of`` are considered (reproducible pinning).
 
     Returns:
-        ``{"pr_attached": N, "decisive": M, "coverage": M / N}`` with
-        ``coverage`` as ``0.0`` when ``N == 0``.
+        ``{"pr_attached": N, "decisive": M, "coverage": M / N,
+        "malformed_labels": K}`` with ``coverage`` as ``0.0`` when ``N == 0``.
     """
     rows = query_runs(archive_dir, where="pr_number IS NOT NULL")
     pr_attached = len(rows)
     if pr_attached == 0:
-        return {"pr_attached": 0, "decisive": 0, "coverage": 0.0}
+        return {"pr_attached": 0, "decisive": 0, "coverage": 0.0, "malformed_labels": 0}
 
     session_ids = [row["session_id"] for row in rows]
     winners = bulk_latest_label_observations(archive_dir, session_ids, as_of=as_of)

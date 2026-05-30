@@ -849,6 +849,50 @@ def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
     assert json.loads(pinned["labels"]) == ["unknown"]
 
 
+def test_same_microsecond_collision_keeps_clean_iso_timestamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two appends frozen to the same microsecond must both persist with parseable
+    ISO 8601 observed_at values, and an exact-boundary as_of must include the
+    boundary row (the contract the ~uuid suffix used to break)."""
+    from datetime import datetime, timezone
+
+    frozen = datetime(2026, 5, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return frozen if tz is None else frozen.astimezone(tz)
+
+    monkeypatch.setattr("daydream.archive.index.datetime", _FrozenDatetime)
+
+    _seed_one_run(tmp_path, "sess-collide")
+    append_label_observation(
+        tmp_path, "sess-collide", labels=["unknown"], pr_state="open",
+        labeler_version="v1", evidence_sha="a",
+    )
+    append_label_observation(
+        tmp_path, "sess-collide", labels=["accepted"], pr_state="merged",
+        labeler_version="v1", evidence_sha="b",
+    )
+
+    hist = label_observation_history(tmp_path, "sess-collide")
+    assert len(hist) == 2
+    stamps = [r["observed_at"] for r in hist]
+    assert stamps[0] != stamps[1]
+    for r in hist:
+        datetime.fromisoformat(r["observed_at"])  # parseable, no ~uuid suffix
+        assert r["valid_at"] == r["observed_at"]
+
+    runs_row = query_runs(tmp_path, "session_id = ?", ("sess-collide",))[0]
+    datetime.fromisoformat(runs_row["labeled_at"])
+
+    boundary = stamps[0]
+    pinned = latest_label_observation(tmp_path, "sess-collide", as_of=boundary)
+    assert pinned is not None
+    assert json.loads(pinned["labels"]) == ["unknown"]  # boundary row included
+
+
 def test_append_label_observation_persists_reviewer_and_posterior_flag(tmp_path: Path) -> None:
     """reviewer_logins + has_posterior persist on the observation row and mirror onto runs."""
     _seed_one_run(tmp_path, "s1")

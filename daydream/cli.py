@@ -895,7 +895,7 @@ def _handle_harvest_command(argv: list[str]) -> int:
         print_error(console, "Invalid --gh-spacing-sec", "Must be >= 0.0.")
         return 1
 
-    archive_dir = args.archive_dir if args.archive_dir is not None else _archive.get_archive_dir()
+    archive_dir = args.archive_dir.expanduser() if args.archive_dir is not None else _archive.get_archive_dir()
     cache_dir = args.cache_dir.expanduser() if args.cache_dir is not None else None
 
     repo_clone_root = args.repo_clone_root.expanduser() if args.repo_clone_root is not None else None
@@ -985,7 +985,7 @@ def _handle_label_command(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     console = create_console()
-    archive_dir = args.archive_dir if args.archive_dir is not None else _archive.get_archive_dir()
+    archive_dir = args.archive_dir.expanduser() if args.archive_dir is not None else _archive.get_archive_dir()
 
     prior = _index.latest_label_observation(archive_dir, args.session)
     if prior is not None and prior.get("labels"):

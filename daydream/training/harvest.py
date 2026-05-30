@@ -250,7 +250,9 @@ def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
     not the local repo.
 
     On a :class:`~daydream.git_ops.RateLimitError`, we sleep with bounded
-    backoff (``min(retry_after or _DEFAULT_BACKOFF_SEC, _MAX_BACKOFF_SEC)``) and
+    backoff (``min(retry_after, _MAX_BACKOFF_SEC)``, falling back to
+    ``_DEFAULT_BACKOFF_SEC`` only when ``retry_after`` is absent, so an explicit
+    ``Retry-After: 0`` hint is preserved) and
     retry up to ``_MAX_RATE_LIMIT_RETRIES`` times; if the limit is still
     exhausted, the :class:`RateLimitError` propagates so the orchestrator can
     abort cleanly while preserving its resume marker.
@@ -266,7 +268,8 @@ def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
         except RateLimitError as exc:
             if attempt == _MAX_RATE_LIMIT_RETRIES - 1:
                 raise
-            backoff = min(exc.retry_after or _DEFAULT_BACKOFF_SEC, _MAX_BACKOFF_SEC)
+            retry_after = exc.retry_after if exc.retry_after is not None else _DEFAULT_BACKOFF_SEC
+            backoff = min(retry_after, _MAX_BACKOFF_SEC)
             print_warning(
                 create_console(),
                 f"harvest: GitHub rate limit hit; retrying in {backoff:.0f}s "
