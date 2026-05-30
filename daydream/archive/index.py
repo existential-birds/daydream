@@ -902,6 +902,7 @@ def pr_attached_label_coverage(
 
     decisive_labels = {"accepted", "contested", "rejected"}
     decisive = 0
+    malformed = 0
     for session_id in session_ids:
         observation = winners.get(session_id)
         if observation is None:
@@ -909,14 +910,19 @@ def pr_attached_label_coverage(
         try:
             labels = json.loads(observation["labels"])
         except (json.JSONDecodeError, TypeError):
+            malformed += 1
             continue
-        if isinstance(labels, list) and labels and str(labels[0]) in decisive_labels:
+        if not isinstance(labels, list):
+            malformed += 1
+            continue
+        if labels and str(labels[0]) in decisive_labels:
             decisive += 1
 
     return {
         "pr_attached": pr_attached,
         "decisive": decisive,
         "coverage": decisive / pr_attached,
+        "malformed_labels": malformed,
     }
 
 

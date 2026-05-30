@@ -41,6 +41,19 @@ from typing import Any
 
 _logger = logging.getLogger(__name__)
 
+# Substrings (lowercased) that identify a GitHub API rate-limit response in
+# ``gh`` stderr output.  Kept as a module constant so the classifier and any
+# future callers share a single source of truth.
+#
+# NOTE: "429" is intentionally absent here; HTTP 429 is matched separately in
+# ``_gh_error_for`` with a word-boundary regex to avoid false positives on
+# arbitrary digit sequences (e.g. URLs, SHAs, file sizes) that happen to
+# contain those three digits.
+_RATE_LIMIT_MARKERS: tuple[str, ...] = (
+    "rate limit",
+    "secondary rate limit",
+)
+
 # --- Errors ------------------------------------------------------------------
 
 
@@ -1082,16 +1095,16 @@ def _gh_error_for(message: str, stderr: str) -> GitError:
     """Classify a ``gh`` failure into a rate-limit error or a plain GitError.
 
     Detection is on the stderr string only: a case-insensitive match against
-    ``rate limit``, ``429``, ``secondary rate limit``, or ``403`` co-occurring
-    with ``rate`` yields a :class:`RateLimitError` (with ``retry_after`` parsed
-    from the stderr when an integer hint is present). Anything else returns a
-    plain :class:`GitError` so non-rate-limit failures are never swallowed.
+    ``rate limit``, ``secondary rate limit``, a word-boundary ``429`` (HTTP
+    status code), or ``403`` co-occurring with ``rate`` yields a
+    :class:`RateLimitError` (with ``retry_after`` parsed from the stderr when
+    an integer hint is present). Anything else returns a plain
+    :class:`GitError` so non-rate-limit failures are never swallowed.
     """
     lowered = stderr.lower()
     is_rate_limit = (
-        "rate limit" in lowered
-        or "429" in lowered
-        or "secondary rate limit" in lowered
+        any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+        or re.search(r"\b429\b", lowered) is not None
         or ("403" in lowered and "rate" in lowered)
     )
     if not is_rate_limit:

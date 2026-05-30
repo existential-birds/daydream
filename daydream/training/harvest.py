@@ -267,6 +267,11 @@ def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
             if attempt == _MAX_RATE_LIMIT_RETRIES - 1:
                 raise
             backoff = min(exc.retry_after or _DEFAULT_BACKOFF_SEC, _MAX_BACKOFF_SEC)
+            print_warning(
+                create_console(),
+                f"harvest: GitHub rate limit hit; retrying in {backoff:.0f}s "
+                f"(attempt {attempt + 1}/{_MAX_RATE_LIMIT_RETRIES - 1})",
+            )
             _rate_limit_sleep(backoff)
     # Unreachable: the loop either returns or raises on the final attempt.
     raise RuntimeError("rate-limit retry loop exited without returning")  # pragma: no cover
@@ -841,14 +846,14 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
             # cleanly. The failed row is NOT marked done, so its resume marker is
             # preserved and a later re-run picks up exactly where we stopped.
             summary["aborted"] = 1
-            resume_marker = (config.cache_dir / "progress.jsonl") if config.cache_dir else None
-            print_warning(
-                console,
+            resume_marker = cache.progress_path if cache is not None else None
+            abort_msg = (
                 "harvest: GitHub rate limit exhausted; aborting cleanly. "
                 f"Resume from {resume_marker} by re-running with the same --cache-dir."
                 if resume_marker is not None
-                else "harvest: GitHub rate limit exhausted; aborting cleanly.",
+                else "harvest: GitHub rate limit exhausted; aborting cleanly."
             )
+            print_warning(console, abort_msg)
             break
         except Exception as exc:  # noqa: BLE001 - per-row isolation by design
             summary["errors"] += 1
