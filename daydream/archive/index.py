@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,14 @@ from pathlib import Path
 from daydream.archive.manifest import Manifest
 
 SCHEMA_VERSION = 5
+
+_PRECEDENCE_ORDER = "CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC"
+"""SQL ORDER BY expression that ranks label_observations by human-first precedence then recency.
+
+Used identically across append_label_observation, latest_label_observation,
+bulk_latest_label_observations, and label_count_summary — centralised here so
+all callers stay in sync if the precedence rule ever changes.
+"""
 
 _REVIEWER_PENALTY_MAP: dict[str, float] = {
     "accepted": 0.0,
@@ -162,27 +171,50 @@ INSERT OR REPLACE INTO runs (
 """
 
 
-def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Add columns that exist in _CREATE_TABLE but are missing from the live DB."""
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
-    migrations: list[tuple[str, str]] = [
-        ("review_backend", "TEXT"),
-        ("fix_backend", "TEXT"),
-        ("test_backend", "TEXT"),
-        ("rubric_json", "TEXT"),
-        ("base_sha", "TEXT"),
-        ("changed_files", "TEXT"),
-        ("composite_reward", "REAL"),
-        ("source_path", "TEXT"),
-        ("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
-    ]
+def _alter_add_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    migrations: list[tuple[str, str]],
+) -> None:
+    """ALTER TABLE *table* to add any columns in *migrations* that are absent.
+
+    Each entry in *migrations* is a ``(column_name, column_type)`` pair.
+    Missing columns are added idempotently; a ``duplicate column name`` error
+    (raised by a race between concurrent openers) is silently swallowed, which
+    preserves the warn-and-continue semantics of the callers it replaces.
+
+    Args:
+        conn: An open SQLite connection.
+        table: Name of the table to inspect and alter.
+        migrations: Ordered list of ``(col, col_type)`` pairs to apply.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608 - table is a module-local constant at every call site
     for col, col_type in migrations:
         if col not in existing:
             try:
-                conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {col_type}")  # noqa: S608 - col/col_type are module-local constants
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")  # noqa: S608 - col/col_type are module-local constants
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Add columns that exist in _CREATE_TABLE but are missing from the live DB."""
+    _alter_add_missing(
+        conn,
+        "runs",
+        [
+            ("review_backend", "TEXT"),
+            ("fix_backend", "TEXT"),
+            ("test_backend", "TEXT"),
+            ("rubric_json", "TEXT"),
+            ("base_sha", "TEXT"),
+            ("changed_files", "TEXT"),
+            ("composite_reward", "REAL"),
+            ("source_path", "TEXT"),
+            ("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
+        ],
+    )
 
 
 def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
@@ -217,24 +249,19 @@ def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
     Unlike ``_recreate_label_observations_if_stale`` (which drop-recreates for
     structural bitemporal/posterior columns), this is non-destructive: the
     ``source`` precedence marker is additive, so pre-existing rows are preserved
-    and default to ``'auto'``. Mirrors ``_migrate_schema`` (the runs migration).
+    and default to ``'auto'``. Delegates to ``_alter_add_missing`` (the shared
+    helper that also backs ``_migrate_schema`` for the runs table).
 
     Args:
         conn: An open connection whose ``label_observations`` table exists.
     """
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
-    migrations: list[tuple[str, str]] = [
-        ("source", "TEXT NOT NULL DEFAULT 'auto'"),
-    ]
-    for col, col_type in migrations:
-        if col not in existing:
-            try:
-                conn.execute(
-                    f"ALTER TABLE label_observations ADD COLUMN {col} {col_type}"  # noqa: S608 - col/col_type are module-local constants
-                )
-            except sqlite3.OperationalError as exc:
-                if "duplicate column name" not in str(exc).lower():
-                    raise
+    _alter_add_missing(
+        conn,
+        "label_observations",
+        [
+            ("source", "TEXT NOT NULL DEFAULT 'auto'"),
+        ],
+    )
 
 
 def _get_connection(archive_dir: Path) -> sqlite3.Connection:
@@ -410,7 +437,7 @@ def append_label_observation(
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table.
     """
-    observed_at = datetime.now(timezone.utc).isoformat()
+    observed_at = datetime.now(timezone.utc).isoformat() + "~" + uuid.uuid4().hex[:8]
     valid_at_value = valid_at if valid_at is not None else observed_at
     labels_json = json.dumps(labels)
     reviewer_logins_json = json.dumps(reviewer_logins) if reviewer_logins is not None else None
@@ -429,7 +456,7 @@ def append_label_observation(
         # appended in between cannot mask a genuine automated re-score.
         if source == "auto":
             latest_auto = conn.execute(
-                "SELECT evidence_sha, reward_version FROM label_observations "
+                "SELECT evidence_sha, reward_version, labels FROM label_observations "
                 "WHERE session_id = ? AND source = 'auto' "
                 "ORDER BY observed_at DESC LIMIT 1",
                 (session_id,),
@@ -438,6 +465,7 @@ def append_label_observation(
                 latest_auto is not None
                 and latest_auto["evidence_sha"] == evidence_sha
                 and latest_auto["reward_version"] == reward_version
+                and latest_auto["labels"] == labels_json
             ):
                 return False
         conn.execute(
@@ -467,9 +495,9 @@ def append_label_observation(
         # necessarily the row just inserted (a newer auto must not dethrone a
         # human label).
         winner = conn.execute(
-            "SELECT labels, observed_at, rubric_json, composite_reward, has_posterior "
-            "FROM label_observations WHERE session_id = ? "
-            "ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC LIMIT 1",
+            f"SELECT labels, observed_at, rubric_json, composite_reward, has_posterior "
+            f"FROM label_observations WHERE session_id = ? "
+            f"ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
             (session_id,),
         ).fetchone()
         conn.execute(
@@ -516,14 +544,14 @@ def latest_label_observation(
     try:
         if as_of is None:
             cursor = conn.execute(
-                "SELECT * FROM label_observations WHERE session_id = ? "
-                "ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC LIMIT 1",
+                f"SELECT * FROM label_observations WHERE session_id = ? "
+                f"ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
                 (session_id,),
             )
         else:
             cursor = conn.execute(
-                "SELECT * FROM label_observations WHERE session_id = ? AND observed_at <= ? "
-                "ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC LIMIT 1",
+                f"SELECT * FROM label_observations WHERE session_id = ? AND observed_at <= ? "
+                f"ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
                 (session_id, as_of),
             )
         row = cursor.fetchone()
@@ -572,8 +600,7 @@ def bulk_latest_label_observations(
                     SELECT *,
                            ROW_NUMBER() OVER (
                                PARTITION BY session_id
-                               ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC,
-                                        observed_at DESC
+                               ORDER BY {_PRECEDENCE_ORDER}
                            ) AS _rn
                     FROM label_observations
                     WHERE session_id IN ({placeholders})
@@ -590,8 +617,7 @@ def bulk_latest_label_observations(
                     SELECT *,
                            ROW_NUMBER() OVER (
                                PARTITION BY session_id
-                               ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC,
-                                        observed_at DESC
+                               ORDER BY {_PRECEDENCE_ORDER}
                            ) AS _rn
                     FROM label_observations
                     WHERE session_id IN ({placeholders})
@@ -923,29 +949,27 @@ def label_count_summary(
     try:
         if as_of is None:
             best_sql = (
-                "SELECT session_id, labels FROM ("
-                "  SELECT session_id, labels, "
-                "         ROW_NUMBER() OVER ("
-                "             PARTITION BY session_id "
-                "             ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, "
-                "                      observed_at DESC"
-                "         ) AS _rn "
-                "  FROM label_observations"
-                ") WHERE _rn = 1"
+                f"SELECT session_id, labels FROM ("
+                f"  SELECT session_id, labels, "
+                f"         ROW_NUMBER() OVER ("
+                f"             PARTITION BY session_id "
+                f"             ORDER BY {_PRECEDENCE_ORDER}"
+                f"         ) AS _rn "
+                f"  FROM label_observations"
+                f") WHERE _rn = 1"
             )
             params: tuple = ()
         else:
             best_sql = (
-                "SELECT session_id, labels FROM ("
-                "  SELECT session_id, labels, "
-                "         ROW_NUMBER() OVER ("
-                "             PARTITION BY session_id "
-                "             ORDER BY CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, "
-                "                      observed_at DESC"
-                "         ) AS _rn "
-                "  FROM label_observations "
-                "  WHERE observed_at <= ?"
-                ") WHERE _rn = 1"
+                f"SELECT session_id, labels FROM ("
+                f"  SELECT session_id, labels, "
+                f"         ROW_NUMBER() OVER ("
+                f"             PARTITION BY session_id "
+                f"             ORDER BY {_PRECEDENCE_ORDER}"
+                f"         ) AS _rn "
+                f"  FROM label_observations "
+                f"  WHERE observed_at <= ?"
+                f") WHERE _rn = 1"
             )
             params = (as_of,)
 
