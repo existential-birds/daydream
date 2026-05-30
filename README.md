@@ -27,7 +27,7 @@ After merge, an optional fix gate applies fixes one-by-one and validates with th
 
 ### Trajectory Recording
 
-Every run produces an ATIF v1.6 trajectory at `<target>/.daydream/runs/<id>/trajectory.json` capturing prompts, responses, tool calls, observations, and per-step token/cost metrics. Parallel fan-outs (per-stack reviews, parallel fixes) produce sibling trajectories via `recorder.fork()` under `.daydream/runs/<id>/trajectories/`. Sensitive content (API keys, JWTs, URL credentials, `.env` values) is automatically redacted before writing. Interrupted runs flush a `.partial` file with `extra.partial=true`.
+Every run produces an ATIF v1.6 trajectory at `<target>/.daydream/runs/<id>/trajectory.json` capturing prompts, responses, tool calls, observations, and per-step token/cost metrics. Parallel fan-outs (per-stack reviews, parallel fixes) produce sibling trajectories via `recorder.fork()` under `.daydream/runs/<id>/trajectories/`. Sensitive content (API keys, JWTs, URL credentials, `.env` values) is redacted before writing. Interrupted runs flush a `.partial` file with `extra.partial=true`.
 
 ### Corpus Pipeline
 
@@ -62,12 +62,12 @@ The [Milestone 1 epic](https://github.com/existential-birds/daydream/issues/86) 
 2. **Span-segmented SFT**: SAD-style segment-specific losses on ATIF REASON/ACT spans (per arXiv:2505.13820)
 3. **KTO**: preference-train on PR-comment accept/reject labels (per arXiv:2402.01306), with synthetic-accept balancing for label imbalance
 
-Target bar on a held-out PR replay benchmark (Martian-5 repos + additional OSS):
+Target bar for the trained model on a held-out PR replay benchmark: Scoring follows [Martian's Code Review Bench](https://github.com/withmartian/code-review-benchmark), evaluated on its five-repo set (Sentry, Grafana, Cal.com, Discourse, Keycloak) plus additional OSS:
 
 | Metric | Target |
 |--------|--------|
 | Precision (offline real PRs) | ≥50% |
-| F1 (Martian-style scoring) | ≥51% |
+| F1 (Martian-bench scoring) | ≥51% |
 | Addressed comments per PR | ≥1.5 |
 | False positives per 50-PR run | ≤4 |
 
@@ -161,7 +161,7 @@ make install    # install dependencies
 make hooks      # install git hooks
 make lint       # ruff linter
 make typecheck  # mypy
-make test       # pytest (343 tests)
+make test       # pytest
 make check      # all CI checks
 ```
 
