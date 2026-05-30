@@ -5,8 +5,6 @@ Daydream is a code-review agent that produces structured training data from its 
 
 The goal is an open-weight code-review model (Qwen2.5-Coder-7B, QLoRA) trained on daydream's own trajectory archive, independently benchmarked against leading commercial code-review bots on a held-out PR replay corpus. See [Milestone 1](https://github.com/existential-birds/daydream/issues/86) for the current training roadmap.
 
-> **Status — research project, not a product.** What ships today is the review agent and its trajectory/corpus tooling: the data-generation front end. The open-weight model, the benchmark numbers, and the labeled corpus are the *goal* — not yet delivered or measured. Expect a workflow oriented toward producing training data, not a turnkey review bot.
-
 ![demo](https://github.com/user-attachments/assets/60a80645-36de-410e-afa7-7a96efef3f57)
 
 ## Architecture
@@ -29,7 +27,7 @@ After merge, an optional fix gate applies fixes one-by-one and validates with th
 
 ### Trajectory Recording
 
-Every run produces an ATIF v1.6 trajectory at `<target>/.daydream/runs/<id>/trajectory.json` capturing prompts, responses, tool calls, observations, and per-step token/cost metrics. Parallel fan-outs (per-stack reviews, parallel fixes) produce sibling trajectories via `recorder.fork()` under `.daydream/runs/<id>/trajectories/`. Sensitive content (API keys, JWTs, URL credentials, `.env` values) is automatically redacted before writing. Interrupted runs flush a `.partial` file with `extra.partial=true`.
+Every run produces an ATIF v1.6 trajectory at `<target>/.daydream/runs/<id>/trajectory.json` capturing prompts, responses, tool calls, observations, and per-step token/cost metrics. Parallel fan-outs (per-stack reviews, parallel fixes) produce sibling trajectories via `recorder.fork()` under `.daydream/runs/<id>/trajectories/`. Sensitive content (API keys, JWTs, URL credentials, `.env` values) is redacted before writing. Interrupted runs flush a `.partial` file with `extra.partial=true`.
 
 ### Corpus Pipeline
 
@@ -64,7 +62,7 @@ The [Milestone 1 epic](https://github.com/existential-birds/daydream/issues/86) 
 2. **Span-segmented SFT**: SAD-style segment-specific losses on ATIF REASON/ACT spans (per arXiv:2505.13820)
 3. **KTO**: preference-train on PR-comment accept/reject labels (per arXiv:2402.01306), with synthetic-accept balancing for label imbalance
 
-Target bar — **aspirational, not yet measured** — on a held-out PR replay benchmark. Scoring follows [Martian's Code Review Bench](https://github.com/withmartian/code-review-benchmark) (what developers actually act on), evaluated on its five-repo set (Sentry, Grafana, Cal.com, Discourse, Keycloak) plus additional OSS:
+Target bar for the trained model on a held-out PR replay benchmark: Scoring follows [Martian's Code Review Bench](https://github.com/withmartian/code-review-benchmark), evaluated on its five-repo set (Sentry, Grafana, Cal.com, Discourse, Keycloak) plus additional OSS:
 
 | Metric | Target |
 |--------|--------|
