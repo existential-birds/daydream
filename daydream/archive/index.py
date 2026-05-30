@@ -15,11 +15,13 @@ Exports:
         ``valid_at`` valid time, reward columns, plus ``reviewer_logins`` and
         the ``has_posterior`` population discriminator) and refresh the
         denormalized runs cache (including the ``has_posterior`` mirror).
-    latest_label_observation: Return the most recent label_observations row for
-        a session, optionally constrained by an ``as_of`` cutoff timestamp.
-    bulk_latest_label_observations: Return the most recent label_observations
-        row for each session in a collection — single round-trip alternative to
-        calling ``latest_label_observation`` in a loop.
+    latest_label_observation: Return the highest-precedence (human-first, then
+        recency) label_observations row for a session, optionally constrained by
+        an ``as_of`` cutoff timestamp.
+    bulk_latest_label_observations: Return the highest-precedence (human-first,
+        then recency) label_observations row for each session in a collection —
+        single round-trip alternative to calling ``latest_label_observation`` in
+        a loop.
     reviewer_set_penalty_prior: Pooled mean false-positive penalty over prior
         runs sharing a reviewer (strict ``valid_at`` cutoff), for the posterior
         outcome prior (C4).
@@ -34,12 +36,20 @@ from __future__ import annotations
 import json
 import sqlite3
 import warnings
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from daydream.archive.manifest import Manifest
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+_PRECEDENCE_ORDER = "CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC"
+"""SQL ORDER BY expression that ranks label_observations by human-first precedence then recency.
+
+Used identically across append_label_observation, latest_label_observation,
+bulk_latest_label_observations, and label_count_summary — centralised here so
+all callers stay in sync if the precedence rule ever changes.
+"""
 
 _REVIEWER_PENALTY_MAP: dict[str, float] = {
     "accepted": 0.0,
@@ -107,6 +117,10 @@ CREATE TABLE IF NOT EXISTS runs (
 # carries a ``PosteriorBreakdown``, mirrored onto ``runs`` so SQL consumers can
 # split labeled/unlabeled populations without parsing ``reward_json``). See spec
 # ``corpus-pipeline-architecture`` (silver layer) and ``reward-posterior-corrections`` (C3).
+# ``source`` is the precedence marker (``'auto'`` for automated rubric labels,
+# ``'human'`` for maintainer overrides) — human-sourced rows win in the "latest
+# label" projections regardless of recency. Pre-existing rows default to ``'auto'``
+# via the additive ``_migrate_label_observations_schema`` ALTER-ADD migration.
 _CREATE_LABEL_OBSERVATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS label_observations (
     session_id       TEXT NOT NULL,
@@ -122,6 +136,7 @@ CREATE TABLE IF NOT EXISTS label_observations (
     composite_reward REAL,
     reviewer_logins  TEXT,
     has_posterior    INTEGER NOT NULL DEFAULT 0,
+    source           TEXT NOT NULL DEFAULT 'auto',
     PRIMARY KEY (session_id, observed_at)
 )
 """
@@ -155,27 +170,50 @@ INSERT OR REPLACE INTO runs (
 """
 
 
-def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Add columns that exist in _CREATE_TABLE but are missing from the live DB."""
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
-    migrations: list[tuple[str, str]] = [
-        ("review_backend", "TEXT"),
-        ("fix_backend", "TEXT"),
-        ("test_backend", "TEXT"),
-        ("rubric_json", "TEXT"),
-        ("base_sha", "TEXT"),
-        ("changed_files", "TEXT"),
-        ("composite_reward", "REAL"),
-        ("source_path", "TEXT"),
-        ("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
-    ]
+def _alter_add_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    migrations: list[tuple[str, str]],
+) -> None:
+    """ALTER TABLE *table* to add any columns in *migrations* that are absent.
+
+    Each entry in *migrations* is a ``(column_name, column_type)`` pair.
+    Missing columns are added idempotently; a ``duplicate column name`` error
+    (raised by a race between concurrent openers) is silently swallowed, which
+    preserves the warn-and-continue semantics of the callers it replaces.
+
+    Args:
+        conn: An open SQLite connection.
+        table: Name of the table to inspect and alter.
+        migrations: Ordered list of ``(col, col_type)`` pairs to apply.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608 - table is a module-local constant at every call site
     for col, col_type in migrations:
         if col not in existing:
             try:
-                conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {col_type}")  # noqa: S608 - col/col_type are module-local constants
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")  # noqa: S608 - col/col_type are module-local constants
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Add columns that exist in _CREATE_TABLE but are missing from the live DB."""
+    _alter_add_missing(
+        conn,
+        "runs",
+        [
+            ("review_backend", "TEXT"),
+            ("fix_backend", "TEXT"),
+            ("test_backend", "TEXT"),
+            ("rubric_json", "TEXT"),
+            ("base_sha", "TEXT"),
+            ("changed_files", "TEXT"),
+            ("composite_reward", "REAL"),
+            ("source_path", "TEXT"),
+            ("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
+        ],
+    )
 
 
 def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
@@ -204,6 +242,27 @@ def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
         conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
 
 
+def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
+    """Additively ALTER-ADD columns missing from a live ``label_observations`` table.
+
+    Unlike ``_recreate_label_observations_if_stale`` (which drop-recreates for
+    structural bitemporal/posterior columns), this is non-destructive: the
+    ``source`` precedence marker is additive, so pre-existing rows are preserved
+    and default to ``'auto'``. Delegates to ``_alter_add_missing`` (the shared
+    helper that also backs ``_migrate_schema`` for the runs table).
+
+    Args:
+        conn: An open connection whose ``label_observations`` table exists.
+    """
+    _alter_add_missing(
+        conn,
+        "label_observations",
+        [
+            ("source", "TEXT NOT NULL DEFAULT 'auto'"),
+        ],
+    )
+
+
 def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     """Open the index database, creating schema if needed.
 
@@ -225,6 +284,7 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     conn.execute(_CREATE_TABLE)
     conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
     _recreate_label_observations_if_stale(conn)
+    _migrate_label_observations_schema(conn)
     _migrate_schema(conn)
     for idx_sql in _CREATE_INDEXES:
         conn.execute(idx_sql)
@@ -307,14 +367,20 @@ def append_label_observation(
     composite_reward: float | None = None,
     reviewer_logins: list[str] | None = None,
     has_posterior: bool = False,
-) -> None:
+    source: str = "auto",
+) -> bool:
     """Append a row to the immutable ``label_observations`` history.
 
     Writes a single ``(session_id, observed_at)`` row capturing the current
     label decision plus the bitemporal valid time and reward breakdown, and in
     the same transaction refreshes the denormalized
     ``runs.outcome_labels`` / ``runs.labeled_at`` / ``runs.rubric_json`` /
-    ``runs.composite_reward`` cache.
+    ``runs.composite_reward`` / ``runs.has_posterior`` cache.
+
+    The cache is recomputed from the *winning* observation under the
+    precedence projection (human-first, then most recent) — **not** necessarily
+    the row just inserted. A newer automated append therefore cannot dethrone an
+    existing human label in the denormalized cache.
 
     Args:
         archive_dir: Path to the archive root.
@@ -323,7 +389,8 @@ def append_label_observation(
         pr_state: One of ``open``/``merged``/``closed``/``reverted`` or
             ``None`` when not applicable (e.g. local-branch runs).
         labeler_version: Free-form version tag of the labeler that produced
-            this observation (e.g. ``2026.05.22`` or ``legacy``).
+            this observation (e.g. ``2026.05.22`` for an automated rubric, or
+            ``human`` for a maintainer override).
         evidence_sha: Optional commit SHA / artifact hash that grounds the
             decision; ``None`` when no concrete evidence applies.
         rubric_json: Optional JSON-serialised rubric (``Rubric.to_dict()``).
@@ -349,12 +416,27 @@ def append_label_observation(
             Coerced to ``int`` and written to ``label_observations.has_posterior``
             and mirrored onto ``runs.has_posterior`` so SQL consumers can split
             labeled/unlabeled populations without parsing ``reward_json``.
+        source: Provenance of this observation — ``"auto"`` (automated rubric
+            labeler; the default that keeps existing harvest callers
+            unchanged) or ``"human"`` (operator override). Human-sourced rows
+            take precedence over automated ones in every projection regardless
+            of timing, which is why the cache is written from the winning row
+            rather than the inserted one.
+
+    Returns:
+        ``True`` when a new observation row was inserted; ``False`` when the
+        append was a deduped no-op. Dedup is **auto-only**: an automated
+        (``source="auto"``) append whose ``(evidence_sha, reward_version)``
+        matches the latest existing *auto* observation for the session is
+        skipped without inserting and without touching the cache. Human
+        (``source != "auto"``) appends are never deduped and always return
+        ``True``; a reward-version bump on otherwise-identical evidence also
+        appends a fresh generation.
 
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table.
     """
-    observed_at = datetime.now(timezone.utc).isoformat()
-    valid_at_value = valid_at if valid_at is not None else observed_at
+    observed_dt = datetime.now(timezone.utc)
     labels_json = json.dumps(labels)
     reviewer_logins_json = json.dumps(reviewer_logins) if reviewer_logins is not None else None
     has_posterior_int = int(has_posterior)
@@ -367,34 +449,79 @@ def append_label_observation(
         if cursor.fetchone() is None:
             msg = f"Unknown session {session_id!r}"
             raise ValueError(msg)
-        conn.execute(
-            "INSERT INTO label_observations "
-            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
-            "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                session_id,
-                observed_at,
-                labels_json,
-                pr_state,
-                labeler_version,
-                evidence_sha,
-                rubric_json,
-                valid_at_value,
-                reward_version,
-                reward_json,
-                composite_reward,
-                reviewer_logins_json,
-                has_posterior_int,
-            ),
-        )
+        # Idempotency: an automated re-score with identical evidence is a no-op.
+        # Compare against the latest *auto* row specifically so a human override
+        # appended in between cannot mask a genuine automated re-score.
+        if source == "auto":
+            latest_auto = conn.execute(
+                "SELECT evidence_sha, reward_version, labels FROM label_observations "
+                "WHERE session_id = ? AND source = 'auto' "
+                "ORDER BY observed_at DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if (
+                latest_auto is not None
+                and latest_auto["evidence_sha"] == evidence_sha
+                and latest_auto["reward_version"] == reward_version
+                and latest_auto["labels"] == labels_json
+            ):
+                return False
+        # Bump observed_at by a microsecond and retry on a same-microsecond
+        # primary-key collision so the column stays a clean ISO 8601 timestamp.
+        while True:
+            observed_at = observed_dt.isoformat()
+            valid_at_value = valid_at if valid_at is not None else observed_at
+            try:
+                conn.execute(
+                    "INSERT INTO label_observations "
+                    "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
+                    "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        observed_at,
+                        labels_json,
+                        pr_state,
+                        labeler_version,
+                        evidence_sha,
+                        rubric_json,
+                        valid_at_value,
+                        reward_version,
+                        reward_json,
+                        composite_reward,
+                        reviewer_logins_json,
+                        has_posterior_int,
+                        source,
+                    ),
+                )
+                break
+            except sqlite3.IntegrityError:
+                observed_dt += timedelta(microseconds=1)
+        # Recompute the winning observation (human-first, then recency) so the
+        # denormalized runs cache mirrors the precedence projection — not
+        # necessarily the row just inserted (a newer auto must not dethrone a
+        # human label).
+        winner = conn.execute(
+            f"SELECT labels, observed_at, rubric_json, composite_reward, has_posterior "
+            f"FROM label_observations WHERE session_id = ? "
+            f"ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
+            (session_id,),
+        ).fetchone()
         conn.execute(
             "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ?, composite_reward = ?, "
             "has_posterior = ? "
             "WHERE session_id = ?",
-            (labels_json, observed_at, rubric_json, composite_reward, has_posterior_int, session_id),
+            (
+                winner["labels"],
+                winner["observed_at"],
+                winner["rubric_json"],
+                winner["composite_reward"],
+                winner["has_posterior"],
+                session_id,
+            ),
         )
         conn.commit()
+        return True
     finally:
         conn.close()
 
@@ -405,10 +532,12 @@ def latest_label_observation(
     *,
     as_of: str | None = None,
 ) -> dict | None:
-    """Return the most recent label observation for ``session_id``.
+    """Return the highest-precedence (human-first, then most recent) label observation for ``session_id``.
 
-    When ``as_of`` is provided, the result is the most recent observation
-    whose ``observed_at <= as_of`` — enabling reproducible corpus pinning.
+    Human-sourced observations win over automated ones regardless of timing;
+    ties broken by recency. When ``as_of`` is provided, the result is the
+    highest-precedence observation whose ``observed_at <= as_of`` — enabling
+    reproducible corpus pinning.
 
     Args:
         archive_dir: Path to the archive root.
@@ -422,14 +551,14 @@ def latest_label_observation(
     try:
         if as_of is None:
             cursor = conn.execute(
-                "SELECT * FROM label_observations WHERE session_id = ? "
-                "ORDER BY observed_at DESC LIMIT 1",
+                f"SELECT * FROM label_observations WHERE session_id = ? "
+                f"ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
                 (session_id,),
             )
         else:
             cursor = conn.execute(
-                "SELECT * FROM label_observations WHERE session_id = ? AND observed_at <= ? "
-                "ORDER BY observed_at DESC LIMIT 1",
+                f"SELECT * FROM label_observations WHERE session_id = ? AND observed_at <= ? "
+                f"ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
                 (session_id, as_of),
             )
         row = cursor.fetchone()
@@ -444,10 +573,12 @@ def bulk_latest_label_observations(
     *,
     as_of: str | None = None,
 ) -> dict[str, dict]:
-    """Return the most recent label observation for each session in *session_ids*.
+    """Return the highest-precedence (human-first, then most recent) label observation for each session.
 
-    Fetches all matching rows in a single SQL query instead of one query per
-    session, eliminating the N+1 pattern when building a corpus.
+    Human-sourced observations win over automated ones regardless of timing;
+    ties broken by recency. Fetches all matching rows in a single SQL query
+    instead of one query per session, eliminating the N+1 pattern when building
+    a corpus.
 
     When ``as_of`` is provided, only observations whose ``observed_at <= as_of``
     are considered — the same temporal constraint applied by
@@ -476,7 +607,7 @@ def bulk_latest_label_observations(
                     SELECT *,
                            ROW_NUMBER() OVER (
                                PARTITION BY session_id
-                               ORDER BY observed_at DESC
+                               ORDER BY {_PRECEDENCE_ORDER}
                            ) AS _rn
                     FROM label_observations
                     WHERE session_id IN ({placeholders})
@@ -493,7 +624,7 @@ def bulk_latest_label_observations(
                     SELECT *,
                            ROW_NUMBER() OVER (
                                PARTITION BY session_id
-                               ORDER BY observed_at DESC
+                               ORDER BY {_PRECEDENCE_ORDER}
                            ) AS _rn
                     FROM label_observations
                     WHERE session_id IN ({placeholders})
@@ -667,10 +798,13 @@ def label_observation_history(archive_dir: Path, session_id: str) -> list[dict]:
 def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool:
     """Update outcome labels for a session, supporting prefix matching.
 
-    Backwards-compatible thin wrapper around :func:`append_label_observation`.
-    The session_id can be a prefix (e.g. first 8 chars of the UUID). If the
-    prefix matches exactly one row, that row is updated. If it matches
-    multiple rows, a ValueError is raised asking for a longer prefix.
+    Thin wrapper around :func:`append_label_observation` that records a
+    **human-sourced** observation (``source="human"``, ``labeler_version="human"``).
+    Human labels win over automated ones in every precedence projection and are
+    never deduped, so this is the authoritative override surface backing
+    ``daydream label``. The session_id can be a prefix (e.g. first 8 chars of
+    the UUID). If the prefix matches exactly one row, that row is updated. If it
+    matches multiple rows, a ValueError is raised asking for a longer prefix.
 
     Args:
         archive_dir: Path to the archive root.
@@ -707,8 +841,9 @@ def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool
         full_id,
         labels=labels,
         pr_state=None,
-        labeler_version="legacy",
+        labeler_version="human",
         evidence_sha=None,
+        source="human",
     )
     return True
 
@@ -736,16 +871,79 @@ def query_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> list[d
         conn.close()
 
 
+def pr_attached_label_coverage(
+    archive_dir: Path,
+    *,
+    as_of: str | None = None,
+) -> dict[str, float | int]:
+    """Return the fraction of PR-attached runs with a decisive automated label.
+
+    "PR-attached" means the run carries a ``pr_number`` (``pr_number IS NOT
+    NULL``). A run is "decisive" when its winning label — under the same
+    human-first, then-recency precedence projection used by
+    :func:`bulk_latest_label_observations` — is one of ``"accepted"``,
+    ``"contested"``, or ``"rejected"``. Runs whose winning label is
+    ``"unknown"`` (or that have no qualifying observation at all) are not
+    decisive.
+
+    This is a pure read; it never writes. An archive with zero PR-attached runs
+    yields ``coverage`` ``0.0`` rather than raising ``ZeroDivisionError``.
+
+    Args:
+        archive_dir: Path to the archive root.
+        as_of: Optional ISO 8601 cutoff; threaded through to
+            :func:`bulk_latest_label_observations` so only observations whose
+            ``observed_at <= as_of`` are considered (reproducible pinning).
+
+    Returns:
+        ``{"pr_attached": N, "decisive": M, "coverage": M / N,
+        "malformed_labels": K}`` with ``coverage`` as ``0.0`` when ``N == 0``.
+    """
+    rows = query_runs(archive_dir, where="pr_number IS NOT NULL")
+    pr_attached = len(rows)
+    if pr_attached == 0:
+        return {"pr_attached": 0, "decisive": 0, "coverage": 0.0, "malformed_labels": 0}
+
+    session_ids = [row["session_id"] for row in rows]
+    winners = bulk_latest_label_observations(archive_dir, session_ids, as_of=as_of)
+
+    decisive_labels = {"accepted", "contested", "rejected"}
+    decisive = 0
+    malformed = 0
+    for session_id in session_ids:
+        observation = winners.get(session_id)
+        if observation is None:
+            continue
+        try:
+            labels = json.loads(observation["labels"])
+        except (json.JSONDecodeError, TypeError):
+            malformed += 1
+            continue
+        if not isinstance(labels, list):
+            malformed += 1
+            continue
+        if labels and str(labels[0]) in decisive_labels:
+            decisive += 1
+
+    return {
+        "pr_attached": pr_attached,
+        "decisive": decisive,
+        "coverage": decisive / pr_attached,
+        "malformed_labels": malformed,
+    }
+
+
 def label_count_summary(
     archive_dir: Path,
     as_of: str | None = None,
 ) -> dict[str, int]:
     """Return label counts for all runs in a single aggregate query.
 
-    For each run in ``runs``, finds the most recent ``label_observations`` row
-    whose ``observed_at <= as_of`` (or the most recent overall when ``as_of``
-    is ``None``), extracts the first label, and tallies counts.  Runs with no
-    qualifying observation are counted under ``"unlabeled"``.
+    For each run in ``runs``, finds the highest-precedence (human-first, then
+    most recent) ``label_observations`` row whose ``observed_at <= as_of`` (or
+    overall when ``as_of`` is ``None``), extracts the first label, and tallies
+    counts.  Runs with no qualifying observation are counted under
+    ``"unlabeled"``.
 
     This replaces the N+1 pattern of calling
     :func:`latest_label_observation` once per run.
@@ -764,26 +962,34 @@ def label_count_summary(
     try:
         if as_of is None:
             best_sql = (
-                "SELECT session_id, MAX(observed_at) AS max_at "
-                "FROM label_observations "
-                "GROUP BY session_id"
+                f"SELECT session_id, labels FROM ("
+                f"  SELECT session_id, labels, "
+                f"         ROW_NUMBER() OVER ("
+                f"             PARTITION BY session_id "
+                f"             ORDER BY {_PRECEDENCE_ORDER}"
+                f"         ) AS _rn "
+                f"  FROM label_observations"
+                f") WHERE _rn = 1"
             )
             params: tuple = ()
         else:
             best_sql = (
-                "SELECT session_id, MAX(observed_at) AS max_at "
-                "FROM label_observations "
-                "WHERE observed_at <= ? "
-                "GROUP BY session_id"
+                f"SELECT session_id, labels FROM ("
+                f"  SELECT session_id, labels, "
+                f"         ROW_NUMBER() OVER ("
+                f"             PARTITION BY session_id "
+                f"             ORDER BY {_PRECEDENCE_ORDER}"
+                f"         ) AS _rn "
+                f"  FROM label_observations "
+                f"  WHERE observed_at <= ?"
+                f") WHERE _rn = 1"
             )
             params = (as_of,)
 
         cursor = conn.execute(
-            f"SELECT lo.labels "  # noqa: S608
+            f"SELECT best.labels "  # noqa: S608
             f"FROM runs r "
-            f"LEFT JOIN ({best_sql}) best ON r.session_id = best.session_id "
-            f"LEFT JOIN label_observations lo "
-            f"    ON lo.session_id = best.session_id AND lo.observed_at = best.max_at",
+            f"LEFT JOIN ({best_sql}) best ON r.session_id = best.session_id",
             params,
         )
         counts: dict[str, int] = {}

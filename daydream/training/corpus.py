@@ -381,7 +381,13 @@ def _build_record(
     # Rubric + posterior_source are additive optional fields. The schema models
     # ``rubric`` as ``type: object`` and ``posterior_source`` as an enum string
     # — neither nullable — so each key is written only when a value is present.
-    raw_rubric = manifest_row.get("rubric_json")
+    # Read rubric_json from the as_of-pinned annotation, NOT from the
+    # denormalized runs.rubric_json cache.  The cache is always the current
+    # human-first winner (no as_of constraint), so a human annotation appended
+    # after the corpus pin would retroactively change this field and break
+    # as_of reproducibility.  The label_observations row already carries
+    # rubric_json (it is self-describing per the silver-layer contract).
+    raw_rubric = annotation.get("rubric_json") if annotation is not None else None
     parsed_rubric: dict | None = None
     if isinstance(raw_rubric, str) and raw_rubric:
         try:

@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream.archive.index import append_label_observation, label_observation_history, latest_label_observation, upsert_run
+from daydream import git_ops
+from daydream.archive.index import (
+    append_label_observation,
+    label_observation_history,
+    latest_label_observation,
+    pr_attached_label_coverage,
+    upsert_run,
+)
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
 from daydream.training import harvest
+from daydream.training.backfill_cache import BackfillCache
 from daydream.training.harvest import (
     HarvestConfig,
     _resolve_repo_for_row,
@@ -389,12 +398,78 @@ async def test_harvest_writes_one_annotation(tmp_path, archive_dir, monkeypatch)
     assert obs["valid_at"] == "2026-02-01T00:00:00+00:00" and obs["composite_reward"] is not None
 
 
-async def test_re_harvest_appends_new_generation(tmp_path, archive_dir, monkeypatch):
+async def test_re_harvest_is_idempotent(tmp_path, archive_dir, monkeypatch):
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
     monkeypatch.setattr("daydream.training.harvest._gh_api", _fake_gh_merged("2026-02-01T00:00:00+00:00"))
     await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1"))
+    second = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
+    assert len(label_observation_history(archive_dir, "s1")) == 1  # deduped
+    assert second["skipped"] == 1 and second["annotated"] == 0
+
+
+async def test_re_harvest_appends_on_version_bump(tmp_path, archive_dir, monkeypatch):
+    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _fake_gh_merged("2026-02-01T00:00:00+00:00"))
+    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1"))
+    monkeypatch.setattr("daydream.training.harvest.reward.REWARD_VERSION", "9999.99.99-bump")
     await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
-    assert len(label_observation_history(archive_dir, "s1")) == 2  # append-only, re-runnable
+    assert len(label_observation_history(archive_dir, "s1")) == 2
+
+
+async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(tmp_path, archive_dir, monkeypatch):
+    # Two distinct sessions with distinct PR numbers (so the gh endpoint identifies
+    # the session), each with its own bronze run dir so the index has two rows.
+    for sid, pr_number in (("s1", 1), ("s2", 2)):
+        run_dir = _seed_deep_bronze(tmp_path / sid, verdict="consistent", grounding=1.0)
+        upsert_run(
+            archive_dir,
+            Manifest(
+                session_id=sid,
+                archived_at="2026-01-01T00:00:00Z",
+                run_flow="normal",
+                backend="claude",
+                repo_slug="org/repo",
+                pr_repo="org/repo",
+                pr_number=pr_number,
+                head_sha="abc",
+                base_branch="main",
+                grounding_rate=1.0,
+                changed_files=["app.py"],
+                archive_path=str(run_dir),
+            ),
+        )
+    # The first row (PR 1) fully succeeds; the second (PR 2) triggers an exhausted
+    # rate-limit on every gh call so the harvest loop must abort cleanly.
+    merged = _fake_gh_merged("2026-02-01T00:00:00+00:00")
+
+    def _gh(repo, endpoint, **kw):
+        if "/pulls/2" in endpoint or "/2/" in endpoint or endpoint.endswith("/2"):
+            raise git_ops.RateLimitError("exhausted")
+        return merged(repo, endpoint, **kw)
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh)
+    cache_dir = tmp_path / "c"
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir))
+    assert summary["aborted"] == 1
+    # The completed session is preserved for resume; the failed one is not:
+    done = BackfillCache(cache_dir=cache_dir, inner=_gh).completed_sessions()
+    assert "s1" in done and "s2" not in done
+
+
+def test_gh_api_backoff_retries_then_succeeds(monkeypatch):
+    slept = []
+    monkeypatch.setattr(harvest, "_rate_limit_sleep", lambda s: slept.append(s))
+    seq = [git_ops.RateLimitError("x"), git_ops.RateLimitError("x"), {"ok": True}]
+
+    def _inner(*a, **k):
+        v = seq.pop(0)
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    monkeypatch.setattr(harvest.git_ops, "gh_api", _inner)
+    assert harvest._gh_api("o/r", "endpoint") == {"ok": True}
+    assert len(slept) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -476,3 +551,98 @@ def test_resolve_repo_for_row_fetch_failure_returns_cached_path(tmp_path: Path, 
     row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
     result = _resolve_repo_for_row(row, clone_cache=cache)
     assert result == cached_repo
+
+
+# ---------------------------------------------------------------------------
+# pr_attached_label_coverage
+# ---------------------------------------------------------------------------
+
+
+def _make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
+    """Build a minimal indexed manifest, mirroring ``test_archive._make_manifest``.
+
+    ``pr_number``/``pr_repo`` are plain ``Manifest`` fields (see
+    ``daydream/archive/manifest.py``), so PR-attached rows are produced by
+    passing them through ``overrides``.
+    """
+    defaults: dict[str, Any] = {
+        "session_id": session_id,
+        "archived_at": "2026-04-29T00:00:00+00:00",
+        "status": "complete",
+        "run_flow": "normal",
+        "skill": "python",
+        "model": "opus",
+        "backend": "claude",
+        "archive_path": "/tmp/archive/runs/sess-0001",
+    }
+    defaults.update(overrides)
+    return Manifest(**defaults)
+
+
+def test_pr_coverage_helper_counts_decisive(tmp_path: Path):
+    for i, label in [(1, "accepted"), (2, "rejected"), (3, "unknown")]:
+        upsert_run(tmp_path, _make_manifest(session_id=f"p{i}", pr_number=i, pr_repo="o/r"))
+        append_label_observation(
+            tmp_path,
+            f"p{i}",
+            labels=[label],
+            pr_state=None,
+            labeler_version="auto",
+            evidence_sha=f"s{i}",
+            source="auto",
+        )
+    upsert_run(tmp_path, _make_manifest(session_id="local1"))  # no pr_number — excluded
+    cov = pr_attached_label_coverage(tmp_path)
+    assert cov["pr_attached"] == 3 and cov["decisive"] == 2  # accepted+rejected, not unknown
+
+
+async def test_harvest_meets_80pct_coverage_on_mixed_archive(tmp_path, archive_dir, monkeypatch):
+    # Seed 10 PR-attached runs with distinct pr_number 1..10, each with its own
+    # bronze run dir so the index carries ten rows. A fake _gh_api branches on the
+    # PR number embedded in the endpoint: PRs 1..8 report merged (decisive ->
+    # "accepted"); PRs 9..10 raise a plain GitError so build_annotation fails and
+    # the harvest's per-row isolation skips them WITHOUT aborting (a RateLimitError
+    # would abort the whole sweep — see test_harvest_aborts_cleanly_on_rate_limit).
+    # The two skipped rows leave no label observation, so they project to
+    # unlabeled/non-decisive, making 80% a real bar rather than trivially 100%.
+    for pr_number in range(1, 11):
+        sid = f"s{pr_number}"
+        run_dir = _seed_deep_bronze(tmp_path / sid, verdict="consistent", grounding=1.0)
+        upsert_run(
+            archive_dir,
+            Manifest(
+                session_id=sid,
+                archived_at="2026-01-01T00:00:00Z",
+                run_flow="normal",
+                backend="claude",
+                repo_slug="org/repo",
+                pr_repo="org/repo",
+                pr_number=pr_number,
+                head_sha="abc",
+                base_branch="main",
+                grounding_rate=1.0,
+                changed_files=["app.py"],
+                archive_path=str(run_dir),
+            ),
+        )
+
+    merged = _fake_gh_merged("2026-02-01T00:00:00+00:00")
+
+    def _gh(repo: str, endpoint: str, **kw: Any) -> Any:
+        match = re.search(r"/pulls/(\d+)", endpoint)
+        number = int(match.group(1)) if match else 0
+        if number >= 9:
+            # Non-rate-limit failure: per-row isolation skips this run (no
+            # annotation written) and the harvest loop CONTINUES rather than aborting.
+            raise GitError(f"unresolvable evidence for PR {number}")
+        return merged(repo, endpoint, **kw)
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh)
+
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["aborted"] == 0  # the GitError rows did NOT abort the sweep
+    assert summary["annotated"] == 8 and summary["errors"] == 2
+    cov = pr_attached_label_coverage(archive_dir)
+    assert cov["pr_attached"] == 10
+    assert cov["coverage"] >= 0.8

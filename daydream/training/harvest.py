@@ -55,11 +55,12 @@ Annotation builder:
 
 Orchestrator (:func:`run_harvest`):
 
-* **Append-only and re-runnable:** every indexed run is considered on every
-  pass; rows that already carry an annotation are *not* skipped — a re-harvest
-  appends a fresh generation so a ``REWARD_VERSION`` bump can re-score the whole
-  archive while older ``as_of`` pins still resolve their original generation.
-  Only the ``cache``/``dry_run`` paths suppress writes.
+* **Idempotent and re-runnable:** every indexed run is considered on every
+  pass, but the write layer dedups on ``(evidence_sha, reward_version)`` — a
+  re-harvest with unchanged evidence is a no-op (counted in ``skipped``). A
+  ``REWARD_VERSION`` bump changes the dedup key and so appends a fresh
+  generation, letting older ``as_of`` pins still resolve their original
+  generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
 * **Per-row error isolation:** an exception on one row counts in ``errors`` and
   does not derail subsequent rows. Configuration errors (missing
   ``archive_dir``) raise before the loop begins.
@@ -76,6 +77,7 @@ injection seams.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,7 +88,7 @@ from rich.console import Console
 
 from daydream import git_ops
 from daydream.archive.index import append_label_observation, query_runs, reviewer_set_penalty_prior
-from daydream.git_ops import GitError
+from daydream.git_ops import GitError, RateLimitError
 from daydream.training import reward
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.base_sha import materialize_base_sha
@@ -223,6 +225,19 @@ def assemble_scoring_inputs(run_dir: Path, row: dict[str, Any]) -> ScoringInputs
 # git / gh wrappers — module-level so they double as monkeypatch seams.
 # ---------------------------------------------------------------------------
 
+# Bounded rate-limit backoff for the gh seam. When GitHub returns a rate-limit
+# error, ``_gh_api`` sleeps and retries up to ``_MAX_RATE_LIMIT_RETRIES`` times,
+# honoring a parsed ``Retry-After`` (capped at ``_MAX_BACKOFF_SEC``) and falling
+# back to ``_DEFAULT_BACKOFF_SEC`` when none is supplied.
+_DEFAULT_BACKOFF_SEC = 30.0
+_MAX_BACKOFF_SEC = 120.0
+_MAX_RATE_LIMIT_RETRIES = 5
+
+
+def _rate_limit_sleep(seconds: float) -> None:
+    """Sleep ``seconds`` between rate-limit retries (seam for tests to stub)."""
+    time.sleep(seconds)
+
 
 def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
     """Proxy to :func:`daydream.git_ops.gh_api` keyed by ``repo`` slug.
@@ -234,12 +249,35 @@ def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
     because it authenticates against the GitHub host configured in ``gh auth``,
     not the local repo.
 
+    On a :class:`~daydream.git_ops.RateLimitError`, we sleep with bounded
+    backoff (``min(retry_after, _MAX_BACKOFF_SEC)``, falling back to
+    ``_DEFAULT_BACKOFF_SEC`` only when ``retry_after`` is absent, so an explicit
+    ``Retry-After: 0`` hint is preserved) and
+    retry up to ``_MAX_RATE_LIMIT_RETRIES`` times; if the limit is still
+    exhausted, the :class:`RateLimitError` propagates so the orchestrator can
+    abort cleanly while preserving its resume marker.
+
     Limitation: ``repo`` is accepted for API compatibility but is not used to
     resolve the GitHub host; all requests go to the single host configured in
     ``gh auth`` (typically ``github.com``). Mixing repos from different GitHub
     hosts in a single harvest run would silently use the wrong host.
     """
-    return git_ops.gh_api(Path("."), endpoint, **kwargs)
+    for attempt in range(_MAX_RATE_LIMIT_RETRIES):
+        try:
+            return git_ops.gh_api(Path("."), endpoint, **kwargs)
+        except RateLimitError as exc:
+            if attempt == _MAX_RATE_LIMIT_RETRIES - 1:
+                raise
+            retry_after = exc.retry_after if exc.retry_after is not None else _DEFAULT_BACKOFF_SEC
+            backoff = min(retry_after, _MAX_BACKOFF_SEC)
+            print_warning(
+                create_console(),
+                f"harvest: GitHub rate limit hit; retrying in {backoff:.0f}s "
+                f"(attempt {attempt + 1}/{_MAX_RATE_LIMIT_RETRIES - 1})",
+            )
+            _rate_limit_sleep(backoff)
+    # Unreachable: the loop either returns or raises on the final attempt.
+    raise RuntimeError("rate-limit retry loop exited without returning")  # pragma: no cover
 
 
 def _diff_name_only(repo: Path, base: str, head: str) -> list[str]:
@@ -654,7 +692,7 @@ def _materialize_base_sha_if_missing(
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator — append-only, re-runnable, per-row isolation
+# Orchestrator — idempotent (evidence-hash dedup), re-runnable, per-row isolation
 # ---------------------------------------------------------------------------
 
 
@@ -701,11 +739,12 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
     :func:`daydream.archive.index.append_label_observation` (which persists
     ``reviewer_logins`` and the ``has_posterior`` population discriminator).
 
-    **Append-only and re-runnable:** rows that already carry an annotation are
-    *not* skipped — a re-harvest appends a fresh generation, so a later
-    ``REWARD_VERSION`` bump can re-score the whole archive while older
-    ``as_of`` pins still resolve their original generation. Only the
-    ``cache``/``dry_run`` paths suppress writes.
+    **Idempotent and re-runnable:** every indexed run is considered, but the
+    write layer dedups on ``(evidence_sha, reward_version)`` — a re-harvest with
+    unchanged evidence is a no-op counted in ``skipped``. A later
+    ``REWARD_VERSION`` bump changes the dedup key and so appends a fresh
+    generation, letting older ``as_of`` pins still resolve their original
+    generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
 
     Per-row error isolation: an exception on one row counts in ``errors`` and
     does not derail subsequent rows. Configuration errors (missing
@@ -716,7 +755,8 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
 
     Returns:
         Summary dict with keys ``considered``, ``annotated``,
-        ``would_annotate``, ``skipped``, ``errors``.
+        ``would_annotate``, ``skipped``, ``errors``, and ``aborted`` (``1`` when
+        the sweep stopped early on an exhausted GitHub rate limit, else ``0``).
 
     Raises:
         FileNotFoundError: When ``config.archive_dir`` does not exist.
@@ -726,9 +766,10 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         msg = f"archive_dir does not exist: {config.archive_dir}"
         raise FileNotFoundError(msg)
 
-    # Build the queue: every indexed run, optionally prefix-filtered. Unlike
-    # the old labeler, we do NOT drop rows that already carry an annotation —
-    # harvest is append-only and re-runnable.
+    # Build the queue: every indexed run, optionally prefix-filtered. We do not
+    # pre-drop annotated rows — the write layer makes re-harvest idempotent by
+    # deduping on unchanged ``(evidence_sha, reward_version)`` (a version bump
+    # still appends a new generation).
     if config.session_filter:
         queue = query_runs(
             config.archive_dir,
@@ -757,6 +798,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         "would_annotate": 0,
         "skipped": 0,
         "errors": 0,
+        "aborted": 0,
     }
 
     console = create_console()
@@ -779,7 +821,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
             if config.dry_run:
                 summary["would_annotate"] += 1
             else:
-                append_label_observation(
+                appended = append_label_observation(
                     config.archive_dir,
                     row["session_id"],
                     labels=payload.labels,
@@ -794,9 +836,28 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                     reviewer_logins=payload.reviewer_logins,
                     has_posterior=payload.has_posterior,
                 )
-                summary["annotated"] += 1
+                if appended:
+                    summary["annotated"] += 1
+                else:
+                    # Deduped: unchanged evidence/reward-version is a no-op re-run.
+                    summary["skipped"] += 1
+                # Either way the row is "done" for resume — re-running must not re-fetch it.
                 if cache is not None:
                     cache.mark_session_done(row["session_id"])
+        except RateLimitError:
+            # Rate limit exhausted after bounded backoff: abort the whole sweep
+            # cleanly. The failed row is NOT marked done, so its resume marker is
+            # preserved and a later re-run picks up exactly where we stopped.
+            summary["aborted"] = 1
+            resume_marker = cache.progress_path if cache is not None else None
+            abort_msg = (
+                "harvest: GitHub rate limit exhausted; aborting cleanly. "
+                f"Resume from {resume_marker} by re-running with the same --cache-dir."
+                if resume_marker is not None
+                else "harvest: GitHub rate limit exhausted; aborting cleanly."
+            )
+            print_warning(console, abort_msg)
+            break
         except Exception as exc:  # noqa: BLE001 - per-row isolation by design
             summary["errors"] += 1
             print_warning(

@@ -805,3 +805,29 @@ def test_clone_default_no_filter_flag(tmp_path: Path, monkeypatch: pytest.Monkey
 
     git_ops.clone("https://example.com/repo.git", tmp_path / "out")
     assert "--filter=blob:none" not in captured["cmd"]
+
+
+def test_gh_api_raises_rate_limit_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "gh: API rate limit exceeded for user (HTTP 403)"
+
+    monkeypatch.setattr(git_ops, "_run_gh", lambda *a, **k: _Proc())
+    with pytest.raises(git_ops.RateLimitError):
+        git_ops.gh_api(tmp_path, "repos/o/r/pulls/1")
+
+
+def test_gh_api_non_ratelimit_raises_plain_git_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "gh: Not Found (HTTP 404)"
+
+    monkeypatch.setattr(git_ops, "_run_gh", lambda *a, **k: _Proc())
+    with pytest.raises(git_ops.GitError):
+        git_ops.gh_api(tmp_path, "repos/o/r/pulls/1")
+    # RateLimitError subclasses GitError; assert the 404 is NOT classified as one:
+    with pytest.raises(git_ops.GitError) as exc:
+        git_ops.gh_api(tmp_path, "repos/o/r/pulls/1")
+    assert not isinstance(exc.value, git_ops.RateLimitError)

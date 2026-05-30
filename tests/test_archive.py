@@ -17,6 +17,8 @@ from daydream.archive import _copy_bundle, archive_run, get_archive_dir
 from daydream.archive.git_context import GitContext, _parse_repo_slug, capture_git_context
 from daydream.archive.index import (
     append_label_observation,
+    bulk_latest_label_observations,
+    label_count_summary,
     label_observation_history,
     latest_label_observation,
     query_runs,
@@ -617,6 +619,119 @@ def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path):
     assert "composite_reward" in runs_cols
 
 
+_OLD_LABEL_OBSERVATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS label_observations (
+    session_id       TEXT NOT NULL,
+    observed_at      TEXT NOT NULL,
+    labels           TEXT NOT NULL,
+    pr_state         TEXT,
+    labeler_version  TEXT NOT NULL,
+    evidence_sha     TEXT,
+    rubric_json      TEXT,
+    valid_at         TEXT,
+    reward_version   TEXT,
+    reward_json      TEXT,
+    composite_reward REAL,
+    reviewer_logins  TEXT,
+    has_posterior    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_id, observed_at)
+)
+"""
+
+
+def _label_obs_columns(archive_dir: Path) -> set[str]:
+    conn = sqlite3.connect(str(archive_dir / "index.db"))
+    try:
+        return {r[1] for r in conn.execute("PRAGMA table_info(label_observations)")}
+    finally:
+        conn.close()
+
+
+def _seed_legacy_label_observation(archive_dir: Path, session_id: str) -> None:
+    """Insert a label_observations row using the OLD DDL that lacks ``source``."""
+    conn = sqlite3.connect(str(archive_dir / "index.db"))
+    try:
+        conn.execute("DROP TABLE IF EXISTS label_observations")
+        conn.execute(_OLD_LABEL_OBSERVATIONS_DDL)
+        conn.execute(
+            "INSERT INTO label_observations "
+            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, "2026-01-01T00:00:00+00:00", '["accepted"]', "merged", "v1", "sha1"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_label_observations_source_column_migrates(tmp_path: Path):
+    # Build the schema, then simulate a pre-source DB by replacing the table with
+    # the OLD DDL (no `source`) and seeding a legacy row.
+    upsert_run(tmp_path, _make_manifest(session_id="s-mig"))
+    _seed_legacy_label_observation(tmp_path, "s-mig")
+    assert "source" not in _label_obs_columns(tmp_path)  # precondition: legacy shape
+
+    # Open via the production connection path, which must ALTER-ADD `source`.
+    upsert_run(tmp_path, _make_manifest(session_id="s-mig2"))
+
+    cols = _label_obs_columns(tmp_path)
+    assert "source" in cols
+    rows = label_observation_history(tmp_path, "s-mig")
+    assert rows and rows[0]["source"] == "auto"  # existing row defaulted, non-destructive
+
+
+def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s-prec"))
+    append_label_observation(tmp_path, "s-prec", labels=["rejected"], pr_state="closed",
+                             labeler_version="auto-v1", evidence_sha="sha1", source="auto")
+    append_label_observation(tmp_path, "s-prec", labels=["accepted"], pr_state=None,
+                             labeler_version="human", evidence_sha=None, source="human")
+    # A NEWER auto observation must NOT dethrone the human label:
+    append_label_observation(tmp_path, "s-prec", labels=["rejected"], pr_state="closed",
+                             labeler_version="auto-v2", evidence_sha="sha2", source="auto")
+    assert latest_label_observation(tmp_path, "s-prec")["labels"] == '["accepted"]'
+    assert bulk_latest_label_observations(tmp_path, ["s-prec"])["s-prec"]["labels"] == '["accepted"]'
+    assert label_count_summary(tmp_path) == {"accepted": 1}
+
+
+def test_append_cache_reflects_winning_human_label(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s-cache"))
+    append_label_observation(tmp_path, "s-cache", labels=["rejected"], pr_state="closed",
+                             labeler_version="auto-v1", evidence_sha="sha1", source="auto")
+    append_label_observation(tmp_path, "s-cache", labels=["accepted"], pr_state=None,
+                             labeler_version="human", evidence_sha=None, source="human")
+    # A later auto append must leave the denormalized runs cache on the human label:
+    append_label_observation(tmp_path, "s-cache", labels=["rejected"], pr_state="closed",
+                             labeler_version="auto-v2", evidence_sha="sha2", source="auto")
+    row = query_runs(tmp_path, "session_id = ?", ("s-cache",))[0]
+    assert row["outcome_labels"] == '["accepted"]'
+
+
+def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s-dedup"))
+    first = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
+                                     labeler_version="rv1", evidence_sha="shaA", source="auto")
+    second = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
+                                      labeler_version="rv1", evidence_sha="shaA", source="auto")
+    assert first is True and second is False
+    assert len(label_observation_history(tmp_path, "s-dedup")) == 1
+    # A reward_version change DOES append:
+    third = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
+                                     labeler_version="rv2", evidence_sha="shaA",
+                                     reward_version="rv2", source="auto")
+    assert third is True
+    assert len(label_observation_history(tmp_path, "s-dedup")) == 2
+
+
+def test_human_append_never_dedups(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s-h"))
+    append_label_observation(tmp_path, "s-h", labels=["accepted"], pr_state=None,
+                             labeler_version="human", evidence_sha=None, source="human")
+    append_label_observation(tmp_path, "s-h", labels=["accepted"], pr_state=None,
+                             labeler_version="human", evidence_sha=None, source="human")
+    assert len(label_observation_history(tmp_path, "s-h")) == 2
+
+
 def test_append_observation_persists_valid_at_and_reward(tmp_path: Path):
     upsert_run(tmp_path, _make_manifest(session_id="s1"))
     append_label_observation(
@@ -734,6 +849,50 @@ def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
     assert json.loads(pinned["labels"]) == ["unknown"]
 
 
+def test_same_microsecond_collision_keeps_clean_iso_timestamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two appends frozen to the same microsecond must both persist with parseable
+    ISO 8601 observed_at values, and an exact-boundary as_of must include the
+    boundary row (the contract the ~uuid suffix used to break)."""
+    from datetime import datetime, timezone
+
+    frozen = datetime(2026, 5, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return frozen if tz is None else frozen.astimezone(tz)
+
+    monkeypatch.setattr("daydream.archive.index.datetime", _FrozenDatetime)
+
+    _seed_one_run(tmp_path, "sess-collide")
+    append_label_observation(
+        tmp_path, "sess-collide", labels=["unknown"], pr_state="open",
+        labeler_version="v1", evidence_sha="a",
+    )
+    append_label_observation(
+        tmp_path, "sess-collide", labels=["accepted"], pr_state="merged",
+        labeler_version="v1", evidence_sha="b",
+    )
+
+    hist = label_observation_history(tmp_path, "sess-collide")
+    assert len(hist) == 2
+    stamps = [r["observed_at"] for r in hist]
+    assert stamps[0] != stamps[1]
+    for r in hist:
+        datetime.fromisoformat(r["observed_at"])  # parseable, no ~uuid suffix
+        assert r["valid_at"] == r["observed_at"]
+
+    runs_row = query_runs(tmp_path, "session_id = ?", ("sess-collide",))[0]
+    datetime.fromisoformat(runs_row["labeled_at"])
+
+    boundary = stamps[0]
+    pinned = latest_label_observation(tmp_path, "sess-collide", as_of=boundary)
+    assert pinned is not None
+    assert json.loads(pinned["labels"]) == ["unknown"]  # boundary row included
+
+
 def test_append_label_observation_persists_reviewer_and_posterior_flag(tmp_path: Path) -> None:
     """reviewer_logins + has_posterior persist on the observation row and mirror onto runs."""
     _seed_one_run(tmp_path, "s1")
@@ -808,7 +967,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     conn.close()
     assert "has_posterior" in runs_cols
     assert {"reviewer_logins", "has_posterior"} <= lo_cols
-    assert user_version == SCHEMA_VERSION == 4
+    assert user_version == SCHEMA_VERSION == 5
 
     obs = latest_label_observation(tmp_path, "mig-1")
     assert obs is not None

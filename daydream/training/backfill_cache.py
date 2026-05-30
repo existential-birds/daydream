@@ -106,6 +106,11 @@ class BackfillCache:
         self.cache_dir = cache_dir
         self.inner = inner
 
+    @property
+    def progress_path(self) -> Path:
+        """Absolute path of the JSONL resume log (``<cache_dir>/progress.jsonl``)."""
+        return self.cache_dir / "progress.jsonl"
+
     def __call__(self, repo: str, endpoint: str, **kwargs: Any) -> Any:
         """Return the cached response for ``(repo, endpoint, **kwargs)``.
 
@@ -145,8 +150,7 @@ class BackfillCache:
             {"session_id": session_id, "completed_at": _now_iso_utc()},
             sort_keys=True,
         )
-        progress = self.cache_dir / "progress.jsonl"
-        with progress.open("a", encoding="utf-8") as f:
+        with self.progress_path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
     def completed_sessions(self) -> set[str]:
@@ -156,11 +160,10 @@ class BackfillCache:
         are skipped (the log is append-only and a partial last-line
         write is the only realistic failure mode).
         """
-        progress = self.cache_dir / "progress.jsonl"
-        if not progress.exists():
+        if not self.progress_path.exists():
             return set()
         out: set[str] = set()
-        with progress.open("r", encoding="utf-8") as f:
+        with self.progress_path.open("r", encoding="utf-8") as f:
             for raw in f:
                 line = raw.strip()
                 if not line:
