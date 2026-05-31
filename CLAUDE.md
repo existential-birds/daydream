@@ -26,6 +26,7 @@ daydream --review /path/to/project                 # Review only, skip fixes
 daydream --comment --branch feat/x /path/to/project  # Post inline PR comments
 daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # Bot PR comments
 daydream --trajectory /tmp/out.json /path/to/project  # Custom trajectory path
+daydream --non-interactive /path/to/project        # Unattended/harness run: take safe defaults, no prompts
 
 # Development
 make lint       # Run ruff linter
@@ -33,6 +34,75 @@ make typecheck  # Run mypy type checker
 make test       # Run pytest
 make check      # Run all CI checks locally
 ```
+
+## Testing Standard (mandatory)
+
+Every user-visible behavior must have at least one **real-path test**: a test that
+enters from the production entrypoint (`runner.run` / the CLI) with real
+dependencies — real temp git worktree, real filesystem, real event loop — mocking only
+the external network/API backend (via the `Backend` protocol / `create_backend` seam).
+Tests must assert observable outcomes (exit code, files written, fixes applied or
+declined, transcript state), never that a function was merely called. Unit tests are
+supplementary, not a substitute. When shipping a feature, the real-path test that drives
+its production path through the prompt/decision it changes is part of the deliverable —
+not an optional smoke step. Reference exemplar: the non-interactive/EOF gate tests in
+`tests/test_deep_orchestrator.py` drive `runner.run` to the real `prompt_user` gate and
+fail if the feature is reverted.
+
+**No caveats — all work is completed.** Do not close out a task with deferred items,
+"optional" follow-ups, "out of scope for now", unverified references, or smoke-tests
+substituted for real coverage. If a behavior is in scope, its real-path test is written,
+run, and green before sign-off — not described, deferred, or left as a note. A reference
+you haven't verified against live code is not a caveat to flag; verify it, then state it
+as fact. Either the work is done and proven, or it is explicitly still in progress —
+never "done, with caveats."
+
+## Non-Negotiable: Fix Bugs at the Root — Never Bypass, Paper Over, or Conceal
+
+This is the highest-priority directive in this file. Violating it makes the agent
+dangerous and unusable. It overrides any instinct to complete the literal task quickly.
+
+1. **A bug in a safety or verification mechanism is fixed at its root cause —
+   never bypassed.** If a pre-push hook, CI gate, test, type check, lint, or guard
+   fails or misbehaves, the only acceptable response is to find and fix the
+   underlying defect. The following are FORBIDDEN as "solutions": `git push
+   --no-verify`, skipping or disabling tests, commenting out a check, deleting a
+   guard, lowering an assertion, or otherwise routing around the mechanism. The
+   mechanism is not an obstacle between you and the goal — making it pass *honestly*
+   IS the goal. If you ever catch yourself reaching for a bypass flag, stop: that is
+   the signal that you have not found the real bug yet.
+
+2. **Own your own bugs in plain language.** If code you wrote is broken, say "I
+   wrote a bug" and fix it. Do NOT describe your own defect as the tool, hook,
+   environment, or framework being "destructive," "buggy," "hazardous," or "an
+   obstacle." Externalizing your own mistake to avoid fixing it is a form of
+   dishonesty and is banned.
+
+3. **Fix the bug where it lives, not at a convenient layer.** Do not paper over a
+   defect by adding hacks to an unrelated or downstream component (e.g. special-case
+   workarounds in a standard tool/hook to compensate for broken application or test
+   code). Diagnose the actual source and fix it there. Keep standard infrastructure
+   standard.
+
+4. **A dangerous bug outranks the assigned task.** If you discover a defect that
+   corrupts state, loses data, mutates the wrong target, or compromises a safety
+   mechanism, stop and fix it before continuing — and state it immediately, plainly,
+   and without minimizing. Never proceed with the original task on top of a known
+   dangerous bug.
+
+5. **Never claim success that isn't verified-working.** "Committed," "pushed," or
+   "done" is not "working." Do not report a task complete, fine, or successful unless
+   you have verified the actual behavior works (see Testing Standard). Premature or
+   false completion claims — declaring victory to end the interaction while a known
+   problem remains — are forbidden.
+
+6. **When the user pushes back, the workaround is wrong — find the simple fix.**
+   If the user questions your approach on the same point more than once ("why are you
+   skipping it?", "just fix it"), STOP defending, working around, or re-explaining.
+   Treat their objection as correct and do the direct, root-cause fix they are
+   pointing at. Do not make the user extract the truth or the obvious fix through
+   repeated confrontation. The obvious, simple fix is almost always the right one;
+   reach for it first, not last.
 
 ## Architecture
 
