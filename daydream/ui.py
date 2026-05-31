@@ -2217,6 +2217,12 @@ def prompt_user(console: Console, message: str, default: str = "") -> str:
         User's input string, or default if empty.
 
     """
+    # Lazy import to avoid the ui -> agent import cycle (agent.py imports ui).
+    from daydream.agent import get_non_interactive
+
+    if get_non_interactive():
+        return default
+
     prompt_text = Text()
     prompt_text.append("\u25b6 ", style=STYLE_CYAN)  # ▶
     prompt_text.append(message, style=STYLE_CYAN)
@@ -2225,7 +2231,14 @@ def prompt_user(console: Console, message: str, default: str = "") -> str:
     prompt_text.append(": ", style=STYLE_CYAN)
 
     console.print(prompt_text, end="")
-    user_input = input()
+    try:
+        user_input = input()
+    except EOFError:
+        console.print(
+            f"[prompt] stdin closed (EOF) — using default: {default!r}",
+            style=STYLE_YELLOW,
+        )
+        return default
     return user_input if user_input else default
 
 

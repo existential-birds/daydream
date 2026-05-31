@@ -138,7 +138,10 @@ daydream --loop --max-iterations 3 /path/to/project
 daydream --trajectory /tmp/run.json /path/to/project
 daydream --ignore-path vendor /path/to/project
 daydream --worktree /path/to/project          # force ephemeral worktree
+daydream --non-interactive /path/to/project   # run unattended; take every prompt's safe default
 ```
+
+`--non-interactive` runs without prompting, taking each prompt's safe default: it confirms intent without re-looping, and exits the test/heal loop on failure rather than launching an unbounded fix loop — on failure it writes a `handoff.md` summary, prints it inline, and returns a non-zero exit code; on success it auto-commits and returns exit code 0. In deep mode it declines the fix gate (exits after producing the report). In shallow mode there is no fix gate to decline; the flag has no additional effect on that flow. The flag is also accepted by the `daydream feedback <pr#>` subcommand so harness invocations are uniform across flows; the feedback flow is already unattended (it commits and pushes without prompting), so the flag is a no-op safeguard there. All prompts are also EOF-safe, so piping `</dev/null` no longer crashes on closed stdin even without the flag.
 
 Per-phase backend and model overrides: `--review-backend`, `--fix-backend`, `--test-backend`, `--review-model`, `--parse-model`, `--fix-model`, `--test-model`, `--exploration-model`. Run `daydream --help` for the full option list and per-backend model defaults.
 

@@ -216,6 +216,18 @@ def test_parse_args_shallow_modifier(monkeypatch):
     assert config.shallow is True
 
 
+def test_parse_args_non_interactive_sets_config(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--non-interactive", "/some/target"])
+    config = _parse_args()
+    assert config.non_interactive is True
+
+
+def test_parse_args_non_interactive_defaults_false(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "/some/target"])
+    config = _parse_args()
+    assert config.non_interactive is False
+
+
 def test_parse_args_copy_repeatable(monkeypatch):
     monkeypatch.setattr(sys, "argv", [
         "daydream", "--copy", "a.env", "--copy", "b.env", "/tmp/repo",

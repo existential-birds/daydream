@@ -1693,3 +1693,149 @@ async def test_start_at_fix_recovers_merged_items(
         "phase_fix received an item that did not originate from the deep-dir "
         f"merged-items.json; got {fixed!r}"
     )
+
+
+# --- Real-path integration: non-interactive / EOF-safe apply-fixes gate -----
+#
+# Both tests drive the REAL deep pipeline through ``runner.run`` -> ``run_deep``
+# to the only deep-mode prompt -- ``prompt_user(console, "Apply fixes now? ...",
+# "n")`` at orchestrator.py:657. The real ``ui.prompt_user`` is left in place
+# (NOT mocked) so the production gate path is genuinely exercised: in
+# non-interactive mode it must short-circuit on ``get_non_interactive()`` and
+# return the safe default; in interactive mode an EOF on stdin must be caught
+# and resolved to the same safe default. Only the backend (and the
+# non-idempotent PR post) are mocked; the noise-only UI helpers are silenced.
+#
+# Observable assertions (CLAUDE.md S3.1): exit code 0, the "report written ...
+# exiting" success path was taken (return BEFORE phase_fix), and phase_fix was
+# never invoked (fixes-not-applied). A spy on phase_fix proves the fix loop
+# never ran; ``builtins.input`` is rigged to fail the test if stdin is touched.
+
+
+def _silence_gate_noise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence noise-only UI in the deep path WITHOUT mocking prompt_user.
+
+    Unlike ``_silence``, this deliberately leaves the real ``prompt_user`` in
+    both the orchestrator and phases so the apply-fixes gate runs the genuine
+    production code path under test.
+    """
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+
+
+async def test_apply_fixes_gate_non_interactive_takes_safe_default(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real-path: non-interactive deep run declines fixes and exits 0 without
+    reading stdin.
+
+    Drives ``runner.run`` -> ``run_deep`` (deep is the default dispatch) with a
+    mock backend to the real ``prompt_user`` apply-fixes gate. With
+    ``set_non_interactive(True)`` the gate must short-circuit to its "n" default
+    -- never touching stdin -- so the run declines fixes and returns 0.
+    """
+    from daydream.agent import get_non_interactive, reset_state, set_non_interactive
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import RunConfig, run
+
+    _silence_gate_noise(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    # The PR post runs before the gate; stub the non-idempotent GitHub write.
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    # Spy on phase_fix to prove fixes are NOT applied when the gate declines.
+    fix_calls: list[Any] = []
+
+    async def _spy_fix(backend, work, item, idx, total):  # noqa: ARG001
+        fix_calls.append(item)
+        return None
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _spy_fix)
+
+    # Any stdin read at all is a bug in non-interactive mode -- fail loudly.
+    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
+
+    monkeypatch.setattr("builtins.input", _forbidden_input)
+
+    set_non_interactive(True)
+    try:
+        assert get_non_interactive() is True
+        config = RunConfig(target=str(multi_stack_target), cleanup=False, non_interactive=True)
+        exit_code = await run(config)
+    finally:
+        reset_state()
+
+    # Observable outcome 1: the run declined and exited cleanly.
+    assert exit_code == 0
+    # Observable outcome 2: NO fix phase ran (fixes-not-applied).
+    assert fix_calls == [], f"phase_fix ran despite the gate declining: {fix_calls!r}"
+    # Observable outcome 3: the gate's "report written ... exiting" path was
+    # taken -- the merged report exists on disk (written before the return 0).
+    assert (multi_stack_target / REVIEW_OUTPUT_FILE).is_file(), (
+        "merged report missing -- the apply-fixes gate's success/exit path did not run"
+    )
+
+
+async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real-path: an EOF on stdin at the apply-fixes gate is caught and resolved
+    to the safe default -- the deep run declines fixes and returns 0, no crash.
+
+    This is the interactive path (``non_interactive`` False): the production
+    ``prompt_user`` reaches ``input()``, which raises ``EOFError`` (closed
+    stdin). The gate must catch it, return the "n" default, and exit 0 -- proving
+    EOF-safety end-to-end through the real orchestrator, not just the unit
+    ``prompt_user``.
+    """
+    from daydream.agent import get_non_interactive, reset_state
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import RunConfig, run
+
+    _silence_gate_noise(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    fix_calls: list[Any] = []
+
+    async def _spy_fix(backend, work, item, idx, total):  # noqa: ARG001
+        fix_calls.append(item)
+        return None
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _spy_fix)
+
+    # Every stdin read raises EOFError (simulates closed / non-interactive stdin
+    # without setting the non_interactive flag).
+    def _eof_input(*_a: Any, **_kw: Any) -> str:
+        raise EOFError("simulated closed stdin")
+
+    monkeypatch.setattr("builtins.input", _eof_input)
+
+    # Sanity: this exercises the interactive branch, NOT the flag short-circuit.
+    reset_state()
+    try:
+        assert get_non_interactive() is False
+        config = RunConfig(target=str(multi_stack_target), cleanup=False, non_interactive=False)
+        # If the gate did not catch EOFError, this await would raise.
+        exit_code = await run(config)
+    finally:
+        reset_state()
+
+    # Observable outcome 1: declined cleanly, no EOFError propagated.
+    assert exit_code == 0
+    # Observable outcome 2: NO fix phase ran (safe default = decline).
+    assert fix_calls == [], f"phase_fix ran despite EOF at the gate: {fix_calls!r}"
+    # Observable outcome 3: the merged report was written before the exit.
+    assert (multi_stack_target / REVIEW_OUTPUT_FILE).is_file(), (
+        "merged report missing -- the apply-fixes gate's success/exit path did not run"
+    )

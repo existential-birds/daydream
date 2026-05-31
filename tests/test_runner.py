@@ -527,3 +527,198 @@ async def test_shallow_items_canonicalized_and_severity_ordered(monkeypatch, tmp
     exit_code = await runner._run_loop_shallow(work, config)
     assert exit_code == 0
     assert order == ["high", "low"], f"phase_fix did not receive severity-ordered items; got {order!r}"
+
+
+# --- Task 4: non_interactive threading -------------------------------------
+
+
+def test_runconfig_defaults_non_interactive_false():
+    assert RunConfig().non_interactive is False
+
+
+@pytest.mark.asyncio
+async def test_run_threads_non_interactive_into_agent_state(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    """A run started with ``config.non_interactive=True`` must flip the agent
+    singleton flag before any phase that can prompt executes.
+    """
+    from daydream.agent import get_non_interactive, reset_state
+
+    reset_state()
+    try:
+
+        async def stub(work, config):
+            return 0
+
+        # Patch the deep-loop dispatch so run() reaches the run-start setup
+        # (where set_non_interactive is called) without executing real phases.
+        monkeypatch.setattr("daydream.runner._run_loop_deep", stub)
+        config = RunConfig(target=str(tmp_path), output_mode="loop", non_interactive=True)
+
+        exit_code = await runner.run(config)
+        assert exit_code == 0
+        assert get_non_interactive() is True
+    finally:
+        reset_state()
+
+
+@pytest.mark.asyncio
+async def test_run_threads_non_interactive_shallow_path(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    """non_interactive=True is propagated to the agent singleton via the
+    shallow-loop dispatch path (``--shallow`` flag).
+    """
+    from daydream.agent import get_non_interactive, reset_state
+
+    reset_state()
+    try:
+
+        async def stub(work, config):
+            return 0
+
+        monkeypatch.setattr("daydream.runner._run_loop_shallow", stub)
+        config = RunConfig(
+            target=str(tmp_path), output_mode="loop", shallow=True, non_interactive=True
+        )
+
+        exit_code = await runner.run(config)
+        assert exit_code == 0
+        assert get_non_interactive() is True
+    finally:
+        reset_state()
+
+
+@pytest.mark.asyncio
+async def test_run_threads_non_interactive_pr_feedback_path(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    """non_interactive=True is propagated to the agent singleton via the
+    PR-feedback dispatch path (``bot`` set).
+    """
+    from daydream.agent import get_non_interactive, reset_state
+
+    reset_state()
+    try:
+
+        async def stub(work, config):
+            return 0
+
+        monkeypatch.setattr("daydream.runner._run_pr_feedback", stub)
+        config = RunConfig(
+            target=str(tmp_path), pr_number=7, bot="botname", non_interactive=True
+        )
+
+        exit_code = await runner.run(config)
+        assert exit_code == 0
+        assert get_non_interactive() is True
+    finally:
+        reset_state()
+
+
+@pytest.mark.asyncio
+async def test_run_threads_non_interactive_loop_dispatch_path(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+):
+    """non_interactive=True is propagated regardless of whether the loop
+    dispatch resolves to deep (default) or shallow — verifies the flag is
+    set in ``run()`` before ``_dispatch()`` branches.
+    """
+    from daydream.agent import get_non_interactive, reset_state
+
+    reset_state()
+    try:
+
+        async def stub(work, config):
+            return 0
+
+        # Intercept at the comment-mode branch to confirm set_non_interactive
+        # fires even on the comment output_mode path.
+        monkeypatch.setattr("daydream.runner._run_comment", stub)
+        config = RunConfig(
+            target=str(tmp_path), output_mode="comment", non_interactive=True
+        )
+
+        exit_code = await runner.run(config)
+        assert exit_code == 0
+        assert get_non_interactive() is True
+    finally:
+        reset_state()
+
+
+# --- non_interactive commit branch in _run_loop_shallow --------------------
+
+
+@pytest.mark.asyncio
+async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch, tmp_path):
+    """When non_interactive=True and tests pass, _run_loop_shallow must call
+    phase_commit_push_auto — not the interactive phase_commit_push.
+
+    This is a real-path test: it drives _run_loop_shallow directly and asserts
+    on which commit function was actually invoked (observable side effect),
+    rather than asserting on dispatch bookkeeping.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
+
+    work = _fake_work(tmp_path)
+
+    class _StubBackend:
+        model = "stub-model"
+
+    monkeypatch.setattr(
+        "daydream.runner._resolve_backend",
+        lambda _config, _phase, _cache=None: _StubBackend(),
+    )
+
+    async def _stub_phase_parse_feedback(_backend, _work):
+        return [{"id": 1, "description": "X", "file": "foo.py", "line": 1}]
+
+    async def _stub_phase_fix(*_args, **_kwargs):
+        return None
+
+    async def _stub_phase_test_and_heal(*_args, **_kwargs):
+        return (True, 0)
+
+    auto_calls: list[bool] = []
+    interactive_calls: list[bool] = []
+
+    async def _spy_phase_commit_push_auto(*_args, **_kwargs):
+        auto_calls.append(True)
+
+    async def _spy_phase_commit_push(*_args, **_kwargs):
+        interactive_calls.append(True)
+
+    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.runner.phase_fix", _stub_phase_fix)
+    monkeypatch.setattr("daydream.runner.phase_test_and_heal", _stub_phase_test_and_heal)
+    monkeypatch.setattr("daydream.runner.phase_commit_push_auto", _spy_phase_commit_push_auto)
+    monkeypatch.setattr("daydream.runner.phase_commit_push", _spy_phase_commit_push)
+
+    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
+
+    config = RunConfig(
+        target=str(tmp_path),
+        start_at="fix",
+        cleanup=False,
+        loop=False,
+        shallow=True,
+        non_interactive=True,
+    )
+
+    exit_code = await runner._run_loop_shallow(work, config)
+    assert exit_code == 0
+    assert auto_calls == [True], (
+        "phase_commit_push_auto was not called when non_interactive=True"
+    )
+    assert interactive_calls == [], (
+        "phase_commit_push was called despite non_interactive=True"
+    )
