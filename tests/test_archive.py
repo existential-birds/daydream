@@ -41,6 +41,7 @@ class _MockRecorder:
     explicit_path: bool = False
     pr_number: int | None = None
     pr_repo: str | None = None
+    _wall_clock_seconds: float | None = None
     _final_totals: dict = field(
         default_factory=lambda: {
             "prompt": 100,
@@ -50,6 +51,9 @@ class _MockRecorder:
             "any_cost_seen": True,
         },
     )
+
+    def compute_wall_clock_seconds(self) -> float | None:
+        return self._wall_clock_seconds
 
 
 @dataclass
@@ -297,6 +301,44 @@ def test_build_manifest_without_evaluation(tmp_path: Path):
     assert m.grounding_rate is None
     assert m.coverage_ratio is None
     assert m.cost_per_finding_usd is None
+
+
+def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path):
+    """Wall-clock is derived from step timestamps even when --eval did not run."""
+    recorder = _MockRecorder(_wall_clock_seconds=12.3)
+    config = _MockConfig()
+    git_ctx = GitContext()
+
+    m = build_manifest(
+        recorder=recorder,
+        config=config,
+        git_ctx=git_ctx,
+        status="complete",
+        archive_path=tmp_path,
+    )
+
+    # Populated from the recorder despite no evaluation; eval-only metrics stay None.
+    assert m.wall_clock_seconds == 12.3
+    assert m.total_findings is None
+
+
+def test_build_manifest_eval_wall_clock_overrides_recorder(tmp_path: Path):
+    """When --eval runs, its fork-inclusive timing takes precedence over the recorder span."""
+    recorder = _MockRecorder(_wall_clock_seconds=12.3)
+    config = _MockConfig()
+    git_ctx = GitContext()
+    evaluation = {"timing": {"total_wall_clock_seconds": 42.5}}
+
+    m = build_manifest(
+        recorder=recorder,
+        config=config,
+        git_ctx=git_ctx,
+        status="complete",
+        archive_path=tmp_path,
+        evaluation=evaluation,
+    )
+
+    assert m.wall_clock_seconds == 42.5
 
 
 # ---------------------------------------------------------------------------

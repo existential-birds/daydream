@@ -167,6 +167,55 @@ async def test_full_archive_round_trip(tmp_path: Path, archive_dir: Path) -> Non
         conn.close()
 
 
+async def test_archive_populates_wall_clock_without_eval(tmp_path: Path, archive_dir: Path) -> None:
+    """Real-path: manifest.json carries wall_clock_seconds even when --eval did not run."""
+    from daydream.runner import RunConfig, _make_archive_callback
+
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    (target_dir / ".daydream").mkdir()
+    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n")
+
+    config = RunConfig(
+        target=str(target_dir),
+        skill="python",
+        backend="claude",
+        archive=True,
+        run_eval=False,  # the path that was previously leaving wall_clock null
+    )
+    callback = _make_archive_callback(config, target_dir)
+    assert callback is not None
+
+    recorder = TrajectoryRecorder(
+        path=target_dir / ".daydream" / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=target_dir,
+        agent_model_name="opus",
+        session_id="test",
+        on_write=callback,
+    )
+
+    async with recorder:
+        # Two steps spaced 8.5s apart so the derived span is deterministic.
+        for ts in ("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"):
+            recorder.steps.append(
+                Step(
+                    step_id=recorder._next_step_id(),
+                    timestamp=ts,
+                    source="agent",
+                    message="step",
+                    extra={
+                        "daydream_phase": DaydreamPhase.REVIEW.value,
+                        "daydream_run_flow": DaydreamRunFlow.NORMAL.value,
+                    },
+                )
+            )
+
+    manifest_path = archive_dir / "runs" / recorder.session_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["metrics"]["wall_clock_seconds"] == 8.5
+
+
 # ---------------------------------------------------------------------------
 # 4. on_write failure does not raise
 # ---------------------------------------------------------------------------

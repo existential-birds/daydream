@@ -858,6 +858,32 @@ class TrajectoryRecorder:
             self._final_totals["cost"] += cost_usd
             self._final_totals["any_cost_seen"] = True
 
+    def compute_wall_clock_seconds(self) -> float | None:
+        """Total wall-clock seconds spanned by recorded step timestamps.
+
+        Derived from the earliest and latest ``Step.timestamp`` across the
+        recorder's steps. Returns ``None`` when fewer than two timestamped
+        steps exist (no measurable span).
+
+        Independent of ``--eval``: this mirrors the timestamp-span derivation
+        in :func:`daydream.eval.analyzer.analyze_timing`, but reads in-memory
+        steps so every archived run captures duration without the deterministic
+        evaluation pass. Fork-only steps live in sibling recorders and are not
+        included here; the main flow's span bounds them because forks are
+        dispatched and merged within it.
+
+        Returns:
+            Rounded duration in seconds, or ``None`` when unmeasurable.
+        """
+        timestamps = [
+            datetime.fromisoformat(s.timestamp.replace("Z", "+00:00"))
+            for s in self.steps
+            if s.timestamp
+        ]
+        if len(timestamps) < 2:
+            return None
+        return round((max(timestamps) - min(timestamps)).total_seconds(), 1)
+
     def _sibling_path_for(self, descriptor: str) -> Path:
         """Return the sibling trajectory file path for *descriptor*.
 
