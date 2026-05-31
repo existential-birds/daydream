@@ -722,3 +722,111 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch,
     assert interactive_calls == [], (
         "phase_commit_push was called despite non_interactive=True"
     )
+
+
+@pytest.mark.asyncio
+async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkeypatch, tmp_path):
+    """Real-path: a non-interactive shallow run whose tests FAIL writes a handoff
+    and exits 1 without launching the fix agent or reading stdin.
+
+    Drives ``_run_loop_shallow`` (the ``--shallow`` dispatch target) with the
+    REAL ``phase_test_and_heal`` -- not stubbed -- against a failing test run.
+    With the agent singleton's ``non_interactive`` flag set, ``phase_test_and_heal``
+    must take choice-"4" semantics: skip the menu, skip stdin, run the read-only
+    failure-summarizer, write ``handoff.md`` to the live run directory, and
+    return ``(False, 0)``. If the non-interactive guard in ``phase_test_and_heal``
+    were reverted, the menu's default "2" would launch the mutating heal fix agent
+    -- whose ``_build_fix_prompt`` text ("Analyze the failures and fix them",
+    asserted absent) -- and ``prompt_user`` would read stdin (rigged to fail).
+    """
+    from daydream.agent import reset_state, set_non_interactive
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from tests.test_phases import _SummarizerBackend
+
+    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
+
+    work = _fake_work(tmp_path)
+
+    # The test phase's backend yields a failing test run, then the read-only
+    # summarizer's handoff body -- exactly the choice-"4" path the guard takes.
+    test_backend = _SummarizerBackend([
+        "fail",
+        ("handoff", "# Handoff\n\nnon-interactive failure context"),
+    ])
+
+    class _StubBackend:
+        model = "stub-model"
+
+    def _resolve(_config, phase, _cache=None):
+        return test_backend if phase == "test" else _StubBackend()
+
+    monkeypatch.setattr("daydream.runner._resolve_backend", _resolve)
+
+    async def _stub_phase_parse_feedback(_backend, _work):
+        return [{"id": 1, "description": "X", "file": "foo.py", "line": 1}]
+
+    async def _stub_phase_fix(*_args, **_kwargs):
+        return None
+
+    commit_calls: list[bool] = []
+
+    async def _spy_phase_commit_push_auto(*_args, **_kwargs):
+        commit_calls.append(True)
+
+    async def _spy_phase_commit_push(*_args, **_kwargs):
+        commit_calls.append(True)
+
+    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.runner.phase_fix", _stub_phase_fix)
+    monkeypatch.setattr("daydream.runner.phase_commit_push_auto", _spy_phase_commit_push_auto)
+    monkeypatch.setattr("daydream.runner.phase_commit_push", _spy_phase_commit_push)
+
+    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
+
+    monkeypatch.setattr("builtins.input", _forbidden_input)
+
+    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "daydream.phases.console",
+        type("C", (), {"print": lambda *a, **kw: None})(),
+    )
+
+    config = RunConfig(
+        target=str(tmp_path),
+        start_at="fix",
+        cleanup=False,
+        loop=False,
+        shallow=True,
+        non_interactive=True,
+    )
+
+    reset_state()
+    set_non_interactive(True)
+    try:
+        exit_code = await runner._run_loop_shallow(work, config)
+    finally:
+        reset_state()
+
+    assert exit_code == 1
+
+    handoffs = list(tmp_path.glob(".daydream/runs/*/handoff.md"))
+    assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
+    assert handoffs[0].read_text(encoding="utf-8") == "# Handoff\n\nnon-interactive failure context"
+
+    assert commit_calls == [], "a commit ran despite tests failing"
+
+    # Exactly two test-backend calls -- the failing test run and the read-only
+    # summarizer. The mutating heal fix agent (which carries _build_fix_prompt's
+    # "Analyze the failures and fix them") was never launched.
+    assert len(test_backend.captured_prompts) == 2
+    assert "read-only failure-summarizer" in test_backend.captured_prompts[1]
+    assert all(
+        "Analyze the failures and fix them" not in p for p in test_backend.captured_prompts
+    ), test_backend.captured_prompts

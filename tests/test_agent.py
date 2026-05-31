@@ -13,8 +13,11 @@ def test_non_interactive_defaults_false():
 
 
 def test_set_and_get_non_interactive():
-    set_non_interactive(True)
-    assert get_non_interactive() is True
+    try:
+        set_non_interactive(True)
+        assert get_non_interactive() is True
+    finally:
+        reset_state()
 
 
 def test_reset_state_clears_non_interactive():

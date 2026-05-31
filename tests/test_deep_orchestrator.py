@@ -1732,10 +1732,11 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
 
     Drives ``runner.run`` -> ``run_deep`` (deep is the default dispatch) with a
     mock backend to the real ``prompt_user`` apply-fixes gate. With
-    ``set_non_interactive(True)`` the gate must short-circuit to its "n" default
-    -- never touching stdin -- so the run declines fixes and returns 0.
+    ``config.non_interactive=True`` propagated by ``run``, the gate must
+    short-circuit to its "n" default -- never touching stdin -- so the run
+    declines fixes and returns 0.
     """
-    from daydream.agent import get_non_interactive, reset_state, set_non_interactive
+    from daydream.agent import get_non_interactive, reset_state
     from daydream.config import REVIEW_OUTPUT_FILE
     from daydream.runner import RunConfig, run
 
@@ -1763,11 +1764,12 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
 
     monkeypatch.setattr("builtins.input", _forbidden_input)
 
-    set_non_interactive(True)
+    reset_state()
     try:
-        assert get_non_interactive() is True
+        assert get_non_interactive() is False
         config = RunConfig(target=str(multi_stack_target), cleanup=False, non_interactive=True)
         exit_code = await run(config)
+        assert get_non_interactive() is True
     finally:
         reset_state()
 
