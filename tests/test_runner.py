@@ -537,11 +537,23 @@ def test_runconfig_defaults_non_interactive_false():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dispatch_target", "config_kwargs"),
+    [
+        ("daydream.runner._run_loop_deep", {"output_mode": "loop"}),
+        ("daydream.runner._run_loop_shallow", {"output_mode": "loop", "shallow": True}),
+        ("daydream.runner._run_pr_feedback", {"pr_number": 7, "bot": "botname"}),
+        ("daydream.runner._run_comment", {"output_mode": "comment"}),
+    ],
+    ids=["deep_loop", "shallow", "pr_feedback", "comment"],
+)
 async def test_run_threads_non_interactive_into_agent_state(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+    dispatch_target, config_kwargs, monkeypatch, patch_workspace, silence_runner_ui, tmp_path
 ):
-    """A run started with ``config.non_interactive=True`` must flip the agent
-    singleton flag before any phase that can prompt executes.
+    """``config.non_interactive=True`` flips the agent singleton flag before any
+    promptable phase, on every dispatch branch ``run()`` can take. Each case
+    patches one dispatch fn so ``run()`` reaches the run-start setup (where
+    ``set_non_interactive`` fires) without executing real phases.
     """
     from daydream.agent import get_non_interactive, reset_state
 
@@ -551,94 +563,8 @@ async def test_run_threads_non_interactive_into_agent_state(
         async def stub(work, config):
             return 0
 
-        # Patch the deep-loop dispatch so run() reaches the run-start setup
-        # (where set_non_interactive is called) without executing real phases.
-        monkeypatch.setattr("daydream.runner._run_loop_deep", stub)
-        config = RunConfig(target=str(tmp_path), output_mode="loop", non_interactive=True)
-
-        exit_code = await runner.run(config)
-        assert exit_code == 0
-        assert get_non_interactive() is True
-    finally:
-        reset_state()
-
-
-@pytest.mark.asyncio
-async def test_run_threads_non_interactive_shallow_path(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
-):
-    """non_interactive=True is propagated to the agent singleton via the
-    shallow-loop dispatch path (``--shallow`` flag).
-    """
-    from daydream.agent import get_non_interactive, reset_state
-
-    reset_state()
-    try:
-
-        async def stub(work, config):
-            return 0
-
-        monkeypatch.setattr("daydream.runner._run_loop_shallow", stub)
-        config = RunConfig(
-            target=str(tmp_path), output_mode="loop", shallow=True, non_interactive=True
-        )
-
-        exit_code = await runner.run(config)
-        assert exit_code == 0
-        assert get_non_interactive() is True
-    finally:
-        reset_state()
-
-
-@pytest.mark.asyncio
-async def test_run_threads_non_interactive_pr_feedback_path(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
-):
-    """non_interactive=True is propagated to the agent singleton via the
-    PR-feedback dispatch path (``bot`` set).
-    """
-    from daydream.agent import get_non_interactive, reset_state
-
-    reset_state()
-    try:
-
-        async def stub(work, config):
-            return 0
-
-        monkeypatch.setattr("daydream.runner._run_pr_feedback", stub)
-        config = RunConfig(
-            target=str(tmp_path), pr_number=7, bot="botname", non_interactive=True
-        )
-
-        exit_code = await runner.run(config)
-        assert exit_code == 0
-        assert get_non_interactive() is True
-    finally:
-        reset_state()
-
-
-@pytest.mark.asyncio
-async def test_run_threads_non_interactive_loop_dispatch_path(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
-):
-    """non_interactive=True is propagated regardless of whether the loop
-    dispatch resolves to deep (default) or shallow — verifies the flag is
-    set in ``run()`` before ``_dispatch()`` branches.
-    """
-    from daydream.agent import get_non_interactive, reset_state
-
-    reset_state()
-    try:
-
-        async def stub(work, config):
-            return 0
-
-        # Intercept at the comment-mode branch to confirm set_non_interactive
-        # fires even on the comment output_mode path.
-        monkeypatch.setattr("daydream.runner._run_comment", stub)
-        config = RunConfig(
-            target=str(tmp_path), output_mode="comment", non_interactive=True
-        )
+        monkeypatch.setattr(dispatch_target, stub)
+        config = RunConfig(target=str(tmp_path), non_interactive=True, **config_kwargs)
 
         exit_code = await runner.run(config)
         assert exit_code == 0
