@@ -397,6 +397,27 @@ def branch_exists(repo: Path, ref: str) -> bool:
     return remote.returncode == 0
 
 
+def ref_exists(repo: Path, ref: str) -> bool:
+    """Check whether *ref* resolves to a commit git can name.
+
+    Accepts a named branch (local or ``origin/<ref>``) plus any commit-ish:
+    a full or abbreviated SHA, a tag, or a relative expression such as
+    ``HEAD~3``. Named branches are checked first, so a named ref always takes
+    precedence over a same-spelled commit-ish.
+
+    Args:
+        repo: Repository working directory.
+        ref: Branch name, SHA, tag, or any commit-ish expression.
+
+    Returns:
+        True when *ref* names a branch or resolves to a commit object.
+    """
+    if branch_exists(repo, ref):
+        return True
+    commit = _run_git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
+    return bool(commit.returncode == 0)
+
+
 def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
     """Compute the merge-base between *head* and *base*, preferring upstream.
 
