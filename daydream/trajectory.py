@@ -43,6 +43,7 @@ from daydream.atif import (
     ToolCall,
     Trajectory,
 )
+from daydream.timeutil import parse_iso_timestamp
 from daydream.ui import create_console, print_error, print_warning
 
 # Run-directory layout (single source of truth)
@@ -873,13 +874,13 @@ class TrajectoryRecorder:
         dispatched and merged within it.
 
         Returns:
-            Rounded duration in seconds, or ``None`` when unmeasurable.
+            Rounded duration in seconds, or ``None`` when unmeasurable —
+            fewer than two timestamped steps, or an unparseable timestamp.
         """
-        timestamps = [
-            datetime.fromisoformat(s.timestamp.replace("Z", "+00:00"))
-            for s in self.steps
-            if s.timestamp
-        ]
+        try:
+            timestamps = [parse_iso_timestamp(s.timestamp) for s in self.steps if s.timestamp]
+        except ValueError:
+            return None
         if len(timestamps) < 2:
             return None
         return round((max(timestamps) - min(timestamps)).total_seconds(), 1)

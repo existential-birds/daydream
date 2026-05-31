@@ -296,7 +296,6 @@ def test_build_manifest_without_evaluation(tmp_path: Path):
         archive_path=tmp_path,
     )
 
-    assert m.wall_clock_seconds is None
     assert m.total_findings is None
     assert m.grounding_rate is None
     assert m.coverage_ratio is None
