@@ -13,6 +13,7 @@ from daydream import git_ops
 from daydream.agent import (
     console,
     detect_test_success,
+    get_non_interactive,
     get_quiet_mode,
     run_agent,
 )
@@ -1551,6 +1552,73 @@ findings with extra skepticism here.
     print_fix_complete(console, item_num, total)
 
 
+async def _emit_failure_handoff(
+    backend: Backend,
+    work: WorkContext,
+    output: str,
+    *,
+    offer_clipboard: bool,
+) -> None:
+    """Run the failure summarizer, display the handoff body, and optionally
+    offer to copy it to the clipboard.
+
+    Args:
+        backend: Backend used to invoke the summarizer subagent.
+        work: Workspace context passed through to ``_run_failure_summarizer``.
+        output: Raw failing test output to ground the summary.
+        offer_clipboard: When ``True``, prompt the user to copy the handoff to
+            the clipboard (interactive mode).  When ``False``, skip the prompt
+            (non-interactive mode).
+    """
+    body, handoff_path, handoff_written = await _run_failure_summarizer(
+        backend, work, output,
+    )
+    if handoff_written:
+        preview_lines = body.splitlines()
+        max_preview = 20
+        if len(preview_lines) <= max_preview:
+            console.print(body)
+        else:
+            console.print("\n".join(preview_lines[:max_preview]))
+            print_info(
+                console,
+                f"... ({len(preview_lines) - max_preview} more lines, see file below)",
+            )
+        print_info(console, f"Handoff written: {handoff_path}")
+    else:
+        print_warning(
+            console,
+            f"Failed to write handoff to {handoff_path}; "
+            "printing inline so it is not lost:",
+        )
+        console.print(body)
+
+    if offer_clipboard:
+        if clipboard_available():
+            response = prompt_user(console, "Copy handoff to clipboard?", "y")
+            if response.lower() in ("y", "yes"):
+                if copy_to_clipboard(body):
+                    print_success(console, "Handoff copied to clipboard")
+                else:
+                    recovery = (
+                        "copy manually from path above"
+                        if handoff_written
+                        else "copy manually from the inline output above"
+                    )
+                    print_warning(
+                        console, f"Clipboard copy failed; {recovery}",
+                    )
+        else:
+            recovery = (
+                "copy manually from path above"
+                if handoff_written
+                else "copy manually from the inline output above"
+            )
+            print_info(
+                console, f"(clipboard unavailable, {recovery})",
+            )
+
+
 async def phase_test_and_heal(
     backend: Backend,
     work: WorkContext,
@@ -1610,6 +1678,19 @@ async def phase_test_and_heal(
             return True, retries_used
 
         print_warning(console, "Tests may have failed or result is unclear.")
+
+        # In non-interactive mode the menu's default "2" (fix-and-retry) would
+        # launch an unbounded, mutating fix loop with no human to stop it.
+        # Take choice-"4" semantics instead: terminate the heal loop and
+        # surface the failure honestly with no mutation. Skip the menu and the
+        # stdin read entirely.
+        if get_non_interactive():
+            print_error(
+                console, "Tests failed", "Non-interactive mode: aborting heal loop",
+            )
+            await _emit_failure_handoff(backend, work, output, offer_clipboard=False)
+            return False, retries_used
+
         print_menu(console, "What would you like to do?", [
             ("1", "Retry tests (run again without fixes)"),
             ("2", "Fix and retry (launch agent to fix issues)"),
@@ -1668,58 +1749,7 @@ async def phase_test_and_heal(
 
         elif choice == "4":
             print_error(console, "Aborted", "User requested abort")
-            body, handoff_path, handoff_written = await _run_failure_summarizer(
-                backend, work, output,
-            )
-            if handoff_written:
-                # Show a short preview — the full handoff can be large enough
-                # to push important messages off-screen.
-                preview_lines = body.splitlines()
-                max_preview = 20
-                if len(preview_lines) <= max_preview:
-                    console.print(body)
-                else:
-                    console.print("\n".join(preview_lines[:max_preview]))
-                    print_info(
-                        console,
-                        f"... ({len(preview_lines) - max_preview} more lines, see file below)",
-                    )
-                print_info(console, f"Handoff written: {handoff_path}")
-            else:
-                # Filesystem write failed (full disk, perms, parent gone).
-                # The path printed above would not exist — surface the full
-                # body inline so the user can copy it manually.
-                print_warning(
-                    console,
-                    f"Failed to write handoff to {handoff_path}; "
-                    "printing inline so it is not lost:",
-                )
-                console.print(body)
-
-            if clipboard_available():
-                response = prompt_user(console, "Copy handoff to clipboard?", "y")
-                if response.lower() in ("y", "yes"):
-                    if copy_to_clipboard(body):
-                        print_success(console, "Handoff copied to clipboard")
-                    else:
-                        recovery = (
-                            "copy manually from path above"
-                            if handoff_written
-                            else "copy manually from the inline output above"
-                        )
-                        print_warning(
-                            console, f"Clipboard copy failed; {recovery}",
-                        )
-            else:
-                recovery = (
-                    "copy manually from path above"
-                    if handoff_written
-                    else "copy manually from the inline output above"
-                )
-                print_info(
-                    console, f"(clipboard unavailable, {recovery})",
-                )
-
+            await _emit_failure_handoff(backend, work, output, offer_clipboard=True)
             return False, retries_used
 
         else:

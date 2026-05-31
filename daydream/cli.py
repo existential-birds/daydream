@@ -228,6 +228,13 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="MODEL",
         help="Override model for the TEST phase (default: per-backend table; see README).",
     )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        dest="non_interactive",
+        help="Run without prompting; take each prompt's safe default "
+             "(confirm intent, decline fixes, exit the test/heal loop).",
+    )
 
 
 def _build_summarize_parser() -> argparse.ArgumentParser:
@@ -745,6 +752,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         shallow=args.shallow,
         extra_copy=list(args.extra_copy),
         plan=args.plan,
+        non_interactive=args.non_interactive,
     )
 
 
@@ -787,6 +795,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         archive=not args.no_archive,
         run_eval=args.run_eval,
         output_mode="loop",
+        non_interactive=args.non_interactive,
     )
 
 

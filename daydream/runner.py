@@ -28,6 +28,8 @@ from daydream import git_ops
 from daydream.agent import (
     MissingSkillError,
     console,
+    get_non_interactive,
+    set_non_interactive,
     set_quiet_mode,
 )
 from daydream.backends import Backend, create_backend
@@ -164,6 +166,8 @@ class RunConfig:
         shallow: Single-stack review (skip multi-stack auto-detection).
         extra_copy: Extra paths to copy into ephemeral worktrees.
         plan: Generate an implementation plan and embed it in PR comments.
+        non_interactive: Run without prompting; take each prompt's safe default
+            without reading stdin.
 
     """
 
@@ -200,6 +204,7 @@ class RunConfig:
     shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)
     plan: bool = False
+    non_interactive: bool = False
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -343,19 +348,6 @@ async def run(config: RunConfig | None = None) -> int:
 
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
-    # Resolve target directory (from config or prompt). Done outside the
-    # workspace context manager so that path-validation errors short-circuit
-    # before we incur any git work.
-    if config.target is not None:
-        target_dir = Path(config.target).resolve()
-    else:
-        target_input = prompt_user(console, "Enter target directory", ".")
-        target_dir = Path(target_input).resolve()
-
-    if not target_dir.is_dir():
-        print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
-        return 1
-
     # Quiet mode tweak: Codex backends need their shell output visible because
     # those commands ARE the user-facing signal. Done before any backend is
     # constructed so per-phase backends inherit the right setting.
@@ -369,6 +361,22 @@ async def run(config: RunConfig | None = None) -> int:
         if codex_in_use:
             quiet = False
     set_quiet_mode(quiet)
+    # Take each prompt's safe default without reading stdin when requested.
+    # Set before any phase that can prompt runs.
+    set_non_interactive(config.non_interactive)
+
+    # Resolve target directory (from config or prompt). Done outside the
+    # workspace context manager so that path-validation errors short-circuit
+    # before we incur any git work.
+    if config.target is not None:
+        target_dir = Path(config.target).resolve()
+    else:
+        target_input = prompt_user(console, "Enter target directory", ".")
+        target_dir = Path(target_input).resolve()
+
+    if not target_dir.is_dir():
+        print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
+        return 1
 
     # ``--comment`` and ``--review`` skip the test phase, so they also skip
     # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).
@@ -763,6 +771,14 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 print_error(console, "Invalid Skill", f"'{config.skill}' is not a valid skill")
                 return 1
         else:
+            if get_non_interactive():
+                print_error(
+                    console,
+                    "Missing --skill",
+                    "Non-interactive mode requires --skill (e.g. --skill python). "
+                    "Valid values: python, react, elixir, go, rust, ios.",
+                )
+                return 1
             console.print()
             print_menu(console, "Select review skill", [
                 ("1", "Python/FastAPI backend (review-python)"),
@@ -1042,6 +1058,10 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             ),
         )
 
+        # non_interactive routes to phase_commit_push_auto below because the
+        # interactive prompt's safe default is "decline" (y/N), which would
+        # silently skip the commit when stdin is not a TTY.
+
         # Clean up exploration files before exit
         exploration_cleanup = target_dir / ".daydream" / "exploration"
         if exploration_cleanup.is_dir():
@@ -1049,7 +1069,10 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
 
         # Commit if tests passed
         if tests_passed:
-            await phase_commit_push(review_backend, work)
+            if config.non_interactive:
+                await phase_commit_push_auto(review_backend, work)
+            else:
+                await phase_commit_push(review_backend, work)
 
             if cleanup_enabled:
                 review_output_path = target_dir / REVIEW_OUTPUT_FILE

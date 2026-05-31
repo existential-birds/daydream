@@ -1643,6 +1643,83 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
 
 
 # ---------------------------------------------------------------------------
+# phase_test_and_heal — non-interactive short-circuit (Task 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
+    tmp_path, monkeypatch, make_work,
+):
+    """Non-interactive: failing tests take choice-"4" semantics — no menu, no fix.
+
+    With ``non_interactive`` set, ``phase_test_and_heal`` must NOT render the
+    menu, NOT call ``prompt_user``, and NOT launch the fix agent. It fully
+    mirrors the interactive choice-"4" path: it runs the *read-only*
+    failure-summarizer and writes a handoff document so an unattended/harness
+    run still produces structured failure context for the next agent — then
+    returns ``(False, retries_used)`` with no source mutation. The summarizer is
+    a single bounded read-only call, so it does not reintroduce the unbounded
+    mutating fix loop the non-interactive guard exists to prevent.
+
+    Observable contract (CLAUDE.md S3.1): the handoff file lands on disk, the
+    menu prompt is never consulted, and the fix agent is never launched.
+    """
+    from daydream.agent import reset_state, set_non_interactive
+    from daydream.phases import phase_test_and_heal
+
+    reset_state()
+    set_non_interactive(True)
+    try:
+        _silence_phase_io(monkeypatch)
+        _install_recorder(monkeypatch, tmp_path)
+
+        # Any prompt read at all proves the menu/stdin path was entered — which
+        # the non-interactive branch must skip entirely.
+        from unittest.mock import Mock
+
+        prompt_sentinel = Mock(
+            side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),
+        )
+        monkeypatch.setattr("daydream.phases.prompt_user", prompt_sentinel)
+
+        # First call: failing test run (menu would otherwise appear). Second
+        # call: the read-only failure-summarizer producing the handoff body —
+        # exactly the choice-"4" path. The backend records every prompt so we
+        # can prove the FIX agent was never launched.
+        backend = _SummarizerBackend([
+            "fail",
+            ("handoff", "# Handoff\n\nnon-interactive failure context"),
+        ])
+
+        passed, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+
+        # Took the abort/terminate path (choice "4" semantics, no mutation).
+        assert passed is False
+        assert retries == 0
+
+        # Observable outcome: the handoff document was written to the live path,
+        # carrying the summarizer's body — the whole point of unattended mode.
+        expected = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
+        assert expected.is_file()
+        assert expected.read_text(encoding="utf-8") == "# Handoff\n\nnon-interactive failure context"
+
+        # Exactly two backend calls — the test run and the read-only summarizer.
+        # The fix agent (which carries the mutating fix prompt) was never run.
+        assert len(backend.captured_prompts) == 2
+        assert "read-only failure-summarizer" in backend.captured_prompts[1]
+        assert all(
+            "Analyze the failures and fix them" not in p
+            for p in backend.captured_prompts
+        ), backend.captured_prompts
+
+        # The menu / stdin prompt was never consulted.
+        prompt_sentinel.assert_not_called()
+    finally:
+        reset_state()
+
+
+# ---------------------------------------------------------------------------
 # _sanitize_suggested_command — fence-break hardening + whitespace collapse
 # ---------------------------------------------------------------------------
 

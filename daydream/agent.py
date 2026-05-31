@@ -55,12 +55,14 @@ class AgentState:
 
     Attributes:
         quiet_mode: True to hide tool calls and results, False to show them.
+        non_interactive: True to take each prompt's safe default without reading stdin.
         shutdown_requested: True if shutdown has been requested.
         current_backends: List of active backend instances.
 
     """
 
     quiet_mode: bool = False
+    non_interactive: bool = False
     shutdown_requested: bool = False
     current_backends: list[Backend] = field(default_factory=list)
 
@@ -122,6 +124,28 @@ def get_quiet_mode() -> bool:
     """
     return _state.quiet_mode
 
+
+def set_non_interactive(value: bool) -> None:
+    """Set non-interactive mode for prompts.
+
+    Args:
+        value: True to take each prompt's safe default without reading stdin.
+
+    Returns:
+        None
+
+    """
+    _state.non_interactive = value
+
+
+def get_non_interactive() -> bool:
+    """Get current non-interactive mode setting.
+
+    Returns:
+        True if non-interactive mode is enabled, False otherwise.
+
+    """
+    return _state.non_interactive
 
 
 def set_shutdown_requested(requested: bool) -> None:
