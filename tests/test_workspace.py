@@ -220,6 +220,34 @@ async def test_unknown_branch_raises(tmp_path: Path) -> None:
             pass  # pragma: no cover
 
 
+# --- 5b. --base accepts any commit-ish --------------------------------------
+
+
+async def test_base_accepts_raw_sha(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    base_sha = git_ops.head_sha(repo)  # pin base to current commit
+    # Advance HEAD so base != HEAD and a merge-base exists.
+    (repo / "next.txt").write_text("next\n")
+    _git(repo, "add", "next.txt")
+    _git(repo, "commit", "-m", "advance head")
+
+    async with open_workspace(
+        repo, branch=None, base=base_sha, force_ephemeral=False, skip_tests=False
+    ) as ctx:
+        assert isinstance(ctx, WorkContext)
+        assert ctx.base_branch == base_sha
+        assert ctx.base_sha == base_sha  # merge-base of HEAD and its parent
+
+
+async def test_base_unknown_ref_raises_reworded(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    with pytest.raises(BranchNotFoundError, match="base ref 'deadbeef' not found"):
+        async with open_workspace(
+            repo, branch=None, base="deadbeef", force_ephemeral=False, skip_tests=False
+        ):
+            pass
+
+
 # --- 6. copy_files_into_ephemeral default list (gitignored only) ------------
 
 
