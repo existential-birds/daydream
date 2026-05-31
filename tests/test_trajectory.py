@@ -483,6 +483,50 @@ def test_no_recorder_no_op_get_current_returns_none() -> None:
     assert get_current_recorder() is None
 
 
+# ---------------------------------------------------------------------------
+# compute_wall_clock_seconds: derived from step timestamps, no --eval needed
+# ---------------------------------------------------------------------------
+
+
+def _append_step_at(recorder: TrajectoryRecorder, ts: str) -> None:
+    """Append a minimal agent step with an explicit ISO-8601 timestamp."""
+    from daydream.atif import Step as AtifStep
+
+    recorder.steps.append(
+        AtifStep(
+            step_id=recorder._next_step_id(),
+            timestamp=ts,
+            source="agent",
+            message="x",
+        )
+    )
+
+
+def test_compute_wall_clock_seconds_spans_first_to_last(tmp_path: Path) -> None:
+    """Span is max(timestamp) - min(timestamp), in seconds, regardless of insertion order."""
+    recorder = _make_recorder(tmp_path)
+    _append_step_at(recorder, "2026-05-31T10:00:00.000000Z")
+    _append_step_at(recorder, "2026-05-31T10:00:07.500000Z")
+    _append_step_at(recorder, "2026-05-31T10:00:03.000000Z")
+
+    assert recorder.compute_wall_clock_seconds() == 7.5
+
+
+def test_compute_wall_clock_seconds_single_step_is_none(tmp_path: Path) -> None:
+    """Fewer than two timestamped steps means no measurable span."""
+    recorder = _make_recorder(tmp_path)
+    _append_step_at(recorder, "2026-05-31T10:00:00.000000Z")
+
+    assert recorder.compute_wall_clock_seconds() is None
+
+
+def test_compute_wall_clock_seconds_no_steps_is_none(tmp_path: Path) -> None:
+    """An empty recorder yields None rather than raising."""
+    recorder = _make_recorder(tmp_path)
+
+    assert recorder.compute_wall_clock_seconds() is None
+
+
 # ===========================================================================
 # Fork / Sibling / Continuation tests (Phase 3, SUBA-01..09)
 # ===========================================================================

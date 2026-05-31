@@ -63,7 +63,8 @@ class Manifest:
         total_prompt_tokens: Non-cached prompt tokens.
         total_completion_tokens: Completion tokens.
         total_cached_tokens: Cached tokens.
-        wall_clock_seconds: Wall-clock duration (from eval, if available).
+        wall_clock_seconds: Wall-clock duration derived from step timestamps
+            on every run; refined by eval's fork-inclusive value when available.
         total_findings: Number of findings (from eval, if available).
         grounding_rate: Grounding rate (from eval, if available).
         coverage_ratio: File coverage ratio (from eval, if available).
@@ -113,7 +114,8 @@ class Manifest:
     total_completion_tokens: int | None = None
     total_cached_tokens: int | None = None
 
-    # Evaluation metrics (populated only with --eval)
+    # wall_clock_seconds is derived from step timestamps on every run; the
+    # remaining metrics below are populated only with --eval.
     wall_clock_seconds: float | None = None
     total_findings: int | None = None
     grounding_rate: float | None = None
@@ -243,9 +245,16 @@ def build_manifest(
         archive_path=str(archive_path),
     )
 
+    # Wall-clock is derivable from step timestamps alone, so populate it for
+    # every run — not just --eval runs. When --eval ran, its fork-inclusive
+    # disk-based value (see eval.analyzer.analyze_timing) takes precedence.
+    m.wall_clock_seconds = recorder.compute_wall_clock_seconds()
+
     if evaluation:
         timing = evaluation.get("timing", {})
-        m.wall_clock_seconds = timing.get("total_wall_clock_seconds")
+        eval_wall_clock = timing.get("total_wall_clock_seconds")
+        if eval_wall_clock is not None:
+            m.wall_clock_seconds = eval_wall_clock
 
         findings = evaluation.get("findings", {})
         m.total_findings = findings.get("total")

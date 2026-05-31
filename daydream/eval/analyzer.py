@@ -17,6 +17,8 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+from daydream.timeutil import parse_iso_timestamp
+
 # ---------------------------------------------------------------------------
 # Trajectory loading
 # ---------------------------------------------------------------------------
@@ -97,7 +99,7 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
 # ---------------------------------------------------------------------------
 
 def _parse_iso_ts(ts: str) -> datetime:
-    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return parse_iso_timestamp(ts)
 
 
 def _agent_label(filename: str) -> str:

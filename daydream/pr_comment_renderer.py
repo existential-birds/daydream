@@ -36,6 +36,7 @@ from pathlib import Path
 import daydream
 from daydream.atif import Step, Trajectory
 from daydream.pricing import compute_cost
+from daydream.timeutil import parse_iso_timestamp
 
 # Display labels for each phase key used in Step.extra['daydream_phase'].
 # Keys are the string values of daydream.trajectory.DaydreamPhase. Defined
@@ -66,7 +67,7 @@ _GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", ""})
 
 def _parse_ts(ts: str) -> datetime:
     """Parse an ATIF ISO 8601 timestamp (Z-suffix) to a timezone-aware datetime."""
-    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return parse_iso_timestamp(ts)
 
 
 def _format_duration(seconds: float | None) -> str:
