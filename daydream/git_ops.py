@@ -402,8 +402,7 @@ def ref_exists(repo: Path, ref: str) -> bool:
 
     Accepts a named branch (local or ``origin/<ref>``) plus any commit-ish:
     a full or abbreviated SHA, a tag, or a relative expression such as
-    ``HEAD~3``. Named branches are checked first, so a named ref always takes
-    precedence over a same-spelled commit-ish.
+    ``HEAD~3``.
 
     Args:
         repo: Repository working directory.
@@ -411,9 +410,18 @@ def ref_exists(repo: Path, ref: str) -> bool:
 
     Returns:
         True when *ref* names a branch or resolves to a commit object.
+
+    Raises:
+        GitError: Only for unexpected subprocess failures (timeout, missing
+            git binary). The documented soft-failure modes return ``False``.
     """
     if branch_exists(repo, ref):
         return True
+    # No valid commit-ish (SHA, tag, relative expression) starts with '-'.
+    # A leading dash would be mis-parsed by git as an option flag; reject it
+    # early rather than letting an attacker-controlled string reach the shell.
+    if ref.startswith("-"):
+        return False
     commit = _run_git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
     return bool(commit.returncode == 0)
 
@@ -448,6 +456,10 @@ def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
     if head_proc.returncode != 0:
         return None
 
+    # Same guard as ref_exists: a leading '-' would be mis-parsed as a git
+    # option flag.  No valid branch name or commit-ish starts with '-'.
+    if base.startswith("-"):
+        return None
     base_proc = _run_git(repo, ["rev-parse", "--verify", base], timeout=5)
     if base_proc.returncode != 0:
         return None
