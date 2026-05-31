@@ -1,5 +1,6 @@
 """Shared pytest fixtures for the daydream test suite."""
 
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -13,6 +14,25 @@ from daydream.exploration import (
     FileInfo,
 )
 from daydream.workspace import WorkContext
+
+# Isolate the test process from any inherited git environment. When the suite
+# runs under a git command that exports them — most importantly a pre-push hook
+# — variables like GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE point every `git`
+# subprocess at the real repository. Tests that create temp git repos would
+# then commit, branch, and checkout against the live worktree instead of their
+# fixtures, corrupting it. Strip these at collection time so every git
+# invocation (test helpers and production git_ops alike) resolves its repo from
+# the working directory, exactly as it does when run outside a hook.
+for _git_env_var in (
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_WORK_TREE",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+):
+    os.environ.pop(_git_env_var, None)
 
 # --- Real-git fixtures ------------------------------------------------------
 #

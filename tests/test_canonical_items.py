@@ -1,5 +1,6 @@
 import jsonschema
 import pytest
+
 from daydream.phases import MERGED_ITEMS_SCHEMA, normalize_items
 
 
