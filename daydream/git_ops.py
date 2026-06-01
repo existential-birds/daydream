@@ -423,7 +423,7 @@ def ref_exists(repo: Path, ref: str) -> bool:
     if ref.startswith("-"):
         return False
     commit = _run_git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
-    return bool(commit.returncode == 0)
+    return commit.returncode == 0
 
 
 def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
