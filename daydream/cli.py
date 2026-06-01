@@ -77,15 +77,20 @@ def _install_signal_handlers() -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
 
 
-def _auto_detect_pr_number() -> int | None:
-    """Auto-detect PR number from the current branch via gh CLI.
+def _auto_detect_pr_number(repo: Path) -> int | None:
+    """Auto-detect PR number from the target checkout's branch via gh CLI.
+
+    Args:
+        repo: Repository working directory to inspect — the target checkout
+            being reviewed, not necessarily the cwd where ``daydream`` was
+            launched.
 
     Returns:
         The PR number if found, or None if detection fails.
 
     """
     try:
-        data = git_ops.gh_pr_view(Path.cwd(), None)
+        data = git_ops.gh_pr_view(repo, None)
     except git_ops.GitError:
         return None
     if not data:
@@ -94,14 +99,21 @@ def _auto_detect_pr_number() -> int | None:
     return int(number) if isinstance(number, int) else None
 
 
-def _detect_repo_slug() -> str | None:
-    """Detect the GitHub owner/repo slug for the current repository via gh CLI.
+def _detect_repo_slug(repo: Path) -> str | None:
+    """Detect the GitHub owner/repo slug for a repository via gh CLI.
+
+    Args:
+        repo: Repository working directory to inspect — the target checkout
+            being reviewed, not necessarily the cwd where ``daydream`` was
+            launched. Attributing the slug to the target keeps trajectory and
+            archive provenance correct when daydream is run from one repo
+            against a checkout of another (the benchmark-harness pattern).
 
     Returns:
         String like ``"owner/repo"``, or None if detection fails.
     """
     try:
-        slug = git_ops.gh_repo_view(Path.cwd())
+        slug = git_ops.gh_repo_view(repo)
     except git_ops.GitError:
         return None
     if slug is None:
@@ -717,9 +729,12 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.max_iterations != 5 and not args.loop:
         warnings.warn("--max-iterations has no effect without --loop", stacklevel=2)
 
-    # Detect repo slug and PR number for trajectory/archive metadata
-    pr_repo = _detect_repo_slug()
-    pr_number = _auto_detect_pr_number()
+    # Detect repo slug and PR number for trajectory/archive metadata.
+    # Attribute provenance to the target checkout, not the invoking cwd —
+    # daydream may run from one repo against a checkout of another.
+    target_repo = Path(args.target) if args.target else Path.cwd()
+    pr_repo = _detect_repo_slug(target_repo)
+    pr_number = _auto_detect_pr_number(target_repo)
 
     return RunConfig(
         target=args.target,
@@ -768,7 +783,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         # argparse already enforces type=int, but guard against negatives.
         raise SystemExit(f"feedback subcommand: PR number must be positive (got {pr_number})")
 
-    pr_repo = _detect_repo_slug()
+    pr_repo = _detect_repo_slug(Path(args.target) if args.target else Path.cwd())
 
     return RunConfig(
         target=args.target,
