@@ -187,6 +187,55 @@ def test_branch_exists_missing(tmp_path: Path) -> None:
     assert git_ops.branch_exists(repo, "nonexistent") is False
 
 
+# --- ref_exists -------------------------------------------------------------
+
+
+def test_ref_exists_raw_sha(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    assert git_ops.ref_exists(repo, sha) is True
+
+
+def test_ref_exists_abbreviated_sha(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    short = _git(repo, "rev-parse", "--short", "HEAD")
+    assert git_ops.ref_exists(repo, short) is True
+
+
+def test_ref_exists_tag(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "tag", "v1.0")
+    assert git_ops.ref_exists(repo, "v1.0") is True
+
+
+def test_ref_exists_relative_commit_ish(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "two.txt").write_text("two\n")
+    _git(repo, "add", "two.txt")
+    _commit(repo, "second")
+    assert git_ops.ref_exists(repo, "HEAD~1") is True
+
+
+def test_ref_exists_named_branch_still_resolves(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "feat-local")
+    assert git_ops.ref_exists(repo, "feat-local") is True
+
+
+def test_ref_exists_missing(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.ref_exists(repo, "nonexistent") is False
+    # A tree-ish that is not a commit must be rejected, not accepted.
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    assert git_ops.ref_exists(repo, tree) is False
+
+
+def test_ref_exists_rejects_leading_dash(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.ref_exists(repo, "-not-a-ref") is False
+    assert git_ops.ref_exists(repo, "--exec=evil") is False
+
+
 # --- merge_base -------------------------------------------------------------
 
 
@@ -247,6 +296,16 @@ def test_merge_base_returns_none_when_head_missing(tmp_path: Path) -> None:
     _init_repo(repo)
     # No commits → no HEAD.
     assert git_ops.merge_base(repo, "main") is None
+
+
+def test_merge_base_returns_none_for_leading_dash_base(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.merge_base(repo, "-no-such-ref") is None
+
+
+def test_merge_base_returns_none_for_leading_dash_head(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.merge_base(repo, "main", "-no-such-ref") is None
 
 
 # --- diff / log / show / grep / status / upstream_ahead_count ---------------

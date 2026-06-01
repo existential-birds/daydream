@@ -397,6 +397,35 @@ def branch_exists(repo: Path, ref: str) -> bool:
     return remote.returncode == 0
 
 
+def ref_exists(repo: Path, ref: str) -> bool:
+    """Check whether *ref* resolves to a commit git can name.
+
+    Accepts a named branch (local or ``origin/<ref>``) plus any commit-ish:
+    a full or abbreviated SHA, a tag, or a relative expression such as
+    ``HEAD~3``.
+
+    Args:
+        repo: Repository working directory.
+        ref: Branch name, SHA, tag, or any commit-ish expression.
+
+    Returns:
+        True when *ref* names a branch or resolves to a commit object.
+
+    Raises:
+        GitError: Only for unexpected subprocess failures (timeout, missing
+            git binary). The documented soft-failure modes return ``False``.
+    """
+    if branch_exists(repo, ref):
+        return True
+    # No valid commit-ish (SHA, tag, relative expression) starts with '-'.
+    # A leading dash would be mis-parsed by git as an option flag; reject it
+    # early rather than letting an attacker-controlled string reach the shell.
+    if ref.startswith("-"):
+        return False
+    commit = _run_git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
+    return commit.returncode == 0
+
+
 def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
     """Compute the merge-base between *head* and *base*, preferring upstream.
 
@@ -423,6 +452,11 @@ def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
         GitError: Only for unexpected subprocess failures (timeout, missing
             git binary). The documented soft-failure modes return ``None``.
     """
+    # Same guard as ref_exists: a leading '-' would be mis-parsed as a git
+    # option flag.  No valid branch name or commit-ish starts with '-'.
+    if head.startswith("-") or base.startswith("-"):
+        return None
+
     head_proc = _run_git(repo, ["rev-parse", "--verify", head], timeout=5)
     if head_proc.returncode != 0:
         return None

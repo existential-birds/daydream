@@ -162,9 +162,11 @@ async def open_workspace(
             repo = source
 
         # Validate the resolved base exists relative to the working repo.
-        if not git_ops.branch_exists(repo, base_branch):
+        # --base accepts any commit-ish (SHA, tag, relative expr), so use
+        # ref_exists rather than the named-ref-only branch_exists.
+        if not git_ops.ref_exists(repo, base_branch):
             raise BranchNotFoundError(
-                f"base branch '{base_branch}' not found in {repo}"
+                f"base ref '{base_branch}' not found in {repo}"
             )
 
         base_sha = git_ops.merge_base(repo, base_branch)
