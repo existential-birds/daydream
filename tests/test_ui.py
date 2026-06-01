@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 def test_plan_renderer_dims_ungrounded_steps():
     from rich.console import Console
@@ -120,3 +122,27 @@ def test_prompt_user_returns_typed_value_interactively(monkeypatch):
     reset_state()
     monkeypatch.setattr("builtins.input", lambda: "y")
     assert prompt_user(Console(), "Confirm?", default="n") == "y"
+
+
+# Polarity contract: each destructive prompt must decline by default. Pairs
+# mirror the source defaults; an "n" -> "y" flip in source (or here) breaks this.
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Cleanup review output after completion? [y/N]",  # runner.py:814 (file deletion)
+        "Post these as a PR review? [y/N]",  # pr_review.py:854 (external mutation)
+        "Use suggested command instead?",  # phases.py:1729
+        "Commit and push changes? [y/N]",  # phases.py:1788 (git push)
+    ],
+)
+def test_prompt_user_destructive_defaults_decline_on_eof(monkeypatch, message):
+    from unittest.mock import Mock
+
+    from rich.console import Console
+
+    from daydream.agent import reset_state
+    from daydream.ui import prompt_user
+
+    reset_state()
+    monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
+    assert prompt_user(Console(record=True), message, default="n") == "n"

@@ -230,6 +230,12 @@ def test_ref_exists_missing(tmp_path: Path) -> None:
     assert git_ops.ref_exists(repo, tree) is False
 
 
+def test_ref_exists_rejects_leading_dash(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.ref_exists(repo, "-not-a-ref") is False
+    assert git_ops.ref_exists(repo, "--exec=evil") is False
+
+
 # --- merge_base -------------------------------------------------------------
 
 
@@ -290,6 +296,16 @@ def test_merge_base_returns_none_when_head_missing(tmp_path: Path) -> None:
     _init_repo(repo)
     # No commits → no HEAD.
     assert git_ops.merge_base(repo, "main") is None
+
+
+def test_merge_base_returns_none_for_leading_dash_base(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.merge_base(repo, "-no-such-ref") is None
+
+
+def test_merge_base_returns_none_for_leading_dash_head(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.merge_base(repo, "main", "-no-such-ref") is None
 
 
 # --- diff / log / show / grep / status / upstream_ahead_count ---------------

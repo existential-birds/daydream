@@ -452,14 +452,15 @@ def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
         GitError: Only for unexpected subprocess failures (timeout, missing
             git binary). The documented soft-failure modes return ``None``.
     """
+    # Same guard as ref_exists: a leading '-' would be mis-parsed as a git
+    # option flag.  No valid branch name or commit-ish starts with '-'.
+    if head.startswith("-") or base.startswith("-"):
+        return None
+
     head_proc = _run_git(repo, ["rev-parse", "--verify", head], timeout=5)
     if head_proc.returncode != 0:
         return None
 
-    # Same guard as ref_exists: a leading '-' would be mis-parsed as a git
-    # option flag.  No valid branch name or commit-ish starts with '-'.
-    if base.startswith("-"):
-        return None
     base_proc = _run_git(repo, ["rev-parse", "--verify", base], timeout=5)
     if base_proc.returncode != 0:
         return None
