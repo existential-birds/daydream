@@ -481,9 +481,13 @@ def _build_minimal_handoff(
     """Build a minimal handoff body without invoking an agent.
 
     Used when the failure-summarizer subagent fails or no recorder is
-    active. Contains the same artifact pointers and instruction block as
-    the agent-produced version so the downstream agent gets useful
-    context either way.
+    active. Mirrors the agent path's **Verified facts** / **Hypotheses
+    (unverified)** split so accuracy does not regress on the fallback —
+    but it runs with no agent and cannot execute git, so it produces no
+    citations and **invents no cause**: the Hypotheses section states the
+    cause is UNKNOWN and must be derived by the next agent. The facts it
+    *can* assert without an agent (the exit gate, the quoted failing
+    output, the git-derived changed-file list) go under Verified facts.
     """
     lines = test_output.splitlines()
     if len(lines) > TEST_OUTPUT_TAIL_LINES:
@@ -508,20 +512,46 @@ def _build_minimal_handoff(
         "\n".join(f"- {p}" for p in changed_files) if changed_files else "_(none detected)_"
     )
 
+    changed_count = len(changed_files)
+    changed_fact = (
+        f"Files changed in the working tree (git): {changed_count} file(s) — "
+        "listed under Changed files below. (cite: git, working-tree status)"
+        if changed_count
+        else "No working-tree file changes were detected. (cite: git, working-tree status)"
+    )
+
     parts: list[str] = [
         "# Daydream handoff",
         "",
         "## Summary",
         "",
-        "Daydream's test phase could not confirm a green run and the user aborted "
-        "(option 4). The failure-summarizer subagent did not produce a structured "
-        "handoff, so this minimal version was written instead.",
+        "Daydream's test phase did not confirm a green run and the heal loop "
+        "aborted at the test gate. The failure-summarizer subagent did not produce "
+        "a structured handoff, so this minimal version was written instead.",
         "",
     ]
     if not has_trajectory:
         parts.append("> Note: trajectory unavailable for this run")
         parts.append("")
     parts.extend([
+        "## Verified facts",
+        "",
+        "- Tests did not report success; the heal loop aborted at the test gate. "
+        "(cite: daydream exit path — non-interactive abort / option 4)",
+        f"- {changed_fact}",
+        "- Tail of the failing test output, quoted verbatim:",
+        "",
+        "```",
+        output_section,
+        "```",
+        "",
+        "## Hypotheses (unverified)",
+        "",
+        "- The failure-summarizer agent did not run, so NO causal or historical "
+        "analysis was performed: the **cause is UNKNOWN** and must be derived by the "
+        "next agent via git (`git log`/`blame`/`show`/`diff`) and Read. Do not assume "
+        "a cause — confirm one from evidence first.",
+        "",
         "## Artifacts",
         "",
         artifacts_block,
@@ -530,16 +560,12 @@ def _build_minimal_handoff(
         "",
         changed_block,
         "",
-        "## Failing test output (tail)",
-        "",
-        "```",
-        output_section,
-        "```",
-        "",
         "## Instructions for the next agent",
         "",
-        "1. Explore the codebase before proposing anything. Read the "
-        "artifacts above and use Read/Grep/Glob to build your own model.",
+        "1. Explore the codebase before proposing anything. Treat \"Verified facts\" "
+        "as ground truth and \"Hypotheses\" as leads to confirm or refute FIRST; "
+        "use Read/Grep/Glob and read-only git to build your own model; do NOT revert "
+        "or rewrite code on a hypothesis alone.",
         "2. Propose an architecturally clean, idiomatic solution rooted in "
         "the project's existing patterns.",
         "3. REFUSE to ship inline hacks that only paper over the symptom "
