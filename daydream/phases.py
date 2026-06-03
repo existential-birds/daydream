@@ -640,6 +640,7 @@ async def _run_failure_summarizer(
                 prompt,
                 output_schema=FAILURE_SUMMARIZER_SCHEMA,
                 phase=DaydreamPhase.TEST,
+                read_only=True,
             )
         except Exception:  # noqa: BLE001 - summarizer failure is non-fatal
             _logger.debug("failure-summarizer agent failed", exc_info=True)

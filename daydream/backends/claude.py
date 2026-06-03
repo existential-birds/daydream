@@ -51,6 +51,7 @@ class ClaudeBackend:
         continuation: ContinuationToken | None = None,
         agents: dict[str, AgentDefinition] | None = None,
         max_turns: int | None = None,
+        read_only: bool = False,
     ) -> AsyncIterator[AgentEvent]:
         """Execute a prompt and yield unified events.
 

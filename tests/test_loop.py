@@ -75,7 +75,10 @@ class LoopMockBackend(Backend):
         self.commit_calls: list[str] = []
         self.review_prompts: list[str] = []
 
-    async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+    async def execute(
+        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+        max_turns=None, read_only=False,
+    ):
         prompt_lower = prompt.lower()
         self.call_log.append(prompt_lower[:80])
 

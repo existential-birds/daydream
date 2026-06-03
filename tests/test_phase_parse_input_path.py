@@ -15,7 +15,10 @@ class _SpyBackend:
     def __init__(self) -> None:
         self.last_prompt: str = ""
 
-    async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+    async def execute(
+        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+        max_turns=None, read_only=False,
+    ):
         from daydream.backends import ResultEvent, TextEvent
         self.last_prompt = prompt
         yield TextEvent(text="parsing")

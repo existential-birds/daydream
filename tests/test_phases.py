@@ -36,7 +36,10 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
     class FreshContextBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             nonlocal call_count
             call_count += 1
             captured_prompts.append(prompt)
@@ -108,7 +111,10 @@ async def test_phase_parse_feedback_empty_response_returns_empty_list(tmp_path, 
 
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             # Only yield a result with no structured output (schema miss)
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -139,7 +145,10 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch, make_wo
 
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text='{"issues": [{"id": 1, "description": "Bug", "file": "foo.py", "line": 10}]}')
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -168,7 +177,10 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(tmp_pa
     class CapturingBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             captured_prompts.append(prompt)
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -399,7 +411,10 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
     class IntentBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="This PR adds a login page with email/password authentication.")
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -439,7 +454,10 @@ async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeyp
     class IntentBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -545,7 +563,10 @@ async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch, ma
     class ReviewBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="Found 2 issues.")
             yield ResultEvent(structured_output=structured_issues, continuation=None)
 
@@ -582,7 +603,10 @@ async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch, make_wo
     class NoIssuesBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="Implementation looks good.")
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
 
@@ -632,7 +656,10 @@ async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch, make_w
     class PlanBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="Here's the plan.")
             yield ResultEvent(structured_output=structured_plan, continuation=None)
 
@@ -685,7 +712,10 @@ async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch, make_work
     class NeverCalledBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             raise AssertionError("Should not be called when user selects 'none'")
             yield  # make it an async generator
 
@@ -853,7 +883,10 @@ async def test_phase_commit_push_includes_daydream_trailers(tmp_path, monkeypatc
     captured: dict[str, str] = {}
 
     class CapturingBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             captured["prompt"] = prompt
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -883,7 +916,10 @@ async def test_phase_commit_iteration_includes_daydream_trailers(tmp_path, monke
     captured: dict[str, str] = {}
 
     class CapturingBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             captured["prompt"] = prompt
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -951,7 +987,8 @@ class _InvestigatorBackend(_ScriptedBackend):
     """
 
     async def execute(
-        self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None,
+        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+        max_turns=None, read_only=False,
     ):
         self.captured_prompts.append(prompt)
         if not self.script:
@@ -1177,6 +1214,25 @@ def test_failure_summarizer_prompt_demands_evidence_and_sections():
     assert "do NOT revert" in prompt or "not revert" in prompt
 
 
+@pytest.mark.asyncio
+async def test_summarizer_invoked_read_only_normal_calls_mutating(
+    tmp_path, monkeypatch, make_work,
+):
+    """The summarizer runs read_only=True; the preceding test run does not."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
+    backend = _SummarizerBackend(["fail", ("handoff", "# H")])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **k: "4")
+
+    await phase_test_and_heal(backend, make_work(tmp_path))
+
+    # First call = the failing test run (mutating allowed); second = summarizer (read-only).
+    assert backend.read_only_calls == [False, True]
+
+
 class _SummarizerBackend(_ScriptedBackend):
     """Mock backend cycling through scripted ResultEvents for option 4.
 
@@ -1189,10 +1245,18 @@ class _SummarizerBackend(_ScriptedBackend):
           unparseable ``structured_output`` (no ``handoff_prompt`` key).
     """
 
+    def __init__(self, script: list) -> None:
+        super().__init__(script)
+        # Records the read_only flag per execute() call so tests can assert
+        # the summarizer runs read-only while the normal test run does not.
+        self.read_only_calls: list[bool] = []
+
     async def execute(
-        self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None,
+        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+        max_turns=None, read_only=False,
     ):
         self.captured_prompts.append(prompt)
+        self.read_only_calls.append(read_only)
         if not self.script:
             raise AssertionError("backend invoked beyond scripted call count")
         entry = self.script.pop(0)
@@ -2057,7 +2121,10 @@ async def test_phase_review_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output=None, continuation=None)
 
         async def cancel(self):
@@ -2088,7 +2155,10 @@ async def test_phase_parse_feedback_prints_model_line_after_hero(
     class _Backend:
         model = "claude-haiku-4-5"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
 
         async def cancel(self):
@@ -2120,7 +2190,10 @@ async def test_phase_test_and_heal_prints_model_line_after_hero(
     class _Backend:
         model = "claude-sonnet-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="All tests passed")
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -2151,7 +2224,10 @@ async def test_phase_fetch_pr_feedback_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output=None, continuation=None)
 
         async def cancel(self):
@@ -2179,7 +2255,10 @@ async def test_phase_understand_intent_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="This PR adds a login page.")
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -2219,7 +2298,10 @@ async def test_phase_alternative_review_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
 
         async def cancel(self):
@@ -2270,7 +2352,10 @@ async def test_phase_generate_plan_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output=structured_plan, continuation=None)
 
         async def cancel(self):
@@ -2313,7 +2398,10 @@ async def test_phase_cross_stack_merge_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             # The merge agent returns a schema-validated item list; the host
             # renders review-output.md from it (no agent file-write step).
             yield ResultEvent(
@@ -2387,7 +2475,10 @@ async def test_merge_writes_canonical_json_and_renders_markdown(tmp_path, monkey
     class MergeBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output=structured, continuation=None)
 
         async def cancel(self):
@@ -2433,7 +2524,10 @@ async def test_merge_raises_on_empty_agent_output(tmp_path, monkeypatch, make_wo
     class EmptyBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output=None, continuation=None)
 
         async def cancel(self):
@@ -2517,7 +2611,10 @@ async def test_verifier_excludes_structural_lens(tmp_path, monkeypatch, make_wor
     class VerifyBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             self.prompt = prompt
             yield ResultEvent(structured_output=structured, continuation=None)
 

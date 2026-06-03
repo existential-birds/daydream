@@ -242,7 +242,18 @@ class Backend(Protocol):
         continuation: ContinuationToken | None = None,
         agents: dict[str, AgentDefinition] | None = None,
         max_turns: int | None = None,
-    ) -> AsyncIterator[AgentEvent]: ...
+        read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        """Yield AgentEvents for *prompt*.
+
+        Args:
+            read_only: When True, the backend enforces a non-mutating tool
+                profile at the tool layer (Claude via a PreToolUse guard hook;
+                Codex via ``--sandbox read-only``) so the agent can inspect
+                history but cannot write/edit/delete or mutate the working
+                tree. Wired True only for the failure-summarizer call.
+        """
+        ...
 
     async def cancel(self) -> None: ...
 

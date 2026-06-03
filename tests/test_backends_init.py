@@ -136,6 +136,7 @@ async def test_backend_execute_accepts_agents_kwarg():
             output_schema=None,
             continuation=None,
             agents=None,
+            read_only=False,
         ) -> AsyncIterator[AgentEvent]:
             yield ResultEvent(structured_output=None, continuation=None)
             return
