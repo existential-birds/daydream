@@ -73,6 +73,10 @@ Target bar for the trained model on a held-out PR replay benchmark: Scoring foll
 
 If the recipe misses precision, F1, or addressed-comments targets, [Milestone 2](https://github.com/existential-birds/daydream/issues/102) triggers automatically with GRPO + composite verifiable reward.
 
+### Benchmarking
+
+`daydream bench` scores daydream's deep-review findings against [Martian's Code Review Benchmark](https://github.com/withmartian/code-review-benchmark) offline set and writes per-PR precision/recall into the benchmark's `results/<model>/evaluations.json`. See the [benchmark runbook](docs/benchmark.md) for the full "nothing → scored result" sequence (prerequisites, smoke subset, full sweep, and the judge-model comparability caveat).
+
 ## Quickstart
 
 Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and [Claude Code](https://claude.ai/code) CLI.
