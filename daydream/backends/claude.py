@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -48,13 +49,27 @@ READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
 )
 
 # Chaining metacharacters that can append a second, non-allowlisted command.
+# Used in docstrings / comments for human readability.
 _CHAIN_METACHARS: tuple[str, ...] = (";", "&&", "||", "|", "`", "$(")
 
-# File-mutating tools that must be denied outright under read_only. Under
-# ``permission_mode="bypassPermissions"`` the SDK's ``allowed_tools`` does NOT
-# restrict the toolset (verified — a Write executed despite omission), so the
-# PreToolUse hook below is the actual enforcement, not the tool list.
-_READ_ONLY_HOOK_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit"
+# Single-character danger tokens checked against shlex output in
+# _is_read_only_command.  shlex (non-posix) splits multi-char operators like
+# ``&&`` and ``$(`` into their constituent characters, so we check at the
+# single-character level.  All of these are safe inside quoted strings (shlex
+# returns the whole quoted chunk as one token).
+_DANGEROUS_TOKENS: frozenset[str] = frozenset({"|", ";", "&", "`", "$"})
+
+# Hook matcher for the read-only guard. Use ``.*`` so the hook fires for
+# EVERY tool call — the guard then explicitly allows only the safe set and
+# denies everything else (fail-closed). A deny-list of mutating tools was
+# fail-open: any tool not on the list would slip through unchecked.
+_READ_ONLY_HOOK_MATCHER = ".*"
+
+# Tools that are unconditionally permitted under the read-only profile
+# (Bash is handled separately via the command allowlist).
+_READ_ONLY_ALLOWED_TOOLS: frozenset[str] = frozenset(
+    {"Read", "Grep", "Glob", "StructuredOutput"}
+)
 
 
 def _is_read_only_command(cmd: str) -> bool:
@@ -63,12 +78,28 @@ def _is_read_only_command(cmd: str) -> bool:
     Denies (returns False) on: an empty/blank command, any command whose first
     token is not an allowlisted prefix, and any command containing a shell
     chaining metacharacter (``;``, ``&&``, ``||``, ``|``, backtick, ``$(``).
+
+    Metacharacter detection uses ``shlex`` to avoid false positives from
+    metacharacters that appear only inside quoted arguments (e.g.
+    ``git log --grep='fix|bug'`` is safe and must be allowed).
     """
     stripped = cmd.strip()
     if not stripped:
         return False
-    if any(meta in stripped for meta in _CHAIN_METACHARS):
+    # Lex in non-posix mode so quoted strings are returned as single tokens
+    # (with their quote characters intact).  Unquoted shell special characters
+    # appear as individual bare tokens.  Multi-character metacharacters like
+    # ``&&``, ``||``, and ``$(`` are emitted as their constituent characters
+    # (e.g. ``&``, ``&``), so we check for the individual dangerous characters
+    # rather than the multi-char strings.  See ``_DANGEROUS_TOKENS``.
+    try:
+        tokens = list(shlex.shlex(stripped, posix=False))
+    except ValueError:
+        # Malformed quoting — deny.
         return False
+    for tok in tokens:
+        if tok in _DANGEROUS_TOKENS:
+            return False
     return any(
         stripped == prefix or stripped.startswith(prefix + " ")
         for prefix in READ_ONLY_BASH_ALLOWLIST
@@ -89,10 +120,10 @@ def _read_only_deny(reason: str) -> HookJSONOutput:
 async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
     """PreToolUse hook enforcing the read-only summarizer contract.
 
-    Fires (under ``bypassPermissions``) for Bash and the file-mutating tools.
-    Denies every file-mutating tool outright and denies any Bash command that
-    is not on the read-only allowlist. Fails closed: malformed input → deny.
-    Returns ``{}`` (allow) only for an allowlisted read-only Bash command.
+    Fires for ALL tools (matcher ``.*``). Explicitly allows only the safe set
+    (Read, Grep, Glob, StructuredOutput, and allowlisted Bash commands) and
+    denies everything else. Fails closed: malformed input → deny.
+    Returns ``{}`` (allow) only for a permitted tool/command.
     """
     tool_name = input_data.get("tool_name") if isinstance(input_data, dict) else None
     if tool_name == "Bash":
@@ -106,7 +137,9 @@ async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> H
         return _read_only_deny(
             f"read-only summarizer: non-read-only Bash command blocked: {command!r}"
         )
-    # Any other matched (file-mutating) tool, or unparseable input → deny.
+    if tool_name in _READ_ONLY_ALLOWED_TOOLS:
+        return {}
+    # Any tool not on the allow-list, or unparseable input → deny.
     return _read_only_deny(
         f"read-only summarizer: tool {tool_name!r} is blocked (non-mutating contract)"
     )
@@ -212,6 +245,15 @@ class ClaudeBackend:
                                 yield ThinkingEvent(text=block.thinking)
                             elif isinstance(block, ToolUseBlock):
                                 if block.name == "StructuredOutput":
+                                    # Explicitly assert the invariant: StructuredOutput must
+                                    # be in _READ_ONLY_ALLOWED_TOOLS so the read_only guard
+                                    # hook permits it by design, not incidentally.  If the
+                                    # set ever drifts, this fires before the silent passthrough
+                                    # becomes a latent mutation hole.
+                                    assert "StructuredOutput" in _READ_ONLY_ALLOWED_TOOLS, (
+                                        "StructuredOutput must remain in _READ_ONLY_ALLOWED_TOOLS "
+                                        "to preserve the read_only non-mutation contract"
+                                    )
                                     skipped_tool_ids.add(block.id)
                                     continue
                                 yield ToolStartEvent(
