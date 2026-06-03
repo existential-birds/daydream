@@ -225,6 +225,97 @@ def test_format_skill_invocation_with_args():
     assert result == "/beagle-core:fetch-pr-feedback --pr 42 --bot mybot"
 
 
+@pytest.mark.parametrize("cmd,allowed", [
+    ("git log --oneline -5", True),
+    ("git blame -L 10,10 daydream/phases.py", True),
+    ("git show 648a327 -- daydream/phases.py", True),
+    ("git diff main..HEAD -- daydream/phases.py", True),
+    ("cat README.md", True),
+    ("git status", True),
+    ("ls -la", True),
+    ("git commit -m x", False),
+    ("git add -A", False),
+    ("git checkout -- f.py", False),
+    ("rm -rf build", False),
+    ("touch newfile", False),
+    ("git status && rm x", False),       # chain into mutating token
+    ("cat f | tee g", False),            # pipe into non-allowlisted
+    ("git log; rm x", False),            # semicolon chain
+    ("echo $(rm x)", False),             # command substitution
+    ("git logfoo", False),               # prefix must be word-bounded
+    ("", False),                          # empty → fail closed
+])
+def test_read_only_bash_guard_decision(cmd, allowed):
+    """The read-only Bash allowlist predicate allows inspection, denies mutation/chains."""
+    from daydream.backends.claude import _is_read_only_command
+
+    assert _is_read_only_command(cmd) is allowed
+
+
+@pytest.mark.asyncio
+async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
+    """read_only=True wires a PreToolUse hook covering Bash + file-mutating tools."""
+    patch_sdk(MockClaudeSDKClientCapture)
+    backend = ClaudeBackend(model="opus")
+
+    async for _ in backend.execute(Path("/tmp"), "Go", read_only=True):
+        pass
+
+    opts = MockClaudeSDKClientCapture.captured_options
+    assert opts is not None
+    hooks = opts.hooks
+    assert hooks is not None and "PreToolUse" in hooks
+    matchers = hooks["PreToolUse"]
+    assert len(matchers) == 1
+    matcher = matchers[0]
+    # The matcher must cover Bash and the file-mutating tools.
+    for tool in ("Bash", "Write", "Edit"):
+        assert tool in matcher.matcher
+    assert matcher.hooks  # at least one callback registered
+
+
+@pytest.mark.asyncio
+async def test_non_read_only_execute_registers_no_hook(patch_sdk):
+    """read_only=False (default) leaves the normal fix/test profile untouched — no hook."""
+    patch_sdk(MockClaudeSDKClientCapture)
+    backend = ClaudeBackend(model="opus")
+
+    async for _ in backend.execute(Path("/tmp"), "Go"):
+        pass
+
+    opts = MockClaudeSDKClientCapture.captured_options
+    assert opts is not None
+    assert getattr(opts, "hooks", None) is None
+
+
+@pytest.mark.asyncio
+async def test_read_only_guard_denies_mutation_allows_inspection():
+    """The registered guard callback denies Write and non-read-only Bash, allows read-only Bash."""
+    from daydream.backends.claude import _read_only_guard
+
+    # File-mutating tool → deny
+    deny_write = await _read_only_guard(
+        {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {},
+    )
+    assert deny_write["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # Mutating Bash → deny
+    deny_bash = await _read_only_guard(
+        {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}, None, {},
+    )
+    assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # Read-only Bash → allow (empty dict, no deny decision)
+    allow_bash = await _read_only_guard(
+        {"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}, None, {},
+    )
+    assert "hookSpecificOutput" not in allow_bash
+
+    # Malformed input → fail closed (deny)
+    deny_malformed = await _read_only_guard({"tool_name": "Bash"}, None, {})
+    assert deny_malformed["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 class MockClaudeSDKClientCapture:
     """Mock client that captures the options it was constructed with."""
 

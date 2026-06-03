@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookJSONOutput, HookMatcher
 from claude_agent_sdk.types import (
     AgentDefinition,
     AssistantMessage,
@@ -31,6 +31,85 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+
+# Read-only Bash allowlist for the enforced read-only profile (the failure
+# summarizer). A command is permitted only if it begins with one of these
+# prefixes AND contains no shell-chaining metacharacters that could smuggle in
+# a mutating command. Mirrored in the summarizer prompt prose
+# (``daydream/phases.py``). Conservative by design: any chain → deny.
+READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
+    "ls",
+    "cat",
+    "git status",
+    "git log",
+    "git show",
+    "git blame",
+    "git diff",
+)
+
+# Chaining metacharacters that can append a second, non-allowlisted command.
+_CHAIN_METACHARS: tuple[str, ...] = (";", "&&", "||", "|", "`", "$(")
+
+# File-mutating tools that must be denied outright under read_only. Under
+# ``permission_mode="bypassPermissions"`` the SDK's ``allowed_tools`` does NOT
+# restrict the toolset (verified — a Write executed despite omission), so the
+# PreToolUse hook below is the actual enforcement, not the tool list.
+_READ_ONLY_HOOK_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit"
+
+
+def _is_read_only_command(cmd: str) -> bool:
+    """Return True only if *cmd* is a single allowlisted read-only command.
+
+    Denies (returns False) on: an empty/blank command, any command whose first
+    token is not an allowlisted prefix, and any command containing a shell
+    chaining metacharacter (``;``, ``&&``, ``||``, ``|``, backtick, ``$(``).
+    """
+    stripped = cmd.strip()
+    if not stripped:
+        return False
+    if any(meta in stripped for meta in _CHAIN_METACHARS):
+        return False
+    return any(
+        stripped == prefix or stripped.startswith(prefix + " ")
+        for prefix in READ_ONLY_BASH_ALLOWLIST
+    )
+
+
+def _read_only_deny(reason: str) -> HookJSONOutput:
+    """Build a PreToolUse deny output (``permissionDecision="deny"``)."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
+    """PreToolUse hook enforcing the read-only summarizer contract.
+
+    Fires (under ``bypassPermissions``) for Bash and the file-mutating tools.
+    Denies every file-mutating tool outright and denies any Bash command that
+    is not on the read-only allowlist. Fails closed: malformed input → deny.
+    Returns ``{}`` (allow) only for an allowlisted read-only Bash command.
+    """
+    tool_name = input_data.get("tool_name") if isinstance(input_data, dict) else None
+    if tool_name == "Bash":
+        tool_input = input_data.get("tool_input") if isinstance(input_data, dict) else None
+        command = ""
+        if isinstance(tool_input, dict):
+            raw = tool_input.get("command")
+            command = raw if isinstance(raw, str) else ""
+        if _is_read_only_command(command):
+            return {}
+        return _read_only_deny(
+            f"read-only summarizer: non-read-only Bash command blocked: {command!r}"
+        )
+    # Any other matched (file-mutating) tool, or unparseable input → deny.
+    return _read_only_deny(
+        f"read-only summarizer: tool {tool_name!r} is blocked (non-mutating contract)"
+    )
 
 
 class ClaudeBackend:
@@ -63,6 +142,11 @@ class ClaudeBackend:
             agents: Optional mapping of specialist name -> AgentDefinition for
                 subagent support. Keys are the specialist names the lead agent
                 dispatches by; they MUST be preserved verbatim.
+            read_only: When True, register a ``PreToolUse`` guard hook that
+                denies file-mutating tools (Write/Edit/...) and any Bash command
+                not on ``READ_ONLY_BASH_ALLOWLIST``. The hook is the enforcement
+                — under ``bypassPermissions`` ``allowed_tools`` does not restrict
+                the toolset — so the tool list is left unchanged.
 
         Yields:
             AgentEvent instances.
@@ -74,6 +158,10 @@ class ClaudeBackend:
             else None
         )
 
+        # Enforced read-only profile (failure summarizer): register a PreToolUse
+        # guard hook that denies file-mutating tools and non-allowlisted Bash.
+        # The hook — NOT allowed_tools — is the enforcement: under
+        # bypassPermissions the tool list does not restrict the toolset.
         options = ClaudeAgentOptions(
             cwd=str(cwd),
             permission_mode="bypassPermissions",
@@ -83,6 +171,11 @@ class ClaudeBackend:
             output_format=output_format,
             max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
             max_turns=max_turns,
+            hooks=(
+                {"PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=[_read_only_guard])]}
+                if read_only
+                else None
+            ),
         )
 
         if agents:
