@@ -10,10 +10,10 @@ This runbook takes you from nothing to a scored result.
 - **`daydream` installed.** Run `uv sync` so the `daydream` console script is on `PATH` (the harness invokes it as a subprocess).
 - **`git` and `gh` on `PATH`.** `git` performs the blobless clone and `pull/N/head` fetch per PR.
 - **The Beagle plugin** installed in Claude Code (see the [Quickstart](../README.md#quickstart)) — deep review needs the stack-specific skills.
-- **The judge credential, exported.** Scoring uses an OpenRouter key:
-  - `MARTIAN_API_KEY` — an OpenRouter `sk-or-…` key. **Required for `--score`.**
-  - `MARTIAN_BASE_URL=https://openrouter.ai/api/v1` — the OpenAI-compatible judge endpoint.
-  - `MARTIAN_MODEL` — the judge model id; should match `--model` (default `anthropic/claude-opus-4.5`).
+- **The judge credential, exported.** Scoring requires one env var and accepts two optional overrides:
+  - `MARTIAN_API_KEY` — an OpenRouter `sk-or-…` key (or a withmartian key). **Required for `--score`.**
+  - `MARTIAN_BASE_URL` — the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1`; set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
+  - `MARTIAN_MODEL` — the judge model id. Defaults to `openai/gpt-4o-mini`; should match `--model` for comparable results.
 
   The harness reads `os.environ` only — it does **not** parse a `.env` file. If you keep these in a `.env`, you must export them into the shell first:
 
@@ -59,7 +59,7 @@ For each scored PR the harness writes a `daydream` leaf into:
 
 The command also prints to stdout:
 
-- per-PR precision/recall,
+- per-PR tp/fp/fn counts,
 - the aggregate precision/recall over all scored PRs (`precision = ΣTP / (ΣTP + ΣFP)`, `recall = ΣTP / (ΣTP + ΣFN)`), and
 - the **N scored** count.
 
@@ -69,6 +69,6 @@ Re-running is resumable and idempotent. `benchmark_data.json` is saved after eac
 
 ## Comparability caveat
 
-The `--model` value names the per-model results directory **and** selects the judge model. To compare against published benchmark numbers, the judge model id must match the published judge model. Using a different judge — or a different id string for the same underlying model — lands in a different `results/<dir>` and is not directly apples-to-apples.
+The `--model` value names the per-model results directory; it does **not** select the judge model. The judge model is selected by the `MARTIAN_MODEL` environment variable consumed by the scoring step. To compare against published benchmark numbers, both the `MARTIAN_MODEL` value and the `--model` label must match the published run. Using a different judge — or a different id string for the same underlying model — lands in a different `results/<dir>` and is not directly apples-to-apples.
 
-The published Martian run used the dated id `anthropic/claude-opus-4-5-20251101` → `results/anthropic_claude-opus-4-5-20251101/`; the default here is `anthropic/claude-opus-4.5` → `results/anthropic_claude-opus-4.5/`, a distinct directory. Scores are model-determined rather than string-determined, and the judge prompt and `temperature: 0.0` are identical, so the same underlying model under a different id string is broadly comparable. But routing through a different gateway can shift outputs slightly (system-prompt injection, sampling, schema handling), so for the closest apples-to-apples comparison run non-structured (the harness omits `--structured`) and note the gateway difference. To reuse the existing published directory exactly, set `--model` to that dated id only if OpenRouter accepts it as a model id.
+The published Martian run used the dated id `anthropic/claude-opus-4-5-20251101` → `results/anthropic_claude-opus-4-5-20251101/`; the default here is `anthropic/claude-opus-4.5` → `results/anthropic_claude-opus-4.5/`, a distinct directory. Scores are model-determined rather than string-determined, and the judge prompt and `temperature: 0.0` are identical, so the same underlying model under a different id string is broadly comparable. But routing through a different gateway can shift outputs slightly (system-prompt injection, sampling, schema handling), so for the closest apples-to-apples comparison run without structured output and note the gateway difference. To reuse the existing published directory exactly, set `--model` to that dated id only if OpenRouter accepts it as a model id.
