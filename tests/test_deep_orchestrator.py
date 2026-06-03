@@ -60,7 +60,7 @@ class _StubBackend:
         continuation: Any = None,
         agents: Any = None,
         max_turns: Any = None,
-        read_only=False,
+        read_only: bool = False,
     ):
         self.calls.append(
             {
