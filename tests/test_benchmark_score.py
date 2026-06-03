@@ -2,7 +2,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from daydream.benchmark.score import model_results_dir, parse_daydream_scores, preflight_judge_env, run_scoring
+from daydream.benchmark.score import (
+    JudgeEnvError,
+    model_results_dir,
+    parse_daydream_scores,
+    preflight_judge_env,
+    run_scoring,
+)
 
 
 def test_model_results_dir_sanitizes_slashes(tmp_path):
@@ -11,7 +17,7 @@ def test_model_results_dir_sanitizes_slashes(tmp_path):
 
 def test_preflight_raises_when_key_unset(monkeypatch):
     monkeypatch.delenv("MARTIAN_API_KEY", raising=False)
-    with pytest.raises(EnvironmentError) as e:
+    with pytest.raises(JudgeEnvError) as e:
         preflight_judge_env()
     assert "MARTIAN_API_KEY" in str(e.value)
 

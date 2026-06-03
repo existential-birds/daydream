@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from daydream.benchmark.daydream_run import run_daydream_review
+from daydream.benchmark.daydream_run import DaydreamArtifactError, run_daydream_review
 
 
 def test_runs_daydream_noninteractive_with_pinned_base_and_trajectory(tmp_path, monkeypatch):
@@ -36,5 +36,5 @@ def test_raises_when_artifact_missing(tmp_path, monkeypatch):
         "daydream.benchmark.daydream_run.subprocess.run",
         lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(DaydreamArtifactError):
         run_daydream_review(checkout, base_sha="x", trajectory_path=tmp_path / "t.json")

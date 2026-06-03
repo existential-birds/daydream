@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 from daydream.agent import console
 from daydream.benchmark.acquire import acquire_checkout
 from daydream.benchmark.benchmark_data import (
-    DAYDREAM_TOOL,
+    has_daydream_review,
     inject_daydream_review,
     load_benchmark_data,
     save_benchmark_data,
@@ -66,11 +66,6 @@ def _trajectory_path(config: BenchConfig, pr: EvaluablePR) -> Path:
     """Build the per-PR trajectory file path: ``<repo>-<pr_number>.json``."""
     repo = pr.source_repo.replace("/", "_")
     return config.trajectory_dir / f"{repo}-{pr.pr_number}.json"
-
-
-def _has_daydream_review(entry: dict) -> bool:
-    """Return whether a ``tool:"daydream"`` review already exists in *entry*."""
-    return any(review.get("tool") == DAYDREAM_TOOL for review in entry.get("reviews", []))
 
 
 def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict) -> bool:
@@ -125,6 +120,10 @@ def run_bench(config: BenchConfig) -> int:
             failed += 1
             continue
 
+        if not config.force and has_daydream_review(entry):
+            print_dim(console, f"Skipping {pr.golden_url} (daydream review already present)")
+            continue
+
         try:
             modified = _process_pr(config, pr, data)
         except Exception as exc:  # noqa: BLE001 - isolate per-PR failure so the sweep continues
@@ -148,6 +147,12 @@ def run_bench(config: BenchConfig) -> int:
         except Exception as exc:  # noqa: BLE001 - report scoring failure without raising past the CLI
             score_failed = True
             print_error(console, "Scoring failed", f"{type(exc).__name__}: {exc}")
+            injected = len(prs) - failed
+            print_info(
+                console,
+                f"{injected} of {len(prs)} PR(s) injected successfully; "
+                "corpus is saved and can be re-scored separately (re-run with --score)",
+            )
         else:
             for golden_url, leaf in scores.per_pr.items():
                 print_info(

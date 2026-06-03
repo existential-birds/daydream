@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -43,9 +44,29 @@ def save_benchmark_data(path: str | Path, data: dict[str, Any]) -> None:
         data: The corpus dict to serialize.
     """
     dest = Path(path)
-    tmp = dest.with_name(f"{dest.name}.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=dest.parent,
+        prefix=f"{dest.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as tf:
+        tmp = tf.name
+        tf.write(json.dumps(data, indent=2, ensure_ascii=False))
     os.replace(tmp, dest)
+
+
+def has_daydream_review(entry: dict[str, Any]) -> bool:
+    """Report whether a corpus entry already carries a synthetic ``daydream`` review.
+
+    Args:
+        entry: A single golden-PR corpus entry (the value of one ``golden_url`` key).
+
+    Returns:
+        ``True`` if any review in ``entry["reviews"]`` has ``tool == "daydream"``.
+    """
+    return any(review.get("tool") == DAYDREAM_TOOL for review in entry.get("reviews", []))
 
 
 def inject_daydream_review(
