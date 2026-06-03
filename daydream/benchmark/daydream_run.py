@@ -15,6 +15,14 @@ from pathlib import Path
 _STDERR_TAIL = 4000
 
 
+class DaydreamRunError(Exception):
+    """Raised when the daydream subprocess exits non-zero."""
+
+
+class DaydreamArtifactError(Exception):
+    """Raised when daydream exits 0 but the expected findings artifact is absent."""
+
+
 def run_daydream_review(checkout: Path, *, base_sha: str, trajectory_path: Path) -> Path:
     """Run a non-interactive deep daydream review against a checkout.
 
@@ -27,8 +35,8 @@ def run_daydream_review(checkout: Path, *, base_sha: str, trajectory_path: Path)
         Path to the canonical ``merged-items.json`` findings artifact.
 
     Raises:
-        RuntimeError: If the daydream process exits non-zero (includes a stderr tail).
-        FileNotFoundError: If the run succeeds but the artifact is absent.
+        DaydreamRunError: If the daydream process exits non-zero (includes a stderr tail).
+        DaydreamArtifactError: If the run succeeds but the artifact is absent.
     """
     cmd = [
         "daydream",
@@ -47,13 +55,13 @@ def run_daydream_review(checkout: Path, *, base_sha: str, trajectory_path: Path)
     )
     if result.returncode != 0:
         stderr_tail = (result.stderr or "")[-_STDERR_TAIL:]
-        raise RuntimeError(
+        raise DaydreamRunError(
             f"daydream review failed (exit {result.returncode}) for {checkout}:\n{stderr_tail}"
         )
 
     artifact = checkout / ".daydream" / "deep" / "merged-items.json"
     if not artifact.exists():
-        raise FileNotFoundError(
+        raise DaydreamArtifactError(
             f"daydream exited 0 but findings artifact is missing: {artifact}"
         )
     return artifact

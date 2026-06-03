@@ -32,6 +32,18 @@ _TOOL = "daydream"
 _STDERR_TAIL = 4000
 
 
+class JudgeEnvError(Exception):
+    """Raised when the judge API credential is absent from the environment."""
+
+
+class BenchmarkStepError(Exception):
+    """Raised when a benchmark step module exits non-zero."""
+
+
+class BenchmarkArtifactError(Exception):
+    """Raised when an expected benchmark output file is absent after a successful step."""
+
+
 def preflight_judge_env() -> None:
     """Verify the judge API credential is present in the process environment.
 
@@ -39,10 +51,10 @@ def preflight_judge_env() -> None:
     value is never logged.
 
     Raises:
-        EnvironmentError: If `MARTIAN_API_KEY` is unset or empty.
+        JudgeEnvError: If `MARTIAN_API_KEY` is unset or empty.
     """
     if not os.environ.get(JUDGE_API_KEY_ENV):
-        raise EnvironmentError(
+        raise JudgeEnvError(
             f"{JUDGE_API_KEY_ENV} is not set; export it (e.g. an OpenRouter sk-or-… key) "
             "before running the judge step."
         )
@@ -138,7 +150,7 @@ def _run_step(module: str, extra_args: list[str], *, cwd: Path) -> None:
         cwd: The benchmark repo directory.
 
     Raises:
-        RuntimeError: If the step exits non-zero; the message carries the module
+        BenchmarkStepError: If the step exits non-zero; the message carries the module
             name and a tail of its stderr.
     """
     cmd = ["uv", "run", "python", "-m", module, "--tool", _TOOL, *extra_args]
@@ -151,7 +163,7 @@ def _run_step(module: str, extra_args: list[str], *, cwd: Path) -> None:
     )
     if result.returncode != 0:
         stderr_tail = (result.stderr or "")[-_STDERR_TAIL:]
-        raise RuntimeError(f"{module} failed (exit {result.returncode}):\n{stderr_tail}")
+        raise BenchmarkStepError(f"{module} failed (exit {result.returncode}):\n{stderr_tail}")
 
 
 def run_scoring(benchmark_repo: Path, model: str) -> DaydreamScores:
@@ -170,9 +182,9 @@ def run_scoring(benchmark_repo: Path, model: str) -> DaydreamScores:
         The parsed `DaydreamScores`.
 
     Raises:
-        EnvironmentError: If the judge credential is unset (via `preflight_judge_env`).
-        RuntimeError: If any step exits non-zero.
-        FileNotFoundError: If `evaluations.json` is absent after a successful step3.
+        JudgeEnvError: If the judge credential is unset (via `preflight_judge_env`).
+        BenchmarkStepError: If any step exits non-zero.
+        BenchmarkArtifactError: If `evaluations.json` is absent after a successful step3.
     """
     preflight_judge_env()
 
@@ -185,7 +197,7 @@ def run_scoring(benchmark_repo: Path, model: str) -> DaydreamScores:
 
     evaluations_file = results_dir / "evaluations.json"
     if not evaluations_file.exists():
-        raise FileNotFoundError(
+        raise BenchmarkArtifactError(
             f"{evaluations_file} not found after step3; the judge step produced no evaluations."
         )
     evals = json.loads(evaluations_file.read_text())
