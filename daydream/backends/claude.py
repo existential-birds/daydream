@@ -75,16 +75,21 @@ _READ_ONLY_ALLOWED_TOOLS: frozenset[str] = frozenset(
 def _is_read_only_command(cmd: str) -> bool:
     """Return True only if *cmd* is a single allowlisted read-only command.
 
-    Denies (returns False) on: an empty/blank command, any command whose first
-    token is not an allowlisted prefix, and any command containing a shell
-    chaining metacharacter (``;``, ``&&``, ``||``, ``|``, backtick, ``$(``).
+    Denies (returns False) on: an empty/blank command, any command containing a
+    newline or carriage return, any command whose first token is not an
+    allowlisted prefix, and any command containing a shell chaining
+    metacharacter (``;``, ``&&``, ``||``, ``|``, backtick, ``$(``).
 
     Metacharacter detection uses ``shlex`` to avoid false positives from
     metacharacters that appear only inside quoted arguments (e.g.
-    ``git log --grep='fix|bug'`` is safe and must be allowed).
+    ``git log --grep='fix|bug'`` is safe and must be allowed).  Newlines and
+    carriage returns are bash command separators but ``shlex`` treats them as
+    whitespace and elides them, so they are rejected directly on the raw string.
     """
     stripped = cmd.strip()
     if not stripped:
+        return False
+    if "\n" in cmd or "\r" in cmd:
         return False
     # Lex in non-posix mode so quoted strings are returned as single tokens
     # (with their quote characters intact).  Unquoted shell special characters

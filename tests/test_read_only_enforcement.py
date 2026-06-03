@@ -22,6 +22,10 @@ def test_claude_read_only_profile_refuses_mutation():
     assert _is_read_only_command("git commit -m x") is False
     assert _is_read_only_command("git reset --hard HEAD") is False
     assert _is_read_only_command("rm -rf build") is False
+    # Newline/carriage-return command separators are bash chaining that shlex
+    # elides as whitespace; they must be rejected on the raw string.
+    assert _is_read_only_command("ls \nrm -rf /") is False
+    assert _is_read_only_command("cat foo\rrm x") is False
     assert _is_read_only_command("git log") is True
     assert _is_read_only_command("git blame -L 1,1 f.py") is True
 
