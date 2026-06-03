@@ -19,6 +19,7 @@ aggregate precision/recall are printed.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -72,8 +73,14 @@ def _has_daydream_review(entry: dict) -> bool:
     return any(review.get("tool") == DAYDREAM_TOOL for review in entry.get("reviews", []))
 
 
-def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict) -> None:
-    """Acquire, review, map, and inject a single PR into *data* (mutated)."""
+def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict) -> bool:
+    """Acquire, review, map, and inject a single PR into *data* (mutated).
+
+    Returns:
+        ``True`` if the corpus was modified, ``False`` if the existing daydream
+        review was left in place (idempotent no-op; see
+        :func:`inject_daydream_review`).
+    """
     checkout = acquire_checkout(
         pr.clone_url,
         pr.pr_number,
@@ -87,9 +94,9 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict) -> None:
         base_sha=pr.base_sha,
         trajectory_path=_trajectory_path(config, pr),
     )
-    doc = load_benchmark_data(artifact)
+    doc = json.loads(artifact.read_text(encoding="utf-8"))
     comments = merged_items_to_review_comments(doc, created_at=_CREATED_AT)
-    inject_daydream_review(data, pr.golden_url, comments, force=config.force)
+    return inject_daydream_review(data, pr.golden_url, comments, force=config.force)
 
 
 def run_bench(config: BenchConfig) -> int:
@@ -118,19 +125,18 @@ def run_bench(config: BenchConfig) -> int:
             failed += 1
             continue
 
-        if _has_daydream_review(entry) and not config.force:
-            print_dim(console, f"Skipping {pr.golden_url} (daydream review already present)")
-            continue
-
         try:
-            _process_pr(config, pr, data)
+            modified = _process_pr(config, pr, data)
         except Exception as exc:  # noqa: BLE001 - isolate per-PR failure so the sweep continues
             failed += 1
             print_error(console, "Benchmark PR failed", f"{pr.golden_url}: {type(exc).__name__}: {exc}")
             continue
 
-        save_benchmark_data(data_path, data)
-        print_info(console, f"Injected daydream review for {pr.golden_url}")
+        if modified:
+            save_benchmark_data(data_path, data)
+            print_info(console, f"Injected daydream review for {pr.golden_url}")
+        else:
+            print_dim(console, f"Skipping {pr.golden_url} (daydream review already present)")
 
     if failed:
         print_warning(console, f"{failed} of {len(prs)} selected PR(s) failed")
