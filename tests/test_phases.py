@@ -1125,6 +1125,34 @@ async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
 # ---------------------------------------------------------------------------
 
 
+def test_failure_summarizer_prompt_demands_evidence_and_sections():
+    """The summarizer prompt carries the A+B+C evidence-grounded contract."""
+    from daydream.phases import _build_failure_summarizer_prompt
+
+    prompt = _build_failure_summarizer_prompt(
+        test_output="E   assert 1 == 2",
+        trajectory_path=None,
+        trajectories_dir=None,
+        diff_path=None,
+        manifest_path=None,
+        deep_dir=None,
+        changed_files=[],
+        has_trajectory=True,
+    )
+    # A — expanded read-only git allowance: every history verb present
+    for verb in ("git log", "git blame", "git show", "git diff"):
+        assert verb in prompt
+    # B — facts/hypotheses structure
+    assert "Verified facts" in prompt
+    assert "Hypotheses (unverified)" in prompt
+    # A — evidence rule targets the incident directly
+    assert "NEVER attribute a code change to" in prompt
+    # C — quote-ground-truth instruction
+    assert "failing assertion" in prompt
+    # Don't-revert-on-hypothesis guidance for the next agent
+    assert "do NOT revert" in prompt or "not revert" in prompt
+
+
 class _SummarizerBackend(_ScriptedBackend):
     """Mock backend cycling through scripted ResultEvents for option 4.
 
