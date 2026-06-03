@@ -141,7 +141,9 @@ def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
     return messages
 
 
-async def claude_loader(script: dict[str, Any]) -> AsyncIterator[AgentEvent]:
+async def claude_loader(
+    script: dict[str, Any], *, read_only: bool = False
+) -> AsyncIterator[AgentEvent]:
     """Drive ``ClaudeBackend.execute`` against the canonical script."""
     messages = _build_claude_messages(script)
 
@@ -173,7 +175,7 @@ async def claude_loader(script: dict[str, Any]) -> AsyncIterator[AgentEvent]:
         patch("daydream.backends.claude.ToolResultBlock", _MockToolResultBlock),
     ):
         backend = ClaudeBackend(model="claude-test-model")
-        async for event in backend.execute(Path("/tmp"), "go"):
+        async for event in backend.execute(Path("/tmp"), "go", read_only=read_only):
             yield event
 
 
@@ -329,7 +331,9 @@ def _make_mock_process(lines: list[str]) -> MagicMock:
     return process
 
 
-async def codex_loader(script: dict[str, Any]) -> AsyncIterator[AgentEvent]:
+async def codex_loader(
+    script: dict[str, Any], *, read_only: bool = False
+) -> AsyncIterator[AgentEvent]:
     """Drive ``CodexBackend.execute`` against the canonical script."""
     lines = _build_codex_jsonl(script)
     mock_proc = _make_mock_process(lines)
@@ -338,5 +342,5 @@ async def codex_loader(script: dict[str, Any]) -> AsyncIterator[AgentEvent]:
         "daydream.backends.codex.asyncio.create_subprocess_exec",
         return_value=mock_proc,
     ):
-        async for event in backend.execute(Path("/tmp"), "go"):
+        async for event in backend.execute(Path("/tmp"), "go", read_only=read_only):
             yield event

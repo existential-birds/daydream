@@ -16,11 +16,11 @@ from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecord
 
 CANONICAL = Path(__file__).parent / "fixtures" / "canonical_script.json"
 
-BackendLoader = Callable[[dict[str, Any]], AsyncIterator[AgentEvent]]
+BackendLoader = Callable[..., AsyncIterator[AgentEvent]]
 
 
 async def _run_backend_against_canonical(
-    backend_loader: BackendLoader, tmp_path: Path
+    backend_loader: BackendLoader, tmp_path: Path, *, read_only: bool = False
 ) -> list[Step]:
     script = json.loads(CANONICAL.read_text())
     recorder = TrajectoryRecorder(
@@ -32,7 +32,7 @@ async def _run_backend_against_canonical(
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            async for event in backend_loader(script):
+            async for event in backend_loader(script, read_only=read_only):
                 inv.observe(event)
     return [s for s in recorder.steps if s.source == "agent"]
 
@@ -62,4 +62,23 @@ async def test_claude_and_codex_produce_identical_steps(tmp_path: Path) -> None:
 
     claude_steps = await _run_backend_against_canonical(claude_loader, tmp_path / "claude")
     codex_steps = await _run_backend_against_canonical(codex_loader, tmp_path / "codex")
+    _compare_steps(claude_steps, codex_steps)
+
+
+@pytest.mark.asyncio
+async def test_claude_and_codex_produce_identical_steps_read_only(tmp_path: Path) -> None:
+    """Both backends must produce byte-identical Step shapes when read_only=True.
+
+    Ensures the read_only kwarg added to Backend.execute() is forwarded
+    consistently by both backends and does not alter the observable AgentEvent
+    stream in a backend-specific way.
+    """
+    from tests.contract._loaders import claude_loader, codex_loader
+
+    claude_steps = await _run_backend_against_canonical(
+        claude_loader, tmp_path / "claude", read_only=True
+    )
+    codex_steps = await _run_backend_against_canonical(
+        codex_loader, tmp_path / "codex", read_only=True
+    )
     _compare_steps(claude_steps, codex_steps)

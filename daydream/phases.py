@@ -18,6 +18,7 @@ from daydream.agent import (
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
+from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.trajectory import (
@@ -295,9 +296,13 @@ def _build_failure_summarizer_prompt(
         "## Hard Constraints (read-only contract)\n"
         "- You MAY use Read, Grep, and Glob to inspect the artifacts listed below.\n"
         "- You MAY use Bash for NON-MUTATING inspection ONLY. Permitted commands: "
-        "`ls`, `cat`, `git status`, `git log`, `git show`, `git blame`, `git diff`. "
+        + ", ".join(f"`{cmd}`" for cmd in READ_ONLY_BASH_ALLOWLIST)
+        + ". "
         "These are read-only — they inspect history and never change the repo. Use "
-        "them to VERIFY any claim about cause or history before you write it as fact.\n"
+        "them to VERIFY any claim about cause or history before you write it as fact. "
+        "Each command MUST be a single, bare invocation — no pipes (`|`), no chaining "
+        "(`&&`, `||`, `;`), no subshells (`` ` `` or `$(...)`). The guard hook will "
+        "silently deny any command that contains these metacharacters.\n"
         "- You MUST NOT run tests, builds, or installers.\n"
         "- You MUST NOT run any command that writes, stages, commits, checks out, "
         "resets, stashes, or pushes (no `git add/commit/checkout/restore/reset/"

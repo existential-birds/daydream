@@ -254,7 +254,16 @@ def test_read_only_bash_guard_decision(cmd, allowed):
 
 @pytest.mark.asyncio
 async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
-    """read_only=True wires a PreToolUse hook covering Bash + file-mutating tools."""
+    """read_only=True wires a fail-closed PreToolUse guard onto the SDK options.
+
+    The contract is behavioral, not a matcher-string shape: under
+    ``bypassPermissions`` the hook is the *only* enforcement, so the guard must
+    fire for every tool and deny-by-default. We assert that by driving the
+    callback that was actually registered on the options — denying Write and
+    mutating Bash, allowing inspection (read-only Bash + allowlisted tools), and
+    denying an unknown/future tool (the fail-closed property a narrow matcher
+    would silently lose).
+    """
     patch_sdk(MockClaudeSDKClientCapture)
     backend = ClaudeBackend(model="opus")
 
@@ -268,10 +277,33 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
     matchers = hooks["PreToolUse"]
     assert len(matchers) == 1
     matcher = matchers[0]
-    # The matcher must cover Bash and the file-mutating tools.
-    for tool in ("Bash", "Write", "Edit"):
-        assert tool in matcher.matcher
     assert matcher.hooks  # at least one callback registered
+    guard = matcher.hooks[0]
+
+    # File-mutating tool → deny.
+    deny_write = await guard(
+        {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {}
+    )
+    assert deny_write["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # Mutating Bash → deny.
+    deny_bash = await guard(
+        {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}, None, {}
+    )
+    assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # Read-only Bash + allowlisted inspection tool → allow (no deny decision).
+    allow_bash = await guard(
+        {"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}, None, {}
+    )
+    assert "hookSpecificOutput" not in allow_bash
+    allow_read = await guard({"tool_name": "Read", "tool_input": {"file_path": "x"}}, None, {})
+    assert "hookSpecificOutput" not in allow_read
+
+    # Unknown/future tool → deny (fail-closed; a narrow deny-list matcher would
+    # never present this to the guard and it would slip through unchecked).
+    deny_unknown = await guard({"tool_name": "FutureMutator", "tool_input": {}}, None, {})
+    assert deny_unknown["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 @pytest.mark.asyncio

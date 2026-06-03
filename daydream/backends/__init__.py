@@ -252,6 +252,15 @@ class Backend(Protocol):
                 Codex via ``--sandbox read-only``) so the agent can inspect
                 history but cannot write/edit/delete or mutate the working
                 tree. Wired True only for the failure-summarizer call.
+
+                **Per-backend semantics diverge**: the Claude backend blocks
+                git commits (the PreToolUse hook denies the Bash tool when the
+                command is a mutating git operation), whereas the Codex backend
+                permits git commits even under ``--sandbox read-only`` because
+                Codex's sandbox only restricts filesystem writes, not git
+                index/object-store operations.  Callers relying on a
+                git-immutable guarantee must not assume ``read_only=True`` is
+                sufficient across all backends.
         """
         ...
 
