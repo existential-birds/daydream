@@ -36,7 +36,10 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
     class FreshContextBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             nonlocal call_count
             call_count += 1
             captured_prompts.append(prompt)
@@ -108,7 +111,10 @@ async def test_phase_parse_feedback_empty_response_returns_empty_list(tmp_path, 
 
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             # Only yield a result with no structured output (schema miss)
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -139,7 +145,10 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch, make_wo
 
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text='{"issues": [{"id": 1, "description": "Bug", "file": "foo.py", "line": 10}]}')
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -168,7 +177,10 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(tmp_pa
     class CapturingBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             captured_prompts.append(prompt)
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -399,7 +411,10 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
     class IntentBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="This PR adds a login page with email/password authentication.")
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -439,7 +454,10 @@ async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeyp
     class IntentBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -545,7 +563,10 @@ async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch, ma
     class ReviewBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="Found 2 issues.")
             yield ResultEvent(structured_output=structured_issues, continuation=None)
 
@@ -582,7 +603,10 @@ async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch, make_wo
     class NoIssuesBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="Implementation looks good.")
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
 
@@ -632,7 +656,10 @@ async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch, make_w
     class PlanBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="Here's the plan.")
             yield ResultEvent(structured_output=structured_plan, continuation=None)
 
@@ -685,7 +712,10 @@ async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch, make_work
     class NeverCalledBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             raise AssertionError("Should not be called when user selects 'none'")
             yield  # make it an async generator
 
@@ -853,7 +883,10 @@ async def test_phase_commit_push_includes_daydream_trailers(tmp_path, monkeypatc
     captured: dict[str, str] = {}
 
     class CapturingBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             captured["prompt"] = prompt
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -883,7 +916,10 @@ async def test_phase_commit_iteration_includes_daydream_trailers(tmp_path, monke
     captured: dict[str, str] = {}
 
     class CapturingBackend:
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             captured["prompt"] = prompt
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -951,7 +987,8 @@ class _InvestigatorBackend(_ScriptedBackend):
     """
 
     async def execute(
-        self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None,
+        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+        max_turns=None, read_only=False,
     ):
         self.captured_prompts.append(prompt)
         if not self.script:
@@ -1125,6 +1162,77 @@ async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
 # ---------------------------------------------------------------------------
 
 
+def test_minimal_handoff_separates_facts_from_unknown_cause():
+    """The no-agent fallback mirrors the facts/hypotheses split and invents no cause."""
+    from daydream.phases import _build_minimal_handoff
+
+    body = _build_minimal_handoff(
+        test_output="E   assert 1 == 2\nFAILED tests/t.py::test_x",
+        trajectory_path=None,
+        trajectories_dir=None,
+        diff_path=None,
+        manifest_path=None,
+        deep_dir=None,
+        changed_files=[],
+        has_trajectory=True,
+    )
+    assert "## Verified facts" in body
+    assert "## Hypotheses (unverified)" in body
+    # Ground truth quoted, not just pointed at
+    assert "assert 1 == 2" in body
+    # No fabricated cause — the fallback states the cause is unknown
+    assert "cause" in body.lower() and "unknown" in body.lower()
+    # Next-agent guidance present
+    assert "not revert" in body or "do NOT revert" in body
+
+
+def test_failure_summarizer_prompt_demands_evidence_and_sections():
+    """The summarizer prompt carries the A+B+C evidence-grounded contract."""
+    from daydream.phases import _build_failure_summarizer_prompt
+
+    prompt = _build_failure_summarizer_prompt(
+        test_output="E   assert 1 == 2",
+        trajectory_path=None,
+        trajectories_dir=None,
+        diff_path=None,
+        manifest_path=None,
+        deep_dir=None,
+        changed_files=[],
+        has_trajectory=True,
+    )
+    # A — expanded read-only git allowance: every history verb present
+    for verb in ("git log", "git blame", "git show", "git diff"):
+        assert verb in prompt
+    # B — facts/hypotheses structure
+    assert "Verified facts" in prompt
+    assert "Hypotheses (unverified)" in prompt
+    # A — evidence rule targets the incident directly
+    assert "NEVER attribute a code change to" in prompt
+    # C — quote-ground-truth instruction
+    assert "failing assertion" in prompt
+    # Don't-revert-on-hypothesis guidance for the next agent
+    assert "do NOT revert" in prompt or "not revert" in prompt
+
+
+@pytest.mark.asyncio
+async def test_summarizer_invoked_read_only_normal_calls_mutating(
+    tmp_path, monkeypatch, make_work,
+):
+    """The summarizer runs read_only=True; the preceding test run does not."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
+    backend = _SummarizerBackend(["fail", ("handoff", "# H")])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **k: "4")
+
+    await phase_test_and_heal(backend, make_work(tmp_path))
+
+    # First call = the failing test run (mutating allowed); second = summarizer (read-only).
+    assert backend.read_only_calls == [False, True]
+
+
 class _SummarizerBackend(_ScriptedBackend):
     """Mock backend cycling through scripted ResultEvents for option 4.
 
@@ -1137,10 +1245,18 @@ class _SummarizerBackend(_ScriptedBackend):
           unparseable ``structured_output`` (no ``handoff_prompt`` key).
     """
 
+    def __init__(self, script: list) -> None:
+        super().__init__(script)
+        # Records the read_only flag per execute() call so tests can assert
+        # the summarizer runs read-only while the normal test run does not.
+        self.read_only_calls: list[bool] = []
+
     async def execute(
-        self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None,
+        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+        max_turns=None, read_only=False,
     ):
         self.captured_prompts.append(prompt)
+        self.read_only_calls.append(read_only)
         if not self.script:
             raise AssertionError("backend invoked beyond scripted call count")
         entry = self.script.pop(0)
@@ -1417,6 +1533,64 @@ async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
     assert handoff.is_file()
     body = handoff.read_text(encoding="utf-8")
     assert "# Daydream handoff" in body
+
+
+@pytest.mark.asyncio
+async def test_option4_handoff_has_facts_and_hypotheses_on_disk(
+    tmp_path, monkeypatch, make_work,
+):
+    """Real path: option-4 drives the summarizer with the facts/hypotheses contract."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
+    backend = _SummarizerBackend(["fail", ("handoff", "# H\nbody")])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **k: "4")
+
+    await phase_test_and_heal(backend, make_work(tmp_path))
+
+    # The code we own is the prompt sent to the summarizer (agent output mocked).
+    summarizer_prompt = backend.captured_prompts[-1]
+    assert "Verified facts" in summarizer_prompt
+    assert "Hypotheses (unverified)" in summarizer_prompt
+    assert "git blame" in summarizer_prompt
+    # And it runs under the enforced read-only profile.
+    assert backend.read_only_calls == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
+    tmp_path, monkeypatch, make_work,
+):
+    """Direct regression for the incident: with no evidence, cause is parked UNKNOWN.
+
+    The summarizer raises, so the on-disk handoff is the no-agent fallback. It
+    MUST carry the facts/hypotheses split, quote the failing output, and state
+    the cause is unknown — never assert a fabricated cause as fact.
+    """
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
+    backend = _SummarizerBackend(["fail", ("raise", RuntimeError)])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **k: "4")
+
+    await phase_test_and_heal(backend, make_work(tmp_path))
+
+    body = (tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md").read_text(
+        encoding="utf-8",
+    )
+    assert "## Verified facts" in body
+    assert "## Hypotheses (unverified)" in body
+    # Ground truth (the failing test output) is quoted, not just pointed at.
+    assert "1 failed, 0 passed" in body
+    # No invented cause — the fallback states the cause is unknown.
+    assert "unknown" in body.lower()
+    # The unknown-cause statement lives under Hypotheses, not Verified facts.
+    facts_section = body.split("## Hypotheses (unverified)")[0]
+    assert "unknown" not in facts_section.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1715,6 +1889,56 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
 
         # The menu / stdin prompt was never consulted.
         prompt_sentinel.assert_not_called()
+
+        # The summarizer ran under the enforced read-only profile (the test run
+        # did not). Same contract as the interactive option-4 path.
+        assert backend.read_only_calls == [False, True]
+    finally:
+        reset_state()
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses_split(
+    tmp_path, monkeypatch, make_work,
+):
+    """Non-interactive + summarizer fails → on-disk handoff carries the split, cause UNKNOWN.
+
+    Mirrors the interactive fallback regression through the unattended abort
+    branch: no menu, no fix agent, but the written handoff still separates
+    Verified facts from Hypotheses and never invents a cause.
+    """
+    from daydream.agent import reset_state, set_non_interactive
+    from daydream.phases import phase_test_and_heal
+
+    reset_state()
+    set_non_interactive(True)
+    try:
+        _silence_phase_io(monkeypatch)
+        _install_recorder(monkeypatch, tmp_path)
+        monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
+
+        from unittest.mock import Mock
+
+        prompt_sentinel = Mock(
+            side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),
+        )
+        monkeypatch.setattr("daydream.phases.prompt_user", prompt_sentinel)
+
+        backend = _SummarizerBackend(["fail", ("raise", RuntimeError)])
+
+        passed, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+        assert passed is False
+        assert retries == 0
+
+        body = (tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md").read_text(
+            encoding="utf-8",
+        )
+        assert "## Verified facts" in body
+        assert "## Hypotheses (unverified)" in body
+        assert "unknown" in body.lower()
+        # The summarizer still ran read-only even on the abort branch.
+        assert backend.read_only_calls == [False, True]
+        prompt_sentinel.assert_not_called()
     finally:
         reset_state()
 
@@ -2005,7 +2229,10 @@ async def test_phase_review_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output=None, continuation=None)
 
         async def cancel(self):
@@ -2036,7 +2263,10 @@ async def test_phase_parse_feedback_prints_model_line_after_hero(
     class _Backend:
         model = "claude-haiku-4-5"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
 
         async def cancel(self):
@@ -2068,7 +2298,10 @@ async def test_phase_test_and_heal_prints_model_line_after_hero(
     class _Backend:
         model = "claude-sonnet-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="All tests passed")
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -2099,7 +2332,10 @@ async def test_phase_fetch_pr_feedback_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output=None, continuation=None)
 
         async def cancel(self):
@@ -2127,7 +2363,10 @@ async def test_phase_understand_intent_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="This PR adds a login page.")
             yield ResultEvent(structured_output=None, continuation=None)
 
@@ -2167,7 +2406,10 @@ async def test_phase_alternative_review_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
 
         async def cancel(self):
@@ -2218,7 +2460,10 @@ async def test_phase_generate_plan_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output=structured_plan, continuation=None)
 
         async def cancel(self):
@@ -2261,7 +2506,10 @@ async def test_phase_cross_stack_merge_prints_model_line_after_hero(
     class _Backend:
         model = "claude-opus-4-6"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             # The merge agent returns a schema-validated item list; the host
             # renders review-output.md from it (no agent file-write step).
             yield ResultEvent(
@@ -2335,7 +2583,10 @@ async def test_merge_writes_canonical_json_and_renders_markdown(tmp_path, monkey
     class MergeBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output=structured, continuation=None)
 
         async def cancel(self):
@@ -2381,7 +2632,10 @@ async def test_merge_raises_on_empty_agent_output(tmp_path, monkeypatch, make_wo
     class EmptyBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield ResultEvent(structured_output=None, continuation=None)
 
         async def cancel(self):
@@ -2465,7 +2719,10 @@ async def test_verifier_excludes_structural_lens(tmp_path, monkeypatch, make_wor
     class VerifyBackend:
         model = "test-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             self.prompt = prompt
             yield ResultEvent(structured_output=structured, continuation=None)
 

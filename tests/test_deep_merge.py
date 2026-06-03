@@ -94,6 +94,7 @@ class _RecordingBackend:
         continuation: Any = None,
         agents: Any = None,
         max_turns: Any = None,
+        read_only: bool = False,
     ):
         self.prompts.append(prompt)
         self.agents_seen.append(agents)

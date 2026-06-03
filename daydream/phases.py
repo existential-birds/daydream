@@ -18,6 +18,7 @@ from daydream.agent import (
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
+from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.trajectory import (
@@ -235,9 +236,13 @@ def _build_failure_summarizer_prompt(
 
     The summarizer is instructed to produce a paste-ready handoff prompt
     (single ``handoff_prompt`` JSON field) that the caller writes verbatim
-    to ``handoff.md``. The summarizer is strictly read-only and must
-    reference artifacts by absolute path — never embed diffs or
-    test-output excerpts.
+    to ``handoff.md``. The summarizer is strictly read-only and non-mutating
+    but MAY use read-only git history commands (``git log``/``show``/``blame``/
+    ``diff``) to *verify* any cause/history/blame claim before stating it as
+    fact. The handoff separates **Verified facts** (each cited) from
+    **Hypotheses (unverified)**, and quotes two tightly-scoped excerpts — the
+    failing assertion and the current source at the failing location — while
+    full diffs / whole files / trajectory dumps stay banned.
 
     Args:
         test_output: Raw failing test output to ground the summary.
@@ -286,32 +291,74 @@ def _build_failure_summarizer_prompt(
     return (
         "You are a read-only failure-summarizer. Your job is to write a "
         "paste-ready handoff prompt that another agent will use, in a fresh "
-        "session, to propose a fix for the failure daydream just hit.\n\n"
+        "session, to propose a fix for a failure daydream's test/heal loop "
+        "could not clear.\n\n"
         "## Hard Constraints (read-only contract)\n"
         "- You MAY use Read, Grep, and Glob to inspect the artifacts listed below.\n"
-        "- You MAY use Bash for NON-MUTATING discovery only (`ls`, `cat`, `git status`).\n"
+        "- You MAY use Bash for NON-MUTATING inspection ONLY. Permitted commands: "
+        + ", ".join(f"`{cmd}`" for cmd in READ_ONLY_BASH_ALLOWLIST)
+        + ". "
+        "These are read-only — they inspect history and never change the repo. Use "
+        "them to VERIFY any claim about cause or history before you write it as fact. "
+        "Each command MUST be a single, bare invocation — no pipes (`|`), no chaining "
+        "(`&&`, `||`, `;`), no subshells (`` ` `` or `$(...)`). The guard hook will "
+        "silently deny any command that contains these metacharacters.\n"
         "- You MUST NOT run tests, builds, or installers.\n"
-        "- You MUST NOT modify, create, or delete any files.\n"
-        "- You MUST NOT invoke Write, Edit, or any file-mutating tool.\n"
-        "- You MUST reference artifacts by absolute path. Do NOT embed diff "
-        "hunks, trajectory excerpts, or test-output excerpts in the handoff.\n\n"
+        "- You MUST NOT run any command that writes, stages, commits, checks out, "
+        "resets, stashes, or pushes (no `git add/commit/checkout/restore/reset/"
+        "stash/push`). You MUST NOT invoke Write, Edit, or any file-mutating tool.\n"
+        "- Do NOT embed full diffs, whole files, or trajectory dumps. You MAY — and "
+        "in \"Verified facts\" you MUST — quote two tightly-scoped excerpts: (a) the "
+        "exact failing assertion / error line(s), and (b) the current source at the "
+        "failing location (≤ ~15 lines, cited `path:start-end`). Everything else is "
+        "a reference by absolute path.\n\n"
+        "## Evidence rule (MANDATORY)\n"
+        "Every statement about CAUSE (\"X failed because…\"), HISTORY (\"the run "
+        "changed…\", \"this was introduced by…\"), or BLAME (\"daydream appended…\") is "
+        "a claim you MUST prove before writing it as fact. To prove a claim: run the "
+        "relevant read-only command (`git log -n 10 --oneline`, `git show <sha> -- "
+        "<file>`, `git blame -L <line>,<line> -- <file>`, `git diff <base>..HEAD -- "
+        "<file>`) or read the named artifact, THEN cite it inline next to the claim, "
+        "e.g. `(git blame phases.py:520 → 648a327, an earlier commit, NOT this run)`. "
+        "If you cannot prove a claim, it is NOT a verified fact — it goes in "
+        "Hypotheses. NEVER attribute a code change to \"the daydream run\" unless "
+        "`git log` / `git blame` shows a commit created during this run. A line that "
+        "predates the run's first commit was NOT written by the run — say so, with "
+        "the blame citation.\n\n"
         "## On-disk artifacts (read these first to ground your summary)\n"
         f"{artifacts_block}\n\n"
         "## Files changed during this daydream run\n"
         f"{changed_block}\n\n"
-        f"## Failing test output (for your context only — do NOT paste into handoff)\n\n{output_section}\n\n"
+        "## Failing test output (for your context — quote only the specific failing "
+        f"assertion / error line(s) into Verified facts, not the whole tail)\n\n{output_section}\n\n"
         f"{no_trajectory_clause}"
         "## Handoff prompt template\n"
         "Produce a Markdown document with these sections, in this order:\n\n"
-        "1. **Summary** — one paragraph: what daydream attempted, where it "
-        "failed (which phase / what gate blocked).\n"
-        "2. **Artifacts** — bulleted list of absolute paths from the section "
-        "above. No embedded contents.\n"
-        "3. **Changed files** — bulleted list of absolute repo paths from the "
-        "section above.\n"
-        "4. **Instructions for the next agent** — explicit, numbered:\n"
-        "   1. Explore the codebase before proposing anything. Read the "
-        "artifacts above and use Read/Grep/Glob to build your own model.\n"
+        "1. **Summary** — ONE neutral paragraph describing only the directly observed "
+        "outcome: the tests did not pass and the heal loop aborted at the test gate. "
+        "NO causal claims, NO history, NO blame here — those belong below.\n"
+        "2. **Verified facts** — a bulleted list. EVERY item ends with a citation in "
+        "parentheses: a command you ran or an artifact path+lines. This section MUST "
+        "include, at minimum:\n"
+        "   - The exact failing assertion / error line(s), quoted. (cite: test output)\n"
+        "   - The current source at the failing location, quoted ≤ 15 lines. "
+        "(cite: `path:start-end`, read just now)\n"
+        "   - The exit gate that fired (test phase, non-interactive abort or option 4).\n"
+        "   - Any history you confirmed with git (what changed in THIS run vs. earlier "
+        "commits), each with its `git log`/`blame`/`show`/`diff` citation.\n"
+        "   This section must be EVIDENCE-RICH. You are required to actually run the "
+        "git/read commands — do not dump everything into Hypotheses to avoid the work.\n"
+        "3. **Hypotheses (unverified)** — a bulleted list of candidate causes or "
+        "explanations you could NOT prove. Mark each explicitly, e.g. \"UNVERIFIED — "
+        "confirm by: <command/check>\". Anything about WHY it failed or WHO introduced "
+        "code that git did not confirm goes HERE, never in Verified facts.\n"
+        "4. **Artifacts** — bulleted absolute paths from the sections above. No contents.\n"
+        "5. **Changed files** — bulleted absolute repo paths from the section above.\n"
+        "6. **Instructions for the next agent** — explicit, numbered:\n"
+        "   1. Explore the codebase before proposing anything. Treat \"Verified "
+        "facts\" as ground truth (citations included); treat \"Hypotheses\" as leads "
+        "to confirm or refute FIRST — and do NOT revert or rewrite code on a "
+        "Hypothesis alone.\n"
         "   2. Propose an architecturally clean, idiomatic solution rooted "
         "in the project's existing patterns.\n"
         "   3. REFUSE to ship inline hacks that only paper over the "
@@ -439,9 +486,13 @@ def _build_minimal_handoff(
     """Build a minimal handoff body without invoking an agent.
 
     Used when the failure-summarizer subagent fails or no recorder is
-    active. Contains the same artifact pointers and instruction block as
-    the agent-produced version so the downstream agent gets useful
-    context either way.
+    active. Mirrors the agent path's **Verified facts** / **Hypotheses
+    (unverified)** split so accuracy does not regress on the fallback —
+    but it runs with no agent and cannot execute git, so it produces no
+    citations and **invents no cause**: the Hypotheses section states the
+    cause is UNKNOWN and must be derived by the next agent. The facts it
+    *can* assert without an agent (the exit gate, the quoted failing
+    output, the git-derived changed-file list) go under Verified facts.
     """
     lines = test_output.splitlines()
     if len(lines) > TEST_OUTPUT_TAIL_LINES:
@@ -466,20 +517,46 @@ def _build_minimal_handoff(
         "\n".join(f"- {p}" for p in changed_files) if changed_files else "_(none detected)_"
     )
 
+    changed_count = len(changed_files)
+    changed_fact = (
+        f"Files changed in the working tree (git): {changed_count} file(s) — "
+        "listed under Changed files below. (cite: git, working-tree status)"
+        if changed_count
+        else "No working-tree file changes were detected. (cite: git, working-tree status)"
+    )
+
     parts: list[str] = [
         "# Daydream handoff",
         "",
         "## Summary",
         "",
-        "Daydream's test phase could not confirm a green run and the user aborted "
-        "(option 4). The failure-summarizer subagent did not produce a structured "
-        "handoff, so this minimal version was written instead.",
+        "Daydream's test phase did not confirm a green run and the heal loop "
+        "aborted at the test gate. The failure-summarizer subagent did not produce "
+        "a structured handoff, so this minimal version was written instead.",
         "",
     ]
     if not has_trajectory:
         parts.append("> Note: trajectory unavailable for this run")
         parts.append("")
     parts.extend([
+        "## Verified facts",
+        "",
+        "- Tests did not report success; the heal loop aborted at the test gate. "
+        "(cite: daydream exit path — non-interactive abort / option 4)",
+        f"- {changed_fact}",
+        "- Tail of the failing test output, quoted verbatim:",
+        "",
+        "```",
+        output_section,
+        "```",
+        "",
+        "## Hypotheses (unverified)",
+        "",
+        "- The failure-summarizer agent did not run, so NO causal or historical "
+        "analysis was performed: the **cause is UNKNOWN** and must be derived by the "
+        "next agent via git (`git log`/`blame`/`show`/`diff`) and Read. Do not assume "
+        "a cause — confirm one from evidence first.",
+        "",
         "## Artifacts",
         "",
         artifacts_block,
@@ -488,16 +565,12 @@ def _build_minimal_handoff(
         "",
         changed_block,
         "",
-        "## Failing test output (tail)",
-        "",
-        "```",
-        output_section,
-        "```",
-        "",
         "## Instructions for the next agent",
         "",
-        "1. Explore the codebase before proposing anything. Read the "
-        "artifacts above and use Read/Grep/Glob to build your own model.",
+        "1. Explore the codebase before proposing anything. Treat \"Verified facts\" "
+        "as ground truth and \"Hypotheses\" as leads to confirm or refute FIRST; "
+        "use Read/Grep/Glob and read-only git to build your own model; do NOT revert "
+        "or rewrite code on a hypothesis alone.",
         "2. Propose an architecturally clean, idiomatic solution rooted in "
         "the project's existing patterns.",
         "3. REFUSE to ship inline hacks that only paper over the symptom "
@@ -572,6 +645,7 @@ async def _run_failure_summarizer(
                 prompt,
                 output_schema=FAILURE_SUMMARIZER_SCHEMA,
                 phase=DaydreamPhase.TEST,
+                read_only=True,
             )
         except Exception:  # noqa: BLE001 - summarizer failure is non-fatal
             _logger.debug("failure-summarizer agent failed", exc_info=True)

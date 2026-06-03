@@ -157,6 +157,38 @@ async def test_continuation_token_resumes():
 
 
 @pytest.mark.asyncio
+async def test_codex_read_only_uses_read_only_sandbox():
+    """read_only=True selects --sandbox read-only; danger-full-access absent."""
+    backend = CodexBackend(model="fixture-model")
+    mock_proc = _make_mock_process("simple_text.jsonl")
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), "p", read_only=True):
+            pass
+
+        flat_args = list(mock_exec.call_args.args)
+        assert "read-only" in flat_args
+        assert "danger-full-access" not in flat_args
+        # --sandbox immediately precedes the mode
+        assert flat_args[flat_args.index("--sandbox") + 1] == "read-only"
+
+
+@pytest.mark.asyncio
+async def test_codex_default_uses_full_access_sandbox():
+    """read_only=False (default) keeps the existing danger-full-access sandbox."""
+    backend = CodexBackend(model="fixture-model")
+    mock_proc = _make_mock_process("simple_text.jsonl")
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), "p"):
+            pass
+
+        flat_args = list(mock_exec.call_args.args)
+        assert flat_args[flat_args.index("--sandbox") + 1] == "danger-full-access"
+        assert "read-only" not in flat_args
+
+
+@pytest.mark.asyncio
 async def test_streamed_structured_output_via_item_updated():
     """Text delivered via item.updated deltas (item.completed has empty content)."""
     backend = CodexBackend(model="fixture-model")

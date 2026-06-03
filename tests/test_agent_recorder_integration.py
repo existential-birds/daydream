@@ -79,6 +79,7 @@ class MockBackend:
         continuation: ContinuationToken | None = None,
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
+        read_only: bool = False,
     ) -> AsyncIterator[AgentEvent]:
         events = self.events
 

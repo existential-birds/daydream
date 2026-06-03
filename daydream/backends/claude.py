@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookJSONOutput, HookMatcher
 from claude_agent_sdk.types import (
     AgentDefinition,
     AssistantMessage,
@@ -32,6 +33,122 @@ from daydream.backends import (
     TurnEndEvent,
 )
 
+# Read-only Bash allowlist for the enforced read-only profile (the failure
+# summarizer). A command is permitted only if it begins with one of these
+# prefixes AND contains no shell-chaining metacharacters that could smuggle in
+# a mutating command. Mirrored in the summarizer prompt prose
+# (``daydream/phases.py``). Conservative by design: any chain → deny.
+READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
+    "ls",
+    "cat",
+    "git status",
+    "git log",
+    "git show",
+    "git blame",
+    "git diff",
+)
+
+# Chaining metacharacters that can append a second, non-allowlisted command.
+# Used in docstrings / comments for human readability.
+_CHAIN_METACHARS: tuple[str, ...] = (";", "&&", "||", "|", "`", "$(")
+
+# Single-character danger tokens checked against shlex output in
+# _is_read_only_command.  shlex (non-posix) splits multi-char operators like
+# ``&&`` and ``$(`` into their constituent characters, so we check at the
+# single-character level.  All of these are safe inside quoted strings (shlex
+# returns the whole quoted chunk as one token).
+_DANGEROUS_TOKENS: frozenset[str] = frozenset({"|", ";", "&", "`", "$"})
+
+# Hook matcher for the read-only guard. Use ``.*`` so the hook fires for
+# EVERY tool call — the guard then explicitly allows only the safe set and
+# denies everything else (fail-closed). A deny-list of mutating tools was
+# fail-open: any tool not on the list would slip through unchecked.
+_READ_ONLY_HOOK_MATCHER = ".*"
+
+# Tools that are unconditionally permitted under the read-only profile
+# (Bash is handled separately via the command allowlist).
+_READ_ONLY_ALLOWED_TOOLS: frozenset[str] = frozenset(
+    {"Read", "Grep", "Glob", "StructuredOutput"}
+)
+
+
+def _is_read_only_command(cmd: str) -> bool:
+    """Return True only if *cmd* is a single allowlisted read-only command.
+
+    Denies (returns False) on: an empty/blank command, any command containing a
+    newline or carriage return, any command whose first token is not an
+    allowlisted prefix, and any command containing a shell chaining
+    metacharacter (``;``, ``&&``, ``||``, ``|``, backtick, ``$(``).
+
+    Metacharacter detection uses ``shlex`` to avoid false positives from
+    metacharacters that appear only inside quoted arguments (e.g.
+    ``git log --grep='fix|bug'`` is safe and must be allowed).  Newlines and
+    carriage returns are bash command separators but ``shlex`` treats them as
+    whitespace and elides them, so they are rejected directly on the raw string.
+    """
+    stripped = cmd.strip()
+    if not stripped:
+        return False
+    if "\n" in cmd or "\r" in cmd:
+        return False
+    # Lex in non-posix mode so quoted strings are returned as single tokens
+    # (with their quote characters intact).  Unquoted shell special characters
+    # appear as individual bare tokens.  Multi-character metacharacters like
+    # ``&&``, ``||``, and ``$(`` are emitted as their constituent characters
+    # (e.g. ``&``, ``&``), so we check for the individual dangerous characters
+    # rather than the multi-char strings.  See ``_DANGEROUS_TOKENS``.
+    try:
+        tokens = list(shlex.shlex(stripped, posix=False))
+    except ValueError:
+        # Malformed quoting — deny.
+        return False
+    for tok in tokens:
+        if tok in _DANGEROUS_TOKENS:
+            return False
+    return any(
+        stripped == prefix or stripped.startswith(prefix + " ")
+        for prefix in READ_ONLY_BASH_ALLOWLIST
+    )
+
+
+def _read_only_deny(reason: str) -> HookJSONOutput:
+    """Build a PreToolUse deny output (``permissionDecision="deny"``)."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
+    """PreToolUse hook enforcing the read-only summarizer contract.
+
+    Fires for ALL tools (matcher ``.*``). Explicitly allows only the safe set
+    (Read, Grep, Glob, StructuredOutput, and allowlisted Bash commands) and
+    denies everything else. Fails closed: malformed input → deny.
+    Returns ``{}`` (allow) only for a permitted tool/command.
+    """
+    tool_name = input_data.get("tool_name") if isinstance(input_data, dict) else None
+    if tool_name == "Bash":
+        tool_input = input_data.get("tool_input") if isinstance(input_data, dict) else None
+        command = ""
+        if isinstance(tool_input, dict):
+            raw = tool_input.get("command")
+            command = raw if isinstance(raw, str) else ""
+        if _is_read_only_command(command):
+            return {}
+        return _read_only_deny(
+            f"read-only summarizer: non-read-only Bash command blocked: {command!r}"
+        )
+    if tool_name in _READ_ONLY_ALLOWED_TOOLS:
+        return {}
+    # Any tool not on the allow-list, or unparseable input → deny.
+    return _read_only_deny(
+        f"read-only summarizer: tool {tool_name!r} is blocked (non-mutating contract)"
+    )
+
 
 class ClaudeBackend:
     """Backend that wraps the Claude Agent SDK.
@@ -51,6 +168,7 @@ class ClaudeBackend:
         continuation: ContinuationToken | None = None,
         agents: dict[str, AgentDefinition] | None = None,
         max_turns: int | None = None,
+        read_only: bool = False,
     ) -> AsyncIterator[AgentEvent]:
         """Execute a prompt and yield unified events.
 
@@ -62,6 +180,11 @@ class ClaudeBackend:
             agents: Optional mapping of specialist name -> AgentDefinition for
                 subagent support. Keys are the specialist names the lead agent
                 dispatches by; they MUST be preserved verbatim.
+            read_only: When True, register a ``PreToolUse`` guard hook that
+                denies file-mutating tools (Write/Edit/...) and any Bash command
+                not on ``READ_ONLY_BASH_ALLOWLIST``. The hook is the enforcement
+                — under ``bypassPermissions`` ``allowed_tools`` does not restrict
+                the toolset — so the tool list is left unchanged.
 
         Yields:
             AgentEvent instances.
@@ -73,6 +196,10 @@ class ClaudeBackend:
             else None
         )
 
+        # Enforced read-only profile (failure summarizer): register a PreToolUse
+        # guard hook that denies file-mutating tools and non-allowlisted Bash.
+        # The hook — NOT allowed_tools — is the enforcement: under
+        # bypassPermissions the tool list does not restrict the toolset.
         options = ClaudeAgentOptions(
             cwd=str(cwd),
             permission_mode="bypassPermissions",
@@ -82,6 +209,11 @@ class ClaudeBackend:
             output_format=output_format,
             max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
             max_turns=max_turns,
+            hooks=(
+                {"PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=[_read_only_guard])]}
+                if read_only
+                else None
+            ),
         )
 
         if agents:
@@ -118,6 +250,15 @@ class ClaudeBackend:
                                 yield ThinkingEvent(text=block.thinking)
                             elif isinstance(block, ToolUseBlock):
                                 if block.name == "StructuredOutput":
+                                    # Explicitly assert the invariant: StructuredOutput must
+                                    # be in _READ_ONLY_ALLOWED_TOOLS so the read_only guard
+                                    # hook permits it by design, not incidentally.  If the
+                                    # set ever drifts, this fires before the silent passthrough
+                                    # becomes a latent mutation hole.
+                                    assert "StructuredOutput" in _READ_ONLY_ALLOWED_TOOLS, (
+                                        "StructuredOutput must remain in _READ_ONLY_ALLOWED_TOOLS "
+                                        "to preserve the read_only non-mutation contract"
+                                    )
                                     skipped_tool_ids.add(block.id)
                                     continue
                                 yield ToolStartEvent(

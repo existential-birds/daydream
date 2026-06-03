@@ -263,6 +263,7 @@ async def run_agent(
     continuation: ContinuationToken | None = None,
     agents: dict[str, AgentDefinition] | None = None,
     max_turns: int | None = None,
+    read_only: bool = False,
 ) -> tuple[str | Any, ContinuationToken | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -288,6 +289,10 @@ async def run_agent(
         continuation: Optional continuation token for multi-turn.
         agents: Optional mapping of specialist name -> AgentDefinition.
         max_turns: Optional cap on the number of model turns.
+        read_only: When True, the backend enforces a non-mutating tool profile
+            at the tool layer (Claude PreToolUse guard hook; Codex
+            ``--sandbox read-only``). Wired True only for the read-only
+            failure-summarizer call; all other call sites keep the default.
 
     Returns:
         Tuple of (output, continuation_token). Output is text or structured data.
@@ -310,7 +315,10 @@ async def run_agent(
             tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
 
         try:
-            event_iter = backend.execute(cwd, prompt, output_schema, continuation, agents=agents, max_turns=max_turns)
+            event_iter = backend.execute(
+                cwd, prompt, output_schema, continuation,
+                agents=agents, max_turns=max_turns, read_only=read_only,
+            )
         except Exception as exc:
             print_error(console, "Backend Init Error", f"{type(exc).__name__}: {exc}")
             raise

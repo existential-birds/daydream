@@ -31,6 +31,7 @@ class _DeepMockBackend:
         *,
         agents=None,
         max_turns=None,
+        read_only=False,
     ):
         # Record parity evidence -- D-38: no stage may pass `agents=`.
         self.agents_kwargs_seen.append(agents)

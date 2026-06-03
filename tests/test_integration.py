@@ -44,7 +44,10 @@ class MockBackend:
         self._prompt: str = ""
         self._call_count = 0
 
-    async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+    async def execute(
+        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+        max_turns=None, read_only=False,
+    ):
         self._prompt = prompt
         self._call_count += 1
         if self._events is not None:
@@ -95,7 +98,10 @@ class MockBackendWithEvents:
     def __init__(self, events: list):
         self._events = events
 
-    async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+    async def execute(
+        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+        max_turns=None, read_only=False,
+    ):
         for event in self._events:
             yield event
 
@@ -594,7 +600,10 @@ async def test_run_comment_full_flow(tmp_path, monkeypatch):
     class TrustMockBackend:
         model = "mock-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -698,7 +707,10 @@ async def test_run_comment_does_not_prompt_for_skill(tmp_path, monkeypatch):
     class MinimalBackend:
         model = "mock-model"
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None, agents=None, max_turns=None):
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
             yield TextEvent(text="Intent: changes f.txt.")
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
         async def cancel(self): pass

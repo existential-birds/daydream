@@ -242,7 +242,27 @@ class Backend(Protocol):
         continuation: ContinuationToken | None = None,
         agents: dict[str, AgentDefinition] | None = None,
         max_turns: int | None = None,
-    ) -> AsyncIterator[AgentEvent]: ...
+        read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        """Yield AgentEvents for *prompt*.
+
+        Args:
+            read_only: When True, the backend enforces a non-mutating tool
+                profile at the tool layer (Claude via a PreToolUse guard hook;
+                Codex via ``--sandbox read-only``) so the agent can inspect
+                history but cannot write/edit/delete or mutate the working
+                tree. Wired True only for the failure-summarizer call.
+
+                **Per-backend semantics diverge**: the Claude backend blocks
+                git commits (the PreToolUse hook denies the Bash tool when the
+                command is a mutating git operation), whereas the Codex backend
+                permits git commits even under ``--sandbox read-only`` because
+                Codex's sandbox only restricts filesystem writes, not git
+                index/object-store operations.  Callers relying on a
+                git-immutable guarantee must not assume ``read_only=True`` is
+                sufficient across all backends.
+        """
+        ...
 
     async def cancel(self) -> None: ...
 
