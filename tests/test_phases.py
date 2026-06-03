@@ -1535,6 +1535,64 @@ async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
     assert "# Daydream handoff" in body
 
 
+@pytest.mark.asyncio
+async def test_option4_handoff_has_facts_and_hypotheses_on_disk(
+    tmp_path, monkeypatch, make_work,
+):
+    """Real path: option-4 drives the summarizer with the facts/hypotheses contract."""
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
+    backend = _SummarizerBackend(["fail", ("handoff", "# H\nbody")])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **k: "4")
+
+    await phase_test_and_heal(backend, make_work(tmp_path))
+
+    # The code we own is the prompt sent to the summarizer (agent output mocked).
+    summarizer_prompt = backend.captured_prompts[-1]
+    assert "Verified facts" in summarizer_prompt
+    assert "Hypotheses (unverified)" in summarizer_prompt
+    assert "git blame" in summarizer_prompt
+    # And it runs under the enforced read-only profile.
+    assert backend.read_only_calls == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
+    tmp_path, monkeypatch, make_work,
+):
+    """Direct regression for the incident: with no evidence, cause is parked UNKNOWN.
+
+    The summarizer raises, so the on-disk handoff is the no-agent fallback. It
+    MUST carry the facts/hypotheses split, quote the failing output, and state
+    the cause is unknown — never assert a fabricated cause as fact.
+    """
+    from daydream.phases import phase_test_and_heal
+
+    _silence_phase_io(monkeypatch)
+    _install_recorder(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
+    backend = _SummarizerBackend(["fail", ("raise", RuntimeError)])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **k: "4")
+
+    await phase_test_and_heal(backend, make_work(tmp_path))
+
+    body = (tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md").read_text(
+        encoding="utf-8",
+    )
+    assert "## Verified facts" in body
+    assert "## Hypotheses (unverified)" in body
+    # Ground truth (the failing test output) is quoted, not just pointed at.
+    assert "1 failed, 0 passed" in body
+    # No invented cause — the fallback states the cause is unknown.
+    assert "unknown" in body.lower()
+    # The unknown-cause statement lives under Hypotheses, not Verified facts.
+    facts_section = body.split("## Hypotheses (unverified)")[0]
+    assert "unknown" not in facts_section.lower()
+
+
 # ---------------------------------------------------------------------------
 # _resolve_handoff_paths — ephemeral worktree + archive routing
 # ---------------------------------------------------------------------------
@@ -1830,6 +1888,56 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
         ), backend.captured_prompts
 
         # The menu / stdin prompt was never consulted.
+        prompt_sentinel.assert_not_called()
+
+        # The summarizer ran under the enforced read-only profile (the test run
+        # did not). Same contract as the interactive option-4 path.
+        assert backend.read_only_calls == [False, True]
+    finally:
+        reset_state()
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses_split(
+    tmp_path, monkeypatch, make_work,
+):
+    """Non-interactive + summarizer fails → on-disk handoff carries the split, cause UNKNOWN.
+
+    Mirrors the interactive fallback regression through the unattended abort
+    branch: no menu, no fix agent, but the written handoff still separates
+    Verified facts from Hypotheses and never invents a cause.
+    """
+    from daydream.agent import reset_state, set_non_interactive
+    from daydream.phases import phase_test_and_heal
+
+    reset_state()
+    set_non_interactive(True)
+    try:
+        _silence_phase_io(monkeypatch)
+        _install_recorder(monkeypatch, tmp_path)
+        monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
+
+        from unittest.mock import Mock
+
+        prompt_sentinel = Mock(
+            side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),
+        )
+        monkeypatch.setattr("daydream.phases.prompt_user", prompt_sentinel)
+
+        backend = _SummarizerBackend(["fail", ("raise", RuntimeError)])
+
+        passed, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+        assert passed is False
+        assert retries == 0
+
+        body = (tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md").read_text(
+            encoding="utf-8",
+        )
+        assert "## Verified facts" in body
+        assert "## Hypotheses (unverified)" in body
+        assert "unknown" in body.lower()
+        # The summarizer still ran read-only even on the abort branch.
+        assert backend.read_only_calls == [False, True]
         prompt_sentinel.assert_not_called()
     finally:
         reset_state()
