@@ -425,3 +425,70 @@ def test_removed_verbs_no_longer_dispatch():
     assert not hasattr(cli, "_handle_export_command")
     assert not hasattr(cli, "_handle_snapshot_command")
     assert hasattr(cli, "_handle_label_command")
+
+
+def test_pr_repo_detected_from_target_not_cwd(monkeypatch, tmp_path):
+    """pr_repo records the target checkout's slug, not the invoking cwd (#128).
+
+    Drives the production ``_parse_args`` path with a target distinct from cwd
+    and a stubbed ``gh repo view`` seam that returns a different slug per path.
+    Asserts the resulting ``RunConfig.pr_repo`` (which flows verbatim into the
+    trajectory's ``extra.pr_repo``) reflects the target — the benchmark-harness
+    pattern of running daydream from one repo against a checkout of another.
+    """
+    target = tmp_path / "target-checkout"
+    target.mkdir()
+
+    def fake_gh_repo_view(repo):
+        # Slug keyed on the inspected path so the assertion proves which dir
+        # was passed: the target, not Path.cwd().
+        if Path(repo) == target:
+            return ("grafana", "grafana")
+        return ("existential-birds", "daydream")
+
+    monkeypatch.setattr("daydream.git_ops.gh_repo_view", fake_gh_repo_view)
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch: None)
+    monkeypatch.setattr(sys, "argv", ["daydream", str(target)])
+
+    config = _parse_args()
+
+    assert config.pr_repo == "grafana/grafana"
+
+
+def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch, tmp_path):
+    """With no target positional, slug detection falls back to the cwd (#128)."""
+    invoking_repo = tmp_path / "invoking-repo"
+    invoking_repo.mkdir()
+    monkeypatch.chdir(invoking_repo)
+
+    def fake_gh_repo_view(repo):
+        assert Path(repo) == invoking_repo
+        return ("existential-birds", "daydream")
+
+    monkeypatch.setattr("daydream.git_ops.gh_repo_view", fake_gh_repo_view)
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch: None)
+    monkeypatch.setattr(sys, "argv", ["daydream"])
+
+    config = _parse_args()
+
+    assert config.target is None
+    assert config.pr_repo == "existential-birds/daydream"
+
+
+def test_feedback_pr_repo_detected_from_target_not_cwd(monkeypatch, tmp_path):
+    """The feedback subcommand also attributes pr_repo to the target (#128)."""
+    target = tmp_path / "target-checkout"
+    target.mkdir()
+
+    def fake_gh_repo_view(repo):
+        if Path(repo) == target:
+            return ("grafana", "grafana")
+        return ("existential-birds", "daydream")
+
+    monkeypatch.setattr("daydream.git_ops.gh_repo_view", fake_gh_repo_view)
+    monkeypatch.setattr(sys, "argv", ["daydream", "feedback", "42", "--bot", "x[bot]", str(target)])
+
+    config = _parse_args()
+
+    assert config.pr_number == 42
+    assert config.pr_repo == "grafana/grafana"

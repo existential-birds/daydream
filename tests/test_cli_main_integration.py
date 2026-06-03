@@ -46,17 +46,23 @@ from tests.test_deep_orchestrator import (
 def _silence_cli_and_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mock only the external seams cli.main touches before/around the loop.
 
-    - gh-detection helpers (`_auto_detect_pr_number`/`_detect_repo_slug`) shell
-      out to ``gh`` against ``Path.cwd()``; pin them to ``None`` for
-      determinism (no network, no dependency on the host's git checkout).
+    - The provenance detectors (`_auto_detect_pr_number`/`_detect_repo_slug`)
+      shell out to ``gh``. We mock one layer deeper — the ``git_ops`` ``gh``
+      seam — rather than stubbing the detectors themselves, so the REAL
+      cwd-vs-target path-threading logic runs (the thing #128 fixed). The
+      ``gh_repo_view`` stub returns a slug keyed on the inspected path's
+      basename (``acme/<dir name>``), making provenance deterministic and
+      letting a test prove which directory was used. ``gh_pr_view`` -> None.
     - ``runner.print_phase_hero`` renders the DAYDREAM banner on the real run
       path; silence it so the test output stays clean. (It does not block, but
       patching keeps the captured output focused.)
     - signal-handler install is a no-op concern here; leave it real — it is a
       cheap, side-effect-free part of the production entrypoint we want covered.
     """
-    monkeypatch.setattr("daydream.cli._auto_detect_pr_number", lambda: None)
-    monkeypatch.setattr("daydream.cli._detect_repo_slug", lambda: None)
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_repo_view", lambda repo: ("acme", Path(repo).name)
+    )
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch: None)
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
 
 
@@ -83,6 +89,43 @@ def test_cli_main_clean_deep_run_exits_0(
     # SystemExit.code is the int returned by runner.run, propagated through
     # anyio.run -> sys.exit. Not a hardcoded 0 (see TDD proof in the PR).
     assert exc.value.code == 0
+
+
+def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end provenance: the written trajectory's extra.pr_repo is the
+    target checkout's slug, not the invoking cwd (#128).
+
+    This drives the full production entrypoint — ``cli.main`` -> ``anyio.run``
+    -> ``run_deep`` -> ``TrajectoryRecorder._write`` — and asserts the OBSERVABLE
+    on-disk artifact: the ATIF trajectory JSON. The ``gh`` seam returns
+    ``acme/<dir basename>``, so the target yields ``acme/multi_stack`` while the
+    cwd (the daydream repo) would yield a different basename. Asserting
+    ``acme/multi_stack`` proves provenance is attributed to the target — the
+    benchmark-harness pattern that regressed before the fix.
+    """
+    import json
+
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    trajectory_path = tmp_path / "trajectory.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["daydream", "--trajectory", str(trajectory_path), str(multi_stack_target)],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 0
+
+    assert trajectory_path.exists(), "deep run must write the trajectory to disk"
+    data = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    assert data["extra"]["pr_repo"] == f"acme/{multi_stack_target.name}"
+    assert data["extra"]["pr_repo"] != f"acme/{Path.cwd().name}"
 
 
 def test_cli_main_wrong_branch_exits_1(
