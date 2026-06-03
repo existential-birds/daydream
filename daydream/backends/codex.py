@@ -91,6 +91,12 @@ class CodexBackend:
             continuation: Optional token for thread resumption.
             agents: Optional subagent mapping. Codex does not support non-empty
                 subagent maps and will raise if provided.
+            read_only: When True, run under ``--sandbox read-only`` so the agent
+                can inspect history (read-only git, cat, ls) but cannot mutate
+                the working tree, index, or refs. Accepted residual (Task 0
+                spike): ``--sandbox read-only`` does not block ``git commit``;
+                the working tree — the failure-handoff incident's danger — is
+                fully protected. Default False keeps ``danger-full-access``.
 
         Yields:
             AgentEvent instances.
@@ -107,10 +113,15 @@ class CodexBackend:
                 "use --backend claude for exploration."
             )
 
+        # Enforced read-only profile (failure summarizer): the read-only sandbox
+        # blocks all working-tree/index/ref mutation while permitting read-only
+        # git inspection. Accepted residual (Task 0 spike): it does not block
+        # `git commit`; the working tree — the incident's danger — is protected.
+        sandbox_mode = "read-only" if read_only else "danger-full-access"
         args = [
             "codex", "exec", "--experimental-json",
             "--model", self.model,
-            "--sandbox", "danger-full-access",
+            "--sandbox", sandbox_mode,
             "--cd", str(cwd),
         ]
 
