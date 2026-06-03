@@ -187,6 +187,28 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
     return out
 
 
+def _extract_item_fields(
+    raw: dict[str, Any],
+) -> tuple[str, int | None, str, str, str | None, str | None, bool] | None:
+    """Extract and normalise fields from a single canonical merged item.
+
+    Returns a ``(path, line_int, description, rationale, severity, confidence,
+    is_cross_stack)`` tuple, or ``None`` when ``file`` is empty (so callers
+    can simply ``continue``).
+    """
+    path = str(raw.get("file", "")).strip()
+    if not path:
+        return None
+    line = raw.get("line")
+    line_int = int(line) if isinstance(line, int) else None
+    description = str(raw.get("description", "")).strip()
+    rationale = str(raw.get("rationale", "")).strip()
+    severity = str(raw.get("severity", "")).strip().lower() or None
+    confidence = str(raw.get("confidence", "")).strip().upper() or None
+    is_cross_stack = str(raw.get("lens", "")).strip() == "cross-stack"
+    return path, line_int, description, rationale, severity, confidence, is_cross_stack
+
+
 def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
     """Convert canonical merged items into ParsedIssue objects.
 
@@ -201,19 +223,12 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
     """
     out: list[ParsedIssue] = []
     for raw in items:
-        path = str(raw.get("file", "")).strip()
-        if not path:
+        fields = _extract_item_fields(raw)
+        if fields is None:
             continue
-        line = raw.get("line")
-        line_int = int(line) if isinstance(line, int) else None
-        description = str(raw.get("description", "")).strip()
-        rationale = str(raw.get("rationale", "")).strip()
-        severity = str(raw.get("severity", "")).strip().lower() or None
-        confidence = str(raw.get("confidence", "")).strip().upper() or None
-        is_cross_stack = str(raw.get("lens", "")).strip() == "cross-stack"
+        path, line_int, description, rationale, severity, confidence, is_cross_stack = fields
         # Title is the description; rationale (when present and distinct)
         # becomes the body so the agent prompt has context.
-        title = description
         body_parts: list[str] = []
         if severity:
             body_parts.append(f"**Severity:** {severity}")
@@ -226,7 +241,7 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
             ParsedIssue(
                 path=path,
                 line=line_int,
-                title=title,
+                title=description,
                 body=body,
                 is_cross_stack=is_cross_stack,
                 confidence=confidence,

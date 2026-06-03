@@ -905,6 +905,40 @@ def fetch(repo: Path, remote: str = "origin") -> None:
         raise GitError(f"git fetch {remote} failed in {repo}: {proc.stderr.strip()}")
 
 
+def fetch_ref(repo: Path, refspec: str, remote: str = "origin") -> None:
+    """Fetch a single *refspec* from *remote* into *repo*.
+
+    Useful for fetching refs that are not covered by the default fetch
+    configuration, such as ``refs/pull/<N>/head`` on GitHub.
+
+    Args:
+        repo: Repository working directory.
+        refspec: Refspec to fetch (e.g. ``"pull/42/head"``).
+        remote: Remote name. Defaults to ``"origin"``.
+
+    Raises:
+        GitError: If the fetch fails for any reason.
+    """
+    proc = _run_git(repo, ["fetch", remote, refspec], timeout=60)
+    if proc.returncode != 0:
+        raise GitError(f"git fetch {remote} {refspec} failed in {repo}: {proc.stderr.strip()}")
+
+
+def checkout_detach(repo: Path, sha: str) -> None:
+    """Detach HEAD onto *sha* in *repo*.
+
+    Args:
+        repo: Repository working directory.
+        sha: Commit SHA or any commit-ish to detach onto.
+
+    Raises:
+        GitError: If the checkout fails.
+    """
+    proc = _run_git(repo, ["checkout", "--detach", sha], timeout=60)
+    if proc.returncode != 0:
+        raise GitError(f"git checkout --detach {sha} failed in {repo}: {proc.stderr.strip()}")
+
+
 def clone(remote_url: str, target: Path, *, blobless: bool = False) -> None:
     """Run ``git clone <remote_url> <target>``.
 

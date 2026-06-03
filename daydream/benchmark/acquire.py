@@ -12,7 +12,6 @@ swallowed.
 from __future__ import annotations
 
 import hashlib
-import subprocess
 from pathlib import Path
 
 from daydream import git_ops
@@ -26,67 +25,6 @@ def _cache_subdir_name(clone_url: str) -> str:
     """
     digest = hashlib.sha256(clone_url.encode("utf-8")).hexdigest()[:16]
     return f"repo-{digest}"
-
-
-def _fetch_ref(repo: Path, refspec: str) -> None:
-    """Fetch a single *refspec* from ``origin`` into *repo*.
-
-    No ``git_ops`` helper exists for ``refs/pull/*`` fetches, so this issues
-    the guarded subprocess call directly.
-
-    Raises:
-        GitError: If the fetch fails for any reason.
-    """
-    try:
-        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", "-C", str(repo), "fetch", "origin", refspec],  # noqa: S607 - git is a trusted command
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise git_ops.GitError(f"git fetch origin {refspec} failed in {repo}: {type(exc).__name__}: {exc}") from exc
-    if proc.returncode != 0:
-        raise git_ops.GitError(f"git fetch origin {refspec} failed in {repo}: {proc.stderr.strip()}")
-
-
-def _checkout_detach(repo: Path, sha: str) -> None:
-    """Detach HEAD onto *sha* in *repo*.
-
-    Raises:
-        GitError: If the checkout fails or HEAD does not land on *sha*.
-    """
-    try:
-        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", "-C", str(repo), "checkout", "--detach", sha],  # noqa: S607 - git is a trusted command
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise git_ops.GitError(f"git checkout --detach {sha} failed in {repo}: {type(exc).__name__}: {exc}") from exc
-    if proc.returncode != 0:
-        raise git_ops.GitError(f"git checkout --detach {sha} failed in {repo}: {proc.stderr.strip()}")
-
-
-def _rev_parse_head(repo: Path) -> str:
-    """Return the SHA that HEAD resolves to in *repo*.
-
-    Raises:
-        GitError: If the rev-parse fails.
-    """
-    try:
-        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],  # noqa: S607 - git is a trusted command
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise git_ops.GitError(f"git rev-parse HEAD failed in {repo}: {type(exc).__name__}: {exc}") from exc
-    if proc.returncode != 0:
-        raise git_ops.GitError(f"git rev-parse HEAD failed in {repo}: {proc.stderr.strip()}")
-    return proc.stdout.strip()
 
 
 def acquire_checkout(
@@ -123,14 +61,16 @@ def acquire_checkout(
     if not (checkout / ".git").exists():
         git_ops.clone(clone_url, checkout, blobless=True)
 
-    _fetch_ref(checkout, f"pull/{pr_number}/head")
+    git_ops.fetch_ref(checkout, f"pull/{pr_number}/head")
 
     if not git_ops.ref_exists(checkout, base_sha):
-        _fetch_ref(checkout, base_sha)
+        git_ops.fetch_ref(checkout, base_sha)
 
-    _checkout_detach(checkout, head_sha)
+    git_ops.checkout_paths(checkout, [Path(".")])
+    git_ops.clean_untracked(checkout)
+    git_ops.checkout_detach(checkout, head_sha)
 
-    resolved = _rev_parse_head(checkout)
+    resolved = git_ops.head_sha(checkout)
     if resolved != head_sha:
         raise git_ops.GitError(f"checkout HEAD is {resolved!r}, expected {head_sha!r} in {checkout}")
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from daydream.pr_review import _extract_item_fields
+
 
 def merged_items_to_review_comments(
     doc: dict[str, Any],
@@ -32,15 +34,10 @@ def merged_items_to_review_comments(
     """
     out: list[dict[str, Any]] = []
     for raw in doc.get("items", []):
-        path = str(raw.get("file", "")).strip()
-        if not path:
+        fields = _extract_item_fields(raw)
+        if fields is None:
             continue
-        line = raw.get("line")
-        line_int = int(line) if isinstance(line, int) else None
-        description = str(raw.get("description", "")).strip()
-        rationale = str(raw.get("rationale", "")).strip()
-        severity = str(raw.get("severity", "")).strip().lower() or None
-        confidence = str(raw.get("confidence", "")).strip().upper() or None
+        path, line_int, description, rationale, severity, confidence, _is_cross_stack = fields
         body_parts: list[str] = []
         if description:
             body_parts.append(description)
