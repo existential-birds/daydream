@@ -48,7 +48,7 @@ def run_daydream_review(checkout: Path, *, base_sha: str, trajectory_path: Path)
         str(checkout),
     ]
     result = subprocess.run(  # noqa: S603 - args are harness-controlled, not user input
-        cmd,
+        cmd,  # noqa: S607 - daydream is a trusted command
         check=False,
         capture_output=True,
         text=True,

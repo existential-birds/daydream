@@ -153,7 +153,7 @@ def _run_step(module: str, extra_args: list[str], *, cwd: Path) -> None:
         BenchmarkStepError: If the step exits non-zero; the message carries the module
             name and a tail of its stderr.
     """
-    cmd = ["uv", "run", "python", "-m", module, "--tool", _TOOL, *extra_args]
+    cmd = ["uv", "run", "python", "-m", module, "--tool", _TOOL, *extra_args]  # noqa: S607 - uv is a trusted command
     result = subprocess.run(  # noqa: S603 - args are not user-controlled; module names are fixed literals
         cmd,
         cwd=cwd,

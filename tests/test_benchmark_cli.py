@@ -20,8 +20,8 @@ def test_bench_parser_defaults_and_flags():
 def test_bench_subcommand_preflights_through_compiled_entrypoint(tmp_path):
     env = {**os.environ}
     env.pop("MARTIAN_API_KEY", None)
-    r = subprocess.run(
-        ["daydream", "bench", "--benchmark-repo", str(tmp_path), "--score"],
+    r = subprocess.run(  # noqa: S603 - args are not user-controlled
+        ["daydream", "bench", "--benchmark-repo", str(tmp_path), "--score"],  # noqa: S607 - daydream is a trusted command
         capture_output=True,
         text=True,
         env=env,
@@ -30,5 +30,7 @@ def test_bench_subcommand_preflights_through_compiled_entrypoint(tmp_path):
 
 
 def test_bench_help_lists_flags():
-    r = subprocess.run(["daydream", "bench", "--help"], capture_output=True, text=True)
+    r = subprocess.run(  # noqa: S603 - args are not user-controlled
+        ["daydream", "bench", "--help"], capture_output=True, text=True  # noqa: S607 - daydream is a trusted command
+    )
     assert r.returncode == 0 and "--benchmark-repo" in r.stdout
