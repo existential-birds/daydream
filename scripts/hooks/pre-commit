@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook that refuses commits authored as the test-fixture identity.
+# The test suite configures `Tester <test@example.com>` on temp repos; if that
+# ever leaks into a real commit, the commit is misattributed. Block it here.
+# Install with: ln -sf ../../scripts/hooks/pre-commit .git/hooks/pre-commit
+#
+set -euo pipefail
+
+author_ident=$(git var GIT_AUTHOR_IDENT)
+committer_ident=$(git var GIT_COMMITTER_IDENT)
+
+for ident in "$author_ident" "$committer_ident"; do
+    if printf '%s' "$ident" | grep -qiE 'test@example\.com|<Tester>|^Tester '; then
+        echo "pre-commit: refusing commit by the test-fixture identity:" >&2
+        echo "  $ident" >&2
+        echo "Your git user.name/user.email is set to the test identity (likely leaked into .git/config)." >&2
+        echo "Set your real identity, e.g.:" >&2
+        echo "  git config user.name 'Your Name' && git config user.email 'you@example.com'" >&2
+        exit 1
+    fi
+done
