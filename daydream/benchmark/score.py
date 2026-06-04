@@ -31,6 +31,10 @@ _TOOL = "daydream"
 #: Tail length (chars) of captured stderr included in failure messages.
 _STDERR_TAIL = 4000
 
+#: Maximum wall-clock seconds to wait for each benchmark step subprocess.
+#: Step 3 calls an external judge API and can be slow; 30 minutes is generous.
+_STEP_TIMEOUT = 1800
+
 
 class JudgeEnvError(Exception):
     """Raised when the judge API credential is absent from the environment."""
@@ -154,13 +158,19 @@ def _run_step(module: str, extra_args: list[str], *, cwd: Path) -> None:
             name and a tail of its stderr.
     """
     cmd = ["uv", "run", "python", "-m", module, "--tool", _TOOL, *extra_args]  # noqa: S607 - uv is a trusted command
-    result = subprocess.run(  # noqa: S603 - args are not user-controlled; module names are fixed literals
-        cmd,
-        cwd=cwd,
-        env=os.environ.copy(),
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(  # noqa: S603 - args are not user-controlled; module names are fixed literals
+            cmd,
+            cwd=cwd,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=_STEP_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BenchmarkStepError(
+            f"{module} timed out after {_STEP_TIMEOUT}s"
+        ) from exc
     if result.returncode != 0:
         stderr_tail = (result.stderr or "")[-_STDERR_TAIL:]
         raise BenchmarkStepError(f"{module} failed (exit {result.returncode}):\n{stderr_tail}")
@@ -169,10 +179,13 @@ def _run_step(module: str, extra_args: list[str], *, cwd: Path) -> None:
 def run_scoring(benchmark_repo: Path, model: str) -> DaydreamScores:
     """Run step2/2.5/3 against the benchmark repo and parse daydream scores.
 
-    Verifies the judge credential, then runs the three benchmark step modules in
-    order (extract → dedup → judge), each with `--tool daydream` and `cwd` set to
-    the benchmark checkout. step3 additionally receives `--dedup-groups` pointing
-    at step2.5's output. Finally loads `evaluations.json` and parses it.
+    Runs the three benchmark step modules in order (extract → dedup → judge),
+    each with `--tool daydream` and `cwd` set to the benchmark checkout. step3
+    additionally receives `--dedup-groups` pointing at step2.5's output.
+    Finally loads `evaluations.json` and parses it.
+
+    The judge credential is verified by the caller (``run_bench``) before any
+    expensive reviews run; this function does not re-check it.
 
     Args:
         benchmark_repo: Path to the external benchmark checkout.
@@ -182,12 +195,9 @@ def run_scoring(benchmark_repo: Path, model: str) -> DaydreamScores:
         The parsed `DaydreamScores`.
 
     Raises:
-        JudgeEnvError: If the judge credential is unset (via `preflight_judge_env`).
         BenchmarkStepError: If any step exits non-zero.
         BenchmarkArtifactError: If `evaluations.json` is absent after a successful step3.
     """
-    preflight_judge_env()
-
     results_dir = model_results_dir(benchmark_repo, model)
     dedup_groups = results_dir / "dedup_groups.json"
 
