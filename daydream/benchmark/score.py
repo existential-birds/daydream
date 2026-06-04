@@ -201,6 +201,12 @@ def run_scoring(benchmark_repo: Path, model: str, *, pr_count: int | None = None
         BenchmarkStepError: If any step exits non-zero.
         BenchmarkArtifactError: If `evaluations.json` is absent after a successful step3.
     """
+    # Resolve to an absolute path: each step runs with ``cwd`` set to the
+    # benchmark checkout, so any path handed to a step as an argument (notably
+    # step3's ``--dedup-groups``) is re-interpreted against that cwd. A
+    # benchmark-repo-relative path (e.g. ``../code-review-benchmark/offline``)
+    # would double up and miss; an absolute path is cwd-independent.
+    benchmark_repo = benchmark_repo.resolve()
     results_dir = model_results_dir(benchmark_repo, model)
     dedup_groups = results_dir / "dedup_groups.json"
 
