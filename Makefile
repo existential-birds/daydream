@@ -18,5 +18,4 @@ check: lint typecheck test
 # Install git hooks
 hooks:
 	ln -sf ../../scripts/hooks/pre-push .git/hooks/pre-push
-	ln -sf ../../scripts/hooks/pre-commit .git/hooks/pre-commit
-	@echo "Pre-push and pre-commit hooks installed"
+	@echo "Pre-push hook installed"
