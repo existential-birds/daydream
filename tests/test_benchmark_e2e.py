@@ -111,15 +111,20 @@ def test_bench_acceptance_2pr_subset_real_run():
         assert isinstance(leaf.get("recall"), (int, float)), url
 
     # Step 2 contract (c): aggregate line printed with scored count.
-    out = first.stdout
-    assert "daydream aggregate over 2 PR(s)" in out, out
-    assert "precision=" in out and "recall=" in out, out
+    # Normalize whitespace: the Rich console wraps long lines at its detected
+    # width (no TTY under capture → a default width), so assertions must not
+    # depend on where a line happens to wrap.
+    out = " ".join(first.stdout.split())
+    assert "daydream aggregate over 2 PR(s)" in out, first.stdout
+    assert "precision=" in out and "recall=" in out, first.stdout
 
     # --- Step 4: re-run is incremental — zero new reviews, exit 0. ---
     before = data_path.read_text()
     second = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ})
     assert second.returncode == 0, f"re-run failed: {second.stdout}\n{second.stderr}"
-    assert "already present" in second.stdout, f"expected skip messages: {second.stdout}"
+    second_out = " ".join(second.stdout.split())
+    assert "already present" in second_out, f"expected skip messages: {second.stdout}"
+    assert "Injected daydream review" not in second_out, f"re-run injected anew: {second.stdout}"
     after = data_path.read_text()
     assert json.loads(after) == json.loads(before), "re-run mutated the corpus (not incremental)"
     assert len(_grafana_daydream_reviews(json.loads(after))) == 2
