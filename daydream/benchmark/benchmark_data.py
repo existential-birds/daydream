@@ -11,6 +11,7 @@ See ``research/benchmark-pipeline.md`` §1 for the full shape.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
@@ -39,22 +40,34 @@ def save_benchmark_data(path: str | Path, data: dict[str, Any]) -> None:
     committed corpus on a partial write. Uses ``indent=2`` and
     ``ensure_ascii=False`` and preserves dict key order.
 
+    A ``benchmark_data.json.lock`` file serialises concurrent writers within
+    the same OS (``fcntl.LOCK_EX``). Two ``daydream bench`` processes sharing
+    the same ``--benchmark-repo`` path would otherwise silently clobber each
+    other's injections: both read the old corpus, both write a partial sweep,
+    and the second ``os.replace`` wins. The lock does not protect across
+    machines or network filesystems — run one bench sweep per benchmark repo
+    at a time (see ``docs/benchmark.md``).
+
     Args:
         path: Destination path for ``benchmark_data.json``.
         data: The corpus dict to serialize.
     """
     dest = Path(path)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=dest.parent,
-        prefix=f"{dest.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as tf:
-        tmp = tf.name
-        tf.write(json.dumps(data, indent=2, ensure_ascii=False))
-    os.replace(tmp, dest)
+    lock_path = dest.parent / f"{dest.name}.lock"
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=dest.parent,
+            prefix=f"{dest.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tf:
+            tmp = tf.name
+            tf.write(json.dumps(data, indent=2, ensure_ascii=False))
+        os.replace(tmp, dest)
+        fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def has_daydream_review(entry: dict[str, Any]) -> bool:

@@ -12,8 +12,8 @@ This runbook takes you from nothing to a scored result.
 - **The Beagle plugin** installed in Claude Code (see the [Quickstart](../README.md#quickstart)) — deep review needs the stack-specific skills.
 - **The judge credential, exported.** Scoring requires one env var and accepts two optional overrides:
   - `MARTIAN_API_KEY` — an OpenRouter `sk-or-…` key (or a withmartian key). **Required for `--score`.**
-  - `MARTIAN_BASE_URL` — the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1`; set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
-  - `MARTIAN_MODEL` — the judge model id. Defaults to `openai/gpt-4o-mini`; should match `--model` for comparable results.
+  - `MARTIAN_BASE_URL` — the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1` (default set by the withmartian step modules, not by daydream); set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
+  - `MARTIAN_MODEL` — the judge model id. Defaults to `openai/gpt-4o-mini` (default set by the withmartian step modules, not by daydream); should match `--model` for comparable results.
 
   The harness reads `os.environ` only — it does **not** parse a `.env` file. If you keep these in a `.env`, you must export them into the shell first:
 
@@ -24,6 +24,8 @@ This runbook takes you from nothing to a scored result.
 ## Smoke subset
 
 Wire the pipeline cheaply before spending on the paid judge. Run two Grafana PRs with scoring off:
+
+> **Note:** On first run each PR repo is blobless-cloned from GitHub. The clone is subject to a 60 s timeout; on a slow connection a large repo (Grafana, Sentry) can hit that limit and surface as a `GitError`, aborting the sweep. If you see a clone timeout, retry once the network is faster, or pre-clone the repos manually and point `--benchmark-repo` at a local mirror.
 
 ```bash
 daydream bench --benchmark-repo ../code-review-benchmark/offline --only grafana --limit 2 --no-score
@@ -63,12 +65,20 @@ The command also prints to stdout:
 - the aggregate precision/recall over all scored PRs (`precision = ΣTP / (ΣTP + ΣFP)`, `recall = ΣTP / (ΣTP + ΣFN)`), and
 - the **N scored** count.
 
+Aggregate scores use **micro-averaging** (pool all TP/FP/FN, then divide) — the same method used in the published Martian benchmark numbers, so results are directly comparable.
+
 ## Incremental re-runs
 
 Re-running is resumable and idempotent. `benchmark_data.json` is saved after each PR, so an interrupted sweep can be resumed. A PR that already has a `tool:"daydream"` review is **skipped** — no checkout, no review, no judge call. Pass `--force` to re-run injected PRs and replace their findings.
 
+**Run one sweep per benchmark repo at a time.** Each save acquires an exclusive `benchmark_data.json.lock` file to serialise concurrent writers on the same machine, but two sweeps sharing the same `--benchmark-repo` would still race at the read-inject-write level: the second run reads a stale corpus, overwrites the first run's injections, and you lose results. Start a second sweep only after the first has finished (or been interrupted).
+
 ## Comparability caveat
 
-The `--model` value names the per-model results directory; it does **not** select the judge model. The judge model is selected by the `MARTIAN_MODEL` environment variable consumed by the scoring step. To compare against published benchmark numbers, both the `MARTIAN_MODEL` value and the `--model` label must match the published run. Using a different judge — or a different id string for the same underlying model — lands in a different `results/<dir>` and is not directly apples-to-apples.
+The `--model` value names the per-model results directory; it does **not** select the judge model. The judge model is selected by the `MARTIAN_MODEL` environment variable consumed by the scoring step.
+
+> **Warning:** `--model` and `MARTIAN_MODEL` must agree. The sweep writes `evaluations.json` under a directory derived from `MARTIAN_MODEL`; the scoring step looks up that file under a directory derived from `--model`. If the two values differ, scoring will fail with a hard error (`BenchmarkArtifactError: evaluations.json not found`) — not merely produce non-comparable numbers.
+
+To compare against published benchmark numbers, both the `MARTIAN_MODEL` value and the `--model` label must match the published run. Using a different judge — or a different id string for the same underlying model — lands in a different `results/<dir>` and is not directly apples-to-apples.
 
 The published Martian run used the dated id `anthropic/claude-opus-4-5-20251101` → `results/anthropic_claude-opus-4-5-20251101/`; the default here is `anthropic/claude-opus-4.5` → `results/anthropic_claude-opus-4.5/`, a distinct directory. Scores are model-determined rather than string-determined, and the judge prompt and `temperature: 0.0` are identical, so the same underlying model under a different id string is broadly comparable. But routing through a different gateway can shift outputs slightly (system-prompt injection, sampling, schema handling), so for the closest apples-to-apples comparison run without structured output and note the gateway difference. To reuse the existing published directory exactly, set `--model` to that dated id only if OpenRouter accepts it as a model id.

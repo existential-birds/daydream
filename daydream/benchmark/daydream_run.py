@@ -14,6 +14,10 @@ from pathlib import Path
 #: How many trailing characters of stderr to surface in the failure message.
 _STDERR_TAIL = 4000
 
+#: Maximum wall-clock seconds to wait for the daydream subprocess.
+#: A full deep review can take many minutes; 1 hour is a generous upper bound.
+_DAYDREAM_TIMEOUT = 3600
+
 
 class DaydreamRunError(Exception):
     """Raised when the daydream subprocess exits non-zero."""
@@ -47,12 +51,18 @@ def run_daydream_review(checkout: Path, *, base_sha: str, trajectory_path: Path)
         str(trajectory_path),
         str(checkout),
     ]
-    result = subprocess.run(  # noqa: S603 - args are harness-controlled, not user input
-        cmd,  # noqa: S607 - daydream is a trusted command
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(  # noqa: S603 - args are harness-controlled, not user input
+            cmd,  # noqa: S607 - daydream is a trusted command
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_DAYDREAM_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DaydreamRunError(
+            f"daydream review timed out after {_DAYDREAM_TIMEOUT}s for {checkout}"
+        ) from exc
     if result.returncode != 0:
         stderr_tail = (result.stderr or "")[-_STDERR_TAIL:]
         raise DaydreamRunError(

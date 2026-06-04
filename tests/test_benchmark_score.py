@@ -55,3 +55,30 @@ def test_run_scoring_invokes_three_steps_in_order(tmp_path, monkeypatch):
                     "code_review_benchmark.step2_5_dedup_candidates",
                     "code_review_benchmark.step3_judge_comments"]
     assert all(c[c.index("--tool") + 1] == "daydream" for c in calls)
+
+
+def test_run_scoring_passes_limit_to_step3_when_pr_count_given(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
+    calls = []
+    monkeypatch.setattr("daydream.benchmark.score.subprocess.run",
+        lambda cmd, **k: calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+    rdir = tmp_path / "results" / "anthropic_claude-opus-4.5"
+    rdir.mkdir(parents=True)
+    (rdir / "evaluations.json").write_text("{}")
+    run_scoring(tmp_path, "anthropic/claude-opus-4.5", pr_count=3)
+    step3_cmd = next(c for c in calls if c[c.index("-m") + 1] == "code_review_benchmark.step3_judge_comments")
+    assert "--limit" in step3_cmd
+    assert step3_cmd[step3_cmd.index("--limit") + 1] == "3"
+
+
+def test_run_scoring_omits_limit_from_step3_when_pr_count_not_given(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
+    calls = []
+    monkeypatch.setattr("daydream.benchmark.score.subprocess.run",
+        lambda cmd, **k: calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+    rdir = tmp_path / "results" / "anthropic_claude-opus-4.5"
+    rdir.mkdir(parents=True)
+    (rdir / "evaluations.json").write_text("{}")
+    run_scoring(tmp_path, "anthropic/claude-opus-4.5")
+    step3_cmd = next(c for c in calls if c[c.index("-m") + 1] == "code_review_benchmark.step3_judge_comments")
+    assert "--limit" not in step3_cmd

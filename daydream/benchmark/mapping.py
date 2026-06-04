@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from daydream.pr_review import _extract_item_fields
+from daydream.pr_review import extract_item_fields
 
 
 def merged_items_to_review_comments(
@@ -34,24 +34,23 @@ def merged_items_to_review_comments(
     """
     out: list[dict[str, Any]] = []
     for raw in doc.get("items", []):
-        fields = _extract_item_fields(raw)
+        fields = extract_item_fields(raw)
         if fields is None:
             continue
-        path, line_int, description, rationale, severity, confidence, _is_cross_stack = fields
         body_parts: list[str] = []
-        if description:
-            body_parts.append(description)
-        if severity:
-            body_parts.append(f"**Severity:** {severity}")
-        if confidence:
-            body_parts.append(f"**Confidence:** {confidence}")
-        if rationale and rationale != description:
-            body_parts.append(rationale)
+        if fields.description:
+            body_parts.append(fields.description)
+        if fields.severity:
+            body_parts.append(f"**Severity:** {fields.severity}")
+        if fields.confidence:
+            body_parts.append(f"**Confidence:** {fields.confidence}")
+        if fields.rationale and fields.rationale != fields.description:
+            body_parts.append(fields.rationale)
         body = "\n\n".join(body_parts)
         out.append(
             {
-                "path": path,
-                "line": line_int,
+                "path": fields.path,
+                "line": fields.line_int,
                 "body": body,
                 "created_at": created_at,
             }

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from daydream.agent import console
 from daydream.benchmark.acquire import acquire_checkout
@@ -68,7 +68,7 @@ def _trajectory_path(config: BenchConfig, pr: EvaluablePR) -> Path:
     return config.trajectory_dir / f"{repo}-{pr.pr_number}.json"
 
 
-def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict) -> bool:
+def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> bool:
     """Acquire, review, map, and inject a single PR into *data* (mutated).
 
     Returns:
@@ -134,8 +134,6 @@ def run_bench(config: BenchConfig) -> int:
         if modified:
             save_benchmark_data(data_path, data)
             print_info(console, f"Injected daydream review for {pr.golden_url}")
-        else:
-            print_dim(console, f"Skipping {pr.golden_url} (daydream review already present)")
 
     if failed:
         print_warning(console, f"{failed} of {len(prs)} selected PR(s) failed")
@@ -143,7 +141,7 @@ def run_bench(config: BenchConfig) -> int:
     score_failed = False
     if config.score:
         try:
-            scores = run_scoring(config.benchmark_repo, config.model)
+            scores = run_scoring(config.benchmark_repo, config.model, pr_count=len(prs))
         except Exception as exc:  # noqa: BLE001 - report scoring failure without raising past the CLI
             score_failed = True
             print_error(console, "Scoring failed", f"{type(exc).__name__}: {exc}")

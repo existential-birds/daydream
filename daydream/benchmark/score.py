@@ -176,7 +176,7 @@ def _run_step(module: str, extra_args: list[str], *, cwd: Path) -> None:
         raise BenchmarkStepError(f"{module} failed (exit {result.returncode}):\n{stderr_tail}")
 
 
-def run_scoring(benchmark_repo: Path, model: str) -> DaydreamScores:
+def run_scoring(benchmark_repo: Path, model: str, *, pr_count: int | None = None) -> DaydreamScores:
     """Run step2/2.5/3 against the benchmark repo and parse daydream scores.
 
     Runs the three benchmark step modules in order (extract → dedup → judge),
@@ -190,6 +190,9 @@ def run_scoring(benchmark_repo: Path, model: str) -> DaydreamScores:
     Args:
         benchmark_repo: Path to the external benchmark checkout.
         model: Judge model id (e.g. `anthropic/claude-opus-4.5`).
+        pr_count: When provided, passed as ``--limit`` to step3 so the judge
+            only evaluates that many PRs.  Use this to bound judge cost when
+            ``--limit`` was passed to the harness.
 
     Returns:
         The parsed `DaydreamScores`.
@@ -203,7 +206,10 @@ def run_scoring(benchmark_repo: Path, model: str) -> DaydreamScores:
 
     _run_step(_STEP2_MODULE, [], cwd=benchmark_repo)
     _run_step(_STEP2_5_MODULE, [], cwd=benchmark_repo)
-    _run_step(_STEP3_MODULE, ["--dedup-groups", str(dedup_groups)], cwd=benchmark_repo)
+    step3_extra: list[str] = ["--dedup-groups", str(dedup_groups)]
+    if pr_count is not None:
+        step3_extra += ["--limit", str(pr_count)]
+    _run_step(_STEP3_MODULE, step3_extra, cwd=benchmark_repo)
 
     evaluations_file = results_dir / "evaluations.json"
     if not evaluations_file.exists():

@@ -17,13 +17,15 @@ from pathlib import Path
 from daydream import git_ops
 
 
-def _cache_subdir_name(clone_url: str) -> str:
-    """Derive a deterministic per-repo subdirectory name from *clone_url*.
+def _cache_subdir_name(clone_url: str, pr_number: int) -> str:
+    """Derive a deterministic per-PR subdirectory name from *clone_url* and *pr_number*.
 
-    The same URL always maps to the same directory, so a second acquisition
-    of the same repo reuses the existing clone instead of re-cloning.
+    Keying on both the URL and the PR number gives each PR its own isolated
+    working tree, so concurrent sweeps over PRs from the same repo do not
+    race on ``git checkout`` / ``git clean`` steps.
     """
-    digest = hashlib.sha256(clone_url.encode("utf-8")).hexdigest()[:16]
+    key = f"{clone_url}#{pr_number}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     return f"repo-{digest}"
 
 
@@ -37,17 +39,18 @@ def acquire_checkout(
 ) -> Path:
     """Acquire a checkout of a PR head with the base commit resolvable.
 
-    One checkout directory is created per *clone_url* under *cache_dir* and
-    reused on subsequent calls (no re-clone). The repo is cloned blobless,
-    the PR head is fetched via ``refs/pull/<pr_number>/head``, the base SHA
-    is fetched if still unresolvable, and HEAD is detached onto *head_sha*.
+    One checkout directory is created per *(clone_url, pr_number)* pair under
+    *cache_dir* and reused on subsequent calls (no re-clone). The repo is
+    cloned blobless, the PR head is fetched via ``refs/pull/<pr_number>/head``,
+    the base SHA is fetched if still unresolvable, and HEAD is detached onto
+    *head_sha*.
 
     Args:
         clone_url: Remote URL or local path to clone from.
         pr_number: Pull request number whose head to acquire.
         base_sha: Base commit SHA; must end up resolvable in the checkout.
         head_sha: Head commit SHA to detach HEAD onto.
-        cache_dir: Directory under which the per-repo checkout lives.
+        cache_dir: Directory under which the per-PR checkout lives.
 
     Returns:
         Path to the checkout directory (HEAD detached at *head_sha*).
@@ -56,7 +59,7 @@ def acquire_checkout(
         GitError: If any git step fails, or HEAD does not land on *head_sha*.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    checkout = cache_dir / _cache_subdir_name(clone_url)
+    checkout = cache_dir / _cache_subdir_name(clone_url, pr_number)
 
     if not (checkout / ".git").exists():
         git_ops.clone(clone_url, checkout, blobless=True)
@@ -64,7 +67,11 @@ def acquire_checkout(
     git_ops.fetch_ref(checkout, f"pull/{pr_number}/head")
 
     if not git_ops.ref_exists(checkout, base_sha):
-        git_ops.fetch_ref(checkout, base_sha)
+        # Fetching a raw SHA via `git fetch origin <sha>` is rejected by
+        # GitHub's upload-pack for non-advertised (non-tip) commits.  A plain
+        # `git fetch origin` fetches all advertised refs and their reachable
+        # history, which is sufficient to make the base commit resolvable.
+        git_ops.fetch(checkout)
 
     git_ops.checkout_paths(checkout, [Path(".")])
     git_ops.clean_untracked(checkout)

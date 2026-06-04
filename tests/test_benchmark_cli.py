@@ -8,7 +8,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from daydream.cli import _bench_config_from_argv
+from daydream.benchmark.cli import _bench_config_from_argv
 
 
 def test_bench_parser_defaults_and_flags():
