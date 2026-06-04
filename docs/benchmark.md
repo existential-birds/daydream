@@ -53,7 +53,7 @@ This is the load-bearing, money-spending run: 26 deep reviews plus 26 judge pass
 
 For each scored PR the harness writes a `daydream` leaf into:
 
-```
+```text
 <benchmark-repo>/results/<sanitized-model>/evaluations.json
 ```
 

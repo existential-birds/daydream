@@ -104,7 +104,10 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
     """
     from daydream.benchmark import BenchConfig
 
-    args = _build_bench_parser().parse_args(argv)
+    parser = _build_bench_parser()
+    args = parser.parse_args(argv)
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be a positive integer")
     bench_root = args.benchmark_repo / ".daydream-bench"
     cache_dir = args.cache_dir if args.cache_dir is not None else bench_root / "cache"
     trajectory_dir = args.trajectory_dir if args.trajectory_dir is not None else bench_root / "trajectories"
