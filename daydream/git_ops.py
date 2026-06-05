@@ -905,7 +905,46 @@ def fetch(repo: Path, remote: str = "origin") -> None:
         raise GitError(f"git fetch {remote} failed in {repo}: {proc.stderr.strip()}")
 
 
-def clone(remote_url: str, target: Path, *, blobless: bool = False) -> None:
+def fetch_ref(repo: Path, refspec: str, remote: str = "origin", *, timeout: int = 300) -> None:
+    """Fetch a single *refspec* from *remote* into *repo*.
+
+    Useful for fetching refs that are not covered by the default fetch
+    configuration, such as ``refs/pull/<N>/head`` on GitHub.
+
+    Args:
+        repo: Repository working directory.
+        refspec: Refspec to fetch (e.g. ``"pull/42/head"``).
+        remote: Remote name. Defaults to ``"origin"``.
+        timeout: Subprocess timeout in seconds. Defaults to 300 s to
+            accommodate first-run blobless fetches of large repositories.
+
+    Raises:
+        GitError: If the fetch fails for any reason.
+    """
+    proc = _run_git(repo, ["fetch", remote, refspec], timeout=timeout)
+    if proc.returncode != 0:
+        raise GitError(f"git fetch {remote} {refspec} failed in {repo}: {proc.stderr.strip()}")
+
+
+def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
+    """Detach HEAD onto *sha* in *repo*.
+
+    Args:
+        repo: Repository working directory.
+        sha: Commit SHA or any commit-ish to detach onto.
+        timeout: Subprocess timeout in seconds.  Defaults to 300 s because
+            detaching HEAD in a blobless clone triggers lazy blob fetches that
+            can take several minutes on large repositories.
+
+    Raises:
+        GitError: If the checkout fails.
+    """
+    proc = _run_git(repo, ["checkout", "--detach", sha], timeout=timeout)
+    if proc.returncode != 0:
+        raise GitError(f"git checkout --detach {sha} failed in {repo}: {proc.stderr.strip()}")
+
+
+def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int = 300) -> None:
     """Run ``git clone <remote_url> <target>``.
 
     Args:
@@ -915,6 +954,8 @@ def clone(remote_url: str, target: Path, *, blobless: bool = False) -> None:
             partial clone that omits blobs until they are accessed.  Reduces
             initial transfer and storage at the cost of lazy blob fetches on
             first access.  Requires server-side partial-clone support.
+        timeout: Subprocess timeout in seconds. Defaults to 300 s to
+            accommodate first-run blobless clones of large repositories.
 
     Raises:
         GitError: If the clone fails.
@@ -928,7 +969,7 @@ def clone(remote_url: str, target: Path, *, blobless: bool = False) -> None:
             cmd,  # noqa: S607 - git is a trusted command
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         raise GitError(f"git clone {remote_url} failed: {type(exc).__name__}: {exc}") from exc

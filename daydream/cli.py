@@ -30,6 +30,7 @@ from daydream.agent import (
     get_current_backends,
     set_shutdown_requested,
 )
+from daydream.benchmark.cli import _handle_bench_command
 from daydream.runner import RunConfig, run, run_feedback
 from daydream.trajectory import get_signal_recorder
 from daydream.ui import (
@@ -1046,7 +1047,7 @@ def main() -> None:
 
     # Route subcommands before main arg parse. Each handler returns an exit
     # code; we translate via sys.exit. Supported subcommands: feedback,
-    # summarize, harvest, build-corpus.
+    # summarize, harvest, build-corpus, label, bench.
     argv = sys.argv[1:]
     try:
         # ``summarize`` is sync — short-circuit before anyio.run kicks in.
@@ -1063,6 +1064,11 @@ def main() -> None:
         # ``harvest`` drives the annotate-pass orchestrator via its own anyio.run.
         if argv and argv[0] == "harvest":
             sys.exit(_handle_harvest_command(argv[1:]))
+
+        # ``bench`` scores deep-review findings against the offline benchmark.
+        # ``run_bench`` is sync — short-circuit before anyio.run.
+        if argv and argv[0] == "bench":
+            sys.exit(_handle_bench_command(argv[1:]))
 
         # ``label`` records an authoritative human outcome label — sync,
         # SQLite-only. Short-circuit before anyio.run.

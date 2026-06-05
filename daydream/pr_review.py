@@ -74,6 +74,23 @@ class PRInfo:
     url: str
 
 
+@dataclass(frozen=True)
+class ItemFields:
+    """Named fields extracted from a single canonical merged item.
+
+    Returned by :func:`extract_item_fields` in place of the former positional
+    7-tuple so callers can use attribute access instead of positional unpacking.
+    """
+
+    path: str
+    line_int: int | None
+    description: str
+    rationale: str
+    severity: str | None
+    confidence: str | None
+    is_cross_stack: bool
+
+
 @dataclass
 class _ClassifiedIssues:
     inline: list[dict[str, Any]] = field(default_factory=list)
@@ -187,6 +204,35 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
     return out
 
 
+def extract_item_fields(
+    raw: dict[str, Any],
+) -> ItemFields | None:
+    """Extract and normalise fields from a single canonical merged item.
+
+    Returns an :class:`ItemFields` instance, or ``None`` when ``file`` is
+    empty (so callers can simply ``continue``).
+    """
+    path = str(raw.get("file", "")).strip()
+    if not path:
+        return None
+    line = raw.get("line")
+    line_int = int(line) if isinstance(line, int) and not isinstance(line, bool) else None
+    description = str(raw.get("description", "")).strip()
+    rationale = str(raw.get("rationale", "")).strip()
+    severity = str(raw.get("severity", "")).strip().lower() or None
+    confidence = str(raw.get("confidence", "")).strip().upper() or None
+    is_cross_stack = str(raw.get("lens", "")).strip() == "cross-stack"
+    return ItemFields(
+        path=path,
+        line_int=line_int,
+        description=description,
+        rationale=rationale,
+        severity=severity,
+        confidence=confidence,
+        is_cross_stack=is_cross_stack,
+    )
+
+
 def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
     """Convert canonical merged items into ParsedIssue objects.
 
@@ -201,36 +247,28 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
     """
     out: list[ParsedIssue] = []
     for raw in items:
-        path = str(raw.get("file", "")).strip()
-        if not path:
+        fields = extract_item_fields(raw)
+        if fields is None:
             continue
-        line = raw.get("line")
-        line_int = int(line) if isinstance(line, int) else None
-        description = str(raw.get("description", "")).strip()
-        rationale = str(raw.get("rationale", "")).strip()
-        severity = str(raw.get("severity", "")).strip().lower() or None
-        confidence = str(raw.get("confidence", "")).strip().upper() or None
-        is_cross_stack = str(raw.get("lens", "")).strip() == "cross-stack"
         # Title is the description; rationale (when present and distinct)
         # becomes the body so the agent prompt has context.
-        title = description
         body_parts: list[str] = []
-        if severity:
-            body_parts.append(f"**Severity:** {severity}")
-        if confidence:
-            body_parts.append(f"**Confidence:** {confidence}")
-        if rationale and rationale != description:
-            body_parts.append(rationale)
+        if fields.severity:
+            body_parts.append(f"**Severity:** {fields.severity}")
+        if fields.confidence:
+            body_parts.append(f"**Confidence:** {fields.confidence}")
+        if fields.rationale and fields.rationale != fields.description:
+            body_parts.append(fields.rationale)
         body = "\n\n".join(body_parts)
         out.append(
             ParsedIssue(
-                path=path,
-                line=line_int,
-                title=title,
+                path=fields.path,
+                line=fields.line_int,
+                title=fields.description,
                 body=body,
-                is_cross_stack=is_cross_stack,
-                confidence=confidence,
-                severity=severity,
+                is_cross_stack=fields.is_cross_stack,
+                confidence=fields.confidence,
+                severity=fields.severity,
             )
         )
     return out

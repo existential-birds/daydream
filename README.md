@@ -3,7 +3,7 @@
 
 Daydream is a code-review agent that produces structured training data from its own runs. It reviews diffs using stack-specific [Beagle](https://github.com/existential-birds/beagle) skills, applies fixes, validates via test suite, and records every agent interaction as an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus pipeline then scores, labels, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
 
-The goal is an open-weight code-review model (Qwen2.5-Coder-7B, QLoRA) trained on daydream's own trajectory archive, independently benchmarked against leading commercial code-review bots on a held-out PR replay corpus. See [Milestone 1](https://github.com/existential-birds/daydream/issues/86) for the current training roadmap.
+The goal is an open-weight code-review model (Qwen2.5-Coder-7B, QLoRA) trained on daydream's own trajectory archive, benchmarked against commercial code-review bots on a held-out PR replay corpus.
 
 ![demo](https://github.com/user-attachments/assets/60a80645-36de-410e-afa7-7a96efef3f57)
 
@@ -15,11 +15,11 @@ Two modes: deep (default) and shallow (`--shallow`).
 
 **Deep review** runs a five-stage pipeline:
 
-1. **Exploration pre-scan**: tree-sitter import resolution and convention detection across the changed files
-2. **Intent analysis**: understands the diff and commit history to build context
-3. **Alternative review**: identifies potential improvements as numbered findings
+1. **Exploration pre-scan**: tree-sitter import resolution and convention detection
+2. **Intent analysis**: understands the diff and commit history
+3. **Alternative review**: identifies improvements as numbered findings
 4. **Per-stack reviews**: parallel Beagle skill invocations, one per detected stack (Python, TypeScript, Go, Rust, Elixir, iOS)
-5. **Cross-stack merge**: deduplicates and synthesizes per-stack findings into a unified report
+5. **Cross-stack merge**: deduplicates per-stack findings into a unified report
 
 After merge, an optional fix gate applies fixes one-by-one and validates with the project's test suite.
 
@@ -27,28 +27,24 @@ After merge, an optional fix gate applies fixes one-by-one and validates with th
 
 ### Trajectory Recording
 
-Every run produces an ATIF v1.6 trajectory at `<target>/.daydream/runs/<id>/trajectory.json` capturing prompts, responses, tool calls, observations, and per-step token/cost metrics. Parallel fan-outs (per-stack reviews, parallel fixes) produce sibling trajectories via `recorder.fork()` under `.daydream/runs/<id>/trajectories/`. Sensitive content (API keys, JWTs, URL credentials, `.env` values) is redacted before writing. Interrupted runs flush a `.partial` file with `extra.partial=true`.
+Every run produces an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory at `<target>/.daydream/runs/<id>/trajectory.json` capturing prompts, responses, tool calls, and per-step token/cost metrics. Parallel fan-outs fork sibling trajectories under `.daydream/runs/<id>/trajectories/`; secrets are redacted before writing and interrupted runs flush a `.partial` file.
 
 ### Corpus Pipeline
 
 The training data pipeline converts archived trajectories into fine-tuning datasets through three stages:
 
-**Harvest** (`daydream harvest`): Walks the archive index, assembles bronze signals (recommendation-verifier verdicts, per-stack finding records, grounding rate, review length), scores an intrinsic reward per run, derives the outcome label, and appends one bitemporal annotation. Re-running appends a new generation rather than overwriting, so older `as_of` pins still resolve their original scores after a reward-version bump.
+**Harvest** (`daydream harvest`): Walks the archive index, assembles bronze signals (verifier verdicts, finding records, grounding rate, review length), scores an intrinsic reward, derives the outcome label, and appends a bitemporal annotation. Re-running appends a new generation rather than overwriting, so older `as_of` pins still resolve their original scores.
 
-**Reward scoring** (`daydream/training/reward.py`): Pure composite reducer over capture-time signals. Formula:
+**Reward scoring** (`daydream/training/reward.py`): a pure composite over capture-time signals:
 
 - **correctness** (w=0.6): mean over per-finding verifier verdicts (`consistent→1.0`, `uncertain→0.5`, `contradicts→0.0`)
-- **grounding** (w=0.4): `grounding_rate ∈ [0,1]` passed through
-- **format_valid**: dominating gate; `False` floors composite to 0.0 (an internal design choice, in the spirit of the DeepSeek-R1 accuracy+format reward — arXiv:2501.12948)
-- **length**: bounded saturating penalty (w=0.2), subtracted from credit mean
+- **grounding** (w=0.4): `grounding_rate ∈ [0,1]`
+- **format_valid**: dominating gate — `False` floors the composite to 0.0 (after DeepSeek-R1, arXiv:2501.12948)
+- **length**: bounded saturating penalty (w=0.2)
 
-Composite = `round(clip(credit − w_len·len_norm, 0, 1), 4)` — a **pure intrinsic** score, where credit is the weighted mean over present credit axes, renormalized. Missing signals become `None`, never imputed as 0.
+Composite = `round(clip(credit − w_len·len_norm, 0, 1), 4)`. Missing signals are `None`, never imputed as 0. When a maintainer accept/reject label is supplied, scoring also returns a posterior false-positive cost as a sibling field — it never alters the composite. See `reward.py` for the posterior breakdown and weight details.
 
-The posterior false-positive axis is **not** folded into the composite. When a mapped maintainer accept/reject label is supplied, `score_trajectory` returns a `PosteriorBreakdown` (a subclass of `RewardBreakdown`) carrying `posterior_cost` as a **sibling field** of `composite` — `posterior_cost = max(0.0, observed_penalty − outcome_prior)`, the calibrated surprise above the reviewers' mean observed penalty on the `[0,1]` penalty scale (`rejected→1.0`, `contested→0.5`, `accepted→0.0` — see `_FP_PENALTY_MAP` in `daydream/training/reward.py`; `outcome_prior` defaults to the `0.5` max-entropy midpoint when uncalibrated). The `composite` field is identical whether or not the posterior is present. `w_fp` (default 0.3) survives on `RewardWeights` as a documented training-time combination weight pending recalibration (#114) — it is **never** applied inside the composite.
-
-`has_posterior` is the population discriminator: intrinsic-only runs return a plain `RewardBreakdown` (no posterior fields), labeled runs return a `PosteriorBreakdown`. The two populations require different treatment, so aggregate consumers in `training/` must filter on `has_posterior` (the `runs` index mirrors it as an `INTEGER` (0/1) column) rather than mixing labeled and unlabeled rows (C3).
-
-**Build corpus** (`daydream build-corpus`): Projects the `as_of`-pinned silver annotations into JSONL training records. Filters by outcome label (default: `accepted` only), reward threshold, stack stratification, exclusion list (benchmark repos), and copyleft license opt-in. Writes a `lineage.json` manifest with content-addressed `trajectory_set_hash`, labeler/reward versions, and the `as_of` pin for byte-for-byte reproducibility. A temporal-leakage guard drops annotations whose `valid_at` (e.g., PR merge timestamp) is posterior to the `as_of` pin.
+**Build corpus** (`daydream build-corpus`): Projects `as_of`-pinned silver annotations into JSONL training records, filtered by outcome label, reward threshold, stack, exclusion list, and license. Writes a `lineage.json` manifest (content-addressed `trajectory_set_hash`, labeler/reward versions, `as_of` pin) for byte-for-byte reproducibility, with a temporal-leakage guard that drops annotations newer than the pin.
 
 ### Archive
 
@@ -58,11 +54,11 @@ Unless `--no-archive` is passed, each run is archived to `~/.daydream/archive/ru
 
 The [Milestone 1 epic](https://github.com/existential-birds/daydream/issues/86) tracks an open-weight code-review model (Qwen2.5-Coder-7B-Instruct, QLoRA rank 32/alpha 64, 4-bit) trained via a staged recipe:
 
-1. **RFT**: rejection-filter the corpus using the composite reward as a threshold
-2. **Span-segmented SFT**: SAD-style segment-specific losses on ATIF REASON/ACT spans (per arXiv:2505.13820)
-3. **KTO**: preference-train on PR-comment accept/reject labels (per arXiv:2402.01306), with synthetic-accept balancing for label imbalance
+1. **RFT**: rejection-filter the corpus by composite-reward threshold
+2. **Span-segmented SFT**: SAD-style losses on ATIF REASON/ACT spans (arXiv:2505.13820)
+3. **KTO**: preference-train on PR-comment accept/reject labels (arXiv:2402.01306), with synthetic-accept balancing
 
-Target bar for the trained model on a held-out PR replay benchmark: Scoring follows [Martian's Code Review Bench](https://github.com/withmartian/code-review-benchmark), evaluated on its five-repo set (Sentry, Grafana, Cal.com, Discourse, Keycloak) plus additional OSS:
+Targets follow [Martian's Code Review Benchmark](https://github.com/withmartian/code-review-benchmark), scored on its five-repo set (Sentry, Grafana, Cal.com, Discourse, Keycloak) plus additional OSS:
 
 | Metric | Target |
 |--------|--------|
@@ -71,7 +67,11 @@ Target bar for the trained model on a held-out PR replay benchmark: Scoring foll
 | Addressed comments per PR | ≥1.5 |
 | False positives per 50-PR run | ≤4 |
 
-If the recipe misses precision, F1, or addressed-comments targets, [Milestone 2](https://github.com/existential-birds/daydream/issues/102) triggers automatically with GRPO + composite verifiable reward.
+Missing the precision, F1, or addressed-comments targets auto-triggers [Milestone 2](https://github.com/existential-birds/daydream/issues/102) (GRPO + composite verifiable reward).
+
+### Benchmarking
+
+`daydream bench` scores deep-review findings against [Martian's Code Review Benchmark](https://github.com/withmartian/code-review-benchmark) offline set and writes per-PR precision/recall into `results/<model>/evaluations.json`. See the [benchmark runbook](docs/benchmark.md) for the full setup-to-result sequence.
 
 ## Quickstart
 
@@ -83,7 +83,7 @@ cd daydream
 uv sync
 ```
 
-Install the [Beagle](https://github.com/existential-birds/beagle) plugin (provides the stack-specific review skills):
+Install the [Beagle](https://github.com/existential-birds/beagle) plugin:
 
 ```bash
 claude plugin marketplace add https://github.com/existential-birds/beagle
@@ -120,7 +120,7 @@ To update: `git pull && uv sync`
 
 ```bash
 daydream harvest                              # annotate all archived runs (reward + label)
-daydream harvest --dry-run                    # preview without writing
+daydream harvest --dry-run
 daydream build-corpus --out /path/to/out.jsonl  # project labeled runs to JSONL
 daydream build-corpus --out out.jsonl --min-reward 0.5 --label accepted --label mixed
 daydream build-corpus --out out.jsonl --as-of 2026-05-01T00:00:00Z  # pinned snapshot
@@ -131,7 +131,7 @@ daydream label <session_id> --accepted        # manual outcome label override
 
 ```bash
 daydream -s python /path/to/project           # force a specific Beagle skill
-daydream --backend codex /path/to/project     # use Codex instead of Claude
+daydream --backend codex /path/to/project
 daydream --review-model claude-opus-4-6 /path/to/project
 daydream --start-at fix /path/to/project      # resume from a specific phase
 daydream --loop --max-iterations 3 /path/to/project
@@ -141,7 +141,7 @@ daydream --worktree /path/to/project          # force ephemeral worktree
 daydream --non-interactive /path/to/project   # run unattended; take every prompt's safe default
 ```
 
-`--non-interactive` runs without prompting, taking each prompt's safe default: it confirms intent without re-looping, and exits the test/heal loop on failure rather than launching an unbounded fix loop — on failure it writes a `handoff.md` summary, prints it inline, and returns a non-zero exit code; on success it auto-commits and returns exit code 0. In deep mode it declines the fix gate (exits after producing the report). In shallow mode there is no fix gate to decline; the flag has no additional effect on that flow. The flag is also accepted by the `daydream feedback <pr#>` subcommand so harness invocations are uniform across flows; the feedback flow is already unattended (it commits and pushes without prompting), so the flag is a no-op safeguard there. All prompts are also EOF-safe, so piping `</dev/null` no longer crashes on closed stdin even without the flag.
+`--non-interactive` takes each prompt's safe default: on test failure it writes a `handoff.md` and exits non-zero instead of looping, otherwise it auto-commits and exits 0.
 
 Per-phase backend and model overrides: `--review-backend`, `--fix-backend`, `--test-backend`, `--review-model`, `--parse-model`, `--fix-model`, `--test-model`, `--exploration-model`. Run `daydream --help` for the full option list and per-backend model defaults.
 
@@ -160,7 +160,7 @@ Per-phase backend and model overrides: `--review-backend`, `--fix-backend`, `--t
 ## Development
 
 ```bash
-make install    # install dependencies
+make install
 make hooks      # install git hooks
 make lint       # ruff linter
 make typecheck  # mypy
