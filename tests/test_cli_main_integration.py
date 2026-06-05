@@ -175,3 +175,31 @@ def test_cli_main_wrong_branch_exits_1(
         cli.main()
 
     assert exc.value.code == 1
+
+
+def test_non_tty_auto_enables_non_interactive(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A piped (non-TTY) stdin auto-enables non-interactive with no flag.
+
+    This drives the production entrypoint (``cli.main`` -> ``runner.run``) with a
+    bare target and a non-TTY stdin. The interactivity axis must resolve from the
+    environment (non-TTY) rather than requiring an explicit ``--non-interactive``
+    flag, so the captured ``set_non_interactive`` value is ``True``.
+    """
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)  # piped stdin
+    monkeypatch.delenv("CI", raising=False)
+    captured: dict[str, bool] = {}
+    monkeypatch.setattr(
+        "daydream.runner.set_non_interactive",
+        lambda v: captured.__setitem__("v", v),
+    )
+    monkeypatch.setattr(sys, "argv", ["daydream", str(multi_stack_target)])
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    assert captured["v"] is True  # auto-enabled with no flag

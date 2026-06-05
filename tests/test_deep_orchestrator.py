@@ -249,6 +249,19 @@ def _silence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
 
+def _force_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the run's interactivity axis to interactive for prompt-path tests.
+
+    ``runner.run`` now auto-resolves non-interactive from a non-TTY stdin or a
+    truthy ``CI`` env var (Task 4). Under pytest, stdin is not a TTY (and ``CI``
+    is set in CI), so a test that drives the REAL interactive prompt path must
+    explicitly establish a TTY stdin and unset ``CI`` -- otherwise the gate
+    short-circuits to its safe default and the interactive branch never runs.
+    """
+    monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+
+
 def _install_stub_backend(
     monkeypatch: pytest.MonkeyPatch,
     target: Path,
@@ -1491,6 +1504,9 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    # This test drives the REAL interactive heal menu; pin interactivity on so
+    # the auto non-interactive resolution (non-TTY pytest stdin) does not bypass it.
+    _force_interactive(monkeypatch)
     # Apply-fixes gate (orchestrator) -> "y".
     monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
 
@@ -1829,6 +1845,11 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
         raise EOFError("simulated closed stdin")
 
     monkeypatch.setattr("builtins.input", _eof_input)
+
+    # Pin interactivity ON so this genuinely exercises the interactive EOF branch
+    # (input() -> EOFError), not the auto non-interactive short-circuit that the
+    # non-TTY pytest stdin would otherwise trigger.
+    _force_interactive(monkeypatch)
 
     # Sanity: this exercises the interactive branch, NOT the flag short-circuit.
     reset_state()

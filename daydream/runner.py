@@ -359,6 +359,53 @@ def _resolve_backend(
     return create_backend(backend_name, model=resolved_model)
 
 
+def _truthy(value: str | None) -> bool:
+    """Interpret an environment-variable string as a boolean.
+
+    Args:
+        value: The raw environment value, or None when unset.
+
+    Returns:
+        False for None and for ``""``/``"0"``/``"false"`` (case-insensitive);
+        True for any other non-empty value.
+    """
+    if value is None:
+        return False
+    return value.strip().lower() not in ("", "0", "false")
+
+
+def _stdin_isatty() -> bool:
+    """Report whether stdin is an interactive TTY.
+
+    Returns:
+        True if stdin is attached to a terminal. A detached or closed stdin
+        (raising ``AttributeError``/``ValueError``) is treated as not a TTY.
+    """
+    import sys
+
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _resolve_interactive(config: "RunConfig") -> bool:
+    """Resolve whether this run may prompt the user, from three sources.
+
+    Precedence: an explicit ``--non-interactive`` flag forces False; otherwise
+    the run is interactive only when stdin is a TTY and ``CI`` is not truthy.
+
+    Args:
+        config: The run configuration carrying the explicit flag.
+
+    Returns:
+        True if prompts may read stdin; False for unattended/harness runs.
+    """
+    if config.non_interactive:
+        return False
+    return _stdin_isatty() and not _truthy(os.environ.get("CI"))
+
+
 def _compute_diff_ref(cwd: Path) -> str:
     """Compute the diff ref to hand to exploration specialists.
 
@@ -422,9 +469,12 @@ async def run(config: RunConfig | None = None) -> int:
         if codex_in_use:
             quiet = False
     set_quiet_mode(quiet)
-    # Take each prompt's safe default without reading stdin when requested.
-    # Set before any phase that can prompt runs.
-    set_non_interactive(config.non_interactive)
+    # Resolve the interactivity axis from three sources, in precedence order:
+    #   1. explicit ``--non-interactive`` flag (config.non_interactive) wins,
+    #   2. else a non-TTY stdin (piped/detached) implies unattended,
+    #   3. else a truthy ``CI`` env var implies unattended.
+    # The result feeds set_non_interactive before any phase that can prompt runs.
+    set_non_interactive(not _resolve_interactive(config))
 
     # Resolve target directory (from config or prompt). Done outside the
     # workspace context manager so that path-validation errors short-circuit
