@@ -67,25 +67,31 @@ def test_test_backend_override(monkeypatch):
     assert config.test_backend == "codex"
 
 
+def _cfg(monkeypatch, args: list[str]) -> RunConfig:
+    """Parse ``daydream <args>`` into a RunConfig via the real CLI parser."""
+    monkeypatch.setattr(sys, "argv", ["daydream", *args])
+    return _parse_args()
+
+
 def test_loop_flag_default_off(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project"])
-    config = _parse_args()
+    config = _cfg(monkeypatch, ["/tmp/project"])
     assert config.loop is False
     assert config.max_iterations == 5
 
 
-def test_loop_flag_enabled(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--loop"])
-    config = _parse_args()
-    assert config.loop is True
+def test_loop_optional_count(monkeypatch):
+    """--loop with no count enables looping at the default of 5; --loop N sets N."""
+    bare = _cfg(monkeypatch, ["--loop", "/tmp/project"])
+    assert (bare.loop, bare.max_iterations) == (True, 5)
+    assert _cfg(monkeypatch, ["--loop", "3", "/tmp/project"]).max_iterations == 3
+    assert _cfg(monkeypatch, ["/tmp/project"]).loop is False
 
 
-def test_max_iterations_flag(monkeypatch):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project", "--loop", "--max-iterations", "10",
-    ])
-    config = _parse_args()
-    assert config.max_iterations == 10
+def test_loop_with_comment_errors(monkeypatch):
+    """--loop is incompatible with --comment (review-only output mode)."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "--comment", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
 
 
 def test_loop_start_at_conflict(monkeypatch):
@@ -94,17 +100,6 @@ def test_loop_start_at_conflict(monkeypatch):
     ])
     with pytest.raises(SystemExit):
         _parse_args()
-
-
-def test_max_iterations_without_loop_accepted(monkeypatch):
-    """--max-iterations without --loop is accepted but prints a warning."""
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project", "--max-iterations", "3",
-    ])
-    with pytest.warns(UserWarning, match="no effect without --loop"):
-        config = _parse_args()
-    assert config.max_iterations == 3
-    assert config.loop is False
 
 
 def test_skill_map_includes_go():

@@ -24,7 +24,6 @@ import argparse
 import inspect
 import signal
 import sys
-import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -671,22 +670,47 @@ def _build_main_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--loop",
-        action="store_true",
-        default=False,
-        help="Repeat review-fix-test cycle until zero issues or max iterations",
-    )
-    parser.add_argument(
-        "--max-iterations",
+        nargs="?",
+        const=5,
+        default=None,
         type=int,
-        default=5,
         metavar="N",
-        dest="max_iterations",
-        help="Maximum loop iterations (default: 5, only meaningful with --loop)",
+        help="Repeat the review-fix-test cycle until zero issues or N iterations (default N: 5)",
     )
 
     _add_shared_arguments(parser)
 
     return parser
+
+
+def _normalize_loop_argv(raw_argv: list[str]) -> list[str]:
+    """Disambiguate ``--loop``'s optional count from a following positional.
+
+    ``--loop`` carries an optional integer count (``nargs="?"``), which makes
+    argparse greedily try to consume the next token as that count. For the
+    golden path ``daydream --loop /some/path`` argparse would then fail trying
+    to parse the path as an int. This pre-scan pins the count explicitly when
+    ``--loop`` is bare (last token, or followed by a flag or a non-integer
+    token), turning it into ``--loop=5`` so the positional is preserved. An
+    explicit ``--loop N`` is left untouched.
+
+    Args:
+        raw_argv: The argument list after verb-shim stripping.
+
+    Returns:
+        A new argv list with bare ``--loop`` rewritten to ``--loop=5``.
+    """
+    normalized: list[str] = []
+    for i, token in enumerate(raw_argv):
+        if token == "--loop":
+            nxt = raw_argv[i + 1] if i + 1 < len(raw_argv) else None
+            if nxt is None or not nxt.isdigit():
+                # Bare --loop (end, before a flag, or before a non-int target):
+                # pin the default count so the next token stays a positional.
+                normalized.append("--loop=5")
+                continue
+        normalized.append(token)
+    return normalized
 
 
 def _parse_args(argv: list[str] | None = None) -> RunConfig:
@@ -725,6 +749,8 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # we never reach this branch from the summarize path. Kept here only as
     # a guard for callers that hand crafted-argv to _parse_args directly.
 
+    raw_argv = _normalize_loop_argv(raw_argv)
+
     parser = _build_main_parser()
     args = parser.parse_args(raw_argv)
 
@@ -755,15 +781,16 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
             "(use --shallow, or --start-at fix to resume after the merged report)"
         )
 
-    # Validate --loop incompatibilities
-    if args.loop and output_mode != "loop":
-        parser.error("--loop cannot be combined with --review/--comment")
-    if args.loop and args.start_at != "review":
-        parser.error("--loop requires starting at review phase (incompatible with --start-at)")
+    # ``--loop`` takes an optional count (``--loop`` ⇒ 5, ``--loop N`` ⇒ N).
+    # ``args.loop`` is None when the flag is absent.
+    loop = args.loop is not None
+    max_iterations = args.loop or 5
 
-    # Warn if --max-iterations without --loop
-    if args.max_iterations != 5 and not args.loop:
-        warnings.warn("--max-iterations has no effect without --loop", stacklevel=2)
+    # Validate --loop incompatibilities
+    if loop and output_mode != "loop":
+        parser.error("--loop cannot be combined with --review/--comment")
+    if loop and args.start_at != "review":
+        parser.error("--loop requires starting at review phase (incompatible with --start-at)")
 
     # Detect repo slug and PR number for trajectory/archive metadata.
     # Attribute provenance to the target checkout, not the invoking cwd —
@@ -796,8 +823,8 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         fix_backend=args.fix_backend,
         test_backend=args.test_backend,
         ignore_paths=args.ignore_paths,
-        loop=args.loop,
-        max_iterations=args.max_iterations,
+        loop=loop,
+        max_iterations=max_iterations,
         trajectory_path=args.trajectory_path,
         pr_repo=pr_repo,
         archive=not args.no_archive,
