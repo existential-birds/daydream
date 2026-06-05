@@ -17,6 +17,7 @@ subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
 :func:`run`.
 """
 
+import os
 import shutil
 import uuid
 from collections.abc import Callable
@@ -40,6 +41,7 @@ from daydream.config import (
     SKILL_MAP,
     ReviewSkillChoice,
 )
+from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
 from daydream.git_ops import GitError
@@ -131,7 +133,14 @@ class RunConfig:
             "per-stack", or "merge").
         pr_number: GitHub PR number for PR feedback mode. If None, normal mode.
         bot: Bot username whose comments to fetch (e.g. "coderabbitai[bot]").
-        backend: Default backend to use ("claude" or "codex"). Default is "claude".
+        backend: Default backend to use ("claude" or "codex"). Default is None;
+            ``_resolve_backend`` falls back through env/config-file to ``"claude"``.
+        model: Global default model applied across phases when no explicit
+            per-phase model is set. Resolved by ``_resolved_model`` below the
+            per-phase field but above env/config/table sources. Default None.
+        file_config: File-sourced configuration (``[tool.daydream]`` /
+            ``.daydream.toml``) feeding ``_resolved_model`` / ``_resolve_backend``
+            as a low-precedence source. None is treated as an empty config.
         review_backend: Override backend for the review phase. If None, uses backend.
         fix_backend: Override backend for the fix phase. If None, uses backend.
         test_backend: Override backend for the test phase. If None, uses backend.
@@ -178,7 +187,9 @@ class RunConfig:
     start_at: str = "review"
     pr_number: int | None = None
     bot: str | None = None
-    backend: str = "claude"
+    backend: str | None = None
+    model: str | None = None
+    file_config: DaydreamFileConfig | None = None
     review_backend: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
@@ -252,25 +263,78 @@ def _make_archive_callback(
     return _cb
 
 
+def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
+    """Return ``config.file_config``, or an empty config when it is None.
+
+    A single accessor so resolution call sites never branch on ``None`` —
+    an absent file config behaves identically to one with no keys set.
+    """
+    return config.file_config if config.file_config is not None else DaydreamFileConfig()
+
+
+def _resolved_backend_name(config: RunConfig, phase: str) -> str:
+    """Resolve the backend kind for ``phase`` across all precedence tiers.
+
+    Order (highest first): explicit per-phase ``--{phase}-backend``, global
+    ``config.backend``, ``DAYDREAM_BACKEND`` env, file-config phase override,
+    file-config global, then the terminal ``"claude"`` fallback.
+    """
+    file_config = _file_config_or_empty(config)
+    return (
+        getattr(config, f"{phase}_backend", None)
+        or config.backend
+        or os.environ.get("DAYDREAM_BACKEND")
+        or file_config.phase_backend(phase)
+        or file_config.backend
+        or "claude"
+    )
+
+
+def _resolved_model(config: RunConfig, phase: str) -> str | None:
+    """Resolve the model for ``phase`` across all precedence tiers.
+
+    Order (highest first): explicit per-phase ``{phase}_model``, global
+    ``config.model``, ``DAYDREAM_MODEL`` env, file-config phase override,
+    file-config global, then ``PHASE_DEFAULT_MODELS[backend][phase]``. Returns
+    ``None`` only when no source supplies a model (the backend then applies its
+    own default).
+
+    The per-backend table lookup keys off the backend kind resolved by
+    :func:`_resolved_backend_name`, so a config-selected backend still gets its
+    own phase tier defaults.
+    """
+    file_config = _file_config_or_empty(config)
+    backend_name = _resolved_backend_name(config, phase)
+    return (
+        getattr(config, f"{phase}_model", None)
+        or config.model
+        or os.environ.get("DAYDREAM_MODEL")
+        or file_config.phase_model(phase)
+        or file_config.model
+        or PHASE_DEFAULT_MODELS.get(backend_name, {}).get(phase)
+    )
+
+
 def _resolve_backend(
     config: RunConfig,
     phase: str,
     cache: dict[tuple[str, str | None], Backend] | None = None,
 ) -> Backend:
-    """Get or create the backend for a given phase, respecting per-phase overrides.
+    """Get or create the backend for a given phase, respecting all precedence tiers.
 
-    Resolution order for the model:
-        1. ``getattr(config, f"{phase}_model", None)`` — explicit per-phase flag.
-        2. ``PHASE_DEFAULT_MODELS[backend_name].get(phase)`` — per-backend phase
-           default table.
-        3. ``None`` — let :func:`create_backend` apply its own backend default.
+    Both the backend kind and the model are resolved through the source-tiered
+    precedence ``CLI > env > config-file > default``:
 
-    The backend kind is resolved first via
-    ``getattr(config, f"{phase}_backend", None) or config.backend``; the model
-    lookup then keys into that backend name's table.
+    - Backend kind via :func:`_resolved_backend_name`
+      (per-phase flag → ``config.backend`` → ``DAYDREAM_BACKEND`` →
+      file-config phase → file-config global → ``"claude"``).
+    - Model via :func:`_resolved_model`
+      (per-phase field → ``config.model`` → ``DAYDREAM_MODEL`` →
+      file-config phase → file-config global → ``PHASE_DEFAULT_MODELS`` →
+      ``None``, where ``None`` falls through to the backend's own default).
 
     Args:
-        config: Run configuration with backend and per-phase model settings.
+        config: Run configuration with backend/model and file-config sources.
         phase: Phase name (e.g. ``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
             ``"intent"``, ``"wonder"``, ``"envision"``, ``"merge"``,
             ``"exploration"``, ``"pr_feedback"``).
@@ -283,12 +347,8 @@ def _resolve_backend(
         Backend instance for the phase.
 
     """
-    backend_override = getattr(config, f"{phase}_backend", None)
-    backend_name = backend_override or config.backend
-
-    phase_flag = getattr(config, f"{phase}_model", None)
-    table_default = PHASE_DEFAULT_MODELS.get(backend_name, {}).get(phase)
-    resolved_model = phase_flag or table_default  # ``None`` falls through to backend default
+    backend_name = _resolved_backend_name(config, phase)
+    resolved_model = _resolved_model(config, phase)
 
     cache_key = (backend_name, resolved_model)
     if cache is not None:
@@ -350,13 +410,14 @@ async def run(config: RunConfig | None = None) -> int:
 
     # Quiet mode tweak: Codex backends need their shell output visible because
     # those commands ARE the user-facing signal. Done before any backend is
-    # constructed so per-phase backends inherit the right setting.
+    # constructed so per-phase backends inherit the right setting. Resolve each
+    # phase's backend through the full precedence chain (CLI/env/config-file)
+    # so a codex backend selected via env or config still disables quiet mode.
     quiet = config.quiet
     if quiet:
-        codex_in_use = config.backend == "codex" or any(
-            b == "codex"
-            for b in (config.review_backend, config.fix_backend, config.test_backend)
-            if b is not None
+        codex_in_use = any(
+            _resolved_backend_name(config, phase) == "codex"
+            for phase in ("review", "fix", "test")
         )
         if codex_in_use:
             quiet = False

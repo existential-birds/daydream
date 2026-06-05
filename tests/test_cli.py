@@ -10,13 +10,17 @@ import pytest
 
 from daydream.cli import _parse_args
 from daydream.config import SKILL_MAP
-from daydream.runner import RunConfig
+from daydream.runner import RunConfig, _resolved_backend_name
 
 
-def test_default_backend_is_claude(monkeypatch):
+def test_default_backend_is_none_and_resolves_to_claude(monkeypatch):
+    # --backend default is now None so env/config-file can supply it; the
+    # terminal fallback in _resolved_backend_name is "claude".
+    monkeypatch.delenv("DAYDREAM_BACKEND", raising=False)
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project"])
     config = _parse_args()
-    assert config.backend == "claude"
+    assert config.backend is None
+    assert _resolved_backend_name(config, "review") == "claude"
 
 
 def test_backend_flag_codex(monkeypatch):
@@ -335,28 +339,19 @@ def test_existing_exploration_model_flag_unchanged(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Removed --model flag (Task 5 of per-phase-model-overrides — breaking change)
+# Global --model flag (cli-verb-redesign Task 2 — re-added as a global override)
 # ---------------------------------------------------------------------------
 
 
-def test_removed_model_flag_emits_curated_error(capsys, tmp_path):
-    with pytest.raises(SystemExit) as exc_info:
-        _parse_args(["--model", "claude-opus-4-6", str(tmp_path)])
-    assert exc_info.value.code != 0
-    err = capsys.readouterr().err
-    assert "--model has been removed" in err
-    assert "--review-model" in err
-    assert "--parse-model" in err
-    assert "--fix-model" in err
-    assert "--test-model" in err
-    assert "--exploration-model" in err
+def test_global_model_flag_populates_runconfig(tmp_path):
+    config = _parse_args(["--model", "claude-opus-4-8", str(tmp_path)])
+    assert config.model == "claude-opus-4-8"
 
 
-def test_runconfig_has_no_model_field():
+def test_runconfig_has_model_field():
     config = RunConfig(backend="claude")
-    assert not hasattr(config, "model"), (
-        "RunConfig.model was supposed to be removed in favor of per-phase fields"
-    )
+    assert hasattr(config, "model"), "RunConfig.model is the global model override source"
+    assert config.model is None
 
 
 # ---------------------------------------------------------------------------

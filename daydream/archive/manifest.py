@@ -214,6 +214,11 @@ def build_manifest(
     """
     totals = recorder._final_totals  # noqa: SLF001 - intentional access to recorder internals
 
+    # ``config.backend`` is now None by default (env/config-file may supply it
+    # at resolution time). The manifest records the global backend selection,
+    # falling back to ``"claude"`` so the field is never None.
+    backend_used = config.backend or "claude"
+
     m = Manifest(
         session_id=recorder.session_id,
         archived_at=datetime.now(timezone.utc).isoformat(),
@@ -221,7 +226,7 @@ def build_manifest(
         run_flow=recorder.run_flow.value,
         skill=config.skill,
         model=None,
-        backend=config.backend,
+        backend=backend_used,
         review_backend=config.review_backend,
         fix_backend=config.fix_backend,
         test_backend=config.test_backend,

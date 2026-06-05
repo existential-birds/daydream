@@ -31,6 +31,7 @@ from daydream.agent import (
     set_shutdown_requested,
 )
 from daydream.benchmark.cli import _handle_bench_command
+from daydream.config_file import load_file_config
 from daydream.runner import RunConfig, run, run_feedback
 from daydream.trajectory import get_signal_recorder
 from daydream.ui import (
@@ -123,33 +124,14 @@ def _detect_repo_slug(repo: Path) -> str | None:
     return f"{owner}/{name}"
 
 
-_REMOVED_MODEL_FLAG_MESSAGE = (
-    "--model has been removed. Use per-phase flags: "
-    "--review-model, --parse-model, --fix-model, --test-model, --exploration-model. "
-    "See README for the per-backend default table."
-)
-
-
-def _reject_removed_model_flag(parser: argparse.ArgumentParser, argv: list[str]) -> None:
-    """Surface a curated error before argparse runs when ``--model`` is passed.
-
-    Argparse would otherwise reject ``--model`` with a generic "unrecognized
-    arguments" message that gives users no path forward. Catching both
-    ``--model X`` and ``--model=X`` shapes here points users at the new
-    per-phase flags before any parsing happens.
-    """
-    for token in argv:
-        if token == "--model" or token.startswith("--model="):
-            parser.error(_REMOVED_MODEL_FLAG_MESSAGE)
-
-
 def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the shared (non-output-mode) arguments to a parser or subparser.
 
     Used by both the top-level parser and the ``feedback`` subparser so flags
-    like ``--backend``, ``--trajectory`` work in both places. ``--model`` is
-    intentionally absent — see :func:`_reject_removed_model_flag` for the
-    curated error surfaced when a user passes the removed flag.
+    like ``--backend``, ``--model``, ``--trajectory`` work in both places. The
+    global ``--model``/``--backend`` here feed the source-tiered precedence in
+    :func:`daydream.runner._resolved_model` / ``_resolve_backend``
+    (CLI > env > config-file > per-backend table).
     """
     parser.add_argument(
         "--trajectory",
@@ -179,8 +161,19 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--backend", "-b",
         choices=["claude", "codex"],
-        default="claude",
-        help="Agent backend: claude (default) or codex",
+        default=None,
+        help="Agent backend: claude or codex "
+             "(default: env DAYDREAM_BACKEND, config file, then claude)",
+    )
+    parser.add_argument(
+        "--model", "-m",
+        default=None,
+        type=str,
+        dest="model",
+        metavar="MODEL",
+        help="Global default model across phases "
+             "(default: env DAYDREAM_MODEL, config file, then the per-backend table). "
+             "A per-phase config override is beaten by this global --model.",
     )
     parser.add_argument(
         "--review-backend",
@@ -681,7 +674,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # front ourselves and route to a dedicated parser.
     if raw_argv and raw_argv[0] == "feedback":
         feedback_parser = _build_feedback_parser()
-        _reject_removed_model_flag(feedback_parser, raw_argv[1:])
         feedback_args = feedback_parser.parse_intermixed_args(raw_argv[1:])
         return _build_feedback_config(feedback_args)
 
@@ -690,7 +682,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # a guard for callers that hand crafted-argv to _parse_args directly.
 
     parser = _build_main_parser()
-    _reject_removed_model_flag(parser, raw_argv)
     args = parser.parse_args(raw_argv)
 
     # ----- Reject purely numeric TARGET (likely meant `daydream feedback N`) -----
@@ -737,9 +728,15 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     pr_repo = _detect_repo_slug(target_repo)
     pr_number = _auto_detect_pr_number(target_repo)
 
+    # Low-precedence model/backend source: [tool.daydream] / .daydream.toml at
+    # the target repo root, consulted by ``_resolve_backend`` below CLI and env.
+    file_config = load_file_config(target_repo)
+
     return RunConfig(
         target=args.target,
         skill=args.skill,
+        model=args.model,
+        file_config=file_config,
         exploration_model=args.exploration_model,
         review_model=args.review_model,
         parse_model=args.parse_model,
@@ -784,11 +781,15 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         # argparse already enforces type=int, but guard against negatives.
         raise SystemExit(f"feedback subcommand: PR number must be positive (got {pr_number})")
 
-    pr_repo = _detect_repo_slug(Path(args.target) if args.target else Path.cwd())
+    target_repo = Path(args.target) if args.target else Path.cwd()
+    pr_repo = _detect_repo_slug(target_repo)
+    file_config = load_file_config(target_repo)
 
     return RunConfig(
         target=args.target,
         skill=None,
+        model=args.model,
+        file_config=file_config,
         exploration_model=None,
         review_model=args.review_model,
         parse_model=args.parse_model,

@@ -304,7 +304,12 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     from daydream.backends import Backend
     from daydream.git_ops import GitError
     from daydream.phases import _git_branch, _git_log
-    from daydream.runner import _compute_diff_ref, _make_archive_callback, _resolve_backend
+    from daydream.runner import (
+        _compute_diff_ref,
+        _make_archive_callback,
+        _resolve_backend,
+        _resolved_backend_name,
+    )
     from daydream.ui import phase_subtitle, print_dim, print_phase_hero
 
     # Per-phase backends are resolved on demand via `_resolve_backend(config,
@@ -352,7 +357,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
-        print_info(console, f"Default backend: {config.backend}")
+        print_info(console, f"Default backend: {_resolved_backend_name(config, 'review')}")
         console.print()
 
         # ------ Resume gate (D-34, D-36, D-37) ------
