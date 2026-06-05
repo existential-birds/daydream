@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-06-04
+
+### Added
+
+- **benchmark:** Add held-out PR replay benchmark harness via `daydream bench` ([#137](https://github.com/existential-birds/daydream/pull/137))
+
+  Replays a corpus of held-out, already-merged PRs through the review pipeline and scores each run's findings against the human reviewers' acted-upon comments, producing precision/recall metrics for the review agent. Lets daydream measure regressions in review quality across changes to skills, prompts, and backends.
+
+- **cli:** Add harness-safe non-interactive mode across all daydream flows ([#132](https://github.com/existential-birds/daydream/pull/132))
+
+  `--non-interactive` makes every flow (deep loop, shallow loop, comment, review, PR feedback) take safe defaults instead of prompting, so daydream can run unattended inside CI or an orchestration harness without blocking on a TTY gate.
+
+- **archive:** Add human-override label precedence, idempotent harvest, and rate-limit handling ([#119](https://github.com/existential-birds/daydream/pull/119))
+
+  Harvest now treats human-applied labels as authoritative over inferred ones, re-running a harvest no longer duplicates entries, and GitHub rate-limit responses are backed off and retried instead of aborting the run.
+
+- **training:** Add a posterior reject-penalty axis to the reward signal ([#115](https://github.com/existential-birds/daydream/pull/115))
+
+  The reward model now penalizes findings that were posted but later rejected by a human reviewer, sharpening the signal that distinguishes useful review comments from noise.
+
+- **pr-comment:** Add per-phase wall-clock latency to metrics ([#109](https://github.com/existential-birds/daydream/pull/109))
+
+### Fixed
+
+- **phases:** Ground the failure handoff in evidence with an enforced read-only summarizer ([#136](https://github.com/existential-birds/daydream/pull/136))
+
+  When a run hands off after a failure, the summary is now produced by a read-only agent constrained to cite actual evidence, preventing the handoff from inventing diagnoses or mutating state.
+
+- **cli:** Detect repo slug and PR number from the target checkout, not the current working directory ([#135](https://github.com/existential-birds/daydream/pull/135))
+
+- **workspace:** Accept a commit-ish `--base` and guard against dash injection ([#134](https://github.com/existential-birds/daydream/pull/134))
+
+- **archive:** Derive `wall_clock_seconds` on every run and unify ISO timestamp parsing ([#133](https://github.com/existential-birds/daydream/pull/133))
+
+- **git_ops:** Diff against the remote default branch instead of the local one ([#113](https://github.com/existential-birds/daydream/pull/113))
+
+- **exploration:** Prevent stuck subagents and unmatched tool results ([#112](https://github.com/existential-birds/daydream/pull/112))
+
+- **runner:** Dispatch on `bot` instead of `pr_number` to prevent false feedback routing ([#111](https://github.com/existential-birds/daydream/pull/111))
+
+### Security
+
+- **deps:** Bump `starlette` from 0.52.1 to 1.0.1 in the uv group ([#138](https://github.com/existential-birds/daydream/pull/138))
+
 ## [0.18.0] - 2026-05-26
 
 ### Added
@@ -511,7 +555,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.18.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/existential-birds/daydream/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/existential-birds/daydream/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/existential-birds/daydream/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/existential-birds/daydream/compare/v0.15.0...v0.16.0
