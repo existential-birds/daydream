@@ -91,6 +91,29 @@ def test_cli_main_clean_deep_run_exits_0(
     assert exc.value.code == 0
 
 
+def test_cli_main_explicit_review_verb_exits_0(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``daydream review <target>`` is identical to the bare-target run.
+
+    The default-verb shim must make the explicit ``review`` verb behave
+    exactly like a bare ``daydream <target>``. This drives the SAME production
+    path (cli.main -> verb dispatch -> _parse_args -> anyio.run(run) ->
+    sys.exit) with an explicit leading ``review`` token and asserts the same
+    clean exit 0 as ``test_cli_main_clean_deep_run_exits_0``.
+    """
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    monkeypatch.setattr(sys, "argv", ["daydream", "review", str(multi_stack_target)])
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 0
+
+
 def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

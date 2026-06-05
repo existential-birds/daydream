@@ -1,11 +1,17 @@
 """CLI entry point for daydream.
 
-Subcommands dispatched manually from :func:`main` before the main argparse
-parser runs (so their flags don't collide with the top-level ``TARGET``
-positional):
+Dispatch is verb-first. :func:`_first_verb` classifies the leading argv token
+against :data:`KNOWN_VERBS`; anything that is not an explicit verb — a bare
+target path, a leading flag, or empty argv — falls through to the default
+``review`` shim, so ``daydream /path`` and ``daydream review /path`` are
+equivalent. Each non-``review`` verb is dispatched manually from :func:`main`
+before the main argparse parser runs (so its flags don't collide with the
+top-level ``TARGET`` positional):
 
+- ``daydream [review] <target>`` — the review/fix loop (default verb)
 - ``daydream feedback <pr#>`` — apply bot PR-review comments
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
+- ``daydream bench`` — score deep-review findings against the offline benchmark
 - ``daydream harvest`` — walk the archive and append one bitemporal
   annotation (outcome label + intrinsic reward) per indexed run
 - ``daydream label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
@@ -40,6 +46,38 @@ from daydream.ui import (
     print_error,
     set_shutdown_panel,
 )
+
+# Verb-first dispatch table. ``_first_verb`` classifies the leading argv token;
+# anything that isn't an explicit verb (bare path, leading flag, empty argv)
+# falls through to the ``review`` golden path via the default-verb shim.
+KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench"}
+
+# Data-pipeline verbs still routed at the top level. These are slated to move
+# under the ``corpus`` namespace; until then they remain explicit verbs so the
+# shim does not misroute them to ``review``.
+_LEGACY_DATA_VERBS = {"harvest", "build-corpus", "label"}
+
+
+def _first_verb(argv: list[str]) -> str:
+    """Classify the leading argv token into a verb.
+
+    Returns the leading token when it is a recognized verb; otherwise returns
+    ``"review"``. The fallthrough covers the three default-verb cases — empty
+    argv, a leading flag, and a bare target path — so a plain
+    ``daydream /path`` routes through the same parser as ``daydream review
+    /path``.
+
+    Args:
+        argv: The raw argument list (``sys.argv[1:]``).
+
+    Returns:
+        str: The dispatched verb name (a member of :data:`KNOWN_VERBS`, one of
+        the legacy data verbs, or ``"review"``).
+
+    """
+    if argv and (argv[0] in KNOWN_VERBS or argv[0] in _LEGACY_DATA_VERBS):
+        return argv[0]
+    return "review"
 
 
 def _signal_handler(signum: int, frame: object) -> None:
@@ -669,6 +707,12 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     """
     raw_argv = sys.argv[1:] if argv is None else list(argv)
 
+    # Default-verb shim: an explicit leading ``review`` token is equivalent to
+    # the bare ``daydream <target>`` form. Strip it so both parse identically
+    # against the main review parser (positional TARGET unchanged).
+    if raw_argv and raw_argv[0] == "review":
+        raw_argv = raw_argv[1:]
+
     # Manual subcommand dispatch: argparse subparsers eat the first positional
     # which conflicts with our positional TARGET. So we pop "feedback" off the
     # front ourselves and route to a dedicated parser.
@@ -1036,6 +1080,19 @@ def _handle_label_command(argv: list[str]) -> int:
 def main() -> None:
     """Run the CLI entry point.
 
+    Dispatch is verb-first (see :func:`_first_verb` and :data:`KNOWN_VERBS`):
+    the leading token selects a verb, and anything that is not an explicit
+    verb — a bare target path, a leading flag, or empty argv — routes through
+    the default ``review`` shim. Each non-``review`` verb owns its own parser
+    and exit code; ``review`` flows into :func:`_parse_args`.
+
+    Verbs:
+        - ``review`` (default) — the review/fix loop (bare ``daydream <target>``)
+        - ``feedback`` — apply bot PR-review comments
+        - ``summarize`` — print run-info markdown for a trajectory
+        - ``bench`` — score deep-review findings against the offline benchmark
+        - ``harvest`` / ``build-corpus`` / ``label`` — data-pipeline verbs
+
     Returns:
         None: This function does not return; it exits via sys.exit().
 
@@ -1046,39 +1103,42 @@ def main() -> None:
     """
     _install_signal_handlers()
 
-    # Route subcommands before main arg parse. Each handler returns an exit
-    # code; we translate via sys.exit. Supported subcommands: feedback,
-    # summarize, harvest, build-corpus, label, bench.
+    # Verb-first dispatch. ``_first_verb`` classifies the leading token; bare
+    # paths, leading flags, and empty argv all fall through to ``review``.
+    # The non-``review`` verbs are short-circuited here (their handlers own
+    # their own parsers and exit codes); ``review`` flows into ``_parse_args``
+    # which applies the default-verb shim (an explicit leading ``review`` is
+    # equivalent to a bare target).
     argv = sys.argv[1:]
+    verb = _first_verb(argv)
     try:
         # ``summarize`` is sync — short-circuit before anyio.run kicks in.
-        if argv and argv[0] == "summarize":
+        if verb == "summarize":
             summarize_parser = _build_summarize_parser()
             summarize_args = summarize_parser.parse_args(argv[1:])
             sys.exit(_run_summarize(summarize_args))
 
         # ``build-corpus`` is sync — no agent invocations, just SQLite +
         # filesystem. Short-circuit before anyio.run.
-        if argv and argv[0] == "build-corpus":
+        if verb == "build-corpus":
             sys.exit(_handle_build_corpus_command(argv[1:]))
 
         # ``harvest`` drives the annotate-pass orchestrator via its own anyio.run.
-        if argv and argv[0] == "harvest":
+        if verb == "harvest":
             sys.exit(_handle_harvest_command(argv[1:]))
 
         # ``bench`` scores deep-review findings against the offline benchmark.
         # ``run_bench`` is sync — short-circuit before anyio.run.
-        if argv and argv[0] == "bench":
+        if verb == "bench":
             sys.exit(_handle_bench_command(argv[1:]))
 
         # ``label`` records an authoritative human outcome label — sync,
         # SQLite-only. Short-circuit before anyio.run.
-        if argv and argv[0] == "label":
+        if verb == "label":
             sys.exit(_handle_label_command(argv[1:]))
 
-        is_feedback_subcommand = bool(argv) and argv[0] == "feedback"
         config = _parse_args()
-        if is_feedback_subcommand:
+        if verb == "feedback":
             assert config.pr_number is not None  # _build_feedback_config guarantees
             exit_code = anyio.run(run_feedback, config, config.pr_number)
         else:
