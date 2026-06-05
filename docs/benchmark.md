@@ -82,3 +82,24 @@ The `--model` value names the per-model results directory; it does **not** selec
 To compare against published benchmark numbers, both the `MARTIAN_MODEL` value and the `--model` label must match the published run. Using a different judge — or a different id string for the same underlying model — lands in a different `results/<dir>` and is not directly apples-to-apples.
 
 The published Martian run used the dated id `anthropic/claude-opus-4-5-20251101` → `results/anthropic_claude-opus-4-5-20251101/`; the default here is `anthropic/claude-opus-4.5` → `results/anthropic_claude-opus-4.5/`, a distinct directory. Scores are model-determined rather than string-determined, and the judge prompt and `temperature: 0.0` are identical, so the same underlying model under a different id string is broadly comparable. But routing through a different gateway can shift outputs slightly (system-prompt injection, sampling, schema handling), so for the closest apples-to-apples comparison run without structured output and note the gateway difference. To reuse the existing published directory exactly, set `--model` to that dated id only if OpenRouter accepts it as a model id.
+
+## First measured baseline (provisional)
+
+A first full sweep was run on **2026-06-04** to validate the harness end-to-end. These numbers are a **single-sweep provisional baseline**, not a published result — they are recorded here for provenance only. Treat them as a smoke-level anchor, not a calibrated score. For the published commercial-bot numbers these are ultimately measured against, see the [Martian Code Review Benchmark leaderboard (offline mode)](https://codereview.withmartian.com/?mode=offline).
+
+| Field | Value |
+|---|---|
+| Date | 2026-06-04 |
+| Judge model | `anthropic/claude-opus-4.5` via OpenRouter (`MARTIAN_BASE_URL=https://openrouter.ai/api/v1`) |
+| daydream config | default deep multi-stack review, `--non-interactive` |
+| PRs scored | **25 / 26** |
+| Precision (micro) | **0.192** (ΣTP=47, ΣFP=198) |
+| Recall (micro) | **0.691** (ΣTP=47, ΣFN=21) |
+| F1 (micro) | **0.300** (= 2·TP / (2·TP + FP + FN) = 94 / 313) |
+
+Caveats — read before quoting these:
+
+- **Single sweep.** No variance band yet; the LLM judge is run at `temperature: 0.0` but is not fully deterministic. Multiple sweeps are needed before these numbers are trustworthy as a metric.
+- **One PR excluded.** `calcom/cal.com#10600` is not in the 25 — its deep review exceeded the 3600 s per-PR cap (`DaydreamRunError`) and was skipped. The sweep is resumable, so a later run can fill it in.
+- **False-positive heavy.** 47 TP against 198 FP — precision (0.192) sits well below the README's ≥50% target. This is an *uncalibrated* first measurement of a brand-new harness, not a tuned result, and is the gap the training milestone is meant to close.
+- **Tied to this exact setup.** Judge model, gateway, daydream model, and date all move the number; it is not directly comparable to the published Martian run (different gateway and model-id string — see the comparability caveat above).
