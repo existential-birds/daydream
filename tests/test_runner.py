@@ -333,8 +333,8 @@ class TestResolveBackendPhaseModel:
         assert backend.model == "gpt-5.5"
 
     def test_backend_override_uses_overridden_backends_table(self):
-        # --review-backend codex while default is claude: resolver should look up
-        # the codex table for review, not the claude one.
+        # review_backend=codex (config/programmatic) while default is claude:
+        # resolver should look up the codex table for review, not the claude one.
         config = RunConfig(backend="claude", review_backend="codex")
         backend = runner._resolve_backend(config, "review")
         assert backend.model == "gpt-5.5"  # codex REVIEW default (v1)

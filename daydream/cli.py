@@ -170,6 +170,13 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
     :func:`daydream.runner._resolved_model` / ``_resolve_backend``
     (CLI > env > config-file > per-backend table).
 
+    Per-phase model/backend overrides are no longer CLI flags — they live in
+    ``[tool.daydream.phases.<phase>]`` of the config file (``pyproject.toml`` /
+    ``.daydream.toml``). The removed flags are rejected with a curated pointer
+    by :func:`_reject_removed_phase_flags`; the underlying ``RunConfig`` fields
+    (``review_model``, ``fix_backend``, …) remain and are still populated from
+    the config file and read by ``_resolve_backend``.
+
     Args:
         parser: The parser (or subparser) to add the shared arguments to.
         full_help: When False, advanced flags (``--trajectory``, ``--no-archive``,
@@ -220,65 +227,6 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         help="Global default model across phases "
              "(default: env DAYDREAM_MODEL, config file, then the per-backend table). "
              "A per-phase config override is beaten by this global --model.",
-    )
-    parser.add_argument(
-        "--review-backend",
-        choices=["claude", "codex"],
-        default=None,
-        help="Override backend for review phase",
-    )
-    parser.add_argument(
-        "--fix-backend",
-        choices=["claude", "codex"],
-        default=None,
-        help="Override backend for fix phase",
-    )
-    parser.add_argument(
-        "--test-backend",
-        choices=["claude", "codex"],
-        default=None,
-        help="Override backend for test phase",
-    )
-    parser.add_argument(
-        "--exploration-model",
-        default=None,
-        dest="exploration_model",
-        help=(
-            "Model for exploration subagents (default: claude-sonnet-4-6). "
-            "Use a smaller model to save cost."
-        ),
-    )
-    parser.add_argument(
-        "--review-model",
-        default=None,
-        type=str,
-        dest="review_model",
-        metavar="MODEL",
-        help="Override model for the REVIEW phase (default: per-backend table; see README).",
-    )
-    parser.add_argument(
-        "--parse-model",
-        default=None,
-        type=str,
-        dest="parse_model",
-        metavar="MODEL",
-        help="Override model for the PARSE phase (default: per-backend table; see README).",
-    )
-    parser.add_argument(
-        "--fix-model",
-        default=None,
-        type=str,
-        dest="fix_model",
-        metavar="MODEL",
-        help="Override model for the FIX phase (default: per-backend table; see README).",
-    )
-    parser.add_argument(
-        "--test-model",
-        default=None,
-        type=str,
-        dest="test_model",
-        metavar="MODEL",
-        help="Override model for the TEST phase (default: per-backend table; see README).",
     )
     parser.add_argument(
         "--non-interactive",
@@ -772,6 +720,46 @@ def _normalize_loop_argv(raw_argv: list[str]) -> list[str]:
     return normalized
 
 
+# Removed per-phase model/backend flags → their config-file replacement. The
+# per-phase overrides moved out of the CLI surface into
+# ``[tool.daydream.phases.<phase>]`` (pyproject.toml / .daydream.toml). The
+# ``RunConfig`` fields they used to set (``review_model``, ``fix_backend``, …)
+# remain — still read by ``_resolve_backend`` and settable via the config file —
+# they are simply no longer CLI-settable.
+_REMOVED_PHASE_FLAGS: dict[str, str] = {
+    "--review-backend": "[tool.daydream.phases.review] backend = \"...\"",
+    "--fix-backend": "[tool.daydream.phases.fix] backend = \"...\"",
+    "--test-backend": "[tool.daydream.phases.test] backend = \"...\"",
+    "--exploration-model": "[tool.daydream.phases.exploration] model = \"...\"",
+    "--review-model": "[tool.daydream.phases.review] model = \"...\"",
+    "--parse-model": "[tool.daydream.phases.parse] model = \"...\"",
+    "--fix-model": "[tool.daydream.phases.fix] model = \"...\"",
+    "--test-model": "[tool.daydream.phases.test] model = \"...\"",
+}
+
+
+def _reject_removed_phase_flags(parser: argparse.ArgumentParser, argv: list[str]) -> None:
+    """Reject any removed per-phase model/backend flag with a config pointer.
+
+    Pre-parse scan (P-reject pattern): if any token in ``argv`` is a removed
+    per-phase flag — either the bare ``--flag`` form (``--fix-model value``) or
+    the joined ``--flag=value`` form — call ``parser.error`` with a curated
+    message naming the ``[tool.daydream.phases.<phase>]`` config replacement.
+
+    Args:
+        parser: The parser whose ``error`` is used to exit with the message.
+        argv: The argument list (after verb-shim stripping).
+    """
+    for token in argv:
+        flag = token.split("=", 1)[0]
+        replacement = _REMOVED_PHASE_FLAGS.get(flag)
+        if replacement is not None:
+            parser.error(
+                f"{flag} was removed; set it in the config file instead: "
+                f"{replacement} (pyproject.toml or .daydream.toml)."
+            )
+
+
 def _parse_args(argv: list[str] | None = None) -> RunConfig:
     """Parse command line arguments and return a RunConfig.
 
@@ -801,6 +789,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # front ourselves and route to a dedicated parser.
     if raw_argv and raw_argv[0] == "feedback":
         feedback_parser = _build_feedback_parser()
+        _reject_removed_phase_flags(feedback_parser, raw_argv[1:])
         feedback_args = feedback_parser.parse_intermixed_args(raw_argv[1:])
         return _build_feedback_config(feedback_args)
 
@@ -811,6 +800,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     raw_argv = _normalize_loop_argv(raw_argv)
 
     parser = _build_main_parser()
+    _reject_removed_phase_flags(parser, raw_argv)
     args = parser.parse_args(raw_argv)
 
     # ----- Reject purely numeric TARGET (likely meant `daydream feedback N`) -----
@@ -873,20 +863,22 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         skill=args.skill,
         model=args.model,
         file_config=file_config,
-        exploration_model=args.exploration_model,
-        review_model=args.review_model,
-        parse_model=args.parse_model,
-        fix_model=args.fix_model,
-        test_model=args.test_model,
+        # Per-phase model/backend overrides are config-file-only (no CLI flags).
+        # Left None here so the config file is the sole low-precedence source.
+        exploration_model=None,
+        review_model=None,
+        parse_model=None,
+        fix_model=None,
+        test_model=None,
         cleanup=args.cleanup,
         quiet=True,
         start_at=args.start_at,
         pr_number=pr_number,
         bot=None,
         backend=args.backend,
-        review_backend=args.review_backend,
-        fix_backend=args.fix_backend,
-        test_backend=args.test_backend,
+        review_backend=None,
+        fix_backend=None,
+        test_backend=None,
         ignore_paths=args.ignore_paths,
         loop=loop,
         max_iterations=max_iterations,
@@ -927,20 +919,21 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         skill=None,
         model=args.model,
         file_config=file_config,
+        # Per-phase model/backend overrides are config-file-only (no CLI flags).
         exploration_model=None,
-        review_model=args.review_model,
-        parse_model=args.parse_model,
-        fix_model=args.fix_model,
-        test_model=args.test_model,
+        review_model=None,
+        parse_model=None,
+        fix_model=None,
+        test_model=None,
         cleanup=None,
         quiet=True,
         start_at="review",
         pr_number=pr_number,
         bot=args.bot,
         backend=args.backend,
-        review_backend=args.review_backend,
-        fix_backend=args.fix_backend,
-        test_backend=args.test_backend,
+        review_backend=None,
+        fix_backend=None,
+        test_backend=None,
         ignore_paths=[],
         loop=False,
         max_iterations=5,

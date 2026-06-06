@@ -10,7 +10,8 @@ import pytest
 
 from daydream.cli import _parse_args
 from daydream.config import SKILL_MAP
-from daydream.runner import RunConfig, _resolved_backend_name
+from daydream.config_file import DaydreamFileConfig
+from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
 
 
 def test_default_backend_is_none_and_resolves_to_claude(monkeypatch):
@@ -41,30 +42,28 @@ def test_invalid_backend_rejected(monkeypatch):
         _parse_args()
 
 
-def test_review_backend_override(monkeypatch):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project",
-        "--backend", "claude", "--review-backend", "codex",
-    ])
-    config = _parse_args()
-    assert config.backend == "claude"
-    assert config.review_backend == "codex"
+def test_review_backend_override_via_config_file(monkeypatch):
+    # Per-phase backend overrides moved from CLI flags to the config file
+    # (cli-verb-redesign Task 8). The resolver still honours a phase override.
+    monkeypatch.delenv("DAYDREAM_BACKEND", raising=False)
+    fc = DaydreamFileConfig(backend="claude", phases={"review": {"backend": "codex"}})
+    config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
+    assert _resolved_backend_name(config, "review") == "codex"
+    assert _resolved_backend_name(config, "fix") == "claude"
 
 
-def test_fix_backend_override(monkeypatch):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project", "--fix-backend", "codex",
-    ])
-    config = _parse_args()
-    assert config.fix_backend == "codex"
+def test_fix_backend_override_via_config_file(monkeypatch):
+    monkeypatch.delenv("DAYDREAM_BACKEND", raising=False)
+    fc = DaydreamFileConfig(phases={"fix": {"backend": "codex"}})
+    config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
+    assert _resolved_backend_name(config, "fix") == "codex"
 
 
-def test_test_backend_override(monkeypatch):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project", "--test-backend", "codex",
-    ])
-    config = _parse_args()
-    assert config.test_backend == "codex"
+def test_test_backend_override_via_config_file(monkeypatch):
+    monkeypatch.delenv("DAYDREAM_BACKEND", raising=False)
+    fc = DaydreamFileConfig(phases={"test": {"backend": "codex"}})
+    config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
+    assert _resolved_backend_name(config, "test") == "codex"
 
 
 def _cfg(monkeypatch, args: list[str]) -> RunConfig:
@@ -302,22 +301,26 @@ def test_print_issues_table_renders():
 
 
 # ---------------------------------------------------------------------------
-# Per-phase model override flags (Task 3 of per-phase-model-overrides)
+# Per-phase model overrides — config-file path (cli-verb-redesign Task 8)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "flag,attr,value",
+    "phase,value",
     [
-        ("--review-model", "review_model", "claude-haiku-4-5"),
-        ("--parse-model", "parse_model", "claude-haiku-4-5"),
-        ("--fix-model", "fix_model", "claude-opus-4-6"),
-        ("--test-model", "test_model", "gpt-5.5"),
+        ("review", "claude-haiku-4-5"),
+        ("parse", "claude-haiku-4-5"),
+        ("fix", "claude-opus-4-6"),
+        ("test", "gpt-5.5"),
     ],
 )
-def test_per_phase_model_flags_set_runconfig_field(flag, attr, value, tmp_path):
-    config = _parse_args([flag, value, str(tmp_path)])
-    assert getattr(config, attr) == value
+def test_per_phase_model_set_via_config_file(phase, value, monkeypatch):
+    # Per-phase model overrides moved from CLI flags to the config file; the
+    # resolver still honours a phase override read from the file.
+    monkeypatch.delenv("DAYDREAM_MODEL", raising=False)
+    fc = DaydreamFileConfig(phases={phase: {"model": value}})
+    config = RunConfig(target="/tmp/project", backend=None, model=None, file_config=fc)
+    assert _resolved_model(config, phase) == value
 
 
 def test_no_per_phase_model_flag_leaves_field_none(tmp_path):
@@ -326,11 +329,52 @@ def test_no_per_phase_model_flag_leaves_field_none(tmp_path):
     assert config.parse_model is None
     assert config.fix_model is None
     assert config.test_model is None
+    assert config.exploration_model is None
 
 
-def test_existing_exploration_model_flag_unchanged(tmp_path):
-    config = _parse_args(["--exploration-model", "claude-haiku-4-5", str(tmp_path)])
-    assert config.exploration_model == "claude-haiku-4-5"
+# ---------------------------------------------------------------------------
+# Per-phase model/backend flags removed (cli-verb-redesign Task 8 — config-only)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "flag,phase",
+    [
+        ("--review-backend", "review"),
+        ("--fix-backend", "fix"),
+        ("--test-backend", "test"),
+        ("--exploration-model", "exploration"),
+        ("--review-model", "review"),
+        ("--parse-model", "parse"),
+        ("--fix-model", "fix"),
+        ("--test-model", "test"),
+    ],
+)
+def test_per_phase_flag_rejected_with_config_pointer(flag, phase, tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        _parse_args([flag, "claude-opus-4-8", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert flag in err
+    assert f"[tool.daydream.phases.{phase}]" in err
+
+
+@pytest.mark.parametrize(
+    "flag,phase",
+    [
+        ("--fix-model", "fix"),
+        ("--review-backend", "review"),
+    ],
+)
+def test_per_phase_flag_rejected_equals_form(flag, phase, tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        _parse_args([f"{flag}=claude-opus-4-8", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert flag in err
+    assert f"[tool.daydream.phases.{phase}]" in err
+
+
+def test_global_model_still_works(tmp_path):
+    assert _parse_args(["--model", "claude-opus-4-8", str(tmp_path)]).model == "claude-opus-4-8"
 
 
 # ---------------------------------------------------------------------------
