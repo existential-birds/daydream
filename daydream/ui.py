@@ -1369,57 +1369,6 @@ def print_tool_result(
 
 
 # =============================================================================
-# Code Result Component
-# =============================================================================
-
-
-def print_code_result(
-    console: Console,
-    content: str,
-    filename: str = "",
-    max_lines: int = 30,
-) -> None:
-    """Print code content with syntax highlighting.
-
-    Uses Rich's Syntax component for proper highlighting and
-    automatic line wrapping that respects terminal width.
-
-    Args:
-        console: Rich Console instance for output.
-        content: The code content to display.
-        filename: Optional filename to detect language (e.g., "test.py").
-        max_lines: Maximum number of lines to display.
-
-    """
-    lines = content.split("\n")
-    truncated = len(lines) > max_lines
-    display_content = "\n".join(lines[:max_lines]) if truncated else content
-
-    # Detect language from filename extension
-    if "." in filename:
-        lang = filename.rsplit(".", 1)[-1]
-        # Map common extensions
-        lang_map = {"py": "python", "js": "javascript", "ts": "typescript", "md": "markdown"}
-        lang = lang_map.get(lang, lang)
-    else:
-        lang = "text"
-
-    syntax = Syntax(
-        display_content,
-        lang,
-        theme="dracula",
-        line_numbers=True,
-        word_wrap=True,
-    )
-    console.print(syntax)
-
-    if truncated:
-        console.print(
-            f"[neon.dim]... ({len(lines) - max_lines} more lines)[/]"
-        )
-
-
-# =============================================================================
 # Thinking Component
 # =============================================================================
 
