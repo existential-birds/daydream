@@ -394,7 +394,7 @@ def test_runconfig_has_model_field():
 
 
 # ---------------------------------------------------------------------------
-# build-corpus exit-code regression guard (Task 11 / corpus-pipeline-architecture)
+# corpus build exit-code regression guard (Task 11 / corpus-pipeline-architecture)
 # ---------------------------------------------------------------------------
 # Tier-3 subprocess test: drives the real CLI entry point through `uv run`
 # against an empty archive directory and asserts a clean exit 0. This catches
@@ -408,7 +408,7 @@ def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
     out = tmp_path / "out.jsonl"
     result = subprocess.run(  # noqa: S603 - args are not user-controlled
         [  # noqa: S607 - hardcoded uv/daydream entrypoint
-            "uv", "run", "daydream", "build-corpus",
+            "uv", "run", "daydream", "corpus", "build",
             "--out", str(out), "--include-all-labels", "--dry-run",
         ],
         capture_output=True,
@@ -421,7 +421,7 @@ def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# harvest / build-corpus subcommand wiring (Task 11 / corpus-pipeline-architecture)
+# corpus harvest / build subcommand wiring (Task 11 / corpus-pipeline-architecture)
 # ---------------------------------------------------------------------------
 
 

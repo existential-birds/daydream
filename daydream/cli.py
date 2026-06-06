@@ -12,12 +12,13 @@ top-level ``TARGET`` positional):
 - ``daydream feedback <pr#>`` — apply bot PR-review comments
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
 - ``daydream bench`` — score deep-review findings against the offline benchmark
-- ``daydream harvest`` — walk the archive and append one bitemporal
-  annotation (outcome label + intrinsic reward) per indexed run
-- ``daydream label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
-  — record an authoritative human outcome label that overrides automated ones
-- ``daydream build-corpus --out <path>`` — project the as-of-pinned
-  annotations into a JSONL training corpus plus a lineage manifest
+- ``daydream corpus <sub-verb>`` — the data-pipeline namespace:
+    - ``corpus harvest`` — walk the archive and append one bitemporal
+      annotation (outcome label + intrinsic reward) per indexed run
+    - ``corpus build --out <path>`` — project the as-of-pinned annotations
+      into a JSONL training corpus plus a lineage manifest
+    - ``corpus label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
+      — record an authoritative human outcome label that overrides automated ones
 """
 
 import argparse
@@ -51,11 +52,6 @@ from daydream.ui import (
 # falls through to the ``review`` golden path via the default-verb shim.
 KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench"}
 
-# Data-pipeline verbs still routed at the top level. These are slated to move
-# under the ``corpus`` namespace; until then they remain explicit verbs so the
-# shim does not misroute them to ``review``.
-_LEGACY_DATA_VERBS = {"harvest", "build-corpus", "label"}
-
 
 def _first_verb(argv: list[str]) -> str:
     """Classify the leading argv token into a verb.
@@ -70,11 +66,11 @@ def _first_verb(argv: list[str]) -> str:
         argv: The raw argument list (``sys.argv[1:]``).
 
     Returns:
-        str: The dispatched verb name (a member of :data:`KNOWN_VERBS`, one of
-        the legacy data verbs, or ``"review"``).
+        str: The dispatched verb name (a member of :data:`KNOWN_VERBS` or
+        ``"review"``).
 
     """
-    if argv and (argv[0] in KNOWN_VERBS or argv[0] in _LEGACY_DATA_VERBS):
+    if argv and argv[0] in KNOWN_VERBS:
         return argv[0]
     return "review"
 
@@ -282,14 +278,14 @@ def _run_summarize(args: argparse.Namespace) -> int:
 
 
 def _build_build_corpus_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream build-corpus --out <path> [...]``.
+    """Build the parser for ``daydream corpus build --out <path> [...]``.
 
-    Like ``summarize`` and ``feedback``, ``build-corpus`` is dispatched manually
-    from ``main()`` before the main parser runs so its options don't collide
-    with the top-level ``TARGET`` positional.
+    The ``corpus build`` sub-verb is dispatched manually from ``main()`` (via
+    :func:`_handle_corpus_command`) before the main parser runs so its options
+    don't collide with the top-level ``TARGET`` positional.
     """
     parser = argparse.ArgumentParser(
-        prog="daydream build-corpus",
+        prog="daydream corpus build",
         description="Project as-of-pinned annotations into JSONL training records (one object per run).",
     )
 
@@ -404,16 +400,16 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
 
 
 def _handle_build_corpus_command(argv: list[str]) -> int:
-    """Handle ``daydream build-corpus --out <path> [...]``.
+    """Handle ``daydream corpus build --out <path> [...]``.
 
     Drives :func:`daydream.training.corpus.run_build_corpus` synchronously
-    (``build-corpus`` does no agent work — just SQLite reads and a JSONL +
+    (``corpus build`` does no agent work — just SQLite reads and a JSONL +
     lineage-manifest write). Returns an exit code rather than calling
     :func:`sys.exit`; ``main()`` is responsible for translating the code into a
     process exit. This keeps the handler easy to drive from tests.
 
     Args:
-        argv: The argument vector after the ``build-corpus`` verb.
+        argv: The argument vector after the ``corpus build`` sub-verb.
 
     Returns:
         ``0`` on success; ``1`` on a validation error.
@@ -948,7 +944,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
 
 
 def _build_harvest_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream harvest [...]``.
+    """Build the parser for ``daydream corpus harvest [...]``.
 
     Drives the single deferred annotate pass from
     :mod:`daydream.training.harvest`. Every indexed run gets one fresh
@@ -956,7 +952,7 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
     re-running appends a new generation rather than skipping annotated rows.
     """
     parser = argparse.ArgumentParser(
-        prog="daydream harvest",
+        prog="daydream corpus harvest",
         description=(
             "Walk the archive and append one bitemporal annotation "
             "(outcome label + intrinsic reward) for every indexed run "
@@ -1021,7 +1017,7 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
 
 
 def _handle_harvest_command(argv: list[str]) -> int:
-    """Handle ``daydream harvest [...]``.
+    """Handle ``daydream corpus harvest [...]``.
 
     Drives :func:`daydream.training.harvest.run_harvest` (looked up via the
     module attribute so test monkeypatches take effect). ``run_harvest`` is a
@@ -1032,7 +1028,7 @@ def _handle_harvest_command(argv: list[str]) -> int:
     ``errors`` counter surfaces them.
 
     Args:
-        argv: The argument vector after the ``harvest`` verb.
+        argv: The argument vector after the ``corpus harvest`` sub-verb.
 
     Returns:
         ``0`` on success; ``1`` on a validation error.
@@ -1080,7 +1076,7 @@ def _handle_harvest_command(argv: list[str]) -> int:
 
 
 def _build_label_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream label <session-prefix> --outcome ...``.
+    """Build the parser for ``daydream corpus label <session-prefix> --outcome ...``.
 
     Records a human-sourced outcome label that wins over automated rubric
     labels in every precedence projection (and is never deduped). ``unknown``
@@ -1088,7 +1084,7 @@ def _build_label_parser() -> argparse.ArgumentParser:
     decide" signal distinct from an unlabeled run.
     """
     parser = argparse.ArgumentParser(
-        prog="daydream label",
+        prog="daydream corpus label",
         description=(
             "Set an authoritative human outcome label on an archived run "
             "(overrides automated rubric labels)."
@@ -1120,7 +1116,7 @@ def _build_label_parser() -> argparse.ArgumentParser:
 
 
 def _handle_label_command(argv: list[str]) -> int:
-    """Handle ``daydream label <session-prefix> --outcome {...}``.
+    """Handle ``daydream corpus label <session-prefix> --outcome {...}``.
 
     Resolves the archive dir, echoes the label being overridden (the
     "show what it's overriding" affordance), then writes a human-sourced
@@ -1128,7 +1124,7 @@ def _handle_label_command(argv: list[str]) -> int:
     cache and every precedence projection settle on the human value.
 
     Args:
-        argv: The argument vector after the ``label`` verb.
+        argv: The argument vector after the ``corpus label`` sub-verb.
 
     Returns:
         ``0`` on success; ``1`` when no session matches the prefix or the
@@ -1164,6 +1160,52 @@ def _handle_label_command(argv: list[str]) -> int:
     return 0
 
 
+# Sub-verbs of the ``corpus`` namespace, mapped to the handler attribute name
+# on this module. ``build`` is the public name for the build-corpus projection.
+# Handlers are resolved by name at call time (via ``getattr``) so test
+# monkeypatches on the module attribute take effect.
+_CORPUS_SUBVERBS = {
+    "harvest": "_handle_harvest_command",
+    "build": "_handle_build_corpus_command",
+    "label": "_handle_label_command",
+}
+
+
+def _print_corpus_help() -> None:
+    """Print usage for the ``corpus`` namespace to stderr."""
+    print(
+        "usage: daydream corpus {harvest,build,label} ...\n"
+        "\n"
+        "Data-pipeline sub-verbs:\n"
+        "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
+        "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
+        "  label     record an authoritative human outcome label that overrides automated ones\n",
+        file=sys.stderr,
+    )
+
+
+def _handle_corpus_command(argv: list[str]) -> int:
+    """Dispatch a ``corpus`` sub-verb to its handler.
+
+    ``corpus harvest|build|label`` routes to the existing data-pipeline
+    handlers (``build`` → the build-corpus projection). A bare ``daydream
+    corpus`` (no sub-verb) prints help and exits 2. Exit codes propagate
+    unchanged from the handlers.
+
+    Args:
+        argv: The argument vector after the ``corpus`` verb.
+
+    Returns:
+        int: The sub-handler's exit code, or ``2`` for a missing/unknown
+        sub-verb.
+    """
+    if not argv or argv[0] not in _CORPUS_SUBVERBS:
+        _print_corpus_help()
+        return 2
+    handler = getattr(sys.modules[__name__], _CORPUS_SUBVERBS[argv[0]])
+    return int(handler(argv[1:]))
+
+
 def main() -> None:
     """Run the CLI entry point.
 
@@ -1178,7 +1220,7 @@ def main() -> None:
         - ``feedback`` — apply bot PR-review comments
         - ``summarize`` — print run-info markdown for a trajectory
         - ``bench`` — score deep-review findings against the offline benchmark
-        - ``harvest`` / ``build-corpus`` / ``label`` — data-pipeline verbs
+        - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label``)
 
     Returns:
         None: This function does not return; it exits via sys.exit().
@@ -1205,24 +1247,17 @@ def main() -> None:
             summarize_args = summarize_parser.parse_args(argv[1:])
             sys.exit(_run_summarize(summarize_args))
 
-        # ``build-corpus`` is sync — no agent invocations, just SQLite +
-        # filesystem. Short-circuit before anyio.run.
-        if verb == "build-corpus":
-            sys.exit(_handle_build_corpus_command(argv[1:]))
-
-        # ``harvest`` drives the annotate-pass orchestrator via its own anyio.run.
-        if verb == "harvest":
-            sys.exit(_handle_harvest_command(argv[1:]))
+        # ``corpus`` namespaces the data-pipeline sub-verbs
+        # (``harvest`` / ``build`` / ``label``). Each handler owns its own
+        # parser and exit code; a bare ``daydream corpus`` prints help and
+        # exits 2. All three are sync (SQLite + filesystem, no agent work).
+        if verb == "corpus":
+            sys.exit(_handle_corpus_command(argv[1:]))
 
         # ``bench`` scores deep-review findings against the offline benchmark.
         # ``run_bench`` is sync — short-circuit before anyio.run.
         if verb == "bench":
             sys.exit(_handle_bench_command(argv[1:]))
-
-        # ``label`` records an authoritative human outcome label — sync,
-        # SQLite-only. Short-circuit before anyio.run.
-        if verb == "label":
-            sys.exit(_handle_label_command(argv[1:]))
 
         config = _parse_args()
         if verb == "feedback":
