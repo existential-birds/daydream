@@ -1196,6 +1196,7 @@ def _print_corpus_help(*, error: bool = False) -> None:
             request path).
     """
     from rich.console import Console
+
     from daydream.ui import NEON_THEME
 
     console = Console(stderr=error, theme=NEON_THEME)
