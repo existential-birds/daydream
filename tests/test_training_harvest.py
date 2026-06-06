@@ -512,6 +512,63 @@ async def test_harvest_relinks_orphan_run_and_labels_it(tmp_path, archive_dir, m
     assert json.loads(row["outcome_labels"]) == ["contested"]  # now labelable (was orphan)
 
 
+async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_link(
+    tmp_path, archive_dir, monkeypatch
+):
+    """dry_run=True: in-memory linkage preview is applied but not persisted.
+
+    The contract (harvest.py lines 832-836): when an orphan run re-links to a
+    PR, ``row['pr_number']`` and ``row['pr_repo']`` are mutated unconditionally
+    so ``build_annotation`` sees the linked PR and produces a PR-path annotation.
+    The ``set_run_pr_link`` DB write is guarded by ``if not config.dry_run`` and
+    must not fire.
+
+    This test exercises the real ``set_run_pr_link`` code path (no spy/patch):
+    if the guard is broken the function will actually write to the DB and the
+    DB-state assertions below will catch it.
+    """
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id="s-orph-dry",
+            archived_at="2026-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            branch="feat/x",
+            head_sha="orphsha",
+            base_branch="main",
+            pr_number=None,
+            pr_repo=None,
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(run_dir),
+        ),
+    )
+
+    monkeypatch.setattr(
+        "daydream.training.harvest._gh_api",
+        _fake_gh_orphan_relink("2026-02-01T00:00:00+00:00"),
+    )
+
+    summary = await run_harvest(
+        HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c", dry_run=True)
+    )
+
+    # In-memory linkage drove build_annotation through the PR path:
+    assert summary["would_annotate"] == 1
+    assert summary["annotated"] == 0
+
+    # DB row stays unlinked (real set_run_pr_link was not called):
+    row = query_runs(archive_dir, "session_id = ?", ("s-orph-dry",))[0]
+    assert row["pr_number"] is None
+    assert row["pr_repo"] is None
+
+    # No label observation written:
+    assert latest_label_observation(archive_dir, "s-orph-dry") is None
+
+
 async def test_harvest_leaves_true_local_run_unlinked(tmp_path, archive_dir, monkeypatch):
     """Real-path: a local-only run (no PR ever opened) flows the local path.
 

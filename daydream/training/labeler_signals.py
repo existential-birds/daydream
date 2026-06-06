@@ -28,7 +28,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from daydream.pr_review import DAYDREAM_FOOTER
+# Version-stable prefix shared across all daydream releases.  Matching only
+# this prefix means comments posted by older or newer versions of daydream are
+# still recognised even when their embedded version string differs from the
+# currently-installed package.  (The full DAYDREAM_FOOTER constant from
+# daydream.pr_review embeds the current version number and therefore fails to
+# match historical comments posted by a different release.)
+_DAYDREAM_FOOTER_PREFIX = "<sub>🧙 Posted by [daydream v"
 
 
 def _is_daydream_comment(comment: dict[str, Any]) -> bool:
@@ -38,13 +44,20 @@ def _is_daydream_comment(comment: dict[str, Any]) -> bool:
     authorship is identified by the :data:`DAYDREAM_FOOTER` badge in the
     comment body rather than a ``*[bot]`` login.
 
+    The match is made against the version-stable prefix of the footer
+    (``_DAYDREAM_FOOTER_PREFIX``) rather than the full version-pinned
+    :data:`DAYDREAM_FOOTER` constant, so that comments posted by any release
+    of daydream are correctly identified even when their embedded version
+    string differs from the currently-installed package.
+
     Args:
         comment: A parsed PR review comment dict (``body`` field read).
 
     Returns:
         True iff the comment body contains the daydream footer badge.
     """
-    return DAYDREAM_FOOTER in (comment.get("body") or "")
+    return _DAYDREAM_FOOTER_PREFIX in (comment.get("body") or "")
+
 
 # ---------------------------------------------------------------------------
 # Result dataclasses
@@ -387,7 +400,11 @@ def pr_link_signal(
     pulls = gh_api(repo_slug, f"repos/{repo_slug}/commits/{head_sha}/pulls", paginate=True)
     for pr in pulls:
         if pr.get("head", {}).get("sha") == head_sha:
-            return int(pr["number"]), repo_slug
+            pr_number = pr.get("number")
+            if pr_number is None:
+                continue
+            pr_repo = pr.get("head", {}).get("repo", {}).get("full_name") or repo_slug
+            return int(pr_number), pr_repo
     return None
 
 
