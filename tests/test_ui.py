@@ -170,3 +170,15 @@ def test_colorize_tool_args_drops_mechanical_keys():
     out = console.export_text()
     assert "command" in out and "pytest" in out
     assert "block" not in out and "timeout" not in out
+
+
+def test_registry_harvests_task_label_from_originating_result():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "Bash", {"command": "pytest", "run_in_background": True, "description": "Run tests"})
+    reg.observe_result("c1", "Command running in background with ID: a066168. Output ...")
+    assert reg.resolve_label("a066168") == "Run tests"
+    assert reg.resolve_label("unknown") is None

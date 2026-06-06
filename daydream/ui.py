@@ -2842,9 +2842,63 @@ class LiveToolPanelRegistry:
         self._static_ids: set[str] = set()
         self._live: Live | None = None
         self._group = _ActivePanelsGroup(self)
+        self._task_labels: dict[str, str] = {}
 
     # Tool names whose panels should scroll inline rather than pin via Live.
     _STATIC_TOOL_NAMES: frozenset[str] = frozenset({"Task"})
+
+    # Tool names whose result strings assign an id we can label.
+    _LABEL_SOURCE_TOOL_NAMES: frozenset[str] = frozenset({"Bash", "Agent", "Task", "TaskCreate"})
+
+    def observe_result(self, tool_use_id: str, output: str) -> None:
+        """Harvest a ``task_id → label`` mapping from an originating tool's result.
+
+        When a backgrounded launch tool (``Bash``/``Agent``/``Task``) or a
+        ``TaskCreate`` call returns, its result string assigns an id. This
+        records that id mapped to a human-readable label derived from the
+        originating call's input args.
+
+        Args:
+            tool_use_id: The id of the originating tool call.
+            output: The originating tool's result string.
+
+        """
+        panel = self._panels.get(tool_use_id)
+        if panel is None or panel._name not in self._LABEL_SOURCE_TOOL_NAMES:
+            return
+        task_id = _parse_assigned_task_id(panel._name, output)
+        if task_id is None:
+            return
+        self._task_labels[task_id] = self._derive_label(panel._args, task_id)
+
+    @staticmethod
+    def _derive_label(args: dict[str, object], task_id: str) -> str:
+        """Derive a human label from an originating call's input args.
+
+        Prefers ``description``, then ``subagent_type``, then the first line of
+        ``command``/``prompt``, falling back to the bare id.
+        """
+        for key in ("description", "subagent_type"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        for key in ("command", "prompt"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.splitlines()[0]
+        return task_id
+
+    def resolve_label(self, task_id: str) -> str | None:
+        """Return the harvested label for a task id, or None if unknown.
+
+        Args:
+            task_id: The assigned task id to look up.
+
+        Returns:
+            The mapped label, or None if no mapping was recorded.
+
+        """
+        return self._task_labels.get(task_id)
 
     def create(
         self,
