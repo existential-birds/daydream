@@ -585,7 +585,13 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch,
     on which commit function was actually invoked (observable side effect),
     rather than asserting on dispatch bookkeeping.
     """
+    from daydream.agent import set_non_interactive
     from daydream.config import REVIEW_OUTPUT_FILE
+
+    # The commit gate reads the agent singleton (set by run() from config), not
+    # config.non_interactive directly. This test enters at _run_loop_shallow,
+    # below run()'s set_non_interactive call, so establish the global here.
+    set_non_interactive(True)
 
     (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
 

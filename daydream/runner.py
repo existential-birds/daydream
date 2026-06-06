@@ -30,6 +30,8 @@ from daydream.agent import (
     MissingSkillError,
     console,
     get_non_interactive,
+    resolve_gate,
+    set_assume,
     set_non_interactive,
     set_quiet_mode,
 )
@@ -177,6 +179,9 @@ class RunConfig:
         plan: Generate an implementation plan and embed it in PR comments.
         non_interactive: Run without prompting; take each prompt's safe default
             without reading stdin.
+        assume: Forced yes/no answer for interactive gates — ``"yes"`` (``--yes``),
+            ``"no"``, or ``None``. Orthogonal to ``non_interactive``: it supplies a
+            pre-decided answer rather than controlling stdin access.
 
     """
 
@@ -216,6 +221,7 @@ class RunConfig:
     extra_copy: list[Path] = field(default_factory=list)
     plan: bool = False
     non_interactive: bool = False
+    assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -475,6 +481,10 @@ async def run(config: RunConfig | None = None) -> int:
     #   3. else a truthy ``CI`` env var implies unattended.
     # The result feeds set_non_interactive before any phase that can prompt runs.
     set_non_interactive(not _resolve_interactive(config))
+    # Interaction has a second, orthogonal axis: ``assume`` (``--yes``) supplies a
+    # forced gate answer regardless of TTY. The two feed ``resolve_gate`` at each
+    # yes/no gate. Set alongside non_interactive so every gate sees both axes.
+    set_assume(config.assume)
 
     # Resolve target directory (from config or prompt). Done outside the
     # workspace context manager so that path-validation errors short-circuit
@@ -918,12 +928,24 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             print_error(console, "Missing Review File", str(e))
             return 1
 
-    # Cleanup setting (from config or prompt).
+    # Cleanup setting. An explicit ``--cleanup/--no-cleanup`` (config.cleanup)
+    # wins outright. Otherwise route the yes/no gate through resolve_gate:
+    # ``--yes`` enables cleanup; an unattended run keeps the review output
+    # (safe_default=False); an interactive run prompts.
     if config.cleanup is not None:
         cleanup_enabled = config.cleanup
     else:
-        cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
-        cleanup_enabled = cleanup_response.lower() in ("y", "yes")
+        cleanup_decision = resolve_gate(
+            assume=config.assume,
+            interactive=not get_non_interactive(),
+            safe_default=False,
+        )
+        if cleanup_decision is None:
+            cleanup_response = prompt_user(
+                console, "Cleanup review output after completion? [y/N]", "n",
+            )
+            cleanup_decision = cleanup_response.lower() in ("y", "yes")
+        cleanup_enabled = cleanup_decision
 
     # Backends (per-phase overrides).
     backend_cache: dict[tuple[str, str | None], Backend] = {}
@@ -1169,21 +1191,28 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             ),
         )
 
-        # non_interactive routes to phase_commit_push_auto below because the
-        # interactive prompt's safe default is "decline" (y/N), which would
-        # silently skip the commit when stdin is not a TTY.
-
         # Clean up exploration files before exit
         exploration_cleanup = target_dir / ".daydream" / "exploration"
         if exploration_cleanup.is_dir():
             shutil.rmtree(exploration_cleanup)
 
-        # Commit if tests passed
+        # Commit if tests passed. Commit/push gate across the two interaction
+        # axes. The unattended safe default is to auto-commit (safe_default=True):
+        # the interactive prompt's own default is "decline", which would silently
+        # drop a green run's commit when stdin is not a TTY. ``--yes`` also
+        # auto-commits; a forced ``--no`` skips the commit; an interactive run
+        # with no assumption gets the y/N prompt.
         if tests_passed:
-            if config.non_interactive:
+            commit_decision = resolve_gate(
+                assume=config.assume,
+                interactive=not get_non_interactive(),
+                safe_default=True,
+            )
+            if commit_decision is True:
                 await phase_commit_push_auto(review_backend, work)
-            else:
+            elif commit_decision is None:
                 await phase_commit_push(review_backend, work)
+            # commit_decision is False -> forced decline, skip commit.
 
             if cleanup_enabled:
                 review_output_path = target_dir / REVIEW_OUTPUT_FILE

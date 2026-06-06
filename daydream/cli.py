@@ -278,6 +278,16 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         help="Run without prompting; take each prompt's safe default "
              "(confirm intent, decline fixes, exit the test/heal loop).",
     )
+    parser.add_argument(
+        "--yes",
+        action="store_const",
+        const="yes",
+        default=None,
+        dest="assume",
+        help="Auto-answer every yes/no gate with yes (apply fixes, commit). "
+             "Orthogonal to --non-interactive: --yes pre-decides the answer, "
+             "--non-interactive controls whether we may block on stdin.",
+    )
 
 
 def _build_summarize_parser() -> argparse.ArgumentParser:
@@ -768,6 +778,12 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     elif args.review:
         output_mode = "review"
 
+    # ``--yes`` auto-answers the fix/commit gates; ``--review``/``--comment`` run
+    # no fix phase, so the flag has nothing to answer there. Reject it rather than
+    # silently ignore it.
+    if args.assume == "yes" and output_mode != "loop":
+        parser.error("--yes has no effect with --review/--comment (no fix phase to auto-apply)")
+
     # ttt/per-stack/merge are deep-pipeline resume stages; they don't apply
     # to shallow runs.
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
@@ -837,6 +853,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         extra_copy=list(args.extra_copy),
         plan=args.plan,
         non_interactive=args.non_interactive,
+        assume=args.assume,
     )
 
 
@@ -884,6 +901,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         run_eval=args.run_eval,
         output_mode="loop",
         non_interactive=args.non_interactive,
+        assume=args.assume,
     )
 
 

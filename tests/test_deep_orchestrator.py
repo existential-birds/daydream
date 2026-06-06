@@ -191,6 +191,16 @@ class _StubBackend:
             )
             return
 
+        # phase_fix -> apply the fix. The stub "applies" the edit by writing a
+        # sentinel file in the repo, an observable consequence the real-path
+        # --yes test asserts on (proving the fix gate auto-approved, not merely
+        # that resolve_gate was called). Keyed on the phase_fix prompt opener.
+        if pl.startswith("fix this issue"):
+            (cwd / ".daydream-fix-applied").write_text("applied\n")
+            yield TextEvent(text="Applied the fix.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
         # Recommendation verifier (issue #83). Discriminator: build_verification_prompt
         # always embeds the schema constant name "RECOMMENDATION_VERDICTS_SCHEMA" in
         # the prompt text (via json.dumps). This is structural — tied to the schema
@@ -509,6 +519,10 @@ async def test_cross_stack_prefix(multi_stack_target: Path, monkeypatch: pytest.
 async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-28: Y/n prompt after merge decides whether to apply fixes."""
     _install_stub_backend(monkeypatch, multi_stack_target)
+    # The fix gate now routes through resolve_gate; under a non-TTY/CI run it
+    # short-circuits to its safe default (decline) WITHOUT prompting. This test
+    # asserts the interactive prompt path, so pin interactivity on.
+    _force_interactive(monkeypatch)
 
     asked: list[str] = []
 
@@ -527,6 +541,54 @@ async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.Mon
     assert exit_code == 0
     # At least one prompt message must mention the fix gate.
     assert any("fix" in msg.lower() or "apply" in msg.lower() for msg in asked)
+
+
+async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task 6 real-path: ``--yes`` (assume="yes") auto-applies fixes without prompting.
+
+    Drives ``runner.run`` through the deep orchestrator's fix gate with
+    ``assume="yes"``. The gate must NOT call ``prompt_user`` and MUST proceed to
+    ``phase_fix`` — the observable consequence is the sentinel file the stub
+    writes when it receives a fix prompt.
+    """
+    from daydream.runner import RunConfig, run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    fix_marker = multi_stack_target / ".daydream-fix-applied"
+    assert not fix_marker.exists()
+
+    prompt_calls: list[tuple[Any, ...]] = []
+
+    def _record_prompt(console, message, default=""):
+        prompt_calls.append((message, default))
+        return default
+
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", _record_prompt)
+    # phase_understand_intent also calls prompt_user; assume="yes" should also
+    # suppress that gate, so patch it to fail loudly if it is ever reached.
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("phases.prompt_user called under --yes")),
+    )
+
+    config = RunConfig(
+        target=str(multi_stack_target),
+        assume="yes",
+        output_mode="loop",
+        cleanup=False,
+    )
+    exit_code = await run(config)
+
+    assert exit_code == 0
+    # The fix gate never prompted.
+    assert not any(
+        "apply" in msg.lower() or "fix" in msg.lower() for msg, _ in prompt_calls
+    ), f"fix gate prompted under --yes: {prompt_calls}"
+    # Observable consequence: the fix landed.
+    assert fix_marker.exists(), "phase_fix never ran -> --yes did not auto-apply"
 
 
 async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1309,6 +1371,10 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     monkeypatch.setattr("daydream.runner._resolve_backend", spy)
 
     # Silence interactive UI but accept the fix gate so fix/test/commit run.
+    # The fix gate routes through resolve_gate; pin interactivity so the "y"
+    # prompt stub is honoured instead of short-circuiting to the unattended
+    # decline default.
+    _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
@@ -1365,6 +1431,8 @@ async def test_verifier_runs_after_merge_before_fix(
     from daydream.deep.artifacts import verdicts_path
 
     # Silence interactive UI but accept the fix gate so the fix loop runs.
+    # Pin interactivity so the resolve_gate fix gate honours the "y" stub.
+    _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
@@ -1439,6 +1507,8 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
     feedback item, the orchestrator attaches the verdict and phase_fix inlines
     `Verifier verdict: contradicts` into the fix-agent prompt.
     """
+    # Pin interactivity so the resolve_gate fix gate honours the "y" stub.
+    _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
@@ -1567,6 +1637,8 @@ async def test_structural_finding_reaches_fix_loop(
     markdown re-parse), and items MUST arrive severity-ordered (high before low,
     stable within a tier).
     """
+    # Pin interactivity so the resolve_gate fix gate honours the "y" stub.
+    _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
@@ -1649,6 +1721,8 @@ async def test_start_at_fix_recovers_merged_items(
     """
     from daydream.config import REVIEW_OUTPUT_FILE
 
+    # Pin interactivity so the resolve_gate fix gate honours the "y" stub.
+    _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)

@@ -56,6 +56,10 @@ class AgentState:
     Attributes:
         quiet_mode: True to hide tool calls and results, False to show them.
         non_interactive: True to take each prompt's safe default without reading stdin.
+        assume: A forced yes/no answer for interactive gates — ``"yes"`` (``--yes``),
+            ``"no"`` (a future ``--no``), or ``None`` (no assumption). Orthogonal to
+            ``non_interactive``: ``non_interactive`` controls *whether* we may block on
+            stdin; ``assume`` supplies a *pre-decided answer* regardless of TTY.
         shutdown_requested: True if shutdown has been requested.
         current_backends: List of active backend instances.
 
@@ -63,6 +67,7 @@ class AgentState:
 
     quiet_mode: bool = False
     non_interactive: bool = False
+    assume: str | None = None
     shutdown_requested: bool = False
     current_backends: list[Backend] = field(default_factory=list)
 
@@ -146,6 +151,56 @@ def get_non_interactive() -> bool:
 
     """
     return _state.non_interactive
+
+
+def set_assume(value: str | None) -> None:
+    """Set the forced yes/no answer for interactive gates.
+
+    Args:
+        value: ``"yes"`` to auto-approve gates (``--yes``), ``"no"`` to auto-decline,
+            or ``None`` for no assumption (gates fall back to prompting or their
+            unattended safe default).
+
+    Returns:
+        None
+
+    """
+    _state.assume = value
+
+
+def get_assume() -> str | None:
+    """Get the forced yes/no answer for interactive gates.
+
+    Returns:
+        ``"yes"``, ``"no"``, or ``None`` when no assumption is set.
+
+    """
+    return _state.assume
+
+
+def resolve_gate(*, assume: str | None, interactive: bool, safe_default: bool) -> bool | None:
+    """Resolve a yes/no interaction gate across the two orthogonal axes.
+
+    Collapses *assume* (a forced answer) and *interactivity* (may we block on
+    stdin?) into a single decision. Pure — performs no I/O.
+
+    Args:
+        assume: A forced answer: ``"yes"`` → True, ``"no"`` → False, ``None`` →
+            no assumption (defer to interactivity).
+        interactive: True when prompts may read stdin.
+        safe_default: The answer to use when unattended and no assumption is set
+            (e.g. ``False`` to decline a fix-apply, ``True`` to auto-commit).
+
+    Returns:
+        ``True``/``False`` to use the resolved answer directly, or ``None`` when
+        the caller should fall back to an interactive prompt.
+
+    """
+    if assume is not None:
+        return assume == "yes"
+    if not interactive:
+        return safe_default
+    return None
 
 
 def set_shutdown_requested(requested: bool) -> None:
