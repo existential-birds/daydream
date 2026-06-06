@@ -520,6 +520,70 @@ def _parse_assigned_task_id(name: str, output: str) -> str | None:
     return None
 
 
+def _derive_task_label(args: dict[str, object], task_id: str) -> str:
+    """Derive a human label from an originating Task-family call's input args.
+
+    Prefers ``subject`` (todo-list ``TaskCreate``), then ``description``,
+    then ``subagent_type``, then the first line of ``command``/``prompt``,
+    falling back to the bare id.
+
+    Args:
+        args: The originating tool call's input args.
+        task_id: The assigned id, used as the fallback when no label key is set.
+
+    Returns:
+        The derived label, or ``task_id`` if no meaningful key is present.
+
+    """
+    for key in ("subject", "description", "subagent_type"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    for key in ("command", "prompt"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.splitlines()[0]
+    return task_id
+
+
+def format_callback_progress(
+    name: str,
+    args: dict[str, object],
+    label: str | None,
+    max_len: int = 80,
+) -> str:
+    """Build a one-line, plumbing-free progress string for the callback render path.
+
+    The callback (parallel-fix/quiet) render path streams a single status line
+    per tool call instead of a Rich panel. Task-family tools must never surface
+    the opaque ``name + task_id`` dump or mechanical ``block``/``timeout`` args
+    here; they lead with the resolved label (when known) and otherwise fall back
+    to a non-opaque derivation (``subject``/``description``/first command line),
+    demoting the bare id to a parenthesized suffix.
+
+    Args:
+        name: The tool's name.
+        args: The tool's input args.
+        label: The resolved label for the call's id, or None when unknown.
+        max_len: Maximum length of the returned string.
+
+    Returns:
+        A truncated progress line.
+
+    """
+    if name in _BACKGROUND_TASK_TOOLS or name in _TODO_TASK_TOOLS:
+        id_key = "task_id" if name in _BACKGROUND_TASK_TOOLS else "taskId"
+        task_id = str(args.get(id_key, "")).strip()
+        lead = label or _derive_task_label(args, task_id)
+        line = f"{name} {lead}"
+        if task_id and task_id != lead:
+            line += f" ({task_id})"
+        return line[:max_len]
+
+    first_arg = next(iter(args.values()), "") if args else ""
+    return f"{name} {first_arg}"[:max_len]
+
+
 def _colorize_tool_args(args: dict[str, object]) -> Text:
     """Apply neon syntax highlighting to tool call arguments.
 
@@ -2893,6 +2957,10 @@ class LiveToolPanelRegistry:
         self._live: Live | None = None
         self._group = _ActivePanelsGroup(self)
         self._task_labels: dict[str, str] = {}
+        # Originating-call args by tool_use_id, populated on every ToolStartEvent
+        # (both render modes) so result→label correlation does not depend on a
+        # panel having been created (the callback render path creates no panels).
+        self._call_args: dict[str, tuple[str, dict[str, object]]] = {}
 
     # Tool names whose panels should scroll inline rather than pin via Live.
     _STATIC_TOOL_NAMES: frozenset[str] = frozenset({"Task"})
@@ -2900,44 +2968,44 @@ class LiveToolPanelRegistry:
     # Tool names whose result strings assign an id we can label.
     _LABEL_SOURCE_TOOL_NAMES: frozenset[str] = frozenset({"Bash", "Agent", "Task", "TaskCreate"})
 
+    def note_call(self, tool_use_id: str, name: str, args: dict[str, object]) -> None:
+        """Record an originating call's name + args for later label correlation.
+
+        Called on **every** ``ToolStartEvent`` (both the Live-panel and the
+        callback render paths) so that ``observe_result`` can resolve a
+        background ``task_id``'s label without a panel having been created.
+
+        Args:
+            tool_use_id: The id of the tool call.
+            name: The tool's name.
+            args: The tool's input args.
+
+        """
+        self._call_args[tool_use_id] = (name, args)
+
     def observe_result(self, tool_use_id: str, output: str) -> None:
         """Harvest a ``task_id → label`` mapping from an originating tool's result.
 
         When a backgrounded launch tool (``Bash``/``Agent``/``Task``) or a
         ``TaskCreate`` call returns, its result string assigns an id. This
         records that id mapped to a human-readable label derived from the
-        originating call's input args.
+        originating call's input args. Reads the originating call from the
+        ``note_call`` store, so it works in both render modes (panel creation
+        is not a prerequisite).
 
         Args:
             tool_use_id: The id of the originating tool call.
             output: The originating tool's result string.
 
         """
-        panel = self._panels.get(tool_use_id)
-        if panel is None or panel._name not in self._LABEL_SOURCE_TOOL_NAMES:
+        call = self._call_args.get(tool_use_id)
+        if call is None or call[0] not in self._LABEL_SOURCE_TOOL_NAMES:
             return
-        task_id = _parse_assigned_task_id(panel._name, output)
+        name, args = call
+        task_id = _parse_assigned_task_id(name, output)
         if task_id is None:
             return
-        self._task_labels[task_id] = self._derive_label(panel._args, task_id)
-
-    @staticmethod
-    def _derive_label(args: dict[str, object], task_id: str) -> str:
-        """Derive a human label from an originating call's input args.
-
-        Prefers ``subject`` (todo-list ``TaskCreate``), then ``description``,
-        then ``subagent_type``, then the first line of ``command``/``prompt``,
-        falling back to the bare id.
-        """
-        for key in ("subject", "description", "subagent_type"):
-            value = args.get(key)
-            if isinstance(value, str) and value.strip():
-                return value
-        for key in ("command", "prompt"):
-            value = args.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.splitlines()[0]
-        return task_id
+        self._task_labels[task_id] = _derive_task_label(args, task_id)
 
     def resolve_label(self, task_id: str) -> str | None:
         """Return the harvested label for a task id, or None if unknown.
@@ -2950,6 +3018,29 @@ class LiveToolPanelRegistry:
 
         """
         return self._task_labels.get(task_id)
+
+    def resolve_call_label(self, name: str, args: dict[str, object]) -> str | None:
+        """Resolve a Task-family call's human label from its args.
+
+        Background-task tools (``TaskOutput``/``TaskStop``) key off ``task_id``;
+        todo-list tools (``TaskGet``/``TaskUpdate``/…) key off ``taskId``. Returns
+        the harvested label for that id, or None when no mapping was recorded (the
+        caller falls back to a non-opaque rendering).
+
+        Args:
+            name: The tool's name.
+            args: The tool's input args.
+
+        Returns:
+            The resolved label, or None if the tool is not Task-family or the id
+            is unknown.
+
+        """
+        if name in _BACKGROUND_TASK_TOOLS:
+            return self.resolve_label(str(args.get("task_id", "")))
+        if name in _TODO_TASK_TOOLS:
+            return self.resolve_label(str(args.get("taskId", "")))
+        return None
 
     def create(
         self,
@@ -2976,14 +3067,12 @@ class LiveToolPanelRegistry:
         if tool_use_id in self._panels:
             self._finalize_panel(tool_use_id)
 
+        # Store the originating call's args for later result→label correlation.
+        self.note_call(tool_use_id, name, args)
+
         # Resolve a human label so the panel header leads with it instead of the
-        # opaque/numeric id. Background-task tools key off ``task_id``; todo-list
-        # tools (TaskGet/TaskUpdate) key off ``taskId``.
-        label: str | None = None
-        if name in _BACKGROUND_TASK_TOOLS:
-            label = self.resolve_label(str(args.get("task_id", "")))
-        elif name in _TODO_TASK_TOOLS:
-            label = self.resolve_label(str(args.get("taskId", "")))
+        # opaque/numeric id.
+        label = self.resolve_call_label(name, args)
 
         panel = LiveToolPanel(
             console=self._console,

@@ -30,6 +30,7 @@ from daydream.ui import (
     AgentTextRenderer,
     LiveToolPanelRegistry,
     create_console,
+    format_callback_progress,
     print_cost,
     print_error,
     print_thinking,
@@ -402,9 +403,13 @@ async def run_agent(
 
     _state.current_backends.append(backend)
     try:
+        # The registry owns the task_id→label correlation used by both render
+        # modes; it is created unconditionally. In callback mode only its
+        # label-correlation methods (note_call/observe_result/resolve_call_label)
+        # are used — no panels or Live display are created.
+        tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
         if not use_callback:
             agent_renderer = AgentTextRenderer(console)
-            tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
 
         try:
             event_iter = backend.execute(
@@ -461,8 +466,12 @@ async def run_agent(
 
                 elif isinstance(event, ToolStartEvent):
                     if progress_callback is not None:
-                        first_arg = next(iter(event.input.values()), "") if event.input else ""
-                        progress_callback(f"{event.name} {first_arg}"[:80])
+                        # Record the originating call so a backgrounded launch's
+                        # result can later resolve a Task-family label, then emit a
+                        # plumbing-free, label-aware progress line.
+                        tool_registry.note_call(event.id, event.name, event.input)
+                        label = tool_registry.resolve_call_label(event.name, event.input)
+                        progress_callback(format_callback_progress(event.name, event.input, label))
                     else:
                         if agent_renderer.has_content:
                             agent_renderer.finish()
@@ -472,7 +481,11 @@ async def run_agent(
                         inv.observe(event)
 
                 elif isinstance(event, ToolResultEvent):
-                    if not use_callback:
+                    if use_callback:
+                        # Populate the task_id→label map in callback mode too, so a
+                        # later TaskOutput/TaskStop resolves its originating label.
+                        tool_registry.observe_result(event.id, event.output)
+                    else:
                         panel = tool_registry.get(event.id)
                         if panel:
                             tool_registry.observe_result(event.id, event.output)

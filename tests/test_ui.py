@@ -322,3 +322,40 @@ async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
     assert "Run tests" in out and "a066168" in out
     assert "done-with-bg-work" in out
     assert "block=True" not in out and "timeout=120000" not in out
+
+
+async def test_run_agent_callback_path_labels_taskoutput(tmp_path):
+    from daydream.agent import run_agent
+    from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
+    from daydream.trajectory import DaydreamPhase
+    from tests.test_agent_recorder_integration import MockBackend  # existing event-replay mock
+
+    backend = MockBackend(
+        [
+            ToolStartEvent(
+                id="c1",
+                name="Bash",
+                input={"command": "pytest", "run_in_background": True, "description": "Run tests"},
+            ),
+            ToolResultEvent(id="c1", output="Command running in background with ID: a066168. ...", is_error=False),
+            ToolStartEvent(id="c2", name="TaskOutput", input={"task_id": "a066168", "block": True, "timeout": 120000}),
+            ToolResultEvent(
+                id="c2",
+                output="<task_id>a066168</task_id>\n<output>\ndone-with-bg-work\n</output>",
+                is_error=False,
+            ),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
+    lines: list[str] = []
+    await run_agent(
+        backend,
+        tmp_path,
+        "go",
+        phase=DaydreamPhase.REVIEW,
+        progress_callback=lines.append,
+    )
+    joined = "\n".join(lines)
+    assert "Run tests" in joined  # resolved label surfaces in callback mode
+    assert "block" not in joined and "timeout" not in joined
+    assert "TaskOutput a066168" not in joined  # opaque bare-id dump form is gone
