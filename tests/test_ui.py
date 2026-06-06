@@ -182,3 +182,36 @@ def test_registry_harvests_task_label_from_originating_result():
     reg.observe_result("c1", "Command running in background with ID: a066168. Output ...")
     assert reg.resolve_label("a066168") == "Run tests"
     assert reg.resolve_label("unknown") is None
+
+
+def _render_panel_text(reg, tool_use_id):
+    from rich.console import Console
+
+    c = Console(record=True)
+    c.print(reg.get(tool_use_id)._render_panel())
+    return c.export_text()
+
+
+def test_taskoutput_header_leads_with_label_demotes_id():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "Bash", {"command": "x", "run_in_background": True, "description": "Run tests"})
+    reg.observe_result("c1", "Command running in background with ID: a066168. ...")
+    reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 120000})
+    out = _render_panel_text(reg, "c2")
+    assert "Run tests" in out and "a066168" in out
+    assert "block" not in out and "timeout" not in out
+
+
+def test_taskoutput_header_unknown_id_falls_back_to_bare_id():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c2", "TaskOutput", {"task_id": "zzz999", "block": True, "timeout": 1})
+    out = _render_panel_text(reg, "c2")
+    assert "zzz999" in out and "block" not in out

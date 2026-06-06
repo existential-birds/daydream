@@ -98,6 +98,10 @@ STYLE_DIM = Style(dim=True)
 # line leads with meaningful keys instead of noise.
 _MECHANICAL_TOOL_ARGS = frozenset({"block", "timeout"})
 
+# Background-task tools that reference an opaque background ``task_id``; rendered
+# with the resolved label leading and the id demoted to a dim suffix.
+_BACKGROUND_TASK_TOOLS = frozenset({"TaskOutput", "TaskStop"})
+
 # Mystical action terms for tool displays
 MYSTICAL_TERMS = {
     "Glob": ["scrying", "divining", "seeking", "wandering"],
@@ -564,6 +568,8 @@ def _build_tool_header(
     name: str,
     args: dict[str, object],
     quiet_mode: bool = False,
+    *,
+    label: str | None = None,
 ) -> Text:
     """Build styled tool header content.
 
@@ -573,12 +579,31 @@ def _build_tool_header(
         name: Name of the tool being called.
         args: Dictionary of arguments passed to the tool.
         quiet_mode: If True, hide command details for Bash tools.
+        label: Resolved human-readable label for background-task tools
+            (``TaskOutput``/``TaskStop``); when provided it leads the header
+            and the opaque ``task_id`` is demoted to a dim suffix.
 
     Returns:
         Rich Text containing the styled tool header.
 
     """
     content = Text()
+
+    # Background-task tools reference an opaque task_id; lead with the resolved
+    # label (when known) and demote the id to a dim suffix. Never surface the
+    # mechanical block/timeout plumbing.
+    if name in _BACKGROUND_TASK_TOOLS:
+        header_line = Text()
+        header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
+        header_line.append(name, style=STYLE_BOLD_PINK)
+        task_id = str(args.get("task_id", ""))
+        if label is not None:
+            header_line.append(' → "')
+            header_line.append(label, style=STYLE_CYAN)
+            header_line.append('"')
+        header_line.append(f" ({task_id})", style=STYLE_DIM)
+        content.append_text(header_line)
+        return content
 
     # Special handling for Skill tool calls - Gradient Whisper style
     if name == "Skill":
@@ -2445,6 +2470,7 @@ class LiveToolPanel:
         name: str,
         args: dict[str, object],
         quiet_mode: bool = False,
+        label: str | None = None,
     ) -> None:
         """Initialize the LiveToolPanel.
 
@@ -2454,12 +2480,15 @@ class LiveToolPanel:
             name: Name of the tool being called.
             args: Dictionary of arguments passed to the tool.
             quiet_mode: If True, use static display instead of Live updates.
+            label: Resolved human label for background-task tools, threaded
+                through to the header by the registry.
 
         """
         self._console = console
         self._tool_use_id = tool_use_id
         self._name = name
         self._args = args
+        self._label = label
         self._result: str | None = None
         self._is_error: bool = False
         self._live: Live | None = None
@@ -2481,7 +2510,7 @@ class LiveToolPanel:
             Rich Text containing the styled tool header.
 
         """
-        return _build_tool_header(self._name, self._args, self._quiet_mode)
+        return _build_tool_header(self._name, self._args, self._quiet_mode, label=self._label)
 
     def _build_result_content_internal(self, max_lines: int = 20) -> Text | Syntax | Group:
         """Build the result content with syntax highlighting.
@@ -2925,12 +2954,19 @@ class LiveToolPanelRegistry:
         if tool_use_id in self._panels:
             self._finalize_panel(tool_use_id)
 
+        # Resolve a human label for background-task tools so the panel header
+        # leads with it instead of the opaque task_id.
+        label: str | None = None
+        if name in _BACKGROUND_TASK_TOOLS:
+            label = self.resolve_label(str(args.get("task_id", "")))
+
         panel = LiveToolPanel(
             console=self._console,
             tool_use_id=tool_use_id,
             name=name,
             args=args,
             quiet_mode=self._quiet_mode,
+            label=label,
         )
         self._panels[tool_use_id] = panel
 
