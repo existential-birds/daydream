@@ -147,7 +147,7 @@ daydream corpus label <session_id> --outcome accepted  # manual outcome label ov
 ```bash
 daydream -s python /path/to/project           # force a specific Beagle skill
 daydream --backend codex /path/to/project     # or env DAYDREAM_BACKEND
-daydream --model claude-opus-4-8 /path/to/project  # global model; or env DAYDREAM_MODEL
+daydream --model claude-opus-4-8 /path/to/project  # overrides ALL phases (env DAYDREAM_MODEL is lower-precedence)
 daydream --loop 3 /path/to/project            # repeat up to 3 review-fix-test rounds
 daydream --yes /path/to/project               # auto-apply fixes without prompting
 ```
@@ -195,8 +195,8 @@ model = "claude-opus-4-8"
 backend = "codex"
 ```
 
-Phase names: `exploration`, `review`, `parse`, `fix`, `test`, `merge` (plus
-`intent`, `pr_feedback`). Resolution precedence, highest first:
+Phase names: `exploration`, `review`, `parse`, `fix`, `test`, `verify`, `merge` (plus
+`intent`, `wonder`, `envision`, `pr_feedback`). Resolution precedence, highest first:
 
 **CLI > env > config file > built-in per-backend default.**
 

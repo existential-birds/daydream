@@ -33,6 +33,7 @@ from daydream.ui import (
     print_cost,
     print_error,
     print_thinking,
+    prompt_user,
 )
 
 
@@ -201,6 +202,42 @@ def resolve_gate(*, assume: str | None, interactive: bool, safe_default: bool) -
     if not interactive:
         return safe_default
     return None
+
+
+def resolve_or_prompt(
+    *,
+    assume: str | None,
+    interactive: bool,
+    safe_default: bool,
+    question: str,
+    default: str,
+) -> bool:
+    """Resolve a yes/no gate, falling back to an interactive prompt when needed.
+
+    Wraps :func:`resolve_gate` with the canonical prompt-and-coerce step so
+    callers don't each re-implement the ``decision is None → prompt_user →
+    lower() in ("y", "yes")`` idiom.
+
+    Args:
+        assume: Forwarded to :func:`resolve_gate` — ``"yes"`` → ``True``,
+            ``"no"`` → ``False``, ``None`` → defer to interactivity.
+        interactive: Forwarded to :func:`resolve_gate` — True when stdin may
+            be read.
+        safe_default: Forwarded to :func:`resolve_gate` — the answer used when
+            unattended and no assumption is set.
+        question: The prompt string shown to the user when interactive (e.g.
+            ``"Apply fixes now? [y/N]"``).
+        default: The default hint shown alongside the question (e.g. ``"n"``).
+
+    Returns:
+        ``True`` if the gate is approved, ``False`` if declined.
+
+    """
+    decision = resolve_gate(assume=assume, interactive=interactive, safe_default=safe_default)
+    if decision is None:
+        response = prompt_user(console, question, default)
+        decision = response.lower() in ("y", "yes")
+    return decision
 
 
 def set_shutdown_requested(requested: bool) -> None:

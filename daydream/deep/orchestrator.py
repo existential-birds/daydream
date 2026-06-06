@@ -23,7 +23,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from daydream.agent import console, get_assume, get_non_interactive, resolve_gate
+from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
 from daydream.config import REVIEW_OUTPUT_FILE, SKILL_MAP, STRUCTURE_STACK_NAME
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
@@ -662,14 +662,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
             # an unattended run with no assumption declines (safe_default=False) so a
             # piped/CI run never mutates without intent; otherwise prompt.
-            decision = resolve_gate(
+            decision = resolve_or_prompt(
                 assume=get_assume(),
                 interactive=not get_non_interactive(),
                 safe_default=False,
+                question="Apply fixes now? [y/N]",
+                default="n",
             )
-            if decision is None:
-                answer = prompt_user(console, "Apply fixes now? [y/N]", "n")
-                decision = answer.strip().lower() in ("y", "yes")
             if not decision:
                 print_success(console, f"Report written to {merged_report}. Exiting.")
                 return 0

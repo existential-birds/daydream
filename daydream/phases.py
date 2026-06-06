@@ -17,6 +17,7 @@ from daydream.agent import (
     get_non_interactive,
     get_quiet_mode,
     resolve_gate,
+    resolve_or_prompt,
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
@@ -1671,8 +1672,13 @@ async def _emit_failure_handoff(
 
     if offer_clipboard:
         if clipboard_available():
-            response = prompt_user(console, "Copy handoff to clipboard?", "y")
-            if response.lower() in ("y", "yes"):
+            if resolve_or_prompt(
+                assume=get_assume(),
+                interactive=not get_non_interactive(),
+                safe_default=False,
+                question="Copy handoff to clipboard?",
+                default="y",
+            ):
                 if copy_to_clipboard(body):
                     print_success(console, "Handoff copied to clipboard")
                 else:
@@ -1818,10 +1824,13 @@ async def phase_test_and_heal(
                     print_info(
                         console, f"Suggested command: {sanitized_preview}",
                     )
-                    response = prompt_user(
-                        console, "Use suggested command instead?", "n",
-                    )
-                    if response.lower() in ("y", "yes"):
+                    if resolve_or_prompt(
+                        assume=get_assume(),
+                        interactive=not get_non_interactive(),
+                        safe_default=False,
+                        question="Use suggested command instead?",
+                        default="n",
+                    ):
                         test_command_override = sanitized_preview
 
             retries_used += 1
@@ -1883,14 +1892,13 @@ async def _do_commit(
         # (safe_default=False — the interactive default is decline); otherwise
         # prompt. Routed here (not at the caller) so every interactive commit
         # path honours both axes.
-        decision = resolve_gate(
+        decision = resolve_or_prompt(
             assume=get_assume(),
             interactive=not get_non_interactive(),
             safe_default=False,
+            question="Commit and push changes? [y/N]",
+            default="n",
         )
-        if decision is None:
-            response = prompt_user(console, "Commit and push changes? [y/N]", "n")
-            decision = response.lower() in ("y", "yes")
         if not decision:
             print_dim(console, "Skipping commit and push")
             return False
@@ -2141,12 +2149,16 @@ async def phase_understand_intent(
         # understanding as-is and proceed (this read step is non-mutating, so the
         # safe unattended outcome is to continue, not to block); only an
         # interactive run with no assumption may offer a correction. A forced
-        # "no" has no correction to supply, so it also proceeds.
-        if resolve_gate(
+        # "no" declines the current understanding and falls through so the user
+        # can supply a correction interactively — but only when interactive;
+        # a forced "no" in a non-interactive run also proceeds rather than
+        # blocking on stdin.
+        gate = resolve_gate(
             assume=get_assume(),
             interactive=not get_non_interactive(),
             safe_default=True,
-        ) is not None:
+        )
+        if gate is True or (gate is False and get_non_interactive()):
             return intent_text
 
         response = prompt_user(

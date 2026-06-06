@@ -52,7 +52,11 @@ def test_corpus_build_and_label_route(monkeypatch: pytest.MonkeyPatch, tmp_path)
         label_called["argv"] = argv
         return 0
 
-    monkeypatch.setattr(cli, "_handle_label_command", _fake_label)
+    # Patch the dict entry directly: _handle_corpus_command dispatches from
+    # _CORPUS_SUBVERBS, which captured the original function reference at import
+    # time. Patching cli._handle_label_command replaces the module attribute but
+    # leaves the dict value unchanged, so the real handler still runs.
+    monkeypatch.setitem(cli._CORPUS_SUBVERBS, "label", _fake_label)
     assert _run_main(["corpus", "label", "sess-0001", "--outcome", "accepted"]) == 0
     assert label_called["argv"] == ["sess-0001", "--outcome", "accepted"]
 

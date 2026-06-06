@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from daydream.archive.git_context import GitContext
+from daydream.runner import _resolved_backend_name
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -214,10 +215,13 @@ def build_manifest(
     """
     totals = recorder._final_totals  # noqa: SLF001 - intentional access to recorder internals
 
-    # ``config.backend`` is now None by default (env/config-file may supply it
-    # at resolution time). The manifest records the global backend selection,
-    # falling back to ``"claude"`` so the field is never None.
-    backend_used = config.backend or "claude"
+    # Resolve the effective backend through the full precedence chain
+    # (per-phase flag → config.backend → env → file-config → "claude") so the
+    # manifest records the backend that was *actually* used rather than the raw
+    # config value (which is None when the backend came from env or file-config).
+    # "review" is used as the representative phase — consistent with how the
+    # orchestrator prints the default backend.
+    backend_used = _resolved_backend_name(config, "review")
 
     m = Manifest(
         session_id=recorder.session_id,
@@ -227,9 +231,9 @@ def build_manifest(
         skill=config.skill,
         model=None,
         backend=backend_used,
-        review_backend=config.review_backend,
-        fix_backend=config.fix_backend,
-        test_backend=config.test_backend,
+        review_backend=_resolved_backend_name(config, "review"),
+        fix_backend=_resolved_backend_name(config, "fix"),
+        test_backend=_resolved_backend_name(config, "test"),
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         loop=config.loop,

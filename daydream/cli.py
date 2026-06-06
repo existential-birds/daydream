@@ -25,6 +25,7 @@ import argparse
 import inspect
 import signal
 import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -222,7 +223,7 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         metavar="MODEL",
         help="Global default model across phases "
              "(default: env DAYDREAM_MODEL, config file, then the per-backend table). "
-             "A per-phase config override is beaten by this global --model.",
+             "A per-phase config-file override takes precedence over this global --model.",
     )
     parser.add_argument(
         "--non-interactive",
@@ -703,11 +704,25 @@ def _normalize_loop_argv(raw_argv: list[str]) -> list[str]:
     Returns:
         A new argv list with bare ``--loop`` rewritten to ``--loop=5``.
     """
+    def _looks_like_int(s: str) -> bool:
+        # Use int() — the same parser argparse applies via type=int — so the
+        # pre-scan and the argument parser agree on what counts as an integer.
+        try:
+            int(s)
+            return True
+        except ValueError:
+            return False
+
     normalized: list[str] = []
     for i, token in enumerate(raw_argv):
         if token == "--loop":
             nxt = raw_argv[i + 1] if i + 1 < len(raw_argv) else None
-            if nxt is None or not nxt.isdigit():
+            # Accept both positive bare digits ("5") and negative/signed
+            # integers ("-3", "+2") so argparse receives the literal value
+            # and can apply type=int validation (including our post-parse
+            # positive-count check).  Only pin the default when the next
+            # token is absent, a flag, or a clearly non-numeric string.
+            if nxt is None or not _looks_like_int(nxt):
                 # Bare --loop (end, before a flag, or before a non-int target):
                 # pin the default count so the next token stays a positional.
                 normalized.append("--loop=5")
@@ -835,7 +850,10 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # ``--loop`` takes an optional count (``--loop`` ⇒ 5, ``--loop N`` ⇒ N).
     # ``args.loop`` is None when the flag is absent.
     loop = args.loop is not None
-    max_iterations = args.loop or 5
+    max_iterations = args.loop if args.loop is not None else 5
+
+    if loop and max_iterations < 1:
+        parser.error("--loop count must be positive")
 
     # Validate --loop incompatibilities
     if loop and output_mode != "loop":
@@ -1160,27 +1178,27 @@ def _handle_label_command(argv: list[str]) -> int:
     return 0
 
 
-# Sub-verbs of the ``corpus`` namespace, mapped to the handler attribute name
-# on this module. ``build`` is the public name for the build-corpus projection.
-# Handlers are resolved by name at call time (via ``getattr``) so test
-# monkeypatches on the module attribute take effect.
-_CORPUS_SUBVERBS = {
-    "harvest": "_handle_harvest_command",
-    "build": "_handle_build_corpus_command",
-    "label": "_handle_label_command",
+# Sub-verbs of the ``corpus`` namespace mapped to their handler callables.
+# ``build`` is the public name for the build-corpus projection.
+_CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
+    "harvest": _handle_harvest_command,
+    "build": _handle_build_corpus_command,
+    "label": _handle_label_command,
 }
 
 
 def _print_corpus_help() -> None:
-    """Print usage for the ``corpus`` namespace to stderr."""
-    print(
+    """Print usage for the ``corpus`` namespace via the daydream.ui console."""
+    from daydream.ui import create_console
+
+    console = create_console()
+    console.print(
         "usage: daydream corpus {harvest,build,label} ...\n"
         "\n"
         "Data-pipeline sub-verbs:\n"
         "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
         "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
-        "  label     record an authoritative human outcome label that overrides automated ones\n",
-        file=sys.stderr,
+        "  label     record an authoritative human outcome label that overrides automated ones"
     )
 
 
@@ -1202,7 +1220,7 @@ def _handle_corpus_command(argv: list[str]) -> int:
     if not argv or argv[0] not in _CORPUS_SUBVERBS:
         _print_corpus_help()
         return 2
-    handler = getattr(sys.modules[__name__], _CORPUS_SUBVERBS[argv[0]])
+    handler = _CORPUS_SUBVERBS[argv[0]]
     return int(handler(argv[1:]))
 
 

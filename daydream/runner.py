@@ -29,8 +29,10 @@ from daydream import git_ops
 from daydream.agent import (
     MissingSkillError,
     console,
+    get_assume,
     get_non_interactive,
     resolve_gate,
+    resolve_or_prompt,
     set_assume,
     set_non_interactive,
     set_quiet_mode,
@@ -139,7 +141,8 @@ class RunConfig:
             ``_resolve_backend`` falls back through env/config-file to ``"claude"``.
         model: Global default model applied across phases when no explicit
             per-phase model is set. Resolved by ``_resolved_model`` below the
-            per-phase field but above env/config/table sources. Default None.
+            per-phase field and below per-phase config-file overrides, but above
+            the env var, config-file global, and table sources. Default None.
         file_config: File-sourced configuration (``[tool.daydream]`` /
             ``.daydream.toml``) feeding ``_resolved_model`` / ``_resolve_backend``
             as a low-precedence source. None is treated as an empty config.
@@ -282,15 +285,15 @@ def _resolved_backend_name(config: RunConfig, phase: str) -> str:
     """Resolve the backend kind for ``phase`` across all precedence tiers.
 
     Order (highest first): explicit per-phase ``--{phase}-backend``, global
-    ``config.backend``, ``DAYDREAM_BACKEND`` env, file-config phase override,
+    ``config.backend``, file-config phase override, ``DAYDREAM_BACKEND`` env,
     file-config global, then the terminal ``"claude"`` fallback.
     """
     file_config = _file_config_or_empty(config)
     return (
         getattr(config, f"{phase}_backend", None)
         or config.backend
-        or os.environ.get("DAYDREAM_BACKEND")
         or file_config.phase_backend(phase)
+        or os.environ.get("DAYDREAM_BACKEND")
         or file_config.backend
         or "claude"
     )
@@ -300,10 +303,10 @@ def _resolved_model(config: RunConfig, phase: str) -> str | None:
     """Resolve the model for ``phase`` across all precedence tiers.
 
     Order (highest first): explicit per-phase ``{phase}_model``, global
-    ``config.model``, ``DAYDREAM_MODEL`` env, file-config phase override,
-    file-config global, then ``PHASE_DEFAULT_MODELS[backend][phase]``. Returns
-    ``None`` only when no source supplies a model (the backend then applies its
-    own default).
+    ``config.model`` (``--model``), ``DAYDREAM_MODEL`` env, file-config phase
+    override, file-config global, then ``PHASE_DEFAULT_MODELS[backend][phase]``.
+    Returns ``None`` only when no source supplies a model (the backend then
+    applies its own default).
 
     The per-backend table lookup keys off the backend kind resolved by
     :func:`_resolved_backend_name`, so a config-selected backend still gets its
@@ -332,11 +335,11 @@ def _resolve_backend(
     precedence ``CLI > env > config-file > default``:
 
     - Backend kind via :func:`_resolved_backend_name`
-      (per-phase flag → ``config.backend`` → ``DAYDREAM_BACKEND`` →
-      file-config phase → file-config global → ``"claude"``).
+      (per-phase flag → ``config.backend`` → file-config phase →
+      ``DAYDREAM_BACKEND`` → file-config global → ``"claude"``).
     - Model via :func:`_resolved_model`
-      (per-phase field → ``config.model`` → ``DAYDREAM_MODEL`` →
-      file-config phase → file-config global → ``PHASE_DEFAULT_MODELS`` →
+      (per-phase field → file-config phase → ``config.model`` → ``DAYDREAM_MODEL`` →
+      file-config global → ``PHASE_DEFAULT_MODELS`` →
       ``None``, where ``None`` falls through to the backend's own default).
 
     Args:
@@ -935,17 +938,13 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
     if config.cleanup is not None:
         cleanup_enabled = config.cleanup
     else:
-        cleanup_decision = resolve_gate(
-            assume=config.assume,
+        cleanup_enabled = resolve_or_prompt(
+            assume=get_assume(),
             interactive=not get_non_interactive(),
             safe_default=False,
+            question="Cleanup review output after completion? [y/N]",
+            default="n",
         )
-        if cleanup_decision is None:
-            cleanup_response = prompt_user(
-                console, "Cleanup review output after completion? [y/N]", "n",
-            )
-            cleanup_decision = cleanup_response.lower() in ("y", "yes")
-        cleanup_enabled = cleanup_decision
 
     # Backends (per-phase overrides).
     backend_cache: dict[tuple[str, str | None], Backend] = {}
@@ -1204,7 +1203,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         # with no assumption gets the y/N prompt.
         if tests_passed:
             commit_decision = resolve_gate(
-                assume=config.assume,
+                assume=get_assume(),
                 interactive=not get_non_interactive(),
                 safe_default=True,
             )

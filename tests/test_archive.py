@@ -27,6 +27,7 @@ from daydream.archive.index import (
     upsert_run,
 )
 from daydream.archive.manifest import Manifest, build_manifest
+from daydream.config_file import DaydreamFileConfig
 
 # ---------------------------------------------------------------------------
 # Mock helpers
@@ -68,6 +69,7 @@ class _MockConfig:
     loop: bool = False
     archive: bool = True
     run_eval: bool = False
+    file_config: DaydreamFileConfig | None = None
 
 
 # ---------------------------------------------------------------------------

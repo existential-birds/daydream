@@ -879,6 +879,8 @@ async def test_phase_commit_push_includes_daydream_trailers(tmp_path, monkeypatc
     monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    # _do_commit uses resolve_or_prompt which calls prompt_user from agent's namespace.
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
     captured: dict[str, str] = {}
 
@@ -1068,11 +1070,11 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
         "pass",
     ])
 
-    # First prompt_user call: "Choice" -> "1". Second: confirm "y".
-    answers = iter(["1", "y"])
-    monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(answers, "3"),
-    )
+    # First prompt_user call: "Choice" -> "1" (goes through phases.prompt_user).
+    # Second: "Use suggested command?" -> "y" goes through resolve_or_prompt
+    # which calls agent.prompt_user, not phases.prompt_user.
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
     success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
 
@@ -1104,10 +1106,10 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_declines(
         "pass",
     ])
 
-    answers = iter(["1", "n"])
-    monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(answers, "3"),
-    )
+    # "Choice" -> "1" via phases.prompt_user; "Use suggested command?" -> "n"
+    # via agent.prompt_user (resolve_or_prompt routes through agent's namespace).
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
 
     success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
 
@@ -1360,11 +1362,10 @@ async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
         ("handoff", "BODY"),
     ])
 
-    # Choice "4" then clipboard "y"
-    answers = iter(["4", "y"])
-    monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(answers, "n"),
-    )
+    # "Choice" -> "4" via phases.prompt_user (direct call).
+    # Clipboard confirm -> "y" via agent.prompt_user (resolve_or_prompt path).
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "4")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
     success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
@@ -1995,10 +1996,9 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_retry_prompt(
         "pass",
     ])
 
-    answers = iter(["1", "y"])
-    monkeypatch.setattr(
-        "daydream.phases.prompt_user", lambda *a, **kw: next(answers, "3"),
-    )
+    # "Choice" -> "1" via phases.prompt_user; confirm "y" via agent.prompt_user.
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
     success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
 
@@ -2042,6 +2042,7 @@ async def test_phase_test_and_heal_option1_shows_suggested_command_before_confir
 
     # Capture the order: info messages relative to the y/n prompt.
     prompt_called_at: list[int] = []
+    prompt_called_at_choice: list[bool] = []
 
     def _prompt(*_args, **_kw):
         prompt_called_at.append(len(infos))
@@ -2051,8 +2052,12 @@ async def test_phase_test_and_heal_option1_shows_suggested_command_before_confir
             return "1"  # menu Choice
         return "n"
 
-    prompt_called_at_choice: list[bool] = []
+    # Menu choice ("Choice") goes through phases.prompt_user (direct call).
     monkeypatch.setattr("daydream.phases.prompt_user", _prompt)
+    # Confirm gate ("Use suggested command?") goes through agent.prompt_user
+    # (via resolve_or_prompt). Route it through the same _prompt so
+    # prompt_called_at tracks both calls and the ordering assertion holds.
+    monkeypatch.setattr("daydream.agent.prompt_user", _prompt)
 
     backend = _InvestigatorBackend([
         "fail",
