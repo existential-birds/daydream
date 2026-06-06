@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -146,3 +148,13 @@ def test_prompt_user_destructive_defaults_decline_on_eof(monkeypatch, message):
     reset_state()
     monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
     assert prompt_user(Console(record=True), message, default="n") == "n"
+
+
+def test_parse_background_task_id_from_launch_string():
+    from daydream.ui import _parse_assigned_task_id
+
+    launch = (Path(__file__).parent / "fixtures/task_tools/bash_bg_launch.txt").read_text()
+    assert _parse_assigned_task_id("Bash", launch) == "b0nsmwb99"
+    create = (Path(__file__).parent / "fixtures/task_tools/taskcreate_result.txt").read_text()
+    assert _parse_assigned_task_id("TaskCreate", create) == "1"
+    assert _parse_assigned_task_id("Bash", "no id here") is None

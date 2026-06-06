@@ -474,6 +474,34 @@ def pill(text: str, bg_color: str, fg_color: str) -> Text:
 # Pattern for tool argument colorization
 _TOOL_ARG_PATTERN = re.compile(r"(\w+)=((?:'[^']*'|\"[^\"]*\"|[^,\s]+))")
 
+# Patterns for harvesting the assigned task id out of an originating tool's result string.
+_LAUNCH_TASK_ID_PATTERN = re.compile(r"\bID:\s*([A-Za-z0-9]+)\b")
+_TASKCREATE_ID_PATTERN = re.compile(r"Task #(\d+)")
+_LAUNCH_TASK_TOOLS = frozenset({"Bash", "Agent", "Task"})
+
+
+def _parse_assigned_task_id(name: str, output: str) -> str | None:
+    """Extract the assigned task id from an originating tool's result string.
+
+    Backgrounded launch tools (Bash/Agent/Task) report their id in a
+    ``Command running in background with ID: <id>. …`` prose string; TaskCreate
+    reports it as ``Task #<N> created successfully: …``.
+
+    Args:
+        name: The originating tool's name.
+        output: The tool's result string.
+
+    Returns:
+        The captured id, or None if the input does not match the expected shape.
+    """
+    if name in _LAUNCH_TASK_TOOLS:
+        match = _LAUNCH_TASK_ID_PATTERN.search(output)
+        return match.group(1) if match else None
+    if name == "TaskCreate":
+        match = _TASKCREATE_ID_PATTERN.search(output)
+        return match.group(1) if match else None
+    return None
+
 
 def _colorize_tool_args(args: dict[str, object]) -> Text:
     """Apply neon syntax highlighting to tool call arguments.
