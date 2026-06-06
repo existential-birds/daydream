@@ -138,11 +138,11 @@ class RunConfig:
         pr_number: GitHub PR number for PR feedback mode. If None, normal mode.
         bot: Bot username whose comments to fetch (e.g. "coderabbitai[bot]").
         backend: Default backend to use ("claude" or "codex"). Default is None;
-            ``_resolve_backend`` falls back through env/config-file to ``"claude"``.
+            ``_resolve_backend`` falls back through the config file to ``"claude"``.
         model: Global default model applied across phases when no explicit
             per-phase model is set. Resolved by ``_resolved_model`` below the
-            per-phase field and below per-phase config-file overrides, but above
-            the env var, config-file global, and table sources. Default None.
+            per-phase field but above the config-file (phase then global) and
+            table sources. Default None.
         file_config: File-sourced configuration (``[tool.daydream]`` /
             ``.daydream.toml``) feeding ``_resolved_model`` / ``_resolve_backend``
             as a low-precedence source. None is treated as an empty config.
@@ -284,16 +284,15 @@ def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
 def _resolved_backend_name(config: RunConfig, phase: str) -> str:
     """Resolve the backend kind for ``phase`` across all precedence tiers.
 
-    Order (highest first): explicit per-phase ``--{phase}-backend``, global
-    ``config.backend``, file-config phase override, ``DAYDREAM_BACKEND`` env,
-    file-config global, then the terminal ``"claude"`` fallback.
+    Order (highest first): explicit per-phase ``{phase}_backend``, global
+    ``config.backend`` (``--backend``), file-config phase override, file-config
+    global, then the terminal ``"claude"`` fallback.
     """
     file_config = _file_config_or_empty(config)
     return (
         getattr(config, f"{phase}_backend", None)
         or config.backend
         or file_config.phase_backend(phase)
-        or os.environ.get("DAYDREAM_BACKEND")
         or file_config.backend
         or "claude"
     )
@@ -303,10 +302,10 @@ def _resolved_model(config: RunConfig, phase: str) -> str | None:
     """Resolve the model for ``phase`` across all precedence tiers.
 
     Order (highest first): explicit per-phase ``{phase}_model``, global
-    ``config.model`` (``--model``), ``DAYDREAM_MODEL`` env, file-config phase
-    override, file-config global, then ``PHASE_DEFAULT_MODELS[backend][phase]``.
-    Returns ``None`` only when no source supplies a model (the backend then
-    applies its own default).
+    ``config.model`` (``--model``), file-config phase override, file-config
+    global, then ``PHASE_DEFAULT_MODELS[backend][phase]``. Returns ``None``
+    only when no source supplies a model (the backend then applies its own
+    default).
 
     The per-backend table lookup keys off the backend kind resolved by
     :func:`_resolved_backend_name`, so a config-selected backend still gets its
@@ -317,7 +316,6 @@ def _resolved_model(config: RunConfig, phase: str) -> str | None:
     return (
         getattr(config, f"{phase}_model", None)
         or config.model
-        or os.environ.get("DAYDREAM_MODEL")
         or file_config.phase_model(phase)
         or file_config.model
         or PHASE_DEFAULT_MODELS.get(backend_name, {}).get(phase)
@@ -332,13 +330,13 @@ def _resolve_backend(
     """Get or create the backend for a given phase, respecting all precedence tiers.
 
     Both the backend kind and the model are resolved through the source-tiered
-    precedence ``CLI > env > config-file > default``:
+    precedence ``CLI > config-file > default``:
 
     - Backend kind via :func:`_resolved_backend_name`
       (per-phase flag → ``config.backend`` → file-config phase →
-      ``DAYDREAM_BACKEND`` → file-config global → ``"claude"``).
+      file-config global → ``"claude"``).
     - Model via :func:`_resolved_model`
-      (per-phase field → file-config phase → ``config.model`` → ``DAYDREAM_MODEL`` →
+      (per-phase field → ``config.model`` → file-config phase →
       file-config global → ``PHASE_DEFAULT_MODELS`` →
       ``None``, where ``None`` falls through to the backend's own default).
 
@@ -467,8 +465,8 @@ async def run(config: RunConfig | None = None) -> int:
     # Quiet mode tweak: Codex backends need their shell output visible because
     # those commands ARE the user-facing signal. Done before any backend is
     # constructed so per-phase backends inherit the right setting. Resolve each
-    # phase's backend through the full precedence chain (CLI/env/config-file)
-    # so a codex backend selected via env or config still disables quiet mode.
+    # phase's backend through the full precedence chain (CLI/config-file)
+    # so a codex backend selected via config still disables quiet mode.
     quiet = config.quiet
     if quiet:
         codex_in_use = any(

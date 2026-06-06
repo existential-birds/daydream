@@ -15,9 +15,8 @@ from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
 
 
 def test_default_backend_is_none_and_resolves_to_claude(monkeypatch):
-    # --backend default is now None so env/config-file can supply it; the
+    # --backend default is now None so the config file can supply it; the
     # terminal fallback in _resolved_backend_name is "claude".
-    monkeypatch.delenv("DAYDREAM_BACKEND", raising=False)
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project"])
     config = _parse_args()
     assert config.backend is None
@@ -42,25 +41,22 @@ def test_invalid_backend_rejected(monkeypatch):
         _parse_args()
 
 
-def test_review_backend_override_via_config_file(monkeypatch):
+def test_review_backend_override_via_config_file():
     # Per-phase backend overrides moved from CLI flags to the config file
     # (cli-verb-redesign Task 8). The resolver still honours a phase override.
-    monkeypatch.delenv("DAYDREAM_BACKEND", raising=False)
     fc = DaydreamFileConfig(backend="claude", phases={"review": {"backend": "codex"}})
     config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
     assert _resolved_backend_name(config, "review") == "codex"
     assert _resolved_backend_name(config, "fix") == "claude"
 
 
-def test_fix_backend_override_via_config_file(monkeypatch):
-    monkeypatch.delenv("DAYDREAM_BACKEND", raising=False)
+def test_fix_backend_override_via_config_file():
     fc = DaydreamFileConfig(phases={"fix": {"backend": "codex"}})
     config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
     assert _resolved_backend_name(config, "fix") == "codex"
 
 
-def test_test_backend_override_via_config_file(monkeypatch):
-    monkeypatch.delenv("DAYDREAM_BACKEND", raising=False)
+def test_test_backend_override_via_config_file():
     fc = DaydreamFileConfig(phases={"test": {"backend": "codex"}})
     config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
     assert _resolved_backend_name(config, "test") == "codex"
@@ -314,10 +310,9 @@ def test_print_issues_table_renders():
         ("test", "gpt-5.5"),
     ],
 )
-def test_per_phase_model_set_via_config_file(phase, value, monkeypatch):
+def test_per_phase_model_set_via_config_file(phase, value):
     # Per-phase model overrides moved from CLI flags to the config file; the
     # resolver still honours a phase override read from the file.
-    monkeypatch.delenv("DAYDREAM_MODEL", raising=False)
     fc = DaydreamFileConfig(phases={phase: {"model": value}})
     config = RunConfig(target="/tmp/project", backend=None, model=None, file_config=fc)
     assert _resolved_model(config, phase) == value

@@ -39,7 +39,7 @@ daydream corpus label <session_id> --outcome accepted
 
 # Per-phase model/backend overrides are config-file-only (no CLI flags):
 #   set [tool.daydream] / [tool.daydream.phases.<phase>] in pyproject.toml or .daydream.toml.
-#   Precedence: CLI (--model/--backend, DAYDREAM_MODEL/DAYDREAM_BACKEND) > config file > built-in default.
+#   Precedence: CLI (--model/--backend) > config file > built-in default.
 
 # Development
 make lint       # Run ruff linter

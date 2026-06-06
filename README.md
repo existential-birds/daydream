@@ -146,8 +146,8 @@ daydream corpus label <session_id> --outcome accepted  # manual outcome label ov
 
 ```bash
 daydream -s python /path/to/project           # force a specific Beagle skill
-daydream --backend codex /path/to/project     # or env DAYDREAM_BACKEND
-daydream --model claude-opus-4-8 /path/to/project  # overrides ALL phases (env DAYDREAM_MODEL is lower-precedence)
+daydream --backend codex /path/to/project     # override backend for this run
+daydream --model claude-opus-4-8 /path/to/project  # overrides ALL phases (beats config-file overrides)
 daydream --loop 3 /path/to/project            # repeat up to 3 review-fix-test rounds
 daydream --yes /path/to/project               # auto-apply fixes without prompting
 ```
@@ -198,12 +198,12 @@ backend = "codex"
 Phase names: `exploration`, `review`, `parse`, `fix`, `test`, `verify`, `merge` (plus
 `intent`, `wonder`, `envision`, `pr_feedback`). Resolution precedence, highest first:
 
-**CLI > env > config file > built-in per-backend default.**
+**CLI > config file (phase, then global) > built-in per-backend default.**
 
-So `--model` (or `DAYDREAM_MODEL`) beats a `[tool.daydream.phases.*]` override,
-which beats the per-backend table in `daydream/config.py`. The same order applies
-to backend selection via `--backend` / `DAYDREAM_BACKEND` / config / the `claude`
-fallback.
+So `--model` beats a `[tool.daydream.phases.*]` override, which beats the
+per-backend table in `daydream/config.py`. The same order applies to backend
+selection via `--backend` / config / the `claude` fallback. (There is no
+environment-variable tier — `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
 
 ## Output Files
 

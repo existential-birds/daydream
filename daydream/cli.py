@@ -213,7 +213,7 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         choices=["claude", "codex"],
         default=None,
         help="Agent backend: claude or codex "
-             "(default: env DAYDREAM_BACKEND, config file, then claude)",
+             "(default: config file, then claude)",
     )
     parser.add_argument(
         "--model", "-m",
@@ -222,8 +222,8 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         dest="model",
         metavar="MODEL",
         help="Global default model across phases "
-             "(default: env DAYDREAM_MODEL, config file, then the per-backend table). "
-             "A per-phase config-file override takes precedence over this global --model.",
+             "(default: config file, then the per-backend table). "
+             "This global --model takes precedence over any per-phase config-file override.",
     )
     parser.add_argument(
         "--non-interactive",
