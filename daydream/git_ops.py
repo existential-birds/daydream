@@ -10,6 +10,12 @@ Conventions:
     * Every command receives ``cwd=repo`` (no ``git -C`` shenanigans).
     * Read-only queries time out at 5 seconds, IO-bound at 30 seconds, and
       ``gh`` operations at 60 seconds.
+    * ``git`` timeouts are retried a bounded number of times before raising
+      :class:`GitTimeoutError` — a trivial command exceeding its timeout means
+      the host is overloaded, not that the command hung. Only read-only queries
+      are retried; mutating operations (fetch/checkout/clean/worktree/amend)
+      pass ``retries=0`` because re-running a non-idempotent command after a
+      timeout could happen on top of partial repo changes.
 
 Error-handling patterns:
     Functions in this module follow one of two documented patterns:
@@ -61,6 +67,18 @@ class GitError(Exception):
     """Base class for all git/gh failures raised by :mod:`daydream.git_ops`."""
 
 
+class GitTimeoutError(GitError):
+    """Raised when a ``git``/``gh`` subprocess exceeds its timeout.
+
+    Distinct from the generic :class:`GitError` so callers can tell a
+    *transient* host-load timeout (a trivial command starved of CPU) apart
+    from a genuine git failure (bad ref, missing object, not a worktree). A
+    timeout signals the machine is overloaded, not that the command is wrong,
+    so it is retried a bounded number of times in :func:`_run_git` before it
+    surfaces as this exception.
+    """
+
+
 class RateLimitError(GitError):
     """Raised when a ``gh`` call fails due to a GitHub API rate limit.
 
@@ -93,12 +111,22 @@ class WrongBranchError(GitError):
 # --- Internal subprocess helpers --------------------------------------------
 
 
+# A trivial git command exceeding its timeout means the host was momentarily
+# starved of CPU (heavy concurrent load), not that the command hung — so a
+# timeout is retried a bounded number of times before it surfaces as a
+# GitTimeoutError. This is what kept the deep-orchestrator full-suite tests
+# flaky: under load a 5s `git rev-parse`/`diff` would time out, collapse to a
+# generic GitError, and the run would exit 1 (see issue #120).
+_GIT_TIMEOUT_RETRIES = 2
+
+
 def _run_git(
     repo: Path,
     args: list[str],
     *,
     timeout: int = 5,
     capture_bytes: bool = False,
+    retries: int = _GIT_TIMEOUT_RETRIES,
 ) -> subprocess.CompletedProcess[Any]:
     """Run ``git`` in *repo* with hardened defaults.
 
@@ -107,26 +135,51 @@ def _run_git(
         args: Arguments after ``git``.
         timeout: Subprocess timeout in seconds.
         capture_bytes: When True, capture stdout/stderr as bytes (no decoding).
+        retries: How many additional attempts to make after a
+            :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
+            Only timeouts are retried; other failures raise immediately.
+            Mutating wrappers pass ``retries=0`` because re-running a
+            non-idempotent git command after a timeout is unsafe; only
+            read-only queries inherit the retrying default.
 
     Returns:
         The completed process. ``returncode`` is left to the caller to inspect.
 
     Raises:
-        GitError: If the underlying subprocess machinery itself fails (for
-            example timeout, missing binary, OS-level error).
+        GitTimeoutError: If every attempt times out. Subclass of
+            :class:`GitError`, so existing ``except GitError`` handlers still
+            catch it.
+        GitError: If the underlying subprocess machinery fails for any other
+            reason (missing binary, OS-level error).
     """
-    try:
-        return subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", *args],  # noqa: S607 - git is a trusted command
-            cwd=repo,
-            capture_output=True,
-            text=not capture_bytes,
-            timeout=timeout,
-            shell=False,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise GitError(f"git {' '.join(args)} failed: {type(exc).__name__}: {exc}") from exc
+    last_timeout: subprocess.TimeoutExpired | None = None
+    for attempt in range(retries + 1):
+        try:
+            return subprocess.run(  # noqa: S603 - arguments are not user-controlled
+                ["git", *args],  # noqa: S607 - git is a trusted command
+                cwd=repo,
+                capture_output=True,
+                text=not capture_bytes,
+                timeout=timeout,
+                shell=False,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_timeout = exc
+            if attempt < retries:
+                _logger.warning(
+                    "git %s timed out after %ss (attempt %d/%d); retrying",
+                    " ".join(args),
+                    timeout,
+                    attempt + 1,
+                    retries + 1,
+                )
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise GitError(f"git {' '.join(args)} failed: {type(exc).__name__}: {exc}") from exc
+
+    raise GitTimeoutError(
+        f"git {' '.join(args)} timed out after {timeout}s ({retries + 1} attempts)",
+    ) from last_timeout
 
 
 def _run_gh(
@@ -146,8 +199,9 @@ def _run_gh(
         The completed process with text-decoded stdout/stderr.
 
     Raises:
-        GitError: If the subprocess machinery fails (timeout, missing ``gh``,
-            OS-level error).
+        GitTimeoutError: If the call times out. Subclass of :class:`GitError`.
+        GitError: If the subprocess machinery fails for any other reason
+            (missing ``gh``, OS-level error).
     """
     try:
         return subprocess.run(  # noqa: S603 - arguments are not user-controlled
@@ -159,6 +213,8 @@ def _run_gh(
             shell=False,
             check=False,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError(f"gh {' '.join(args)} timed out after {timeout}s") from exc
     except (subprocess.SubprocessError, OSError) as exc:
         raise GitError(f"gh {' '.join(args)} failed: {type(exc).__name__}: {exc}") from exc
 
@@ -304,7 +360,7 @@ def amend_trailers(repo: Path, trailers: dict[str, str], *, message: str | None 
 
     amended_msg = interp.stdout
     amend_proc = _run_git(
-        repo, ["commit", "--amend", "-m", amended_msg.strip()], timeout=30,
+        repo, ["commit", "--amend", "-m", amended_msg.strip()], timeout=30, retries=0,
     )
     if amend_proc.returncode != 0:
         raise GitError(f"git commit --amend failed: {amend_proc.stderr.strip()}")
@@ -900,7 +956,7 @@ def fetch(repo: Path, remote: str = "origin") -> None:
     Raises:
         GitError: If the fetch fails.
     """
-    proc = _run_git(repo, ["fetch", remote], timeout=30)
+    proc = _run_git(repo, ["fetch", remote], timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git fetch {remote} failed in {repo}: {proc.stderr.strip()}")
 
@@ -921,7 +977,7 @@ def fetch_ref(repo: Path, refspec: str, remote: str = "origin", *, timeout: int 
     Raises:
         GitError: If the fetch fails for any reason.
     """
-    proc = _run_git(repo, ["fetch", remote, refspec], timeout=timeout)
+    proc = _run_git(repo, ["fetch", remote, refspec], timeout=timeout, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git fetch {remote} {refspec} failed in {repo}: {proc.stderr.strip()}")
 
@@ -939,7 +995,7 @@ def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
     Raises:
         GitError: If the checkout fails.
     """
-    proc = _run_git(repo, ["checkout", "--detach", sha], timeout=timeout)
+    proc = _run_git(repo, ["checkout", "--detach", sha], timeout=timeout, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git checkout --detach {sha} failed in {repo}: {proc.stderr.strip()}")
 
@@ -991,7 +1047,7 @@ def checkout_paths(repo: Path, paths: list[Path]) -> None:
     if not paths:
         return
     args = ["checkout", "--", *(str(p) for p in paths)]
-    proc = _run_git(repo, args, timeout=30)
+    proc = _run_git(repo, args, timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git checkout -- {paths} failed in {repo}: {proc.stderr.strip()}")
 
@@ -1005,7 +1061,7 @@ def clean_untracked(repo: Path) -> None:
     Raises:
         GitError: If the clean fails.
     """
-    proc = _run_git(repo, ["clean", "-fd"], timeout=30)
+    proc = _run_git(repo, ["clean", "-fd"], timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git clean -fd failed in {repo}: {proc.stderr.strip()}")
 
@@ -1026,7 +1082,7 @@ def worktree_add(repo: Path, path: Path, ref: str, *, detach: bool = True) -> No
     if detach:
         args.append("--detach")
     args.extend([str(path), ref])
-    proc = _run_git(repo, args, timeout=30)
+    proc = _run_git(repo, args, timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git worktree add {path} {ref} failed: {proc.stderr.strip()}")
 
@@ -1046,7 +1102,7 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
     if force:
         args.append("--force")
     args.append(str(path))
-    proc = _run_git(repo, args, timeout=30)
+    proc = _run_git(repo, args, timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git worktree remove {path} failed: {proc.stderr.strip()}")
 

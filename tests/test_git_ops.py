@@ -530,6 +530,83 @@ def test_error_hierarchy_is_consistent() -> None:
     assert issubclass(NotAWorktreeError, GitError)
     assert issubclass(BranchNotFoundError, GitError)
     assert issubclass(WrongBranchError, GitError)
+    assert issubclass(git_ops.GitTimeoutError, GitError)
+
+
+# --- _run_git timeout retry (issue #120) ------------------------------------
+
+
+def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`_run_git` retries transient timeouts but not other failures (#120).
+
+    One test, three cases:
+      * a timeout on the first attempt is retried and the later success returns;
+      * timeouts that exhaust every attempt raise the distinct GitTimeoutError;
+      * a non-timeout subprocess error raises a plain GitError immediately, with
+        no wasted retries.
+    """
+    repo = _make_repo_with_main(tmp_path)
+    ok = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="true\n", stderr="")
+
+    # Case 1: transient timeout (1st attempt) then success on the retry.
+    calls = {"n": 0}
+
+    def flaky_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise subprocess.TimeoutExpired(cmd=["git"], timeout=5)
+        return ok
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", flaky_run)
+    assert git_ops._run_git(repo, ["rev-parse", "HEAD"]).returncode == 0
+    assert calls["n"] == 2  # timed out once, then succeeded
+
+    # Case 2: every attempt times out -> GitTimeoutError after retries+1 tries.
+    calls["n"] = 0
+
+    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        calls["n"] += 1
+        raise subprocess.TimeoutExpired(cmd=["git"], timeout=5)
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
+    with pytest.raises(git_ops.GitTimeoutError):
+        git_ops._run_git(repo, ["rev-parse", "HEAD"], retries=2)
+    assert calls["n"] == 3  # 1 initial + 2 retries
+
+    # Case 3: non-timeout failure raises plain GitError immediately (no retry).
+    calls["n"] = 0
+
+    def os_error(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        calls["n"] += 1
+        raise OSError("git binary missing")
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", os_error)
+    with pytest.raises(GitError) as exc:
+        git_ops._run_git(repo, ["rev-parse", "HEAD"], retries=2)
+    assert not isinstance(exc.value, git_ops.GitTimeoutError)
+    assert calls["n"] == 1  # no retries for non-timeout failures
+
+
+def test_mutating_wrapper_does_not_retry_on_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutating wrappers pass `retries=0`, so a timeout is not re-run (#120).
+
+    Re-running a non-idempotent git command after a timeout could land on top of
+    partial repo changes. `fetch` drives the production path through `_run_git`
+    and must raise GitTimeoutError after exactly one attempt.
+    """
+    repo = _make_repo_with_main(tmp_path)
+    calls = {"n": 0}
+
+    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        calls["n"] += 1
+        raise subprocess.TimeoutExpired(cmd=["git"], timeout=30)
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
+    with pytest.raises(git_ops.GitTimeoutError):
+        git_ops.fetch(repo)
+    assert calls["n"] == 1  # no retries for mutating operations
 
 
 def test_wrong_branch_error_is_raisable() -> None:
