@@ -1,5 +1,6 @@
 """Deep-mode prompt builder tests (D-09, D-10, D-19, D-20)."""
 from pathlib import Path
+from typing import TypedDict
 
 from daydream.deep.prompts import (
     DOC_REVIEW_NOTICE,
@@ -9,7 +10,21 @@ from daydream.deep.prompts import (
 )
 
 
-def _paths(tmp_path: Path) -> dict[str, Path]:
+class _PromptPaths(TypedDict):
+    """The four on-disk path kwargs shared by the per-stack and fallback builders.
+
+    Declaring each key's type explicitly lets mypy reconcile ``**p`` unpacking
+    with the builders' per-parameter signatures; a plain ``dict[str, Path]`` would
+    spill ``Path`` onto unrelated kwargs like ``prior_commits``/``is_docs_only``.
+    """
+
+    diff_path: Path
+    intent_path: Path
+    alternatives_path: Path
+    output_path: Path
+
+
+def _paths(tmp_path: Path) -> _PromptPaths:
     return {
         "diff_path": tmp_path / ".daydream" / "diff.patch",
         "intent_path": tmp_path / ".daydream" / "deep" / "intent.md",

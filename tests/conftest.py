@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -290,7 +290,7 @@ def _reset_trajectory_recorder():
 
 
 @pytest.fixture(autouse=True)
-def archive_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def archive_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Isolate DAYDREAM_ARCHIVE_DIR to a per-test tmpdir so tests never touch ~/.daydream/archive/."""
     path = tmp_path / "archive"
     path.mkdir(parents=True, exist_ok=True)

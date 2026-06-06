@@ -6,6 +6,8 @@ cache value, the human-sourced observation in history, and the prior label
 echoed to stdout — not mere dispatch.
 """
 
+from typing import Any
+
 from daydream import cli
 from daydream.archive.index import (
     append_label_observation,
@@ -16,8 +18,8 @@ from daydream.archive.index import (
 from daydream.archive.manifest import Manifest
 
 
-def _make_manifest(session_id: str = "sess-0001", **overrides) -> Manifest:
-    defaults = {
+def _make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
+    defaults: dict[str, Any] = {
         "session_id": session_id,
         "archived_at": "2026-04-29T00:00:00+00:00",
         "status": "complete",

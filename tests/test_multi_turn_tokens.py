@@ -16,7 +16,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import pytest
 
@@ -35,11 +35,19 @@ from daydream.trajectory import (
     TrajectoryRecorder,
 )
 
+
 # -- Token value constants for the 3-turn sequence --------------------------
-TURN_1 = {"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 5, "cost_usd": 0.001}
-TURN_2 = {"prompt_tokens": 150, "completion_tokens": 30, "cached_tokens": 10, "cost_usd": 0.002}
-TURN_3 = {"prompt_tokens": 200, "completion_tokens": 40, "cached_tokens": 15, "cost_usd": 0.003}
-TURNS = [TURN_1, TURN_2, TURN_3]
+class _TurnTokens(TypedDict):
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+    cost_usd: float
+
+
+TURN_1: _TurnTokens = {"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 5, "cost_usd": 0.001}
+TURN_2: _TurnTokens = {"prompt_tokens": 150, "completion_tokens": 30, "cached_tokens": 10, "cost_usd": 0.002}
+TURN_3: _TurnTokens = {"prompt_tokens": 200, "completion_tokens": 40, "cached_tokens": 15, "cost_usd": 0.003}
+TURNS: list[_TurnTokens] = [TURN_1, TURN_2, TURN_3]
 PHASES = [DaydreamPhase.REVIEW, DaydreamPhase.FIX, DaydreamPhase.TEST]
 
 
