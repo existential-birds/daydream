@@ -10,6 +10,9 @@ Conventions:
     * Every command receives ``cwd=repo`` (no ``git -C`` shenanigans).
     * Read-only queries time out at 5 seconds, IO-bound at 30 seconds, and
       ``gh`` operations at 60 seconds.
+    * ``git`` timeouts are retried a bounded number of times before raising
+      :class:`GitTimeoutError` — a trivial command exceeding its timeout means
+      the host is overloaded, not that the command hung.
 
 Error-handling patterns:
     Functions in this module follow one of two documented patterns:
@@ -61,6 +64,18 @@ class GitError(Exception):
     """Base class for all git/gh failures raised by :mod:`daydream.git_ops`."""
 
 
+class GitTimeoutError(GitError):
+    """Raised when a ``git``/``gh`` subprocess exceeds its timeout.
+
+    Distinct from the generic :class:`GitError` so callers can tell a
+    *transient* host-load timeout (a trivial command starved of CPU) apart
+    from a genuine git failure (bad ref, missing object, not a worktree). A
+    timeout signals the machine is overloaded, not that the command is wrong,
+    so it is retried a bounded number of times in :func:`_run_git` before it
+    surfaces as this exception.
+    """
+
+
 class RateLimitError(GitError):
     """Raised when a ``gh`` call fails due to a GitHub API rate limit.
 
@@ -93,12 +108,22 @@ class WrongBranchError(GitError):
 # --- Internal subprocess helpers --------------------------------------------
 
 
+# A trivial git command exceeding its timeout means the host was momentarily
+# starved of CPU (heavy concurrent load), not that the command hung — so a
+# timeout is retried a bounded number of times before it surfaces as a
+# GitTimeoutError. This is what kept the deep-orchestrator full-suite tests
+# flaky: under load a 5s `git rev-parse`/`diff` would time out, collapse to a
+# generic GitError, and the run would exit 1 (see issue #120).
+_GIT_TIMEOUT_RETRIES = 2
+
+
 def _run_git(
     repo: Path,
     args: list[str],
     *,
     timeout: int = 5,
     capture_bytes: bool = False,
+    retries: int = _GIT_TIMEOUT_RETRIES,
 ) -> subprocess.CompletedProcess[Any]:
     """Run ``git`` in *repo* with hardened defaults.
 
@@ -107,26 +132,48 @@ def _run_git(
         args: Arguments after ``git``.
         timeout: Subprocess timeout in seconds.
         capture_bytes: When True, capture stdout/stderr as bytes (no decoding).
+        retries: How many additional attempts to make after a
+            :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
+            Only timeouts are retried; other failures raise immediately.
 
     Returns:
         The completed process. ``returncode`` is left to the caller to inspect.
 
     Raises:
-        GitError: If the underlying subprocess machinery itself fails (for
-            example timeout, missing binary, OS-level error).
+        GitTimeoutError: If every attempt times out. Subclass of
+            :class:`GitError`, so existing ``except GitError`` handlers still
+            catch it.
+        GitError: If the underlying subprocess machinery fails for any other
+            reason (missing binary, OS-level error).
     """
-    try:
-        return subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", *args],  # noqa: S607 - git is a trusted command
-            cwd=repo,
-            capture_output=True,
-            text=not capture_bytes,
-            timeout=timeout,
-            shell=False,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise GitError(f"git {' '.join(args)} failed: {type(exc).__name__}: {exc}") from exc
+    last_timeout: subprocess.TimeoutExpired | None = None
+    for attempt in range(retries + 1):
+        try:
+            return subprocess.run(  # noqa: S603 - arguments are not user-controlled
+                ["git", *args],  # noqa: S607 - git is a trusted command
+                cwd=repo,
+                capture_output=True,
+                text=not capture_bytes,
+                timeout=timeout,
+                shell=False,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_timeout = exc
+            if attempt < retries:
+                _logger.warning(
+                    "git %s timed out after %ss (attempt %d/%d); retrying",
+                    " ".join(args),
+                    timeout,
+                    attempt + 1,
+                    retries + 1,
+                )
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise GitError(f"git {' '.join(args)} failed: {type(exc).__name__}: {exc}") from exc
+
+    raise GitTimeoutError(
+        f"git {' '.join(args)} timed out after {timeout}s ({retries + 1} attempts)",
+    ) from last_timeout
 
 
 def _run_gh(
@@ -146,8 +193,9 @@ def _run_gh(
         The completed process with text-decoded stdout/stderr.
 
     Raises:
-        GitError: If the subprocess machinery fails (timeout, missing ``gh``,
-            OS-level error).
+        GitTimeoutError: If the call times out. Subclass of :class:`GitError`.
+        GitError: If the subprocess machinery fails for any other reason
+            (missing ``gh``, OS-level error).
     """
     try:
         return subprocess.run(  # noqa: S603 - arguments are not user-controlled
@@ -159,6 +207,8 @@ def _run_gh(
             shell=False,
             check=False,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError(f"gh {' '.join(args)} timed out after {timeout}s") from exc
     except (subprocess.SubprocessError, OSError) as exc:
         raise GitError(f"gh {' '.join(args)} failed: {type(exc).__name__}: {exc}") from exc
 

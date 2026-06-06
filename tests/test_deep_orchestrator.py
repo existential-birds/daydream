@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -1948,4 +1949,91 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     # Observable outcome 3: the merged report was written before the exit.
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).is_file(), (
         "merged report missing -- the apply-fixes gate's success/exit path did not run"
+    )
+
+
+# --- Git timeout under load (issue #120) ------------------------------------
+
+
+async def test_deep_run_recovers_from_transient_git_timeout(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for #120: a transient git timeout no longer fails the run.
+
+    Under heavy host load a trivial git command in the deep preamble would
+    exceed its 5s timeout, collapse to a generic ``GitError``, and the run
+    would exit 1 -- making every ``assert exit_code == 0`` deep test flaky.
+    With the bounded retry in ``git_ops._run_git`` the timeout is retried and
+    the run completes normally.
+
+    Drives the real production path: ``runner.run`` -> deep orchestrator ->
+    ``git_ops.diff`` -> ``_run_git`` -> ``subprocess.run`` (only the backend is
+    stubbed). The first git subprocess call raises ``TimeoutExpired``; every
+    later call delegates to the real ``subprocess.run``.
+    """
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    real_run = subprocess.run
+    state = {"timed_out_once": False}
+
+    def flaky_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        cmd = args[0] if args else kwargs.get("args", [])
+        # Only trip on a real `git` invocation (these go through the retry
+        # path); leave any `gh` call untouched so the test is deterministic.
+        is_git = isinstance(cmd, (list, tuple)) and len(cmd) and cmd[0] == "git"
+        if is_git and not state["timed_out_once"]:
+            state["timed_out_once"] = True
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=5)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", flaky_run)
+
+    exit_code = await _run_deep(multi_stack_target)
+
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    assert state["timed_out_once"], "the injected git timeout never fired"
+    # Observable outcome: the run survived the timeout and exited cleanly...
+    assert exit_code == 0
+    # ...and progressed past the diff preamble to write the merged report.
+    assert (multi_stack_target / REVIEW_OUTPUT_FILE).is_file()
+
+
+async def test_deep_run_reports_persistent_git_timeout_distinctly(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timeout that survives retries is surfaced as a distinct 'Git Timeout'.
+
+    A genuine bad-ref ``GitError`` reports 'Unable to determine base branch for
+    diff'. A timeout is a different failure mode (transient host load) and must
+    not be misreported as that deterministic-sounding ref error (#120). Drives
+    ``runner.run`` to the real orchestrator branch and captures the rendered
+    error title.
+    """
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    from daydream.git_ops import GitTimeoutError
+
+    def always_timeout(*args: Any, **kwargs: Any) -> str:
+        raise GitTimeoutError("git diff main...HEAD timed out after 30s (3 attempts)")
+
+    monkeypatch.setattr("daydream.git_ops.diff", always_timeout)
+
+    errors: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_error",
+        lambda console, title, msg, *a, **kw: errors.append((title, msg)),
+    )
+
+    exit_code = await _run_deep(multi_stack_target)
+
+    # Observable outcome: the run aborts...
+    assert exit_code == 1
+    # ...with the timeout-specific title, NOT the misleading base-branch error.
+    titles = [t for t, _ in errors]
+    assert "Git Timeout" in titles, f"expected a distinct Git Timeout error, got {errors!r}"
+    assert "Git Error" not in titles, (
+        f"a timeout was misreported as the generic base-branch error: {errors!r}"
     )

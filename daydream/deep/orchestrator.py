@@ -301,7 +301,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     # Late imports to avoid circular dependency with runner.
     from daydream import git_ops
     from daydream.backends import Backend
-    from daydream.git_ops import GitError
+    from daydream.git_ops import GitError, GitTimeoutError
     from daydream.phases import _git_branch, _git_log
     from daydream.runner import (
         _compute_diff_ref,
@@ -322,6 +322,12 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     # ------ Preamble (mirrors run_trust) ------
     try:
         diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
+    except GitTimeoutError as exc:
+        # Transient host-load timeout that survived git_ops' bounded retries.
+        # Report it accurately instead of the misleading "Unable to determine
+        # base branch" message a genuine ref error would produce (issue #120).
+        print_error(console, "Git Timeout", f"git timed out under load: {exc}")
+        return 1
     except GitError:
         diff = None
     log = _git_log(target_dir)
