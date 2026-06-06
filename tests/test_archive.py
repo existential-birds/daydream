@@ -23,6 +23,7 @@ from daydream.archive.index import (
     latest_label_observation,
     query_runs,
     reviewer_set_penalty_prior,
+    set_run_pr_link,
     update_labels,
     upsert_run,
 )
@@ -413,6 +414,13 @@ def test_update_labels_ambiguous_prefix(tmp_path: Path):
 
     with pytest.raises(ValueError, match="matches 2 sessions"):
         update_labels(tmp_path, "abc", ["x"])
+
+
+def test_set_run_pr_link_backfills_pr_columns(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s-orphan", pr_number=None, pr_repo=None))
+    set_run_pr_link(tmp_path, "s-orphan", 7, "org/repo")
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-orphan",))[0]
+    assert (row["pr_number"], row["pr_repo"]) == (7, "org/repo")
 
 
 def test_query_runs_with_where(tmp_path: Path):

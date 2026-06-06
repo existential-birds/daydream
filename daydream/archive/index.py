@@ -848,6 +848,36 @@ def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool
     return True
 
 
+def set_run_pr_link(archive_dir: Path, session_id: str, pr_number: int, pr_repo: str) -> None:
+    """Backfill the PR linkage columns on a run row.
+
+    Used by harvest to durably record a PR resolved for an orphan run (a run
+    launched before its PR existed, so ``pr_number`` was frozen as ``None``).
+    Persisting the linkage keeps subsequent harvest passes from re-querying
+    GitHub for the same row and makes the resolution auditable.
+
+    This is a pure linkage backfill: it touches only the ``pr_number`` and
+    ``pr_repo`` columns on the ``runs`` table and never writes to
+    ``label_observations`` or any cache column. A zero-row match (no such
+    ``session_id``) is a silent no-op; the caller guarantees the row exists.
+
+    Args:
+        archive_dir: Path to the archive root.
+        session_id: Full session ID of the run to link.
+        pr_number: Resolved PR number to record.
+        pr_repo: Resolved PR repository slug (``owner/name``) to record.
+    """
+    conn = _get_connection(archive_dir)
+    try:
+        conn.execute(
+            "UPDATE runs SET pr_number = ?, pr_repo = ? WHERE session_id = ?",
+            (pr_number, pr_repo, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def query_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> list[dict]:
     """Query the runs index with an optional WHERE clause.
 
