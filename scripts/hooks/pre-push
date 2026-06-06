@@ -8,7 +8,7 @@ set -euo pipefail
 echo "Running pre-push checks..."
 
 echo "→ Linting with ruff..."
-uv run ruff check daydream
+uv run ruff check daydream tests
 
 echo "→ Type checking with mypy..."
 uv run mypy daydream
