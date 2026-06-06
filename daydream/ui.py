@@ -580,8 +580,10 @@ def _append_label_and_id(header_line: Text, label: str | None, task_id: str, *, 
     """Append the shared ``→ "label" (id)`` suffix to a task-tool header line.
 
     Used by both the background-task (``TaskOutput``/``TaskStop``) and todo-list
-    (``TaskGet``/``TaskUpdate``) header branches so the label/id formatting lives
-    in one place (R13). When ``label`` is ``None`` only the dimmed id is shown.
+    (``TaskGet``/``TaskUpdate``/``TaskList``) header branches so the label/id
+    formatting lives in one place (R13). When ``label`` is ``None`` only the
+    dimmed id is shown; when ``task_id`` is empty (e.g. id-less ``TaskList``)
+    no id suffix is appended at all.
 
     Args:
         header_line: The header Text to append to (mutated in place).
@@ -594,7 +596,8 @@ def _append_label_and_id(header_line: Text, label: str | None, task_id: str, *, 
         header_line.append(' → "')
         header_line.append(label, style=STYLE_CYAN)
         header_line.append('"')
-    header_line.append(f" ({id_prefix}{task_id})", style=STYLE_DIM)
+    if task_id.strip():
+        header_line.append(f" ({id_prefix}{task_id})", style=STYLE_DIM)
 
 
 def _build_tool_header(

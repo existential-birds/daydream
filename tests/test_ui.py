@@ -246,6 +246,18 @@ def test_taskupdate_resolves_subject_and_shows_status():
     assert "Fix auth bug" in out and "completed" in out
 
 
+def test_tasklist_header_omits_empty_id_suffix():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "TaskList", {})
+    out = _render_panel_text(reg, "c1")
+    assert "TaskList" in out
+    assert "(#)" not in out and "()" not in out
+
+
 def test_taskoutput_result_shows_output_snippet():
     from rich.console import Console
 
