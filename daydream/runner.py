@@ -17,6 +17,7 @@ subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
 :func:`run`.
 """
 
+import os
 import shutil
 import uuid
 from collections.abc import Callable
@@ -28,7 +29,11 @@ from daydream import git_ops
 from daydream.agent import (
     MissingSkillError,
     console,
+    get_assume,
     get_non_interactive,
+    resolve_gate,
+    resolve_or_prompt,
+    set_assume,
     set_non_interactive,
     set_quiet_mode,
 )
@@ -40,6 +45,7 @@ from daydream.config import (
     SKILL_MAP,
     ReviewSkillChoice,
 )
+from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
 from daydream.git_ops import GitError
@@ -131,7 +137,15 @@ class RunConfig:
             "per-stack", or "merge").
         pr_number: GitHub PR number for PR feedback mode. If None, normal mode.
         bot: Bot username whose comments to fetch (e.g. "coderabbitai[bot]").
-        backend: Default backend to use ("claude" or "codex"). Default is "claude".
+        backend: Default backend to use ("claude" or "codex"). Default is None;
+            ``_resolve_backend`` falls back through the config file to ``"claude"``.
+        model: Global default model applied across phases when no explicit
+            per-phase model is set. Resolved by ``_resolved_model`` below the
+            per-phase field but above the config-file (phase then global) and
+            table sources. Default None.
+        file_config: File-sourced configuration (``[tool.daydream]`` /
+            ``.daydream.toml``) feeding ``_resolved_model`` / ``_resolve_backend``
+            as a low-precedence source. None is treated as an empty config.
         review_backend: Override backend for the review phase. If None, uses backend.
         fix_backend: Override backend for the fix phase. If None, uses backend.
         test_backend: Override backend for the test phase. If None, uses backend.
@@ -168,6 +182,9 @@ class RunConfig:
         plan: Generate an implementation plan and embed it in PR comments.
         non_interactive: Run without prompting; take each prompt's safe default
             without reading stdin.
+        assume: Forced yes/no answer for interactive gates — ``"yes"`` (``--yes``),
+            ``"no"``, or ``None``. Orthogonal to ``non_interactive``: it supplies a
+            pre-decided answer rather than controlling stdin access.
 
     """
 
@@ -178,7 +195,9 @@ class RunConfig:
     start_at: str = "review"
     pr_number: int | None = None
     bot: str | None = None
-    backend: str = "claude"
+    backend: str | None = None
+    model: str | None = None
+    file_config: DaydreamFileConfig | None = None
     review_backend: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
@@ -205,6 +224,7 @@ class RunConfig:
     extra_copy: list[Path] = field(default_factory=list)
     plan: bool = False
     non_interactive: bool = False
+    assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -252,25 +272,76 @@ def _make_archive_callback(
     return _cb
 
 
+def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
+    """Return ``config.file_config``, or an empty config when it is None.
+
+    A single accessor so resolution call sites never branch on ``None`` —
+    an absent file config behaves identically to one with no keys set.
+    """
+    return config.file_config if config.file_config is not None else DaydreamFileConfig()
+
+
+def _resolved_backend_name(config: RunConfig, phase: str) -> str:
+    """Resolve the backend kind for ``phase`` across all precedence tiers.
+
+    Order (highest first): explicit per-phase ``{phase}_backend``, global
+    ``config.backend`` (``--backend``), file-config phase override, file-config
+    global, then the terminal ``"claude"`` fallback.
+    """
+    file_config = _file_config_or_empty(config)
+    return (
+        getattr(config, f"{phase}_backend", None)
+        or config.backend
+        or file_config.phase_backend(phase)
+        or file_config.backend
+        or "claude"
+    )
+
+
+def _resolved_model(config: RunConfig, phase: str) -> str | None:
+    """Resolve the model for ``phase`` across all precedence tiers.
+
+    Order (highest first): explicit per-phase ``{phase}_model``, global
+    ``config.model`` (``--model``), file-config phase override, file-config
+    global, then ``PHASE_DEFAULT_MODELS[backend][phase]``. Returns ``None``
+    only when no source supplies a model (the backend then applies its own
+    default).
+
+    The per-backend table lookup keys off the backend kind resolved by
+    :func:`_resolved_backend_name`, so a config-selected backend still gets its
+    own phase tier defaults.
+    """
+    file_config = _file_config_or_empty(config)
+    backend_name = _resolved_backend_name(config, phase)
+    return (
+        getattr(config, f"{phase}_model", None)
+        or config.model
+        or file_config.phase_model(phase)
+        or file_config.model
+        or PHASE_DEFAULT_MODELS.get(backend_name, {}).get(phase)
+    )
+
+
 def _resolve_backend(
     config: RunConfig,
     phase: str,
     cache: dict[tuple[str, str | None], Backend] | None = None,
 ) -> Backend:
-    """Get or create the backend for a given phase, respecting per-phase overrides.
+    """Get or create the backend for a given phase, respecting all precedence tiers.
 
-    Resolution order for the model:
-        1. ``getattr(config, f"{phase}_model", None)`` — explicit per-phase flag.
-        2. ``PHASE_DEFAULT_MODELS[backend_name].get(phase)`` — per-backend phase
-           default table.
-        3. ``None`` — let :func:`create_backend` apply its own backend default.
+    Both the backend kind and the model are resolved through the source-tiered
+    precedence ``CLI > config-file > default``:
 
-    The backend kind is resolved first via
-    ``getattr(config, f"{phase}_backend", None) or config.backend``; the model
-    lookup then keys into that backend name's table.
+    - Backend kind via :func:`_resolved_backend_name`
+      (per-phase flag → ``config.backend`` → file-config phase →
+      file-config global → ``"claude"``).
+    - Model via :func:`_resolved_model`
+      (per-phase field → ``config.model`` → file-config phase →
+      file-config global → ``PHASE_DEFAULT_MODELS`` →
+      ``None``, where ``None`` falls through to the backend's own default).
 
     Args:
-        config: Run configuration with backend and per-phase model settings.
+        config: Run configuration with backend/model and file-config sources.
         phase: Phase name (e.g. ``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
             ``"intent"``, ``"wonder"``, ``"envision"``, ``"merge"``,
             ``"exploration"``, ``"pr_feedback"``).
@@ -283,12 +354,8 @@ def _resolve_backend(
         Backend instance for the phase.
 
     """
-    backend_override = getattr(config, f"{phase}_backend", None)
-    backend_name = backend_override or config.backend
-
-    phase_flag = getattr(config, f"{phase}_model", None)
-    table_default = PHASE_DEFAULT_MODELS.get(backend_name, {}).get(phase)
-    resolved_model = phase_flag or table_default  # ``None`` falls through to backend default
+    backend_name = _resolved_backend_name(config, phase)
+    resolved_model = _resolved_model(config, phase)
 
     cache_key = (backend_name, resolved_model)
     if cache is not None:
@@ -297,6 +364,53 @@ def _resolve_backend(
         return cache[cache_key]
 
     return create_backend(backend_name, model=resolved_model)
+
+
+def _truthy(value: str | None) -> bool:
+    """Interpret an environment-variable string as a boolean.
+
+    Args:
+        value: The raw environment value, or None when unset.
+
+    Returns:
+        False for None and for ``""``/``"0"``/``"false"`` (case-insensitive);
+        True for any other non-empty value.
+    """
+    if value is None:
+        return False
+    return value.strip().lower() not in ("", "0", "false")
+
+
+def _stdin_isatty() -> bool:
+    """Report whether stdin is an interactive TTY.
+
+    Returns:
+        True if stdin is attached to a terminal. A detached or closed stdin
+        (raising ``AttributeError``/``ValueError``) is treated as not a TTY.
+    """
+    import sys
+
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _resolve_interactive(config: "RunConfig") -> bool:
+    """Resolve whether this run may prompt the user, from three sources.
+
+    Precedence: an explicit ``--non-interactive`` flag forces False; otherwise
+    the run is interactive only when stdin is a TTY and ``CI`` is not truthy.
+
+    Args:
+        config: The run configuration carrying the explicit flag.
+
+    Returns:
+        True if prompts may read stdin; False for unattended/harness runs.
+    """
+    if config.non_interactive:
+        return False
+    return _stdin_isatty() and not _truthy(os.environ.get("CI"))
 
 
 def _compute_diff_ref(cwd: Path) -> str:
@@ -350,20 +464,28 @@ async def run(config: RunConfig | None = None) -> int:
 
     # Quiet mode tweak: Codex backends need their shell output visible because
     # those commands ARE the user-facing signal. Done before any backend is
-    # constructed so per-phase backends inherit the right setting.
+    # constructed so per-phase backends inherit the right setting. Resolve each
+    # phase's backend through the full precedence chain (CLI/config-file)
+    # so a codex backend selected via config still disables quiet mode.
     quiet = config.quiet
     if quiet:
-        codex_in_use = config.backend == "codex" or any(
-            b == "codex"
-            for b in (config.review_backend, config.fix_backend, config.test_backend)
-            if b is not None
+        codex_in_use = any(
+            _resolved_backend_name(config, phase) == "codex"
+            for phase in ("review", "fix", "test")
         )
         if codex_in_use:
             quiet = False
     set_quiet_mode(quiet)
-    # Take each prompt's safe default without reading stdin when requested.
-    # Set before any phase that can prompt runs.
-    set_non_interactive(config.non_interactive)
+    # Resolve the interactivity axis from three sources, in precedence order:
+    #   1. explicit ``--non-interactive`` flag (config.non_interactive) wins,
+    #   2. else a non-TTY stdin (piped/detached) implies unattended,
+    #   3. else a truthy ``CI`` env var implies unattended.
+    # The result feeds set_non_interactive before any phase that can prompt runs.
+    set_non_interactive(not _resolve_interactive(config))
+    # Interaction has a second, orthogonal axis: ``assume`` (``--yes``) supplies a
+    # forced gate answer regardless of TTY. The two feed ``resolve_gate`` at each
+    # yes/no gate. Set alongside non_interactive so every gate sees both axes.
+    set_assume(config.assume)
 
     # Resolve target directory (from config or prompt). Done outside the
     # workspace context manager so that path-validation errors short-circuit
@@ -807,12 +929,20 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             print_error(console, "Missing Review File", str(e))
             return 1
 
-    # Cleanup setting (from config or prompt).
+    # Cleanup setting. An explicit ``--cleanup/--no-cleanup`` (config.cleanup)
+    # wins outright. Otherwise route the yes/no gate through resolve_gate:
+    # ``--yes`` enables cleanup; an unattended run keeps the review output
+    # (safe_default=False); an interactive run prompts.
     if config.cleanup is not None:
         cleanup_enabled = config.cleanup
     else:
-        cleanup_response = prompt_user(console, "Cleanup review output after completion? [y/N]", "n")
-        cleanup_enabled = cleanup_response.lower() in ("y", "yes")
+        cleanup_enabled = resolve_or_prompt(
+            assume=get_assume(),
+            interactive=not get_non_interactive(),
+            safe_default=False,
+            question="Cleanup review output after completion? [y/N]",
+            default="n",
+        )
 
     # Backends (per-phase overrides).
     backend_cache: dict[tuple[str, str | None], Backend] = {}
@@ -1058,21 +1188,28 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             ),
         )
 
-        # non_interactive routes to phase_commit_push_auto below because the
-        # interactive prompt's safe default is "decline" (y/N), which would
-        # silently skip the commit when stdin is not a TTY.
-
         # Clean up exploration files before exit
         exploration_cleanup = target_dir / ".daydream" / "exploration"
         if exploration_cleanup.is_dir():
             shutil.rmtree(exploration_cleanup)
 
-        # Commit if tests passed
+        # Commit if tests passed. Commit/push gate across the two interaction
+        # axes. The unattended safe default is to auto-commit (safe_default=True):
+        # the interactive prompt's own default is "decline", which would silently
+        # drop a green run's commit when stdin is not a TTY. ``--yes`` also
+        # auto-commits; a forced ``--no`` skips the commit; an interactive run
+        # with no assumption gets the y/N prompt.
         if tests_passed:
-            if config.non_interactive:
+            commit_decision = resolve_gate(
+                assume=get_assume(),
+                interactive=not get_non_interactive(),
+                safe_default=True,
+            )
+            if commit_decision is True:
                 await phase_commit_push_auto(review_backend, work)
-            else:
+            elif commit_decision is None:
                 await phase_commit_push(review_backend, work)
+            # commit_decision is False -> forced decline, skip commit.
 
             if cleanup_enabled:
                 review_output_path = target_dir / REVIEW_OUTPUT_FILE

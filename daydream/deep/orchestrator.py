@@ -23,7 +23,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from daydream.agent import console
+from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
 from daydream.config import REVIEW_OUTPUT_FILE, SKILL_MAP, STRUCTURE_STACK_NAME
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
@@ -62,7 +62,6 @@ from daydream.ui import (
     print_success,
     print_verification_summary,
     print_warning,
-    prompt_user,
 )
 from daydream.workspace import WorkContext
 
@@ -304,7 +303,12 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     from daydream.backends import Backend
     from daydream.git_ops import GitError
     from daydream.phases import _git_branch, _git_log
-    from daydream.runner import _compute_diff_ref, _make_archive_callback, _resolve_backend
+    from daydream.runner import (
+        _compute_diff_ref,
+        _make_archive_callback,
+        _resolve_backend,
+        _resolved_backend_name,
+    )
     from daydream.ui import phase_subtitle, print_dim, print_phase_hero
 
     # Per-phase backends are resolved on demand via `_resolve_backend(config,
@@ -352,7 +356,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
-        print_info(console, f"Default backend: {config.backend}")
+        print_info(console, f"Default backend: {_resolved_backend_name(config, 'review')}")
         console.print()
 
         # ------ Resume gate (D-34, D-36, D-37) ------
@@ -654,8 +658,17 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     target_dir, merged_items_path(dd), console=console
                 )
 
-            answer = prompt_user(console, "Apply fixes now? [y/N]", "n")
-            if answer.strip().lower() not in ("y", "yes"):
+            # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
+            # an unattended run with no assumption declines (safe_default=False) so a
+            # piped/CI run never mutates without intent; otherwise prompt.
+            decision = resolve_or_prompt(
+                assume=get_assume(),
+                interactive=not get_non_interactive(),
+                safe_default=False,
+                question="Apply fixes now? [y/N]",
+                default="n",
+            )
+            if not decision:
                 print_success(console, f"Report written to {merged_report}. Exiting.")
                 return 0
 

@@ -214,6 +214,19 @@ def build_manifest(
     """
     totals = recorder._final_totals  # noqa: SLF001 - intentional access to recorder internals
 
+    # Deferred import to avoid a module-level cycle: archive.manifest →
+    # runner → (lazy) archive.  Importing here keeps the call-site semantics
+    # identical while breaking the top-level cycle.
+    from daydream.runner import _resolved_backend_name  # noqa: PLC0415 - deferred import avoids cycle
+
+    # Resolve the effective backend through the full precedence chain
+    # (per-phase flag → config.backend → file-config phase → file-config global → "claude")
+    # so the manifest records the backend that was *actually* used rather than the raw
+    # config value (which is None when the backend came from file-config).
+    # "review" is used as the representative phase — consistent with how the
+    # orchestrator prints the default backend.
+    backend_used = _resolved_backend_name(config, "review")
+
     m = Manifest(
         session_id=recorder.session_id,
         archived_at=datetime.now(timezone.utc).isoformat(),
@@ -221,10 +234,10 @@ def build_manifest(
         run_flow=recorder.run_flow.value,
         skill=config.skill,
         model=None,
-        backend=config.backend,
-        review_backend=config.review_backend,
-        fix_backend=config.fix_backend,
-        test_backend=config.test_backend,
+        backend=backend_used,
+        review_backend=_resolved_backend_name(config, "review"),
+        fix_backend=_resolved_backend_name(config, "fix"),
+        test_backend=_resolved_backend_name(config, "test"),
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         loop=config.loop,

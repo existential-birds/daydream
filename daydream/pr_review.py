@@ -26,10 +26,11 @@ from typing import TYPE_CHECKING, Any
 
 import daydream
 from daydream import git_ops
+from daydream.agent import get_assume, get_non_interactive, resolve_or_prompt
 from daydream.git_ops import GitError
 from daydream.pr_comment_renderer import render_run_info_block
 from daydream.trajectory import TrajectoryRecorder, get_current_recorder
-from daydream.ui import print_info, print_success, print_warning, prompt_user
+from daydream.ui import print_info, print_success, print_warning
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -889,8 +890,13 @@ async def _post(
     )
     print_info(console, f"PR #{pr.number}: {summary}")
 
-    answer = prompt_user(console, "Post these as a PR review? [y/N]", "n")
-    if answer.strip().lower() not in ("y", "yes"):
+    if not resolve_or_prompt(
+        assume=get_assume(),
+        interactive=not get_non_interactive(),
+        safe_default=False,
+        question="Post these as a PR review? [y/N]",
+        default="n",
+    ):
         print_info(console, "Skipped posting to PR.")
         return
 

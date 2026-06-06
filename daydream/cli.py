@@ -1,24 +1,31 @@
 """CLI entry point for daydream.
 
-Subcommands dispatched manually from :func:`main` before the main argparse
-parser runs (so their flags don't collide with the top-level ``TARGET``
-positional):
+Dispatch is verb-first. :func:`_first_verb` classifies the leading argv token
+against :data:`KNOWN_VERBS`; anything that is not an explicit verb — a bare
+target path, a leading flag, or empty argv — falls through to the default
+``review`` shim, so ``daydream /path`` and ``daydream review /path`` are
+equivalent. Each non-``review`` verb is dispatched manually from :func:`main`
+before the main argparse parser runs (so its flags don't collide with the
+top-level ``TARGET`` positional):
 
+- ``daydream [review] <target>`` — the review/fix loop (default verb)
 - ``daydream feedback <pr#>`` — apply bot PR-review comments
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
-- ``daydream harvest`` — walk the archive and append one bitemporal
-  annotation (outcome label + intrinsic reward) per indexed run
-- ``daydream label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
-  — record an authoritative human outcome label that overrides automated ones
-- ``daydream build-corpus --out <path>`` — project the as-of-pinned
-  annotations into a JSONL training corpus plus a lineage manifest
+- ``daydream bench`` — score deep-review findings against the offline benchmark
+- ``daydream corpus <sub-verb>`` — the data-pipeline namespace:
+    - ``corpus harvest`` — walk the archive and append one bitemporal
+      annotation (outcome label + intrinsic reward) per indexed run
+    - ``corpus build --out <path>`` — project the as-of-pinned annotations
+      into a JSONL training corpus plus a lineage manifest
+    - ``corpus label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
+      — record an authoritative human outcome label that overrides automated ones
 """
 
 import argparse
 import inspect
 import signal
 import sys
-import warnings
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -31,6 +38,7 @@ from daydream.agent import (
     set_shutdown_requested,
 )
 from daydream.benchmark.cli import _handle_bench_command
+from daydream.config_file import load_file_config
 from daydream.runner import RunConfig, run, run_feedback
 from daydream.trajectory import get_signal_recorder
 from daydream.ui import (
@@ -39,6 +47,33 @@ from daydream.ui import (
     print_error,
     set_shutdown_panel,
 )
+
+# Verb-first dispatch table. ``_first_verb`` classifies the leading argv token;
+# anything that isn't an explicit verb (bare path, leading flag, empty argv)
+# falls through to the ``review`` golden path via the default-verb shim.
+KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench"}
+
+
+def _first_verb(argv: list[str]) -> str:
+    """Classify the leading argv token into a verb.
+
+    Returns the leading token when it is a recognized verb; otherwise returns
+    ``"review"``. The fallthrough covers the three default-verb cases — empty
+    argv, a leading flag, and a bare target path — so a plain
+    ``daydream /path`` routes through the same parser as ``daydream review
+    /path``.
+
+    Args:
+        argv: The raw argument list (``sys.argv[1:]``).
+
+    Returns:
+        str: The dispatched verb name (a member of :data:`KNOWN_VERBS` or
+        ``"review"``).
+
+    """
+    if argv and argv[0] in KNOWN_VERBS:
+        return argv[0]
+    return "review"
 
 
 def _signal_handler(signum: int, frame: object) -> None:
@@ -123,33 +158,29 @@ def _detect_repo_slug(repo: Path) -> str | None:
     return f"{owner}/{name}"
 
 
-_REMOVED_MODEL_FLAG_MESSAGE = (
-    "--model has been removed. Use per-phase flags: "
-    "--review-model, --parse-model, --fix-model, --test-model, --exploration-model. "
-    "See README for the per-backend default table."
-)
-
-
-def _reject_removed_model_flag(parser: argparse.ArgumentParser, argv: list[str]) -> None:
-    """Surface a curated error before argparse runs when ``--model`` is passed.
-
-    Argparse would otherwise reject ``--model`` with a generic "unrecognized
-    arguments" message that gives users no path forward. Catching both
-    ``--model X`` and ``--model=X`` shapes here points users at the new
-    per-phase flags before any parsing happens.
-    """
-    for token in argv:
-        if token == "--model" or token.startswith("--model="):
-            parser.error(_REMOVED_MODEL_FLAG_MESSAGE)
-
-
-def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = True) -> None:
     """Add the shared (non-output-mode) arguments to a parser or subparser.
 
     Used by both the top-level parser and the ``feedback`` subparser so flags
-    like ``--backend``, ``--trajectory`` work in both places. ``--model`` is
-    intentionally absent — see :func:`_reject_removed_model_flag` for the
-    curated error surfaced when a user passes the removed flag.
+    like ``--backend``, ``--model``, ``--trajectory`` work in both places. The
+    global ``--model``/``--backend`` here feed the source-tiered precedence in
+    :func:`daydream.runner._resolved_model` / ``_resolve_backend``
+    (CLI > config-file phase override > config-file global > per-backend default).
+
+    Per-phase model/backend overrides are no longer CLI flags — they live in
+    ``[tool.daydream.phases.<phase>]`` of the config file (``pyproject.toml`` /
+    ``.daydream.toml``). The removed flags are rejected with a curated pointer
+    by :func:`_reject_removed_phase_flags`; the underlying ``RunConfig`` fields
+    (``review_model``, ``fix_backend``, …) remain and are still populated from
+    the config file and read by ``_resolve_backend``.
+
+    Args:
+        parser: The parser (or subparser) to add the shared arguments to.
+        full_help: When False, advanced flags (``--trajectory``, ``--no-archive``,
+            ``--eval``, ``--non-interactive``) are added with their help text
+            suppressed so the default ``--help`` stays focused on common flags.
+            They still parse and populate ``RunConfig`` unchanged; ``--help-all``
+            re-builds the parser with ``full_help=True`` to surface them.
     """
     parser.add_argument(
         "--trajectory",
@@ -160,93 +191,57 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Write ATIF v1.6 trajectory JSON to this path "
             "(default: <target>/.daydream/runs/<session_id>/trajectory.json)"
-        ),
+        ) if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--no-archive",
         action="store_true",
         default=False,
         dest="no_archive",
-        help="Disable automatic archival to ~/.daydream/archive/",
+        help="Disable automatic archival to ~/.daydream/archive/" if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--eval",
         action="store_true",
         default=False,
         dest="run_eval",
-        help="Run deterministic evaluation analysis and store evaluation.json in archive",
+        help="Run deterministic evaluation analysis and store evaluation.json in archive"
+        if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--backend", "-b",
         choices=["claude", "codex"],
-        default="claude",
-        help="Agent backend: claude (default) or codex",
-    )
-    parser.add_argument(
-        "--review-backend",
-        choices=["claude", "codex"],
         default=None,
-        help="Override backend for review phase",
+        help="Agent backend: claude or codex "
+             "(default: config file, then claude)",
     )
     parser.add_argument(
-        "--fix-backend",
-        choices=["claude", "codex"],
-        default=None,
-        help="Override backend for fix phase",
-    )
-    parser.add_argument(
-        "--test-backend",
-        choices=["claude", "codex"],
-        default=None,
-        help="Override backend for test phase",
-    )
-    parser.add_argument(
-        "--exploration-model",
-        default=None,
-        dest="exploration_model",
-        help=(
-            "Model for exploration subagents (default: claude-sonnet-4-6). "
-            "Use a smaller model to save cost."
-        ),
-    )
-    parser.add_argument(
-        "--review-model",
+        "--model", "-m",
         default=None,
         type=str,
-        dest="review_model",
+        dest="model",
         metavar="MODEL",
-        help="Override model for the REVIEW phase (default: per-backend table; see README).",
-    )
-    parser.add_argument(
-        "--parse-model",
-        default=None,
-        type=str,
-        dest="parse_model",
-        metavar="MODEL",
-        help="Override model for the PARSE phase (default: per-backend table; see README).",
-    )
-    parser.add_argument(
-        "--fix-model",
-        default=None,
-        type=str,
-        dest="fix_model",
-        metavar="MODEL",
-        help="Override model for the FIX phase (default: per-backend table; see README).",
-    )
-    parser.add_argument(
-        "--test-model",
-        default=None,
-        type=str,
-        dest="test_model",
-        metavar="MODEL",
-        help="Override model for the TEST phase (default: per-backend table; see README).",
+        help="Global default model across phases "
+             "(default: config file, then the per-backend table). "
+             "This global --model takes precedence over any per-phase config-file override.",
     )
     parser.add_argument(
         "--non-interactive",
         action="store_true",
         dest="non_interactive",
         help="Run without prompting; take each prompt's safe default "
-             "(confirm intent, decline fixes, exit the test/heal loop).",
+             "(confirm intent, decline fixes, exit the test/heal loop)."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_const",
+        const="yes",
+        default=None,
+        dest="assume",
+        help="Auto-answer every yes/no gate with yes (apply fixes, commit). "
+             "Orthogonal to --non-interactive: --yes pre-decides the answer, "
+             "--non-interactive controls whether we may block on stdin.",
     )
 
 
@@ -284,14 +279,14 @@ def _run_summarize(args: argparse.Namespace) -> int:
 
 
 def _build_build_corpus_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream build-corpus --out <path> [...]``.
+    """Build the parser for ``daydream corpus build --out <path> [...]``.
 
-    Like ``summarize`` and ``feedback``, ``build-corpus`` is dispatched manually
-    from ``main()`` before the main parser runs so its options don't collide
-    with the top-level ``TARGET`` positional.
+    The ``corpus build`` sub-verb is dispatched manually from ``main()`` (via
+    :func:`_handle_corpus_command`) before the main parser runs so its options
+    don't collide with the top-level ``TARGET`` positional.
     """
     parser = argparse.ArgumentParser(
-        prog="daydream build-corpus",
+        prog="daydream corpus build",
         description="Project as-of-pinned annotations into JSONL training records (one object per run).",
     )
 
@@ -406,16 +401,16 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
 
 
 def _handle_build_corpus_command(argv: list[str]) -> int:
-    """Handle ``daydream build-corpus --out <path> [...]``.
+    """Handle ``daydream corpus build --out <path> [...]``.
 
     Drives :func:`daydream.training.corpus.run_build_corpus` synchronously
-    (``build-corpus`` does no agent work — just SQLite reads and a JSONL +
+    (``corpus build`` does no agent work — just SQLite reads and a JSONL +
     lineage-manifest write). Returns an exit code rather than calling
     :func:`sys.exit`; ``main()`` is responsible for translating the code into a
     process exit. This keeps the handler easy to drive from tests.
 
     Args:
-        argv: The argument vector after the ``build-corpus`` verb.
+        argv: The argument vector after the ``corpus build`` sub-verb.
 
     Returns:
         ``0`` on success; ``1`` on a validation error.
@@ -514,12 +509,49 @@ def _build_feedback_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_main_parser() -> argparse.ArgumentParser:
-    """Build the main argparse parser for the consolidated CLI surface."""
+class _HelpAllAction(argparse.Action):
+    """Print the full help (advanced flags included) and exit.
+
+    The default ``--help`` is built with ``full_help=False`` so advanced flags
+    are suppressed. ``--help-all`` re-builds the parser with ``full_help=True``
+    and renders that help instead, surfacing every flag without changing how
+    any of them parse.
+    """
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):  # noqa: A002 - `help` is argparse.Action's API parameter name
+        super().__init__(
+            option_strings=option_strings,
+            dest=dest,
+            default=default,
+            nargs=0,
+            help=help,
+        )
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        _build_main_parser(full_help=True).print_help()
+        parser.exit()
+
+
+def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
+    """Build the main argparse parser for the consolidated CLI surface.
+
+    Args:
+        full_help: When True, advanced flags carry their help text so they show
+            up under ``--help-all``. When False (the default for ``--help``),
+            advanced flags are added with ``argparse.SUPPRESS`` help so the
+            default help stays focused on common flags. Either way the flags
+            parse identically and populate ``RunConfig`` unchanged.
+    """
     parser = argparse.ArgumentParser(
         prog="daydream",
         description="Automated code review and fix loop. "
                     "Use `daydream feedback <pr#>` to process PR bot comments.",
+    )
+
+    parser.add_argument(
+        "--help-all",
+        action=_HelpAllAction,
+        help="Show all flags, including advanced ones, then exit.",
     )
 
     parser.add_argument(
@@ -568,7 +600,7 @@ def _build_main_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         dest="force_worktree",
-        help="Force ephemeral worktree even when --branch is omitted.",
+        help="Force ephemeral worktree even when --branch is omitted." if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--shallow",
@@ -584,14 +616,15 @@ def _build_main_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         dest="extra_copy",
         type=Path,
-        help="Extra path to copy into ephemeral worktree (repeatable).",
+        help="Extra path to copy into ephemeral worktree (repeatable)." if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--plan",
         action="store_true",
         default=False,
         dest="plan",
-        help="Generate an implementation plan and embed it in PR comments (use with --comment).",
+        help="Generate an implementation plan and embed it in PR comments (use with --comment)."
+        if full_help else argparse.SUPPRESS,
     )
 
     # ---- Skill selection (overrides auto-detect) ----
@@ -609,13 +642,13 @@ def _build_main_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         dest="cleanup",
-        help="Cleanup review output after completion",
+        help="Cleanup review output after completion" if full_help else argparse.SUPPRESS,
     )
     cleanup_group.add_argument(
         "--no-cleanup",
         action="store_false",
         dest="cleanup",
-        help="Keep review output after completion",
+        help="Keep review output after completion" if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--start-at",
@@ -626,7 +659,7 @@ def _build_main_parser() -> argparse.ArgumentParser:
             "Start at a specific phase (default: review). "
             "Choices: review | parse | fix | test | ttt | per-stack | merge. "
             "ttt, per-stack, and merge are valid only in deep (non-shallow) mode."
-        ),
+        ) if full_help else argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -635,27 +668,107 @@ def _build_main_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="PATH",
         dest="ignore_paths",
-        help="Exclude path from diff (repeatable, e.g. --ignore-path .planning --ignore-path vendor)",
+        help="Exclude path from diff (repeatable, e.g. --ignore-path .planning --ignore-path vendor)"
+        if full_help else argparse.SUPPRESS,
     )
 
     parser.add_argument(
         "--loop",
-        action="store_true",
-        default=False,
-        help="Repeat review-fix-test cycle until zero issues or max iterations",
-    )
-    parser.add_argument(
-        "--max-iterations",
+        nargs="?",
+        const=5,
+        default=None,
         type=int,
-        default=5,
         metavar="N",
-        dest="max_iterations",
-        help="Maximum loop iterations (default: 5, only meaningful with --loop)",
+        help="Repeat the review-fix-test cycle until zero issues or N iterations (default N: 5)",
     )
 
-    _add_shared_arguments(parser)
+    _add_shared_arguments(parser, full_help=full_help)
 
     return parser
+
+
+def _normalize_loop_argv(raw_argv: list[str]) -> list[str]:
+    """Disambiguate ``--loop``'s optional count from a following positional.
+
+    ``--loop`` carries an optional integer count (``nargs="?"``), which makes
+    argparse greedily try to consume the next token as that count. For the
+    golden path ``daydream --loop /some/path`` argparse would then fail trying
+    to parse the path as an int. This pre-scan pins the count explicitly when
+    ``--loop`` is bare (last token, or followed by a flag or a non-integer
+    token), turning it into ``--loop=5`` so the positional is preserved. An
+    explicit ``--loop N`` is left untouched.
+
+    Args:
+        raw_argv: The argument list after verb-shim stripping.
+
+    Returns:
+        A new argv list with bare ``--loop`` rewritten to ``--loop=5``.
+    """
+    def _looks_like_int(s: str) -> bool:
+        # Use int() — the same parser argparse applies via type=int — so the
+        # pre-scan and the argument parser agree on what counts as an integer.
+        try:
+            int(s)
+            return True
+        except ValueError:
+            return False
+
+    normalized: list[str] = []
+    for i, token in enumerate(raw_argv):
+        if token == "--loop":
+            nxt = raw_argv[i + 1] if i + 1 < len(raw_argv) else None
+            # Accept both positive bare digits ("5") and negative/signed
+            # integers ("-3", "+2") so argparse receives the literal value
+            # and can apply type=int validation (including our post-parse
+            # positive-count check).  Only pin the default when the next
+            # token is absent, a flag, or a clearly non-numeric string.
+            if nxt is None or not _looks_like_int(nxt):
+                # Bare --loop (end, before a flag, or before a non-int target):
+                # pin the default count so the next token stays a positional.
+                normalized.append("--loop=5")
+                continue
+        normalized.append(token)
+    return normalized
+
+
+# Removed per-phase model/backend flags → their config-file replacement. The
+# per-phase overrides moved out of the CLI surface into
+# ``[tool.daydream.phases.<phase>]`` (pyproject.toml / .daydream.toml). The
+# ``RunConfig`` fields they used to set (``review_model``, ``fix_backend``, …)
+# remain — still read by ``_resolve_backend`` and settable via the config file —
+# they are simply no longer CLI-settable.
+_REMOVED_PHASE_FLAGS: dict[str, str] = {
+    "--review-backend": "[tool.daydream.phases.review] backend = \"...\"",
+    "--fix-backend": "[tool.daydream.phases.fix] backend = \"...\"",
+    "--test-backend": "[tool.daydream.phases.test] backend = \"...\"",
+    "--exploration-model": "[tool.daydream.phases.exploration] model = \"...\"",
+    "--review-model": "[tool.daydream.phases.review] model = \"...\"",
+    "--parse-model": "[tool.daydream.phases.parse] model = \"...\"",
+    "--fix-model": "[tool.daydream.phases.fix] model = \"...\"",
+    "--test-model": "[tool.daydream.phases.test] model = \"...\"",
+}
+
+
+def _reject_removed_phase_flags(parser: argparse.ArgumentParser, argv: list[str]) -> None:
+    """Reject any removed per-phase model/backend flag with a config pointer.
+
+    Pre-parse scan (P-reject pattern): if any token in ``argv`` is a removed
+    per-phase flag — either the bare ``--flag`` form (``--fix-model value``) or
+    the joined ``--flag=value`` form — call ``parser.error`` with a curated
+    message naming the ``[tool.daydream.phases.<phase>]`` config replacement.
+
+    Args:
+        parser: The parser whose ``error`` is used to exit with the message.
+        argv: The argument list (after verb-shim stripping).
+    """
+    for token in argv:
+        flag = token.split("=", 1)[0]
+        replacement = _REMOVED_PHASE_FLAGS.get(flag)
+        if replacement is not None:
+            parser.error(
+                f"{flag} was removed; set it in the config file instead: "
+                f"{replacement} (pyproject.toml or .daydream.toml)."
+            )
 
 
 def _parse_args(argv: list[str] | None = None) -> RunConfig:
@@ -676,12 +789,18 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     """
     raw_argv = sys.argv[1:] if argv is None else list(argv)
 
+    # Default-verb shim: an explicit leading ``review`` token is equivalent to
+    # the bare ``daydream <target>`` form. Strip it so both parse identically
+    # against the main review parser (positional TARGET unchanged).
+    if raw_argv and raw_argv[0] == "review":
+        raw_argv = raw_argv[1:]
+
     # Manual subcommand dispatch: argparse subparsers eat the first positional
     # which conflicts with our positional TARGET. So we pop "feedback" off the
     # front ourselves and route to a dedicated parser.
     if raw_argv and raw_argv[0] == "feedback":
         feedback_parser = _build_feedback_parser()
-        _reject_removed_model_flag(feedback_parser, raw_argv[1:])
+        _reject_removed_phase_flags(feedback_parser, raw_argv[1:])
         feedback_args = feedback_parser.parse_intermixed_args(raw_argv[1:])
         return _build_feedback_config(feedback_args)
 
@@ -689,8 +808,10 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # we never reach this branch from the summarize path. Kept here only as
     # a guard for callers that hand crafted-argv to _parse_args directly.
 
+    raw_argv = _normalize_loop_argv(raw_argv)
+
     parser = _build_main_parser()
-    _reject_removed_model_flag(parser, raw_argv)
+    _reject_removed_phase_flags(parser, raw_argv)
     args = parser.parse_args(raw_argv)
 
     # ----- Reject purely numeric TARGET (likely meant `daydream feedback N`) -----
@@ -707,6 +828,12 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     elif args.review:
         output_mode = "review"
 
+    # ``--yes`` auto-answers the fix/commit gates; ``--review``/``--comment`` run
+    # no fix phase, so the flag has nothing to answer there. Reject it rather than
+    # silently ignore it.
+    if args.assume == "yes" and output_mode != "loop":
+        parser.error("--yes has no effect with --review/--comment (no fix phase to auto-apply)")
+
     # ttt/per-stack/merge are deep-pipeline resume stages; they don't apply
     # to shallow runs.
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
@@ -720,15 +847,19 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
             "(use --shallow, or --start-at fix to resume after the merged report)"
         )
 
-    # Validate --loop incompatibilities
-    if args.loop and output_mode != "loop":
-        parser.error("--loop cannot be combined with --review/--comment")
-    if args.loop and args.start_at != "review":
-        parser.error("--loop requires starting at review phase (incompatible with --start-at)")
+    # ``--loop`` takes an optional count (``--loop`` ⇒ 5, ``--loop N`` ⇒ N).
+    # ``args.loop`` is None when the flag is absent.
+    loop = args.loop is not None
+    max_iterations = args.loop if args.loop is not None else 5
 
-    # Warn if --max-iterations without --loop
-    if args.max_iterations != 5 and not args.loop:
-        warnings.warn("--max-iterations has no effect without --loop", stacklevel=2)
+    if loop and max_iterations < 1:
+        parser.error("--loop count must be positive")
+
+    # Validate --loop incompatibilities
+    if loop and output_mode != "loop":
+        parser.error("--loop cannot be combined with --review/--comment")
+    if loop and args.start_at != "review":
+        parser.error("--loop requires starting at review phase (incompatible with --start-at)")
 
     # Detect repo slug and PR number for trajectory/archive metadata.
     # Attribute provenance to the target checkout, not the invoking cwd —
@@ -737,26 +868,34 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     pr_repo = _detect_repo_slug(target_repo)
     pr_number = _auto_detect_pr_number(target_repo)
 
+    # Low-precedence model/backend source: [tool.daydream] / .daydream.toml at
+    # the target repo root, consulted by ``_resolve_backend`` below CLI and env.
+    file_config = load_file_config(target_repo)
+
     return RunConfig(
         target=args.target,
         skill=args.skill,
-        exploration_model=args.exploration_model,
-        review_model=args.review_model,
-        parse_model=args.parse_model,
-        fix_model=args.fix_model,
-        test_model=args.test_model,
+        model=args.model,
+        file_config=file_config,
+        # Per-phase model/backend overrides are config-file-only (no CLI flags).
+        # Left None here so the config file is the sole low-precedence source.
+        exploration_model=None,
+        review_model=None,
+        parse_model=None,
+        fix_model=None,
+        test_model=None,
         cleanup=args.cleanup,
         quiet=True,
         start_at=args.start_at,
         pr_number=pr_number,
         bot=None,
         backend=args.backend,
-        review_backend=args.review_backend,
-        fix_backend=args.fix_backend,
-        test_backend=args.test_backend,
+        review_backend=None,
+        fix_backend=None,
+        test_backend=None,
         ignore_paths=args.ignore_paths,
-        loop=args.loop,
-        max_iterations=args.max_iterations,
+        loop=loop,
+        max_iterations=max_iterations,
         trajectory_path=args.trajectory_path,
         pr_repo=pr_repo,
         archive=not args.no_archive,
@@ -769,6 +908,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         extra_copy=list(args.extra_copy),
         plan=args.plan,
         non_interactive=args.non_interactive,
+        assume=args.assume,
     )
 
 
@@ -784,25 +924,30 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         # argparse already enforces type=int, but guard against negatives.
         raise SystemExit(f"feedback subcommand: PR number must be positive (got {pr_number})")
 
-    pr_repo = _detect_repo_slug(Path(args.target) if args.target else Path.cwd())
+    target_repo = Path(args.target) if args.target else Path.cwd()
+    pr_repo = _detect_repo_slug(target_repo)
+    file_config = load_file_config(target_repo)
 
     return RunConfig(
         target=args.target,
         skill=None,
+        model=args.model,
+        file_config=file_config,
+        # Per-phase model/backend overrides are config-file-only (no CLI flags).
         exploration_model=None,
-        review_model=args.review_model,
-        parse_model=args.parse_model,
-        fix_model=args.fix_model,
-        test_model=args.test_model,
+        review_model=None,
+        parse_model=None,
+        fix_model=None,
+        test_model=None,
         cleanup=None,
         quiet=True,
         start_at="review",
         pr_number=pr_number,
         bot=args.bot,
         backend=args.backend,
-        review_backend=args.review_backend,
-        fix_backend=args.fix_backend,
-        test_backend=args.test_backend,
+        review_backend=None,
+        fix_backend=None,
+        test_backend=None,
         ignore_paths=[],
         loop=False,
         max_iterations=5,
@@ -812,11 +957,12 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         run_eval=args.run_eval,
         output_mode="loop",
         non_interactive=args.non_interactive,
+        assume=args.assume,
     )
 
 
 def _build_harvest_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream harvest [...]``.
+    """Build the parser for ``daydream corpus harvest [...]``.
 
     Drives the single deferred annotate pass from
     :mod:`daydream.training.harvest`. Every indexed run gets one fresh
@@ -824,7 +970,7 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
     re-running appends a new generation rather than skipping annotated rows.
     """
     parser = argparse.ArgumentParser(
-        prog="daydream harvest",
+        prog="daydream corpus harvest",
         description=(
             "Walk the archive and append one bitemporal annotation "
             "(outcome label + intrinsic reward) for every indexed run "
@@ -889,7 +1035,7 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
 
 
 def _handle_harvest_command(argv: list[str]) -> int:
-    """Handle ``daydream harvest [...]``.
+    """Handle ``daydream corpus harvest [...]``.
 
     Drives :func:`daydream.training.harvest.run_harvest` (looked up via the
     module attribute so test monkeypatches take effect). ``run_harvest`` is a
@@ -900,7 +1046,7 @@ def _handle_harvest_command(argv: list[str]) -> int:
     ``errors`` counter surfaces them.
 
     Args:
-        argv: The argument vector after the ``harvest`` verb.
+        argv: The argument vector after the ``corpus harvest`` sub-verb.
 
     Returns:
         ``0`` on success; ``1`` on a validation error.
@@ -948,7 +1094,7 @@ def _handle_harvest_command(argv: list[str]) -> int:
 
 
 def _build_label_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream label <session-prefix> --outcome ...``.
+    """Build the parser for ``daydream corpus label <session-prefix> --outcome ...``.
 
     Records a human-sourced outcome label that wins over automated rubric
     labels in every precedence projection (and is never deduped). ``unknown``
@@ -956,7 +1102,7 @@ def _build_label_parser() -> argparse.ArgumentParser:
     decide" signal distinct from an unlabeled run.
     """
     parser = argparse.ArgumentParser(
-        prog="daydream label",
+        prog="daydream corpus label",
         description=(
             "Set an authoritative human outcome label on an archived run "
             "(overrides automated rubric labels)."
@@ -988,7 +1134,7 @@ def _build_label_parser() -> argparse.ArgumentParser:
 
 
 def _handle_label_command(argv: list[str]) -> int:
-    """Handle ``daydream label <session-prefix> --outcome {...}``.
+    """Handle ``daydream corpus label <session-prefix> --outcome {...}``.
 
     Resolves the archive dir, echoes the label being overridden (the
     "show what it's overriding" affordance), then writes a human-sourced
@@ -996,7 +1142,7 @@ def _handle_label_command(argv: list[str]) -> int:
     cache and every precedence projection settle on the human value.
 
     Args:
-        argv: The argument vector after the ``label`` verb.
+        argv: The argument vector after the ``corpus label`` sub-verb.
 
     Returns:
         ``0`` on success; ``1`` when no session matches the prefix or the
@@ -1032,8 +1178,79 @@ def _handle_label_command(argv: list[str]) -> int:
     return 0
 
 
+# Sub-verbs of the ``corpus`` namespace mapped to their handler callables.
+# ``build`` is the public name for the build-corpus projection.
+_CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
+    "harvest": _handle_harvest_command,
+    "build": _handle_build_corpus_command,
+    "label": _handle_label_command,
+}
+
+
+def _print_corpus_help(*, error: bool = False) -> None:
+    """Print usage for the ``corpus`` namespace.
+
+    Args:
+        error: When ``True`` write to stderr (unknown sub-verb error path);
+            when ``False`` (default) write to stdout (bare invocation / help
+            request path).
+    """
+    from rich.console import Console
+
+    from daydream.ui import NEON_THEME
+
+    console = Console(stderr=error, theme=NEON_THEME)
+    console.print(
+        "usage: daydream corpus {harvest,build,label} ...\n"
+        "\n"
+        "Data-pipeline sub-verbs:\n"
+        "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
+        "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
+        "  label     record an authoritative human outcome label that overrides automated ones"
+    )
+
+
+def _handle_corpus_command(argv: list[str]) -> int:
+    """Dispatch a ``corpus`` sub-verb to its handler.
+
+    ``corpus harvest|build|label`` routes to the existing data-pipeline
+    handlers (``build`` → the build-corpus projection). A bare ``daydream
+    corpus`` (no sub-verb) prints help to stdout and exits 2. An unknown
+    sub-verb prints help to stderr and exits 2. Exit codes propagate
+    unchanged from the handlers.
+
+    Args:
+        argv: The argument vector after the ``corpus`` verb.
+
+    Returns:
+        int: The sub-handler's exit code; ``2`` for a bare (no-arg)
+        invocation or an unknown sub-verb.
+    """
+    if not argv:
+        _print_corpus_help(error=False)
+        return 2
+    if argv[0] not in _CORPUS_SUBVERBS:
+        _print_corpus_help(error=True)
+        return 2
+    handler = _CORPUS_SUBVERBS[argv[0]]
+    return int(handler(argv[1:]))
+
+
 def main() -> None:
     """Run the CLI entry point.
+
+    Dispatch is verb-first (see :func:`_first_verb` and :data:`KNOWN_VERBS`):
+    the leading token selects a verb, and anything that is not an explicit
+    verb — a bare target path, a leading flag, or empty argv — routes through
+    the default ``review`` shim. Each non-``review`` verb owns its own parser
+    and exit code; ``review`` flows into :func:`_parse_args`.
+
+    Verbs:
+        - ``review`` (default) — the review/fix loop (bare ``daydream <target>``)
+        - ``feedback`` — apply bot PR-review comments
+        - ``summarize`` — print run-info markdown for a trajectory
+        - ``bench`` — score deep-review findings against the offline benchmark
+        - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label``)
 
     Returns:
         None: This function does not return; it exits via sys.exit().
@@ -1045,39 +1262,35 @@ def main() -> None:
     """
     _install_signal_handlers()
 
-    # Route subcommands before main arg parse. Each handler returns an exit
-    # code; we translate via sys.exit. Supported subcommands: feedback,
-    # summarize, harvest, build-corpus, label, bench.
+    # Verb-first dispatch. ``_first_verb`` classifies the leading token; bare
+    # paths, leading flags, and empty argv all fall through to ``review``.
+    # The non-``review`` verbs are short-circuited here (their handlers own
+    # their own parsers and exit codes); ``review`` flows into ``_parse_args``
+    # which applies the default-verb shim (an explicit leading ``review`` is
+    # equivalent to a bare target).
     argv = sys.argv[1:]
+    verb = _first_verb(argv)
     try:
         # ``summarize`` is sync — short-circuit before anyio.run kicks in.
-        if argv and argv[0] == "summarize":
+        if verb == "summarize":
             summarize_parser = _build_summarize_parser()
             summarize_args = summarize_parser.parse_args(argv[1:])
             sys.exit(_run_summarize(summarize_args))
 
-        # ``build-corpus`` is sync — no agent invocations, just SQLite +
-        # filesystem. Short-circuit before anyio.run.
-        if argv and argv[0] == "build-corpus":
-            sys.exit(_handle_build_corpus_command(argv[1:]))
-
-        # ``harvest`` drives the annotate-pass orchestrator via its own anyio.run.
-        if argv and argv[0] == "harvest":
-            sys.exit(_handle_harvest_command(argv[1:]))
+        # ``corpus`` namespaces the data-pipeline sub-verbs
+        # (``harvest`` / ``build`` / ``label``). Each handler owns its own
+        # parser and exit code; a bare ``daydream corpus`` prints help and
+        # exits 2. All three are sync (SQLite + filesystem, no agent work).
+        if verb == "corpus":
+            sys.exit(_handle_corpus_command(argv[1:]))
 
         # ``bench`` scores deep-review findings against the offline benchmark.
         # ``run_bench`` is sync — short-circuit before anyio.run.
-        if argv and argv[0] == "bench":
+        if verb == "bench":
             sys.exit(_handle_bench_command(argv[1:]))
 
-        # ``label`` records an authoritative human outcome label — sync,
-        # SQLite-only. Short-circuit before anyio.run.
-        if argv and argv[0] == "label":
-            sys.exit(_handle_label_command(argv[1:]))
-
-        is_feedback_subcommand = bool(argv) and argv[0] == "feedback"
         config = _parse_args()
-        if is_feedback_subcommand:
+        if verb == "feedback":
             assert config.pr_number is not None  # _build_feedback_config guarantees
             exit_code = anyio.run(run_feedback, config, config.pr_number)
         else:

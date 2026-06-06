@@ -253,6 +253,24 @@ def make_work() -> Callable[..., WorkContext]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_agent_state():
+    """Reset the ``AgentState`` singleton before AND after every test.
+
+    The interaction axes (``non_interactive``, ``assume``) and ``quiet_mode``
+    live on a module-level ``AgentState`` singleton in ``daydream.agent``. A test
+    that drives ``run()`` calls ``set_non_interactive``/``set_assume``, leaving
+    the singleton dirty for the next test — which silently changes the resolved
+    answer at every ``resolve_gate`` call site. Reset on both edges so each test
+    starts from defaults regardless of order.
+    """
+    from daydream.agent import reset_state
+
+    reset_state()
+    yield
+    reset_state()
+
+
+@pytest.fixture(autouse=True)
 def _reset_trajectory_recorder():
     """Clear the trajectory ContextVar before AND after every test.
 

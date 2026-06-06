@@ -333,8 +333,8 @@ class TestResolveBackendPhaseModel:
         assert backend.model == "gpt-5.5"
 
     def test_backend_override_uses_overridden_backends_table(self):
-        # --review-backend codex while default is claude: resolver should look up
-        # the codex table for review, not the claude one.
+        # review_backend=codex (config/programmatic) while default is claude:
+        # resolver should look up the codex table for review, not the claude one.
         config = RunConfig(backend="claude", review_backend="codex")
         backend = runner._resolve_backend(config, "review")
         assert backend.model == "gpt-5.5"  # codex REVIEW default (v1)
@@ -585,7 +585,13 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch,
     on which commit function was actually invoked (observable side effect),
     rather than asserting on dispatch bookkeeping.
     """
+    from daydream.agent import set_non_interactive
     from daydream.config import REVIEW_OUTPUT_FILE
+
+    # The commit gate reads the agent singleton (set by run() from config), not
+    # config.non_interactive directly. This test enters at _run_loop_shallow,
+    # below run()'s set_non_interactive call, so establish the global here.
+    set_non_interactive(True)
 
     (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
 
@@ -665,9 +671,17 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkey
     -- whose ``_build_fix_prompt`` text ("Analyze the failures and fix them",
     asserted absent) -- and ``prompt_user`` would read stdin (rigged to fail).
     """
+    import importlib
+    import sys
+    from pathlib import Path as _Path
+
+    _tests_dir = str(_Path(__file__).parent)
+    if _tests_dir not in sys.path:
+        sys.path.insert(0, _tests_dir)
+    _SummarizerBackend = importlib.import_module("test_phases")._SummarizerBackend
+
     from daydream.agent import reset_state, set_non_interactive
     from daydream.config import REVIEW_OUTPUT_FILE
-    from tests.test_phases import _SummarizerBackend
 
     (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
 
@@ -756,3 +770,122 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkey
     assert all(
         "Analyze the failures and fix them" not in p for p in test_backend.captured_prompts
     ), test_backend.captured_prompts
+
+
+@pytest.mark.asyncio
+async def test_yes_shallow_failing_tests_bounded_fix_and_abort(monkeypatch, tmp_path):
+    """Real-path: a --yes shallow run whose tests FAIL runs ONE fix attempt then aborts.
+
+    Drives ``_run_loop_shallow`` with the REAL ``phase_test_and_heal`` (not stubbed)
+    against a scripted backend: fail → fix → fail → handoff (summarizer).
+
+    With ``assume="yes"`` the bounded-loop guard at phases.py line 1777
+    (``decision is True and retries_used > 0``) must fire after the first auto
+    fix attempt, writing ``handoff.md`` and returning exit code 1. If the guard
+    were absent, the fix agent would loop forever (the backend raises on call 5).
+    The fix prompt text ("Analyze the failures and fix them") must appear in
+    exactly one call (the fix agent), proving the fix ran once and only once.
+    stdin must never be touched.
+    """
+    import importlib
+    import sys
+    from pathlib import Path as _Path
+
+    _tests_dir = str(_Path(__file__).parent)
+    if _tests_dir not in sys.path:
+        sys.path.insert(0, _tests_dir)
+    _SummarizerBackend = importlib.import_module("test_phases")._SummarizerBackend
+
+    from daydream.agent import reset_state, set_assume
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
+
+    work = _fake_work(tmp_path)
+
+    # Script: fail → fix (one bounded attempt) → fail → handoff (summarizer).
+    # Any 5th call raises via _SummarizerBackend's guard, proving the loop ends.
+    test_backend = _SummarizerBackend([
+        "fail",
+        "fix",
+        "fail",
+        ("handoff", "# Handoff\n\n--yes bounded fix failure"),
+    ])
+
+    class _StubBackend:
+        model = "stub-model"
+
+    def _resolve(_config, phase, _cache=None):
+        return test_backend if phase == "test" else _StubBackend()
+
+    monkeypatch.setattr("daydream.runner._resolve_backend", _resolve)
+
+    async def _stub_phase_parse_feedback(_backend, _work):
+        return [{"id": 1, "description": "X", "file": "foo.py", "line": 1}]
+
+    async def _stub_phase_fix(*_args, **_kwargs):
+        return None
+
+    commit_calls: list[bool] = []
+
+    async def _spy_phase_commit_push_auto(*_args, **_kwargs):
+        commit_calls.append(True)
+
+    async def _spy_phase_commit_push(*_args, **_kwargs):
+        commit_calls.append(True)
+
+    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.runner.phase_fix", _stub_phase_fix)
+    monkeypatch.setattr("daydream.runner.phase_commit_push_auto", _spy_phase_commit_push_auto)
+    monkeypatch.setattr("daydream.runner.phase_commit_push", _spy_phase_commit_push)
+
+    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("input() must not be called under --yes")
+
+    monkeypatch.setattr("builtins.input", _forbidden_input)
+
+    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "daydream.phases.console",
+        type("C", (), {"print": lambda *a, **kw: None})(),
+    )
+
+    config = RunConfig(
+        target=str(tmp_path),
+        start_at="fix",
+        cleanup=False,
+        loop=False,
+        shallow=True,
+        assume="yes",
+    )
+
+    reset_state()
+    set_assume("yes")
+    try:
+        exit_code = await runner._run_loop_shallow(work, config)
+    finally:
+        reset_state()
+
+    assert exit_code == 1
+
+    handoffs = list(tmp_path.glob(".daydream/runs/*/handoff.md"))
+    assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
+    assert handoffs[0].read_text(encoding="utf-8") == "# Handoff\n\n--yes bounded fix failure"
+
+    assert commit_calls == [], "a commit ran despite tests failing"
+
+    # Exactly four test-backend calls: fail → fix → fail → summarizer.
+    # The fix prompt (call 2) carries the repair instruction; the summarizer
+    # (call 4) ran read-only. No 5th call (bounded-loop guard fired).
+    assert len(test_backend.captured_prompts) == 4, test_backend.captured_prompts
+    assert "Analyze the failures and fix them" in test_backend.captured_prompts[1]
+    assert "read-only failure-summarizer" in test_backend.captured_prompts[3]
+    assert test_backend.read_only_calls == [False, False, False, True], (
+        test_backend.read_only_calls
+    )

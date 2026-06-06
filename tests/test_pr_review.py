@@ -398,7 +398,7 @@ async def test_post_succeeds_and_prints_url(
             body_only=[],
         ),
     )
-    monkeypatch.setattr(pr_review, "prompt_user", lambda *_a, **_k: "y")
+    monkeypatch.setattr(pr_review, "resolve_or_prompt", lambda **_k: True)
 
     captured: dict[str, Any] = {}
 
@@ -442,7 +442,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
             body_only=[],
         ),
     )
-    monkeypatch.setattr(pr_review, "prompt_user", lambda *_a, **_k: "y")
+    monkeypatch.setattr(pr_review, "resolve_or_prompt", lambda **_k: True)
     err = "gh api /repos/acme/widgets/pulls/42/reviews failed: HTTP 422 (payload preserved at /tmp/x.json)"
     monkeypatch.setattr(
         pr_review, "_submit_review", lambda *_a, **_k: (None, err)
@@ -479,7 +479,7 @@ async def test_post_skipped_when_user_declines(
             body_only=[],
         ),
     )
-    monkeypatch.setattr(pr_review, "prompt_user", lambda *_a, **_k: "n")
+    monkeypatch.setattr(pr_review, "resolve_or_prompt", lambda **_k: False)
     submit_called = False
 
     def fake_submit(*_a: Any, **_k: Any) -> tuple[str | None, str | None]:

@@ -13,8 +13,11 @@ from daydream import git_ops
 from daydream.agent import (
     console,
     detect_test_success,
+    get_assume,
     get_non_interactive,
     get_quiet_mode,
+    resolve_gate,
+    resolve_or_prompt,
     run_agent,
 )
 from daydream.backends import Backend, ContinuationToken
@@ -1669,8 +1672,13 @@ async def _emit_failure_handoff(
 
     if offer_clipboard:
         if clipboard_available():
-            response = prompt_user(console, "Copy handoff to clipboard?", "y")
-            if response.lower() in ("y", "yes"):
+            if resolve_or_prompt(
+                assume=get_assume(),
+                interactive=not get_non_interactive(),
+                safe_default=False,
+                question="Copy handoff to clipboard?",
+                default="y",
+            ):
                 if copy_to_clipboard(body):
                     print_success(console, "Handoff copied to clipboard")
                 else:
@@ -1753,17 +1761,34 @@ async def phase_test_and_heal(
 
         print_warning(console, "Tests may have failed or result is unclear.")
 
-        # In non-interactive mode the menu's default "2" (fix-and-retry) would
-        # launch an unbounded, mutating fix loop with no human to stop it.
-        # Take choice-"4" semantics instead: terminate the heal loop and
-        # surface the failure honestly with no mutation. Skip the menu and the
-        # stdin read entirely.
-        if get_non_interactive():
+        # Test-heal retry gate across the two interaction axes. With no human at
+        # the keyboard, the menu's default "2" (fix-and-retry) would launch an
+        # unbounded, mutating fix loop with nothing to stop it -- so the
+        # unattended safe default is to abort (choice-"4" semantics: surface the
+        # failure honestly with no mutation). ``--yes`` opts into a SINGLE bounded
+        # auto fix-and-retry (choice "2"); after that one attempt it falls through
+        # to abort so the loop still terminates. Only an interactive run with no
+        # assumption shows the menu.
+        decision = resolve_gate(
+            assume=get_assume(),
+            interactive=not get_non_interactive(),
+            safe_default=False,
+        )
+        if decision is False or (decision is True and retries_used > 0):
             print_error(
-                console, "Tests failed", "Non-interactive mode: aborting heal loop",
+                console, "Tests failed", "Aborting heal loop (no further auto-retries)",
             )
             await _emit_failure_handoff(backend, work, output, offer_clipboard=False)
             return False, retries_used
+        if decision is True:
+            # Bounded auto fix-and-retry: launch one fix attempt, then loop.
+            console.print()
+            print_info(console, "Launching agent to fix test failures (auto)...")
+            fix_prompt = _build_fix_prompt(output, feedback_items)
+            _, _ = await run_agent(backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX)
+            retries_used += 1
+            continuation = None
+            continue
 
         print_menu(console, "What would you like to do?", [
             ("1", "Retry tests (run again without fixes)"),
@@ -1799,10 +1824,13 @@ async def phase_test_and_heal(
                     print_info(
                         console, f"Suggested command: {sanitized_preview}",
                     )
-                    response = prompt_user(
-                        console, "Use suggested command instead?", "n",
-                    )
-                    if response.lower() in ("y", "yes"):
+                    if resolve_or_prompt(
+                        assume=get_assume(),
+                        interactive=not get_non_interactive(),
+                        safe_default=False,
+                        question="Use suggested command instead?",
+                        default="n",
+                    ):
                         test_command_override = sanitized_preview
 
             retries_used += 1
@@ -1859,8 +1887,19 @@ async def _do_commit(
 
     """
     if interactive:
-        response = prompt_user(console, "Commit and push changes? [y/N]", "n")
-        if response.lower() not in ("y", "yes"):
+        # Commit/push gate across the two interaction axes. ``--yes`` commits
+        # without prompting; an unattended run with no assumption declines
+        # (safe_default=False — the interactive default is decline); otherwise
+        # prompt. Routed here (not at the caller) so every interactive commit
+        # path honours both axes.
+        decision = resolve_or_prompt(
+            assume=get_assume(),
+            interactive=not get_non_interactive(),
+            safe_default=False,
+            question="Commit and push changes? [y/N]",
+            default="n",
+        )
+        if not decision:
             print_dim(console, "Skipping commit and push")
             return False
 
@@ -2106,6 +2145,24 @@ async def phase_understand_intent(
         intent_text = output if isinstance(output, str) else str(output)
 
         console.print()
+        # Confirm-or-correct gate. ``--yes`` and unattended runs accept the
+        # understanding as-is and proceed (this read step is non-mutating, so the
+        # safe unattended outcome is to continue, not to block); only an
+        # interactive run with no assumption may offer a correction. A forced
+        # "no" declines the current understanding and falls through so the user
+        # can supply a correction interactively — but only when interactive;
+        # a forced "no" in a non-interactive run also proceeds rather than
+        # blocking on stdin.
+        gate = resolve_gate(
+            assume=get_assume(),
+            interactive=not get_non_interactive(),
+            safe_default=True,
+        )
+        if gate is True:
+            return intent_text
+        if gate is False and get_non_interactive():
+            return intent_text
+
         response = prompt_user(
             console,
             "Is this understanding correct? [y/provide correction]",

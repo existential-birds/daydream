@@ -91,6 +91,29 @@ def test_cli_main_clean_deep_run_exits_0(
     assert exc.value.code == 0
 
 
+def test_cli_main_explicit_review_verb_exits_0(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``daydream review <target>`` is identical to the bare-target run.
+
+    The default-verb shim must make the explicit ``review`` verb behave
+    exactly like a bare ``daydream <target>``. This drives the SAME production
+    path (cli.main -> verb dispatch -> _parse_args -> anyio.run(run) ->
+    sys.exit) with an explicit leading ``review`` token and asserts the same
+    clean exit 0 as ``test_cli_main_clean_deep_run_exits_0``.
+    """
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    monkeypatch.setattr(sys, "argv", ["daydream", "review", str(multi_stack_target)])
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 0
+
+
 def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -152,3 +175,31 @@ def test_cli_main_wrong_branch_exits_1(
         cli.main()
 
     assert exc.value.code == 1
+
+
+def test_non_tty_auto_enables_non_interactive(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A piped (non-TTY) stdin auto-enables non-interactive with no flag.
+
+    This drives the production entrypoint (``cli.main`` -> ``runner.run``) with a
+    bare target and a non-TTY stdin. The interactivity axis must resolve from the
+    environment (non-TTY) rather than requiring an explicit ``--non-interactive``
+    flag, so the captured ``set_non_interactive`` value is ``True``.
+    """
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)  # piped stdin
+    monkeypatch.delenv("CI", raising=False)
+    captured: dict[str, bool] = {}
+    monkeypatch.setattr(
+        "daydream.runner.set_non_interactive",
+        lambda v: captured.__setitem__("v", v),
+    )
+    monkeypatch.setattr(sys, "argv", ["daydream", str(multi_stack_target)])
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    assert captured["v"] is True  # auto-enabled with no flag

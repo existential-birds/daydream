@@ -551,12 +551,24 @@ def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _answer_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Phase prompts: y for intent confirmation; n for fix gate + PR post.
+    """Phase prompts: y for intent confirmation + PR post; n for fix gate.
 
-    The PR-post prompt lives in ``daydream.pr_review.prompt_user`` and asks
-    "Post these as a PR review? [y/N]" — we MUST answer ``y`` or the test
-    never reaches ``_submit_review``.
+    In pytest stdin is not a TTY, so ``runner._resolve_interactive`` returns
+    False and ``set_non_interactive(True)`` is called. Every gate that uses
+    ``resolve_or_prompt(safe_default=False)`` then auto-declines without
+    prompting -- including the PR-post gate. We must force interactive mode
+    the same way ``_force_interactive`` does (in test_deep_orchestrator.py).
+
+    Both the orchestrator fix gate ("Apply fixes now?") and the PR-post gate
+    ("Post these as a PR review?") route through resolve_or_prompt in agent.py,
+    which calls prompt_user from its own (agent) namespace. We dispatch on the
+    question text so the fix gate gets "n" (skip fixes) and PR-post gets "y".
     """
+    # Force interactive mode so resolve_gate defers to prompt_user instead of
+    # short-circuiting to the safe_default=False decline.
+    monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+
     monkeypatch.setattr(
         "daydream.phases.prompt_user", lambda *a, **kw: "y", raising=False,
     )
@@ -572,6 +584,20 @@ def _answer_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(
         "daydream.runner.prompt_user", lambda *a, **kw: "n", raising=False,
+    )
+
+    def _agent_prompt(console, message: str, default: str = "") -> str:  # noqa: ARG001
+        # Fix gate: decline so the flow proceeds to PR post without applying fixes.
+        if "apply fixes" in message.lower() or "apply fix" in message.lower():
+            return "n"
+        # PR post gate: approve so _submit_review is reached.
+        if "post these" in message.lower() or "pr review" in message.lower():
+            return "y"
+        # All other gates (phase understand intent, intent confirmation, etc.)
+        return "y"
+
+    monkeypatch.setattr(
+        "daydream.agent.prompt_user", _agent_prompt, raising=False,
     )
 
 

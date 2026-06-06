@@ -10,13 +10,17 @@ import pytest
 
 from daydream.cli import _parse_args
 from daydream.config import SKILL_MAP
-from daydream.runner import RunConfig
+from daydream.config_file import DaydreamFileConfig
+from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
 
 
-def test_default_backend_is_claude(monkeypatch):
+def test_default_backend_is_none_and_resolves_to_claude(monkeypatch):
+    # --backend default is now None so the config file can supply it; the
+    # terminal fallback in _resolved_backend_name is "claude".
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project"])
     config = _parse_args()
-    assert config.backend == "claude"
+    assert config.backend is None
+    assert _resolved_backend_name(config, "review") == "claude"
 
 
 def test_backend_flag_codex(monkeypatch):
@@ -37,51 +41,84 @@ def test_invalid_backend_rejected(monkeypatch):
         _parse_args()
 
 
-def test_review_backend_override(monkeypatch):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project",
-        "--backend", "claude", "--review-backend", "codex",
-    ])
-    config = _parse_args()
-    assert config.backend == "claude"
-    assert config.review_backend == "codex"
+def test_review_backend_override_via_config_file():
+    # Per-phase backend overrides moved from CLI flags to the config file
+    # (cli-verb-redesign Task 8). The resolver still honours a phase override.
+    fc = DaydreamFileConfig(backend="claude", phases={"review": {"backend": "codex"}})
+    config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
+    assert _resolved_backend_name(config, "review") == "codex"
+    assert _resolved_backend_name(config, "fix") == "claude"
 
 
-def test_fix_backend_override(monkeypatch):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project", "--fix-backend", "codex",
-    ])
-    config = _parse_args()
-    assert config.fix_backend == "codex"
+def test_fix_backend_override_via_config_file():
+    fc = DaydreamFileConfig(phases={"fix": {"backend": "codex"}})
+    config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
+    assert _resolved_backend_name(config, "fix") == "codex"
 
 
-def test_test_backend_override(monkeypatch):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project", "--test-backend", "codex",
-    ])
-    config = _parse_args()
-    assert config.test_backend == "codex"
+def test_test_backend_override_via_config_file():
+    fc = DaydreamFileConfig(phases={"test": {"backend": "codex"}})
+    config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
+    assert _resolved_backend_name(config, "test") == "codex"
+
+
+def _cfg(monkeypatch, args: list[str]) -> RunConfig:
+    """Parse ``daydream <args>`` into a RunConfig via the real CLI parser."""
+    monkeypatch.setattr(sys, "argv", ["daydream", *args])
+    return _parse_args()
 
 
 def test_loop_flag_default_off(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project"])
-    config = _parse_args()
+    config = _cfg(monkeypatch, ["/tmp/project"])
     assert config.loop is False
     assert config.max_iterations == 5
 
 
-def test_loop_flag_enabled(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--loop"])
-    config = _parse_args()
-    assert config.loop is True
+def test_loop_optional_count(monkeypatch):
+    """--loop with no count enables looping at the default of 5; --loop N sets N."""
+    bare = _cfg(monkeypatch, ["--loop", "/tmp/project"])
+    assert (bare.loop, bare.max_iterations) == (True, 5)
+    assert _cfg(monkeypatch, ["--loop", "3", "/tmp/project"]).max_iterations == 3
+    assert _cfg(monkeypatch, ["/tmp/project"]).loop is False
 
 
-def test_max_iterations_flag(monkeypatch):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project", "--loop", "--max-iterations", "10",
-    ])
-    config = _parse_args()
-    assert config.max_iterations == 10
+def test_yes_with_review_errors(monkeypatch, capsys):
+    """--yes has no effect with --review (no fix phase) and must be rejected."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--yes", "--review", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_yes_with_comment_errors(monkeypatch, capsys):
+    """--yes has no effect with --comment (no fix phase) and must be rejected."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--yes", "--comment", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_loop_zero_count_errors(monkeypatch, capsys):
+    """--loop 0 is rejected because the count must be positive."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "0", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+    assert "positive" in capsys.readouterr().err
+
+
+def test_loop_negative_count_errors(monkeypatch, capsys):
+    """--loop -1 is rejected because the count must be positive."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "-1", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+    assert "positive" in capsys.readouterr().err
+
+
+def test_loop_with_comment_errors(monkeypatch):
+    """--loop is incompatible with --comment (review-only output mode)."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "--comment", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
 
 
 def test_loop_start_at_conflict(monkeypatch):
@@ -90,17 +127,6 @@ def test_loop_start_at_conflict(monkeypatch):
     ])
     with pytest.raises(SystemExit):
         _parse_args()
-
-
-def test_max_iterations_without_loop_accepted(monkeypatch):
-    """--max-iterations without --loop is accepted but prints a warning."""
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project", "--max-iterations", "3",
-    ])
-    with pytest.warns(UserWarning, match="no effect without --loop"):
-        config = _parse_args()
-    assert config.max_iterations == 3
-    assert config.loop is False
 
 
 def test_skill_map_includes_go():
@@ -303,22 +329,25 @@ def test_print_issues_table_renders():
 
 
 # ---------------------------------------------------------------------------
-# Per-phase model override flags (Task 3 of per-phase-model-overrides)
+# Per-phase model overrides — config-file path (cli-verb-redesign Task 8)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "flag,attr,value",
+    "phase,value",
     [
-        ("--review-model", "review_model", "claude-haiku-4-5"),
-        ("--parse-model", "parse_model", "claude-haiku-4-5"),
-        ("--fix-model", "fix_model", "claude-opus-4-6"),
-        ("--test-model", "test_model", "gpt-5.5"),
+        ("review", "claude-haiku-4-5"),
+        ("parse", "claude-haiku-4-5"),
+        ("fix", "claude-opus-4-6"),
+        ("test", "gpt-5.5"),
     ],
 )
-def test_per_phase_model_flags_set_runconfig_field(flag, attr, value, tmp_path):
-    config = _parse_args([flag, value, str(tmp_path)])
-    assert getattr(config, attr) == value
+def test_per_phase_model_set_via_config_file(phase, value):
+    # Per-phase model overrides moved from CLI flags to the config file; the
+    # resolver still honours a phase override read from the file.
+    fc = DaydreamFileConfig(phases={phase: {"model": value}})
+    config = RunConfig(target="/tmp/project", backend=None, model=None, file_config=fc)
+    assert _resolved_model(config, phase) == value
 
 
 def test_no_per_phase_model_flag_leaves_field_none(tmp_path):
@@ -327,40 +356,72 @@ def test_no_per_phase_model_flag_leaves_field_none(tmp_path):
     assert config.parse_model is None
     assert config.fix_model is None
     assert config.test_model is None
-
-
-def test_existing_exploration_model_flag_unchanged(tmp_path):
-    config = _parse_args(["--exploration-model", "claude-haiku-4-5", str(tmp_path)])
-    assert config.exploration_model == "claude-haiku-4-5"
+    assert config.exploration_model is None
 
 
 # ---------------------------------------------------------------------------
-# Removed --model flag (Task 5 of per-phase-model-overrides — breaking change)
+# Per-phase model/backend flags removed (cli-verb-redesign Task 8 — config-only)
 # ---------------------------------------------------------------------------
 
 
-def test_removed_model_flag_emits_curated_error(capsys, tmp_path):
-    with pytest.raises(SystemExit) as exc_info:
-        _parse_args(["--model", "claude-opus-4-6", str(tmp_path)])
-    assert exc_info.value.code != 0
+@pytest.mark.parametrize(
+    "flag,phase",
+    [
+        ("--review-backend", "review"),
+        ("--fix-backend", "fix"),
+        ("--test-backend", "test"),
+        ("--exploration-model", "exploration"),
+        ("--review-model", "review"),
+        ("--parse-model", "parse"),
+        ("--fix-model", "fix"),
+        ("--test-model", "test"),
+    ],
+)
+def test_per_phase_flag_rejected_with_config_pointer(flag, phase, tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        _parse_args([flag, "claude-opus-4-8", str(tmp_path)])
     err = capsys.readouterr().err
-    assert "--model has been removed" in err
-    assert "--review-model" in err
-    assert "--parse-model" in err
-    assert "--fix-model" in err
-    assert "--test-model" in err
-    assert "--exploration-model" in err
+    assert flag in err
+    assert f"[tool.daydream.phases.{phase}]" in err
 
 
-def test_runconfig_has_no_model_field():
-    config = RunConfig(backend="claude")
-    assert not hasattr(config, "model"), (
-        "RunConfig.model was supposed to be removed in favor of per-phase fields"
-    )
+@pytest.mark.parametrize(
+    "flag,phase",
+    [
+        ("--fix-model", "fix"),
+        ("--review-backend", "review"),
+    ],
+)
+def test_per_phase_flag_rejected_equals_form(flag, phase, tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        _parse_args([f"{flag}=claude-opus-4-8", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert flag in err
+    assert f"[tool.daydream.phases.{phase}]" in err
+
+
+def test_global_model_still_works(tmp_path):
+    assert _parse_args(["--model", "claude-opus-4-8", str(tmp_path)]).model == "claude-opus-4-8"
 
 
 # ---------------------------------------------------------------------------
-# build-corpus exit-code regression guard (Task 11 / corpus-pipeline-architecture)
+# Global --model flag (cli-verb-redesign Task 2 — re-added as a global override)
+# ---------------------------------------------------------------------------
+
+
+def test_global_model_flag_populates_runconfig(tmp_path):
+    config = _parse_args(["--model", "claude-opus-4-8", str(tmp_path)])
+    assert config.model == "claude-opus-4-8"
+
+
+def test_runconfig_has_model_field():
+    config = RunConfig(backend="claude")
+    assert hasattr(config, "model"), "RunConfig.model is the global model override source"
+    assert config.model is None
+
+
+# ---------------------------------------------------------------------------
+# corpus build exit-code regression guard (Task 11 / corpus-pipeline-architecture)
 # ---------------------------------------------------------------------------
 # Tier-3 subprocess test: drives the real CLI entry point through `uv run`
 # against an empty archive directory and asserts a clean exit 0. This catches
@@ -374,7 +435,7 @@ def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
     out = tmp_path / "out.jsonl"
     result = subprocess.run(  # noqa: S603 - args are not user-controlled
         [  # noqa: S607 - hardcoded uv/daydream entrypoint
-            "uv", "run", "daydream", "build-corpus",
+            "uv", "run", "daydream", "corpus", "build",
             "--out", str(out), "--include-all-labels", "--dry-run",
         ],
         capture_output=True,
@@ -387,7 +448,7 @@ def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# harvest / build-corpus subcommand wiring (Task 11 / corpus-pipeline-architecture)
+# corpus harvest / build subcommand wiring (Task 11 / corpus-pipeline-architecture)
 # ---------------------------------------------------------------------------
 
 
