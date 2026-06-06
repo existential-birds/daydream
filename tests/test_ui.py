@@ -244,3 +244,21 @@ def test_taskupdate_resolves_subject_and_shows_status():
     c.print(reg.get("c2")._render_panel())
     out = c.export_text()
     assert "Fix auth bug" in out and "completed" in out
+
+
+def test_taskoutput_result_shows_output_snippet():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    # quiet_mode=False so the result body renders (quiet mode suppresses result
+    # output entirely); R8 is about the rendered TaskOutput result snippet.
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=False)
+    reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 1})
+    result = (Path(__file__).parent / "fixtures/task_tools/taskoutput_result.txt").read_text()
+    reg.get("c2").set_result(result, is_error=False)
+    c = Console(record=True)
+    c.print(reg.get("c2")._render_panel())
+    out = c.export_text()
+    assert "done-with-bg-work" in out  # the <output> snippet surfaces
+    assert "<retrieval_status>" not in out  # tag plumbing is stripped

@@ -2591,6 +2591,14 @@ class LiveToolPanel:
         if self._name == "Edit" and not self._is_error:
             return self._build_edit_result()
 
+        # Special handling for TaskOutput - surface the <output> snippet, stripping
+        # the XML-ish tag plumbing (retrieval_status, task_id, status, ...).
+        if self._name == "TaskOutput":
+            match = re.search(r"<output>(.*?)</output>", self._result, re.DOTALL)
+            snippet = match.group(1).strip() if match else self._result
+            result, _ = _build_result_content(snippet, self._is_error, max_lines)
+            return result
+
         result, _ = _build_result_content(self._result, self._is_error, max_lines)
         return result
 
