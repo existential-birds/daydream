@@ -4,7 +4,7 @@ install:
 	uv sync
 
 lint:
-	uv run ruff check daydream
+	uv run ruff check daydream tests
 
 typecheck:
 	uv run mypy daydream
