@@ -254,7 +254,6 @@ def _silence(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence interactive UI helpers in deep orchestrator + phases."""
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "n")
     # phase_understand_intent calls prompt_user("Is this understanding correct?", "y")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
     # resolve_or_prompt in agent.py calls prompt_user from its own namespace;
@@ -536,7 +535,6 @@ async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.Mon
 
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", _record_prompt)
     # resolve_or_prompt in agent.py calls prompt_user from its own namespace; patch it
     # there too so the interactive gate is captured and returns "n".
     monkeypatch.setattr("daydream.agent.prompt_user", _record_prompt)
@@ -572,7 +570,6 @@ async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytes
 
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", _record_prompt)
     # phase_understand_intent also calls prompt_user; assume="yes" should also
     # suppress that gate, so patch it to fail loudly if it is ever reached.
     monkeypatch.setattr(
@@ -614,7 +611,7 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", _capture)
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "n")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
     _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -643,7 +640,7 @@ async def test_codex_cost_caveat(multi_stack_target: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", _capture)
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "n")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
     _install_stub_backend(monkeypatch, multi_stack_target, is_codex=True)
 
@@ -753,7 +750,7 @@ async def test_stage_ui_surfacing(multi_stack_target: Path, monkeypatch: pytest.
 
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", _capture)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "n")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
     _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -1383,7 +1380,6 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
@@ -1443,7 +1439,6 @@ async def test_verifier_runs_after_merge_before_fix(
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
@@ -1520,7 +1515,6 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
@@ -1586,10 +1580,7 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
     # This test drives the REAL interactive heal menu; pin interactivity on so
     # the auto non-interactive resolution (non-TTY pytest stdin) does not bypass it.
     _force_interactive(monkeypatch)
-    # Apply-fixes gate (orchestrator) -> "y".
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
-    # resolve_or_prompt in agent.py calls prompt_user from its own namespace; patch
-    # it there too so the apply-fixes gate honours "y" when going through that path.
+    # Apply-fixes gate routes through resolve_or_prompt → agent.prompt_user.
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
     # phases.prompt_user is shared: intent-confirmation needs "y"; the
@@ -1655,7 +1646,6 @@ async def test_structural_finding_reaches_fix_loop(
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
     # Accept the apply-fixes gate so the fix loop runs.
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
@@ -1740,7 +1730,6 @@ async def test_start_at_fix_recovers_merged_items(
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
     # Accept the apply-fixes gate so the fix loop runs.
-    monkeypatch.setattr("daydream.deep.orchestrator.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
