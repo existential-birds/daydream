@@ -15,10 +15,12 @@ from daydream.archive.index import (
     label_observation_history,
     latest_label_observation,
     pr_attached_label_coverage,
+    query_runs,
     upsert_run,
 )
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
+from daydream.pr_review import DAYDREAM_FOOTER
 from daydream.training import harvest
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.harvest import (
@@ -102,6 +104,33 @@ def _fake_gh_not_merged_with_reviewer(login: str = "alice"):
         if endpoint.endswith("/comments"):
             return []
         return {"merged": False, "merged_at": None}
+
+    return responder
+
+
+def _fake_gh_merged_unresolved_daydream(merged_at: str):
+    """Return a ``gh_api`` responder: a merged PR whose only top-level comment
+    is daydream's footer-marked comment with NO reply.
+
+    Mirrors :func:`_fake_gh_merged` but the ``comments`` endpoint returns a
+    single unresolved daydream finding (identified by ``DAYDREAM_FOOTER``,
+    authored as a normal human user — not a ``[bot]``). The rubric must read
+    this as one unresolved daydream issue → ``contested``, not ``accepted``.
+    """
+
+    def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/comments"):
+            return [
+                {
+                    "id": 1,
+                    "in_reply_to_id": None,
+                    "user": {"login": "kevin"},
+                    "body": f"finding\n\n{DAYDREAM_FOOTER}",
+                }
+            ]
+        if endpoint.endswith("/reviews"):
+            return []
+        return {"merged": True, "merged_at": merged_at}
 
     return responder
 
@@ -396,6 +425,25 @@ async def test_harvest_writes_one_annotation(tmp_path, archive_dir, monkeypatch)
     obs = latest_label_observation(archive_dir, "s1")
     assert summary["annotated"] == 1
     assert obs["valid_at"] == "2026-02-01T00:00:00+00:00" and obs["composite_reward"] is not None
+
+
+async def test_harvest_labels_unresolved_daydream_comment_contested(tmp_path, archive_dir, monkeypatch):
+    """Real-path: a merged PR whose daydream comment is unresolved → ``contested``.
+
+    Bug 1 regression guard. daydream posts review comments as a normal
+    authenticated (non-``[bot]``) user, so the old ``[bot]`` author check made
+    its findings invisible → every merged PR was mislabeled ``accepted``. This
+    drives ``run_harvest`` end-to-end and asserts the persisted run label is
+    ``contested``, the rubric's correct verdict for an unresolved finding.
+    """
+    _seed_archived_deep_run(archive_dir, "s-contest", merged_at="2026-02-01T00:00:00+00:00")
+    monkeypatch.setattr(
+        "daydream.training.harvest._gh_api",
+        _fake_gh_merged_unresolved_daydream("2026-02-01T00:00:00+00:00"),
+    )
+    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    row = query_runs(archive_dir, "session_id = ?", ("s-contest",))[0]
+    assert json.loads(row["outcome_labels"]) == ["contested"]
 
 
 async def test_re_harvest_is_idempotent(tmp_path, archive_dir, monkeypatch):
