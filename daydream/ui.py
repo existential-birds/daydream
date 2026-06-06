@@ -102,6 +102,10 @@ _MECHANICAL_TOOL_ARGS = frozenset({"block", "timeout"})
 # with the resolved label leading and the id demoted to a dim suffix.
 _BACKGROUND_TASK_TOOLS = frozenset({"TaskOutput", "TaskStop"})
 
+# Todo-list tools that reference a small-integer ``taskId``; the human label is
+# the todo's ``subject`` (in ``TaskCreate``'s input; later tools resolve by id).
+_TODO_TASK_TOOLS = frozenset({"TaskCreate", "TaskGet", "TaskUpdate", "TaskList"})
+
 # Mystical action terms for tool displays
 MYSTICAL_TERMS = {
     "Glob": ["scrying", "divining", "seeking", "wandering"],
@@ -564,6 +568,27 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
 # =============================================================================
 
 
+def _append_label_and_id(header_line: Text, label: str | None, task_id: str, *, id_prefix: str = "") -> None:
+    """Append the shared ``→ "label" (id)`` suffix to a task-tool header line.
+
+    Used by both the background-task (``TaskOutput``/``TaskStop``) and todo-list
+    (``TaskGet``/``TaskUpdate``) header branches so the label/id formatting lives
+    in one place (R13). When ``label`` is ``None`` only the dimmed id is shown.
+
+    Args:
+        header_line: The header Text to append to (mutated in place).
+        label: Resolved human-readable label, or None when unresolved.
+        task_id: The opaque/numeric id to demote to a dim suffix.
+        id_prefix: Optional prefix for the id (e.g. ``"#"`` for todo ids).
+
+    """
+    if label is not None:
+        header_line.append(' → "')
+        header_line.append(label, style=STYLE_CYAN)
+        header_line.append('"')
+    header_line.append(f" ({id_prefix}{task_id})", style=STYLE_DIM)
+
+
 def _build_tool_header(
     name: str,
     args: dict[str, object],
@@ -597,11 +622,31 @@ def _build_tool_header(
         header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
         header_line.append(name, style=STYLE_BOLD_PINK)
         task_id = str(args.get("task_id", ""))
-        if label is not None:
-            header_line.append(' → "')
-            header_line.append(label, style=STYLE_CYAN)
-            header_line.append('"')
-        header_line.append(f" ({task_id})", style=STYLE_DIM)
+        _append_label_and_id(header_line, label, task_id)
+        content.append_text(header_line)
+        return content
+
+    # Todo-list tools. TaskCreate leads with its own ``subject`` (description
+    # renders below as a Markdown body via _build_tool_body_extras). TaskGet /
+    # TaskUpdate lead with the resolved subject and demote the numeric id;
+    # TaskUpdate appends the meaningful status change. Never surface plumbing.
+    if name in _TODO_TASK_TOOLS:
+        header_line = Text()
+        header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
+        header_line.append(name, style=STYLE_BOLD_PINK)
+        if name == "TaskCreate":
+            subject = str(args.get("subject", "")).strip()
+            if subject:
+                header_line.append("  ")
+                header_line.append(subject, style=STYLE_CYAN)
+        else:
+            task_id = str(args.get("taskId", ""))
+            _append_label_and_id(header_line, label, task_id, id_prefix="#")
+            if name == "TaskUpdate":
+                status = str(args.get("status", "")).strip()
+                if status:
+                    header_line.append(" → ")
+                    header_line.append(status, style=STYLE_CYAN)
         content.append_text(header_line)
         return content
 
@@ -871,10 +916,14 @@ def _build_tool_header(
 def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
     """Return extra renderables to display between header and result.
 
-    Currently used for the Task tool, whose `description` and `prompt`
-    arguments are rendered as Markdown so bold/italic/code/lists display
+    Used for the Task tool, whose `description` and `prompt` arguments are
+    rendered as Markdown, and for TaskCreate, whose `description` renders as the
+    Markdown body below its `subject` header — so bold/italic/code/lists display
     properly instead of as a flat key=value dump.
     """
+    if name == "TaskCreate":
+        description = str(args.get("description", "")).strip()
+        return [Markdown(description)] if description else []
     if name != "Task":
         return []
     extras: list = []
@@ -2904,10 +2953,11 @@ class LiveToolPanelRegistry:
     def _derive_label(args: dict[str, object], task_id: str) -> str:
         """Derive a human label from an originating call's input args.
 
-        Prefers ``description``, then ``subagent_type``, then the first line of
-        ``command``/``prompt``, falling back to the bare id.
+        Prefers ``subject`` (todo-list ``TaskCreate``), then ``description``,
+        then ``subagent_type``, then the first line of ``command``/``prompt``,
+        falling back to the bare id.
         """
-        for key in ("description", "subagent_type"):
+        for key in ("subject", "description", "subagent_type"):
             value = args.get(key)
             if isinstance(value, str) and value.strip():
                 return value
@@ -2954,11 +3004,14 @@ class LiveToolPanelRegistry:
         if tool_use_id in self._panels:
             self._finalize_panel(tool_use_id)
 
-        # Resolve a human label for background-task tools so the panel header
-        # leads with it instead of the opaque task_id.
+        # Resolve a human label so the panel header leads with it instead of the
+        # opaque/numeric id. Background-task tools key off ``task_id``; todo-list
+        # tools (TaskGet/TaskUpdate) key off ``taskId``.
         label: str | None = None
         if name in _BACKGROUND_TASK_TOOLS:
             label = self.resolve_label(str(args.get("task_id", "")))
+        elif name in _TODO_TASK_TOOLS:
+            label = self.resolve_label(str(args.get("taskId", "")))
 
         panel = LiveToolPanel(
             console=self._console,

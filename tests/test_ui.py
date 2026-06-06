@@ -215,3 +215,32 @@ def test_taskoutput_header_unknown_id_falls_back_to_bare_id():
     reg.create("c2", "TaskOutput", {"task_id": "zzz999", "block": True, "timeout": 1})
     out = _render_panel_text(reg, "c2")
     assert "zzz999" in out and "block" not in out
+
+
+def test_taskcreate_header_shows_subject_and_body():
+    from rich.console import Console
+
+    from daydream.ui import _build_tool_body_extras, _build_tool_header
+
+    c = Console(record=True)
+    args = {"subject": "Fix auth bug", "description": "details here"}
+    c.print(_build_tool_header("TaskCreate", args))
+    for e in _build_tool_body_extras("TaskCreate", args):
+        c.print(e)
+    out = c.export_text()
+    assert "Fix auth bug" in out and "details here" in out
+
+
+def test_taskupdate_resolves_subject_and_shows_status():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "d"})
+    reg.observe_result("c1", "Task #1 created successfully: Fix auth bug")
+    reg.create("c2", "TaskUpdate", {"taskId": "1", "status": "completed"})
+    c = Console(record=True)
+    c.print(reg.get("c2")._render_panel())
+    out = c.export_text()
+    assert "Fix auth bug" in out and "completed" in out
