@@ -165,7 +165,7 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
     like ``--backend``, ``--model``, ``--trajectory`` work in both places. The
     global ``--model``/``--backend`` here feed the source-tiered precedence in
     :func:`daydream.runner._resolved_model` / ``_resolve_backend``
-    (CLI > env > config-file > per-backend table).
+    (CLI > config-file phase override > config-file global > per-backend default).
 
     Per-phase model/backend overrides are no longer CLI flags — they live in
     ``[tool.daydream.phases.<phase>]`` of the config file (``pyproject.toml`` /
@@ -1187,11 +1187,18 @@ _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
 }
 
 
-def _print_corpus_help() -> None:
-    """Print usage for the ``corpus`` namespace via the daydream.ui console."""
-    from daydream.ui import create_console
+def _print_corpus_help(*, error: bool = False) -> None:
+    """Print usage for the ``corpus`` namespace.
 
-    console = create_console()
+    Args:
+        error: When ``True`` write to stderr (unknown sub-verb error path);
+            when ``False`` (default) write to stdout (bare invocation / help
+            request path).
+    """
+    from rich.console import Console
+    from daydream.ui import NEON_THEME
+
+    console = Console(stderr=error, theme=NEON_THEME)
     console.print(
         "usage: daydream corpus {harvest,build,label} ...\n"
         "\n"
@@ -1207,18 +1214,22 @@ def _handle_corpus_command(argv: list[str]) -> int:
 
     ``corpus harvest|build|label`` routes to the existing data-pipeline
     handlers (``build`` → the build-corpus projection). A bare ``daydream
-    corpus`` (no sub-verb) prints help and exits 2. Exit codes propagate
+    corpus`` (no sub-verb) prints help to stdout and exits 2. An unknown
+    sub-verb prints help to stderr and exits 2. Exit codes propagate
     unchanged from the handlers.
 
     Args:
         argv: The argument vector after the ``corpus`` verb.
 
     Returns:
-        int: The sub-handler's exit code, or ``2`` for a missing/unknown
-        sub-verb.
+        int: The sub-handler's exit code; ``2`` for a bare (no-arg)
+        invocation or an unknown sub-verb.
     """
-    if not argv or argv[0] not in _CORPUS_SUBVERBS:
-        _print_corpus_help()
+    if not argv:
+        _print_corpus_help(error=False)
+        return 2
+    if argv[0] not in _CORPUS_SUBVERBS:
+        _print_corpus_help(error=True)
         return 2
     handler = _CORPUS_SUBVERBS[argv[0]]
     return int(handler(argv[1:]))

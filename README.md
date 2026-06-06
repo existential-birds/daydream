@@ -147,7 +147,7 @@ daydream corpus label <session_id> --outcome accepted  # manual outcome label ov
 ```bash
 daydream -s python /path/to/project           # force a specific Beagle skill
 daydream --backend codex /path/to/project     # override backend for this run
-daydream --model claude-opus-4-8 /path/to/project  # overrides ALL phases (beats config-file overrides)
+daydream --model claude-haiku-4-5 /path/to/project  # overrides ALL phases (beats config-file overrides)
 daydream --loop 3 /path/to/project            # repeat up to 3 review-fix-test rounds
 daydream --yes /path/to/project               # auto-apply fixes without prompting
 ```

@@ -82,6 +82,38 @@ def test_loop_optional_count(monkeypatch):
     assert _cfg(monkeypatch, ["/tmp/project"]).loop is False
 
 
+def test_yes_with_review_errors(monkeypatch, capsys):
+    """--yes has no effect with --review (no fix phase) and must be rejected."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--yes", "--review", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_yes_with_comment_errors(monkeypatch, capsys):
+    """--yes has no effect with --comment (no fix phase) and must be rejected."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--yes", "--comment", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_loop_zero_count_errors(monkeypatch, capsys):
+    """--loop 0 is rejected because the count must be positive."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "0", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+    assert "positive" in capsys.readouterr().err
+
+
+def test_loop_negative_count_errors(monkeypatch, capsys):
+    """--loop -1 is rejected because the count must be positive."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "-1", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+    assert "positive" in capsys.readouterr().err
+
+
 def test_loop_with_comment_errors(monkeypatch):
     """--loop is incompatible with --comment (review-only output mode)."""
     monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "--comment", "/tmp/project"])

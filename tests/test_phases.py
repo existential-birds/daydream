@@ -1265,6 +1265,10 @@ class _SummarizerBackend(_ScriptedBackend):
         if entry == "fail":
             yield TextEvent(text="1 failed, 0 passed")
             yield ResultEvent(structured_output=None, continuation=None)
+        elif entry == "fix":
+            # Simulate a fix-agent response (output discarded by caller).
+            yield TextEvent(text="Applied fix attempt")
+            yield ResultEvent(structured_output=None, continuation=None)
         elif isinstance(entry, tuple) and entry[0] == "handoff":
             yield ResultEvent(
                 structured_output={"handoff_prompt": entry[1]}, continuation=None,
@@ -1939,6 +1943,115 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
         assert "unknown" in body.lower()
         # The summarizer still ran read-only even on the abort branch.
         assert backend.read_only_calls == [False, True]
+        prompt_sentinel.assert_not_called()
+    finally:
+        reset_state()
+
+
+# ---------------------------------------------------------------------------
+# phase_test_and_heal — --yes bounded auto fix-and-retry (Task assume="yes")
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
+    tmp_path, monkeypatch, make_work,
+):
+    """``--yes`` (assume="yes") triggers exactly ONE auto fix attempt then aborts.
+
+    Observable contract:
+    - Tests fail → fix agent runs once (retries_used becomes 1).
+    - Tests fail again → ``retries_used > 0`` guard fires → loop terminates.
+    - ``prompt_user`` is never called (no interactive menu).
+    - Total backend calls: 1 (test) + 1 (fix) + 1 (test) + 1 (summarizer) = 4.
+    - Return value is ``(False, 1)``.
+
+    This exercises the real code path at lines 1777-1791 of phases.py that
+    implements the bounded-loop invariant: ``decision is True and retries_used > 0``
+    → abort, preventing an unbounded mutating fix loop under ``--yes``.
+    """
+    from daydream.agent import reset_state, set_assume
+    from daydream.phases import phase_test_and_heal
+
+    reset_state()
+    set_assume("yes")
+    try:
+        _silence_phase_io(monkeypatch)
+        _install_recorder(monkeypatch, tmp_path)
+
+        # Sentinel: the menu must never be shown in auto mode.
+        from unittest.mock import Mock
+
+        prompt_sentinel = Mock(
+            side_effect=AssertionError("prompt_user must not be called under --yes"),
+        )
+        monkeypatch.setattr("daydream.phases.prompt_user", prompt_sentinel)
+
+        # Script: fail → fix (no-op) → fail → handoff (summarizer).
+        # Four calls total; any extra call raises AssertionError via the backend.
+        call_log: list[str] = []
+
+        class _BoundedLoopBackend:
+            model = "test-model"
+            read_only_calls: list[bool] = []
+
+            async def execute(
+                self,
+                cwd,
+                prompt,
+                output_schema=None,
+                continuation=None,
+                agents=None,
+                max_turns=None,
+                read_only=False,
+            ):
+                call_log.append(prompt)
+                self.read_only_calls.append(read_only)
+                n = len(call_log)
+                if n == 1:
+                    # Initial test run → fail.
+                    yield TextEvent(text="1 failed, 0 passed")
+                    yield ResultEvent(structured_output=None, continuation=None)
+                elif n == 2:
+                    # Auto fix agent — returns without passing tests.
+                    yield TextEvent(text="Applied fix attempt")
+                    yield ResultEvent(structured_output=None, continuation=None)
+                elif n == 3:
+                    # Second test run → still fails.
+                    yield TextEvent(text="1 failed, 0 passed")
+                    yield ResultEvent(structured_output=None, continuation=None)
+                elif n == 4:
+                    # Read-only failure summarizer (abort path).
+                    yield ResultEvent(
+                        structured_output={"handoff_prompt": "# Handoff\nauto-mode failure"},
+                        continuation=None,
+                    )
+                else:
+                    raise AssertionError(f"backend called more than 4 times (call #{n})")
+
+            async def cancel(self):
+                pass
+
+            def format_skill_invocation(self, skill_key, args=""):
+                return f"/{skill_key}"
+
+        backend = _BoundedLoopBackend()
+        success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+
+        # Loop terminated after exactly one auto fix attempt.
+        assert success is False
+        assert retries == 1
+
+        # Exactly 4 backend calls: test → fix → test → summarizer.
+        assert len(call_log) == 4, f"Expected 4 backend calls, got {len(call_log)}: {call_log!r}"
+
+        # The fix prompt (call 2) contains the repair instruction.
+        assert "Analyze the failures and fix them" in call_log[1], call_log[1]
+
+        # The summarizer (call 4) ran read-only; the test runs did not.
+        assert backend.read_only_calls == [False, False, False, True], backend.read_only_calls
+
+        # The interactive menu was never consulted.
         prompt_sentinel.assert_not_called()
     finally:
         reset_state()

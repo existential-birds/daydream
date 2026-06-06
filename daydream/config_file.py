@@ -16,10 +16,13 @@ Exports:
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,12 @@ def _coerce_phases(raw: Any) -> dict[str, dict[str, str]]:
     for phase_name, table in raw.items():
         if isinstance(table, dict):
             result[str(phase_name)] = {str(k): str(v) for k, v in table.items()}
+        else:
+            logger.warning(
+                "daydream config: ignoring phase %r — expected a table, got %s",
+                phase_name,
+                type(table).__name__,
+            )
     return result
 
 
