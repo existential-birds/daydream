@@ -28,6 +28,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from daydream.pr_review import DAYDREAM_FOOTER
+
+
+def _is_daydream_comment(comment: dict[str, Any]) -> bool:
+    """Return True when ``comment`` was authored by daydream.
+
+    Daydream posts review comments as a normal authenticated user, so
+    authorship is identified by the :data:`DAYDREAM_FOOTER` badge in the
+    comment body rather than a ``*[bot]`` login.
+
+    Args:
+        comment: A parsed PR review comment dict (``body`` field read).
+
+    Returns:
+        True iff the comment body contains the daydream footer badge.
+    """
+    return DAYDREAM_FOOTER in (comment.get("body") or "")
+
 # ---------------------------------------------------------------------------
 # Result dataclasses
 # ---------------------------------------------------------------------------
@@ -305,9 +323,10 @@ def comment_resolution_signal(
 ) -> CommentResolutionSignal:
     """Return a proxy for "review comments addressed".
 
-    Top-level review comments authored by bot users (login matching
-    ``*[bot]``) are treated as issues; any reply (regardless of author
-    or body) marks the issue resolved.
+    Top-level review comments authored by daydream (identified by the
+    :data:`DAYDREAM_FOOTER` badge in the comment body) are treated as
+    issues; any reply (regardless of author or body) marks the issue
+    resolved.
 
     Args:
         row: Manifest row carrying ``pr_repo`` and ``pr_number``.
@@ -323,21 +342,19 @@ def comment_resolution_signal(
         return CommentResolutionSignal(total=0, replied=0, unresolved=0)
 
     comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments")
-    top_level_bot_ids: list[int] = []
+    top_level_daydream_ids: list[int] = []
     replies_by_parent: dict[int, int] = {}
 
     for comment in comments:
         in_reply_to = comment.get("in_reply_to_id")
         if in_reply_to is None:
-            user = comment.get("user") or {}
-            login = user.get("login", "")
-            if login.endswith("[bot]"):
-                top_level_bot_ids.append(comment["id"])
+            if _is_daydream_comment(comment):
+                top_level_daydream_ids.append(comment["id"])
         else:
             replies_by_parent[in_reply_to] = replies_by_parent.get(in_reply_to, 0) + 1
 
-    total = len(top_level_bot_ids)
-    replied = sum(1 for cid in top_level_bot_ids if replies_by_parent.get(cid, 0) >= 1)
+    total = len(top_level_daydream_ids)
+    replied = sum(1 for cid in top_level_daydream_ids if replies_by_parent.get(cid, 0) >= 1)
     return CommentResolutionSignal(total=total, replied=replied, unresolved=total - replied)
 
 
@@ -425,8 +442,6 @@ def reviewer_logins_signal(
         Exception: Any exception raised by ``gh_api`` is propagated
             unchanged; failures are never swallowed into ``[]``.
     """
-    from daydream.pr_review import DAYDREAM_FOOTER
-
     repo = row.get("pr_repo")
     number = row.get("pr_number")
     if repo is None or number is None:
@@ -452,7 +467,7 @@ def reviewer_logins_signal(
         user = comment.get("user") or {}
         login = user.get("login", "")
         if in_reply_to is None:
-            if DAYDREAM_FOOTER in (comment.get("body") or ""):
+            if _is_daydream_comment(comment):
                 daydream_comment_ids.add(comment["id"])
                 if login:
                     excluded.add(login)

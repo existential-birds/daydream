@@ -157,12 +157,46 @@ def test_comment_resolution_signal_all_resolved() -> None:
     gh = _fake_gh_responder(
         {
             ("org/repo", "repos/org/repo/pulls/42/comments"): [
-                {"id": 1, "in_reply_to_id": None, "user": {"login": "coderabbitai[bot]"}},
+                {
+                    "id": 1,
+                    "in_reply_to_id": None,
+                    "user": {"login": "daydream-runner"},
+                    "body": f"finding\n\n{DAYDREAM_FOOTER}",
+                },
                 {"id": 2, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "ack"},
             ],
         }
     )
     assert comment_resolution_signal(row, gh_api=gh) == CommentResolutionSignal(total=1, replied=1, unresolved=0)
+
+
+def test_comment_resolution_counts_footer_comment_from_human_author() -> None:
+    row = {"pr_repo": "org/repo", "pr_number": 42}
+    gh = _fake_gh_responder(
+        {
+            ("org/repo", "repos/org/repo/pulls/42/comments"): [
+                {
+                    "id": 1,
+                    "in_reply_to_id": None,
+                    "user": {"login": "kevin"},
+                    "body": f"finding\n\n{DAYDREAM_FOOTER}",
+                },
+            ],
+        }
+    )
+    assert comment_resolution_signal(row, gh_api=gh) == CommentResolutionSignal(total=1, replied=0, unresolved=1)
+
+
+def test_comment_resolution_ignores_non_daydream_bot_comment() -> None:
+    row = {"pr_repo": "org/repo", "pr_number": 42}
+    gh = _fake_gh_responder(
+        {
+            ("org/repo", "repos/org/repo/pulls/42/comments"): [
+                {"id": 1, "in_reply_to_id": None, "user": {"login": "coderabbitai[bot]"}, "body": "nit"},
+            ],
+        }
+    )
+    assert comment_resolution_signal(row, gh_api=gh) == CommentResolutionSignal(total=0, replied=0, unresolved=0)
 
 
 def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:
