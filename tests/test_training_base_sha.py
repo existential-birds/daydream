@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -84,10 +85,12 @@ def test_materialize_is_noop_when_base_sha_already_set(
         )
     )
     called: list[bool] = []
-    monkeypatch.setattr(
-        "daydream.git_ops.merge_base",
-        lambda *a, **k: called.append(True) or "should-not-be-used",
-    )
+
+    def _record_merge_base(*a: Any, **k: Any) -> str:
+        called.append(True)
+        return "should-not-be-used"
+
+    monkeypatch.setattr("daydream.git_ops.merge_base", _record_merge_base)
     result = materialize_base_sha(manifest_path, repo_clone=tmp_path / "fake-clone")
     assert result == "existing-sha"
     assert called == []

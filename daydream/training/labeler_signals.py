@@ -28,6 +28,37 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+# Version-stable prefix shared across all daydream releases.  Matching only
+# this prefix means comments posted by older or newer versions of daydream are
+# still recognised even when their embedded version string differs from the
+# currently-installed package.  (The full DAYDREAM_FOOTER constant from
+# daydream.pr_review embeds the current version number and therefore fails to
+# match historical comments posted by a different release.)
+_DAYDREAM_FOOTER_PREFIX = "<sub>🧙 Posted by [daydream v"
+
+
+def _is_daydream_comment(comment: dict[str, Any]) -> bool:
+    """Return True when ``comment`` was authored by daydream.
+
+    Daydream posts review comments as a normal authenticated user, so
+    authorship is identified by the :data:`DAYDREAM_FOOTER` badge in the
+    comment body rather than a ``*[bot]`` login.
+
+    The match is made against the version-stable prefix of the footer
+    (``_DAYDREAM_FOOTER_PREFIX``) rather than the full version-pinned
+    :data:`DAYDREAM_FOOTER` constant, so that comments posted by any release
+    of daydream are correctly identified even when their embedded version
+    string differs from the currently-installed package.
+
+    Args:
+        comment: A parsed PR review comment dict (``body`` field read).
+
+    Returns:
+        True iff the comment body contains the daydream footer badge.
+    """
+    return _DAYDREAM_FOOTER_PREFIX in (comment.get("body") or "")
+
+
 # ---------------------------------------------------------------------------
 # Result dataclasses
 # ---------------------------------------------------------------------------
@@ -305,9 +336,10 @@ def comment_resolution_signal(
 ) -> CommentResolutionSignal:
     """Return a proxy for "review comments addressed".
 
-    Top-level review comments authored by bot users (login matching
-    ``*[bot]``) are treated as issues; any reply (regardless of author
-    or body) marks the issue resolved.
+    Top-level review comments authored by daydream (identified by the
+    :data:`DAYDREAM_FOOTER` badge in the comment body) are treated as
+    issues; any reply (regardless of author or body) marks the issue
+    resolved.
 
     Args:
         row: Manifest row carrying ``pr_repo`` and ``pr_number``.
@@ -322,23 +354,58 @@ def comment_resolution_signal(
     if repo is None or number is None:
         return CommentResolutionSignal(total=0, replied=0, unresolved=0)
 
-    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments")
-    top_level_bot_ids: list[int] = []
+    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
+    top_level_daydream_ids: list[int] = []
     replies_by_parent: dict[int, int] = {}
 
     for comment in comments:
         in_reply_to = comment.get("in_reply_to_id")
         if in_reply_to is None:
-            user = comment.get("user") or {}
-            login = user.get("login", "")
-            if login.endswith("[bot]"):
-                top_level_bot_ids.append(comment["id"])
+            if _is_daydream_comment(comment):
+                top_level_daydream_ids.append(comment["id"])
         else:
             replies_by_parent[in_reply_to] = replies_by_parent.get(in_reply_to, 0) + 1
 
-    total = len(top_level_bot_ids)
-    replied = sum(1 for cid in top_level_bot_ids if replies_by_parent.get(cid, 0) >= 1)
+    total = len(top_level_daydream_ids)
+    replied = sum(1 for cid in top_level_daydream_ids if replies_by_parent.get(cid, 0) >= 1)
     return CommentResolutionSignal(total=total, replied=replied, unresolved=total - replied)
+
+
+def pr_link_signal(
+    row: dict[str, Any],
+    *,
+    gh_api: Callable[..., Any],
+) -> tuple[int, str] | None:
+    """Resolve an orphan run's PR by its ``head_sha`` (SHA-native lookup).
+
+    A run launched before its PR existed has ``pr_number=None`` but carries
+    ``repo_slug`` + ``head_sha``. This looks up the PR(s) whose head commit
+    is ``head_sha`` via ``repos/{slug}/commits/{sha}/pulls`` and returns the
+    one whose head matches exactly, disambiguating reused branch names.
+
+    Args:
+        row: Manifest row carrying ``repo_slug`` and ``head_sha``.
+        gh_api: Callable returning the parsed pull list for the commit.
+
+    Returns:
+        ``(pr_number, repo_slug)`` for the first pull whose head matches
+        ``head_sha``; ``None`` when required fields are missing or no pull
+        matches. Exceptions from ``gh_api`` propagate to the caller.
+    """
+    repo_slug = row.get("repo_slug")
+    head_sha = row.get("head_sha")
+    if not repo_slug or not head_sha:
+        return None
+
+    pulls = gh_api(repo_slug, f"repos/{repo_slug}/commits/{head_sha}/pulls", paginate=True)
+    for pr in pulls:
+        if pr.get("head", {}).get("sha") == head_sha:
+            pr_number = pr.get("number")
+            if pr_number is None:
+                continue
+            pr_repo = pr.get("head", {}).get("repo", {}).get("full_name") or repo_slug
+            return int(pr_number), pr_repo
+    return None
 
 
 def local_commit_applied_signal(
@@ -425,8 +492,6 @@ def reviewer_logins_signal(
         Exception: Any exception raised by ``gh_api`` is propagated
             unchanged; failures are never swallowed into ``[]``.
     """
-    from daydream.pr_review import DAYDREAM_FOOTER
-
     repo = row.get("pr_repo")
     number = row.get("pr_number")
     if repo is None or number is None:
@@ -436,7 +501,7 @@ def reviewer_logins_signal(
     excluded: set[str] = set()
 
     # (a) Authors of PR reviews.
-    reviews = gh_api(repo, f"repos/{repo}/pulls/{number}/reviews")
+    reviews = gh_api(repo, f"repos/{repo}/pulls/{number}/reviews", paginate=True)
     for review in reviews:
         user = review.get("user") or {}
         login = user.get("login", "")
@@ -444,7 +509,7 @@ def reviewer_logins_signal(
             logins.add(login)
 
     # (b) Authors of replies to daydream's footer-marked top-level comments.
-    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments")
+    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
     daydream_comment_ids: set[int] = set()
     replies_by_parent: dict[int, list[str]] = {}
     for comment in comments:
@@ -452,7 +517,7 @@ def reviewer_logins_signal(
         user = comment.get("user") or {}
         login = user.get("login", "")
         if in_reply_to is None:
-            if DAYDREAM_FOOTER in (comment.get("body") or ""):
+            if _is_daydream_comment(comment):
                 daydream_comment_ids.add(comment["id"])
                 if login:
                     excluded.add(login)

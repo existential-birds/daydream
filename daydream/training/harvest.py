@@ -87,7 +87,12 @@ import anyio
 from rich.console import Console
 
 from daydream import git_ops
-from daydream.archive.index import append_label_observation, query_runs, reviewer_set_penalty_prior
+from daydream.archive.index import (
+    append_label_observation,
+    query_runs,
+    reviewer_set_penalty_prior,
+    set_run_pr_link,
+)
 from daydream.git_ops import GitError, RateLimitError
 from daydream.training import reward
 from daydream.training.backfill_cache import BackfillCache
@@ -100,6 +105,7 @@ from daydream.training.labeler_signals import (
     comment_resolution_signal,
     fix_applied_signal,
     local_commit_applied_signal,
+    pr_link_signal,
     pr_merge_signal,
     reviewer_logins_signal,
 )
@@ -733,7 +739,12 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
     """Walk the archive and append one fresh annotation per indexed run.
 
     The single deferred annotate pass: for every indexed run, materialize the
-    capture-time ``base_sha`` (when missing), build the bitemporal annotation
+    capture-time ``base_sha`` (when missing), re-link orphan runs to their PR
+    (a run launched before its PR existed has ``pr_number=None`` but carries
+    ``repo_slug`` + ``head_sha``; :func:`pr_link_signal` resolves the PR by
+    head sha and the linkage is persisted via
+    :func:`daydream.archive.index.set_run_pr_link` so it becomes labelable),
+    build the bitemporal annotation
     (label + intrinsic reward + posterior sibling axis + captured reviewer set +
     ``valid_at``) via :func:`build_annotation`, and append it through
     :func:`daydream.archive.index.append_label_observation` (which persists
@@ -810,6 +821,19 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                 row, clone_cache=clone_cache, fetched_repos=fetched_repos, console=console
             )
             _materialize_base_sha_if_missing(row, run_dir, repo_clone=row_repo_clone, console=console)
+            # Re-link orphan runs: the default deep loop archives before the PR
+            # exists, freezing ``pr_number=None``. Resolve the now-existing PR by
+            # ``head_sha`` so the run becomes labelable through the PR path. Stays
+            # inside the per-row ``try`` so a lookup error isolates to this row
+            # (and ``RateLimitError`` propagates to the abort handler unchanged).
+            if not _row_is_pr(row):
+                link = pr_link_signal(row, gh_api=gh_api_callable)
+                if link is not None:
+                    number, slug = link
+                    row["pr_number"] = number
+                    row["pr_repo"] = slug
+                    if not config.dry_run:
+                        set_run_pr_link(config.archive_dir, row["session_id"], number, slug)
             payload = build_annotation(
                 row,
                 run_dir=run_dir,

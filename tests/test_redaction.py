@@ -468,11 +468,15 @@ def test_redactor_scrubs_text_content_parts() -> None:
     assert len(out.message) == 3
     # First text part: secret redacted
     assert out.message[0].type == "text"
-    assert "sk-test-secret123abc" not in out.message[0].text
-    assert "[REDACTED_API_KEY]" in out.message[0].text
+    first_text = out.message[0].text
+    assert first_text is not None  # type='text' guarantees text is populated
+    assert "sk-test-secret123abc" not in first_text
+    assert "[REDACTED_API_KEY]" in first_text
     # Image part: unchanged
     assert out.message[1].type == "image"
-    assert out.message[1].source.path == "screenshot.png"
+    image_source = out.message[1].source
+    assert image_source is not None  # type='image' guarantees source is populated
+    assert image_source.path == "screenshot.png"
     # Second text part: clean, no redaction tokens injected
     assert out.message[2].type == "text"
     assert out.message[2].text == "clean text"

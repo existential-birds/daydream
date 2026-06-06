@@ -15,10 +15,12 @@ from daydream.archive.index import (
     label_observation_history,
     latest_label_observation,
     pr_attached_label_coverage,
+    query_runs,
     upsert_run,
 )
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
+from daydream.pr_review import DAYDREAM_FOOTER
 from daydream.training import harvest
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.harvest import (
@@ -102,6 +104,61 @@ def _fake_gh_not_merged_with_reviewer(login: str = "alice"):
         if endpoint.endswith("/comments"):
             return []
         return {"merged": False, "merged_at": None}
+
+    return responder
+
+
+def _fake_gh_orphan_relink(merged_at: str):
+    """Return a ``gh_api`` responder that re-links an orphan run to PR 7.
+
+    The ``commits/{sha}/pulls`` probe resolves the row's ``head_sha`` to PR 7
+    (head sha ``orphsha``); PR 7 is then a merged PR whose only top-level
+    comment is daydream's footer-marked, unresolved finding — so once the run
+    is re-linked the rubric must label it ``contested``.
+    """
+
+    def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/pulls") and "/commits/" in endpoint:
+            return [{"number": 7, "head": {"sha": "orphsha"}}]
+        if endpoint.endswith("/comments"):
+            return [
+                {
+                    "id": 1,
+                    "in_reply_to_id": None,
+                    "user": {"login": "kevin"},
+                    "body": f"finding\n\n{DAYDREAM_FOOTER}",
+                }
+            ]
+        if endpoint.endswith("/reviews"):
+            return []
+        return {"merged": True, "merged_at": merged_at}
+
+    return responder
+
+
+def _fake_gh_merged_unresolved_daydream(merged_at: str):
+    """Return a ``gh_api`` responder: a merged PR whose only top-level comment
+    is daydream's footer-marked comment with NO reply.
+
+    Mirrors :func:`_fake_gh_merged` but the ``comments`` endpoint returns a
+    single unresolved daydream finding (identified by ``DAYDREAM_FOOTER``,
+    authored as a normal human user — not a ``[bot]``). The rubric must read
+    this as one unresolved daydream issue → ``contested``, not ``accepted``.
+    """
+
+    def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/comments"):
+            return [
+                {
+                    "id": 1,
+                    "in_reply_to_id": None,
+                    "user": {"login": "kevin"},
+                    "body": f"finding\n\n{DAYDREAM_FOOTER}",
+                }
+            ]
+        if endpoint.endswith("/reviews"):
+            return []
+        return {"merged": True, "merged_at": merged_at}
 
     return responder
 
@@ -396,6 +453,159 @@ async def test_harvest_writes_one_annotation(tmp_path, archive_dir, monkeypatch)
     obs = latest_label_observation(archive_dir, "s1")
     assert summary["annotated"] == 1
     assert obs["valid_at"] == "2026-02-01T00:00:00+00:00" and obs["composite_reward"] is not None
+
+
+async def test_harvest_labels_unresolved_daydream_comment_contested(tmp_path, archive_dir, monkeypatch):
+    """Real-path: a merged PR whose daydream comment is unresolved → ``contested``.
+
+    Bug 1 regression guard. daydream posts review comments as a normal
+    authenticated (non-``[bot]``) user, so the old ``[bot]`` author check made
+    its findings invisible → every merged PR was mislabeled ``accepted``. This
+    drives ``run_harvest`` end-to-end and asserts the persisted run label is
+    ``contested``, the rubric's correct verdict for an unresolved finding.
+    """
+    _seed_archived_deep_run(archive_dir, "s-contest", merged_at="2026-02-01T00:00:00+00:00")
+    monkeypatch.setattr(
+        "daydream.training.harvest._gh_api",
+        _fake_gh_merged_unresolved_daydream("2026-02-01T00:00:00+00:00"),
+    )
+    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    row = query_runs(archive_dir, "session_id = ?", ("s-contest",))[0]
+    assert json.loads(row["outcome_labels"]) == ["contested"]
+
+
+async def test_harvest_relinks_orphan_run_and_labels_it(tmp_path, archive_dir, monkeypatch):
+    """Real-path: an orphan run (PR opened after launch) is re-linked at harvest.
+
+    Bug 2. The default deep loop archives before the PR exists, freezing
+    ``pr_number=None``. Harvest must re-link the orphan row by its ``head_sha``
+    (via ``commits/{sha}/pulls``), persist the linkage, and then label the run
+    through the PR path. Drives ``run_harvest`` end-to-end and asserts both the
+    persisted linkage and the resulting ``contested`` label.
+    """
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id="s-orph",
+            archived_at="2026-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            branch="feat/x",
+            head_sha="orphsha",
+            base_branch="main",
+            pr_number=None,
+            pr_repo=None,
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(run_dir),
+        ),
+    )
+    monkeypatch.setattr(
+        "daydream.training.harvest._gh_api",
+        _fake_gh_orphan_relink("2026-02-01T00:00:00+00:00"),
+    )
+    await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    row = query_runs(archive_dir, "session_id = ?", ("s-orph",))[0]
+    assert row["pr_number"] == 7 and row["pr_repo"] == "org/repo"  # linkage persisted
+    assert json.loads(row["outcome_labels"]) == ["contested"]  # now labelable (was orphan)
+
+
+async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_link(
+    tmp_path, archive_dir, monkeypatch
+):
+    """dry_run=True: in-memory linkage preview is applied but not persisted.
+
+    The contract (harvest.py lines 832-836): when an orphan run re-links to a
+    PR, ``row['pr_number']`` and ``row['pr_repo']`` are mutated unconditionally
+    so ``build_annotation`` sees the linked PR and produces a PR-path annotation.
+    The ``set_run_pr_link`` DB write is guarded by ``if not config.dry_run`` and
+    must not fire.
+
+    This test exercises the real ``set_run_pr_link`` code path (no spy/patch):
+    if the guard is broken the function will actually write to the DB and the
+    DB-state assertions below will catch it.
+    """
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id="s-orph-dry",
+            archived_at="2026-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            branch="feat/x",
+            head_sha="orphsha",
+            base_branch="main",
+            pr_number=None,
+            pr_repo=None,
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(run_dir),
+        ),
+    )
+
+    monkeypatch.setattr(
+        "daydream.training.harvest._gh_api",
+        _fake_gh_orphan_relink("2026-02-01T00:00:00+00:00"),
+    )
+
+    summary = await run_harvest(
+        HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c", dry_run=True)
+    )
+
+    # In-memory linkage drove build_annotation through the PR path:
+    assert summary["would_annotate"] == 1
+    assert summary["annotated"] == 0
+
+    # DB row stays unlinked (real set_run_pr_link was not called):
+    row = query_runs(archive_dir, "session_id = ?", ("s-orph-dry",))[0]
+    assert row["pr_number"] is None
+    assert row["pr_repo"] is None
+
+    # No label observation written:
+    assert latest_label_observation(archive_dir, "s-orph-dry") is None
+
+
+async def test_harvest_leaves_true_local_run_unlinked(tmp_path, archive_dir, monkeypatch):
+    """Real-path: a local-only run (no PR ever opened) flows the local path.
+
+    Bug 2 guard. The ``commits/{sha}/pulls`` probe returns no PR, so the row
+    stays unlinked and must not be force-linked or errored — it flows the
+    existing local-branch posterior path unchanged.
+    """
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id="s-local",
+            archived_at="2026-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            branch="feat/x",
+            head_sha="localsha",
+            base_branch="main",
+            pr_number=None,
+            pr_repo=None,
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(run_dir),
+        ),
+    )
+
+    def _gh_no_pr(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/pulls") and "/commits/" in endpoint:
+            return []  # no PR ever opened
+        raise AssertionError(f"PR endpoints must not be hit for an unlinked local run ({endpoint})")
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_no_pr)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    row = query_runs(archive_dir, "session_id = ?", ("s-local",))[0]
+    assert row["pr_number"] is None
+    assert summary["errors"] == 0
 
 
 async def test_re_harvest_is_idempotent(tmp_path, archive_dir, monkeypatch):

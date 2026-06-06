@@ -12,6 +12,8 @@ from daydream.phases import phase_per_stack_reviews
 class _RecordingBackend:
     """Records every execute call; verifies no `agents` kwarg was passed."""
 
+    model = "mock-model"  # satisfies the Backend protocol's `model: str` member
+
     def __init__(self) -> None:
         self.prompts: list[str] = []
         self.agents_seen: list[Any] = []

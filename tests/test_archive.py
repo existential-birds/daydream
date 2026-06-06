@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,11 +24,14 @@ from daydream.archive.index import (
     latest_label_observation,
     query_runs,
     reviewer_set_penalty_prior,
+    set_run_pr_link,
     update_labels,
     upsert_run,
 )
 from daydream.archive.manifest import Manifest, build_manifest
 from daydream.config_file import DaydreamFileConfig
+from daydream.runner import RunConfig
+from daydream.trajectory import TrajectoryRecorder
 
 # ---------------------------------------------------------------------------
 # Mock helpers
@@ -175,8 +179,8 @@ def test_build_manifest_basic(tmp_path: Path):
     )
 
     m = build_manifest(
-        recorder=recorder,
-        config=config,
+        recorder=cast(TrajectoryRecorder, recorder),
+        config=cast(RunConfig, config),
         git_ctx=git_ctx,
         status="complete",
         archive_path=tmp_path,
@@ -203,8 +207,8 @@ def test_manifest_to_dict_structure(tmp_path: Path):
     git_ctx = GitContext()
 
     m = build_manifest(
-        recorder=recorder,
-        config=config,
+        recorder=cast(TrajectoryRecorder, recorder),
+        config=cast(RunConfig, config),
         git_ctx=git_ctx,
         status="complete",
         archive_path=tmp_path,
@@ -240,8 +244,8 @@ def test_manifest_to_dict_code_context_carries_git_ctx_fields(tmp_path: Path):
     )
 
     m = build_manifest(
-        recorder=recorder,
-        config=config,
+        recorder=cast(TrajectoryRecorder, recorder),
+        config=cast(RunConfig, config),
         git_ctx=git_ctx,
         status="complete",
         archive_path=tmp_path,
@@ -270,8 +274,8 @@ def test_build_manifest_with_evaluation(tmp_path: Path):
     }
 
     m = build_manifest(
-        recorder=recorder,
-        config=config,
+        recorder=cast(TrajectoryRecorder, recorder),
+        config=cast(RunConfig, config),
         git_ctx=git_ctx,
         status="complete",
         archive_path=tmp_path,
@@ -291,8 +295,8 @@ def test_build_manifest_without_evaluation(tmp_path: Path):
     git_ctx = GitContext()
 
     m = build_manifest(
-        recorder=recorder,
-        config=config,
+        recorder=cast(TrajectoryRecorder, recorder),
+        config=cast(RunConfig, config),
         git_ctx=git_ctx,
         status="complete",
         archive_path=tmp_path,
@@ -311,8 +315,8 @@ def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path):
     git_ctx = GitContext()
 
     m = build_manifest(
-        recorder=recorder,
-        config=config,
+        recorder=cast(TrajectoryRecorder, recorder),
+        config=cast(RunConfig, config),
         git_ctx=git_ctx,
         status="complete",
         archive_path=tmp_path,
@@ -331,8 +335,8 @@ def test_build_manifest_eval_wall_clock_overrides_recorder(tmp_path: Path):
     evaluation = {"timing": {"total_wall_clock_seconds": 42.5}}
 
     m = build_manifest(
-        recorder=recorder,
-        config=config,
+        recorder=cast(TrajectoryRecorder, recorder),
+        config=cast(RunConfig, config),
         git_ctx=git_ctx,
         status="complete",
         archive_path=tmp_path,
@@ -347,8 +351,8 @@ def test_build_manifest_eval_wall_clock_overrides_recorder(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def _make_manifest(session_id: str = "sess-0001", **overrides) -> Manifest:
-    defaults = {
+def _make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
+    defaults: dict[str, Any] = {
         "session_id": session_id,
         "archived_at": "2026-04-29T00:00:00+00:00",
         "status": "complete",
@@ -413,6 +417,13 @@ def test_update_labels_ambiguous_prefix(tmp_path: Path):
 
     with pytest.raises(ValueError, match="matches 2 sessions"):
         update_labels(tmp_path, "abc", ["x"])
+
+
+def test_set_run_pr_link_backfills_pr_columns(tmp_path: Path):
+    upsert_run(tmp_path, _make_manifest(session_id="s-orphan", pr_number=None, pr_repo=None))
+    set_run_pr_link(tmp_path, "s-orphan", 7, "org/repo")
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-orphan",))[0]
+    assert (row["pr_number"], row["pr_repo"]) == (7, "org/repo")
 
 
 def test_query_runs_with_where(tmp_path: Path):
@@ -617,7 +628,12 @@ def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path):
     target, _, _ = _setup_bundle(tmp_path, session_id)
     recorder = _MockRecorder(session_id=session_id)
 
-    archive_run(recorder=recorder, target_dir=target, config=config, status="complete")
+    archive_run(
+        recorder=cast(TrajectoryRecorder, recorder),
+        target_dir=target,
+        config=cast(RunConfig, config),
+        status="complete",
+    )
 
     run_dir = archive_dir / "runs" / session_id
     assert run_dir.is_dir()
@@ -732,7 +748,9 @@ def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path):
     # A NEWER auto observation must NOT dethrone the human label:
     append_label_observation(tmp_path, "s-prec", labels=["rejected"], pr_state="closed",
                              labeler_version="auto-v2", evidence_sha="sha2", source="auto")
-    assert latest_label_observation(tmp_path, "s-prec")["labels"] == '["accepted"]'
+    prec_obs = latest_label_observation(tmp_path, "s-prec")
+    assert prec_obs is not None
+    assert prec_obs["labels"] == '["accepted"]'
     assert bulk_latest_label_observations(tmp_path, ["s-prec"])["s-prec"]["labels"] == '["accepted"]'
     assert label_count_summary(tmp_path) == {"accepted": 1}
 
@@ -784,6 +802,7 @@ def test_append_observation_persists_valid_at_and_reward(tmp_path: Path):
         reward_version="r1", reward_json='{"composite":0.5}', composite_reward=0.5,
     )
     obs = latest_label_observation(tmp_path, "s1")
+    assert obs is not None
     assert obs["valid_at"] == "2026-01-02T00:00:00+00:00"
     assert obs["reward_version"] == "r1"
     assert query_runs(tmp_path, "session_id = ?", ("s1",))[0]["composite_reward"] == 0.5
@@ -794,6 +813,7 @@ def test_append_observation_defaults_valid_at_to_observed_at(tmp_path: Path):
     append_label_observation(tmp_path, "s2", labels=[], pr_state=None,
                              labeler_version="v1", evidence_sha=None, valid_at=None)
     obs = latest_label_observation(tmp_path, "s2")
+    assert obs is not None
     assert obs["valid_at"] == obs["observed_at"]   # Q2 collapse for local runs
 
 
