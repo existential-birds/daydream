@@ -12,7 +12,10 @@ Conventions:
       ``gh`` operations at 60 seconds.
     * ``git`` timeouts are retried a bounded number of times before raising
       :class:`GitTimeoutError` — a trivial command exceeding its timeout means
-      the host is overloaded, not that the command hung.
+      the host is overloaded, not that the command hung. Only read-only queries
+      are retried; mutating operations (fetch/checkout/clean/worktree/amend)
+      pass ``retries=0`` because re-running a non-idempotent command after a
+      timeout could happen on top of partial repo changes.
 
 Error-handling patterns:
     Functions in this module follow one of two documented patterns:
@@ -135,6 +138,9 @@ def _run_git(
         retries: How many additional attempts to make after a
             :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
             Only timeouts are retried; other failures raise immediately.
+            Mutating wrappers pass ``retries=0`` because re-running a
+            non-idempotent git command after a timeout is unsafe; only
+            read-only queries inherit the retrying default.
 
     Returns:
         The completed process. ``returncode`` is left to the caller to inspect.
@@ -354,7 +360,7 @@ def amend_trailers(repo: Path, trailers: dict[str, str], *, message: str | None 
 
     amended_msg = interp.stdout
     amend_proc = _run_git(
-        repo, ["commit", "--amend", "-m", amended_msg.strip()], timeout=30,
+        repo, ["commit", "--amend", "-m", amended_msg.strip()], timeout=30, retries=0,
     )
     if amend_proc.returncode != 0:
         raise GitError(f"git commit --amend failed: {amend_proc.stderr.strip()}")
@@ -950,7 +956,7 @@ def fetch(repo: Path, remote: str = "origin") -> None:
     Raises:
         GitError: If the fetch fails.
     """
-    proc = _run_git(repo, ["fetch", remote], timeout=30)
+    proc = _run_git(repo, ["fetch", remote], timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git fetch {remote} failed in {repo}: {proc.stderr.strip()}")
 
@@ -971,7 +977,7 @@ def fetch_ref(repo: Path, refspec: str, remote: str = "origin", *, timeout: int 
     Raises:
         GitError: If the fetch fails for any reason.
     """
-    proc = _run_git(repo, ["fetch", remote, refspec], timeout=timeout)
+    proc = _run_git(repo, ["fetch", remote, refspec], timeout=timeout, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git fetch {remote} {refspec} failed in {repo}: {proc.stderr.strip()}")
 
@@ -989,7 +995,7 @@ def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
     Raises:
         GitError: If the checkout fails.
     """
-    proc = _run_git(repo, ["checkout", "--detach", sha], timeout=timeout)
+    proc = _run_git(repo, ["checkout", "--detach", sha], timeout=timeout, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git checkout --detach {sha} failed in {repo}: {proc.stderr.strip()}")
 
@@ -1041,7 +1047,7 @@ def checkout_paths(repo: Path, paths: list[Path]) -> None:
     if not paths:
         return
     args = ["checkout", "--", *(str(p) for p in paths)]
-    proc = _run_git(repo, args, timeout=30)
+    proc = _run_git(repo, args, timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git checkout -- {paths} failed in {repo}: {proc.stderr.strip()}")
 
@@ -1055,7 +1061,7 @@ def clean_untracked(repo: Path) -> None:
     Raises:
         GitError: If the clean fails.
     """
-    proc = _run_git(repo, ["clean", "-fd"], timeout=30)
+    proc = _run_git(repo, ["clean", "-fd"], timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git clean -fd failed in {repo}: {proc.stderr.strip()}")
 
@@ -1076,7 +1082,7 @@ def worktree_add(repo: Path, path: Path, ref: str, *, detach: bool = True) -> No
     if detach:
         args.append("--detach")
     args.extend([str(path), ref])
-    proc = _run_git(repo, args, timeout=30)
+    proc = _run_git(repo, args, timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git worktree add {path} {ref} failed: {proc.stderr.strip()}")
 
@@ -1096,7 +1102,7 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
     if force:
         args.append("--force")
     args.append(str(path))
-    proc = _run_git(repo, args, timeout=30)
+    proc = _run_git(repo, args, timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git worktree remove {path} failed: {proc.stderr.strip()}")
 

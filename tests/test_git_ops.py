@@ -587,6 +587,28 @@ def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert calls["n"] == 1  # no retries for non-timeout failures
 
 
+def test_mutating_wrapper_does_not_retry_on_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutating wrappers pass `retries=0`, so a timeout is not re-run (#120).
+
+    Re-running a non-idempotent git command after a timeout could land on top of
+    partial repo changes. `fetch` drives the production path through `_run_git`
+    and must raise GitTimeoutError after exactly one attempt.
+    """
+    repo = _make_repo_with_main(tmp_path)
+    calls = {"n": 0}
+
+    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        calls["n"] += 1
+        raise subprocess.TimeoutExpired(cmd=["git"], timeout=30)
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
+    with pytest.raises(git_ops.GitTimeoutError):
+        git_ops.fetch(repo)
+    assert calls["n"] == 1  # no retries for mutating operations
+
+
 def test_wrong_branch_error_is_raisable() -> None:
     with pytest.raises(WrongBranchError):
         raise WrongBranchError("expected feat, got main")
