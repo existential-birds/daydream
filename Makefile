@@ -7,7 +7,7 @@ lint:
 	uv run ruff check daydream tests
 
 typecheck:
-	uv run mypy daydream
+	uv run mypy daydream tests
 
 test:
 	uv run pytest -v

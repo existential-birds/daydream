@@ -11,7 +11,7 @@ echo "→ Linting with ruff..."
 uv run ruff check daydream tests
 
 echo "→ Type checking with mypy..."
-uv run mypy daydream
+uv run mypy daydream tests
 
 echo "→ Running tests..."
 uv run pytest -v
