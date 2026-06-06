@@ -341,7 +341,7 @@ def comment_resolution_signal(
     if repo is None or number is None:
         return CommentResolutionSignal(total=0, replied=0, unresolved=0)
 
-    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments")
+    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
     top_level_daydream_ids: list[int] = []
     replies_by_parent: dict[int, int] = {}
 
@@ -384,7 +384,7 @@ def pr_link_signal(
     if not repo_slug or not head_sha:
         return None
 
-    pulls = gh_api(repo_slug, f"repos/{repo_slug}/commits/{head_sha}/pulls")
+    pulls = gh_api(repo_slug, f"repos/{repo_slug}/commits/{head_sha}/pulls", paginate=True)
     for pr in pulls:
         if pr.get("head", {}).get("sha") == head_sha:
             return int(pr["number"]), repo_slug
@@ -484,7 +484,7 @@ def reviewer_logins_signal(
     excluded: set[str] = set()
 
     # (a) Authors of PR reviews.
-    reviews = gh_api(repo, f"repos/{repo}/pulls/{number}/reviews")
+    reviews = gh_api(repo, f"repos/{repo}/pulls/{number}/reviews", paginate=True)
     for review in reviews:
         user = review.get("user") or {}
         login = user.get("login", "")
@@ -492,7 +492,7 @@ def reviewer_logins_signal(
             logins.add(login)
 
     # (b) Authors of replies to daydream's footer-marked top-level comments.
-    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments")
+    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
     daydream_comment_ids: set[int] = set()
     replies_by_parent: dict[int, list[str]] = {}
     for comment in comments:
