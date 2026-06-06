@@ -262,3 +262,16 @@ def test_taskoutput_result_shows_output_snippet():
     out = c.export_text()
     assert "done-with-bg-work" in out  # the <output> snippet surfaces
     assert "<retrieval_status>" not in out  # tag plumbing is stripped
+
+
+def test_task_prompt_truncation_uses_named_limit():
+    from rich.console import Console
+
+    from daydream.ui import _TASK_PROMPT_MAX_LINES, _build_tool_body_extras
+
+    args = {"description": "d", "prompt": "\n".join(f"l{i}" for i in range(40))}
+    extras = _build_tool_body_extras("Task", args)
+    c = Console(record=True)
+    for e in extras:
+        c.print(e)
+    assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in c.export_text()

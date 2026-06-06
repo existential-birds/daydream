@@ -94,6 +94,14 @@ STYLE_AGENT_BG = Style(bgcolor="#051208")
 # Dim style
 STYLE_DIM = Style(dim=True)
 
+# Truncation limits shared across the tool renderers. Named so the scattered
+# magic line-counts/char-caps have one source of meaning instead of bare literals.
+_TASK_PROMPT_MAX_LINES = 10
+_RESULT_MAX_LINES = 20
+_EDIT_PREVIEW_MAX_LINES = 30
+_GLOB_MAX_LINES = 15
+_WRITE_PREVIEW_CHARS = 200
+
 # Mechanical/plumbing tool args dropped from the generic key=value fallback so the
 # line leads with meaningful keys instead of noise.
 _MECHANICAL_TOOL_ARGS = frozenset({"block", "timeout"})
@@ -849,9 +857,9 @@ def _build_tool_header(
         content.append("BLOCKED", style=Style(color=NEON_COLORS["red"], bold=True))
         content.append("\n")
         if old_string:
-            lines = old_string.split("\n")[:30]  # Up to 30 lines
+            lines = old_string.split("\n")[:_EDIT_PREVIEW_MAX_LINES]
             preview = "\n".join(lines)
-            if len(old_string.split("\n")) > 30:
+            if len(old_string.split("\n")) > _EDIT_PREVIEW_MAX_LINES:
                 preview += "\n..."
             preview_len = max(len(preview) - 1, 1)
             # Show with gradient from red to orange
@@ -869,9 +877,9 @@ def _build_tool_header(
         content.append("FLOWING", style=Style(color=NEON_COLORS["green"], bold=True))
         content.append("\n")
         if new_string:
-            lines = new_string.split("\n")[:30]  # Up to 30 lines
+            lines = new_string.split("\n")[:_EDIT_PREVIEW_MAX_LINES]
             preview = "\n".join(lines)
-            if len(new_string.split("\n")) > 30:
+            if len(new_string.split("\n")) > _EDIT_PREVIEW_MAX_LINES:
                 preview += "\n..."
             preview_len = max(len(preview) - 1, 1)
             # Show with gradient from cyan to green
@@ -933,7 +941,7 @@ def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
         extras.append(Markdown(f"**{description}**"))
     if prompt:
         prompt_lines = prompt.split("\n")
-        max_prompt_lines = 10
+        max_prompt_lines = _TASK_PROMPT_MAX_LINES
         if len(prompt_lines) > max_prompt_lines:
             remaining = len(prompt_lines) - max_prompt_lines
             truncated_prompt = "\n".join(prompt_lines[:max_prompt_lines])
@@ -947,7 +955,7 @@ def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
 def _build_result_content(
     content: str,
     is_error: bool = False,
-    max_lines: int = 20,
+    max_lines: int = _RESULT_MAX_LINES,
 ) -> tuple[Text | Syntax | Group, bool]:
     """Build styled result content with syntax highlighting.
 
@@ -1051,7 +1059,11 @@ def print_tool_call(
         elif content_str:
             # Show truncated content preview for non-markdown files
             content.append("\n")
-            preview = content_str[:200] + "..." if len(content_str) > 200 else content_str
+            preview = (
+                content_str[:_WRITE_PREVIEW_CHARS] + "..."
+                if len(content_str) > _WRITE_PREVIEW_CHARS
+                else content_str
+            )
             content.append(preview, style=Style(color=NEON_COLORS["foreground"], dim=True))
     elif name == "Task":
         extras = _build_tool_body_extras(name, args)
@@ -1311,7 +1323,7 @@ def print_tool_result(
     console: Console,
     content: str,
     is_error: bool = False,
-    max_lines: int = 20,
+    max_lines: int = _RESULT_MAX_LINES,
 ) -> None:
     """Print a tool result with neon syntax highlighting.
 
@@ -2561,7 +2573,7 @@ class LiveToolPanel:
         """
         return _build_tool_header(self._name, self._args, self._quiet_mode, label=self._label)
 
-    def _build_result_content_internal(self, max_lines: int = 20) -> Text | Syntax | Group:
+    def _build_result_content_internal(self, max_lines: int = _RESULT_MAX_LINES) -> Text | Syntax | Group:
         """Build the result content with syntax highlighting.
 
         Delegates to shared _build_result_content() helper for consistent styling.
@@ -2602,7 +2614,7 @@ class LiveToolPanel:
         result, _ = _build_result_content(self._result, self._is_error, max_lines)
         return result
 
-    def _build_glob_result(self, max_lines: int = 15) -> Text:
+    def _build_glob_result(self, max_lines: int = _GLOB_MAX_LINES) -> Text:
         """Build formatted Glob result showing file count and paths.
 
         Args:
@@ -2651,7 +2663,7 @@ class LiveToolPanel:
 
         return result
 
-    def _build_grep_result(self, max_lines: int = 20) -> Text | Syntax | Group:
+    def _build_grep_result(self, max_lines: int = _RESULT_MAX_LINES) -> Text | Syntax | Group:
         """Build formatted Grep result showing match count.
 
         Args:
