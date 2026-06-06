@@ -161,7 +161,7 @@ def _detect_repo_slug(repo: Path) -> str | None:
     return f"{owner}/{name}"
 
 
-def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = True) -> None:
     """Add the shared (non-output-mode) arguments to a parser or subparser.
 
     Used by both the top-level parser and the ``feedback`` subparser so flags
@@ -169,6 +169,14 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     global ``--model``/``--backend`` here feed the source-tiered precedence in
     :func:`daydream.runner._resolved_model` / ``_resolve_backend``
     (CLI > env > config-file > per-backend table).
+
+    Args:
+        parser: The parser (or subparser) to add the shared arguments to.
+        full_help: When False, advanced flags (``--trajectory``, ``--no-archive``,
+            ``--eval``, ``--non-interactive``) are added with their help text
+            suppressed so the default ``--help`` stays focused on common flags.
+            They still parse and populate ``RunConfig`` unchanged; ``--help-all``
+            re-builds the parser with ``full_help=True`` to surface them.
     """
     parser.add_argument(
         "--trajectory",
@@ -179,21 +187,22 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Write ATIF v1.6 trajectory JSON to this path "
             "(default: <target>/.daydream/runs/<session_id>/trajectory.json)"
-        ),
+        ) if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--no-archive",
         action="store_true",
         default=False,
         dest="no_archive",
-        help="Disable automatic archival to ~/.daydream/archive/",
+        help="Disable automatic archival to ~/.daydream/archive/" if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--eval",
         action="store_true",
         default=False,
         dest="run_eval",
-        help="Run deterministic evaluation analysis and store evaluation.json in archive",
+        help="Run deterministic evaluation analysis and store evaluation.json in archive"
+        if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--backend", "-b",
@@ -276,7 +285,8 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         dest="non_interactive",
         help="Run without prompting; take each prompt's safe default "
-             "(confirm intent, decline fixes, exit the test/heal loop).",
+             "(confirm intent, decline fixes, exit the test/heal loop)."
+        if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--yes",
@@ -554,12 +564,49 @@ def _build_feedback_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_main_parser() -> argparse.ArgumentParser:
-    """Build the main argparse parser for the consolidated CLI surface."""
+class _HelpAllAction(argparse.Action):
+    """Print the full help (advanced flags included) and exit.
+
+    The default ``--help`` is built with ``full_help=False`` so advanced flags
+    are suppressed. ``--help-all`` re-builds the parser with ``full_help=True``
+    and renders that help instead, surfacing every flag without changing how
+    any of them parse.
+    """
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):  # noqa: A002
+        super().__init__(
+            option_strings=option_strings,
+            dest=dest,
+            default=default,
+            nargs=0,
+            help=help,
+        )
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        _build_main_parser(full_help=True).print_help()
+        parser.exit()
+
+
+def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
+    """Build the main argparse parser for the consolidated CLI surface.
+
+    Args:
+        full_help: When True, advanced flags carry their help text so they show
+            up under ``--help-all``. When False (the default for ``--help``),
+            advanced flags are added with ``argparse.SUPPRESS`` help so the
+            default help stays focused on common flags. Either way the flags
+            parse identically and populate ``RunConfig`` unchanged.
+    """
     parser = argparse.ArgumentParser(
         prog="daydream",
         description="Automated code review and fix loop. "
                     "Use `daydream feedback <pr#>` to process PR bot comments.",
+    )
+
+    parser.add_argument(
+        "--help-all",
+        action=_HelpAllAction,
+        help="Show all flags, including advanced ones, then exit.",
     )
 
     parser.add_argument(
@@ -608,7 +655,7 @@ def _build_main_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         dest="force_worktree",
-        help="Force ephemeral worktree even when --branch is omitted.",
+        help="Force ephemeral worktree even when --branch is omitted." if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--shallow",
@@ -624,14 +671,15 @@ def _build_main_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         dest="extra_copy",
         type=Path,
-        help="Extra path to copy into ephemeral worktree (repeatable).",
+        help="Extra path to copy into ephemeral worktree (repeatable)." if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--plan",
         action="store_true",
         default=False,
         dest="plan",
-        help="Generate an implementation plan and embed it in PR comments (use with --comment).",
+        help="Generate an implementation plan and embed it in PR comments (use with --comment)."
+        if full_help else argparse.SUPPRESS,
     )
 
     # ---- Skill selection (overrides auto-detect) ----
@@ -649,13 +697,13 @@ def _build_main_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         dest="cleanup",
-        help="Cleanup review output after completion",
+        help="Cleanup review output after completion" if full_help else argparse.SUPPRESS,
     )
     cleanup_group.add_argument(
         "--no-cleanup",
         action="store_false",
         dest="cleanup",
-        help="Keep review output after completion",
+        help="Keep review output after completion" if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--start-at",
@@ -666,7 +714,7 @@ def _build_main_parser() -> argparse.ArgumentParser:
             "Start at a specific phase (default: review). "
             "Choices: review | parse | fix | test | ttt | per-stack | merge. "
             "ttt, per-stack, and merge are valid only in deep (non-shallow) mode."
-        ),
+        ) if full_help else argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -675,7 +723,8 @@ def _build_main_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="PATH",
         dest="ignore_paths",
-        help="Exclude path from diff (repeatable, e.g. --ignore-path .planning --ignore-path vendor)",
+        help="Exclude path from diff (repeatable, e.g. --ignore-path .planning --ignore-path vendor)"
+        if full_help else argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -688,7 +737,7 @@ def _build_main_parser() -> argparse.ArgumentParser:
         help="Repeat the review-fix-test cycle until zero issues or N iterations (default N: 5)",
     )
 
-    _add_shared_arguments(parser)
+    _add_shared_arguments(parser, full_help=full_help)
 
     return parser
 
