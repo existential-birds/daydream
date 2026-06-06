@@ -275,3 +275,38 @@ def test_task_prompt_truncation_uses_named_limit():
     for e in extras:
         c.print(e)
     assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in c.export_text()
+
+
+async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
+    from rich.console import Console
+
+    import daydream.agent as agent_mod
+    from daydream.agent import run_agent
+    from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
+    from daydream.trajectory import DaydreamPhase
+    from tests.test_agent_recorder_integration import MockBackend  # existing event-replay mock
+
+    rec = Console(record=True, width=120)
+    monkeypatch.setattr(agent_mod, "console", rec)
+    backend = MockBackend(
+        [
+            ToolStartEvent(
+                id="c1",
+                name="Bash",
+                input={"command": "pytest", "run_in_background": True, "description": "Run tests"},
+            ),
+            ToolResultEvent(id="c1", output="Command running in background with ID: a066168. ...", is_error=False),
+            ToolStartEvent(id="c2", name="TaskOutput", input={"task_id": "a066168", "block": True, "timeout": 120000}),
+            ToolResultEvent(
+                id="c2",
+                output="<task_id>a066168</task_id>\n<output>\ndone-with-bg-work\n</output>",
+                is_error=False,
+            ),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
+    await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)
+    out = rec.export_text()
+    assert "Run tests" in out and "a066168" in out
+    assert "done-with-bg-work" in out
+    assert "block=True" not in out and "timeout=120000" not in out
