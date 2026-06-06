@@ -158,3 +158,15 @@ def test_parse_background_task_id_from_launch_string():
     create = (Path(__file__).parent / "fixtures/task_tools/taskcreate_result.txt").read_text()
     assert _parse_assigned_task_id("TaskCreate", create) == "1"
     assert _parse_assigned_task_id("Bash", "no id here") is None
+
+
+def test_colorize_tool_args_drops_mechanical_keys():
+    from rich.console import Console
+
+    from daydream.ui import _colorize_tool_args
+
+    console = Console(record=True)
+    console.print(_colorize_tool_args({"command": "pytest", "block": True, "timeout": 120000}))
+    out = console.export_text()
+    assert "command" in out and "pytest" in out
+    assert "block" not in out and "timeout" not in out

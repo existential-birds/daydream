@@ -94,6 +94,10 @@ STYLE_AGENT_BG = Style(bgcolor="#051208")
 # Dim style
 STYLE_DIM = Style(dim=True)
 
+# Mechanical/plumbing tool args dropped from the generic key=value fallback so the
+# line leads with meaningful keys instead of noise.
+_MECHANICAL_TOOL_ARGS = frozenset({"block", "timeout"})
+
 # Mystical action terms for tool displays
 MYSTICAL_TERMS = {
     "Glob": ["scrying", "divining", "seeking", "wandering"],
@@ -471,9 +475,6 @@ def pill(text: str, bg_color: str, fg_color: str) -> Text:
 # Tool Call Component
 # =============================================================================
 
-# Pattern for tool argument colorization
-_TOOL_ARG_PATTERN = re.compile(r"(\w+)=((?:'[^']*'|\"[^\"]*\"|[^,\s]+))")
-
 # Patterns for harvesting the assigned task id out of an originating tool's result string.
 _LAUNCH_TASK_ID_PATTERN = re.compile(r"\bID:\s*([A-Za-z0-9]+)\b")
 _TASKCREATE_ID_PATTERN = re.compile(r"Task #(\d+)")
@@ -521,7 +522,10 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
     """
     result = Text()
 
-    for i, (key, value) in enumerate(args.items()):
+    # Drop mechanical/plumbing keys entirely so the line leads with meaningful args.
+    items = [(key, value) for key, value in args.items() if key not in _MECHANICAL_TOOL_ARGS]
+
+    for i, (key, value) in enumerate(items):
         if i > 0:
             result.append(", ", style=STYLE_FG)
 
