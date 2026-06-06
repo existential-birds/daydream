@@ -62,7 +62,6 @@ from daydream.ui import (
     print_success,
     print_verification_summary,
     print_warning,
-    prompt_user,
 )
 from daydream.workspace import WorkContext
 
