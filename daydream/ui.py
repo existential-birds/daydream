@@ -492,7 +492,7 @@ def pill(text: str, bg_color: str, fg_color: str) -> Text:
 # =============================================================================
 
 # Patterns for harvesting the assigned task id out of an originating tool's result string.
-_LAUNCH_TASK_ID_PATTERN = re.compile(r"\bID:\s*([A-Za-z0-9]+)\b")
+_LAUNCH_TASK_ID_PATTERN = re.compile(r"\bCommand running in background with ID:\s*([A-Za-z0-9]+)\b")
 _TASKCREATE_ID_PATTERN = re.compile(r"Task #(\d+)")
 _LAUNCH_TASK_TOOLS = frozenset({"Bash", "Agent", "Task"})
 
@@ -520,6 +520,27 @@ def _parse_assigned_task_id(name: str, output: str) -> str | None:
     return None
 
 
+def _task_label_ns_key(name: str, task_id: str) -> str:
+    """Return a namespaced ``_task_labels`` dict key for *task_id*.
+
+    Background launch tools (Bash/Agent/Task) use opaque alphanumeric ids;
+    TaskCreate uses small integer ids.  Storing both in one flat dict risks
+    collision (e.g. a background id of ``'1'`` colliding with TaskCreate id
+    ``1``).  This function prefixes each id with a short namespace tag so the
+    two id spaces never share keys.
+
+    Args:
+        name: The originating tool's name.
+        task_id: The raw assigned id string.
+
+    Returns:
+        ``"bg:<task_id>"`` for launch tools, ``"tc:<task_id>"`` for TaskCreate.
+    """
+    if name in _LAUNCH_TASK_TOOLS:
+        return f"bg:{task_id}"
+    return f"tc:{task_id}"
+
+
 def _derive_task_label(args: dict[str, object], task_id: str) -> str:
     """Derive a human label from an originating Task-family call's input args.
 
@@ -538,12 +559,24 @@ def _derive_task_label(args: dict[str, object], task_id: str) -> str:
     for key in ("subject", "description", "subagent_type"):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
-            return value
+            return value[:80]
     for key in ("command", "prompt"):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
-            return value.splitlines()[0]
+            return value.splitlines()[0][:80]
     return task_id
+
+
+def _task_id_key(name: str) -> str:
+    """Return the arg key that carries a task id for a Task-family tool.
+
+    Background-task tools (``TaskOutput``/``TaskStop``) use ``"task_id"``;
+    todo-list tools (``TaskGet``/``TaskUpdate``/…) use ``"taskId"``.  Keeping
+    this mapping in one place eliminates the three-way duplication that existed
+    across ``resolve_call_label``, ``format_callback_progress``, and
+    ``_build_tool_header``.
+    """
+    return "task_id" if name in _BACKGROUND_TASK_TOOLS else "taskId"
 
 
 def format_callback_progress(
@@ -572,13 +605,10 @@ def format_callback_progress(
 
     """
     if name in _BACKGROUND_TASK_TOOLS or name in _TODO_TASK_TOOLS:
-        id_key = "task_id" if name in _BACKGROUND_TASK_TOOLS else "taskId"
-        task_id = str(args.get(id_key, "")).strip()
+        task_id = str(args.get(_task_id_key(name), "")).strip()
         lead = label or _derive_task_label(args, task_id)
-        line = f"{name} {lead}"
-        if task_id and task_id != lead:
-            line += f" ({task_id})"
-        return line[:max_len]
+        suffix = _format_label_and_id_str(lead, task_id if task_id != lead else "")
+        return f"{name} {suffix}"[:max_len]
 
     first_arg = next(iter(args.values()), "") if args else ""
     return f"{name} {first_arg}"[:max_len]
@@ -640,6 +670,31 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
 # =============================================================================
 
 
+def _format_label_and_id_str(label: str | None, task_id: str, *, id_prefix: str = "") -> str:
+    """Return the plain-string ``lead (id)`` suffix shared by all task-tool paths.
+
+    This is the single source of truth for the lead-label / id-suffix pattern
+    (R13). Both the Rich panel path (``_append_label_and_id``) and the plain
+    callback/quiet path (``format_callback_progress``) delegate here so the
+    logic is never duplicated.
+
+    Args:
+        label: Resolved human-readable label, or None when unresolved.
+        task_id: The opaque/numeric id to demote to a parenthesized suffix.
+        id_prefix: Optional prefix for the id (e.g. ``"#"`` for todo ids).
+
+    Returns:
+        A plain string such as ``'some label (42)'`` or ``'(42)'``.
+
+    """
+    parts: list[str] = []
+    if label is not None:
+        parts.append(label)
+    if task_id.strip():
+        parts.append(f"({id_prefix}{task_id})")
+    return " ".join(parts)
+
+
 def _append_label_and_id(header_line: Text, label: str | None, task_id: str, *, id_prefix: str = "") -> None:
     """Append the shared ``→ "label" (id)`` suffix to a task-tool header line.
 
@@ -696,7 +751,7 @@ def _build_tool_header(
         header_line = Text()
         header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
         header_line.append(name, style=STYLE_BOLD_PINK)
-        task_id = str(args.get("task_id", ""))
+        task_id = str(args.get(_task_id_key(name), ""))
         _append_label_and_id(header_line, label, task_id)
         content.append_text(header_line)
         return content
@@ -715,7 +770,7 @@ def _build_tool_header(
                 header_line.append("  ")
                 header_line.append(subject, style=STYLE_CYAN)
         else:
-            task_id = str(args.get("taskId", ""))
+            task_id = str(args.get(_task_id_key(name), ""))
             _append_label_and_id(header_line, label, task_id, id_prefix="#")
             if name == "TaskUpdate":
                 status = str(args.get("status", "")).strip()
@@ -2621,7 +2676,7 @@ class LiveToolPanel:
 
         # Special handling for TaskOutput - surface the <output> snippet, stripping
         # the XML-ish tag plumbing (retrieval_status, task_id, status, ...).
-        if self._name == "TaskOutput":
+        if self._name == "TaskOutput" and not self._is_error:
             match = re.search(r"<output>(.*?)</output>", self._result, re.DOTALL)
             snippet = match.group(1).strip() if match else self._result
             result, _ = _build_result_content(snippet, self._is_error, max_lines)
@@ -2956,7 +3011,7 @@ class LiveToolPanelRegistry:
         self._static_ids: set[str] = set()
         self._live: Live | None = None
         self._group = _ActivePanelsGroup(self)
-        self._task_labels: dict[str, str] = {}
+        self._task_labels: dict[str, str] = {}  # keyed by _task_label_ns_key(name, id)
         # Originating-call args by tool_use_id, populated on every ToolStartEvent
         # (both render modes) so result→label correlation does not depend on a
         # panel having been created (the callback render path creates no panels).
@@ -2966,7 +3021,7 @@ class LiveToolPanelRegistry:
     _STATIC_TOOL_NAMES: frozenset[str] = frozenset({"Task"})
 
     # Tool names whose result strings assign an id we can label.
-    _LABEL_SOURCE_TOOL_NAMES: frozenset[str] = frozenset({"Bash", "Agent", "Task", "TaskCreate"})
+    _LABEL_SOURCE_TOOL_NAMES: frozenset[str] = _LAUNCH_TASK_TOOLS | frozenset({"TaskCreate"})
 
     def note_call(self, tool_use_id: str, name: str, args: dict[str, object]) -> None:
         """Record an originating call's name + args for later label correlation.
@@ -2998,26 +3053,28 @@ class LiveToolPanelRegistry:
             output: The originating tool's result string.
 
         """
-        call = self._call_args.get(tool_use_id)
+        call = self._call_args.pop(tool_use_id, None)
         if call is None or call[0] not in self._LABEL_SOURCE_TOOL_NAMES:
             return
         name, args = call
         task_id = _parse_assigned_task_id(name, output)
         if task_id is None:
             return
-        self._task_labels[task_id] = _derive_task_label(args, task_id)
+        self._task_labels[_task_label_ns_key(name, task_id)] = _derive_task_label(args, task_id)
 
-    def resolve_label(self, task_id: str) -> str | None:
+    def resolve_label(self, name: str, task_id: str) -> str | None:
         """Return the harvested label for a task id, or None if unknown.
 
         Args:
+            name: The originating tool's name (used to select the correct
+                namespace prefix — launch tools vs. TaskCreate).
             task_id: The assigned task id to look up.
 
         Returns:
             The mapped label, or None if no mapping was recorded.
 
         """
-        return self._task_labels.get(task_id)
+        return self._task_labels.get(_task_label_ns_key(name, task_id))
 
     def resolve_call_label(self, name: str, args: dict[str, object]) -> str | None:
         """Resolve a Task-family call's human label from its args.
@@ -3036,10 +3093,12 @@ class LiveToolPanelRegistry:
             is unknown.
 
         """
-        if name in _BACKGROUND_TASK_TOOLS:
-            return self.resolve_label(str(args.get("task_id", "")))
-        if name in _TODO_TASK_TOOLS:
-            return self.resolve_label(str(args.get("taskId", "")))
+        if name in _BACKGROUND_TASK_TOOLS or name in _TODO_TASK_TOOLS:
+            task_id = str(args.get(_task_id_key(name), ""))
+            # Background tools look up ids stored by launch tools ("bg:" prefix);
+            # todo-list tools look up ids stored by TaskCreate ("tc:" prefix).
+            origin_name = "Bash" if name in _BACKGROUND_TASK_TOOLS else "TaskCreate"
+            return self.resolve_label(origin_name, task_id)
         return None
 
     def create(
@@ -3159,6 +3218,8 @@ class LiveToolPanelRegistry:
                 self._console.print(panel._render_panel())
         self._active_order.clear()
         self._panels.clear()
+        self._call_args.clear()
+        self._task_labels.clear()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -3186,6 +3247,10 @@ class LiveToolPanelRegistry:
 
     def _finalize_panel(self, tool_use_id: str) -> None:
         """Remove a panel from the active set and print its final state."""
+        # Prune the originating-call record; by finalization time observe_result
+        # has already harvested any task_id → label mapping from it.
+        self._call_args.pop(tool_use_id, None)
+
         if tool_use_id in self._static_ids:
             self._static_ids.discard(tool_use_id)
             panel = self._panels.pop(tool_use_id, None)

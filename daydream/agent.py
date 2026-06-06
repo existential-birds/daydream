@@ -486,9 +486,9 @@ async def run_agent(
                         # later TaskOutput/TaskStop resolves its originating label.
                         tool_registry.observe_result(event.id, event.output)
                     else:
+                        tool_registry.observe_result(event.id, event.output)
                         panel = tool_registry.get(event.id)
                         if panel:
-                            tool_registry.observe_result(event.id, event.output)
                             panel.set_result(event.output, event.is_error)
                             panel.finish()
                             tool_registry.remove(event.id)

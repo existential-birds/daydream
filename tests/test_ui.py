@@ -180,8 +180,8 @@ def test_registry_harvests_task_label_from_originating_result():
     reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
     reg.create("c1", "Bash", {"command": "pytest", "run_in_background": True, "description": "Run tests"})
     reg.observe_result("c1", "Command running in background with ID: a066168. Output ...")
-    assert reg.resolve_label("a066168") == "Run tests"
-    assert reg.resolve_label("unknown") is None
+    assert reg.resolve_label("Bash", "a066168") == "Run tests"
+    assert reg.resolve_label("Bash", "unknown") is None
 
 
 def _render_panel_text(reg, tool_use_id):
