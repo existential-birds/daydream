@@ -19,14 +19,27 @@ daydream [TARGET] [OPTIONS]
 # Run as module
 python -m daydream
 
-# Examples
-daydream /path/to/project                          # Default: deep multi-stack loop
+# Golden paths (near-zero-flag; `daydream /path` == `daydream review /path`)
+daydream /path/to/project                          # review → fix → test (deep multi-stack)
+daydream --comment /path/to/project                # review → post inline PR comments, then exit
+
+# Other verbs / flags
 daydream --shallow -s python /path/to/project      # Shallow Python review-fix-test loop
 daydream --review /path/to/project                 # Review only, skip fixes
-daydream --comment --branch feat/x /path/to/project  # Post inline PR comments
+daydream --yes /path/to/project                    # Auto-apply fixes without prompting
+daydream --loop 3 /path/to/project                 # Repeat review-fix-test up to 3 rounds
 daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # Bot PR comments
-daydream --trajectory /tmp/out.json /path/to/project  # Custom trajectory path
 daydream --non-interactive /path/to/project        # Unattended/harness run: take safe defaults, no prompts
+daydream --help-all                                # Full advanced flag surface (--start-at, --trajectory, ...)
+
+# Data pipeline moved under the `corpus` namespace
+daydream corpus harvest                            # Annotate archived runs
+daydream corpus build --out out.jsonl              # Project to JSONL training corpus
+daydream corpus label <session_id> --outcome accepted
+
+# Per-phase model/backend overrides are config-file-only (no CLI flags):
+#   set [tool.daydream] / [tool.daydream.phases.<phase>] in pyproject.toml or .daydream.toml.
+#   Precedence: CLI (--model/--backend, DAYDREAM_MODEL/DAYDREAM_BACKEND) > config file > built-in default.
 
 # Development
 make lint       # Run ruff linter

@@ -33,7 +33,7 @@ Every run produces an [ATIF v1.6](https://www.harborframework.com/docs/agents/tr
 
 The training data pipeline converts archived trajectories into fine-tuning datasets through three stages:
 
-**Harvest** (`daydream harvest`): Walks the archive index, assembles bronze signals (verifier verdicts, finding records, grounding rate, review length), scores an intrinsic reward, derives the outcome label, and appends a bitemporal annotation. Re-running appends a new generation rather than overwriting, so older `as_of` pins still resolve their original scores.
+**Harvest** (`daydream corpus harvest`): Walks the archive index, assembles bronze signals (verifier verdicts, finding records, grounding rate, review length), scores an intrinsic reward, derives the outcome label, and appends a bitemporal annotation. Re-running appends a new generation rather than overwriting, so older `as_of` pins still resolve their original scores.
 
 **Reward scoring** (`daydream/training/reward.py`): a pure composite over capture-time signals:
 
@@ -44,7 +44,7 @@ The training data pipeline converts archived trajectories into fine-tuning datas
 
 Composite = `round(clip(credit − w_len·len_norm, 0, 1), 4)`. Missing signals are `None`, never imputed as 0. When a maintainer accept/reject label is supplied, scoring also returns a posterior false-positive cost as a sibling field — it never alters the composite. See `reward.py` for the posterior breakdown and weight details.
 
-**Build corpus** (`daydream build-corpus`): Projects `as_of`-pinned silver annotations into JSONL training records, filtered by outcome label, reward threshold, stack, exclusion list, and license. Writes a `lineage.json` manifest (content-addressed `trajectory_set_hash`, labeler/reward versions, `as_of` pin) for byte-for-byte reproducibility, with a temporal-leakage guard that drops annotations newer than the pin.
+**Build corpus** (`daydream corpus build`): Projects `as_of`-pinned silver annotations into JSONL training records, filtered by outcome label, reward threshold, stack, exclusion list, and license. Writes a `lineage.json` manifest (content-addressed `trajectory_set_hash`, labeler/reward versions, `as_of` pin) for byte-for-byte reproducibility, with a temporal-leakage guard that drops annotations newer than the pin.
 
 ### Archive
 
@@ -92,15 +92,28 @@ claude plugin install beagle
 
 Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`.
 
-Run a review:
+### Golden paths
+
+Two near-zero-flag entry points cover the common cases:
 
 ```bash
-daydream /path/to/project                     # deep multi-stack review-fix-test
-daydream --shallow /path/to/project           # single-stack loop
-daydream --review /path/to/project            # report only, no fixes
-daydream --comment --branch feat/x /path/to/project  # post inline PR comments
+daydream /path/to/project            # review → fix → test (deep multi-stack)
+daydream --comment /path/to/project  # review → post inline PR comments, then exit
+```
+
+`daydream /path` is the default verb; `daydream review /path` is identical. The
+remaining surface is opt-in:
+
+```bash
+daydream --review /path/to/project            # write a report to terminal/markdown, no fixes
+daydream --shallow /path/to/project           # single-stack review → parse → fix → test loop
+daydream --yes /path/to/project               # auto-apply fixes without prompting
+daydream --loop /path/to/project              # repeat review-fix-test until clean (or 5 rounds)
 daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # fix bot PR comments
 ```
+
+Run `daydream --help` for the common flags and `daydream --help-all` for the full
+advanced surface (`--start-at`, `--ignore-path`, `--worktree`, `--trajectory`, …).
 
 To update: `git pull && uv sync`
 
@@ -118,32 +131,79 @@ To update: `git pull && uv sync`
 
 ### Corpus Commands
 
+The data-pipeline verbs live under the `corpus` namespace:
+
 ```bash
-daydream harvest                              # annotate all archived runs (reward + label)
-daydream harvest --dry-run
-daydream build-corpus --out /path/to/out.jsonl  # project labeled runs to JSONL
-daydream build-corpus --out out.jsonl --min-reward 0.5 --label accepted --label mixed
-daydream build-corpus --out out.jsonl --as-of 2026-05-01T00:00:00Z  # pinned snapshot
-daydream label <session_id> --accepted        # manual outcome label override
+daydream corpus harvest                              # annotate all archived runs (reward + label)
+daydream corpus harvest --dry-run
+daydream corpus build --out /path/to/out.jsonl       # project labeled runs to JSONL
+daydream corpus build --out out.jsonl --min-reward 0.5 --include-all-labels
+daydream corpus build --out out.jsonl --as-of 2026-05-01T00:00:00Z  # pinned snapshot
+daydream corpus label <session_id> --outcome accepted  # manual outcome label override
 ```
 
 ### Common Options
 
 ```bash
 daydream -s python /path/to/project           # force a specific Beagle skill
-daydream --backend codex /path/to/project
-daydream --review-model claude-opus-4-6 /path/to/project
+daydream --backend codex /path/to/project     # or env DAYDREAM_BACKEND
+daydream --model claude-opus-4-8 /path/to/project  # global model; or env DAYDREAM_MODEL
+daydream --loop 3 /path/to/project            # repeat up to 3 review-fix-test rounds
+daydream --yes /path/to/project               # auto-apply fixes without prompting
+```
+
+Advanced flags (hidden from `--help`, shown by `--help-all`, all still parse):
+
+```bash
 daydream --start-at fix /path/to/project      # resume from a specific phase
-daydream --loop --max-iterations 3 /path/to/project
 daydream --trajectory /tmp/run.json /path/to/project
 daydream --ignore-path vendor /path/to/project
 daydream --worktree /path/to/project          # force ephemeral worktree
 daydream --non-interactive /path/to/project   # run unattended; take every prompt's safe default
 ```
 
-`--non-interactive` takes each prompt's safe default: on test failure it writes a `handoff.md` and exits non-zero instead of looping, otherwise it auto-commits and exits 0.
+`--non-interactive` takes each prompt's safe default: on test failure it writes a `handoff.md` and exits non-zero instead of looping, otherwise it declines fixes and exits 0. It is orthogonal to `--yes`: `--non-interactive` controls *whether* daydream may block on stdin, while `--yes` pre-decides every yes/no gate as "yes". A non-TTY or CI environment (`CI` set) auto-enables non-interactive mode without the flag.
 
-Per-phase backend and model overrides: `--review-backend`, `--fix-backend`, `--test-backend`, `--review-model`, `--parse-model`, `--fix-model`, `--test-model`, `--exploration-model`. Run `daydream --help` for the full option list and per-backend model defaults.
+Per-phase model and backend overrides are no longer CLI flags — set them in the config file (see [Configuration](#configuration)).
+
+## Configuration
+
+Per-phase model/backend selection and global defaults live in a config file, read from the **target repo root** at two sources, merged per-key (the dotfile wins on scalar conflicts):
+
+- `pyproject.toml` under `[tool.daydream]` (lower precedence)
+- `.daydream.toml` at the repo root, using bare top-level keys (higher precedence)
+
+```toml
+# pyproject.toml  →  [tool.daydream]
+[tool.daydream]
+model = "claude-opus-4-8"     # global default across phases
+backend = "claude"            # global default backend
+
+[tool.daydream.phases.fix]    # per-phase override
+backend = "codex"
+model = "gpt-5.5"
+
+[tool.daydream.phases.review]
+model = "claude-opus-4-8"
+```
+
+```toml
+# .daydream.toml  (top-level keys; no [tool.daydream] prefix)
+model = "claude-opus-4-8"
+
+[phases.fix]
+backend = "codex"
+```
+
+Phase names: `exploration`, `review`, `parse`, `fix`, `test`, `merge` (plus
+`intent`, `pr_feedback`). Resolution precedence, highest first:
+
+**CLI > env > config file > built-in per-backend default.**
+
+So `--model` (or `DAYDREAM_MODEL`) beats a `[tool.daydream.phases.*]` override,
+which beats the per-backend table in `daydream/config.py`. The same order applies
+to backend selection via `--backend` / `DAYDREAM_BACKEND` / config / the `claude`
+fallback.
 
 ## Output Files
 
