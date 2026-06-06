@@ -34,10 +34,12 @@ def _run_main(argv: list[str]) -> int:
 
 def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     called = {}
-    monkeypatch.setattr(
-        "daydream.training.harvest.run_harvest",
-        lambda c: called.setdefault("hit", True) or {"errors": 0, "annotated": 0, "skipped": 0, "total": 0},
-    )
+
+    def _fake_run_harvest(_config):
+        called["hit"] = True
+        return {"errors": 0, "annotated": 0, "skipped": 0, "total": 0}
+
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
     assert _run_main(["corpus", "harvest", "--dry-run"]) == 0
     assert called["hit"]
 

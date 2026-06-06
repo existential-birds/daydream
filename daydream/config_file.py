@@ -41,11 +41,25 @@ class DaydreamFileConfig:
     phases: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def phase_model(self, phase: str) -> str | None:
-        """Return the configured model for ``phase``, or None if unset."""
+        """Return the configured model for a phase.
+
+        Args:
+            phase: Phase name to look up (e.g. ``"fix"``).
+
+        Returns:
+            The configured model, or None if the phase has no ``model`` key.
+        """
         return self.phases.get(phase, {}).get("model")
 
     def phase_backend(self, phase: str) -> str | None:
-        """Return the configured backend for ``phase``, or None if unset."""
+        """Return the configured backend for a phase.
+
+        Args:
+            phase: Phase name to look up (e.g. ``"fix"``).
+
+        Returns:
+            The configured backend, or None if the phase has no ``backend`` key.
+        """
         return self.phases.get(phase, {}).get("backend")
 
 

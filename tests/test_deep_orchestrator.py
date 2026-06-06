@@ -570,6 +570,9 @@ async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytes
 
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    # The fix gate routes through resolve_or_prompt -> daydream.agent.prompt_user,
+    # so observe that namespace; under --yes it must never be reached.
+    monkeypatch.setattr("daydream.agent.prompt_user", _record_prompt)
     # phase_understand_intent also calls prompt_user; assume="yes" should also
     # suppress that gate, so patch it to fail loudly if it is ever reached.
     monkeypatch.setattr(

@@ -217,7 +217,7 @@ def build_manifest(
     # Deferred import to avoid a module-level cycle: archive.manifest →
     # runner → (lazy) archive.  Importing here keeps the call-site semantics
     # identical while breaking the top-level cycle.
-    from daydream.runner import _resolved_backend_name  # noqa: PLC0415
+    from daydream.runner import _resolved_backend_name  # noqa: PLC0415 - deferred import avoids cycle
 
     # Resolve the effective backend through the full precedence chain
     # (per-phase flag → config.backend → file-config phase → file-config global → "claude")

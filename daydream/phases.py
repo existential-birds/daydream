@@ -2158,7 +2158,9 @@ async def phase_understand_intent(
             interactive=not get_non_interactive(),
             safe_default=True,
         )
-        if gate is not None:
+        if gate is True:
+            return intent_text
+        if gate is False and get_non_interactive():
             return intent_text
 
         response = prompt_user(

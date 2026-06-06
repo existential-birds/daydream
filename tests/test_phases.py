@@ -491,6 +491,70 @@ async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeyp
     assert "login" in result.lower()
 
 
+async def test_phase_understand_intent_forced_no_interactive_falls_through(tmp_path, monkeypatch, make_work):
+    """A forced ``no`` (assume="no") in interactive mode must enter the correction flow.
+
+    Regression: ``resolve_gate`` returns False for assume="no", and the gate
+    previously short-circuited on ``gate is not None`` — accepting the
+    understanding without ever offering a correction. The fix falls through to
+    the prompt when interactive, so the user is consulted. Observable: the
+    correction prompt is reached (prompt_user is called), not bypassed.
+    """
+    from daydream.agent import reset_state, set_assume
+    from daydream.phases import phase_understand_intent
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    reset_state()
+    set_assume("no")
+    try:
+        call_count = 0
+
+        class IntentBackend:
+            model = "test-model"
+
+            async def execute(
+                self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+                max_turns=None, read_only=False,
+            ):
+                nonlocal call_count
+                call_count += 1
+                yield TextEvent(text="This PR adds a signup page.")
+                yield ResultEvent(structured_output=None, continuation=None)
+
+            async def cancel(self):
+                pass
+
+            def format_skill_invocation(self, skill_key, args=""):
+                return f"/{skill_key}"
+
+        prompt_calls: list[str] = []
+
+        def _record(console, message, default=""):
+            prompt_calls.append(message)
+            return "y"
+
+        monkeypatch.setattr("daydream.phases.prompt_user", _record)
+
+        diff_file = tmp_path / "diff.patch"
+        diff_file.write_text("diff --git ...")
+
+        result = await phase_understand_intent(
+            IntentBackend(), make_work(tmp_path),
+            diff_path=diff_file,
+            log="abc1234 add signup",
+            branch="feat/signup",
+        )
+
+        # The forced "no" did not bypass the gate: the correction prompt was reached.
+        assert prompt_calls, "forced 'no' short-circuited without offering a correction"
+        assert "signup" in result.lower()
+    finally:
+        reset_state()
+
+
 def test_parse_issue_selection_all():
     from daydream.phases import _parse_issue_selection
     issues = [{"id": 1}, {"id": 2}, {"id": 3}]
@@ -1861,6 +1925,7 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
             side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),
         )
         monkeypatch.setattr("daydream.phases.prompt_user", prompt_sentinel)
+        monkeypatch.setattr("daydream.agent.prompt_user", prompt_sentinel)
 
         # First call: failing test run (menu would otherwise appear). Second
         # call: the read-only failure-summarizer producing the handoff body —
@@ -1928,6 +1993,7 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
             side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),
         )
         monkeypatch.setattr("daydream.phases.prompt_user", prompt_sentinel)
+        monkeypatch.setattr("daydream.agent.prompt_user", prompt_sentinel)
 
         backend = _SummarizerBackend(["fail", ("raise", RuntimeError)])
 
@@ -1986,6 +2052,7 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
             side_effect=AssertionError("prompt_user must not be called under --yes"),
         )
         monkeypatch.setattr("daydream.phases.prompt_user", prompt_sentinel)
+        monkeypatch.setattr("daydream.agent.prompt_user", prompt_sentinel)
 
         # Script: fail → fix (no-op) → fail → handoff (summarizer).
         # Four calls total; any extra call raises AssertionError via the backend.

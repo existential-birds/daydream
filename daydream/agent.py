@@ -236,7 +236,7 @@ def resolve_or_prompt(
     decision = resolve_gate(assume=assume, interactive=interactive, safe_default=safe_default)
     if decision is None:
         response = prompt_user(console, question, default)
-        decision = response.lower() in ("y", "yes")
+        decision = response.strip().lower() in ("y", "yes")
     return decision
 
 
