@@ -358,6 +358,39 @@ def comment_resolution_signal(
     return CommentResolutionSignal(total=total, replied=replied, unresolved=total - replied)
 
 
+def pr_link_signal(
+    row: dict[str, Any],
+    *,
+    gh_api: Callable[..., Any],
+) -> tuple[int, str] | None:
+    """Resolve an orphan run's PR by its ``head_sha`` (SHA-native lookup).
+
+    A run launched before its PR existed has ``pr_number=None`` but carries
+    ``repo_slug`` + ``head_sha``. This looks up the PR(s) whose head commit
+    is ``head_sha`` via ``repos/{slug}/commits/{sha}/pulls`` and returns the
+    one whose head matches exactly, disambiguating reused branch names.
+
+    Args:
+        row: Manifest row carrying ``repo_slug`` and ``head_sha``.
+        gh_api: Callable returning the parsed pull list for the commit.
+
+    Returns:
+        ``(pr_number, repo_slug)`` for the first pull whose head matches
+        ``head_sha``; ``None`` when required fields are missing or no pull
+        matches. Exceptions from ``gh_api`` propagate to the caller.
+    """
+    repo_slug = row.get("repo_slug")
+    head_sha = row.get("head_sha")
+    if not repo_slug or not head_sha:
+        return None
+
+    pulls = gh_api(repo_slug, f"repos/{repo_slug}/commits/{head_sha}/pulls")
+    for pr in pulls:
+        if pr.get("head", {}).get("sha") == head_sha:
+            return int(pr["number"]), repo_slug
+    return None
+
+
 def local_commit_applied_signal(
     row: dict[str, Any],
     *,

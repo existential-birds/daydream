@@ -18,6 +18,7 @@ from daydream.training.labeler_signals import (
     comment_resolution_signal,
     fix_applied_signal,
     local_commit_applied_signal,
+    pr_link_signal,
     pr_merge_signal,
     reviewer_logins_signal,
 )
@@ -273,3 +274,37 @@ def test_local_commit_applied_signal_no_local_commits_returns_rejected(tmp_path:
         file_at_fetcher=lambda repo, path, sha: "",
     )
     assert sig == LocalCommitAppliedSignal(verdict="rejected")
+
+
+def _fake_commits_pulls(pulls):
+    # pulls: list returned by repos/{slug}/commits/{sha}/pulls
+    def responder(repo, endpoint, **kwargs):
+        assert endpoint == "repos/org/repo/commits/abc123/pulls"
+        return pulls
+
+    return responder
+
+
+def test_pr_link_signal_matches_pr_by_head_sha() -> None:
+    row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
+    gh = _fake_commits_pulls([{"number": 7, "head": {"sha": "abc123"}}])
+    assert pr_link_signal(row, gh_api=gh) == (7, "org/repo")
+
+
+def test_pr_link_signal_disambiguates_multiple_pulls_by_head_sha() -> None:
+    row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
+    gh = _fake_commits_pulls(
+        [{"number": 5, "head": {"sha": "other"}}, {"number": 7, "head": {"sha": "abc123"}}]
+    )
+    assert pr_link_signal(row, gh_api=gh) == (7, "org/repo")
+
+
+def test_pr_link_signal_returns_none_when_no_head_sha_match() -> None:
+    row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
+    gh = _fake_commits_pulls([{"number": 5, "head": {"sha": "forcepushed"}}])
+    assert pr_link_signal(row, gh_api=gh) is None
+
+
+def test_pr_link_signal_returns_none_without_required_fields() -> None:
+    gh = _fake_commits_pulls([])  # must NOT be called (missing head_sha short-circuits)
+    assert pr_link_signal({"repo_slug": "org/repo"}, gh_api=gh) is None
