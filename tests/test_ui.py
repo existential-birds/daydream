@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -146,3 +148,214 @@ def test_prompt_user_destructive_defaults_decline_on_eof(monkeypatch, message):
     reset_state()
     monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
     assert prompt_user(Console(record=True), message, default="n") == "n"
+
+
+def test_parse_background_task_id_from_launch_string():
+    from daydream.ui import _parse_assigned_task_id
+
+    launch = (Path(__file__).parent / "fixtures/task_tools/bash_bg_launch.txt").read_text()
+    assert _parse_assigned_task_id("Bash", launch) == "b0nsmwb99"
+    create = (Path(__file__).parent / "fixtures/task_tools/taskcreate_result.txt").read_text()
+    assert _parse_assigned_task_id("TaskCreate", create) == "1"
+    assert _parse_assigned_task_id("Bash", "no id here") is None
+
+
+def test_colorize_tool_args_drops_mechanical_keys():
+    from rich.console import Console
+
+    from daydream.ui import _colorize_tool_args
+
+    console = Console(record=True)
+    console.print(_colorize_tool_args({"command": "pytest", "block": True, "timeout": 120000}))
+    out = console.export_text()
+    assert "command" in out and "pytest" in out
+    assert "block" not in out and "timeout" not in out
+
+
+def test_registry_harvests_task_label_from_originating_result():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "Bash", {"command": "pytest", "run_in_background": True, "description": "Run tests"})
+    reg.observe_result("c1", "Command running in background with ID: a066168. Output ...")
+    assert reg.resolve_label("Bash", "a066168") == "Run tests"
+    assert reg.resolve_label("Bash", "unknown") is None
+
+
+def _render_panel_text(reg, tool_use_id):
+    from rich.console import Console
+
+    c = Console(record=True)
+    c.print(reg.get(tool_use_id)._render_panel())
+    return c.export_text()
+
+
+def test_taskoutput_header_leads_with_label_demotes_id():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "Bash", {"command": "x", "run_in_background": True, "description": "Run tests"})
+    reg.observe_result("c1", "Command running in background with ID: a066168. ...")
+    reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 120000})
+    out = _render_panel_text(reg, "c2")
+    assert "Run tests" in out and "a066168" in out
+    assert "block" not in out and "timeout" not in out
+
+
+def test_taskoutput_header_unknown_id_falls_back_to_bare_id():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c2", "TaskOutput", {"task_id": "zzz999", "block": True, "timeout": 1})
+    out = _render_panel_text(reg, "c2")
+    assert "zzz999" in out and "block" not in out
+
+
+def test_taskcreate_header_shows_subject_and_body():
+    from rich.console import Console
+
+    from daydream.ui import _build_tool_body_extras, _build_tool_header
+
+    c = Console(record=True)
+    args = {"subject": "Fix auth bug", "description": "details here"}
+    c.print(_build_tool_header("TaskCreate", args))
+    for e in _build_tool_body_extras("TaskCreate", args):
+        c.print(e)
+    out = c.export_text()
+    assert "Fix auth bug" in out and "details here" in out
+
+
+def test_taskupdate_resolves_subject_and_shows_status():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "d"})
+    reg.observe_result("c1", "Task #1 created successfully: Fix auth bug")
+    reg.create("c2", "TaskUpdate", {"taskId": "1", "status": "completed"})
+    c = Console(record=True)
+    c.print(reg.get("c2")._render_panel())
+    out = c.export_text()
+    assert "Fix auth bug" in out and "completed" in out
+
+
+def test_tasklist_header_omits_empty_id_suffix():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "TaskList", {})
+    out = _render_panel_text(reg, "c1")
+    assert "TaskList" in out
+    assert "(#)" not in out and "()" not in out
+
+
+def test_taskoutput_result_shows_output_snippet():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    # quiet_mode=False so the result body renders (quiet mode suppresses result
+    # output entirely); R8 is about the rendered TaskOutput result snippet.
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=False)
+    reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 1})
+    result = (Path(__file__).parent / "fixtures/task_tools/taskoutput_result.txt").read_text()
+    reg.get("c2").set_result(result, is_error=False)
+    c = Console(record=True)
+    c.print(reg.get("c2")._render_panel())
+    out = c.export_text()
+    assert "done-with-bg-work" in out  # the <output> snippet surfaces
+    assert "<retrieval_status>" not in out  # tag plumbing is stripped
+
+
+def test_task_prompt_truncation_uses_named_limit():
+    from rich.console import Console
+
+    from daydream.ui import _TASK_PROMPT_MAX_LINES, _build_tool_body_extras
+
+    args = {"description": "d", "prompt": "\n".join(f"l{i}" for i in range(40))}
+    extras = _build_tool_body_extras("Task", args)
+    c = Console(record=True)
+    for e in extras:
+        c.print(e)
+    assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in c.export_text()
+
+
+async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
+    from rich.console import Console
+
+    import daydream.agent as agent_mod
+    from daydream.agent import run_agent
+    from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
+    from daydream.trajectory import DaydreamPhase
+    from tests.test_agent_recorder_integration import MockBackend  # existing event-replay mock
+
+    rec = Console(record=True, width=120)
+    monkeypatch.setattr(agent_mod, "console", rec)
+    backend = MockBackend(
+        [
+            ToolStartEvent(
+                id="c1",
+                name="Bash",
+                input={"command": "pytest", "run_in_background": True, "description": "Run tests"},
+            ),
+            ToolResultEvent(id="c1", output="Command running in background with ID: a066168. ...", is_error=False),
+            ToolStartEvent(id="c2", name="TaskOutput", input={"task_id": "a066168", "block": True, "timeout": 120000}),
+            ToolResultEvent(
+                id="c2",
+                output="<task_id>a066168</task_id>\n<output>\ndone-with-bg-work\n</output>",
+                is_error=False,
+            ),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
+    await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)
+    out = rec.export_text()
+    assert "Run tests" in out and "a066168" in out
+    assert "done-with-bg-work" in out
+    assert "block=True" not in out and "timeout=120000" not in out
+
+
+async def test_run_agent_callback_path_labels_taskoutput(tmp_path):
+    from daydream.agent import run_agent
+    from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
+    from daydream.trajectory import DaydreamPhase
+    from tests.test_agent_recorder_integration import MockBackend  # existing event-replay mock
+
+    backend = MockBackend(
+        [
+            ToolStartEvent(
+                id="c1",
+                name="Bash",
+                input={"command": "pytest", "run_in_background": True, "description": "Run tests"},
+            ),
+            ToolResultEvent(id="c1", output="Command running in background with ID: a066168. ...", is_error=False),
+            ToolStartEvent(id="c2", name="TaskOutput", input={"task_id": "a066168", "block": True, "timeout": 120000}),
+            ToolResultEvent(
+                id="c2",
+                output="<task_id>a066168</task_id>\n<output>\ndone-with-bg-work\n</output>",
+                is_error=False,
+            ),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
+    lines: list[str] = []
+    await run_agent(
+        backend,
+        tmp_path,
+        "go",
+        phase=DaydreamPhase.REVIEW,
+        progress_callback=lines.append,
+    )
+    joined = "\n".join(lines)
+    assert "Run tests" in joined  # resolved label surfaces in callback mode
+    assert "block" not in joined and "timeout" not in joined
+    assert "TaskOutput a066168" not in joined  # opaque bare-id dump form is gone

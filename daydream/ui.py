@@ -94,6 +94,26 @@ STYLE_AGENT_BG = Style(bgcolor="#051208")
 # Dim style
 STYLE_DIM = Style(dim=True)
 
+# Truncation limits shared across the tool renderers. Named so the scattered
+# magic line-counts/char-caps have one source of meaning instead of bare literals.
+_TASK_PROMPT_MAX_LINES = 10
+_RESULT_MAX_LINES = 20
+_EDIT_PREVIEW_MAX_LINES = 30
+_GLOB_MAX_LINES = 15
+_WRITE_PREVIEW_CHARS = 200
+
+# Mechanical/plumbing tool args dropped from the generic key=value fallback so the
+# line leads with meaningful keys instead of noise.
+_MECHANICAL_TOOL_ARGS = frozenset({"block", "timeout"})
+
+# Background-task tools that reference an opaque background ``task_id``; rendered
+# with the resolved label leading and the id demoted to a dim suffix.
+_BACKGROUND_TASK_TOOLS = frozenset({"TaskOutput", "TaskStop"})
+
+# Todo-list tools that reference a small-integer ``taskId``; the human label is
+# the todo's ``subject`` (in ``TaskCreate``'s input; later tools resolve by id).
+_TODO_TASK_TOOLS = frozenset({"TaskCreate", "TaskGet", "TaskUpdate", "TaskList"})
+
 # Mystical action terms for tool displays
 MYSTICAL_TERMS = {
     "Glob": ["scrying", "divining", "seeking", "wandering"],
@@ -471,8 +491,127 @@ def pill(text: str, bg_color: str, fg_color: str) -> Text:
 # Tool Call Component
 # =============================================================================
 
-# Pattern for tool argument colorization
-_TOOL_ARG_PATTERN = re.compile(r"(\w+)=((?:'[^']*'|\"[^\"]*\"|[^,\s]+))")
+# Patterns for harvesting the assigned task id out of an originating tool's result string.
+_LAUNCH_TASK_ID_PATTERN = re.compile(r"\bCommand running in background with ID:\s*([A-Za-z0-9]+)\b")
+_TASKCREATE_ID_PATTERN = re.compile(r"Task #(\d+)")
+_LAUNCH_TASK_TOOLS = frozenset({"Bash", "Agent", "Task"})
+
+
+def _parse_assigned_task_id(name: str, output: str) -> str | None:
+    """Extract the assigned task id from an originating tool's result string.
+
+    Backgrounded launch tools (Bash/Agent/Task) report their id in a
+    ``Command running in background with ID: <id>. …`` prose string; TaskCreate
+    reports it as ``Task #<N> created successfully: …``.
+
+    Args:
+        name: The originating tool's name.
+        output: The tool's result string.
+
+    Returns:
+        The captured id, or None if the input does not match the expected shape.
+    """
+    if name in _LAUNCH_TASK_TOOLS:
+        match = _LAUNCH_TASK_ID_PATTERN.search(output)
+        return match.group(1) if match else None
+    if name == "TaskCreate":
+        match = _TASKCREATE_ID_PATTERN.search(output)
+        return match.group(1) if match else None
+    return None
+
+
+def _task_label_ns_key(name: str, task_id: str) -> str:
+    """Return a namespaced ``_task_labels`` dict key for *task_id*.
+
+    Background launch tools (Bash/Agent/Task) use opaque alphanumeric ids;
+    TaskCreate uses small integer ids.  Storing both in one flat dict risks
+    collision (e.g. a background id of ``'1'`` colliding with TaskCreate id
+    ``1``).  This function prefixes each id with a short namespace tag so the
+    two id spaces never share keys.
+
+    Args:
+        name: The originating tool's name.
+        task_id: The raw assigned id string.
+
+    Returns:
+        ``"bg:<task_id>"`` for launch tools, ``"tc:<task_id>"`` for TaskCreate.
+    """
+    if name in _LAUNCH_TASK_TOOLS:
+        return f"bg:{task_id}"
+    return f"tc:{task_id}"
+
+
+def _derive_task_label(args: dict[str, object], task_id: str) -> str:
+    """Derive a human label from an originating Task-family call's input args.
+
+    Prefers ``subject`` (todo-list ``TaskCreate``), then ``description``,
+    then ``subagent_type``, then the first line of ``command``/``prompt``,
+    falling back to the bare id.
+
+    Args:
+        args: The originating tool call's input args.
+        task_id: The assigned id, used as the fallback when no label key is set.
+
+    Returns:
+        The derived label, or ``task_id`` if no meaningful key is present.
+
+    """
+    for key in ("subject", "description", "subagent_type"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value[:80]
+    for key in ("command", "prompt"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.splitlines()[0][:80]
+    return task_id
+
+
+def _task_id_key(name: str) -> str:
+    """Return the arg key that carries a task id for a Task-family tool.
+
+    Background-task tools (``TaskOutput``/``TaskStop``) use ``"task_id"``;
+    todo-list tools (``TaskGet``/``TaskUpdate``/…) use ``"taskId"``.  Keeping
+    this mapping in one place eliminates the three-way duplication that existed
+    across ``resolve_call_label``, ``format_callback_progress``, and
+    ``_build_tool_header``.
+    """
+    return "task_id" if name in _BACKGROUND_TASK_TOOLS else "taskId"
+
+
+def format_callback_progress(
+    name: str,
+    args: dict[str, object],
+    label: str | None,
+    max_len: int = 80,
+) -> str:
+    """Build a one-line, plumbing-free progress string for the callback render path.
+
+    The callback (parallel-fix/quiet) render path streams a single status line
+    per tool call instead of a Rich panel. Task-family tools must never surface
+    the opaque ``name + task_id`` dump or mechanical ``block``/``timeout`` args
+    here; they lead with the resolved label (when known) and otherwise fall back
+    to a non-opaque derivation (``subject``/``description``/first command line),
+    demoting the bare id to a parenthesized suffix.
+
+    Args:
+        name: The tool's name.
+        args: The tool's input args.
+        label: The resolved label for the call's id, or None when unknown.
+        max_len: Maximum length of the returned string.
+
+    Returns:
+        A truncated progress line.
+
+    """
+    if name in _BACKGROUND_TASK_TOOLS or name in _TODO_TASK_TOOLS:
+        task_id = str(args.get(_task_id_key(name), "")).strip()
+        lead = label or _derive_task_label(args, task_id)
+        suffix = _format_label_and_id_str(lead, task_id if task_id != lead else "")
+        return f"{name} {suffix}"[:max_len]
+
+    first_arg = next(iter(args.values()), "") if args else ""
+    return f"{name} {first_arg}"[:max_len]
 
 
 def _colorize_tool_args(args: dict[str, object]) -> Text:
@@ -493,7 +632,10 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
     """
     result = Text()
 
-    for i, (key, value) in enumerate(args.items()):
+    # Drop mechanical/plumbing keys entirely so the line leads with meaningful args.
+    items = [(key, value) for key, value in args.items() if key not in _MECHANICAL_TOOL_ARGS]
+
+    for i, (key, value) in enumerate(items):
         if i > 0:
             result.append(", ", style=STYLE_FG)
 
@@ -528,10 +670,61 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
 # =============================================================================
 
 
+def _format_label_and_id_str(label: str | None, task_id: str, *, id_prefix: str = "") -> str:
+    """Return the plain-string ``lead (id)`` suffix shared by all task-tool paths.
+
+    This is the single source of truth for the lead-label / id-suffix pattern
+    (R13). Both the Rich panel path (``_append_label_and_id``) and the plain
+    callback/quiet path (``format_callback_progress``) delegate here so the
+    logic is never duplicated.
+
+    Args:
+        label: Resolved human-readable label, or None when unresolved.
+        task_id: The opaque/numeric id to demote to a parenthesized suffix.
+        id_prefix: Optional prefix for the id (e.g. ``"#"`` for todo ids).
+
+    Returns:
+        A plain string such as ``'some label (42)'`` or ``'(42)'``.
+
+    """
+    parts: list[str] = []
+    if label is not None:
+        parts.append(label)
+    if task_id.strip():
+        parts.append(f"({id_prefix}{task_id})")
+    return " ".join(parts)
+
+
+def _append_label_and_id(header_line: Text, label: str | None, task_id: str, *, id_prefix: str = "") -> None:
+    """Append the shared ``→ "label" (id)`` suffix to a task-tool header line.
+
+    Used by both the background-task (``TaskOutput``/``TaskStop``) and todo-list
+    (``TaskGet``/``TaskUpdate``/``TaskList``) header branches so the label/id
+    formatting lives in one place (R13). When ``label`` is ``None`` only the
+    dimmed id is shown; when ``task_id`` is empty (e.g. id-less ``TaskList``)
+    no id suffix is appended at all.
+
+    Args:
+        header_line: The header Text to append to (mutated in place).
+        label: Resolved human-readable label, or None when unresolved.
+        task_id: The opaque/numeric id to demote to a dim suffix.
+        id_prefix: Optional prefix for the id (e.g. ``"#"`` for todo ids).
+
+    """
+    if label is not None:
+        header_line.append(' → "')
+        header_line.append(label, style=STYLE_CYAN)
+        header_line.append('"')
+    if task_id.strip():
+        header_line.append(f" ({id_prefix}{task_id})", style=STYLE_DIM)
+
+
 def _build_tool_header(
     name: str,
     args: dict[str, object],
     quiet_mode: bool = False,
+    *,
+    label: str | None = None,
 ) -> Text:
     """Build styled tool header content.
 
@@ -541,12 +734,51 @@ def _build_tool_header(
         name: Name of the tool being called.
         args: Dictionary of arguments passed to the tool.
         quiet_mode: If True, hide command details for Bash tools.
+        label: Resolved human-readable label for background-task tools
+            (``TaskOutput``/``TaskStop``); when provided it leads the header
+            and the opaque ``task_id`` is demoted to a dim suffix.
 
     Returns:
         Rich Text containing the styled tool header.
 
     """
     content = Text()
+
+    # Background-task tools reference an opaque task_id; lead with the resolved
+    # label (when known) and demote the id to a dim suffix. Never surface the
+    # mechanical block/timeout plumbing.
+    if name in _BACKGROUND_TASK_TOOLS:
+        header_line = Text()
+        header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
+        header_line.append(name, style=STYLE_BOLD_PINK)
+        task_id = str(args.get(_task_id_key(name), ""))
+        _append_label_and_id(header_line, label, task_id)
+        content.append_text(header_line)
+        return content
+
+    # Todo-list tools. TaskCreate leads with its own ``subject`` (description
+    # renders below as a Markdown body via _build_tool_body_extras). TaskGet /
+    # TaskUpdate lead with the resolved subject and demote the numeric id;
+    # TaskUpdate appends the meaningful status change. Never surface plumbing.
+    if name in _TODO_TASK_TOOLS:
+        header_line = Text()
+        header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
+        header_line.append(name, style=STYLE_BOLD_PINK)
+        if name == "TaskCreate":
+            subject = str(args.get("subject", "")).strip()
+            if subject:
+                header_line.append("  ")
+                header_line.append(subject, style=STYLE_CYAN)
+        else:
+            task_id = str(args.get(_task_id_key(name), ""))
+            _append_label_and_id(header_line, label, task_id, id_prefix="#")
+            if name == "TaskUpdate":
+                status = str(args.get("status", "")).strip()
+                if status:
+                    header_line.append(" → ")
+                    header_line.append(status, style=STYLE_CYAN)
+        content.append_text(header_line)
+        return content
 
     # Special handling for Skill tool calls - Gradient Whisper style
     if name == "Skill":
@@ -747,9 +979,9 @@ def _build_tool_header(
         content.append("BLOCKED", style=Style(color=NEON_COLORS["red"], bold=True))
         content.append("\n")
         if old_string:
-            lines = old_string.split("\n")[:30]  # Up to 30 lines
+            lines = old_string.split("\n")[:_EDIT_PREVIEW_MAX_LINES]
             preview = "\n".join(lines)
-            if len(old_string.split("\n")) > 30:
+            if len(old_string.split("\n")) > _EDIT_PREVIEW_MAX_LINES:
                 preview += "\n..."
             preview_len = max(len(preview) - 1, 1)
             # Show with gradient from red to orange
@@ -767,9 +999,9 @@ def _build_tool_header(
         content.append("FLOWING", style=Style(color=NEON_COLORS["green"], bold=True))
         content.append("\n")
         if new_string:
-            lines = new_string.split("\n")[:30]  # Up to 30 lines
+            lines = new_string.split("\n")[:_EDIT_PREVIEW_MAX_LINES]
             preview = "\n".join(lines)
-            if len(new_string.split("\n")) > 30:
+            if len(new_string.split("\n")) > _EDIT_PREVIEW_MAX_LINES:
                 preview += "\n..."
             preview_len = max(len(preview) - 1, 1)
             # Show with gradient from cyan to green
@@ -814,10 +1046,14 @@ def _build_tool_header(
 def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
     """Return extra renderables to display between header and result.
 
-    Currently used for the Task tool, whose `description` and `prompt`
-    arguments are rendered as Markdown so bold/italic/code/lists display
+    Used for the Task tool, whose `description` and `prompt` arguments are
+    rendered as Markdown, and for TaskCreate, whose `description` renders as the
+    Markdown body below its `subject` header — so bold/italic/code/lists display
     properly instead of as a flat key=value dump.
     """
+    if name == "TaskCreate":
+        description = str(args.get("description", "")).strip()
+        return [Markdown(description)] if description else []
     if name != "Task":
         return []
     extras: list = []
@@ -827,7 +1063,7 @@ def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
         extras.append(Markdown(f"**{description}**"))
     if prompt:
         prompt_lines = prompt.split("\n")
-        max_prompt_lines = 10
+        max_prompt_lines = _TASK_PROMPT_MAX_LINES
         if len(prompt_lines) > max_prompt_lines:
             remaining = len(prompt_lines) - max_prompt_lines
             truncated_prompt = "\n".join(prompt_lines[:max_prompt_lines])
@@ -841,7 +1077,7 @@ def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
 def _build_result_content(
     content: str,
     is_error: bool = False,
-    max_lines: int = 20,
+    max_lines: int = _RESULT_MAX_LINES,
 ) -> tuple[Text | Syntax | Group, bool]:
     """Build styled result content with syntax highlighting.
 
@@ -945,7 +1181,11 @@ def print_tool_call(
         elif content_str:
             # Show truncated content preview for non-markdown files
             content.append("\n")
-            preview = content_str[:200] + "..." if len(content_str) > 200 else content_str
+            preview = (
+                content_str[:_WRITE_PREVIEW_CHARS] + "..."
+                if len(content_str) > _WRITE_PREVIEW_CHARS
+                else content_str
+            )
             content.append(preview, style=Style(color=NEON_COLORS["foreground"], dim=True))
     elif name == "Task":
         extras = _build_tool_body_extras(name, args)
@@ -1205,7 +1445,7 @@ def print_tool_result(
     console: Console,
     content: str,
     is_error: bool = False,
-    max_lines: int = 20,
+    max_lines: int = _RESULT_MAX_LINES,
 ) -> None:
     """Print a tool result with neon syntax highlighting.
 
@@ -1245,57 +1485,6 @@ def print_tool_result(
         padding=(0, 1),
     )
     console.print(panel)
-
-
-# =============================================================================
-# Code Result Component
-# =============================================================================
-
-
-def print_code_result(
-    console: Console,
-    content: str,
-    filename: str = "",
-    max_lines: int = 30,
-) -> None:
-    """Print code content with syntax highlighting.
-
-    Uses Rich's Syntax component for proper highlighting and
-    automatic line wrapping that respects terminal width.
-
-    Args:
-        console: Rich Console instance for output.
-        content: The code content to display.
-        filename: Optional filename to detect language (e.g., "test.py").
-        max_lines: Maximum number of lines to display.
-
-    """
-    lines = content.split("\n")
-    truncated = len(lines) > max_lines
-    display_content = "\n".join(lines[:max_lines]) if truncated else content
-
-    # Detect language from filename extension
-    if "." in filename:
-        lang = filename.rsplit(".", 1)[-1]
-        # Map common extensions
-        lang_map = {"py": "python", "js": "javascript", "ts": "typescript", "md": "markdown"}
-        lang = lang_map.get(lang, lang)
-    else:
-        lang = "text"
-
-    syntax = Syntax(
-        display_content,
-        lang,
-        theme="dracula",
-        line_numbers=True,
-        word_wrap=True,
-    )
-    console.print(syntax)
-
-    if truncated:
-        console.print(
-            f"[neon.dim]... ({len(lines) - max_lines} more lines)[/]"
-        )
 
 
 # =============================================================================
@@ -2413,6 +2602,7 @@ class LiveToolPanel:
         name: str,
         args: dict[str, object],
         quiet_mode: bool = False,
+        label: str | None = None,
     ) -> None:
         """Initialize the LiveToolPanel.
 
@@ -2422,12 +2612,15 @@ class LiveToolPanel:
             name: Name of the tool being called.
             args: Dictionary of arguments passed to the tool.
             quiet_mode: If True, use static display instead of Live updates.
+            label: Resolved human label for background-task tools, threaded
+                through to the header by the registry.
 
         """
         self._console = console
         self._tool_use_id = tool_use_id
         self._name = name
         self._args = args
+        self._label = label
         self._result: str | None = None
         self._is_error: bool = False
         self._live: Live | None = None
@@ -2449,9 +2642,9 @@ class LiveToolPanel:
             Rich Text containing the styled tool header.
 
         """
-        return _build_tool_header(self._name, self._args, self._quiet_mode)
+        return _build_tool_header(self._name, self._args, self._quiet_mode, label=self._label)
 
-    def _build_result_content_internal(self, max_lines: int = 20) -> Text | Syntax | Group:
+    def _build_result_content_internal(self, max_lines: int = _RESULT_MAX_LINES) -> Text | Syntax | Group:
         """Build the result content with syntax highlighting.
 
         Delegates to shared _build_result_content() helper for consistent styling.
@@ -2481,10 +2674,18 @@ class LiveToolPanel:
         if self._name == "Edit" and not self._is_error:
             return self._build_edit_result()
 
+        # Special handling for TaskOutput - surface the <output> snippet, stripping
+        # the XML-ish tag plumbing (retrieval_status, task_id, status, ...).
+        if self._name == "TaskOutput" and not self._is_error:
+            match = re.search(r"<output>(.*?)</output>", self._result, re.DOTALL)
+            snippet = match.group(1).strip() if match else self._result
+            result, _ = _build_result_content(snippet, self._is_error, max_lines)
+            return result
+
         result, _ = _build_result_content(self._result, self._is_error, max_lines)
         return result
 
-    def _build_glob_result(self, max_lines: int = 15) -> Text:
+    def _build_glob_result(self, max_lines: int = _GLOB_MAX_LINES) -> Text:
         """Build formatted Glob result showing file count and paths.
 
         Args:
@@ -2533,7 +2734,7 @@ class LiveToolPanel:
 
         return result
 
-    def _build_grep_result(self, max_lines: int = 20) -> Text | Syntax | Group:
+    def _build_grep_result(self, max_lines: int = _RESULT_MAX_LINES) -> Text | Syntax | Group:
         """Build formatted Grep result showing match count.
 
         Args:
@@ -2810,9 +3011,95 @@ class LiveToolPanelRegistry:
         self._static_ids: set[str] = set()
         self._live: Live | None = None
         self._group = _ActivePanelsGroup(self)
+        self._task_labels: dict[str, str] = {}  # keyed by _task_label_ns_key(name, id)
+        # Originating-call args by tool_use_id, populated on every ToolStartEvent
+        # (both render modes) so result→label correlation does not depend on a
+        # panel having been created (the callback render path creates no panels).
+        self._call_args: dict[str, tuple[str, dict[str, object]]] = {}
 
     # Tool names whose panels should scroll inline rather than pin via Live.
     _STATIC_TOOL_NAMES: frozenset[str] = frozenset({"Task"})
+
+    # Tool names whose result strings assign an id we can label.
+    _LABEL_SOURCE_TOOL_NAMES: frozenset[str] = _LAUNCH_TASK_TOOLS | frozenset({"TaskCreate"})
+
+    def note_call(self, tool_use_id: str, name: str, args: dict[str, object]) -> None:
+        """Record an originating call's name + args for later label correlation.
+
+        Called on **every** ``ToolStartEvent`` (both the Live-panel and the
+        callback render paths) so that ``observe_result`` can resolve a
+        background ``task_id``'s label without a panel having been created.
+
+        Args:
+            tool_use_id: The id of the tool call.
+            name: The tool's name.
+            args: The tool's input args.
+
+        """
+        self._call_args[tool_use_id] = (name, args)
+
+    def observe_result(self, tool_use_id: str, output: str) -> None:
+        """Harvest a ``task_id → label`` mapping from an originating tool's result.
+
+        When a backgrounded launch tool (``Bash``/``Agent``/``Task``) or a
+        ``TaskCreate`` call returns, its result string assigns an id. This
+        records that id mapped to a human-readable label derived from the
+        originating call's input args. Reads the originating call from the
+        ``note_call`` store, so it works in both render modes (panel creation
+        is not a prerequisite).
+
+        Args:
+            tool_use_id: The id of the originating tool call.
+            output: The originating tool's result string.
+
+        """
+        call = self._call_args.pop(tool_use_id, None)
+        if call is None or call[0] not in self._LABEL_SOURCE_TOOL_NAMES:
+            return
+        name, args = call
+        task_id = _parse_assigned_task_id(name, output)
+        if task_id is None:
+            return
+        self._task_labels[_task_label_ns_key(name, task_id)] = _derive_task_label(args, task_id)
+
+    def resolve_label(self, name: str, task_id: str) -> str | None:
+        """Return the harvested label for a task id, or None if unknown.
+
+        Args:
+            name: The originating tool's name (used to select the correct
+                namespace prefix — launch tools vs. TaskCreate).
+            task_id: The assigned task id to look up.
+
+        Returns:
+            The mapped label, or None if no mapping was recorded.
+
+        """
+        return self._task_labels.get(_task_label_ns_key(name, task_id))
+
+    def resolve_call_label(self, name: str, args: dict[str, object]) -> str | None:
+        """Resolve a Task-family call's human label from its args.
+
+        Background-task tools (``TaskOutput``/``TaskStop``) key off ``task_id``;
+        todo-list tools (``TaskGet``/``TaskUpdate``/…) key off ``taskId``. Returns
+        the harvested label for that id, or None when no mapping was recorded (the
+        caller falls back to a non-opaque rendering).
+
+        Args:
+            name: The tool's name.
+            args: The tool's input args.
+
+        Returns:
+            The resolved label, or None if the tool is not Task-family or the id
+            is unknown.
+
+        """
+        if name in _BACKGROUND_TASK_TOOLS or name in _TODO_TASK_TOOLS:
+            task_id = str(args.get(_task_id_key(name), ""))
+            # Background tools look up ids stored by launch tools ("bg:" prefix);
+            # todo-list tools look up ids stored by TaskCreate ("tc:" prefix).
+            origin_name = "Bash" if name in _BACKGROUND_TASK_TOOLS else "TaskCreate"
+            return self.resolve_label(origin_name, task_id)
+        return None
 
     def create(
         self,
@@ -2839,12 +3126,20 @@ class LiveToolPanelRegistry:
         if tool_use_id in self._panels:
             self._finalize_panel(tool_use_id)
 
+        # Store the originating call's args for later result→label correlation.
+        self.note_call(tool_use_id, name, args)
+
+        # Resolve a human label so the panel header leads with it instead of the
+        # opaque/numeric id.
+        label = self.resolve_call_label(name, args)
+
         panel = LiveToolPanel(
             console=self._console,
             tool_use_id=tool_use_id,
             name=name,
             args=args,
             quiet_mode=self._quiet_mode,
+            label=label,
         )
         self._panels[tool_use_id] = panel
 
@@ -2923,6 +3218,8 @@ class LiveToolPanelRegistry:
                 self._console.print(panel._render_panel())
         self._active_order.clear()
         self._panels.clear()
+        self._call_args.clear()
+        self._task_labels.clear()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -2950,6 +3247,10 @@ class LiveToolPanelRegistry:
 
     def _finalize_panel(self, tool_use_id: str) -> None:
         """Remove a panel from the active set and print its final state."""
+        # Prune the originating-call record; by finalization time observe_result
+        # has already harvested any task_id → label mapping from it.
+        self._call_args.pop(tool_use_id, None)
+
         if tool_use_id in self._static_ids:
             self._static_ids.discard(tool_use_id)
             panel = self._panels.pop(tool_use_id, None)

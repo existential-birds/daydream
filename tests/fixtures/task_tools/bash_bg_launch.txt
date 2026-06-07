@@ -1,0 +1,1 @@
+Command running in background with ID: b0nsmwb99. Output is being written to: /tmp/x/b0nsmwb99.output

@@ -1,0 +1,9 @@
+<retrieval_status>success</retrieval_status>
+<task_id>b0nsmwb99</task_id>
+<task_type>local_bash</task_type>
+<status>completed</status>
+<exit_code>0</exit_code>
+<output>
+spike: backgrounded command output shape
+done-with-bg-work
+</output>
