@@ -1,6 +1,7 @@
 """Tests for continuous loop mode."""
 
 import re
+import subprocess
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -123,37 +124,23 @@ class LoopMockBackend(Backend):
 
 
 @pytest.fixture
-def loop_target(tmp_path: Path) -> Path:
-    import subprocess
+def loop_target(feature_branch_repo: Path) -> Path:
+    """Loop-mode target: a clean repo on a feature branch with a committed diff.
 
-    project = tmp_path / "loop_project"
-    project.mkdir()
-    (project / "main.py").write_text("def hello():\n    return 'world'\n")
-    (project / ".review-output.md").write_text("# Review\n\n1. Issue in main.py:1\n")
-    # Loop mode requires a clean git repo (dirty-tree preflight check).
-    # Use "main" as the default branch so _detect_default_branch() finds it.
-    subprocess.run(
-        ["git", "init", "-b", "main"], cwd=project, capture_output=True, check=True,
+    Consumes the shared ``feature_branch_repo`` fixture (tests/conftest.py)
+    instead of re-rolling git setup inline.
+    """
+    return feature_branch_repo
+
+
+def test_feature_branch_repo_has_committed_diff(feature_branch_repo):
+    """The shared fixture yields a clean repo on a non-main branch with a committed diff."""
+    out = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=feature_branch_repo, capture_output=True, text=True, check=True,
     )
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=project, capture_output=True, check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=project, capture_output=True, check=True,
-    )
-    subprocess.run(["git", "add", "."], cwd=project, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"],
-        cwd=project, capture_output=True, check=True,
-    )
-    # Create a feature branch so the test runs on a non-main branch
-    subprocess.run(
-        ["git", "checkout", "-b", "feature-branch"],
-        cwd=project, capture_output=True, check=True,
-    )
-    return project
+    assert out.stdout.strip() != "main"
+    assert (feature_branch_repo / "main.py").exists()
 
 
 @pytest.fixture
