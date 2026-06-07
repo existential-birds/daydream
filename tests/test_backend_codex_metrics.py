@@ -27,11 +27,10 @@ from daydream.backends import (
 )
 from daydream.backends.codex import CodexBackend
 
-# Reuse the JSONL-stream mock helper from tests/test_backend_codex.py —
-# single source of truth for the mock-process shape (Pitfall: do NOT
-# re-implement readline). Imported directly so the existing pattern is
-# preserved.
-from tests.test_backend_codex import _make_mock_process
+# Reuse the shared JSONL-stream mock helper from tests/harness — single
+# source of truth for the mock-process shape (Pitfall: do NOT re-implement
+# readline). Imported directly so the existing pattern is preserved.
+from tests.harness.codex_replay import make_mock_process_from_fixture as _make_mock_process
 
 
 @pytest.mark.asyncio

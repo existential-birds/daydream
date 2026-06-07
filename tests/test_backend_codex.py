@@ -2,7 +2,7 @@
 """Tests for CodexBackend with canned JSONL fixtures."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -17,42 +17,15 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.backends.codex import CodexBackend, CodexError, _unwrap_shell_command
+from tests.harness.codex_replay import make_mock_process_from_fixture
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
-
-
-def _make_mock_process(fixture_name: str):
-    """Create a mock asyncio.subprocess.Process from a JSONL fixture file."""
-    fixture_path = FIXTURES_DIR / fixture_name
-    lines = fixture_path.read_text().strip().split("\n")
-
-    class MockStdout:
-        def __init__(self):
-            self._lines = iter(lines)
-
-        async def readline(self):
-            try:
-                line = next(self._lines)
-                return (line + "\n").encode()
-            except StopIteration:
-                return b""
-
-    process = MagicMock()
-    process.stdout = MockStdout()
-    process.stdin = MagicMock()
-    process.stdin.write = MagicMock()
-    process.stdin.close = MagicMock()
-    process.wait = AsyncMock(return_value=0)
-    process.returncode = 0
-    process.terminate = MagicMock()
-    process.kill = MagicMock()
-    return process
 
 
 @pytest.mark.asyncio
 async def test_simple_text_events():
     backend = CodexBackend(model="gpt-5.3-codex")
-    mock_proc = _make_mock_process("simple_text.jsonl")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
@@ -78,7 +51,7 @@ async def test_simple_text_events():
 @pytest.mark.asyncio
 async def test_tool_use_events():
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("tool_use.jsonl")
+    mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
@@ -109,7 +82,7 @@ async def test_tool_use_events():
 @pytest.mark.asyncio
 async def test_structured_output():
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("structured_output.jsonl")
+    mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -127,7 +100,7 @@ async def test_structured_output():
 @pytest.mark.asyncio
 async def test_turn_failed_raises():
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("turn_failed.jsonl")
+    mock_proc = make_mock_process_from_fixture("turn_failed.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CodexError, match="Model returned an error"):
@@ -141,7 +114,7 @@ async def test_continuation_token_resumes():
     from daydream.backends import ContinuationToken
 
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("simple_text.jsonl")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
@@ -160,7 +133,7 @@ async def test_continuation_token_resumes():
 async def test_codex_read_only_uses_read_only_sandbox():
     """read_only=True selects --sandbox read-only; danger-full-access absent."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("simple_text.jsonl")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(Path("/tmp"), "p", read_only=True):
@@ -177,7 +150,7 @@ async def test_codex_read_only_uses_read_only_sandbox():
 async def test_codex_default_uses_full_access_sandbox():
     """read_only=False (default) keeps the existing danger-full-access sandbox."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("simple_text.jsonl")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(Path("/tmp"), "p"):
@@ -192,7 +165,7 @@ async def test_codex_default_uses_full_access_sandbox():
 async def test_streamed_structured_output_via_item_updated():
     """Text delivered via item.updated deltas (item.completed has empty content)."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("streamed_structured_output.jsonl")
+    mock_proc = make_mock_process_from_fixture("streamed_structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -215,7 +188,7 @@ async def test_streamed_structured_output_via_item_updated():
 async def test_output_text_content_blocks():
     """agent_message with output_text content blocks (schema-constrained)."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("output_text_blocks.jsonl")
+    mock_proc = make_mock_process_from_fixture("output_text_blocks.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -234,7 +207,7 @@ async def test_output_text_content_blocks():
 async def test_toplevel_text_field():
     """Real Codex format: text directly on item, not in content blocks."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("toplevel_text.jsonl")
+    mock_proc = make_mock_process_from_fixture("toplevel_text.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -270,7 +243,7 @@ async def test_toplevel_text_field():
 async def test_turn_completed_result_field():
     """Structured output returned in turn.completed result field."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("turn_completed_result.jsonl")
+    mock_proc = make_mock_process_from_fixture("turn_completed_result.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -291,7 +264,7 @@ async def test_turn_completed_cached_input_tokens():
     MetricsEvent and CostEvent so cache-hit ratios work for the Codex backend
     (refs #65, K4 — fix for the historical hardcoded cached_tokens=None)."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("turn_completed_cached_tokens.jsonl")
+    mock_proc = make_mock_process_from_fixture("turn_completed_cached_tokens.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
@@ -317,7 +290,7 @@ async def test_turn_completed_cached_input_tokens():
 async def test_codex_backend_emits_turn_end_after_each_agent_message() -> None:
     """One TurnEndEvent per item.completed of type agent_message."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("two_agent_turns.jsonl")
+    mock_proc = make_mock_process_from_fixture("two_agent_turns.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
