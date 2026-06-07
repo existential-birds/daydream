@@ -816,6 +816,24 @@ class TrajectoryRecorder:
         """
         return _InvocationCM(self, phase)
 
+    def current_phase(self) -> DaydreamPhase | None:
+        """Return the firing :class:`DaydreamPhase`, or None if no invocation is active.
+
+        The public read-seam for the phase of the innermost open Invocation,
+        complementing :func:`get_current_recorder`. The replay harness reads this
+        during ``execute()`` iteration to serve the right per-phase fixture: by
+        the time a backend's first event is pulled, ``agent.py`` has already
+        opened ``recorder.invocation(phase=...)`` around the stream, so the
+        active phase is observable here.
+
+        Returns:
+            The ``.phase`` of the last (innermost) active Invocation, or
+            ``None`` when ``self._active_invocations`` is empty — the documented,
+            correct default for the direct-call no-op path (no active invocation),
+            mirroring :func:`get_current_recorder`.
+        """
+        return self._active_invocations[-1].phase if self._active_invocations else None
+
     def _next_step_id(self) -> int:
         self._step_id_counter += 1
         return self._step_id_counter
