@@ -19,6 +19,7 @@ from daydream.backends import (
 from daydream.runner import RunConfig, run
 from daydream.trajectory import DaydreamPhase
 from daydream.ui import NEON_THEME
+from tests.harness.phase_backend import PhaseDispatchBackend
 
 # ANSI escape code pattern for stripping terminal colors
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
@@ -34,60 +35,14 @@ def strip_ansi(text: str) -> str:
 # =============================================================================
 
 
-class MockBackend:
-    """Mock backend that yields events based on prompt content."""
-
-    model = "mock-model"
-
-    def __init__(self, events: list | None = None):
-        self._events = events
-        self._prompt: str = ""
-        self._call_count = 0
-
-    async def execute(
-        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
-        max_turns=None, read_only=False,
-    ):
-        self._prompt = prompt
-        self._call_count += 1
-        if self._events is not None:
-            for event in self._events:
-                yield event
-            return
-
-        # Default: generate events based on prompt content (like MockClaudeSDKClient)
-        text, structured = self._get_response_for_prompt(prompt)
-        yield TextEvent(text=text)
-        if structured is not None:
-            yield ResultEvent(structured_output=structured, continuation=None)
-        else:
-            yield CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None)
-            yield ResultEvent(structured_output=None, continuation=None)
-
-    def _get_response_for_prompt(self, prompt: str) -> tuple[str, Any]:
-        prompt_lower = prompt.lower()
-        if "beagle-" in prompt_lower and "review" in prompt_lower:
-            return "Review complete. Found 1 issue to fix.", None
-        if "extract" in prompt_lower and "json" in prompt_lower:
-            structured = {
-                "issues": [
-                    {"id": 1, "description": "Add type hints to function", "file": "main.py", "line": 1}
-                ]
-            }
-            return "Extracted feedback.", structured
-        if "fix this issue" in prompt_lower:
-            return "Fixed the issue by adding type hints.", None
-        if "test suite" in prompt_lower or "run the project" in prompt_lower:
-            return "All 1 tests passed. 0 failed.", None
-        if "commit-push" in prompt_lower:
-            return "Changes committed and pushed.", None
-        return "OK", None
-
-    async def cancel(self):
-        pass
-
-    def format_skill_invocation(self, skill_key, args=""):
-        return f"/{skill_key}" + (f" {args}" if args else "")
+# The former prompt-dispatching ``MockBackend`` was consolidated onto the shared
+# ``PhaseDispatchBackend`` (tests/harness/phase_backend.py): both classified the
+# same four shallow phases off the same prompt substrings. ``emit_cost=True``
+# preserves the old default-event shape (a CostEvent on non-structured turns);
+# the per-iteration parse queue [[issue]] yields one issue on the first parse,
+# matching the old hard-coded single-issue dispatch. The structured PARSE issue
+# id/file/line are observably identical (id=1, main.py:1).
+_FULL_FLOW_ISSUE = {"id": 1, "description": "Add type hints to function", "file": "main.py", "line": 1}
 
 
 class MockBackendWithEvents:
@@ -119,9 +74,10 @@ class MockBackendWithEvents:
 
 @pytest.fixture
 def mock_backend(monkeypatch):
-    """Patch create_backend to return MockBackend."""
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: MockBackend())
-    return MockBackend
+    """Patch create_backend to return the shared phase-dispatch fake."""
+    backend = PhaseDispatchBackend(parse_results=[[_FULL_FLOW_ISSUE]], emit_cost=True)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    return backend
 
 
 @pytest.fixture

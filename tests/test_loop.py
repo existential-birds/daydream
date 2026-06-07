@@ -9,9 +9,9 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
 from daydream.ui import NEON_THEME, SummaryData, print_iteration_divider, print_summary
+from tests.harness.phase_backend import PhaseDispatchBackend
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -58,69 +58,15 @@ def test_summary_loop_mode_shows_iterations():
     assert "3" in plain
 
 
-class LoopMockBackend(Backend):
-    """Mock backend that returns different results on successive calls.
+def LoopMockBackend(review_results: list[list[dict[str, Any]]], tests_pass: bool = True) -> PhaseDispatchBackend:
+    """Build a shared ``PhaseDispatchBackend`` configured for loop-mode tests.
 
-    Tracks call count and uses prompt content to determine responses.
-    The `review_results` list controls what phase_parse_feedback returns
-    on each iteration (list of issue lists, one per iteration).
+    Migrated onto the consolidated dispatch fake. ``review_results`` maps to the
+    fake's per-iteration ``parse_results`` queue; the prompt-heuristic dispatch,
+    ``_parse_call``/``commit_calls``/``review_prompts`` tracking, and observable
+    outcomes are byte-for-byte the same as the former local class.
     """
-
-    model = "mock-model"
-
-    def __init__(self, review_results: list[list[dict[str, Any]]], tests_pass: bool = True):
-        self._review_results = review_results
-        self._tests_pass = tests_pass
-        self._parse_call = 0
-        self.call_log: list[str] = []
-        self.commit_calls: list[str] = []
-        self.review_prompts: list[str] = []
-
-    async def execute(
-        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
-        max_turns=None, read_only=False,
-    ):
-        prompt_lower = prompt.lower()
-        self.call_log.append(prompt_lower[:80])
-
-        if "beagle-" in prompt_lower and "review" in prompt_lower:
-            self.review_prompts.append(prompt)
-            yield TextEvent(text="Review complete.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        elif "extract" in prompt_lower and "json" in prompt_lower:
-            issues = (
-                self._review_results[self._parse_call]
-                if self._parse_call < len(self._review_results)
-                else []
-            )
-            self._parse_call += 1
-            yield TextEvent(text="Parsed.")
-            yield ResultEvent(structured_output={"issues": issues}, continuation=None)
-        elif "fix this issue" in prompt_lower:
-            yield TextEvent(text="Fixed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        elif "test suite" in prompt_lower or "run the project" in prompt_lower:
-            if self._tests_pass:
-                yield TextEvent(text="All 1 tests passed. 0 failed.")
-            else:
-                yield TextEvent(text="1 test failed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        elif "stage all changes and commit" in prompt_lower and "do not push" in prompt_lower:
-            self.commit_calls.append(prompt_lower)
-            yield TextEvent(text="Committed iteration changes.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        elif "commit-push" in prompt_lower:
-            yield TextEvent(text="Committed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        else:
-            yield TextEvent(text="OK")
-            yield ResultEvent(structured_output=None, continuation=None)
-
-    async def cancel(self):
-        pass
-
-    def format_skill_invocation(self, skill_key, args=""):
-        return f"/{skill_key}" + (f" {args}" if args else "")
+    return PhaseDispatchBackend(parse_results=review_results, tests_pass=tests_pass)
 
 
 @pytest.fixture
