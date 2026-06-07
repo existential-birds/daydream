@@ -48,9 +48,14 @@ printf '%s' "$PROMPT" | \
   > /tmp/realpath_parse.jsonl   # capture to /tmp first, redact, then move into place
 ```
 
-- **Use the default model — omit `-m`.** On a ChatGPT-account login, `-m
-  gpt-5-codex` and `-m gpt-5` are rejected (`model is not supported when using
-  Codex with a ChatGPT account`); the default model returns a full turn.
+- **Use the account default — omit `-m`.** Verified June 2026 against `codex`
+  0.137.0 with a ChatGPT-account login: the configured default is `gpt-5.5`
+  (`~/.codex/config.toml`), which returns a full turn. Explicitly supported IDs
+  on a ChatGPT login are `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` (and
+  `gpt-5.3-codex-spark` for ChatGPT Pro). The legacy `-m gpt-5-codex` / `-m
+  gpt-5` are rejected (`model is not supported when using Codex with a ChatGPT
+  account`), as are `gpt-5.2` / `gpt-5.3-codex` (API-key auth only). Omitting
+  `-m` avoids pinning a stale id.
 - `--output-schema` is only for the PARSE phase (it constrains the agent to
   `FEEDBACK_SCHEMA`, defined in `daydream/phases.py`); omit it for
   REVIEW/FIX/TEST captures.
