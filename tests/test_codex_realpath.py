@@ -22,6 +22,7 @@ import pytest
 
 from daydream.runner import RunConfig, run
 from daydream.trajectory import DaydreamPhase
+from tests.harness.codex_replay import FIXTURES_DIR
 from tests.harness.phase_replay import replay_through_runner
 
 # Per-phase canonical scripts (synthesized via the Task 4 builders through
@@ -112,3 +113,62 @@ async def test_codex_realpath_shallow_run(feature_branch_repo: Path, tmp_path: P
     assert any(
         (s.get("extra") or {}).get("daydream_phase") == "fix" for s in steps
     ), "extracted PARSE issue must drive a fix-phase step"
+
+
+# The recorded-real variant reuses the synthesized REVIEW/FIX/TEST scripts but
+# swaps in a RECORDED-REAL JSONL file for PARSE — a captured (then redacted)
+# fragment of genuine ``codex`` CLI output. Synthesis cannot reproduce real-CLI
+# shape surprises ("Codex Backend Gotchas": ``item.updated`` text deltas,
+# ``output_text`` content blocks, ``turn.completed.result``); this variant
+# drives the GENUINE parser over those shapes to prove the structured issue is
+# still extracted and the shallow run still exits 0.
+SYNTH_PHASES: dict[DaydreamPhase, dict] = {
+    DaydreamPhase.REVIEW: PHASE_SCRIPTS[DaydreamPhase.REVIEW],
+    DaydreamPhase.FIX: PHASE_SCRIPTS[DaydreamPhase.FIX],
+    DaydreamPhase.TEST: PHASE_SCRIPTS[DaydreamPhase.TEST],
+}
+
+
+def recorded(name: str) -> dict:
+    """Load a recorded-real Codex JSONL fixture into a passthrough phase script.
+
+    Reads ``tests/fixtures/codex_jsonl/<name>`` and wraps its raw lines in a
+    ``{"raw_lines": [...]}`` script. The harness rendering seam
+    (``build_codex_jsonl_for_phase``) replays ``raw_lines`` verbatim — no
+    re-synthesis — so the GENUINE backend parser sees the captured real-CLI
+    bytes, not a re-encoded approximation.
+    """
+    lines = (FIXTURES_DIR / name).read_text(encoding="utf-8").strip().split("\n")
+    return {"raw_lines": lines}
+
+
+@pytest.mark.asyncio
+async def test_codex_realpath_from_recorded_fixture(feature_branch_repo: Path, tmp_path: Path) -> None:
+    """Shallow run where the PARSE phase replays a RECORDED-REAL JSONL fixture.
+
+    Same harness as ``test_codex_realpath_shallow_run``, but PARSE replays a
+    captured ``codex`` CLI fragment (``realpath_parse.jsonl``) instead of a
+    synthesized script. The real parser must still extract a valid
+    ``FEEDBACK_SCHEMA`` structured output from the recorded shape and let the
+    single-pass shallow run exit 0. ``assume="no"`` declines the post-pass
+    commit gate (mirrors ``test_codex_realpath_shallow_run``).
+    """
+    scripts = {**SYNTH_PHASES, DaydreamPhase.PARSE: recorded("realpath_parse.jsonl")}
+    traj = tmp_path / "trajectory.json"
+    config = RunConfig(
+        target=str(feature_branch_repo),
+        skill="python",
+        quiet=True,
+        cleanup=False,
+        shallow=True,
+        loop=False,
+        backend="codex",
+        assume="no",
+        trajectory_path=traj,
+    )
+
+    with replay_through_runner("codex", scripts):
+        exit_code = await run(config)
+
+    assert exit_code == 0
+    assert traj.exists()

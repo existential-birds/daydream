@@ -61,7 +61,19 @@ def build_codex_jsonl_for_phase(script: dict[str, Any]) -> list[str]:
     ``script["structured_output"]`` is set, the final ``agent_message``
     ``item.completed`` text is ``json.dumps(structured_output)`` so the real
     backend parser extracts it on ``ResultEvent.structured_output``.
+
+    A script carrying ``raw_lines`` is a RECORDED-REAL passthrough: the lines
+    are replayed verbatim (no synthesis, no structured-output rewrite) so the
+    genuine parser sees the captured real-CLI bytes. ``raw_lines`` and the
+    synthesized keys (``turns``/``structured_output``) are mutually exclusive.
     """
+    raw_lines = script.get("raw_lines")
+    if raw_lines is not None:
+        if "turns" in script:
+            raise AssertionError(
+                "a raw_lines passthrough script must not also carry synthesized 'turns'"
+            )
+        return list(raw_lines)
     return _build_codex_jsonl(_with_structured_output(script))
 
 
