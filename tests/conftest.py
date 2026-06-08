@@ -93,6 +93,32 @@ def git_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def feature_branch_repo(tmp_path: Path) -> Path:
+    """Git repo with a committed Python diff on a non-``main`` feature branch.
+
+    Built on ``_make_repo_with_main`` + the shared ``_git``/``_commit`` helpers
+    (not inline ``subprocess.run``). Seeds ``main.py`` on ``main`` and commits,
+    then checks out a ``feature`` branch and commits a modification — so the
+    branch carries a real ``main...HEAD`` diff. Leaves a clean working tree on a
+    non-``main`` branch, satisfying loop mode's dirty-tree preflight check.
+
+    Intentionally does NOT pre-write ``.review-output.md``: under replay the
+    parse phase consumes structured output, so the file's absence is the correct
+    shape (and a Spike-2 regression guard).
+    """
+    repo = _make_repo_with_main(tmp_path, name="loop_project")
+    main_py = repo / "main.py"
+    main_py.write_text("def hello():\n    return 'world'\n")
+    _git(repo, "add", "main.py")
+    _commit(repo, "add main.py")
+    _git(repo, "checkout", "-b", "feature")
+    main_py.write_text("def hello():\n    return 'universe'\n")
+    _git(repo, "add", "main.py")
+    _commit(repo, "modify main.py")
+    return repo
+
+
+@pytest.fixture
 def bare_origin(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A bare repo suitable for use as `origin`."""
     path = tmp_path_factory.mktemp("origin") / "remote.git"

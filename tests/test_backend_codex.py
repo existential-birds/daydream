@@ -1,6 +1,8 @@
 # tests/test_backend_codex.py
 """Tests for CodexBackend with canned JSONL fixtures."""
 
+import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,43 +18,21 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.backends.codex import CodexBackend, CodexError, _unwrap_shell_command
+from daydream.backends.codex import (
+    _CODEX_STDOUT_LIMIT_BYTES,
+    CodexBackend,
+    CodexError,
+    _unwrap_shell_command,
+)
+from tests.harness.codex_replay import make_mock_process_from_fixture
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
-
-
-def _make_mock_process(fixture_name: str):
-    """Create a mock asyncio.subprocess.Process from a JSONL fixture file."""
-    fixture_path = FIXTURES_DIR / fixture_name
-    lines = fixture_path.read_text().strip().split("\n")
-
-    class MockStdout:
-        def __init__(self):
-            self._lines = iter(lines)
-
-        async def readline(self):
-            try:
-                line = next(self._lines)
-                return (line + "\n").encode()
-            except StopIteration:
-                return b""
-
-    process = MagicMock()
-    process.stdout = MockStdout()
-    process.stdin = MagicMock()
-    process.stdin.write = MagicMock()
-    process.stdin.close = MagicMock()
-    process.wait = AsyncMock(return_value=0)
-    process.returncode = 0
-    process.terminate = MagicMock()
-    process.kill = MagicMock()
-    return process
 
 
 @pytest.mark.asyncio
 async def test_simple_text_events():
     backend = CodexBackend(model="gpt-5.3-codex")
-    mock_proc = _make_mock_process("simple_text.jsonl")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
@@ -78,7 +58,7 @@ async def test_simple_text_events():
 @pytest.mark.asyncio
 async def test_tool_use_events():
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("tool_use.jsonl")
+    mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
@@ -109,7 +89,7 @@ async def test_tool_use_events():
 @pytest.mark.asyncio
 async def test_structured_output():
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("structured_output.jsonl")
+    mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -127,7 +107,7 @@ async def test_structured_output():
 @pytest.mark.asyncio
 async def test_turn_failed_raises():
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("turn_failed.jsonl")
+    mock_proc = make_mock_process_from_fixture("turn_failed.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CodexError, match="Model returned an error"):
@@ -141,7 +121,7 @@ async def test_continuation_token_resumes():
     from daydream.backends import ContinuationToken
 
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("simple_text.jsonl")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
@@ -160,7 +140,7 @@ async def test_continuation_token_resumes():
 async def test_codex_read_only_uses_read_only_sandbox():
     """read_only=True selects --sandbox read-only; danger-full-access absent."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("simple_text.jsonl")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(Path("/tmp"), "p", read_only=True):
@@ -177,7 +157,7 @@ async def test_codex_read_only_uses_read_only_sandbox():
 async def test_codex_default_uses_full_access_sandbox():
     """read_only=False (default) keeps the existing danger-full-access sandbox."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("simple_text.jsonl")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(Path("/tmp"), "p"):
@@ -189,10 +169,61 @@ async def test_codex_default_uses_full_access_sandbox():
 
 
 @pytest.mark.asyncio
+async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
+    backend = CodexBackend(model="fixture-model")
+    large_text = "x" * (70 * 1024)
+    large_line = (
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": large_text}}) + "\n"
+    ).encode()
+    lines = [
+        large_line,
+        b'{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+    ]
+    captured_kwargs: dict[str, object] = {}
+
+    class _LimitAwareStdout:
+        def __init__(self, limit: int) -> None:
+            self._limit = limit
+            self._lines = iter(lines)
+
+        async def readline(self) -> bytes:
+            try:
+                line = next(self._lines)
+            except StopIteration:
+                return b""
+            if len(line) > self._limit:
+                raise ValueError("Separator is found, but chunk is longer than limit")
+            return line
+
+    async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
+        captured_kwargs.update(kwargs)
+        raw_limit = kwargs.get("limit", 64 * 1024)
+        limit = raw_limit if isinstance(raw_limit, int) else 64 * 1024
+        process = MagicMock()
+        process.stdout = _LimitAwareStdout(limit)
+        process.stdin = MagicMock()
+        process.stdin.write = MagicMock()
+        process.stdin.close = MagicMock()
+        process.wait = AsyncMock(return_value=0)
+        process.returncode = 0
+        process.terminate = MagicMock()
+        process.kill = MagicMock()
+        return process
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+        events = [event async for event in backend.execute(Path("/tmp"), "large event")]
+
+    text_events = [e for e in events if isinstance(e, TextEvent)]
+    assert text_events[0].text == large_text
+    assert captured_kwargs["limit"] == _CODEX_STDOUT_LIMIT_BYTES
+    assert _CODEX_STDOUT_LIMIT_BYTES > len(large_line)
+
+
+@pytest.mark.asyncio
 async def test_streamed_structured_output_via_item_updated():
     """Text delivered via item.updated deltas (item.completed has empty content)."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("streamed_structured_output.jsonl")
+    mock_proc = make_mock_process_from_fixture("streamed_structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -215,7 +246,7 @@ async def test_streamed_structured_output_via_item_updated():
 async def test_output_text_content_blocks():
     """agent_message with output_text content blocks (schema-constrained)."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("output_text_blocks.jsonl")
+    mock_proc = make_mock_process_from_fixture("output_text_blocks.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -234,7 +265,7 @@ async def test_output_text_content_blocks():
 async def test_toplevel_text_field():
     """Real Codex format: text directly on item, not in content blocks."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("toplevel_text.jsonl")
+    mock_proc = make_mock_process_from_fixture("toplevel_text.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -270,7 +301,7 @@ async def test_toplevel_text_field():
 async def test_turn_completed_result_field():
     """Structured output returned in turn.completed result field."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("turn_completed_result.jsonl")
+    mock_proc = make_mock_process_from_fixture("turn_completed_result.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -291,7 +322,7 @@ async def test_turn_completed_cached_input_tokens():
     MetricsEvent and CostEvent so cache-hit ratios work for the Codex backend
     (refs #65, K4 — fix for the historical hardcoded cached_tokens=None)."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("turn_completed_cached_tokens.jsonl")
+    mock_proc = make_mock_process_from_fixture("turn_completed_cached_tokens.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
@@ -317,7 +348,7 @@ async def test_turn_completed_cached_input_tokens():
 async def test_codex_backend_emits_turn_end_after_each_agent_message() -> None:
     """One TurnEndEvent per item.completed of type agent_message."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = _make_mock_process("two_agent_turns.jsonl")
+    mock_proc = make_mock_process_from_fixture("two_agent_turns.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
@@ -329,6 +360,86 @@ async def test_codex_backend_emits_turn_end_after_each_agent_message() -> None:
     assert len(texts) == 2
     assert len(turn_ends) == 2
     assert all(e.message_id == "" for e in turn_ends)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
+    """Overlapping runs on one backend must keep reading their own process."""
+    backend = CodexBackend(model="fixture-model")
+
+    class _ImmediateStdout:
+        def __init__(self, lines: list[str]) -> None:
+            self._lines = iter(lines)
+
+        async def readline(self) -> bytes:
+            try:
+                return (next(self._lines) + "\n").encode()
+            except StopIteration:
+                return b""
+
+    class _BlockingStdout:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self._waiting = False
+
+        async def readline(self) -> bytes:
+            if self._waiting:
+                raise RuntimeError("readuntil() called while another coroutine is already waiting for incoming data")
+            self._waiting = True
+            self.entered.set()
+            try:
+                await self.release.wait()
+                return b""
+            finally:
+                self._waiting = False
+
+    def _proc(stdout: object) -> MagicMock:
+        process = MagicMock()
+        process.stdout = stdout
+        process.stdin = MagicMock()
+        process.stdin.write = MagicMock()
+        process.stdin.close = MagicMock()
+        process.wait = AsyncMock(return_value=0)
+        process.returncode = 0
+        process.terminate = MagicMock()
+        process.kill = MagicMock()
+        return process
+
+    first_proc = _proc(
+        _ImmediateStdout(
+            [
+                '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
+                '{"type":"turn.completed","usage":{}}',
+            ]
+        )
+    )
+    second_stdout = _BlockingStdout()
+    second_proc = _proc(second_stdout)
+    procs = iter([first_proc, second_proc])
+
+    async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
+        return next(procs)
+
+    async def consume_second() -> list[object]:
+        return [event async for event in backend.execute(Path("/tmp"), "second")]
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+        first_iter = backend.execute(Path("/tmp"), "first")
+        first_event = await anext(first_iter)
+        assert isinstance(first_event, TextEvent)
+
+        second_task = asyncio.create_task(consume_second())
+        await second_stdout.entered.wait()
+
+        try:
+            turn_end = await anext(first_iter)
+            assert isinstance(turn_end, TurnEndEvent)
+            next_first_event = await anext(first_iter)
+            assert isinstance(next_first_event, CostEvent)
+        finally:
+            second_stdout.release.set()
+            await second_task
 
 
 def test_format_skill_invocation():

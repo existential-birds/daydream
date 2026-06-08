@@ -19,11 +19,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 from daydream.backends import AgentEvent
 from daydream.backends.claude import ClaudeBackend
 from daydream.backends.codex import CodexBackend
+from tests.harness.codex_replay import make_mock_process
 
 # ---------------------------------------------------------------------------
 # Claude loader — synthesize SDK message objects, mock receive_response()
@@ -305,38 +306,12 @@ def _build_codex_jsonl(script: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _make_mock_process(lines: list[str]) -> MagicMock:
-    """Build an async-subprocess stand-in that yields *lines* through stdout."""
-
-    class _MockStdout:
-        def __init__(self) -> None:
-            self._lines = iter(lines)
-
-        async def readline(self) -> bytes:
-            try:
-                line = next(self._lines)
-                return (line + "\n").encode()
-            except StopIteration:
-                return b""
-
-    process = MagicMock()
-    process.stdout = _MockStdout()
-    process.stdin = MagicMock()
-    process.stdin.write = MagicMock()
-    process.stdin.close = MagicMock()
-    process.wait = AsyncMock(return_value=0)
-    process.returncode = 0
-    process.terminate = MagicMock()
-    process.kill = MagicMock()
-    return process
-
-
 async def codex_loader(
     script: dict[str, Any], *, read_only: bool = False
 ) -> AsyncIterator[AgentEvent]:
     """Drive ``CodexBackend.execute`` against the canonical script."""
     lines = _build_codex_jsonl(script)
-    mock_proc = _make_mock_process(lines)
+    mock_proc = make_mock_process(lines)
     backend = CodexBackend(model="codex-test-model")
     with patch(
         "daydream.backends.codex.asyncio.create_subprocess_exec",

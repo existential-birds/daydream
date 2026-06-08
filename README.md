@@ -7,6 +7,50 @@ The goal is an open-weight code-review model (Qwen2.5-Coder-7B, QLoRA) trained o
 
 ![demo](https://github.com/user-attachments/assets/60a80645-36de-410e-afa7-7a96efef3f57)
 
+## Quick Start
+
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and [Claude Code](https://claude.ai/code) CLI.
+
+```bash
+git clone https://github.com/existential-birds/daydream.git
+cd daydream
+uv sync
+```
+
+Install the [Beagle](https://github.com/existential-birds/beagle) plugin:
+
+```bash
+claude plugin marketplace add https://github.com/existential-birds/beagle
+claude plugin install beagle
+```
+
+Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`.
+
+### Golden paths
+
+Two near-zero-flag entry points cover the common cases:
+
+```bash
+daydream /path/to/project            # review → fix → test (deep multi-stack)
+daydream --comment /path/to/project  # review → post inline PR comments, then exit
+```
+
+`daydream /path` is the default verb; `daydream review /path` is identical. The
+remaining surface is opt-in:
+
+```bash
+daydream --review /path/to/project            # write a report to terminal/markdown, no fixes
+daydream --shallow /path/to/project           # single-stack review → parse → fix → test loop
+daydream --yes /path/to/project               # auto-apply fixes without prompting
+daydream --loop /path/to/project              # repeat review-fix-test until clean (or 5 rounds)
+daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # fix bot PR comments
+```
+
+Run `daydream --help` for the common flags and `daydream --help-all` for the full
+advanced surface (`--start-at`, `--ignore-path`, `--worktree`, `--trajectory`, …).
+
+To update: `git pull && uv sync`
+
 ## Architecture
 
 ### Review Pipeline
@@ -72,50 +116,6 @@ Missing the precision, F1, or addressed-comments targets auto-triggers [Mileston
 ### Benchmarking
 
 `daydream bench` scores deep-review findings against [Martian's Code Review Benchmark](https://github.com/withmartian/code-review-benchmark) offline set and writes per-PR precision/recall into `results/<model>/evaluations.json`. See the [benchmark runbook](docs/benchmark.md) for the full setup-to-result sequence.
-
-## Quickstart
-
-Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and [Claude Code](https://claude.ai/code) CLI.
-
-```bash
-git clone https://github.com/existential-birds/daydream.git
-cd daydream
-uv sync
-```
-
-Install the [Beagle](https://github.com/existential-birds/beagle) plugin:
-
-```bash
-claude plugin marketplace add https://github.com/existential-birds/beagle
-claude plugin install beagle
-```
-
-Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`.
-
-### Golden paths
-
-Two near-zero-flag entry points cover the common cases:
-
-```bash
-daydream /path/to/project            # review → fix → test (deep multi-stack)
-daydream --comment /path/to/project  # review → post inline PR comments, then exit
-```
-
-`daydream /path` is the default verb; `daydream review /path` is identical. The
-remaining surface is opt-in:
-
-```bash
-daydream --review /path/to/project            # write a report to terminal/markdown, no fixes
-daydream --shallow /path/to/project           # single-stack review → parse → fix → test loop
-daydream --yes /path/to/project               # auto-apply fixes without prompting
-daydream --loop /path/to/project              # repeat review-fix-test until clean (or 5 rounds)
-daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # fix bot PR comments
-```
-
-Run `daydream --help` for the common flags and `daydream --help-all` for the full
-advanced surface (`--start-at`, `--ignore-path`, `--worktree`, `--trajectory`, …).
-
-To update: `git pull && uv sync`
 
 ## CLI Reference
 

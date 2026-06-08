@@ -31,6 +31,7 @@ from daydream.backends import (
 
 _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
 _CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
+_CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 
 
 def _unwrap_shell_command(command: str) -> str:
@@ -49,9 +50,7 @@ def _unwrap_shell_command(command: str) -> str:
         return command
     inner = m.group(1)
     # Strip surrounding quotes if present
-    if (inner.startswith('"') and inner.endswith('"')) or (
-        inner.startswith("'") and inner.endswith("'")
-    ):
+    if (inner.startswith('"') and inner.endswith('"')) or (inner.startswith("'") and inner.endswith("'")):
         inner = inner[1:-1]
     # Strip leading "cd /some/path &&" if present
     inner = _CD_PREFIX_RE.sub("", inner)
@@ -71,6 +70,7 @@ class CodexBackend:
     def __init__(self, model: str):
         self.model = model
         self._process: asyncio.subprocess.Process | None = None
+        self._processes: list[asyncio.subprocess.Process] = []
 
     async def execute(
         self,
@@ -109,8 +109,7 @@ class CodexBackend:
         """
         if agents:
             raise NotImplementedError(
-                "Codex backend does not support exploration subagents; "
-                "use --backend claude for exploration."
+                "Codex backend does not support exploration subagents; use --backend claude for exploration."
             )
 
         # Enforced read-only profile (failure summarizer): the read-only sandbox
@@ -119,10 +118,15 @@ class CodexBackend:
         # `git commit`; the working tree — the incident's danger — is protected.
         sandbox_mode = "read-only" if read_only else "danger-full-access"
         args = [
-            "codex", "exec", "--experimental-json",
-            "--model", self.model,
-            "--sandbox", sandbox_mode,
-            "--cd", str(cwd),
+            "codex",
+            "exec",
+            "--experimental-json",
+            "--model",
+            self.model,
+            "--sandbox",
+            sandbox_mode,
+            "--cd",
+            str(cwd),
         ]
 
         schema_path: str | None = None
@@ -156,24 +160,29 @@ class CodexBackend:
         pending_item_ids: dict[str, str] = {}  # "type:content" → generated UUID
         updated_text: dict[str, list[str]] = {}  # item_id → [text deltas]
 
+        proc: asyncio.subprocess.Process | None = None
+
         try:
-            self._process = await asyncio.create_subprocess_exec(
+            proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                limit=_CODEX_STDOUT_LIMIT_BYTES,
             )
+            self._processes.append(proc)
+            self._process = proc
 
             # Write prompt to stdin and close immediately
-            if self._process.stdin:
-                self._process.stdin.write(prompt.encode())
-                self._process.stdin.close()
+            if proc.stdin:
+                proc.stdin.write(prompt.encode())
+                proc.stdin.close()
 
             # Read JSONL events line by line
             while True:
-                if self._process.stdout is None:
+                if proc.stdout is None:
                     break
-                line = await self._process.stdout.readline()
+                line = await proc.stdout.readline()
                 if not line:
                     break
 
@@ -386,10 +395,9 @@ class CodexBackend:
                 elif event_type not in ("turn.started",):
                     pass
 
-            await self._process.wait()
+            await proc.wait()
 
         finally:
-            proc = self._process
             if proc is not None and proc.returncode is None:
                 proc.terminate()
                 try:
@@ -397,7 +405,8 @@ class CodexBackend:
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
-            self._process = None
+            self._processes = [active for active in self._processes if active is not proc]
+            self._process = self._processes[-1] if self._processes else None
             if schema_path:
                 Path(schema_path).unlink(missing_ok=True)
 
@@ -406,12 +415,15 @@ class CodexBackend:
 
         Sends SIGTERM, waits briefly, then SIGKILL if still running.
         """
-        if self._process is not None:
-            self._process.terminate()
+        processes = list(self._processes)
+        for process in processes:
+            process.terminate()
+        for process in processes:
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except asyncio.TimeoutError:
-                self._process.kill()
+                process.kill()
+                await process.wait()
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
         """Format a skill invocation for Codex.
@@ -459,8 +471,6 @@ class CodexBackend:
     @staticmethod
     def _write_temp_schema(schema: dict[str, Any]) -> str:
         """Write JSON schema to a temp file and return the path."""
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, prefix="daydream-schema-"
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, prefix="daydream-schema-") as f:
             json.dump(schema, f)
             return f.name

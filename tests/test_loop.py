@@ -1,6 +1,7 @@
 """Tests for continuous loop mode."""
 
 import re
+import subprocess
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -8,9 +9,9 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
 from daydream.ui import NEON_THEME, SummaryData, print_iteration_divider, print_summary
+from tests.harness.phase_backend import PhaseDispatchBackend
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -57,103 +58,40 @@ def test_summary_loop_mode_shows_iterations():
     assert "3" in plain
 
 
-class LoopMockBackend(Backend):
-    """Mock backend that returns different results on successive calls.
+def loop_mock_backend(review_results: list[list[dict[str, Any]]], tests_pass: bool = True) -> PhaseDispatchBackend:
+    """Build a shared ``PhaseDispatchBackend`` configured for loop-mode tests.
 
-    Tracks call count and uses prompt content to determine responses.
-    The `review_results` list controls what phase_parse_feedback returns
-    on each iteration (list of issue lists, one per iteration).
+    Migrated onto the consolidated dispatch fake. ``review_results`` maps to the
+    fake's per-iteration ``parse_results`` queue; the prompt-heuristic dispatch,
+    ``_parse_call``/``commit_calls``/``review_prompts`` tracking, and observable
+    outcomes are byte-for-byte the same as the former local class.
     """
-
-    model = "mock-model"
-
-    def __init__(self, review_results: list[list[dict[str, Any]]], tests_pass: bool = True):
-        self._review_results = review_results
-        self._tests_pass = tests_pass
-        self._parse_call = 0
-        self.call_log: list[str] = []
-        self.commit_calls: list[str] = []
-        self.review_prompts: list[str] = []
-
-    async def execute(
-        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
-        max_turns=None, read_only=False,
-    ):
-        prompt_lower = prompt.lower()
-        self.call_log.append(prompt_lower[:80])
-
-        if "beagle-" in prompt_lower and "review" in prompt_lower:
-            self.review_prompts.append(prompt)
-            yield TextEvent(text="Review complete.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        elif "extract" in prompt_lower and "json" in prompt_lower:
-            issues = (
-                self._review_results[self._parse_call]
-                if self._parse_call < len(self._review_results)
-                else []
-            )
-            self._parse_call += 1
-            yield TextEvent(text="Parsed.")
-            yield ResultEvent(structured_output={"issues": issues}, continuation=None)
-        elif "fix this issue" in prompt_lower:
-            yield TextEvent(text="Fixed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        elif "test suite" in prompt_lower or "run the project" in prompt_lower:
-            if self._tests_pass:
-                yield TextEvent(text="All 1 tests passed. 0 failed.")
-            else:
-                yield TextEvent(text="1 test failed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        elif "stage all changes and commit" in prompt_lower and "do not push" in prompt_lower:
-            self.commit_calls.append(prompt_lower)
-            yield TextEvent(text="Committed iteration changes.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        elif "commit-push" in prompt_lower:
-            yield TextEvent(text="Committed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        else:
-            yield TextEvent(text="OK")
-            yield ResultEvent(structured_output=None, continuation=None)
-
-    async def cancel(self):
-        pass
-
-    def format_skill_invocation(self, skill_key, args=""):
-        return f"/{skill_key}" + (f" {args}" if args else "")
+    return PhaseDispatchBackend(parse_results=review_results, tests_pass=tests_pass)
 
 
 @pytest.fixture
-def loop_target(tmp_path: Path) -> Path:
-    import subprocess
+def loop_target(feature_branch_repo: Path) -> Path:
+    """Loop-mode target: a clean repo on a feature branch with a committed diff.
 
-    project = tmp_path / "loop_project"
-    project.mkdir()
-    (project / "main.py").write_text("def hello():\n    return 'world'\n")
-    (project / ".review-output.md").write_text("# Review\n\n1. Issue in main.py:1\n")
-    # Loop mode requires a clean git repo (dirty-tree preflight check).
-    # Use "main" as the default branch so _detect_default_branch() finds it.
-    subprocess.run(
-        ["git", "init", "-b", "main"], cwd=project, capture_output=True, check=True,
+    Consumes the shared ``feature_branch_repo`` fixture (tests/conftest.py)
+    instead of re-rolling git setup inline.
+    """
+    return feature_branch_repo
+
+
+def test_feature_branch_repo_has_committed_diff(feature_branch_repo):
+    """The shared fixture yields a clean repo on a non-main branch with a committed diff."""
+    out = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],  # noqa: S607 - git is a trusted command
+        cwd=feature_branch_repo, capture_output=True, text=True, check=True,
     )
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=project, capture_output=True, check=True,
+    assert out.stdout.strip() != "main"
+    assert (feature_branch_repo / "main.py").exists()
+    diff_out = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", "diff", "--name-only", "main...HEAD"],  # noqa: S607 - git is a trusted command
+        cwd=feature_branch_repo, capture_output=True, text=True, check=True,
     )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=project, capture_output=True, check=True,
-    )
-    subprocess.run(["git", "add", "."], cwd=project, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"],
-        cwd=project, capture_output=True, check=True,
-    )
-    # Create a feature branch so the test runs on a non-main branch
-    subprocess.run(
-        ["git", "checkout", "-b", "feature-branch"],
-        cwd=project, capture_output=True, check=True,
-    )
-    return project
+    assert "main.py" in diff_out.stdout.splitlines()
 
 
 @pytest.fixture
@@ -166,7 +104,7 @@ def mock_ui_loop(monkeypatch):
 async def test_loop_exits_on_zero_issues(loop_target, mock_ui_loop, monkeypatch):
     """Issues on iteration 1, zero on iteration 2 -> exits 0."""
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
-    backend = LoopMockBackend(review_results=[[issue], []])
+    backend = loop_mock_backend(review_results=[[issue], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -186,7 +124,7 @@ async def test_loop_respects_max_iterations(loop_target, mock_ui_loop, monkeypat
     """Always returns issues -> stops at max_iterations, exits 1."""
     issue = {"id": 1, "description": "Persistent issue", "file": "main.py", "line": 1}
     # 3 iterations, all return the same issue
-    backend = LoopMockBackend(review_results=[[issue], [issue], [issue]])
+    backend = loop_mock_backend(review_results=[[issue], [issue], [issue]])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -205,7 +143,7 @@ async def test_loop_respects_max_iterations(loop_target, mock_ui_loop, monkeypat
 async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
     """Tests fail mid-loop -> reverts changes, stops immediately, exits 1."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = LoopMockBackend(review_results=[[issue], [issue]], tests_pass=False)
+    backend = loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -232,7 +170,7 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
     issue1 = {"id": 1, "description": "Issue A", "file": "main.py", "line": 1}
     issue2 = {"id": 2, "description": "Issue B", "file": "main.py", "line": 2}
     # Iteration 1: 2 issues, Iteration 2: 1 issue, Iteration 3: 0 issues
-    backend = LoopMockBackend(review_results=[[issue1, issue2], [issue1], []])
+    backend = loop_mock_backend(review_results=[[issue1, issue2], [issue1], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -269,7 +207,7 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
 async def test_loop_false_single_pass(loop_target, mock_ui_loop, monkeypatch):
     """loop=False behaves identically to existing single-pass flow."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = LoopMockBackend(review_results=[[issue]])
+    backend = loop_mock_backend(review_results=[[issue]])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -290,7 +228,7 @@ async def test_loop_commits_between_iterations(loop_target, mock_ui_loop, monkey
     """Each successful iteration commits changes before the next review."""
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
     # Iteration 1: issue found, Iteration 2: issue found, Iteration 3: clean
-    backend = LoopMockBackend(review_results=[[issue], [issue], []])
+    backend = loop_mock_backend(review_results=[[issue], [issue], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -312,7 +250,7 @@ async def test_loop_commits_between_iterations(loop_target, mock_ui_loop, monkey
 async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
     """No iteration commit when tests fail; changes are reverted."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = LoopMockBackend(review_results=[[issue]], tests_pass=False)
+    backend = loop_mock_backend(review_results=[[issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
     monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
@@ -332,7 +270,7 @@ async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeyp
 async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkeypatch):
     """Fixes from a failed iteration are not counted in the summary."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = LoopMockBackend(review_results=[[issue]], tests_pass=False)
+    backend = loop_mock_backend(review_results=[[issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
     monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
@@ -362,7 +300,7 @@ async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkey
 @pytest.mark.asyncio
 async def test_loop_no_commit_on_clean_first_iteration(loop_target, mock_ui_loop, monkeypatch):
     """No commit when first iteration is already clean (no fixes applied)."""
-    backend = LoopMockBackend(review_results=[[]])
+    backend = loop_mock_backend(review_results=[[]])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -384,7 +322,7 @@ async def test_loop_rejects_dirty_working_tree(loop_target, mock_ui_loop, monkey
     # Dirty the working tree
     (loop_target / "untracked.py").write_text("dirty")
 
-    backend = LoopMockBackend(review_results=[[]])
+    backend = loop_mock_backend(review_results=[[]])
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
     config = RunConfig(
@@ -446,7 +384,7 @@ async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_lo
 
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
     # Iteration 1: issue found, Iteration 2: clean review
-    backend = LoopMockBackend(review_results=[[issue], []])
+    backend = loop_mock_backend(review_results=[[issue], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -487,7 +425,7 @@ async def test_loop_diff_base_unchanged_on_test_failure(loop_target, mock_ui_loo
     """When tests fail, diff_base stays None — next iteration (if any) uses full branch diff."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
     # Two iterations of issues, tests always fail
-    backend = LoopMockBackend(review_results=[[issue], [issue]], tests_pass=False)
+    backend = loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
     monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
