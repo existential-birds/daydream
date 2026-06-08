@@ -69,9 +69,10 @@ def build_codex_jsonl_for_phase(script: dict[str, Any]) -> list[str]:
     """
     raw_lines = script.get("raw_lines")
     if raw_lines is not None:
-        if "turns" in script:
+        if "turns" in script or "structured_output" in script:
             raise AssertionError(
-                "a raw_lines passthrough script must not also carry synthesized 'turns'"
+                "a raw_lines passthrough script must not also carry synthesized "
+                "'turns' or 'structured_output'"
             )
         return list(raw_lines)
     return _build_codex_jsonl(_with_structured_output(script))

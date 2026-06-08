@@ -2,7 +2,7 @@
 
 Consolidates the two genuinely-redundant prompt-heuristic dispatch mocks that
 the shallow loop and single-pass integration tests grew independently
-(``LoopMockBackend`` in ``tests/test_loop.py`` and ``MockBackend`` in
+(``loop_mock_backend`` in ``tests/test_loop.py`` and ``MockBackend`` in
 ``tests/test_integration.py``). Both classified the same four shallow phases off
 the same prompt substrings; this is the unified implementation.
 

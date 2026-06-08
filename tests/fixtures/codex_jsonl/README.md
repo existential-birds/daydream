@@ -33,7 +33,7 @@ to end.
 
 The backend launches the CLI as (see `daydream/backends/codex.py`):
 
-```
+```bash
 codex exec --experimental-json --skip-git-repo-check \
   [--output-schema <schema.json>] -
 ```

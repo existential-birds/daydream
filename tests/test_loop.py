@@ -58,7 +58,7 @@ def test_summary_loop_mode_shows_iterations():
     assert "3" in plain
 
 
-def LoopMockBackend(review_results: list[list[dict[str, Any]]], tests_pass: bool = True) -> PhaseDispatchBackend:
+def loop_mock_backend(review_results: list[list[dict[str, Any]]], tests_pass: bool = True) -> PhaseDispatchBackend:
     """Build a shared ``PhaseDispatchBackend`` configured for loop-mode tests.
 
     Migrated onto the consolidated dispatch fake. ``review_results`` maps to the
@@ -81,12 +81,17 @@ def loop_target(feature_branch_repo: Path) -> Path:
 
 def test_feature_branch_repo_has_committed_diff(feature_branch_repo):
     """The shared fixture yields a clean repo on a non-main branch with a committed diff."""
-    out = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+    out = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],  # noqa: S607 - git is a trusted command
         cwd=feature_branch_repo, capture_output=True, text=True, check=True,
     )
     assert out.stdout.strip() != "main"
     assert (feature_branch_repo / "main.py").exists()
+    diff_out = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", "diff", "--name-only", "main...HEAD"],  # noqa: S607 - git is a trusted command
+        cwd=feature_branch_repo, capture_output=True, text=True, check=True,
+    )
+    assert "main.py" in diff_out.stdout.splitlines()
 
 
 @pytest.fixture
@@ -99,7 +104,7 @@ def mock_ui_loop(monkeypatch):
 async def test_loop_exits_on_zero_issues(loop_target, mock_ui_loop, monkeypatch):
     """Issues on iteration 1, zero on iteration 2 -> exits 0."""
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
-    backend = LoopMockBackend(review_results=[[issue], []])
+    backend = loop_mock_backend(review_results=[[issue], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -119,7 +124,7 @@ async def test_loop_respects_max_iterations(loop_target, mock_ui_loop, monkeypat
     """Always returns issues -> stops at max_iterations, exits 1."""
     issue = {"id": 1, "description": "Persistent issue", "file": "main.py", "line": 1}
     # 3 iterations, all return the same issue
-    backend = LoopMockBackend(review_results=[[issue], [issue], [issue]])
+    backend = loop_mock_backend(review_results=[[issue], [issue], [issue]])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -138,7 +143,7 @@ async def test_loop_respects_max_iterations(loop_target, mock_ui_loop, monkeypat
 async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
     """Tests fail mid-loop -> reverts changes, stops immediately, exits 1."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = LoopMockBackend(review_results=[[issue], [issue]], tests_pass=False)
+    backend = loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -165,7 +170,7 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
     issue1 = {"id": 1, "description": "Issue A", "file": "main.py", "line": 1}
     issue2 = {"id": 2, "description": "Issue B", "file": "main.py", "line": 2}
     # Iteration 1: 2 issues, Iteration 2: 1 issue, Iteration 3: 0 issues
-    backend = LoopMockBackend(review_results=[[issue1, issue2], [issue1], []])
+    backend = loop_mock_backend(review_results=[[issue1, issue2], [issue1], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -202,7 +207,7 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
 async def test_loop_false_single_pass(loop_target, mock_ui_loop, monkeypatch):
     """loop=False behaves identically to existing single-pass flow."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = LoopMockBackend(review_results=[[issue]])
+    backend = loop_mock_backend(review_results=[[issue]])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -223,7 +228,7 @@ async def test_loop_commits_between_iterations(loop_target, mock_ui_loop, monkey
     """Each successful iteration commits changes before the next review."""
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
     # Iteration 1: issue found, Iteration 2: issue found, Iteration 3: clean
-    backend = LoopMockBackend(review_results=[[issue], [issue], []])
+    backend = loop_mock_backend(review_results=[[issue], [issue], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -245,7 +250,7 @@ async def test_loop_commits_between_iterations(loop_target, mock_ui_loop, monkey
 async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
     """No iteration commit when tests fail; changes are reverted."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = LoopMockBackend(review_results=[[issue]], tests_pass=False)
+    backend = loop_mock_backend(review_results=[[issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
     monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
@@ -265,7 +270,7 @@ async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeyp
 async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkeypatch):
     """Fixes from a failed iteration are not counted in the summary."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = LoopMockBackend(review_results=[[issue]], tests_pass=False)
+    backend = loop_mock_backend(review_results=[[issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
     monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
@@ -295,7 +300,7 @@ async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkey
 @pytest.mark.asyncio
 async def test_loop_no_commit_on_clean_first_iteration(loop_target, mock_ui_loop, monkeypatch):
     """No commit when first iteration is already clean (no fixes applied)."""
-    backend = LoopMockBackend(review_results=[[]])
+    backend = loop_mock_backend(review_results=[[]])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -317,7 +322,7 @@ async def test_loop_rejects_dirty_working_tree(loop_target, mock_ui_loop, monkey
     # Dirty the working tree
     (loop_target / "untracked.py").write_text("dirty")
 
-    backend = LoopMockBackend(review_results=[[]])
+    backend = loop_mock_backend(review_results=[[]])
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
     config = RunConfig(
@@ -379,7 +384,7 @@ async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_lo
 
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
     # Iteration 1: issue found, Iteration 2: clean review
-    backend = LoopMockBackend(review_results=[[issue], []])
+    backend = loop_mock_backend(review_results=[[issue], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
@@ -420,7 +425,7 @@ async def test_loop_diff_base_unchanged_on_test_failure(loop_target, mock_ui_loo
     """When tests fail, diff_base stays None — next iteration (if any) uses full branch diff."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
     # Two iterations of issues, tests always fail
-    backend = LoopMockBackend(review_results=[[issue], [issue]], tests_pass=False)
+    backend = loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
     monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
