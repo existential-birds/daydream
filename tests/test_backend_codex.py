@@ -1,8 +1,9 @@
 # tests/test_backend_codex.py
 """Tests for CodexBackend with canned JSONL fixtures."""
 
+import asyncio
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -302,6 +303,89 @@ async def test_codex_backend_emits_turn_end_after_each_agent_message() -> None:
     assert len(texts) == 2
     assert len(turn_ends) == 2
     assert all(e.message_id == "" for e in turn_ends)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
+    """Overlapping runs on one backend must keep reading their own process."""
+    backend = CodexBackend(model="fixture-model")
+
+    class _ImmediateStdout:
+        def __init__(self, lines: list[str]) -> None:
+            self._lines = iter(lines)
+
+        async def readline(self) -> bytes:
+            try:
+                return (next(self._lines) + "\n").encode()
+            except StopIteration:
+                return b""
+
+    class _BlockingStdout:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self._waiting = False
+
+        async def readline(self) -> bytes:
+            if self._waiting:
+                raise RuntimeError(
+                    "readuntil() called while another coroutine is already waiting "
+                    "for incoming data"
+                )
+            self._waiting = True
+            self.entered.set()
+            try:
+                await self.release.wait()
+                return b""
+            finally:
+                self._waiting = False
+
+    def _proc(stdout: object) -> MagicMock:
+        process = MagicMock()
+        process.stdout = stdout
+        process.stdin = MagicMock()
+        process.stdin.write = MagicMock()
+        process.stdin.close = MagicMock()
+        process.wait = AsyncMock(return_value=0)
+        process.returncode = 0
+        process.terminate = MagicMock()
+        process.kill = MagicMock()
+        return process
+
+    first_proc = _proc(
+        _ImmediateStdout(
+            [
+                '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
+                '{"type":"turn.completed","usage":{}}',
+            ]
+        )
+    )
+    second_stdout = _BlockingStdout()
+    second_proc = _proc(second_stdout)
+    procs = iter([first_proc, second_proc])
+
+    async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
+        return next(procs)
+
+    async def consume_second() -> list[object]:
+        return [event async for event in backend.execute(Path("/tmp"), "second")]
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+        first_iter = backend.execute(Path("/tmp"), "first")
+        first_event = await anext(first_iter)
+        assert isinstance(first_event, TextEvent)
+
+        second_task = asyncio.create_task(consume_second())
+        await second_stdout.entered.wait()
+
+        try:
+            turn_end = await anext(first_iter)
+            assert isinstance(turn_end, TurnEndEvent)
+            next_first_event = await anext(first_iter)
+            assert isinstance(next_first_event, CostEvent)
+        finally:
+            second_stdout.release.set()
+            await second_task
 
 
 def test_format_skill_invocation():
