@@ -789,7 +789,6 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                     "rationale": {"type": "string"},
                     "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural"]},
                     "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "source": {"type": "string"},
                 },
                 "required": [
                     "id",
@@ -863,10 +862,12 @@ RECOMMENDATION_VERDICTS_SCHEMA = {
                 },
                 "required": ["issue_id", "verdict", "evidence",
                              "unverified_assumptions"],
+                "additionalProperties": False,
             },
         },
     },
     "required": ["verdicts"],
+    "additionalProperties": False,
 }
 
 PLAN_SCHEMA: dict[str, Any] = {
