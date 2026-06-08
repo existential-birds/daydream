@@ -31,6 +31,7 @@ from daydream.backends import (
 
 _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
 _CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
+_CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 
 
 def _unwrap_shell_command(command: str) -> str:
@@ -49,9 +50,7 @@ def _unwrap_shell_command(command: str) -> str:
         return command
     inner = m.group(1)
     # Strip surrounding quotes if present
-    if (inner.startswith('"') and inner.endswith('"')) or (
-        inner.startswith("'") and inner.endswith("'")
-    ):
+    if (inner.startswith('"') and inner.endswith('"')) or (inner.startswith("'") and inner.endswith("'")):
         inner = inner[1:-1]
     # Strip leading "cd /some/path &&" if present
     inner = _CD_PREFIX_RE.sub("", inner)
@@ -110,8 +109,7 @@ class CodexBackend:
         """
         if agents:
             raise NotImplementedError(
-                "Codex backend does not support exploration subagents; "
-                "use --backend claude for exploration."
+                "Codex backend does not support exploration subagents; use --backend claude for exploration."
             )
 
         # Enforced read-only profile (failure summarizer): the read-only sandbox
@@ -120,10 +118,15 @@ class CodexBackend:
         # `git commit`; the working tree — the incident's danger — is protected.
         sandbox_mode = "read-only" if read_only else "danger-full-access"
         args = [
-            "codex", "exec", "--experimental-json",
-            "--model", self.model,
-            "--sandbox", sandbox_mode,
-            "--cd", str(cwd),
+            "codex",
+            "exec",
+            "--experimental-json",
+            "--model",
+            self.model,
+            "--sandbox",
+            sandbox_mode,
+            "--cd",
+            str(cwd),
         ]
 
         schema_path: str | None = None
@@ -165,6 +168,7 @@ class CodexBackend:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                limit=_CODEX_STDOUT_LIMIT_BYTES,
             )
             self._processes.append(proc)
             self._process = proc
@@ -467,8 +471,6 @@ class CodexBackend:
     @staticmethod
     def _write_temp_schema(schema: dict[str, Any]) -> str:
         """Write JSON schema to a temp file and return the path."""
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, prefix="daydream-schema-"
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, prefix="daydream-schema-") as f:
             json.dump(schema, f)
             return f.name
