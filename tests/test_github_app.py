@@ -153,7 +153,7 @@ def test_mint_installation_token_happy_path():
         if "app/installations" in endpoint:
             return subprocess.CompletedProcess(
                 args, 0,
-                stdout=json.dumps([{"id": 999, "account": {"login": "MyOrg"}}]),
+                stdout=json.dumps({"id": 999, "account": {"login": "MyOrg"}}),
                 stderr="",
             )
         return subprocess.CompletedProcess(args, 1, stdout="", stderr="unexpected")
@@ -171,7 +171,7 @@ def test_mint_installation_token_no_matching_installation():
 
     def fake_run_gh(repo, args, *, timeout=60):
         return subprocess.CompletedProcess(
-            args, 0, stdout=json.dumps([{"id": 1, "account": {"login": "other"}}]), stderr=""
+            args, 0, stdout=json.dumps({"id": 1, "account": {"login": "other"}}), stderr=""
         )
 
     with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
@@ -190,7 +190,7 @@ def test_mint_installation_token_sets_and_clears_jwt_env():
         if "access_tokens" in " ".join(args):
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"token": "ghs_x"}), stderr="")
         return subprocess.CompletedProcess(
-            args, 0, stdout=json.dumps([{"id": 7, "account": {"login": "myorg"}}]), stderr=""
+            args, 0, stdout=json.dumps({"id": 7, "account": {"login": "myorg"}}), stderr=""
         )
 
     from daydream import git_ops

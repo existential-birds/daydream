@@ -148,11 +148,13 @@ def mint_installation_token(app_id: int, private_key: str, owner: str, repo: str
 
 def _find_installation_id(owner: str, repo: str) -> int:
     """List App installations and return the id owned by *owner*."""
-    proc = _run_gh(Path("."), ["api", "/app/installations"])
+    # --paginate walks all pages; --jq '.[]' flattens each page's array to NDJSON
+    # so the combined stdout is one JSON object per line regardless of page count.
+    proc = _run_gh(Path("."), ["api", "--paginate", "--jq", ".[]", "/app/installations"])
     if proc.returncode != 0:
         raise ValueError(f"failed to list App installations: {proc.stderr.strip()}")
     try:
-        installations = json.loads(proc.stdout)
+        installations = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
     except json.JSONDecodeError as exc:
         raise ValueError(f"App installations list returned invalid JSON: {exc}") from exc
 
