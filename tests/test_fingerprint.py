@@ -16,8 +16,8 @@ def test_fingerprint_differs_on_file():
 
 
 def test_fingerprint_differs_on_description():
-    a = ParsedIssue(path="a.py", line=1, title="bug `alpha`", body="")
-    b = ParsedIssue(path="a.py", line=1, title="bug `bravo`", body="")
+    a = ParsedIssue(path="a.py", line=1, title="bug `tok`", body="first rationale")
+    b = ParsedIssue(path="a.py", line=1, title="bug `tok`", body="second rationale")
     assert compute_fingerprint(a) != compute_fingerprint(b)
 
 
