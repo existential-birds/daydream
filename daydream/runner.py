@@ -18,6 +18,7 @@ subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
 """
 
 import os
+import sys
 import shutil
 import uuid
 from collections.abc import Callable
@@ -449,10 +450,10 @@ def _resolve_github_identity(config: RunConfig, target_dir: Path) -> str:
     resolve the identity under that token. Without credentials, fall back to the
     ambient ``gh`` identity.
 
-    A credential/minting/network failure is non-fatal: it is reported and the
-    run continues under ambient ``gh`` auth (identity ``"unknown"``). A partial
-    or malformed-credentials ``ValueError`` from ``resolve_credentials`` is a
-    hard misconfiguration and propagates to abort the run.
+    A minting or network failure is fatal when App credentials are present: the
+    run is aborted so that ``gh`` subprocesses never silently fall back to
+    ambient auth. A partial or malformed-credentials ``ValueError`` from
+    ``resolve_credentials`` also aborts the run.
 
     Args:
         config: Run configuration (``pr_repo`` is preferred for owner/repo).
@@ -467,8 +468,9 @@ def _resolve_github_identity(config: RunConfig, target_dir: Path) -> str:
     from daydream import github_app
 
     # resolve_credentials() is called OUTSIDE the try so a partial-config
-    # ValueError propagates and aborts the run (exit 1). Only the minting and
-    # network calls degrade to ambient auth on failure.
+    # ValueError propagates and aborts the run (exit 1). Minting/network
+    # failures inside the try also abort (sys.exit(1)) — ambient-auth fallback
+    # would violate the requirement that all gh calls use the minted token.
     credentials = github_app.resolve_credentials()
     if credentials is None:
         return github_app.resolve_identity(token=None)
@@ -483,9 +485,9 @@ def _resolve_github_identity(config: RunConfig, target_dir: Path) -> str:
         )
         git_ops.set_gh_token_env(github_app.build_gh_env(token))
         return github_app.resolve_identity(token=token)
-    except Exception as exc:  # noqa: BLE001 - identity/minting must never abort a run
+    except Exception as exc:  # noqa: BLE001
         print_error(console, "GitHub Identity", f"App token resolution failed: {exc}")
-        return github_app.resolve_identity(token=None)
+        sys.exit(1)
 
 
 def _owner_repo_for(config: RunConfig, target_dir: Path) -> tuple[str, str] | None:
@@ -565,9 +567,8 @@ async def run(config: RunConfig | None = None) -> int:
 
     # Resolve the active GitHub identity once and thread it into each flow's
     # banner. Under App credentials this also mints + injects the installation
-    # token into every ``gh`` subprocess via the git_ops singleton. A partial
-    # credential misconfiguration aborts the run with exit 1; minting/network
-    # failures degrade to ambient auth inside the helper.
+    # token into every ``gh`` subprocess via the git_ops singleton. Both partial
+    # credential misconfiguration and minting/network failures abort the run.
     try:
         identity = _resolve_github_identity(config, target_dir)
     except ValueError as exc:
