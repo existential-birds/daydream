@@ -340,16 +340,18 @@ def extract_anchors(issue: ParsedIssue) -> list[str]:
 def compute_fingerprint(issue: ParsedIssue) -> str:
     """Compute a stable SHA256 fingerprint identifying a finding across runs.
 
-    The fingerprint combines the file path, sorted anchor tokens, and the
-    normalized description. Anchor tokens are sorted (order-insensitive code
-    symbols); the description preserves word order so differently-worded
-    findings do not collide. The line number is excluded so code shifts do not
-    change a finding's identity.
+    The fingerprint combines the file path, normalized title, sorted anchor
+    tokens, and normalized description. Anchor tokens are sorted
+    (order-insensitive code symbols); the title and description preserve word
+    order so differently-worded findings do not collide. The line number is
+    excluded so code shifts do not change a finding's identity.
     """
+    normalized_title = " ".join(issue.title.strip().lower().split())
     normalized_description = issue.body.strip().lower()
     canonical = "\n".join(
         [
             issue.path,
+            normalized_title,
             "\n".join(sorted(extract_anchors(issue))),
             normalized_description,
         ]
