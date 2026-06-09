@@ -194,7 +194,7 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     captured: dict[str, Any] = {}
     worktree_path_at_dispatch: dict[str, Path] = {}
 
-    async def fake_run_loop_shallow(work, config):
+    async def fake_run_loop_shallow(work, config, identity="unknown"):
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
@@ -265,7 +265,7 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_shallow(work, config):
+    async def fake_run_loop_shallow(work, config, identity="unknown"):
         captured["head_sha"] = work.head_sha
         captured["is_ephemeral"] = work.is_ephemeral
         captured["repo"] = work.repo
@@ -382,7 +382,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     # the resolved WorkContext.
     captured: dict[str, Any] = {}
 
-    async def fake_run_comment(work, config):
+    async def fake_run_comment(work, config, identity="unknown"):
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         return 0
@@ -423,7 +423,7 @@ async def test_feedback_subcommand_works_like_legacy_pr(
     )
     captured: dict[str, Any] = {}
 
-    async def fake_run_pr_feedback(work, config):
+    async def fake_run_pr_feedback(work, config, identity="unknown"):
         captured["pr_number"] = config.pr_number
         captured["bot"] = config.bot
         captured["repo"] = work.repo
@@ -467,7 +467,7 @@ async def test_review_mode_on_base_branch_does_not_error(
     # WrongBranchError guard into _run_review.
     routed: dict[str, Any] = {}
 
-    async def fake_run_review(work, config):
+    async def fake_run_review(work, config, identity="unknown"):
         routed["base_branch"] = work.base_branch
         routed["head_branch"] = work.head_branch
         return 0

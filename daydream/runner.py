@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from rich.markup import escape as escape_markup
+
 from daydream import git_ops
 from daydream.agent import (
     MissingSkillError,
@@ -438,6 +440,67 @@ def _get_head_sha(cwd: Path) -> str | None:
         return None
 
 
+def _resolve_github_identity(config: RunConfig, target_dir: Path) -> str:
+    """Resolve the active GitHub identity once for the run's banners.
+
+    When App credentials are supplied (``DAYDREAM_APP_ID`` /
+    ``DAYDREAM_APP_PRIVATE_KEY``), mint a scoped installation token, inject it
+    into the ``gh`` subprocess env via the ``git_ops`` token singleton, and
+    resolve the identity under that token. Without credentials, fall back to the
+    ambient ``gh`` identity.
+
+    A credential/minting/network failure is non-fatal: it is reported and the
+    run continues under ambient ``gh`` auth (identity ``"unknown"``). A partial
+    or malformed-credentials ``ValueError`` from ``resolve_credentials`` is a
+    hard misconfiguration and propagates to abort the run.
+
+    Args:
+        config: Run configuration (``pr_repo`` is preferred for owner/repo).
+        target_dir: Resolved target directory for ``gh repo view`` fallback.
+
+    Returns:
+        The resolved GitHub login, or ``"unknown"`` when it cannot be determined.
+
+    Raises:
+        ValueError: On partial/malformed App credentials (hard misconfig).
+    """
+    from daydream import github_app
+
+    # resolve_credentials() is called OUTSIDE the try so a partial-config
+    # ValueError propagates and aborts the run (exit 1). Only the minting and
+    # network calls degrade to ambient auth on failure.
+    credentials = github_app.resolve_credentials()
+    if credentials is None:
+        return github_app.resolve_identity(token=None)
+
+    try:
+        owner_repo = _owner_repo_for(config, target_dir)
+        if owner_repo is None:
+            return github_app.resolve_identity(token=None)
+        owner, repo = owner_repo
+        token = github_app.mint_installation_token(
+            credentials.app_id, credentials.private_key, owner, repo,
+        )
+        git_ops.set_gh_token_env(github_app.build_gh_env(token))
+        return github_app.resolve_identity(token=token)
+    except Exception as exc:  # noqa: BLE001 - identity/minting must never abort a run
+        print_error(console, "GitHub Identity", f"App token resolution failed: {exc}")
+        return github_app.resolve_identity(token=None)
+
+
+def _owner_repo_for(config: RunConfig, target_dir: Path) -> tuple[str, str] | None:
+    """Determine ``(owner, repo)`` for installation-token minting.
+
+    Prefers ``config.pr_repo`` (``"owner/repo"``) when set; otherwise derives it
+    from ``gh repo view``. Returns None when it cannot be determined.
+    """
+    if config.pr_repo and "/" in config.pr_repo:
+        owner, _, repo = config.pr_repo.partition("/")
+        if owner and repo:
+            return owner, repo
+    return git_ops.gh_repo_view(target_dir)
+
+
 # --- Public entry points ----------------------------------------------------
 
 
@@ -500,6 +563,20 @@ async def run(config: RunConfig | None = None) -> int:
         print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
         return 1
 
+    # Resolve the active GitHub identity once and thread it into each flow's
+    # banner. Under App credentials this also mints + injects the installation
+    # token into every ``gh`` subprocess via the git_ops singleton. A partial
+    # credential misconfiguration aborts the run with exit 1; minting/network
+    # failures degrade to ambient auth inside the helper.
+    try:
+        identity = _resolve_github_identity(config, target_dir)
+    except ValueError as exc:
+        print_error(console, "GitHub App Misconfiguration", str(exc))
+        return 1
+    # Bot logins look like ``my-app[bot]``; the brackets are Rich markup, so
+    # escape the identity before it reaches the banner ``print_info`` calls.
+    identity = escape_markup(identity)
+
     # ``--comment`` and ``--review`` skip the test phase, so they also skip
     # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).
     skip_tests = config.output_mode != "loop"
@@ -519,7 +596,7 @@ async def run(config: RunConfig | None = None) -> int:
             extra_copy=config.extra_copy,
             skip_tests=skip_tests,
         ) as work:
-            return await _dispatch(work, config)
+            return await _dispatch(work, config, identity)
     except git_ops.WrongBranchError:
         # Propagate to ``cli.main`` for the actionable error panel.
         raise
@@ -549,7 +626,7 @@ async def run_feedback(config: RunConfig, pr: int) -> int:
 # --- Dispatch ---------------------------------------------------------------
 
 
-async def _dispatch(work: WorkContext, config: RunConfig) -> int:
+async def _dispatch(work: WorkContext, config: RunConfig, identity: str) -> int:
     """Pick the flow helper for the resolved workspace + config.
 
     Order matters: ``bot`` signals PR feedback mode (set only by the
@@ -559,15 +636,20 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
 
     Note: ``config.pr_number`` can be auto-detected from the current branch
     for metadata (trajectory/archive) without implying feedback mode.
+
+    Args:
+        work: Resolved working environment for the run.
+        config: Run configuration.
+        identity: Active GitHub identity resolved once in :func:`run`.
     """
     if config.bot is not None:
-        return await _run_pr_feedback(work, config)
+        return await _run_pr_feedback(work, config, identity)
 
     if config.output_mode == "comment":
-        return await _run_comment(work, config)
+        return await _run_comment(work, config, identity)
 
     if config.output_mode == "review":
-        return await _run_review(work, config)
+        return await _run_review(work, config, identity)
 
     # output_mode == "loop"
     # Stage 4.2 — guard against the silent-failure case where the user runs
@@ -591,16 +673,16 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
         )
 
     if config.shallow:
-        return await _run_loop_shallow(work, config)
+        return await _run_loop_shallow(work, config, identity)
     # Default: deep multi-stack pipeline. Pass ``--shallow`` to opt into the
     # single-stack flow.
-    return await _run_loop_deep(work, config)
+    return await _run_loop_deep(work, config, identity)
 
 
 # --- Helper: PR feedback flow ----------------------------------------------
 
 
-async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
+async def _run_pr_feedback(work: WorkContext, config: RunConfig, identity: str = "unknown") -> int:
     """Today's PR feedback body, refactored to receive ``work`` from the dispatch.
 
     Fetches bot review comments, parses them, applies fixes one-by-one,
@@ -641,6 +723,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         print_info(console, f"Bot: {bot}")
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Model: {review_backend.model}")
+        print_info(console, f"GitHub identity: {identity}")
         console.print()
 
         # Phase 1: Fetch PR feedback
@@ -710,7 +793,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
 # --- Helper: comment mode (--comment) --------------------------------------
 
 
-async def _run_comment(work: WorkContext, config: RunConfig) -> int:
+async def _run_comment(work: WorkContext, config: RunConfig, identity: str) -> int:
     """Review + post inline PR comments + exit.
 
     Pre-flight: when a branch is explicitly requested but no open PR exists
@@ -731,19 +814,19 @@ async def _run_comment(work: WorkContext, config: RunConfig) -> int:
             )
             return 1
 
-    return await _run_review_or_comment(work, config, post_to_pr=True)
+    return await _run_review_or_comment(work, config, identity, post_to_pr=True)
 
 
 # --- Helper: review mode (--review) ----------------------------------------
 
 
-async def _run_review(work: WorkContext, config: RunConfig) -> int:
+async def _run_review(work: WorkContext, config: RunConfig, identity: str) -> int:
     """Review + write a report and exit. No PR posting, no fix, no test."""
-    return await _run_review_or_comment(work, config, post_to_pr=False)
+    return await _run_review_or_comment(work, config, identity, post_to_pr=False)
 
 
 async def _run_review_or_comment(
-    work: WorkContext, config: RunConfig, *, post_to_pr: bool,
+    work: WorkContext, config: RunConfig, identity: str, *, post_to_pr: bool,
 ) -> int:
     """Shared body for ``--comment`` and ``--review``.
 
@@ -795,6 +878,7 @@ async def _run_review_or_comment(
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
         print_info(console, f"Model: {backend.model}")
+        print_info(console, f"GitHub identity: {identity}")
         console.print()
 
         # Pre-scan exploration: populate config.exploration_context before phase 1.
@@ -872,7 +956,7 @@ async def _run_review_or_comment(
 # --- Helper: shallow loop (single-stack review-fix-test) -------------------
 
 
-async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
+async def _run_loop_shallow(work: WorkContext, config: RunConfig, identity: str = "unknown") -> int:
     """Single-stack review → fix → test → loop body.
 
     This is today's ``run`` body lifted into a helper. The workspace
@@ -967,6 +1051,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Model: {review_backend.model}")
+        print_info(console, f"GitHub identity: {identity}")
         if skill:
             print_info(console, f"Review skill: {skill}")
         if config.start_at != "review":
@@ -1225,8 +1310,8 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
 # --- Helper: deep loop (multi-stack pipeline) ------------------------------
 
 
-async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:
+async def _run_loop_deep(work: WorkContext, config: RunConfig, identity: str) -> int:
     """Delegate to the deep-mode orchestrator."""
     from daydream.deep.orchestrator import run_deep
 
-    return await run_deep(config, work)
+    return await run_deep(config, work, identity)
