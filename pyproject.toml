@@ -2,7 +2,7 @@
 name = "daydream"
 version = "0.19.0"
 description = "Automated code review and fix loop using Claude"
-requires-python = ">=3.12"
+requires-python = ">=3.12.13"
 dependencies = [
     "claude-agent-sdk==0.1.72",
     "anyio>=4.0",
