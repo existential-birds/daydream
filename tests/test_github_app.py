@@ -105,11 +105,11 @@ def test_resolve_credentials_raises_on_non_integer_id(monkeypatch):
         resolve_credentials()
 
 
-def test_build_gh_env_injects_token_and_inherits_path(monkeypatch):
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+def test_build_gh_env_returns_token_override_only():
+    # build_gh_env returns only the token override; os.environ is merged at
+    # subprocess call time by run_gh_command so callers see the live env.
     env = build_gh_env("ghs_tok")
-    assert env["GH_TOKEN"] == "ghs_tok"
-    assert env["PATH"] == "/usr/bin:/bin"
+    assert env == {"GH_TOKEN": "ghs_tok"}
 
 
 def test_mint_jwt_is_rs256_with_expected_claims():

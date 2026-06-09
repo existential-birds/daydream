@@ -94,10 +94,10 @@ def build_gh_env(token: str) -> dict[str, str]:
         token: Token to inject as ``GH_TOKEN`` (App JWT or installation token).
 
     Returns:
-        A copy of the parent environment with ``GH_TOKEN`` set, so ``gh`` still
-        inherits ``PATH`` and other parent-env essentials.
+        A dict of env-var overrides containing ``GH_TOKEN``.  Merged with the
+        live ``os.environ`` at subprocess call time by :func:`run_gh_command`.
     """
-    return {**os.environ, "GH_TOKEN": token}
+    return {"GH_TOKEN": token}
 
 
 @contextmanager

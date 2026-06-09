@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -72,12 +73,12 @@ _gh_token_env: dict[str, str] | None = None
 
 
 def set_gh_token_env(env: dict[str, str] | None) -> None:
-    """Set the environment passed to ``gh`` subprocesses.
+    """Set the environment overrides passed to ``gh`` subprocesses.
 
     Args:
-        env: The full environment mapping for ``gh`` (typically
-            ``{**os.environ, "GH_TOKEN": token}``), or ``None`` to fall back to
-            parent-process inheritance.
+        env: Mapping of env-var overrides (e.g. ``{"GH_TOKEN": token}``) merged
+            with the live ``os.environ`` at subprocess call time, or ``None`` to
+            inherit the parent process environment without any overrides.
 
     Returns:
         None
@@ -266,7 +267,7 @@ def _run_gh(
             timeout=timeout,
             shell=False,
             check=False,
-            env=get_gh_token_env(),
+            env={**os.environ, **get_gh_token_env()} if get_gh_token_env() is not None else None,
         )
     except subprocess.TimeoutExpired as exc:
         raise GitTimeoutError(f"gh {' '.join(args)} timed out after {timeout}s") from exc
