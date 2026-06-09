@@ -297,6 +297,24 @@ def _reset_agent_state():
 
 
 @pytest.fixture(autouse=True)
+def _reset_gh_token_env():
+    """Reset the ``gh`` token-env singleton before AND after every test.
+
+    The ``gh`` subprocess environment lives on a module-level singleton in
+    ``daydream.git_ops`` (``set_gh_token_env``/``reset_gh_token_env``). A test
+    that drives ``run()`` with GitHub App credentials sets it, leaving the
+    singleton dirty for the next test — which would silently inject a stale
+    ``GH_TOKEN`` into every subsequent ``gh`` call. Reset on both edges so each
+    test starts from parent-env inheritance regardless of order.
+    """
+    from daydream import git_ops
+
+    git_ops.reset_gh_token_env()
+    yield
+    git_ops.reset_gh_token_env()
+
+
+@pytest.fixture(autouse=True)
 def _reset_trajectory_recorder():
     """Clear the trajectory ContextVar before AND after every test.
 

@@ -46,3 +46,14 @@ def test_token_env_accessors_roundtrip():
     assert git_ops.get_gh_token_env() == {"GH_TOKEN": "x"}
     git_ops.reset_gh_token_env()
     assert git_ops.get_gh_token_env() is None
+
+
+def test_token_env_does_not_leak_across_tests_part1():
+    """Set the singleton; the autouse fixture must clear it before part2 runs."""
+    git_ops.set_gh_token_env({"GH_TOKEN": "leaky"})
+    assert git_ops.get_gh_token_env() == {"GH_TOKEN": "leaky"}
+
+
+def test_token_env_does_not_leak_across_tests_part2():
+    """If the fixture works, this test sees a clean singleton regardless of order."""
+    assert git_ops.get_gh_token_env() is None
