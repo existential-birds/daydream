@@ -12,8 +12,10 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Generator
 
 import jwt as pyjwt
 
@@ -98,6 +100,23 @@ def build_gh_env(token: str) -> dict[str, str]:
     return {**os.environ, "GH_TOKEN": token}
 
 
+@contextmanager
+def _scoped_gh_token(token: str) -> Generator[None, None, None]:
+    """Temporarily set the git_ops GH token singleton, restoring it on exit.
+
+    Args:
+        token: Token to inject as ``GH_TOKEN`` for the duration of the block.
+    """
+    from daydream import git_ops
+
+    prior = git_ops.get_gh_token_env()
+    git_ops.set_gh_token_env(build_gh_env(token))
+    try:
+        yield
+    finally:
+        git_ops.set_gh_token_env(prior)
+
+
 def mint_installation_token(app_id: int, private_key: str, owner: str, repo: str) -> str:
     """Exchange App credentials for a scoped installation access token.
 
@@ -121,16 +140,10 @@ def mint_installation_token(app_id: int, private_key: str, owner: str, repo: str
             installation for *owner*, or the token exchange fails or omits the
             ``token`` field.
     """
-    from daydream import git_ops
-
     jwt_token = mint_jwt(app_id, private_key)
-    prior = git_ops.get_gh_token_env()
-    git_ops.set_gh_token_env(build_gh_env(jwt_token))
-    try:
+    with _scoped_gh_token(jwt_token):
         installation_id = _find_installation_id(owner, repo)
         return _exchange_for_token(installation_id, owner, repo)
-    finally:
-        git_ops.set_gh_token_env(prior)
 
 
 def _find_installation_id(owner: str, repo: str) -> int:
@@ -188,15 +201,9 @@ def resolve_identity(token: str | None = None) -> str:
         fails for any reason. Identity display is cosmetic and must never abort
         a run, so this function never raises.
     """
-    from daydream import git_ops
-
     if token is not None:
-        prior = git_ops.get_gh_token_env()
-        git_ops.set_gh_token_env(build_gh_env(token))
-        try:
+        with _scoped_gh_token(token):
             return _read_user_login()
-        finally:
-            git_ops.set_gh_token_env(prior)
     return _read_user_login()
 
 
