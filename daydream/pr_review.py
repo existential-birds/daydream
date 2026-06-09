@@ -52,6 +52,8 @@ class ParsedIssue:
         is_cross_stack: True when the issue spans multiple stacks.
         confidence: Normalised HIGH / MEDIUM / LOW, if known.
         severity: Normalised high / medium / low, if known.
+        fingerprint: Deterministic SHA256 identity for cross-run dedup. Only set
+            on canonical merged findings; None on other construction paths.
     """
 
     path: str
@@ -61,6 +63,7 @@ class ParsedIssue:
     is_cross_stack: bool = False
     confidence: str | None = None
     severity: str | None = None
+    fingerprint: str | None = None
 
 
 @dataclass
@@ -262,17 +265,17 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
         if fields.rationale and fields.rationale != fields.description:
             body_parts.append(fields.rationale)
         body = "\n\n".join(body_parts)
-        out.append(
-            ParsedIssue(
-                path=fields.path,
-                line=fields.line_int,
-                title=fields.description,
-                body=body,
-                is_cross_stack=fields.is_cross_stack,
-                confidence=fields.confidence,
-                severity=fields.severity,
-            )
+        issue = ParsedIssue(
+            path=fields.path,
+            line=fields.line_int,
+            title=fields.description,
+            body=body,
+            is_cross_stack=fields.is_cross_stack,
+            confidence=fields.confidence,
+            severity=fields.severity,
         )
+        issue.fingerprint = compute_fingerprint(issue)
+        out.append(issue)
     return out
 
 
