@@ -76,7 +76,7 @@ async def test_run_dispatches_to_pr_feedback_when_pr_number_set(
 ):
     called: dict[str, Any] = {}
 
-    async def stub(work, config, identity="unknown"):
+    async def stub(work, config):
         called["work"] = work
         called["pr"] = config.pr_number
         return 0
@@ -97,7 +97,7 @@ async def test_auto_detected_pr_number_dispatches_to_deep_loop(
     """Auto-detected pr_number (no bot) routes to the deep loop, not PR feedback."""
     called: dict[str, Any] = {}
 
-    async def stub(work, config, identity="unknown"):
+    async def stub(work, config):
         called["pr_number"] = config.pr_number
         return 0
 
@@ -115,7 +115,7 @@ async def test_run_dispatches_to_comment_mode(
 ):
     called: dict[str, Any] = {}
 
-    async def stub(work, config, identity="unknown"):
+    async def stub(work, config):
         called["mode"] = config.output_mode
         return 0
 
@@ -133,7 +133,7 @@ async def test_run_dispatches_to_review_mode(
 ):
     called: dict[str, Any] = {}
 
-    async def stub(work, config, identity="unknown"):
+    async def stub(work, config):
         called["mode"] = config.output_mode
         return 0
 
@@ -151,7 +151,7 @@ async def test_run_dispatches_to_shallow_loop(
 ):
     called: dict[str, bool] = {}
 
-    async def stub(work, config, identity="unknown"):
+    async def stub(work, config):
         called["shallow"] = config.shallow
         return 0
 
@@ -170,7 +170,7 @@ async def test_run_dispatches_to_deep_loop(
     """Stage 4.2: deep is the default. No flags required to route here."""
     called: dict[str, bool] = {}
 
-    async def stub(work, config, identity="unknown"):
+    async def stub(work, config):
         called["routed"] = True
         called["shallow"] = config.shallow
         return 0
@@ -192,11 +192,11 @@ async def test_run_dispatches_to_shallow_loop_when_explicit(
     """Shallow runs only when ``--shallow`` is explicitly set (paired w/ deep default)."""
     called: dict[str, bool] = {}
 
-    async def shallow_stub(work, config, identity="unknown"):
+    async def shallow_stub(work, config):
         called["shallow"] = True
         return 0
 
-    async def deep_stub(work, config, identity="unknown"):
+    async def deep_stub(work, config):
         called["deep"] = True
         return 0
 
@@ -244,7 +244,7 @@ async def test_run_feedback_routes_through_pr_feedback(
     """``run_feedback`` sets ``pr_number`` and re-enters dispatch."""
     called: dict[str, Any] = {}
 
-    async def stub(work, config, identity="unknown"):
+    async def stub(work, config):
         called["pr"] = config.pr_number
         return 0
 
@@ -560,7 +560,7 @@ async def test_run_threads_non_interactive_into_agent_state(
     reset_state()
     try:
 
-        async def stub(work, config, identity="unknown"):
+        async def stub(work, config):
             return 0
 
         monkeypatch.setattr(dispatch_target, stub)
