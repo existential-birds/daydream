@@ -9,11 +9,15 @@ token, and resolves the active GitHub identity for banner display.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import jwt as pyjwt
+
+from daydream.git_ops import _run_gh
 
 APP_ID_ENV = "DAYDREAM_APP_ID"
 APP_PRIVATE_KEY_ENV = "DAYDREAM_APP_PRIVATE_KEY"
@@ -92,3 +96,78 @@ def build_gh_env(token: str) -> dict[str, str]:
         inherits ``PATH`` and other parent-env essentials.
     """
     return {**os.environ, "GH_TOKEN": token}
+
+
+def mint_installation_token(app_id: int, private_key: str, owner: str, repo: str) -> str:
+    """Exchange App credentials for a scoped installation access token.
+
+    Mints an App JWT, lists the App's installations to find the one owned by
+    *owner*, and exchanges that installation for a short-lived access token. The
+    JWT is injected into the ``gh`` subprocess environment via the ``git_ops``
+    token singleton for the duration of the two API calls, then the prior
+    singleton value is restored.
+
+    Args:
+        app_id: Numeric GitHub App ID.
+        private_key: PEM-encoded RSA private key for RS256 JWT signing.
+        owner: Repository owner (org or user) whose installation to use.
+        repo: Repository name (used only for error context).
+
+    Returns:
+        The scoped installation access token string.
+
+    Raises:
+        ValueError: If listing installations fails, returns invalid JSON, has no
+            installation for *owner*, or the token exchange fails or omits the
+            ``token`` field.
+    """
+    from daydream import git_ops
+
+    jwt_token = mint_jwt(app_id, private_key)
+    prior = git_ops.get_gh_token_env()
+    git_ops.set_gh_token_env(build_gh_env(jwt_token))
+    try:
+        installation_id = _find_installation_id(owner, repo)
+        return _exchange_for_token(installation_id, owner, repo)
+    finally:
+        git_ops.set_gh_token_env(prior)
+
+
+def _find_installation_id(owner: str, repo: str) -> int:
+    """List App installations and return the id owned by *owner*."""
+    proc = _run_gh(Path("."), ["api", "/app/installations"])
+    if proc.returncode != 0:
+        raise ValueError(f"failed to list App installations: {proc.stderr.strip()}")
+    try:
+        installations = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"App installations list returned invalid JSON: {exc}") from exc
+
+    for entry in installations:
+        account = entry.get("account") or {}
+        login = account.get("login")
+        if isinstance(login, str) and login.lower() == owner.lower():
+            installation_id = entry.get("id")
+            if not isinstance(installation_id, int):
+                raise ValueError(f"installation for {owner!r} is missing an integer id")
+            return installation_id
+    raise ValueError(f"no App installation found for owner {owner!r} (repo {owner}/{repo})")
+
+
+def _exchange_for_token(installation_id: int, owner: str, repo: str) -> str:
+    """Exchange an installation id for a scoped access token."""
+    proc = _run_gh(
+        Path("."),
+        ["api", "--method", "POST", f"/app/installations/{installation_id}/access_tokens"],
+    )
+    if proc.returncode != 0:
+        raise ValueError(f"failed to mint installation token for {owner}/{repo}: {proc.stderr.strip()}")
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"installation token response returned invalid JSON: {exc}") from exc
+
+    token = payload.get("token")
+    if not isinstance(token, str) or not token:
+        raise ValueError(f"installation token response for {owner}/{repo} is missing the 'token' field")
+    return token

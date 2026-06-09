@@ -126,3 +126,81 @@ def test_mint_jwt_is_rs256_with_expected_claims():
     decoded = pyjwt.decode(token, key.public_key(), algorithms=["RS256"])
     assert decoded["iss"] == "12345" or decoded["iss"] == 12345
     assert decoded["exp"] - decoded["iat"] <= 600
+
+
+import json
+
+from daydream.github_app import mint_installation_token
+
+
+def _real_pem() -> str:
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+
+
+def test_mint_installation_token_happy_path():
+    pem = _real_pem()
+    calls = []
+
+    def fake_run_gh(repo, args, *, timeout=60):
+        calls.append(args)
+        endpoint = args[-1]
+        if "access_tokens" in " ".join(args):
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"token": "ghs_minted"}), stderr="")
+        if "app/installations" in endpoint:
+            return subprocess.CompletedProcess(
+                args, 0,
+                stdout=json.dumps([{"id": 999, "account": {"login": "MyOrg"}}]),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="unexpected")
+
+    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
+        token = mint_installation_token(12345, pem, "myorg", "myrepo")
+
+    assert token == "ghs_minted"
+    # Two API calls: list installations, then exchange.
+    assert len(calls) == 2
+
+
+def test_mint_installation_token_no_matching_installation():
+    pem = _real_pem()
+
+    def fake_run_gh(repo, args, *, timeout=60):
+        return subprocess.CompletedProcess(
+            args, 0, stdout=json.dumps([{"id": 1, "account": {"login": "other"}}]), stderr=""
+        )
+
+    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
+        with pytest.raises(ValueError, match="installation"):
+            mint_installation_token(12345, pem, "myorg", "myrepo")
+
+
+def test_mint_installation_token_sets_and_clears_jwt_env():
+    """The JWT env must be active during the API calls and cleared afterward."""
+    pem = _real_pem()
+    seen_during = {}
+
+    def fake_run_gh(repo, args, *, timeout=60):
+        from daydream import git_ops
+        seen_during["env"] = git_ops.get_gh_token_env()
+        if "access_tokens" in " ".join(args):
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"token": "ghs_x"}), stderr="")
+        return subprocess.CompletedProcess(
+            args, 0, stdout=json.dumps([{"id": 7, "account": {"login": "myorg"}}]), stderr=""
+        )
+
+    from daydream import git_ops
+    git_ops.reset_gh_token_env()
+    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
+        mint_installation_token(12345, pem, "myorg", "myrepo")
+
+    assert seen_during["env"] is not None
+    assert "ghs_x" not in (seen_during["env"].get("GH_TOKEN") or "")  # JWT, not installation token
+    assert git_ops.get_gh_token_env() is None  # restored after minting
