@@ -228,6 +228,7 @@ class RunConfig:
     plan: bool = False
     non_interactive: bool = False
     assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
+    identity: str = "unknown"  # resolved GitHub identity; set once by run()
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -585,10 +586,11 @@ async def run(config: RunConfig | None = None) -> int:
         print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
         return 1
 
-    # Resolve the active GitHub identity once and thread it into each flow's
-    # banner. Under App credentials this also mints + injects the installation
-    # token into every ``gh`` subprocess via the git_ops singleton. Both partial
-    # credential misconfiguration and minting/network failures abort the run.
+    # Resolve the active GitHub identity once and store it on config so every
+    # flow can read it from config.identity. Under App credentials this also
+    # mints + injects the installation token into every ``gh`` subprocess via
+    # the git_ops singleton. Both partial credential misconfiguration and
+    # minting/network failures abort the run.
     try:
         identity = _resolve_github_identity(config, target_dir)
     except ValueError as exc:
@@ -596,7 +598,7 @@ async def run(config: RunConfig | None = None) -> int:
         return 1
     # Bot logins look like ``my-app[bot]``; the brackets are Rich markup, so
     # escape the identity before it reaches the banner ``print_info`` calls.
-    identity = escape_markup(identity)
+    config.identity = escape_markup(identity)
 
     # ``--comment`` and ``--review`` skip the test phase, so they also skip
     # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).
@@ -617,7 +619,7 @@ async def run(config: RunConfig | None = None) -> int:
             extra_copy=config.extra_copy,
             skip_tests=skip_tests,
         ) as work:
-            return await _dispatch(work, config, identity)
+            return await _dispatch(work, config)
     except git_ops.WrongBranchError:
         # Propagate to ``cli.main`` for the actionable error panel.
         raise
@@ -647,7 +649,7 @@ async def run_feedback(config: RunConfig, pr: int) -> int:
 # --- Dispatch ---------------------------------------------------------------
 
 
-async def _dispatch(work: WorkContext, config: RunConfig, identity: str) -> int:
+async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     """Pick the flow helper for the resolved workspace + config.
 
     Order matters: ``bot`` signals PR feedback mode (set only by the
@@ -660,17 +662,17 @@ async def _dispatch(work: WorkContext, config: RunConfig, identity: str) -> int:
 
     Args:
         work: Resolved working environment for the run.
-        config: Run configuration.
-        identity: Active GitHub identity resolved once in :func:`run`.
+        config: Run configuration (``config.identity`` carries the resolved
+            GitHub identity set by :func:`run`).
     """
     if config.bot is not None:
-        return await _run_pr_feedback(work, config, identity)
+        return await _run_pr_feedback(work, config)
 
     if config.output_mode == "comment":
-        return await _run_comment(work, config, identity)
+        return await _run_comment(work, config)
 
     if config.output_mode == "review":
-        return await _run_review(work, config, identity)
+        return await _run_review(work, config)
 
     # output_mode == "loop"
     # Stage 4.2 — guard against the silent-failure case where the user runs
@@ -694,16 +696,16 @@ async def _dispatch(work: WorkContext, config: RunConfig, identity: str) -> int:
         )
 
     if config.shallow:
-        return await _run_loop_shallow(work, config, identity)
+        return await _run_loop_shallow(work, config)
     # Default: deep multi-stack pipeline. Pass ``--shallow`` to opt into the
     # single-stack flow.
-    return await _run_loop_deep(work, config, identity)
+    return await _run_loop_deep(work, config)
 
 
 # --- Helper: PR feedback flow ----------------------------------------------
 
 
-async def _run_pr_feedback(work: WorkContext, config: RunConfig, identity: str = "unknown") -> int:
+async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
     """Today's PR feedback body, refactored to receive ``work`` from the dispatch.
 
     Fetches bot review comments, parses them, applies fixes one-by-one,
@@ -744,7 +746,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig, identity: str =
         print_info(console, f"Bot: {bot}")
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Model: {review_backend.model}")
-        print_info(console, f"GitHub identity: {identity}")
+        print_info(console, f"GitHub identity: {config.identity}")
         console.print()
 
         # Phase 1: Fetch PR feedback
@@ -814,7 +816,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig, identity: str =
 # --- Helper: comment mode (--comment) --------------------------------------
 
 
-async def _run_comment(work: WorkContext, config: RunConfig, identity: str) -> int:
+async def _run_comment(work: WorkContext, config: RunConfig) -> int:
     """Review + post inline PR comments + exit.
 
     Pre-flight: when a branch is explicitly requested but no open PR exists
@@ -835,19 +837,19 @@ async def _run_comment(work: WorkContext, config: RunConfig, identity: str) -> i
             )
             return 1
 
-    return await _run_review_or_comment(work, config, identity, post_to_pr=True)
+    return await _run_review_or_comment(work, config, post_to_pr=True)
 
 
 # --- Helper: review mode (--review) ----------------------------------------
 
 
-async def _run_review(work: WorkContext, config: RunConfig, identity: str) -> int:
+async def _run_review(work: WorkContext, config: RunConfig) -> int:
     """Review + write a report and exit. No PR posting, no fix, no test."""
-    return await _run_review_or_comment(work, config, identity, post_to_pr=False)
+    return await _run_review_or_comment(work, config, post_to_pr=False)
 
 
 async def _run_review_or_comment(
-    work: WorkContext, config: RunConfig, identity: str, *, post_to_pr: bool,
+    work: WorkContext, config: RunConfig, *, post_to_pr: bool,
 ) -> int:
     """Shared body for ``--comment`` and ``--review``.
 
@@ -899,7 +901,7 @@ async def _run_review_or_comment(
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
         print_info(console, f"Model: {backend.model}")
-        print_info(console, f"GitHub identity: {identity}")
+        print_info(console, f"GitHub identity: {config.identity}")
         console.print()
 
         # Pre-scan exploration: populate config.exploration_context before phase 1.
@@ -977,7 +979,7 @@ async def _run_review_or_comment(
 # --- Helper: shallow loop (single-stack review-fix-test) -------------------
 
 
-async def _run_loop_shallow(work: WorkContext, config: RunConfig, identity: str = "unknown") -> int:
+async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
     """Single-stack review → fix → test → loop body.
 
     This is today's ``run`` body lifted into a helper. The workspace
@@ -1072,7 +1074,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig, identity: str 
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Model: {review_backend.model}")
-        print_info(console, f"GitHub identity: {identity}")
+        print_info(console, f"GitHub identity: {config.identity}")
         if skill:
             print_info(console, f"Review skill: {skill}")
         if config.start_at != "review":
@@ -1331,8 +1333,8 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig, identity: str 
 # --- Helper: deep loop (multi-stack pipeline) ------------------------------
 
 
-async def _run_loop_deep(work: WorkContext, config: RunConfig, identity: str) -> int:
+async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:
     """Delegate to the deep-mode orchestrator."""
     from daydream.deep.orchestrator import run_deep
 
-    return await run_deep(config, work, identity)
+    return await run_deep(config, work)

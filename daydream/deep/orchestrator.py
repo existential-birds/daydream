@@ -282,7 +282,7 @@ def _candidate_pair_to_json(pair: Any) -> dict[str, Any]:
     return data
 
 
-async def run_deep(config: RunConfig, work: WorkContext, identity: str = "unknown") -> int:
+async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """Execute the deep-review pipeline (D-07).
 
     Composes exploration pre-scan, TTT, per-stack fan-out, per-stack parse,
@@ -293,8 +293,9 @@ async def run_deep(config: RunConfig, work: WorkContext, identity: str = "unknow
     Args:
         config: Run configuration. ``config.shallow`` must be False (deep is
             the default); ``config.start_at`` drives resume behavior.
+            ``config.identity`` carries the GitHub identity set by
+            :func:`daydream.runner.run`.
         work: Resolved working environment for the run.
-        identity: Active GitHub identity resolved once in :func:`daydream.runner.run`.
 
     Returns:
         Exit code (0 on success, 1 on failure).
@@ -364,7 +365,7 @@ async def run_deep(config: RunConfig, work: WorkContext, identity: str = "unknow
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
         print_info(console, f"Default backend: {_resolved_backend_name(config, 'review')}")
-        print_info(console, f"GitHub identity: {identity}")
+        print_info(console, f"GitHub identity: {config.identity}")
         console.print()
 
         # ------ Resume gate (D-34, D-36, D-37) ------
