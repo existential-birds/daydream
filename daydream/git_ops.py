@@ -60,6 +60,55 @@ _RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "secondary rate limit",
 )
 
+# Module-level singleton for the ``gh`` subprocess environment.
+# =============================================================
+# Set once at run entry from GitHub App credentials (mirroring the
+# ``AgentState`` singleton in ``daydream.agent``) and read internally by
+# ``_run_gh`` so every ``gh`` call authenticates under the minted installation
+# token. When ``None``, ``gh`` inherits the parent process environment (the
+# original, unchanged behaviour). Access only through the getter/setter/reset
+# functions below; reset between tests via the autouse conftest fixture.
+_gh_token_env: dict[str, str] | None = None
+
+
+def set_gh_token_env(env: dict[str, str] | None) -> None:
+    """Set the environment passed to ``gh`` subprocesses.
+
+    Args:
+        env: The full environment mapping for ``gh`` (typically
+            ``{**os.environ, "GH_TOKEN": token}``), or ``None`` to fall back to
+            parent-process inheritance.
+
+    Returns:
+        None
+
+    """
+    global _gh_token_env
+    _gh_token_env = env
+
+
+def get_gh_token_env() -> dict[str, str] | None:
+    """Get the environment currently passed to ``gh`` subprocesses.
+
+    Returns:
+        The environment mapping, or ``None`` when ``gh`` inherits the parent
+        process environment.
+
+    """
+    return _gh_token_env
+
+
+def reset_gh_token_env() -> None:
+    """Reset the ``gh`` subprocess environment to parent-process inheritance.
+
+    Returns:
+        None
+
+    """
+    global _gh_token_env
+    _gh_token_env = None
+
+
 # --- Errors ------------------------------------------------------------------
 
 
@@ -195,6 +244,11 @@ def _run_gh(
         args: Arguments after ``gh``.
         timeout: Subprocess timeout in seconds.
 
+    The subprocess environment is sourced from the module ``_gh_token_env``
+    singleton when set (via :func:`set_gh_token_env`), so ``gh`` authenticates
+    under the minted installation token. When the singleton is ``None``, ``env``
+    is ``None`` and ``gh`` inherits the parent process environment.
+
     Returns:
         The completed process with text-decoded stdout/stderr.
 
@@ -212,6 +266,7 @@ def _run_gh(
             timeout=timeout,
             shell=False,
             check=False,
+            env=get_gh_token_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise GitTimeoutError(f"gh {' '.join(args)} timed out after {timeout}s") from exc
