@@ -171,3 +171,44 @@ def _exchange_for_token(installation_id: int, owner: str, repo: str) -> str:
     if not isinstance(token, str) or not token:
         raise ValueError(f"installation token response for {owner}/{repo} is missing the 'token' field")
     return token
+
+
+def resolve_identity(token: str | None = None) -> str:
+    """Resolve the active GitHub login for banner display.
+
+    When *token* is provided, the lookup runs under that token (set into the
+    ``git_ops`` token singleton for the call, then restored). Otherwise the
+    lookup uses the ambient ``gh`` authentication.
+
+    Args:
+        token: Optional installation/access token to authenticate the lookup.
+
+    Returns:
+        The GitHub login string, or the literal ``"unknown"`` if the lookup
+        fails for any reason. Identity display is cosmetic and must never abort
+        a run, so this function never raises.
+    """
+    from daydream import git_ops
+
+    if token is not None:
+        prior = git_ops.get_gh_token_env()
+        git_ops.set_gh_token_env(build_gh_env(token))
+        try:
+            return _read_user_login()
+        finally:
+            git_ops.set_gh_token_env(prior)
+    return _read_user_login()
+
+
+def _read_user_login() -> str:
+    """Read ``gh api /user`` login, returning ``"unknown"`` on any failure."""
+    try:
+        proc = _run_gh(Path("."), ["api", "/user"])
+        if proc.returncode != 0:
+            return "unknown"
+        login = json.loads(proc.stdout).get("login")
+    except Exception:  # noqa: BLE001 - identity display is cosmetic; never abort a run
+        return "unknown"
+    if isinstance(login, str) and login:
+        return login
+    return "unknown"

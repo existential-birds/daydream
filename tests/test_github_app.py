@@ -1,8 +1,19 @@
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from daydream import git_ops
+from daydream.github_app import (
+    AppCredentials,
+    build_gh_env,
+    mint_installation_token,
+    mint_jwt,
+    resolve_credentials,
+    resolve_identity,
+)
 
 
 def test_run_gh_injects_token_env_when_set():
@@ -59,16 +70,6 @@ def test_token_env_does_not_leak_across_tests_part2():
     assert git_ops.get_gh_token_env() is None
 
 
-import pytest
-
-from daydream.github_app import (
-    AppCredentials,
-    build_gh_env,
-    mint_jwt,
-    resolve_credentials,
-)
-
-
 def test_resolve_credentials_returns_none_when_unset(monkeypatch):
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
@@ -76,10 +77,11 @@ def test_resolve_credentials_returns_none_when_unset(monkeypatch):
 
 
 def test_resolve_credentials_parses_both(monkeypatch):
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----"
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", pem)
     creds = resolve_credentials()
-    assert creds == AppCredentials(app_id=12345, private_key="-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
+    assert creds == AppCredentials(app_id=12345, private_key=pem)
 
 
 def test_resolve_credentials_raises_on_partial_id_only(monkeypatch):
@@ -111,9 +113,9 @@ def test_build_gh_env_injects_token_and_inherits_path(monkeypatch):
 
 
 def test_mint_jwt_is_rs256_with_expected_claims():
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.hazmat.primitives import serialization
     import jwt as pyjwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     pem = key.private_bytes(
@@ -128,14 +130,9 @@ def test_mint_jwt_is_rs256_with_expected_claims():
     assert decoded["exp"] - decoded["iat"] <= 600
 
 
-import json
-
-from daydream.github_app import mint_installation_token
-
-
 def _real_pem() -> str:
-    from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     return key.private_bytes(
         serialization.Encoding.PEM,
@@ -204,3 +201,30 @@ def test_mint_installation_token_sets_and_clears_jwt_env():
     assert seen_during["env"] is not None
     assert "ghs_x" not in (seen_during["env"].get("GH_TOKEN") or "")  # JWT, not installation token
     assert git_ops.get_gh_token_env() is None  # restored after minting
+
+
+def test_resolve_identity_with_token_returns_login():
+    """With a token-env active, resolve_identity reads gh api /user login."""
+    def fake_run_gh(repo, args, *, timeout=60):
+        return subprocess.CompletedProcess(args, 0, stdout='{"login": "my-app[bot]"}', stderr="")
+
+    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
+        assert resolve_identity(token="ghs_x") == "my-app[bot]"
+
+
+def test_resolve_identity_without_token_uses_auth_status():
+    """No token → fall back to the current gh-authenticated user."""
+    def fake_run_gh(repo, args, *, timeout=60):
+        return subprocess.CompletedProcess(args, 0, stdout='{"login": "personal-user"}', stderr="")
+
+    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
+        assert resolve_identity(token=None) == "personal-user"
+
+
+def test_resolve_identity_returns_unknown_on_failure():
+    """A failed lookup is non-fatal — return 'unknown', never raise."""
+    def fake_run_gh(repo, args, *, timeout=60):
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="boom")
+
+    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
+        assert resolve_identity(token=None) == "unknown"
