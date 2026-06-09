@@ -57,3 +57,72 @@ def test_token_env_does_not_leak_across_tests_part1():
 def test_token_env_does_not_leak_across_tests_part2():
     """If the fixture works, this test sees a clean singleton regardless of order."""
     assert git_ops.get_gh_token_env() is None
+
+
+import pytest
+
+from daydream.github_app import (
+    AppCredentials,
+    build_gh_env,
+    mint_jwt,
+    resolve_credentials,
+)
+
+
+def test_resolve_credentials_returns_none_when_unset(monkeypatch):
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    assert resolve_credentials() is None
+
+
+def test_resolve_credentials_parses_both(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
+    creds = resolve_credentials()
+    assert creds == AppCredentials(app_id=12345, private_key="-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
+
+
+def test_resolve_credentials_raises_on_partial_id_only(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    with pytest.raises(ValueError, match="DAYDREAM_APP_PRIVATE_KEY"):
+        resolve_credentials()
+
+
+def test_resolve_credentials_raises_on_partial_key_only(monkeypatch):
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "x")
+    with pytest.raises(ValueError, match="DAYDREAM_APP_ID"):
+        resolve_credentials()
+
+
+def test_resolve_credentials_raises_on_non_integer_id(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_APP_ID", "not-an-int")
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "x")
+    with pytest.raises(ValueError, match="DAYDREAM_APP_ID"):
+        resolve_credentials()
+
+
+def test_build_gh_env_injects_token_and_inherits_path(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    env = build_gh_env("ghs_tok")
+    assert env["GH_TOKEN"] == "ghs_tok"
+    assert env["PATH"] == "/usr/bin:/bin"
+
+
+def test_mint_jwt_is_rs256_with_expected_claims():
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+    import jwt as pyjwt
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+
+    token = mint_jwt(12345, pem)
+    decoded = pyjwt.decode(token, key.public_key(), algorithms=["RS256"])
+    assert decoded["iss"] == "12345" or decoded["iss"] == 12345
+    assert decoded["exp"] - decoded["iat"] <= 600
