@@ -341,11 +341,12 @@ def compute_fingerprint(issue: ParsedIssue) -> str:
     """Compute a stable SHA256 fingerprint identifying a finding across runs.
 
     The fingerprint combines the file path, sorted anchor tokens, and the
-    normalized title. Both the anchors and the title's tokens are sorted so the
-    identity is independent of token order. The line number is excluded so code
-    shifts do not change a finding's identity.
+    normalized title. Anchor tokens are sorted (order-insensitive code
+    symbols); the title preserves word order so differently-worded findings
+    do not collide. The line number is excluded so code shifts do not change
+    a finding's identity.
     """
-    normalized_title = " ".join(sorted(issue.title.strip().lower().split()))
+    normalized_title = issue.title.strip().lower()
     canonical = "\n".join(
         [
             issue.path,
