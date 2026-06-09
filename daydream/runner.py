@@ -468,26 +468,46 @@ def _resolve_github_identity(config: RunConfig, target_dir: Path) -> str:
     from daydream import github_app
 
     # resolve_credentials() is called OUTSIDE the try so a partial-config
-    # ValueError propagates and aborts the run (exit 1). Minting/network
+    # ValueError propagates and aborts the run (exit 1). Minting/injection
     # failures inside the try also abort (sys.exit(1)) — ambient-auth fallback
     # would violate the requirement that all gh calls use the minted token.
+    # Identity lookup is cosmetic and kept outside the try so its failure
+    # returns "unknown" rather than aborting.
     credentials = github_app.resolve_credentials()
     if credentials is None:
         return github_app.resolve_identity(token=None)
 
+    # Posting modes (comment / review / bot feedback) require a scoped token;
+    # failing to determine the repo is treated as a hard abort so gh never
+    # silently falls back to ambient auth.
+    is_posting = config.bot is not None or config.output_mode in ("comment", "review")
+
     try:
         owner_repo = _owner_repo_for(config, target_dir)
         if owner_repo is None:
+            if is_posting:
+                print_error(
+                    console,
+                    "GitHub App",
+                    "Cannot determine owner/repo for installation token minting",
+                )
+                sys.exit(1)
             return github_app.resolve_identity(token=None)
         owner, repo = owner_repo
         token = github_app.mint_installation_token(
             credentials.app_id, credentials.private_key, owner, repo,
         )
         git_ops.set_gh_token_env(github_app.build_gh_env(token))
-        return github_app.resolve_identity(token=token)
     except Exception as exc:  # noqa: BLE001
         print_error(console, "GitHub Identity", f"App token resolution failed: {exc}")
         sys.exit(1)
+
+    # Identity lookup is cosmetic: a failure returns "unknown" rather than
+    # aborting the run.
+    try:
+        return github_app.resolve_identity(token=token)
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 def _owner_repo_for(config: RunConfig, target_dir: Path) -> tuple[str, str] | None:
