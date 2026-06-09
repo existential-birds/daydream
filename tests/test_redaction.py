@@ -480,3 +480,50 @@ def test_redactor_scrubs_text_content_parts() -> None:
     # Second text part: clean, no redaction tokens injected
     assert out.message[2].type == "text"
     assert out.message[2].text == "clean text"
+
+
+def test_redactor_scrubs_github_installation_token() -> None:
+    """ghs_* installation tokens replaced with [REDACTED_API_KEY]."""
+    out = Redactor().redact_step(_user_step("token=ghs_abc123DEF456ghi789jkl012 done"))
+    assert isinstance(out.message, str)
+    assert "ghs_abc123DEF456ghi789jkl012" not in out.message
+    assert "[REDACTED_API_KEY]" in out.message
+
+
+def test_redactor_scrubs_pkcs1_private_key_block() -> None:
+    """-----BEGIN RSA PRIVATE KEY----- blocks replaced with [REDACTED_PEM_KEY]."""
+    pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGPgjF\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
+    out = Redactor().redact_step(_user_step(f"key is {pem} ok"))
+    assert isinstance(out.message, str)
+    assert "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn" not in out.message
+    assert "[REDACTED_PEM_KEY]" in out.message
+
+
+def test_redactor_scrubs_pkcs8_private_key_block() -> None:
+    """-----BEGIN PRIVATE KEY----- (PKCS8) blocks also redacted."""
+    pem = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC\n"
+        "-----END PRIVATE KEY-----"
+    )
+    out = Redactor().redact_step(_user_step(f"key: {pem}"))
+    assert isinstance(out.message, str)
+    assert "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC" not in out.message
+    assert "[REDACTED_PEM_KEY]" in out.message
+
+
+def test_redactor_preserves_certificate_block() -> None:
+    """BEGIN CERTIFICATE blocks are public material — not redacted."""
+    cert = (
+        "-----BEGIN CERTIFICATE-----\n"
+        "MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkq\n"
+        "-----END CERTIFICATE-----"
+    )
+    out = Redactor().redact_step(_user_step(f"cert: {cert}"))
+    assert isinstance(out.message, str)
+    assert "[REDACTED_PEM_KEY]" not in out.message
+    assert "BEGIN CERTIFICATE" in out.message
