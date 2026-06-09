@@ -17,6 +17,7 @@ Everything is best-effort: failures warn and return, never raise.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
 import tempfile
@@ -331,6 +332,25 @@ def extract_anchors(issue: ParsedIssue) -> list[str]:
     # Longest-first improves hit quality (generic words lose to identifiers).
     seen.sort(key=len, reverse=True)
     return seen[:8]
+
+
+def compute_fingerprint(issue: ParsedIssue) -> str:
+    """Compute a stable SHA256 fingerprint identifying a finding across runs.
+
+    The fingerprint combines the file path, sorted anchor tokens, and the
+    normalized title. Both the anchors and the title's tokens are sorted so the
+    identity is independent of token order. The line number is excluded so code
+    shifts do not change a finding's identity.
+    """
+    normalized_title = " ".join(sorted(issue.title.strip().lower().split()))
+    canonical = "\n".join(
+        [
+            issue.path,
+            "\n".join(sorted(extract_anchors(issue))),
+            normalized_title,
+        ]
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | None:
