@@ -9,6 +9,7 @@ dependencies = [
     "rich>=13.0",
     "pyfiglet>=1.0",
     "pydantic>=2.11.7",
+    "PyJWT>=2.0",
     "tree-sitter==0.25.2",
     "tree-sitter-python==0.25.0",
     "tree-sitter-typescript==0.23.2",
