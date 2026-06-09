@@ -506,7 +506,7 @@ def _resolve_github_identity(config: RunConfig, target_dir: Path) -> str:
     # Identity lookup is cosmetic: a failure returns "unknown" rather than
     # aborting the run.
     try:
-        return github_app.resolve_identity(token=token)
+        return github_app.resolve_identity(token=token, credentials=credentials)
     except Exception:  # noqa: BLE001
         return "unknown"
 

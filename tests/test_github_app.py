@@ -203,6 +203,24 @@ def test_mint_installation_token_sets_and_clears_jwt_env():
     assert git_ops.get_gh_token_env() is None  # restored after minting
 
 
+def test_resolve_identity_with_credentials_calls_app_endpoint():
+    """When credentials are provided, resolve_identity uses GET /app and returns slug[bot]."""
+    pem = _real_pem()
+    calls = []
+
+    def fake_run_gh(repo, args, *, timeout=60):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout='{"slug": "daydream-bot"}', stderr="")
+
+    creds = AppCredentials(app_id=1, private_key=pem)
+    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
+        result = resolve_identity(token="ghs_x", credentials=creds)
+
+    assert result == "daydream-bot[bot]"
+    assert any("/app" in " ".join(a) for a in calls), "expected GET /app call"
+    assert not any("/user" in " ".join(a) for a in calls), "must not call GET /user with installation token"
+
+
 def test_resolve_identity_with_token_returns_login():
     """With a token-env active, resolve_identity reads gh api /user login."""
     def fake_run_gh(repo, args, *, timeout=60):

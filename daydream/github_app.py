@@ -186,25 +186,50 @@ def _exchange_for_token(installation_id: int, owner: str, repo: str) -> str:
     return token
 
 
-def resolve_identity(token: str | None = None) -> str:
+def resolve_identity(
+    token: str | None = None,
+    credentials: AppCredentials | None = None,
+) -> str:
     """Resolve the active GitHub login for banner display.
 
-    When *token* is provided, the lookup runs under that token (set into the
-    ``git_ops`` token singleton for the call, then restored). Otherwise the
-    lookup uses the ambient ``gh`` authentication.
+    When *credentials* are provided the lookup uses ``GET /app`` (authenticated
+    with a freshly minted App JWT) and returns ``"{slug}[bot]"``.  Installation
+    tokens cannot access ``GET /user``, so the token path is skipped in that
+    case.  When only *token* is provided the lookup runs under that token.
+    Otherwise the lookup uses the ambient ``gh`` authentication.
 
     Args:
         token: Optional installation/access token to authenticate the lookup.
+        credentials: Optional App credentials; when present, the App slug is
+            fetched via ``GET /app`` instead of ``GET /user``.
 
     Returns:
         The GitHub login string, or the literal ``"unknown"`` if the lookup
         fails for any reason. Identity display is cosmetic and must never abort
         a run, so this function never raises.
     """
+    if credentials is not None:
+        return _read_app_slug(credentials.app_id, credentials.private_key)
     if token is not None:
         with _scoped_gh_token(token):
             return _read_user_login()
     return _read_user_login()
+
+
+def _read_app_slug(app_id: int, private_key: str) -> str:
+    """Read ``gh api /app`` slug, returning ``"{slug}[bot]"`` or ``"unknown"`` on failure."""
+    try:
+        jwt_token = mint_jwt(app_id, private_key)
+        with _scoped_gh_token(jwt_token):
+            proc = _run_gh(Path("."), ["api", "/app"])
+            if proc.returncode != 0:
+                return "unknown"
+            slug = json.loads(proc.stdout).get("slug")
+    except Exception:  # noqa: BLE001 - identity display is cosmetic; never abort a run
+        return "unknown"
+    if isinstance(slug, str) and slug:
+        return f"{slug}[bot]"
+    return "unknown"
 
 
 def _read_user_login() -> str:
