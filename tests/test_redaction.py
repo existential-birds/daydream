@@ -516,6 +516,32 @@ def test_redactor_scrubs_pkcs8_private_key_block() -> None:
     assert "[REDACTED_PEM_KEY]" in out.message
 
 
+def test_redactor_scrubs_pkcs1_private_key_in_env_assignment() -> None:
+    """VAR=<PKCS1 PEM> redacts fully — PEM rule must run before the env-var rule."""
+    pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEpAIBAAKCAQEA0Z3VSecretBody1234567890abcdef\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
+    out = Redactor().redact_step(_user_step(f"DAYDREAM_APP_PRIVATE_KEY={pem}"))
+    assert isinstance(out.message, str)
+    assert "MIIEpAIBAAKCAQEA0Z3VSecretBody" not in out.message
+    assert out.message == "DAYDREAM_APP_PRIVATE_KEY=[REDACTED_ENV_VAR]"
+
+
+def test_redactor_scrubs_pkcs8_private_key_in_env_assignment() -> None:
+    """VAR=<PKCS8 PEM> redacts fully — no base64 body survives the assignment form."""
+    pem = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC\n"
+        "-----END PRIVATE KEY-----"
+    )
+    out = Redactor().redact_step(_user_step(f"DAYDREAM_APP_PRIVATE_KEY={pem}"))
+    assert isinstance(out.message, str)
+    assert "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC" not in out.message
+    assert out.message == "DAYDREAM_APP_PRIVATE_KEY=[REDACTED_ENV_VAR]"
+
+
 def test_redactor_preserves_certificate_block() -> None:
     """BEGIN CERTIFICATE blocks are public material — not redacted."""
     cert = (
