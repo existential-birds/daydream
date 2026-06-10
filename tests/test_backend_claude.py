@@ -15,7 +15,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.backends.claude import ClaudeBackend
+from daydream.backends.claude import ClaudeAgentError, ClaudeBackend
 
 # --- Mock SDK types (same pattern as test_integration.py) ---
 
@@ -58,6 +58,9 @@ class MockUserMessage:
 class MockResultMessage:
     total_cost_usd: float | None = 0.001
     structured_output: Any = None
+    is_error: bool = False
+    result: str | None = None
+    subtype: str = "success"
 
 
 class MockClaudeSDKClient:
@@ -111,6 +114,38 @@ class MockClaudeSDKClientWithTools:
             MockToolResultBlock(tool_use_id="tool-1", content="file.py", is_error=False),
         ])
         yield MockResultMessage(total_cost_usd=0.10)
+
+
+class MockClaudeSDKClientErrorResult:
+    """Mock client whose run fails fatally (e.g. invalid API key).
+
+    Mirrors the real SDK shape: the failure arrives as a ResultMessage with
+    ``is_error=True`` and the error text in ``result`` — never as an
+    exception from the SDK itself.
+    """
+
+    def __init__(self, options: Any = None):
+        self.options = options
+        self._prompt: str = ""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def query(self, prompt: str):
+        self._prompt = prompt
+
+    async def receive_response(self):
+        yield MockAssistantMessage(
+            content=[MockTextBlock(text="Invalid API key · Fix external API key")]
+        )
+        yield MockResultMessage(
+            total_cost_usd=None,
+            is_error=True,
+            result="Invalid API key · Fix external API key",
+        )
 
 
 class MockClaudeSDKClientStructured:
@@ -211,6 +246,25 @@ async def test_execute_structured_output(patch_sdk):
     assert result_events[0].structured_output == {
         "issues": [{"id": 1, "description": "Fix X", "file": "a.py", "line": 10}]
     }
+
+
+@pytest.mark.asyncio
+async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk):
+    """An is_error ResultMessage must raise, never yield a normal ResultEvent.
+
+    Regression guard for the sandbox acceptance failure: an invalid API key
+    run streamed the error text and a ResultMessage(is_error=True), and the
+    backend yielded a clean ResultEvent — the review then exited 0 with
+    "no issues found" despite the agent never running.
+    """
+    patch_sdk(MockClaudeSDKClientErrorResult)
+    backend = ClaudeBackend(model="opus")
+    events = []
+    with pytest.raises(ClaudeAgentError, match="Invalid API key"):
+        async for event in backend.execute(Path("/tmp"), "Review this"):
+            events.append(event)
+    # The error text still streamed as agent text, but no ResultEvent escaped.
+    assert not [e for e in events if isinstance(e, ResultEvent)]
 
 
 def test_format_skill_invocation_full_key():

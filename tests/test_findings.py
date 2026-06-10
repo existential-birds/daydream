@@ -149,3 +149,55 @@ async def test_review_mode_writes_findings_artifact(feature_branch_repo, monkeyp
     assert data["head_sha"] == git_ops.head_sha(feature_branch_repo)
     assert all(re.fullmatch(r"[0-9a-f]{64}", f["fingerprint"]) for f in data["findings"])
     assert data["findings"], "scripted issue must survive to the artifact"
+
+
+async def test_review_mode_errored_agent_never_writes_clean_artifact(
+    feature_branch_repo, monkeypatch, tmp_path
+):
+    """A backend error must abort the review run, not produce an empty artifact.
+
+    Regression guard for the sandbox acceptance failure: with an invalid
+    ANTHROPIC_API_KEY the agent errored on every invocation, yet the run
+    exited 0, printed "no issues found", and uploaded an empty findings
+    artifact that Phase B happily validated. Enters from ``runner.run`` with
+    a real temp git repo; only the backend (raising ``ClaudeAgentError`` the
+    way the fixed ClaudeBackend does on ``ResultMessage.is_error``) and the
+    GitHub lookups are mocked.
+    """
+    from daydream.backends.claude import ClaudeAgentError
+
+    out = tmp_path / "findings.json"
+
+    class ErroringBackend:
+        model = None
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None,
+                          agents=None, max_turns=None, read_only=False):
+            yield TextEvent(text="Invalid API key · Fix external API key")
+            raise ClaudeAgentError(
+                "Claude agent run failed: Invalid API key · Fix external API key"
+            )
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    head = git_ops.head_sha(feature_branch_repo)
+    pr = PRInfo(number=7, head_sha=head, base_sha=head, base_ref="main",
+                owner="o", repo="r", url="https://example.invalid/pr/7")
+
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    config = RunConfig(target=str(feature_branch_repo), output_mode="review",
+                       pr_number=7, findings_out=str(out), non_interactive=True)
+
+    with patch("daydream.runner.create_backend", return_value=ErroringBackend()), \
+         patch("daydream.github_app.resolve_user_identity", return_value="tester"), \
+         patch("daydream.pr_review.find_pr_by_number", return_value=pr):
+        with pytest.raises(ClaudeAgentError, match="Invalid API key"):
+            await run(config)
+
+    assert not out.exists(), "an errored run must never write a findings artifact"
