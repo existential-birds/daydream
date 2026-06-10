@@ -1,3 +1,10 @@
+"""Unit tests for :mod:`daydream.github_app`.
+
+Covers credential resolution, JWT minting, installation token exchange,
+identity resolution, and gh token-env propagation through
+:mod:`daydream.git_ops`, with mocked environment and GitHub API calls.
+"""
+
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -145,7 +152,7 @@ def test_mint_installation_token_happy_path():
     calls = []
 
     def fake_gh_api(repo, endpoint, **kwargs):
-        calls.append(endpoint)
+        calls.append((endpoint, kwargs))
         if "access_tokens" in endpoint:
             return {"token": "ghs_minted"}
         return [{"id": 999, "account": {"login": "MyOrg"}, "app_slug": "daydream-bot"}]
@@ -157,6 +164,10 @@ def test_mint_installation_token_happy_path():
     assert identity == "daydream-bot[bot]"
     # Two API calls: list installations, then exchange. No extra GET /app.
     assert len(calls) == 2
+    exchange_endpoint, exchange_kwargs = calls[1]
+    assert exchange_endpoint == "/app/installations/999/access_tokens"
+    assert exchange_kwargs["method"] == "POST"
+    assert exchange_kwargs["input_data"] == {"repositories": ["myrepo"]}
 
 
 def test_mint_installation_token_missing_app_slug_yields_unknown_identity():

@@ -72,6 +72,26 @@ async def test_fallback_identity_without_app_creds(feature_branch_repo, monkeypa
     assert exit_code == 0
 
 
+async def test_fallback_clears_stale_token_from_previous_run(feature_branch_repo, monkeypatch, capsys):
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    # Simulate a prior run() in the same process that injected an App token.
+    git_ops.set_gh_token_env({"GH_TOKEN": "stale"})
+
+    config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
+                       output_mode="review", shallow=True, skill="python", quiet=False)
+
+    with patch("daydream.github_app.resolve_user_identity", return_value="personal-user"), \
+         patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
+        exit_code = await run(config)
+
+    out = capsys.readouterr().out
+    assert "personal-user" in out
+    assert git_ops.get_gh_token_env() is None  # stale token cleared, not reused
+    assert exit_code == 0
+
+
 async def test_posting_aborts_when_owner_repo_undeterminable(feature_branch_repo, monkeypatch, capsys):
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")

@@ -138,7 +138,7 @@ def mint_installation_token(repo_dir: Path, app_id: int, private_key: str, owner
         app_id: Numeric GitHub App ID.
         private_key: PEM-encoded RSA private key for RS256 JWT signing.
         owner: Repository owner (org or user) whose installation to use.
-        repo: Repository name (used only for error context).
+        repo: Repository name the minted token is scoped to.
 
     Returns:
         A ``(token, identity)`` tuple: the scoped installation access token and
@@ -178,10 +178,13 @@ def _find_installation(repo_dir: Path, owner: str, repo: str) -> tuple[int, str]
 
 
 def _exchange_for_token(repo_dir: Path, installation_id: int, owner: str, repo: str) -> str:
-    """Exchange an installation id for a scoped access token."""
+    """Exchange an installation id for an access token scoped to *repo*."""
     try:
         payload = git_ops.gh_api(
-            repo_dir, f"/app/installations/{installation_id}/access_tokens", method="POST"
+            repo_dir,
+            f"/app/installations/{installation_id}/access_tokens",
+            method="POST",
+            input_data={"repositories": [repo]},
         )
     except git_ops.GitError as exc:
         raise ValueError(f"failed to mint installation token for {owner}/{repo}: {exc}") from exc
@@ -215,6 +218,8 @@ def resolve_user_identity(repo_dir: Path) -> str:
 def resolve_run_identity(target_dir: Path, pr_repo: str | None, *, is_posting: bool) -> str:
     """Resolve the active GitHub identity for a run, minting App tokens if configured.
 
+    Always clears any previously injected token first, so a run never
+    inherits the App identity of an earlier run in the same process.
     Without App credentials, returns the ambient ``gh`` identity. With
     credentials, mints a scoped installation token, injects it into every
     ``gh`` subprocess via the ``git_ops`` token singleton, and returns the
@@ -236,6 +241,7 @@ def resolve_run_identity(target_dir: Path, pr_repo: str | None, *, is_posting: b
         GitHubAppError: On partial/malformed credentials, undeterminable
             owner/repo while posting, or minting/injection failure.
     """
+    git_ops.reset_gh_token_env()
     try:
         credentials = resolve_credentials()
     except ValueError as exc:
