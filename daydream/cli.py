@@ -546,6 +546,11 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         prog="daydream",
         description="Automated code review and fix loop. "
                     "Use `daydream feedback <pr#>` to process PR bot comments.",
+        epilog=(
+            "Phase A emission: `daydream --review --findings-out PATH` writes a "
+            "strict-schema findings artifact (fingerprints + comment placement) "
+            "for the privileged `daydream post-findings` poster."
+        ) if full_help else None,
     )
 
     parser.add_argument(
@@ -624,6 +629,25 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         default=False,
         dest="plan",
         help="Generate an implementation plan and embed it in PR comments (use with --comment)."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--findings-out",
+        default=None,
+        metavar="PATH",
+        dest="findings_out",
+        help="Write a strict-schema findings artifact (Phase A emission for "
+             "`daydream post-findings`; requires --review)."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--pr-number",
+        default=None,
+        type=int,
+        metavar="N",
+        dest="pr_number",
+        help="Pin the target PR number (trajectory metadata and the --findings-out "
+             "artifact target; default: auto-detect from the current branch)."
         if full_help else argparse.SUPPRESS,
     )
 
@@ -834,6 +858,11 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.assume == "yes" and output_mode != "loop":
         parser.error("--yes has no effect with --review/--comment (no fix phase to auto-apply)")
 
+    # ``--findings-out`` is Phase A emission of the review report; only the
+    # ``--review`` flow writes the artifact, so reject the flag elsewhere.
+    if args.findings_out is not None and output_mode != "review":
+        parser.error("--findings-out requires --review (Phase A findings artifact emission)")
+
     # ttt/per-stack/merge are deep-pipeline resume stages; they don't apply
     # to shallow runs.
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
@@ -866,7 +895,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # daydream may run from one repo against a checkout of another.
     target_repo = Path(args.target) if args.target else Path.cwd()
     pr_repo = _detect_repo_slug(target_repo)
-    pr_number = _auto_detect_pr_number(target_repo)
+    # An explicit --pr-number pins the target PR (and the --findings-out
+    # artifact's declared target); otherwise auto-detect from the branch.
+    pr_number = args.pr_number if args.pr_number is not None else _auto_detect_pr_number(target_repo)
 
     # Low-precedence model/backend source: [tool.daydream] / .daydream.toml at
     # the target repo root, consulted by ``_resolve_backend`` below CLI and env.
@@ -903,6 +934,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         branch=args.branch,
         base=args.base,
         output_mode=output_mode,  # type: ignore[arg-type]
+        findings_out=args.findings_out,
         force_worktree=args.force_worktree,
         shallow=args.shallow,
         extra_copy=list(args.extra_copy),

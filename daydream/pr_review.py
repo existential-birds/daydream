@@ -341,6 +341,38 @@ def find_open_pr(target_dir: Path) -> PRInfo | None:
     )
 
 
+def find_pr_by_number(target_dir: Path, pr_number: int) -> PRInfo | None:
+    """Resolve :class:`PRInfo` for an explicit PR number via ``gh pr view``.
+
+    Used when the caller pins the target PR (``--pr-number``) instead of
+    deriving it from the current branch like :func:`find_open_pr`.
+
+    Args:
+        target_dir: Repo root.
+        pr_number: The PR number to look up.
+
+    Returns:
+        The resolved :class:`PRInfo`, or ``None`` when the PR or the
+        owner/repo slug cannot be resolved.
+    """
+    data = git_ops.gh_pr_view(target_dir, pr_number)
+    if data is None:
+        return None
+    slug = git_ops.gh_repo_view(target_dir)
+    if slug is None:
+        return None
+    owner, repo = slug
+    return PRInfo(
+        number=int(data["number"]),
+        head_sha=data["headRefOid"],
+        base_sha=data["baseRefOid"],
+        base_ref=data.get("baseRefName", ""),
+        owner=owner,
+        repo=repo,
+        url=data.get("url", ""),
+    )
+
+
 # --- Line resolution + hunk classification --------------------------------
 
 

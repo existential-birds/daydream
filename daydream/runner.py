@@ -179,6 +179,13 @@ class RunConfig:
         base: Base ref to compare against. If None, auto-resolves.
         output_mode: ``"loop"`` (review→fix→test, default), ``"comment"``
             (review + post inline PR comments), or ``"review"`` (review report only).
+        findings_out: Path to write the Phase A findings artifact
+            (``--findings-out``; review mode only — argparse rejects the flag
+            without ``--review``, and the comment/loop flows ignore the field).
+            When set, the review flow resolves the target PR (``pr_number``
+            pin or current branch), classifies the alt-review issues, and
+            writes the strict-schema artifact — empty issue list included, so
+            Phase B can resolve all stale comments. Default None.
         force_worktree: Force ephemeral worktree even when ``branch`` is None.
         shallow: Single-stack review (skip multi-stack auto-detection).
         extra_copy: Extra paths to copy into ephemeral worktrees.
@@ -222,6 +229,7 @@ class RunConfig:
     branch: str | None = None
     base: str | None = None
     output_mode: OutputMode = "loop"
+    findings_out: str | None = None
     force_worktree: bool = False
     shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)
@@ -765,14 +773,68 @@ async def _run_review(work: WorkContext, config: RunConfig) -> int:
     return await _run_review_or_comment(work, config, post_to_pr=False)
 
 
+def _emit_findings_artifact(
+    target_dir: Path, config: RunConfig, issues: list[dict[str, Any]],
+) -> int:
+    """Write the Phase A findings artifact declared by ``--findings-out``.
+
+    Resolves the target PR — via :func:`daydream.pr_review.find_pr_by_number`
+    when ``config.pr_number`` is pinned, else :func:`daydream.pr_review.find_open_pr`
+    — then classifies the alt-review issues and writes the strict-schema
+    artifact. The artifact must declare its target, so an unresolvable PR (or
+    a ``GitError`` from the lookup) is an actionable error, never a silently
+    absent artifact. An empty issue list still writes an (empty) artifact so
+    Phase B can resolve all stale comments.
+
+    Args:
+        target_dir: Repo root containing the PR checkout.
+        config: Run configuration; ``config.findings_out`` must be set.
+        issues: Raw issue dicts from ``phase_alternative_review`` (may be empty).
+
+    Returns:
+        ``0`` on success, ``1`` when no PR is resolvable.
+    """
+    from daydream import pr_review
+    from daydream.findings import build_findings_artifact, write_findings_artifact
+
+    assert config.findings_out is not None  # caller gates on findings_out
+    try:
+        if config.pr_number is not None:
+            pr = pr_review.find_pr_by_number(target_dir, config.pr_number)
+        else:
+            pr = pr_review.find_open_pr(target_dir)
+    except GitError as exc:
+        print_error(console, "Findings Artifact", f"cannot resolve target PR: {exc}")
+        return 1
+    if pr is None:
+        print_error(
+            console,
+            "Findings Artifact",
+            "no PR resolvable for --findings-out — the artifact must declare its "
+            "target (pass --pr-number or open a PR for this branch)",
+        )
+        return 1
+
+    parsed = pr_review.alt_issues_to_parsed(issues)
+    artifact = build_findings_artifact(
+        target_dir, pr, parsed, run_info=pr_review._render_review_info_block(),
+    )
+    out_path = Path(config.findings_out)
+    write_findings_artifact(out_path, artifact)
+    print_success(console, f"Findings artifact written to {out_path}")
+    return 0
+
+
 async def _run_review_or_comment(
     work: WorkContext, config: RunConfig, *, post_to_pr: bool,
 ) -> int:
     """Shared body for ``--comment`` and ``--review``.
 
-    Lifted from today's ``run_trust`` body. The only difference between the
-    two modes is whether the alternative-review issues are posted to the PR
-    via :func:`daydream.pr_review.post_review_to_pr_from_alt_issues`.
+    Lifted from today's ``run_trust`` body. The differences between the two
+    modes: only ``--comment`` posts the alternative-review issues to the PR
+    via :func:`daydream.pr_review.post_review_to_pr_from_alt_issues`, and only
+    ``--review`` honours ``config.findings_out`` (Phase A artifact emission
+    via :func:`_emit_findings_artifact`).
     """
     backend_cache: dict[tuple[str, str | None], Backend] = {}
     backend = _resolve_backend(config, "review", backend_cache)
@@ -858,6 +920,14 @@ async def _run_review_or_comment(
             backend, work, diff_path, intent_summary,
             exploration_dir=exploration_dir,
         )
+
+        # Phase A artifact emission (--findings-out, review mode only).
+        # Runs before the zero-issues early return: an empty artifact is
+        # still written so Phase B can resolve all stale comments.
+        if not post_to_pr and config.findings_out is not None:
+            rc = _emit_findings_artifact(target_dir, config, issues)
+            if rc != 0:
+                return rc
 
         if not issues:
             print_success(console, "No issues found — the implementation looks good!")

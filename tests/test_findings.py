@@ -1,14 +1,20 @@
 """Tests for the findings artifact (build/write/load) in `daydream/findings.py`."""
 
 import json
+import re
+import subprocess
+from unittest.mock import patch
 
-from daydream import pr_review
+from daydream import git_ops, pr_review
+from daydream.backends import ResultEvent, TextEvent
 from daydream.findings import (
     FINDINGS_SCHEMA_VERSION,
     build_findings_artifact,
     write_findings_artifact,
 )
 from daydream.pr_review import ParsedIssue, PRInfo
+from daydream.runner import RunConfig, run
+from tests.harness.phase_backend import PhaseDispatchBackend
 
 
 def test_build_artifact_declares_target_and_placed_findings(tmp_path, monkeypatch) -> None:
@@ -29,3 +35,60 @@ def test_write_artifact_round_trips(tmp_path) -> None:
     write_findings_artifact(path, {"schema_version": FINDINGS_SCHEMA_VERSION, "repo": "o/r",
                                    "pr_number": 7, "head_sha": "h" * 40, "findings": []})
     assert json.loads(path.read_text())["schema_version"] == FINDINGS_SCHEMA_VERSION
+
+
+# --- Real-path Phase A emission (--findings-out via runner.run) --------------
+
+
+async def test_review_mode_writes_findings_artifact(feature_branch_repo, monkeypatch, tmp_path):
+    """`--review --findings-out` writes a fingerprinted artifact pinned to the PR.
+
+    Enters from ``runner.run`` with a real temp git repo and a scripted backend
+    injected through the ``create_backend`` seam (the existing phase-dispatch
+    harness in events mode). Only the backend and the GitHub lookups
+    (``find_pr_by_number`` / identity) are mocked; classification, fingerprints,
+    and the artifact write all run for real.
+    """
+    out = tmp_path / "findings.json"
+    issue = {
+        "id": 1,
+        "title": "Greeting changed without tests",
+        "description": "`hello` now returns a different greeting with no test coverage",
+        "recommendation": "Add a regression test for the new greeting",
+        "severity": "medium",
+        "confidence": "HIGH",
+        "files": ["main.py"],
+        "rationale": "",
+    }
+    # Scripted backend: every phase replays the same event stream; the
+    # alternative-review phase consumes the structured issues, the intent and
+    # plan phases tolerate the same payload (intent stringifies it; the plan
+    # phase renders an empty change list from it).
+    backend = PhaseDispatchBackend(events=[
+        TextEvent(text="Review complete."),
+        ResultEvent(structured_output={"issues": [issue]}, continuation=None),
+    ])
+    head = git_ops.head_sha(feature_branch_repo)
+    base = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", "rev-parse", "main"],  # noqa: S607 - git is a trusted command
+        cwd=feature_branch_repo, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main",
+                owner="o", repo="r", url="https://example.invalid/pr/7")
+
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    config = RunConfig(target=str(feature_branch_repo), output_mode="review",
+                       pr_number=7, findings_out=str(out), non_interactive=True)
+
+    with patch("daydream.runner.create_backend", return_value=backend), \
+         patch("daydream.github_app.resolve_user_identity", return_value="tester"), \
+         patch("daydream.pr_review.find_pr_by_number", return_value=pr):
+        assert await run(config) == 0
+
+    data = json.loads(out.read_text())
+    assert data["pr_number"] == 7
+    assert data["head_sha"] == git_ops.head_sha(feature_branch_repo)
+    assert all(re.fullmatch(r"[0-9a-f]{64}", f["fingerprint"]) for f in data["findings"])
+    assert data["findings"], "scripted issue must survive to the artifact"
