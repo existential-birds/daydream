@@ -379,6 +379,42 @@ def test_find_open_pr_returns_pr_info(
     assert info.repo == "r"
 
 
+def test_find_pr_by_number_returns_none_when_pr_missing(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    """An unresolvable PR number short-circuits before the repo lookup."""
+    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: None)
+    assert pr_review.find_pr_by_number(git_repo, 7) is None
+
+
+def test_find_pr_by_number_returns_none_when_slug_unresolved(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    """A resolvable PR but unresolvable owner/repo slug yields None (no PRInfo)."""
+    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: {"number": 7})
+    monkeypatch.setattr(git_ops, "gh_repo_view", lambda _r: None)
+    assert pr_review.find_pr_by_number(git_repo, 7) is None
+
+
+def test_find_pr_by_number_assembles_pr_info(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    """Valid lookups assemble a fully-populated PRInfo from the gh view row."""
+    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: {
+        "number": 7,
+        "headRefOid": "h",
+        "baseRefOid": "b",
+        "baseRefName": "main",
+        "url": "u",
+    })
+    monkeypatch.setattr(git_ops, "gh_repo_view", lambda _r: ("o", "r"))
+    info = pr_review.find_pr_by_number(git_repo, 7)
+    assert info is not None
+    assert (info.number, info.head_sha, info.base_sha, info.base_ref, info.owner, info.repo, info.url) == (
+        7, "h", "b", "main", "o", "r", "u",
+    )
+
+
 class _FakeConsole:
     def print(self, *_a: Any, **_k: Any) -> None:
         pass
