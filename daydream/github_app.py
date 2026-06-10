@@ -128,10 +128,12 @@ def mint_installation_token(repo_dir: Path, app_id: int, private_key: str, owner
     """Exchange App credentials for a scoped installation access token.
 
     Mints an App JWT, lists the App's installations to find the one owned by
-    *owner*, and exchanges that installation for a short-lived access token. The
-    JWT is injected into the ``gh`` subprocess environment via the ``git_ops``
-    token singleton for the duration of the two API calls, then the prior
-    singleton value is restored.
+    *owner*, and exchanges that installation for a short-lived access token.
+    Both API calls authenticate with an explicit ``Authorization: Bearer``
+    header carrying the JWT (the only scheme GitHub accepts for App JWTs);
+    the JWT is also injected as ``GH_TOKEN`` via the ``git_ops`` token
+    singleton for the duration of the two calls so ``gh`` runs without
+    ambient auth, then the prior singleton value is restored.
 
     Args:
         repo_dir: Working directory for the ``gh`` subprocesses.
@@ -152,15 +154,20 @@ def mint_installation_token(repo_dir: Path, app_id: int, private_key: str, owner
             ``token`` field.
     """
     jwt_token = mint_jwt(app_id, private_key)
+    # GitHub only accepts App JWTs with the Bearer scheme, but gh sends the
+    # token scheme for GH_TOKEN. The explicit Bearer header does the real
+    # authentication; GH_TOKEN is still set so gh runs without ambient auth
+    # (CI) and never falls back to a different identity.
+    bearer = {"Authorization": f"Bearer {jwt_token}"}
     with _scoped_gh_token(jwt_token):
-        installation_id, identity = _find_installation(repo_dir, owner, repo)
-        return _exchange_for_token(repo_dir, installation_id, owner, repo), identity
+        installation_id, identity = _find_installation(repo_dir, owner, repo, bearer)
+        return _exchange_for_token(repo_dir, installation_id, owner, repo, bearer), identity
 
 
-def _find_installation(repo_dir: Path, owner: str, repo: str) -> tuple[int, str]:
+def _find_installation(repo_dir: Path, owner: str, repo: str, headers: dict[str, str]) -> tuple[int, str]:
     """List App installations and return ``(id, "{slug}[bot]")`` for *owner*."""
     try:
-        installations = git_ops.gh_api(repo_dir, "/app/installations", paginate=True, jq=".[]")
+        installations = git_ops.gh_api(repo_dir, "/app/installations", paginate=True, jq=".[]", headers=headers)
     except git_ops.GitError as exc:
         raise ValueError(f"failed to list App installations: {exc}") from exc
 
@@ -177,7 +184,7 @@ def _find_installation(repo_dir: Path, owner: str, repo: str) -> tuple[int, str]
     raise ValueError(f"no App installation found for owner {owner!r} (repo {owner}/{repo})")
 
 
-def _exchange_for_token(repo_dir: Path, installation_id: int, owner: str, repo: str) -> str:
+def _exchange_for_token(repo_dir: Path, installation_id: int, owner: str, repo: str, headers: dict[str, str]) -> str:
     """Exchange an installation id for an access token scoped to *repo*."""
     try:
         payload = git_ops.gh_api(
@@ -185,6 +192,7 @@ def _exchange_for_token(repo_dir: Path, installation_id: int, owner: str, repo: 
             f"/app/installations/{installation_id}/access_tokens",
             method="POST",
             input_data={"repositories": [repo]},
+            headers=headers,
         )
     except git_ops.GitError as exc:
         raise ValueError(f"failed to mint installation token for {owner}/{repo}: {exc}") from exc

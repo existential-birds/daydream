@@ -1312,6 +1312,7 @@ def gh_api(
     paginate: bool = False,
     input_data: Any | None = None,
     jq: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> Any:
     """Call ``gh api <endpoint>`` and return parsed JSON.
 
@@ -1331,6 +1332,10 @@ def gh_api(
             ``paginate=True`` gh concatenates each page's raw JSON, which is
             not itself valid JSON for array endpoints — a filter like ``".[]"``
             flattens every page to one value per line instead.
+        headers: Optional extra request headers passed via ``gh api -H``. An
+            explicit ``Authorization`` header takes precedence over the
+            ``token``-scheme header gh derives from ``GH_TOKEN`` — required
+            for App JWT calls, which GitHub only accepts as ``Bearer``.
 
     Returns:
         The parsed JSON value (object, list, or scalar); with *jq*, a list of
@@ -1341,8 +1346,9 @@ def gh_api(
             (detected from the ``gh`` stderr marker-set).
         GitError: If the call fails for any other reason or returns invalid JSON.
     """
+    header_args = [arg for name, value in (headers or {}).items() for arg in ("-H", f"{name}: {value}")]
     if input_data is None:
-        args = ["api"]
+        args = ["api", *header_args]
         if method.upper() != "GET":
             args.extend(["-X", method.upper()])
         if paginate:
@@ -1371,7 +1377,7 @@ def gh_api(
             json.dump(input_data, tmp)
         finally:
             tmp.close()
-        args = ["api", endpoint, "--method", method.upper(), "--input", str(tmp_path)]
+        args = ["api", *header_args, endpoint, "--method", method.upper(), "--input", str(tmp_path)]
         if paginate:
             args.append("--paginate")
         if jq is not None:

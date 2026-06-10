@@ -988,6 +988,30 @@ def test_gh_api_jq_parses_ndjson_into_list(monkeypatch: pytest.MonkeyPatch, tmp_
     assert captured["args"] == ["api", "--paginate", "--jq", ".[]", "/app/installations"]
 
 
+def test_gh_api_headers_pass_dash_h_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Explicit headers reach gh as -H args, in both the plain and --input branches."""
+    captured: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def fake_run_gh(repo: Path, args: list[str], **kwargs: Any) -> _Proc:
+        captured.append(args)
+        return _Proc()
+
+    monkeypatch.setattr(git_ops, "_run_gh", fake_run_gh)
+    headers = {"Authorization": "Bearer jwt-abc"}
+    git_ops.gh_api(tmp_path, "/app/installations", headers=headers)
+    git_ops.gh_api(tmp_path, "/app/installations/1/access_tokens", method="POST",
+                   input_data={"repositories": ["r"]}, headers=headers)
+
+    assert captured[0][:3] == ["api", "-H", "Authorization: Bearer jwt-abc"]
+    assert captured[1][:3] == ["api", "-H", "Authorization: Bearer jwt-abc"]
+    assert "--input" in captured[1]
+
+
 def test_gh_api_jq_invalid_line_raises_git_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class _Proc:
         returncode = 0

@@ -164,6 +164,10 @@ def test_mint_installation_token_happy_path():
     assert identity == "daydream-bot[bot]"
     # Two API calls: list installations, then exchange. No extra GET /app.
     assert len(calls) == 2
+    # GitHub only accepts App JWTs via the Bearer scheme, so both calls must
+    # carry an explicit Authorization header (gh's GH_TOKEN uses token scheme).
+    for _, kwargs in calls:
+        assert kwargs["headers"]["Authorization"].startswith("Bearer ey")
     exchange_endpoint, exchange_kwargs = calls[1]
     assert exchange_endpoint == "/app/installations/999/access_tokens"
     assert exchange_kwargs["method"] == "POST"
