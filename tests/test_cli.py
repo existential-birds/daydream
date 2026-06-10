@@ -230,6 +230,38 @@ def test_parse_args_default_is_loop(monkeypatch):
     assert config.output_mode == "loop"
 
 
+def test_findings_out_with_review_populates_config(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "--review", "--findings-out", "findings/findings.json", "/tmp/repo",
+    ])
+    config = _parse_args()
+    assert config.findings_out == "findings/findings.json"
+    assert config.output_mode == "review"
+
+
+@pytest.mark.parametrize("extra", [[], ["--comment"]])
+def test_findings_out_requires_review_errors(monkeypatch, capsys, extra):
+    """--findings-out is Phase A emission of the review report; it requires --review."""
+    monkeypatch.setattr(sys, "argv", ["daydream", *extra, "--findings-out", "f.json", "/tmp/repo"])
+    with pytest.raises(SystemExit) as exc_info:
+        _parse_args()
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--findings-out" in err and "--review" in err
+
+
+def test_findings_out_defaults_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--review", "/tmp/repo"])
+    assert _parse_args().findings_out is None
+
+
+def test_pr_number_flag_populates_config(monkeypatch):
+    """--pr-number pins config.pr_number, bypassing branch auto-detection."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--review", "--pr-number", "42", "/tmp/repo"])
+    config = _parse_args()
+    assert config.pr_number == 42
+
+
 def test_parse_args_worktree_modifier(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["daydream", "--worktree", "/tmp/repo"])
     config = _parse_args()

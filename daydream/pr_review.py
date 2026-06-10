@@ -8,8 +8,10 @@ Flow:
     2. Parse issues (from canonical merged items or alt-issue dicts).
     3. Resolve each issue to a real head-SHA line via anchor grep.
     4. Classify into inline (line within a diff hunk) vs body-only.
-    5. Build a single review payload, show a summary, ask y/n.
-    6. On yes, POST to `/repos/<owner>/<repo>/pulls/<num>/reviews`.
+    5. Render comment bodies, embedding a hidden `daydream-finding` marker
+       per fingerprinted issue (cross-run dedup; see `finding_marker`).
+    6. Build a single review payload, show a summary, ask y/n.
+    7. On yes, POST to `/repos/<owner>/<repo>/pulls/<num>/reviews`.
 
 Everything is best-effort: failures warn and return, never raise.
 """
@@ -31,10 +33,12 @@ from daydream.agent import get_assume, get_non_interactive, resolve_or_prompt
 from daydream.git_ops import GitError
 from daydream.pr_comment_renderer import render_run_info_block
 from daydream.trajectory import TrajectoryRecorder, get_current_recorder
-from daydream.ui import print_info, print_success, print_warning
+from daydream.ui import print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
     from rich.console import Console
+
+    from daydream.findings import ArtifactFinding
 
 
 # --- Data shapes ------------------------------------------------------------
@@ -52,8 +56,9 @@ class ParsedIssue:
         is_cross_stack: True when the issue spans multiple stacks.
         confidence: Normalised HIGH / MEDIUM / LOW, if known.
         severity: Normalised high / medium / low, if known.
-        fingerprint: Deterministic SHA256 identity for cross-run dedup. Only set
-            on canonical merged findings; None on other construction paths.
+        fingerprint: Deterministic SHA256 identity for cross-run dedup. Set on
+            canonical merged findings and alt-review issues; None on other
+            construction paths.
     """
 
     path: str
@@ -167,6 +172,21 @@ DAYDREAM_FOOTER = (
     f"<sub>🧙 Posted by [daydream v{daydream.__version__}]({DAYDREAM_REPO_URL})</sub>"
 )
 
+# Hidden HTML-comment marker embedded in posted comment bodies so later runs
+# can recognise their own findings (cross-run dedup). Invisible in rendered
+# markdown, present in the raw body fetched via the API.
+FINDING_MARKER_RE = re.compile(r"<!-- daydream-finding: ([0-9a-f]{64}) -->")
+
+
+def finding_marker(fingerprint: str) -> str:
+    """Render the hidden finding marker comment for a fingerprint."""
+    return f"<!-- daydream-finding: {fingerprint} -->"
+
+
+def parse_finding_markers(text: str) -> list[str]:
+    """Return all finding fingerprints embedded in ``text``, in order."""
+    return FINDING_MARKER_RE.findall(text)
+
 
 def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
     """Convert `phase_alternative_review` dicts into ParsedIssue objects.
@@ -174,6 +194,11 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
     Alt issues have a `files: list[str]` field and no line hint. When
     multiple files are listed we emit one issue per file (classifier will
     fold file-level issues into the review body).
+
+    Every emitted issue carries a stable cross-run ``fingerprint`` computed
+    from the file path, title, and description (``recommendation`` is
+    excluded from identity), so the per-file fan-out yields one distinct
+    fingerprint per file.
     """
     out: list[ParsedIssue] = []
     for raw in alt_issues:
@@ -204,6 +229,7 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
                     body=body,
                     confidence=confidence,
                     severity=severity,
+                    fingerprint=compute_fingerprint(str(path), title, description),
                 )
             )
     return out
@@ -292,15 +318,11 @@ def _current_branch(target_dir: Path) -> str | None:
         return None
 
 
-def find_open_pr(target_dir: Path) -> PRInfo | None:
-    """Locate the open PR for the current branch. Returns None if not found."""
-    branch = _current_branch(target_dir)
-    if not branch:
-        return None
-    rows = git_ops.gh_pr_list_for_branch(target_dir, branch)
-    if not rows:
-        return None
-    row = rows[0]
+def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo | None:
+    """Build :class:`PRInfo` from a ``gh`` PR row, resolving the owner/repo slug.
+
+    Returns None when the owner/repo slug cannot be resolved.
+    """
     # Owner/repo lookup via `gh repo view` (handles fork cases cleanly).
     slug = git_ops.gh_repo_view(target_dir)
     if slug is None:
@@ -315,6 +337,37 @@ def find_open_pr(target_dir: Path) -> PRInfo | None:
         repo=repo,
         url=row.get("url", ""),
     )
+
+
+def find_open_pr(target_dir: Path) -> PRInfo | None:
+    """Locate the open PR for the current branch. Returns None if not found."""
+    branch = _current_branch(target_dir)
+    if not branch:
+        return None
+    rows = git_ops.gh_pr_list_for_branch(target_dir, branch)
+    if not rows:
+        return None
+    return _pr_info_from_row(target_dir, rows[0])
+
+
+def find_pr_by_number(target_dir: Path, pr_number: int) -> PRInfo | None:
+    """Resolve :class:`PRInfo` for an explicit PR number via ``gh pr view``.
+
+    Used when the caller pins the target PR (``--pr-number``) instead of
+    deriving it from the current branch like :func:`find_open_pr`.
+
+    Args:
+        target_dir: Repo root.
+        pr_number: The PR number to look up.
+
+    Returns:
+        The resolved :class:`PRInfo`, or ``None`` when the PR or the
+        owner/repo slug cannot be resolved.
+    """
+    data = git_ops.gh_pr_view(target_dir, pr_number)
+    if data is None:
+        return None
+    return _pr_info_from_row(target_dir, data)
 
 
 # --- Line resolution + hunk classification --------------------------------
@@ -585,6 +638,8 @@ def _format_inline_body(issue: ParsedIssue) -> str:
     agent_prompt = _build_agent_prompt(issue)
     parts.append(agent_prompt)
     parts.append(DAYDREAM_FOOTER)
+    if issue.fingerprint:
+        parts.append(finding_marker(issue.fingerprint))
     return "\n\n".join(parts).strip()
 
 
@@ -654,6 +709,8 @@ def _format_body_section(body_only: list[ParsedIssue]) -> str:
             if issue.body:
                 parts.append(f"\n{issue.body}\n")
             parts.append(_build_agent_prompt(issue))
+            if issue.fingerprint:
+                parts.append(finding_marker(issue.fingerprint))
             if i < len(file_issues) - 1:
                 parts.append("\n---\n")
         parts.append("\n</blockquote></details>")
@@ -825,6 +882,7 @@ def build_payload(
     classified: _ClassifiedIssues,
     *,
     plan_data: dict[str, Any] | None = None,
+    run_info_override: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
 
@@ -834,6 +892,15 @@ def build_payload(
         <details> Consolidated AI agent prompt
         <details> Review info (enriched run-info + version footer)
         Footer (🧙 Posted by daydream vX.Y.Z)
+
+    Args:
+        pr: Target PR.
+        classified: Inline/body-only split from :func:`classify`.
+        plan_data: Optional structured plan rendered into the agent prompt.
+        run_info_override: Pre-rendered run-info markdown to use in place of
+            the live recorder block (``post-findings`` posts from artifact
+            data; there is no recorder in that process). ``None`` renders the
+            live block as usual.
     """
     all_issues_with_inline_meta = [*classified.body_only]
     all_issues_with_inline_meta.extend(classified.inline_issues)
@@ -853,7 +920,7 @@ def build_payload(
     # breakdown + version footer, owned by the renderer) followed by the
     # existing severity/confidence breakdown. The renderer emits its own
     # ``<sub>Generated by daydream...</sub>`` footer, so don't double it.
-    enriched_run_info = _render_review_info_block()
+    enriched_run_info = run_info_override if run_info_override is not None else _render_review_info_block()
     extra_info_lines: list[str] = []
     severity_parts = _count_labels(
         all_issues_with_inline_meta, "severity", ("high", "medium", "low")
@@ -966,3 +1033,129 @@ def _submit_review(
         return None, None
     url = data.get("html_url")
     return (str(url) if url else None), None
+
+
+def post_findings_from_artifact(
+    artifact_path: Path,
+    *,
+    pr_number: int,
+    head_sha: str,
+    repo: str,
+    console: Console,
+) -> int:
+    """Post a Phase A findings artifact to the PR (the Phase B privileged poster).
+
+    Unattended CI flow behind ``daydream post-findings``: validate the
+    untrusted artifact against the event-derived facts (confused-deputy gate,
+    before any GitHub write), reconcile against the bot's own prior comments
+    via hidden fingerprint markers, minimize stale findings, then re-render
+    and post only the new ones through the existing review payload path.
+    No prompting and no ATIF trajectory — there is no agent work here.
+
+    Args:
+        artifact_path: Path to the ``--findings-out`` artifact.
+        pr_number: Event-derived target PR number.
+        head_sha: Event-derived PR head SHA.
+        repo: Event-derived ``owner/repo`` slug.
+        console: Rich console for user-facing output.
+
+    Returns:
+        ``0`` on success (including "no new findings"); ``1`` when the
+        artifact fails validation, the prior-finding inventory fails, or the
+        review POST fails.
+    """
+    # Late imports: ``findings`` and ``reconcile`` both import this module at
+    # module level (one-way by design), so the poster flow resolves them at
+    # call time — the same no-cycle pattern as ``daydream.deep.orchestrator``.
+    from daydream.findings import FindingsValidationError, load_findings_artifact
+    from daydream.reconcile import fetch_prior_findings, partition, resolve_threads
+
+    target_dir = Path.cwd()
+    try:
+        artifact = load_findings_artifact(
+            artifact_path,
+            expected_repo=repo,
+            expected_pr_number=pr_number,
+            expected_head_sha=head_sha,
+        )
+    except FindingsValidationError as exc:
+        print_error(console, "Findings Artifact Rejected", str(exc))
+        return 1
+
+    try:
+        prior = fetch_prior_findings(target_dir, repo, pr_number)
+    except GitError as exc:
+        print_error(console, "Prior-Finding Inventory Failed", str(exc))
+        return 1
+
+    plan = partition([f.fingerprint for f in artifact.findings], prior)
+    if plan.stale:
+        resolved, failed = resolve_threads(target_dir, plan.stale)
+        print_info(console, f"Stale findings minimized: {resolved} succeeded, {failed} failed.")
+
+    new_fingerprints = set(plan.new)
+    classified = _ClassifiedIssues()
+    for finding in artifact.findings:
+        if finding.fingerprint not in new_fingerprints:
+            continue
+        issue = _issue_from_artifact_finding(finding)
+        if finding.placement == "inline" and finding.line is not None:
+            classified.inline.append(
+                {
+                    "path": finding.path,
+                    "line": finding.line,
+                    "side": "RIGHT",
+                    "body": _format_inline_body(issue),
+                }
+            )
+            classified.inline_issues.append(issue)
+        else:
+            classified.body_only.append(issue)
+
+    if not classified.inline and not classified.body_only:
+        print_info(
+            console,
+            f"No new findings to post ({len(plan.matched)} already on PR #{pr_number}).",
+        )
+        return 0
+
+    owner, repo_name = repo.split("/", 1)
+    pr = PRInfo(
+        number=pr_number,
+        head_sha=head_sha,
+        base_sha="",
+        base_ref="",
+        owner=owner,
+        repo=repo_name,
+        url="",
+    )
+    payload = build_payload(pr, classified, run_info_override=artifact.run_info)
+    review_url, error_msg = _submit_review(target_dir, pr, payload)
+    if review_url is None:
+        suffix = f" ({error_msg})" if error_msg else ""
+        print_error(
+            console,
+            "PR Review Post Failed",
+            f"No comments were posted.{suffix}",
+        )
+        return 1
+    print_success(console, f"Posted review: {review_url}")
+    return 0
+
+
+def _issue_from_artifact_finding(finding: ArtifactFinding) -> ParsedIssue:
+    """Rebuild a :class:`ParsedIssue` from a validated artifact finding.
+
+    The artifact carries raw issue fields with placement already resolved by
+    Phase A's :func:`classify`, so rendering here needs no PR git objects.
+    """
+    return ParsedIssue(
+        path=finding.path,
+        line=finding.line,
+        title=finding.title,
+        body=finding.body,
+        is_cross_stack=finding.is_cross_stack,
+        confidence=finding.confidence,
+        severity=finding.severity,
+        fingerprint=finding.fingerprint,
+    )

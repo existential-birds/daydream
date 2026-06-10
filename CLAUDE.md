@@ -31,6 +31,8 @@ daydream --loop 3 /path/to/project                 # Repeat review-fix-test up t
 daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # Bot PR comments
 daydream --non-interactive /path/to/project        # Unattended/harness run: take safe defaults, no prompts
 daydream --help-all                                # Full advanced flag surface (--start-at, --trajectory, ...)
+daydream --review --findings-out findings.json --pr-number 7 /path  # Phase A: emit strict-schema findings artifact
+daydream post-findings findings.json --pr 7 --head-sha <sha> --repo owner/repo  # Phase B: validate + post (unattended)
 
 # Data pipeline moved under the `corpus` namespace
 daydream corpus harvest                            # Annotate archived runs

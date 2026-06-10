@@ -12,6 +12,9 @@ top-level ``TARGET`` positional):
 - ``daydream feedback <pr#>`` — apply bot PR-review comments
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
 - ``daydream bench`` — score deep-review findings against the offline benchmark
+- ``daydream post-findings <artifact>`` — validate a Phase A findings artifact
+  against event-derived facts and post new findings to the PR (the privileged,
+  unattended Phase B poster for the Actions trigger surface)
 - ``daydream corpus <sub-verb>`` — the data-pipeline namespace:
     - ``corpus harvest`` — walk the archive and append one bitemporal
       annotation (outcome label + intrinsic reward) per indexed run
@@ -51,7 +54,7 @@ from daydream.ui import (
 # Verb-first dispatch table. ``_first_verb`` classifies the leading argv token;
 # anything that isn't an explicit verb (bare path, leading flag, empty argv)
 # falls through to the ``review`` golden path via the default-verb shim.
-KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench"}
+KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench", "post-findings"}
 
 
 def _first_verb(argv: list[str]) -> str:
@@ -546,6 +549,11 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         prog="daydream",
         description="Automated code review and fix loop. "
                     "Use `daydream feedback <pr#>` to process PR bot comments.",
+        epilog=(
+            "Phase A emission: `daydream --review --findings-out PATH` writes a "
+            "strict-schema findings artifact (fingerprints + comment placement) "
+            "for the privileged `daydream post-findings` poster."
+        ) if full_help else None,
     )
 
     parser.add_argument(
@@ -624,6 +632,25 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         default=False,
         dest="plan",
         help="Generate an implementation plan and embed it in PR comments (use with --comment)."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--findings-out",
+        default=None,
+        metavar="PATH",
+        dest="findings_out",
+        help="Write a strict-schema findings artifact (Phase A emission for "
+             "`daydream post-findings`; requires --review)."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--pr-number",
+        default=None,
+        type=int,
+        metavar="N",
+        dest="pr_number",
+        help="Pin the target PR number (trajectory metadata and the --findings-out "
+             "artifact target; default: auto-detect from the current branch)."
         if full_help else argparse.SUPPRESS,
     )
 
@@ -834,6 +861,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.assume == "yes" and output_mode != "loop":
         parser.error("--yes has no effect with --review/--comment (no fix phase to auto-apply)")
 
+    if args.findings_out is not None and output_mode != "review":
+        parser.error("--findings-out requires --review (Phase A findings artifact emission)")
+
     # ttt/per-stack/merge are deep-pipeline resume stages; they don't apply
     # to shallow runs.
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
@@ -866,7 +896,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # daydream may run from one repo against a checkout of another.
     target_repo = Path(args.target) if args.target else Path.cwd()
     pr_repo = _detect_repo_slug(target_repo)
-    pr_number = _auto_detect_pr_number(target_repo)
+    # An explicit --pr-number pins the target PR (and the --findings-out
+    # artifact's declared target); otherwise auto-detect from the branch.
+    pr_number = args.pr_number if args.pr_number is not None else _auto_detect_pr_number(target_repo)
 
     # Low-precedence model/backend source: [tool.daydream] / .daydream.toml at
     # the target repo root, consulted by ``_resolve_backend`` below CLI and env.
@@ -903,6 +935,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         branch=args.branch,
         base=args.base,
         output_mode=output_mode,  # type: ignore[arg-type]
+        findings_out=args.findings_out,
         force_worktree=args.force_worktree,
         shallow=args.shallow,
         extra_copy=list(args.extra_copy),
@@ -1236,6 +1269,85 @@ def _handle_corpus_command(argv: list[str]) -> int:
     return int(handler(argv[1:]))
 
 
+def _build_post_findings_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream post-findings <artifact> --pr ... --head-sha ... --repo ...``.
+
+    The privileged Phase B poster is an unattended CI verb: it takes the
+    findings artifact produced by ``--findings-out`` plus the event-derived
+    target facts, and posts when validation passes — no prompting.
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream post-findings",
+        description=(
+            "Validate a Phase A findings artifact against event-derived facts and "
+            "post new findings to the PR (privileged Phase B poster; unattended)."
+        ),
+    )
+    parser.add_argument(
+        "artifact",
+        type=Path,
+        metavar="ARTIFACT",
+        help="Path to the findings artifact written by --findings-out.",
+    )
+    parser.add_argument(
+        "--pr",
+        type=int,
+        required=True,
+        dest="pr_number",
+        metavar="N",
+        help="Event-derived target PR number.",
+    )
+    parser.add_argument(
+        "--head-sha",
+        type=str,
+        required=True,
+        dest="head_sha",
+        metavar="SHA",
+        help="Event-derived PR head SHA the artifact must declare.",
+    )
+    parser.add_argument(
+        "--repo",
+        type=str,
+        required=True,
+        dest="repo",
+        metavar="OWNER/REPO",
+        help="Event-derived repository slug the artifact must declare.",
+    )
+    return parser
+
+
+def _handle_post_findings_command(argv: list[str]) -> int:
+    """Handle ``daydream post-findings <artifact> --pr N --head-sha SHA --repo OWNER/REPO``.
+
+    Delegates to :func:`daydream.pr_review.post_findings_from_artifact` —
+    validate (confused-deputy gate, before any GitHub write), reconcile
+    against prior comments, minimize stale findings, post new ones. Sync: no
+    agent work, no ATIF trajectory.
+
+    Args:
+        argv: The argument vector after the ``post-findings`` verb.
+
+    Returns:
+        ``0`` on success (including "no new findings"); ``1`` on validation,
+        inventory, or post failure.
+    """
+    from daydream import pr_review
+    from daydream.ui import create_console
+
+    parser = _build_post_findings_parser()
+    args = parser.parse_args(argv)
+    if "/" not in args.repo:
+        parser.error(f"--repo must be an OWNER/REPO slug, got {args.repo!r}")
+
+    return pr_review.post_findings_from_artifact(
+        args.artifact,
+        pr_number=args.pr_number,
+        head_sha=args.head_sha,
+        repo=args.repo,
+        console=create_console(),
+    )
+
+
 def main() -> None:
     """Run the CLI entry point.
 
@@ -1251,6 +1363,8 @@ def main() -> None:
         - ``summarize`` — print run-info markdown for a trajectory
         - ``bench`` — score deep-review findings against the offline benchmark
         - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label``)
+        - ``post-findings`` — validate a findings artifact and post new
+          findings to the PR (privileged Phase B poster; unattended)
 
     Returns:
         None: This function does not return; it exits via sys.exit().
@@ -1288,6 +1402,10 @@ def main() -> None:
         # ``run_bench`` is sync — short-circuit before anyio.run.
         if verb == "bench":
             sys.exit(_handle_bench_command(argv[1:]))
+
+        # ``post-findings`` is sync — short-circuit before anyio.run.
+        if verb == "post-findings":
+            sys.exit(_handle_post_findings_command(argv[1:]))
 
         config = _parse_args()
         if verb == "feedback":

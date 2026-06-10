@@ -22,12 +22,15 @@ def test_default_help_hides_advanced(capsys):
         _parse_argv_for_test(["--help"])
     out = capsys.readouterr().out
     assert "--comment" in out and "--start-at" not in out and "--ignore-path" not in out
+    assert "--findings-out" not in out and "--pr-number" not in out
 
 
 def test_help_all_shows_advanced(capsys):
     with pytest.raises(SystemExit):
         _parse_argv_for_test(["--help-all"])
-    assert "--start-at" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "--start-at" in out
+    assert "--findings-out" in out and "--pr-number" in out
 
 
 def test_advanced_flags_still_parse():

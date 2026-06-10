@@ -10,6 +10,7 @@ dependencies = [
     "pyfiglet>=1.0",
     "pydantic>=2.11.7",
     "PyJWT>=2.0",
+    "jsonschema>=4.0",
     "tree-sitter==0.25.2",
     "tree-sitter-python==0.25.0",
     "tree-sitter-typescript==0.23.2",
@@ -19,11 +20,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "jsonschema>=4.0",
     "mypy>=1.14",
     "pytest>=9.0.3",
     "pytest-asyncio>=0.24",
+    "pyyaml>=6.0",
     "ruff>=0.9",
+    "types-pyyaml>=6.0",
 ]
 
 [project.scripts]

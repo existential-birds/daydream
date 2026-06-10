@@ -72,6 +72,17 @@ _READ_ONLY_ALLOWED_TOOLS: frozenset[str] = frozenset(
 )
 
 
+class ClaudeAgentError(Exception):
+    """Raised when the Claude agent run reports an error result.
+
+    The SDK surfaces fatal run failures (invalid API key, execution errors,
+    hitting max turns) as a ``ResultMessage`` with ``is_error=True`` rather
+    than raising. Translating that flag into an exception here keeps an
+    errored run from masquerading as a clean empty result downstream — e.g.
+    a review exiting 0 with "no issues found" because the agent never ran.
+    """
+
+
 def _is_read_only_command(cmd: str) -> bool:
     """Return True only if *cmd* is a single allowlisted read-only command.
 
@@ -188,6 +199,10 @@ class ClaudeBackend:
 
         Yields:
             AgentEvent instances.
+
+        Raises:
+            ClaudeAgentError: If the agent run ends with an error result
+                (``ResultMessage.is_error``), e.g. an invalid API key.
 
         """
         output_format = (
@@ -309,6 +324,9 @@ class ClaudeBackend:
                                 )
 
                     elif isinstance(msg, ResultMessage):
+                        if msg.is_error:
+                            detail = msg.result or msg.subtype or "unknown error"
+                            raise ClaudeAgentError(f"Claude agent run failed: {detail}")
                         if msg.structured_output is not None:
                             structured_result = msg.structured_output
                         # Phase 2 (EVNT-04, EVNT-05): emit CostEvent whenever cost OR
