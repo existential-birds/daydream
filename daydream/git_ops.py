@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -59,6 +60,55 @@ _RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "rate limit",
     "secondary rate limit",
 )
+
+# Module-level singleton for the ``gh`` subprocess environment.
+# =============================================================
+# Set once at run entry from GitHub App credentials (mirroring the
+# ``AgentState`` singleton in ``daydream.agent``) and read internally by
+# ``_run_gh`` so every ``gh`` call authenticates under the minted installation
+# token. When ``None``, ``gh`` inherits the parent process environment (the
+# original, unchanged behaviour). Access only through the getter/setter/reset
+# functions below; reset between tests via the autouse conftest fixture.
+_gh_token_env: dict[str, str] | None = None
+
+
+def set_gh_token_env(env: dict[str, str] | None) -> None:
+    """Set the environment overrides passed to ``gh`` subprocesses.
+
+    Args:
+        env: Mapping of env-var overrides (e.g. ``{"GH_TOKEN": token}``) merged
+            with the live ``os.environ`` at subprocess call time, or ``None`` to
+            inherit the parent process environment without any overrides.
+
+    Returns:
+        None
+
+    """
+    global _gh_token_env
+    _gh_token_env = env
+
+
+def get_gh_token_env() -> dict[str, str] | None:
+    """Get the environment currently passed to ``gh`` subprocesses.
+
+    Returns:
+        The environment mapping, or ``None`` when ``gh`` inherits the parent
+        process environment.
+
+    """
+    return _gh_token_env
+
+
+def reset_gh_token_env() -> None:
+    """Reset the ``gh`` subprocess environment to parent-process inheritance.
+
+    Returns:
+        None
+
+    """
+    global _gh_token_env
+    _gh_token_env = None
+
 
 # --- Errors ------------------------------------------------------------------
 
@@ -195,6 +245,11 @@ def _run_gh(
         args: Arguments after ``gh``.
         timeout: Subprocess timeout in seconds.
 
+    The subprocess environment is sourced from the module ``_gh_token_env``
+    singleton when set (via :func:`set_gh_token_env`), so ``gh`` authenticates
+    under the minted installation token. When the singleton is ``None``, ``env``
+    is ``None`` and ``gh`` inherits the parent process environment.
+
     Returns:
         The completed process with text-decoded stdout/stderr.
 
@@ -203,6 +258,7 @@ def _run_gh(
         GitError: If the subprocess machinery fails for any other reason
             (missing ``gh``, OS-level error).
     """
+    token_env = get_gh_token_env()
     try:
         return subprocess.run(  # noqa: S603 - arguments are not user-controlled
             ["gh", *args],  # noqa: S607 - gh is a trusted command
@@ -212,6 +268,7 @@ def _run_gh(
             timeout=timeout,
             shell=False,
             check=False,
+            env={**os.environ, **token_env} if token_env is not None else None,
         )
     except subprocess.TimeoutExpired as exc:
         raise GitTimeoutError(f"gh {' '.join(args)} timed out after {timeout}s") from exc
@@ -1254,6 +1311,8 @@ def gh_api(
     method: str = "GET",
     paginate: bool = False,
     input_data: Any | None = None,
+    jq: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> Any:
     """Call ``gh api <endpoint>`` and return parsed JSON.
 
@@ -1268,26 +1327,41 @@ def gh_api(
             success the tempfile is removed; on failure it is preserved and
             its path is included in the raised :class:`GitError` so callers
             can inspect the exact request body that was sent.
+        jq: Optional ``gh --jq`` filter. The filtered stdout is parsed as
+            NDJSON (one JSON value per line) and returned as a list. With
+            ``paginate=True`` gh concatenates each page's raw JSON, which is
+            not itself valid JSON for array endpoints — a filter like ``".[]"``
+            flattens every page to one value per line instead.
+        headers: Optional extra request headers passed via ``gh api -H``. An
+            explicit ``Authorization`` header takes precedence over the
+            ``token``-scheme header gh derives from ``GH_TOKEN`` — required
+            for App JWT calls, which GitHub only accepts as ``Bearer``.
 
     Returns:
-        The parsed JSON value (object, list, or scalar).
+        The parsed JSON value (object, list, or scalar); with *jq*, a list of
+        the filtered values.
 
     Raises:
         RateLimitError: If the call fails due to a GitHub API rate limit
             (detected from the ``gh`` stderr marker-set).
         GitError: If the call fails for any other reason or returns invalid JSON.
     """
+    header_args = [arg for name, value in (headers or {}).items() for arg in ("-H", f"{name}: {value}")]
     if input_data is None:
-        args = ["api"]
+        args = ["api", *header_args]
         if method.upper() != "GET":
             args.extend(["-X", method.upper()])
         if paginate:
             args.append("--paginate")
+        if jq is not None:
+            args.extend(["--jq", jq])
         args.append(endpoint)
         proc = _run_gh(repo, args, timeout=60)
         if proc.returncode != 0:
             raise _gh_error_for(f"gh api {endpoint} failed: {proc.stderr.strip()}", proc.stderr)
         try:
+            if jq is not None:
+                return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
             return json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise GitError(f"gh api {endpoint} returned invalid JSON: {exc}") from exc
@@ -1303,9 +1377,11 @@ def gh_api(
             json.dump(input_data, tmp)
         finally:
             tmp.close()
-        args = ["api", endpoint, "--method", method.upper(), "--input", str(tmp_path)]
+        args = ["api", *header_args, endpoint, "--method", method.upper(), "--input", str(tmp_path)]
         if paginate:
             args.append("--paginate")
+        if jq is not None:
+            args.extend(["--jq", jq])
         proc = _run_gh(repo, args, timeout=60)
         if proc.returncode != 0:
             raise _gh_error_for(
@@ -1314,7 +1390,10 @@ def gh_api(
                 proc.stderr,
             )
         try:
-            result = json.loads(proc.stdout)
+            if jq is not None:
+                result = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+            else:
+                result = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise GitError(
                 f"gh api {endpoint} returned invalid JSON: {exc} "

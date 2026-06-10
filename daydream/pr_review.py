@@ -17,6 +17,7 @@ Everything is best-effort: failures warn and return, never raise.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
 import tempfile
@@ -51,6 +52,8 @@ class ParsedIssue:
         is_cross_stack: True when the issue spans multiple stacks.
         confidence: Normalised HIGH / MEDIUM / LOW, if known.
         severity: Normalised high / medium / low, if known.
+        fingerprint: Deterministic SHA256 identity for cross-run dedup. Only set
+            on canonical merged findings; None on other construction paths.
     """
 
     path: str
@@ -60,6 +63,7 @@ class ParsedIssue:
     is_cross_stack: bool = False
     confidence: str | None = None
     severity: str | None = None
+    fingerprint: str | None = None
 
 
 @dataclass
@@ -270,6 +274,9 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
                 is_cross_stack=fields.is_cross_stack,
                 confidence=fields.confidence,
                 severity=fields.severity,
+                fingerprint=compute_fingerprint(
+                    fields.path, fields.description, fields.rationale
+                ),
             )
         )
     return out
@@ -316,21 +323,46 @@ def find_open_pr(target_dir: Path) -> PRInfo | None:
 _ANCHOR_TOKEN = re.compile(r"`([^`\n]{3,80})`|\b([A-Za-z_][A-Za-z0-9_]{4,})\b")
 
 
-def extract_anchors(issue: ParsedIssue) -> list[str]:
-    """Pull candidate anchor tokens from an issue body (longest first).
+def extract_anchors(text: str) -> list[str]:
+    """Pull candidate anchor tokens from issue text (longest first).
 
     Prefers backtick-quoted identifiers (e.g. `foo_bar`) since those are
     the most specific signals of code the reviewer cited. Falls back to
     any alphanumeric word of length >=5.
     """
     seen: list[str] = []
-    for m in _ANCHOR_TOKEN.finditer(f"{issue.title}\n{issue.body}"):
+    for m in _ANCHOR_TOKEN.finditer(text):
         token = m.group(1) or m.group(2)
         if token and token not in seen:
             seen.append(token)
     # Longest-first improves hit quality (generic words lose to identifiers).
     seen.sort(key=len, reverse=True)
     return seen[:8]
+
+
+def compute_fingerprint(path: str, description: str, rationale: str) -> str:
+    """Compute a stable SHA256 fingerprint identifying a finding across runs.
+
+    Hashes the canonical raw fields — never the rendered comment body, which
+    carries volatile severity/confidence badges. The fingerprint combines the
+    file path, normalized description (the finding title), sorted anchor
+    tokens from description + rationale, and normalized rationale. Anchor
+    tokens are sorted (order-insensitive code symbols); description and
+    rationale preserve word order so differently-worded findings do not
+    collide. The line number is excluded so code shifts do not change a
+    finding's identity.
+    """
+    normalized_description = " ".join(description.strip().lower().split())
+    normalized_rationale = " ".join(rationale.strip().lower().split())
+    canonical = "\n".join(
+        [
+            path,
+            normalized_description,
+            "\n".join(sorted(extract_anchors(f"{description}\n{rationale}"))),
+            normalized_rationale,
+        ]
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | None:
@@ -350,7 +382,7 @@ def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | N
     if not lines:
         return None
 
-    anchors = extract_anchors(issue)
+    anchors = extract_anchors(f"{issue.title}\n{issue.body}")
 
     # Step 1: verify hint.
     if issue.line is not None and 1 <= issue.line <= len(lines):

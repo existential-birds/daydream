@@ -77,17 +77,26 @@ _GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", ""})
 # Compiled-regex module constants matching the daydream/ui.py style. Order
 # inside _REDACTION_RULES matters: URL-credential rule MUST run before the
 # bare API-key rule so the captured credential isn't re-matched by it; the
-# env-var rule runs before bare API-key so `OPENAI_API_KEY=sk-1234` becomes
+# PEM rule runs before the env-var rule so `VAR=-----BEGIN RSA PRIVATE KEY...`
+# collapses to `VAR=[REDACTED_PEM_KEY]` instead of the env-var rule consuming
+# only `-----BEGIN` and leaking the key body; the env-var rule runs before
+# bare API-key so `OPENAI_API_KEY=sk-1234` becomes
 # `OPENAI_API_KEY=[REDACTED_ENV_VAR]` (key name preserved per D-03) rather
 # than leaking the `OPENAI_API_KEY=` prefix.
 _URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)([^:@/\s]+):([^@/\s]+)@")
 _API_KEY_PATTERN = re.compile(
-    r"\b(?:sk-[A-Za-z0-9_\-]{6,}|ghp_[A-Za-z0-9]{6,}|xoxb-[A-Za-z0-9\-]{6,}|AKIA[A-Z0-9]{16})\b"
+    r"\b(?:sk-[A-Za-z0-9_\-]{6,}|ghp_[A-Za-z0-9]{6,}|ghs_[A-Za-z0-9]{6,}|xoxb-[A-Za-z0-9\-]{6,}|AKIA[A-Z0-9]{16})\b"
 )
 _JWT_PATTERN = re.compile(
     r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\b"
 )
 _USERNAME_PATH_PATTERN = re.compile(r"(/Users/|/home/|[A-Z]:\\Users\\)([^/\\\s]+)")
+# PEM private-key blocks (PKCS1 and PKCS8). Multi-line body collapsed before the
+# bare API-key rule scans it. CERTIFICATE blocks are public material — not matched.
+_PEM_KEY_PATTERN = re.compile(
+    r"-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----",
+    re.DOTALL,
+)
 # Match env-var assignment where one of the underscore-separated SEGMENTS of
 # the var name is a secret keyword. Substring matching (the original) over-
 # redacted MONKEY_PATCH/KEYBOARD_LAYOUT/AUTHOR/TOKENIZED — segment-aware
@@ -98,9 +107,13 @@ _ENV_VAR_PATTERN = re.compile(
 _REDACTION_RULES: tuple[tuple[Any, str], ...] = (
     # 1) URL-credential rule first — captures user:token before bare API-key rule sees the token.
     (_URL_CREDENTIAL_PATTERN, r"\1[REDACTED_USER]:[REDACTED_API_KEY]@"),
-    # 2) Env-var rule — preserves the key name, replaces only the value.
+    # 2) PEM private-key blocks — collapse the multi-line body before the
+    #    env-var rule (which would otherwise consume only `-----BEGIN` of a
+    #    `VAR=<PEM>` assignment) and the bare API-key rule see it.
+    (_PEM_KEY_PATTERN, "[REDACTED_PEM_KEY]"),
+    # 3) Env-var rule — preserves the key name, replaces only the value.
     (_ENV_VAR_PATTERN, r"\1=[REDACTED_ENV_VAR]"),
-    # 3) Bare API keys / JWT / username paths — order between these does not conflict.
+    # 4) Bare API keys / JWT / username paths — order between these does not conflict.
     (_API_KEY_PATTERN, "[REDACTED_API_KEY]"),
     (_JWT_PATTERN, "[REDACTED_JWT]"),
     (_USERNAME_PATH_PATTERN, r"\1[REDACTED_USER]"),

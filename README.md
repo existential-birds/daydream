@@ -205,6 +205,44 @@ per-backend table in `daydream/config.py`. The same order applies to backend
 selection via `--backend` / config / the `claude` fallback. (There is no
 environment-variable tier — `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
 
+## GitHub App Identity
+
+By default, GitHub reads and writes (PR comments, feedback replies) run under
+whatever identity the `gh` CLI is authenticated as. To post as a bot you own,
+supply GitHub App credentials via environment variables:
+
+```bash
+export DAYDREAM_APP_ID=12345                                   # from the App settings page
+export DAYDREAM_APP_PRIVATE_KEY="$(cat daydream-bot.private-key.pem)"  # raw PEM content, not a file path
+```
+
+When both are set, each run mints a short-lived installation access token
+scoped to the target repository and injects it into every `gh` subprocess.
+Posts are attributed to `<app-slug>[bot]`, and the active identity (bot or
+human) is displayed before any GitHub action.
+
+One-time setup: create a GitHub App (minimum permissions: Pull Requests
+read/write, Contents read, Metadata read), generate a private key from the
+App settings page, and install the App on the target repository's org or user.
+
+In GitHub Actions:
+
+```yaml
+env:
+  DAYDREAM_APP_ID: ${{ vars.DAYDREAM_APP_ID }}
+  DAYDREAM_APP_PRIVATE_KEY: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
+```
+
+Behavior notes:
+
+- Neither var set → ambient `gh` identity, exactly as before (the App identity is opt-in).
+- Setting only one of the two vars aborts with an error naming the missing one.
+- Posting runs (`--comment`, `--review`, `feedback`) abort if the owner/repo
+  cannot be determined or token minting fails — daydream never silently falls
+  back to posting under your personal identity. Non-posting runs fall back to
+  the ambient identity and continue.
+- The private key and minted tokens are redacted from logs and trajectory files.
+
 ## Output Files
 
 | Path | Description |

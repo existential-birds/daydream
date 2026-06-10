@@ -96,13 +96,9 @@ def test_alt_issues_to_parsed_skips_no_files() -> None:
 
 
 def test_extract_anchors_prefers_long_tokens() -> None:
-    issue = ParsedIssue(
-        path="x.py",
-        line=None,
-        title="Null check",
-        body="The function `compute_total` dereferences `items` in handleRequest",
+    anchors = extract_anchors(
+        "Null check\nThe function `compute_total` dereferences `items` in handleRequest"
     )
-    anchors = extract_anchors(issue)
     # Backtick tokens should appear; longest first.
     assert "compute_total" in anchors
     assert "handleRequest" in anchors

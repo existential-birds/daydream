@@ -19,13 +19,16 @@ subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
 
 import os
 import shutil
+import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from daydream import git_ops
+from rich.markup import escape as escape_markup
+
+from daydream import git_ops, github_app
 from daydream.agent import (
     MissingSkillError,
     console,
@@ -225,6 +228,7 @@ class RunConfig:
     plan: bool = False
     non_interactive: bool = False
     assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
+    identity: str = "unknown"  # resolved GitHub identity; set once by run()
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -388,8 +392,6 @@ def _stdin_isatty() -> bool:
         True if stdin is attached to a terminal. A detached or closed stdin
         (raising ``AttributeError``/``ValueError``) is treated as not a TTY.
     """
-    import sys
-
     try:
         return sys.stdin.isatty()
     except (AttributeError, ValueError):
@@ -500,6 +502,20 @@ async def run(config: RunConfig | None = None) -> int:
         print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
         return 1
 
+    # Resolve the active GitHub identity once and store it on config so every
+    # flow can read it from config.identity. Under App credentials this also
+    # mints + injects the installation token into every ``gh`` subprocess via
+    # the git_ops singleton. Every hard-abort case (partial credentials,
+    # undeterminable owner/repo while posting, minting failure) surfaces as
+    # GitHubAppError.
+    is_posting = config.bot is not None or config.output_mode in ("comment", "review")
+    try:
+        identity = github_app.resolve_run_identity(target_dir, config.pr_repo, is_posting=is_posting)
+    except github_app.GitHubAppError as exc:
+        print_error(console, "GitHub App", str(exc))
+        return 1
+    config.identity = identity
+
     # ``--comment`` and ``--review`` skip the test phase, so they also skip
     # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).
     skip_tests = config.output_mode != "loop"
@@ -559,6 +575,11 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
 
     Note: ``config.pr_number`` can be auto-detected from the current branch
     for metadata (trajectory/archive) without implying feedback mode.
+
+    Args:
+        work: Resolved working environment for the run.
+        config: Run configuration (``config.identity`` carries the resolved
+            GitHub identity set by :func:`run`).
     """
     if config.bot is not None:
         return await _run_pr_feedback(work, config)
@@ -641,6 +662,8 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         print_info(console, f"Bot: {bot}")
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Model: {review_backend.model}")
+        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
+        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
         # Phase 1: Fetch PR feedback
@@ -795,6 +818,8 @@ async def _run_review_or_comment(
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
         print_info(console, f"Model: {backend.model}")
+        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
+        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
         # Pre-scan exploration: populate config.exploration_context before phase 1.
@@ -967,6 +992,8 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Model: {review_backend.model}")
+        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
+        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         if skill:
             print_info(console, f"Review skill: {skill}")
         if config.start_at != "review":
