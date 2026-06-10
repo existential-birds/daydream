@@ -52,6 +52,9 @@ class MockResultMessageWithUsage:
     total_cost_usd: float | None = 0.001
     structured_output: Any = None
     usage: dict[str, Any] | None = None
+    is_error: bool = False
+    result: str | None = None
+    subtype: str = "success"
 
 
 class _MockClaudeSDKClient:

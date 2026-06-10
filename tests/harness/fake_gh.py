@@ -1,4 +1,4 @@
-"""Fake ``gh`` executable harness for real-path ``post-findings`` tests (P2).
+"""Fake ``gh`` executable harness for real-path ``post-findings`` tests.
 
 Installs an executable Python shim named ``gh`` into a tmp dir prepended to
 ``PATH`` so the real ``git_ops._run_gh`` subprocess seam, the ``gh_api``
@@ -133,15 +133,11 @@ class GhCall:
     """One recorded ``gh`` invocation.
 
     Attributes:
-        argv: Full argv after ``gh`` (e.g. ``["api", "graphql", ...]``).
-        method: HTTP method (``--method``/``-X`` value, else ``GET``).
         endpoint: Endpoint with any leading slash stripped (``graphql`` for
             GraphQL calls).
         payload: Parsed ``--input`` JSON payload, or None.
     """
 
-    argv: list[str]
-    method: str
     endpoint: str
     payload: Any
 
@@ -168,14 +164,7 @@ class FakeGh:
                 continue
             if wanted_endpoint is not None and record["endpoint"] != wanted_endpoint:
                 continue
-            out.append(
-                GhCall(
-                    argv=record["argv"],
-                    method=record["method"],
-                    endpoint=record["endpoint"],
-                    payload=record["payload"],
-                )
-            )
+            out.append(GhCall(endpoint=record["endpoint"], payload=record["payload"]))
         return out
 
     # --- canned-response configuration ---------------------------------------

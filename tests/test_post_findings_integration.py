@@ -1,4 +1,4 @@
-"""Real-path integration tests for the ``daydream post-findings`` verb (P2).
+"""Real-path integration tests for the ``daydream post-findings`` verb.
 
 Every test enters from ``cli.main`` (sys.argv patched — the production
 entrypoint) with a fake ``gh`` executable prepended to ``PATH``
@@ -43,6 +43,11 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
     return install_fake_gh(tmp_path / "fake-gh-bin", monkeypatch)
 
 
+def _post_argv(artifact: Path, *, pr: int = 7) -> list[str]:
+    """The ``post-findings`` argv for *artifact*; override only what a test varies."""
+    return ["post-findings", str(artifact), "--pr", str(pr), "--head-sha", "h" * 40, "--repo", "o/r"]
+
+
 def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, title: str) -> dict:
     return {
         "fingerprint": fingerprint,
@@ -58,7 +63,7 @@ def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, t
 
 
 def _write_artifact(path: Path, findings: list[dict]) -> Path:
-    """Build a valid artifact via Task 3's writer."""
+    """Build a valid artifact via write_findings_artifact."""
     write_findings_artifact(
         path,
         {
@@ -97,8 +102,7 @@ def artifact_on_disk_v2(tmp_path: Path) -> Path:
 
 
 def test_fresh_post_then_idempotent_repost(fake_gh, artifact_on_disk) -> None:
-    argv = ["post-findings", str(artifact_on_disk), "--pr", "7",
-            "--head-sha", "h" * 40, "--repo", "o/r"]
+    argv = _post_argv(artifact_on_disk)
     assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
@@ -110,8 +114,7 @@ def test_fresh_post_then_idempotent_repost(fake_gh, artifact_on_disk) -> None:
 
 def test_stale_finding_resolved_new_finding_posted(fake_gh, artifact_on_disk_v2) -> None:
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"])
-    assert cli_main(["post-findings", str(artifact_on_disk_v2), "--pr", "7",
-                     "--head-sha", "h" * 40, "--repo", "o/r"]) == 0
+    assert cli_main(_post_argv(artifact_on_disk_v2)) == 0
     # Task 0 spike: resolveReviewThread is FORBIDDEN for the least-privilege
     # installation token; stale findings are minimized via minimizeComment.
     assert any("minimizeComment" in c.payload.get("query", "")
@@ -120,8 +123,7 @@ def test_stale_finding_resolved_new_finding_posted(fake_gh, artifact_on_disk_v2)
 
 
 def test_event_artifact_mismatch_aborts_with_no_side_effects(fake_gh, artifact_on_disk) -> None:
-    rc = cli_main(["post-findings", str(artifact_on_disk), "--pr", "8",  # event says 8
-                   "--head-sha", "h" * 40, "--repo", "o/r"])
+    rc = cli_main(_post_argv(artifact_on_disk, pr=8))  # event says 8
     assert rc == 1
     assert fake_gh.calls("POST") == []  # nothing posted, nothing resolved
 
@@ -129,6 +131,5 @@ def test_event_artifact_mismatch_aborts_with_no_side_effects(fake_gh, artifact_o
 def test_malformed_artifact_aborts(fake_gh, tmp_path) -> None:
     bad = tmp_path / "f.json"
     bad.write_text("{not json")
-    rc = cli_main(["post-findings", str(bad), "--pr", "7",
-                   "--head-sha", "h" * 40, "--repo", "o/r"])
+    rc = cli_main(_post_argv(bad))
     assert rc == 1 and fake_gh.calls("POST") == []

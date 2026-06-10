@@ -235,7 +235,7 @@ def load_findings_artifact(
             )
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise FindingsValidationError(f"artifact size check failed: cannot read {path}: {exc}") from exc
+        raise FindingsValidationError(f"artifact read failed: {path}: {exc}") from exc
 
     try:
         data = json.loads(raw)

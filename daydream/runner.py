@@ -180,12 +180,7 @@ class RunConfig:
         output_mode: ``"loop"`` (review→fix→test, default), ``"comment"``
             (review + post inline PR comments), or ``"review"`` (review report only).
         findings_out: Path to write the Phase A findings artifact
-            (``--findings-out``; review mode only — argparse rejects the flag
-            without ``--review``, and the comment/loop flows ignore the field).
-            When set, the review flow resolves the target PR (``pr_number``
-            pin or current branch), classifies the alt-review issues, and
-            writes the strict-schema artifact — empty issue list included, so
-            Phase B can resolve all stale comments. Default None.
+            (``--findings-out``; review mode only). Default None.
         force_worktree: Force ephemeral worktree even when ``branch`` is None.
         shallow: Single-stack review (skip multi-stack auto-detection).
         extra_copy: Extra paths to copy into ephemeral worktrees.
@@ -922,8 +917,7 @@ async def _run_review_or_comment(
         )
 
         # Phase A artifact emission (--findings-out, review mode only).
-        # Runs before the zero-issues early return: an empty artifact is
-        # still written so Phase B can resolve all stale comments.
+        # Runs before the zero-issues early return.
         if not post_to_pr and config.findings_out is not None:
             rc = _emit_findings_artifact(target_dir, config, issues)
             if rc != 0:

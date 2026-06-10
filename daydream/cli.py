@@ -861,8 +861,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.assume == "yes" and output_mode != "loop":
         parser.error("--yes has no effect with --review/--comment (no fix phase to auto-apply)")
 
-    # ``--findings-out`` is Phase A emission of the review report; only the
-    # ``--review`` flow writes the artifact, so reject the flag elsewhere.
     if args.findings_out is not None and output_mode != "review":
         parser.error("--findings-out requires --review (Phase A findings artifact emission)")
 
@@ -1405,10 +1403,7 @@ def main() -> None:
         if verb == "bench":
             sys.exit(_handle_bench_command(argv[1:]))
 
-        # ``post-findings`` is the privileged Phase B poster: validate a
-        # findings artifact against event-derived facts, reconcile against
-        # prior comments, and post new findings. Sync — no agent work, no
-        # ATIF trajectory (CLAUDE.md enumerates the agent flows).
+        # ``post-findings`` is sync — short-circuit before anyio.run.
         if verb == "post-findings":
             sys.exit(_handle_post_findings_command(argv[1:]))
 

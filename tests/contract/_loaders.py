@@ -73,6 +73,9 @@ class _MockResultMessage:
     total_cost_usd: float | None = None
     structured_output: Any = None
     usage: dict[str, Any] | None = None
+    is_error: bool = False
+    result: str | None = None
+    subtype: str = "success"
 
 
 def _build_claude_messages(script: dict[str, Any]) -> list[Any]:

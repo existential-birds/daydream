@@ -39,8 +39,6 @@ class PriorFinding:
             comment marker.
         thread_id: GraphQL review-thread node id for inline findings; None
             for body-only findings (review bodies have no thread).
-        comment_id: REST database id of the carrying comment (review comment
-            for inline findings, review id for body-only findings).
         is_resolved: True when the finding is already closed — the thread was
             resolved (e.g. by a human) or the comment was previously
             minimized by a daydream run.
@@ -51,7 +49,6 @@ class PriorFinding:
 
     fingerprint: str
     thread_id: str | None
-    comment_id: int
     is_resolved: bool
     comment_node_id: str | None = None
 
@@ -157,7 +154,6 @@ def fetch_prior_findings(target_dir: Path, repo_slug: str, pr_number: int) -> di
                     prior[fingerprint] = PriorFinding(
                         fingerprint=fingerprint,
                         thread_id=thread["id"],
-                        comment_id=comment["databaseId"],
                         is_resolved=bool(thread["isResolved"]) or bool(comment["isMinimized"]),
                         comment_node_id=comment["id"],
                     )
@@ -176,7 +172,6 @@ def fetch_prior_findings(target_dir: Path, repo_slug: str, pr_number: int) -> di
             prior[fingerprint] = PriorFinding(
                 fingerprint=fingerprint,
                 thread_id=None,
-                comment_id=review["id"],
                 is_resolved=False,
                 comment_node_id=review.get("node_id"),
             )

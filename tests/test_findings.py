@@ -3,11 +3,12 @@
 import json
 import re
 import subprocess
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
 
-from daydream import git_ops, pr_review
+from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
 from daydream.findings import (
     FINDINGS_SCHEMA_VERSION,
@@ -22,17 +23,20 @@ from daydream.runner import RunConfig, run
 from tests.harness.phase_backend import PhaseDispatchBackend
 
 
-def test_build_artifact_declares_target_and_placed_findings(tmp_path, monkeypatch) -> None:
+def test_build_artifact_declares_target_envelope(tmp_path) -> None:
+    """build_findings_artifact stamps the PR identity envelope and passes each
+    issue's fingerprint through. A cross-stack issue routes to body placement
+    without touching the diff, so no git/collaborator mocking is needed; inline
+    snapping is exercised by the real-path test below.
+    """
     pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main",
                 owner="o", repo="r", url="u")
     issues = [ParsedIssue(path="a.py", line=None, title="T", body="B", severity="high",
-                          confidence="HIGH", fingerprint="f" * 64)]
-    monkeypatch.setattr(pr_review, "resolve_line", lambda *_a: 12)
-    monkeypatch.setattr(pr_review, "file_hunks", lambda *_a, **_k: [(10, 14)])
+                          confidence="HIGH", fingerprint="f" * 64, is_cross_stack=True)]
     artifact = build_findings_artifact(tmp_path, pr, issues, run_info=None)
     assert (artifact["repo"], artifact["pr_number"], artifact["head_sha"]) == ("o/r", 7, "h" * 40)
     f = artifact["findings"][0]
-    assert (f["fingerprint"], f["placement"], f["line"]) == ("f" * 64, "inline", 12)
+    assert (f["fingerprint"], f["placement"], f["line"]) == ("f" * 64, "body", None)
 
 
 def test_write_artifact_round_trips(tmp_path) -> None:
@@ -47,7 +51,7 @@ def test_write_artifact_round_trips(tmp_path) -> None:
 
 @pytest.fixture
 def valid_artifact() -> dict:
-    """The Task 3 round-trip artifact dict with one inline finding."""
+    """Artifact dict with one inline finding."""
     return {
         "schema_version": FINDINGS_SCHEMA_VERSION,
         "repo": "o/r",
@@ -97,6 +101,24 @@ def test_load_rejects_oversized_artifact(tmp_path) -> None:
 # --- Real-path Phase A emission (--findings-out via runner.run) --------------
 
 
+@contextmanager
+def _review_run_env(feature_branch_repo, monkeypatch, out, backend, pr):
+    """Shared `--review --findings-out` real-path setup: env, config, patch stack.
+
+    Clears the GitHub App env, builds the review-mode RunConfig, and patches the
+    backend seam plus the GitHub lookups. Each test supplies only its backend,
+    PRInfo, and assertions.
+    """
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    config = RunConfig(target=str(feature_branch_repo), output_mode="review",
+                       pr_number=7, findings_out=str(out), non_interactive=True)
+    with patch("daydream.runner.create_backend", return_value=backend), \
+         patch("daydream.github_app.resolve_user_identity", return_value="tester"), \
+         patch("daydream.pr_review.find_pr_by_number", return_value=pr):
+        yield config
+
+
 async def test_review_mode_writes_findings_artifact(feature_branch_repo, monkeypatch, tmp_path):
     """`--review --findings-out` writes a fingerprinted artifact pinned to the PR.
 
@@ -133,15 +155,7 @@ async def test_review_mode_writes_findings_artifact(feature_branch_repo, monkeyp
     pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main",
                 owner="o", repo="r", url="https://example.invalid/pr/7")
 
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-
-    config = RunConfig(target=str(feature_branch_repo), output_mode="review",
-                       pr_number=7, findings_out=str(out), non_interactive=True)
-
-    with patch("daydream.runner.create_backend", return_value=backend), \
-         patch("daydream.github_app.resolve_user_identity", return_value="tester"), \
-         patch("daydream.pr_review.find_pr_by_number", return_value=pr):
+    with _review_run_env(feature_branch_repo, monkeypatch, out, backend, pr) as config:
         assert await run(config) == 0
 
     data = json.loads(out.read_text())
@@ -188,15 +202,7 @@ async def test_review_mode_errored_agent_never_writes_clean_artifact(
     pr = PRInfo(number=7, head_sha=head, base_sha=head, base_ref="main",
                 owner="o", repo="r", url="https://example.invalid/pr/7")
 
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-
-    config = RunConfig(target=str(feature_branch_repo), output_mode="review",
-                       pr_number=7, findings_out=str(out), non_interactive=True)
-
-    with patch("daydream.runner.create_backend", return_value=ErroringBackend()), \
-         patch("daydream.github_app.resolve_user_identity", return_value="tester"), \
-         patch("daydream.pr_review.find_pr_by_number", return_value=pr):
+    with _review_run_env(feature_branch_repo, monkeypatch, out, ErroringBackend(), pr) as config:
         with pytest.raises(ClaudeAgentError, match="Invalid API key"):
             await run(config)
 

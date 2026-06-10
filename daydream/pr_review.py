@@ -318,15 +318,11 @@ def _current_branch(target_dir: Path) -> str | None:
         return None
 
 
-def find_open_pr(target_dir: Path) -> PRInfo | None:
-    """Locate the open PR for the current branch. Returns None if not found."""
-    branch = _current_branch(target_dir)
-    if not branch:
-        return None
-    rows = git_ops.gh_pr_list_for_branch(target_dir, branch)
-    if not rows:
-        return None
-    row = rows[0]
+def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo | None:
+    """Build :class:`PRInfo` from a ``gh`` PR row, resolving the owner/repo slug.
+
+    Returns None when the owner/repo slug cannot be resolved.
+    """
     # Owner/repo lookup via `gh repo view` (handles fork cases cleanly).
     slug = git_ops.gh_repo_view(target_dir)
     if slug is None:
@@ -341,6 +337,17 @@ def find_open_pr(target_dir: Path) -> PRInfo | None:
         repo=repo,
         url=row.get("url", ""),
     )
+
+
+def find_open_pr(target_dir: Path) -> PRInfo | None:
+    """Locate the open PR for the current branch. Returns None if not found."""
+    branch = _current_branch(target_dir)
+    if not branch:
+        return None
+    rows = git_ops.gh_pr_list_for_branch(target_dir, branch)
+    if not rows:
+        return None
+    return _pr_info_from_row(target_dir, rows[0])
 
 
 def find_pr_by_number(target_dir: Path, pr_number: int) -> PRInfo | None:
@@ -360,19 +367,7 @@ def find_pr_by_number(target_dir: Path, pr_number: int) -> PRInfo | None:
     data = git_ops.gh_pr_view(target_dir, pr_number)
     if data is None:
         return None
-    slug = git_ops.gh_repo_view(target_dir)
-    if slug is None:
-        return None
-    owner, repo = slug
-    return PRInfo(
-        number=int(data["number"]),
-        head_sha=data["headRefOid"],
-        base_sha=data["baseRefOid"],
-        base_ref=data.get("baseRefName", ""),
-        owner=owner,
-        repo=repo,
-        url=data.get("url", ""),
-    )
+    return _pr_info_from_row(target_dir, data)
 
 
 # --- Line resolution + hunk classification --------------------------------

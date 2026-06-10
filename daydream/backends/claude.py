@@ -324,19 +324,8 @@ class ClaudeBackend:
                                 )
 
                     elif isinstance(msg, ResultMessage):
-                        # A fatal run failure (invalid API key, execution
-                        # error) arrives as is_error=True, NOT as an SDK
-                        # exception. Raise instead of yielding a normal
-                        # ResultEvent so callers never mistake an errored run
-                        # for a clean empty result. `getattr` keeps us
-                        # defensive against older test mocks that pre-date
-                        # the field.
-                        if getattr(msg, "is_error", False):
-                            detail = (
-                                getattr(msg, "result", None)
-                                or getattr(msg, "subtype", None)
-                                or "unknown error"
-                            )
+                        if msg.is_error:
+                            detail = msg.result or msg.subtype or "unknown error"
                             raise ClaudeAgentError(f"Claude agent run failed: {detail}")
                         if msg.structured_output is not None:
                             structured_result = msg.structured_output

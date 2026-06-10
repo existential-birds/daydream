@@ -239,24 +239,15 @@ def test_findings_out_with_review_populates_config(monkeypatch):
     assert config.output_mode == "review"
 
 
-def test_findings_out_without_review_errors(monkeypatch, capsys):
+@pytest.mark.parametrize("extra", [[], ["--comment"]])
+def test_findings_out_requires_review_errors(monkeypatch, capsys, extra):
     """--findings-out is Phase A emission of the review report; it requires --review."""
-    monkeypatch.setattr(sys, "argv", ["daydream", "--findings-out", "f.json", "/tmp/repo"])
+    monkeypatch.setattr(sys, "argv", ["daydream", *extra, "--findings-out", "f.json", "/tmp/repo"])
     with pytest.raises(SystemExit) as exc_info:
         _parse_args()
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "--findings-out" in err and "--review" in err
-
-
-def test_findings_out_with_comment_errors(monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "--comment", "--findings-out", "f.json", "/tmp/repo",
-    ])
-    with pytest.raises(SystemExit) as exc_info:
-        _parse_args()
-    assert exc_info.value.code == 2
-    assert "--findings-out" in capsys.readouterr().err
 
 
 def test_findings_out_defaults_none(monkeypatch):

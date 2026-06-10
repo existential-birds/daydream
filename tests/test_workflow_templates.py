@@ -1,4 +1,4 @@
-"""Structure tests for the shipped GitHub Actions workflow templates (plan P1).
+"""Structure tests for the shipped GitHub Actions workflow templates.
 
 Parses each template under ``templates/workflows/`` with ``yaml.safe_load`` and
 asserts on the parsed tree; raw-text assertions ("this string never appears")
@@ -233,7 +233,7 @@ def test_post_workflow_token_is_least_privilege(post_wf: dict[str, Any], post_te
     assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
 
 
-def test_post_workflow_never_checks_out_pr_code(post_wf: dict[str, Any], post_text: str) -> None:
+def test_post_workflow_never_checks_out_pr_code(post_wf: dict[str, Any]) -> None:
     checkouts = [
         s
         for job in post_wf["jobs"].values()
