@@ -315,6 +315,21 @@ def _reset_gh_token_env():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_github_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip GitHub App credentials from the environment for every test.
+
+    The development machine exports ``DAYDREAM_APP_ID`` and
+    ``DAYDREAM_APP_PRIVATE_KEY`` via direnv for local bot runs. Tests must
+    never see real credentials: the credentials-absent path is the default
+    under test, and a real key reaching ``mint_installation_token`` would
+    send live JWTs at the GitHub API mid-suite. Tests that need credentials
+    set fakes explicitly via ``monkeypatch.setenv``.
+    """
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_trajectory_recorder():
     """Clear the trajectory ContextVar before AND after every test.
 
