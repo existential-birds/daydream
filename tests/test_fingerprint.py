@@ -27,10 +27,11 @@ def test_fingerprint_ignores_line_number():
     assert compute_fingerprint(a) == compute_fingerprint(b)
 
 
-def test_fingerprint_stable_across_anchor_order():
+def test_fingerprint_differs_on_title_word_order():
+    """Title word order is preserved so differently-worded findings don't collide."""
     a = ParsedIssue(path="a.py", line=1, title="`alpha` and `bravo`", body="")
     b = ParsedIssue(path="a.py", line=1, title="`bravo` and `alpha`", body="")
-    assert compute_fingerprint(a) == compute_fingerprint(b)
+    assert compute_fingerprint(a) != compute_fingerprint(b)
 
 
 def test_parsed_issues_carry_fingerprint():
