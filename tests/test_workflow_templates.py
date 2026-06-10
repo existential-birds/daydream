@@ -40,7 +40,7 @@ def load_workflow(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def wf_on(wf: dict[str, Any]) -> dict[str, Any]:
+def wf_on(wf: dict[Any, Any]) -> dict[str, Any]:
     """Return the trigger mapping, normalizing PyYAML's ``on:`` -> ``True`` key."""
     triggers = wf[True] if True in wf else wf["on"]
     assert isinstance(triggers, dict)
