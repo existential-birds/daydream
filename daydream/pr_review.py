@@ -265,17 +265,20 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
         if fields.rationale and fields.rationale != fields.description:
             body_parts.append(fields.rationale)
         body = "\n\n".join(body_parts)
-        issue = ParsedIssue(
-            path=fields.path,
-            line=fields.line_int,
-            title=fields.description,
-            body=body,
-            is_cross_stack=fields.is_cross_stack,
-            confidence=fields.confidence,
-            severity=fields.severity,
+        out.append(
+            ParsedIssue(
+                path=fields.path,
+                line=fields.line_int,
+                title=fields.description,
+                body=body,
+                is_cross_stack=fields.is_cross_stack,
+                confidence=fields.confidence,
+                severity=fields.severity,
+                fingerprint=compute_fingerprint(
+                    fields.path, fields.description, fields.rationale
+                ),
+            )
         )
-        issue.fingerprint = compute_fingerprint(issue)
-        out.append(issue)
     return out
 
 
@@ -320,15 +323,15 @@ def find_open_pr(target_dir: Path) -> PRInfo | None:
 _ANCHOR_TOKEN = re.compile(r"`([^`\n]{3,80})`|\b([A-Za-z_][A-Za-z0-9_]{4,})\b")
 
 
-def extract_anchors(issue: ParsedIssue) -> list[str]:
-    """Pull candidate anchor tokens from an issue body (longest first).
+def extract_anchors(text: str) -> list[str]:
+    """Pull candidate anchor tokens from issue text (longest first).
 
     Prefers backtick-quoted identifiers (e.g. `foo_bar`) since those are
     the most specific signals of code the reviewer cited. Falls back to
     any alphanumeric word of length >=5.
     """
     seen: list[str] = []
-    for m in _ANCHOR_TOKEN.finditer(f"{issue.title}\n{issue.body}"):
+    for m in _ANCHOR_TOKEN.finditer(text):
         token = m.group(1) or m.group(2)
         if token and token not in seen:
             seen.append(token)
@@ -337,23 +340,26 @@ def extract_anchors(issue: ParsedIssue) -> list[str]:
     return seen[:8]
 
 
-def compute_fingerprint(issue: ParsedIssue) -> str:
+def compute_fingerprint(path: str, description: str, rationale: str) -> str:
     """Compute a stable SHA256 fingerprint identifying a finding across runs.
 
-    The fingerprint combines the file path, normalized title, sorted anchor
-    tokens, and normalized description. Anchor tokens are sorted
-    (order-insensitive code symbols); the title and description preserve word
-    order so differently-worded findings do not collide. The line number is
-    excluded so code shifts do not change a finding's identity.
+    Hashes the canonical raw fields — never the rendered comment body, which
+    carries volatile severity/confidence badges. The fingerprint combines the
+    file path, normalized description (the finding title), sorted anchor
+    tokens from description + rationale, and normalized rationale. Anchor
+    tokens are sorted (order-insensitive code symbols); description and
+    rationale preserve word order so differently-worded findings do not
+    collide. The line number is excluded so code shifts do not change a
+    finding's identity.
     """
-    normalized_title = " ".join(issue.title.strip().lower().split())
-    normalized_description = issue.body.strip().lower()
+    normalized_description = " ".join(description.strip().lower().split())
+    normalized_rationale = " ".join(rationale.strip().lower().split())
     canonical = "\n".join(
         [
-            issue.path,
-            normalized_title,
-            "\n".join(sorted(extract_anchors(issue))),
+            path,
             normalized_description,
+            "\n".join(sorted(extract_anchors(f"{description}\n{rationale}"))),
+            normalized_rationale,
         ]
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
@@ -376,7 +382,7 @@ def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | N
     if not lines:
         return None
 
-    anchors = extract_anchors(issue)
+    anchors = extract_anchors(f"{issue.title}\n{issue.body}")
 
     # Step 1: verify hint.
     if issue.line is not None and 1 <= issue.line <= len(lines):
