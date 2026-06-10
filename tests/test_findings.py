@@ -5,11 +5,16 @@ import re
 import subprocess
 from unittest.mock import patch
 
+import pytest
+
 from daydream import git_ops, pr_review
 from daydream.backends import ResultEvent, TextEvent
 from daydream.findings import (
     FINDINGS_SCHEMA_VERSION,
+    MAX_ARTIFACT_BYTES,
+    FindingsValidationError,
     build_findings_artifact,
+    load_findings_artifact,
     write_findings_artifact,
 )
 from daydream.pr_review import ParsedIssue, PRInfo
@@ -35,6 +40,58 @@ def test_write_artifact_round_trips(tmp_path) -> None:
     write_findings_artifact(path, {"schema_version": FINDINGS_SCHEMA_VERSION, "repo": "o/r",
                                    "pr_number": 7, "head_sha": "h" * 40, "findings": []})
     assert json.loads(path.read_text())["schema_version"] == FINDINGS_SCHEMA_VERSION
+
+
+# --- Load + validation (confused-deputy gate) ---------------------------------
+
+
+@pytest.fixture
+def valid_artifact() -> dict:
+    """The Task 3 round-trip artifact dict with one inline finding."""
+    return {
+        "schema_version": FINDINGS_SCHEMA_VERSION,
+        "repo": "o/r",
+        "pr_number": 7,
+        "head_sha": "h" * 40,
+        "run_info": None,
+        "findings": [
+            {
+                "fingerprint": "f" * 64,
+                "path": "a.py",
+                "line": 12,
+                "placement": "inline",
+                "title": "T",
+                "body": "B",
+                "severity": "high",
+                "confidence": "HIGH",
+                "is_cross_stack": False,
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("mutate, match", [
+    (lambda a: a.pop("head_sha"), "schema"),
+    (lambda a: a.update(head_sha="e" * 40), "does not match"),
+    (lambda a: a.update(pr_number=8), "does not match"),
+    (lambda a: a.update(unexpected=1), "schema"),
+    (lambda a: a["findings"][0].update(fingerprint="nope"), "schema"),
+])
+def test_load_rejects_invalid_artifacts(tmp_path, valid_artifact, mutate, match) -> None:
+    mutate(valid_artifact)
+    p = tmp_path / "f.json"
+    p.write_text(json.dumps(valid_artifact))
+    with pytest.raises(FindingsValidationError, match=match):
+        load_findings_artifact(p, expected_repo="o/r", expected_pr_number=7,
+                               expected_head_sha="h" * 40)
+
+
+def test_load_rejects_oversized_artifact(tmp_path) -> None:
+    p = tmp_path / "f.json"
+    p.write_text("[" + " " * MAX_ARTIFACT_BYTES)
+    with pytest.raises(FindingsValidationError, match="size"):
+        load_findings_artifact(p, expected_repo="o/r", expected_pr_number=7,
+                               expected_head_sha="h" * 40)
 
 
 # --- Real-path Phase A emission (--findings-out via runner.run) --------------

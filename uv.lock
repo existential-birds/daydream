@@ -198,6 +198,7 @@ source = { editable = "." }
 dependencies = [
     { name = "anyio" },
     { name = "claude-agent-sdk" },
+    { name = "jsonschema" },
     { name = "pydantic" },
     { name = "pyfiglet" },
     { name = "pyjwt" },
@@ -211,7 +212,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "jsonschema" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -222,6 +222,7 @@ dev = [
 requires-dist = [
     { name = "anyio", specifier = ">=4.0" },
     { name = "claude-agent-sdk", specifier = "==0.1.72" },
+    { name = "jsonschema", specifier = ">=4.0" },
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pyfiglet", specifier = ">=1.0" },
     { name = "pyjwt", specifier = ">=2.0" },
@@ -235,7 +236,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "jsonschema", specifier = ">=4.0" },
     { name = "mypy", specifier = ">=1.14" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
