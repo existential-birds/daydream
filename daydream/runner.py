@@ -28,7 +28,7 @@ from typing import Any, Literal
 
 from rich.markup import escape as escape_markup
 
-from daydream import git_ops
+from daydream import git_ops, github_app
 from daydream.agent import (
     MissingSkillError,
     console,
@@ -392,8 +392,6 @@ def _stdin_isatty() -> bool:
         True if stdin is attached to a terminal. A detached or closed stdin
         (raising ``AttributeError``/``ValueError``) is treated as not a TTY.
     """
-    import sys
-
     try:
         return sys.stdin.isatty()
     except (AttributeError, ValueError):
@@ -440,88 +438,6 @@ def _get_head_sha(cwd: Path) -> str | None:
         return git_ops.head_sha(cwd)
     except GitError:
         return None
-
-
-def _resolve_github_identity(config: RunConfig, target_dir: Path) -> str:
-    """Resolve the active GitHub identity once for the run's banners.
-
-    When App credentials are supplied (``DAYDREAM_APP_ID`` /
-    ``DAYDREAM_APP_PRIVATE_KEY``), mint a scoped installation token, inject it
-    into the ``gh`` subprocess env via the ``git_ops`` token singleton, and
-    resolve the identity under that token. Without credentials, fall back to the
-    ambient ``gh`` identity.
-
-    A minting or network failure is fatal when App credentials are present: the
-    run is aborted so that ``gh`` subprocesses never silently fall back to
-    ambient auth. A partial or malformed-credentials ``ValueError`` from
-    ``resolve_credentials`` also aborts the run.
-
-    Args:
-        config: Run configuration (``pr_repo`` is preferred for owner/repo).
-        target_dir: Resolved target directory for ``gh repo view`` fallback.
-
-    Returns:
-        The resolved GitHub login, or ``"unknown"`` when it cannot be determined.
-
-    Raises:
-        ValueError: On partial/malformed App credentials (hard misconfig).
-    """
-    from daydream import github_app
-
-    # resolve_credentials() is called OUTSIDE the try so a partial-config
-    # ValueError propagates and aborts the run (exit 1). Minting/injection
-    # failures inside the try also abort (sys.exit(1)) — ambient-auth fallback
-    # would violate the requirement that all gh calls use the minted token.
-    # Identity lookup is cosmetic and kept outside the try so its failure
-    # returns "unknown" rather than aborting.
-    credentials = github_app.resolve_credentials()
-    if credentials is None:
-        return github_app.resolve_identity(token=None)
-
-    # Posting modes (comment / review / bot feedback) require a scoped token;
-    # failing to determine the repo is treated as a hard abort so gh never
-    # silently falls back to ambient auth.
-    is_posting = config.bot is not None or config.output_mode in ("comment", "review")
-
-    try:
-        owner_repo = _owner_repo_for(config, target_dir)
-        if owner_repo is None:
-            if is_posting:
-                print_error(
-                    console,
-                    "GitHub App",
-                    "Cannot determine owner/repo for installation token minting",
-                )
-                sys.exit(1)
-            return github_app.resolve_identity(token=None)
-        owner, repo = owner_repo
-        token = github_app.mint_installation_token(
-            credentials.app_id, credentials.private_key, owner, repo,
-        )
-        git_ops.set_gh_token_env(github_app.build_gh_env(token))
-    except Exception as exc:  # noqa: BLE001
-        print_error(console, "GitHub Identity", f"App token resolution failed: {exc}")
-        sys.exit(1)
-
-    # Identity lookup is cosmetic: a failure returns "unknown" rather than
-    # aborting the run.
-    try:
-        return github_app.resolve_identity(token=token, credentials=credentials)
-    except Exception:  # noqa: BLE001
-        return "unknown"
-
-
-def _owner_repo_for(config: RunConfig, target_dir: Path) -> tuple[str, str] | None:
-    """Determine ``(owner, repo)`` for installation-token minting.
-
-    Prefers ``config.pr_repo`` (``"owner/repo"``) when set; otherwise derives it
-    from ``gh repo view``. Returns None when it cannot be determined.
-    """
-    if config.pr_repo and "/" in config.pr_repo:
-        owner, _, repo = config.pr_repo.partition("/")
-        if owner and repo:
-            return owner, repo
-    return git_ops.gh_repo_view(target_dir)
 
 
 # --- Public entry points ----------------------------------------------------
@@ -589,16 +505,16 @@ async def run(config: RunConfig | None = None) -> int:
     # Resolve the active GitHub identity once and store it on config so every
     # flow can read it from config.identity. Under App credentials this also
     # mints + injects the installation token into every ``gh`` subprocess via
-    # the git_ops singleton. Both partial credential misconfiguration and
-    # minting/network failures abort the run.
+    # the git_ops singleton. Every hard-abort case (partial credentials,
+    # undeterminable owner/repo while posting, minting failure) surfaces as
+    # GitHubAppError.
+    is_posting = config.bot is not None or config.output_mode in ("comment", "review")
     try:
-        identity = _resolve_github_identity(config, target_dir)
-    except ValueError as exc:
-        print_error(console, "GitHub App Misconfiguration", str(exc))
+        identity = github_app.resolve_run_identity(target_dir, config.pr_repo, is_posting=is_posting)
+    except github_app.GitHubAppError as exc:
+        print_error(console, "GitHub App", str(exc))
         return 1
-    # Bot logins look like ``my-app[bot]``; the brackets are Rich markup, so
-    # escape the identity before it reaches the banner ``print_info`` calls.
-    config.identity = escape_markup(identity)
+    config.identity = identity
 
     # ``--comment`` and ``--review`` skip the test phase, so they also skip
     # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).
@@ -746,7 +662,8 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         print_info(console, f"Bot: {bot}")
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Model: {review_backend.model}")
-        print_info(console, f"GitHub identity: {config.identity}")
+        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
+        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
         # Phase 1: Fetch PR feedback
@@ -901,7 +818,8 @@ async def _run_review_or_comment(
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
         print_info(console, f"Model: {backend.model}")
-        print_info(console, f"GitHub identity: {config.identity}")
+        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
+        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
         # Pre-scan exploration: populate config.exploration_context before phase 1.
@@ -1074,7 +992,8 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Model: {review_backend.model}")
-        print_info(console, f"GitHub identity: {config.identity}")
+        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
+        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         if skill:
             print_info(console, f"Review skill: {skill}")
         if config.start_at != "review":

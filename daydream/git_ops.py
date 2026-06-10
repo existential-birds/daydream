@@ -1311,6 +1311,7 @@ def gh_api(
     method: str = "GET",
     paginate: bool = False,
     input_data: Any | None = None,
+    jq: str | None = None,
 ) -> Any:
     """Call ``gh api <endpoint>`` and return parsed JSON.
 
@@ -1325,9 +1326,15 @@ def gh_api(
             success the tempfile is removed; on failure it is preserved and
             its path is included in the raised :class:`GitError` so callers
             can inspect the exact request body that was sent.
+        jq: Optional ``gh --jq`` filter. The filtered stdout is parsed as
+            NDJSON (one JSON value per line) and returned as a list. With
+            ``paginate=True`` gh concatenates each page's raw JSON, which is
+            not itself valid JSON for array endpoints — a filter like ``".[]"``
+            flattens every page to one value per line instead.
 
     Returns:
-        The parsed JSON value (object, list, or scalar).
+        The parsed JSON value (object, list, or scalar); with *jq*, a list of
+        the filtered values.
 
     Raises:
         RateLimitError: If the call fails due to a GitHub API rate limit
@@ -1340,11 +1347,15 @@ def gh_api(
             args.extend(["-X", method.upper()])
         if paginate:
             args.append("--paginate")
+        if jq is not None:
+            args.extend(["--jq", jq])
         args.append(endpoint)
         proc = _run_gh(repo, args, timeout=60)
         if proc.returncode != 0:
             raise _gh_error_for(f"gh api {endpoint} failed: {proc.stderr.strip()}", proc.stderr)
         try:
+            if jq is not None:
+                return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
             return json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise GitError(f"gh api {endpoint} returned invalid JSON: {exc}") from exc
@@ -1363,6 +1374,8 @@ def gh_api(
         args = ["api", endpoint, "--method", method.upper(), "--input", str(tmp_path)]
         if paginate:
             args.append("--paginate")
+        if jq is not None:
+            args.extend(["--jq", jq])
         proc = _run_gh(repo, args, timeout=60)
         if proc.returncode != 0:
             raise _gh_error_for(
@@ -1371,7 +1384,10 @@ def gh_api(
                 proc.stderr,
             )
         try:
-            result = json.loads(proc.stdout)
+            if jq is not None:
+                result = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+            else:
+                result = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise GitError(
                 f"gh api {endpoint} returned invalid JSON: {exc} "

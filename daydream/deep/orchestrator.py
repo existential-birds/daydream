@@ -23,6 +23,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rich.markup import escape as escape_markup
+
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
 from daydream.config import REVIEW_OUTPUT_FILE, SKILL_MAP, STRUCTURE_STACK_NAME
 from daydream.deep.artifacts import (
@@ -365,7 +367,8 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
         print_info(console, f"Default backend: {_resolved_backend_name(config, 'review')}")
-        print_info(console, f"GitHub identity: {config.identity}")
+        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
+        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
         # ------ Resume gate (D-34, D-36, D-37) ------

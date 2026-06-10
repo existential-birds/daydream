@@ -1,4 +1,3 @@
-import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -12,7 +11,7 @@ from daydream.github_app import (
     mint_installation_token,
     mint_jwt,
     resolve_credentials,
-    resolve_identity,
+    resolve_user_identity,
 )
 
 
@@ -107,7 +106,7 @@ def test_resolve_credentials_raises_on_non_integer_id(monkeypatch):
 
 def test_build_gh_env_returns_token_override_only():
     # build_gh_env returns only the token override; os.environ is merged at
-    # subprocess call time by run_gh_command so callers see the live env.
+    # subprocess call time by git_ops._run_gh so callers see the live env.
     env = build_gh_env("ghs_tok")
     assert env == {"GH_TOKEN": "ghs_tok"}
 
@@ -145,38 +144,52 @@ def test_mint_installation_token_happy_path():
     pem = _real_pem()
     calls = []
 
-    def fake_run_gh(repo, args, *, timeout=60):
-        calls.append(args)
-        endpoint = args[-1]
-        if "access_tokens" in " ".join(args):
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"token": "ghs_minted"}), stderr="")
-        if "app/installations" in endpoint:
-            return subprocess.CompletedProcess(
-                args, 0,
-                stdout=json.dumps({"id": 999, "account": {"login": "MyOrg"}}),
-                stderr="",
-            )
-        return subprocess.CompletedProcess(args, 1, stdout="", stderr="unexpected")
+    def fake_gh_api(repo, endpoint, **kwargs):
+        calls.append(endpoint)
+        if "access_tokens" in endpoint:
+            return {"token": "ghs_minted"}
+        return [{"id": 999, "account": {"login": "MyOrg"}, "app_slug": "daydream-bot"}]
 
-    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
-        token = mint_installation_token(12345, pem, "myorg", "myrepo")
+    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
+        token, identity = mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
 
     assert token == "ghs_minted"
-    # Two API calls: list installations, then exchange.
+    assert identity == "daydream-bot[bot]"
+    # Two API calls: list installations, then exchange. No extra GET /app.
     assert len(calls) == 2
+
+
+def test_mint_installation_token_missing_app_slug_yields_unknown_identity():
+    """A missing/empty app_slug is cosmetic: the mint succeeds, identity is 'unknown'."""
+    pem = _real_pem()
+
+    def fake_gh_api(repo, endpoint, **kwargs):
+        if "access_tokens" in endpoint:
+            return {"token": "ghs_minted"}
+        return [{"id": 999, "account": {"login": "myorg"}}]
+
+    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
+        token, identity = mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
+
+    assert token == "ghs_minted"
+    assert identity == "unknown"
 
 
 def test_mint_installation_token_no_matching_installation():
     pem = _real_pem()
 
-    def fake_run_gh(repo, args, *, timeout=60):
-        return subprocess.CompletedProcess(
-            args, 0, stdout=json.dumps({"id": 1, "account": {"login": "other"}}), stderr=""
-        )
-
-    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
+    with patch("daydream.git_ops.gh_api", return_value=[{"id": 1, "account": {"login": "other"}}]):
         with pytest.raises(ValueError, match="installation"):
-            mint_installation_token(12345, pem, "myorg", "myrepo")
+            mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
+
+
+def test_mint_installation_token_wraps_gh_api_failure():
+    """A gh api failure (GitError) surfaces as the module's ValueError abort channel."""
+    pem = _real_pem()
+
+    with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 401")):
+        with pytest.raises(ValueError, match="failed to list App installations"):
+            mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
 
 
 def test_mint_installation_token_sets_and_clears_jwt_env():
@@ -184,65 +197,28 @@ def test_mint_installation_token_sets_and_clears_jwt_env():
     pem = _real_pem()
     seen_during = {}
 
-    def fake_run_gh(repo, args, *, timeout=60):
-        from daydream import git_ops
+    def fake_gh_api(repo, endpoint, **kwargs):
         seen_during["env"] = git_ops.get_gh_token_env()
-        if "access_tokens" in " ".join(args):
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"token": "ghs_x"}), stderr="")
-        return subprocess.CompletedProcess(
-            args, 0, stdout=json.dumps({"id": 7, "account": {"login": "myorg"}}), stderr=""
-        )
+        if "access_tokens" in endpoint:
+            return {"token": "ghs_x"}
+        return [{"id": 7, "account": {"login": "myorg"}, "app_slug": "daydream-bot"}]
 
-    from daydream import git_ops
     git_ops.reset_gh_token_env()
-    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
-        mint_installation_token(12345, pem, "myorg", "myrepo")
+    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
+        mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
 
     assert seen_during["env"] is not None
     assert "ghs_x" not in (seen_during["env"].get("GH_TOKEN") or "")  # JWT, not installation token
     assert git_ops.get_gh_token_env() is None  # restored after minting
 
 
-def test_resolve_identity_with_credentials_calls_app_endpoint():
-    """When credentials are provided, resolve_identity uses GET /app and returns slug[bot]."""
-    pem = _real_pem()
-    calls = []
-
-    def fake_run_gh(repo, args, *, timeout=60):
-        calls.append(args)
-        return subprocess.CompletedProcess(args, 0, stdout='{"slug": "daydream-bot"}', stderr="")
-
-    creds = AppCredentials(app_id=1, private_key=pem)
-    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
-        result = resolve_identity(token="ghs_x", credentials=creds)
-
-    assert result == "daydream-bot[bot]"
-    assert any("/app" in " ".join(a) for a in calls), "expected GET /app call"
-    assert not any("/user" in " ".join(a) for a in calls), "must not call GET /user with installation token"
+def test_resolve_user_identity_returns_login():
+    """resolve_user_identity reads the current gh-authenticated user."""
+    with patch("daydream.git_ops.gh_api", return_value={"login": "personal-user"}):
+        assert resolve_user_identity(Path("/tmp")) == "personal-user"
 
 
-def test_resolve_identity_with_token_returns_login():
-    """With a token-env active, resolve_identity reads gh api /user login."""
-    def fake_run_gh(repo, args, *, timeout=60):
-        return subprocess.CompletedProcess(args, 0, stdout='{"login": "my-app[bot]"}', stderr="")
-
-    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
-        assert resolve_identity(token="ghs_x") == "my-app[bot]"
-
-
-def test_resolve_identity_without_token_uses_auth_status():
-    """No token → fall back to the current gh-authenticated user."""
-    def fake_run_gh(repo, args, *, timeout=60):
-        return subprocess.CompletedProcess(args, 0, stdout='{"login": "personal-user"}', stderr="")
-
-    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
-        assert resolve_identity(token=None) == "personal-user"
-
-
-def test_resolve_identity_returns_unknown_on_failure():
-    """A failed lookup is non-fatal — return 'unknown', never raise."""
-    def fake_run_gh(repo, args, *, timeout=60):
-        return subprocess.CompletedProcess(args, 1, stdout="", stderr="boom")
-
-    with patch("daydream.github_app._run_gh", side_effect=fake_run_gh):
-        assert resolve_identity(token=None) == "unknown"
+def test_resolve_user_identity_returns_unknown_on_failure():
+    """A failed user lookup is non-fatal — return 'unknown', never raise."""
+    with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("boom")):
+        assert resolve_user_identity(Path("/tmp")) == "unknown"

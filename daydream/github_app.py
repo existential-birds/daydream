@@ -9,7 +9,6 @@ token, and resolves the active GitHub identity for banner display.
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from contextlib import contextmanager
@@ -19,10 +18,19 @@ from typing import Generator
 
 import jwt as pyjwt
 
-from daydream.git_ops import _run_gh
+from daydream import git_ops
 
 APP_ID_ENV = "DAYDREAM_APP_ID"
 APP_PRIVATE_KEY_ENV = "DAYDREAM_APP_PRIVATE_KEY"
+
+
+class GitHubAppError(Exception):
+    """Raised when GitHub App identity resolution must abort the run.
+
+    Covers every hard-abort case: partial or malformed credentials,
+    owner/repo undeterminable while posting, and installation-token
+    minting or injection failure.
+    """
 
 
 @dataclass(frozen=True)
@@ -95,7 +103,8 @@ def build_gh_env(token: str) -> dict[str, str]:
 
     Returns:
         A dict of env-var overrides containing ``GH_TOKEN``.  Merged with the
-        live ``os.environ`` at subprocess call time by :func:`run_gh_command`.
+        live ``os.environ`` at subprocess call time by
+        :func:`daydream.git_ops._run_gh`.
     """
     return {"GH_TOKEN": token}
 
@@ -107,8 +116,6 @@ def _scoped_gh_token(token: str) -> Generator[None, None, None]:
     Args:
         token: Token to inject as ``GH_TOKEN`` for the duration of the block.
     """
-    from daydream import git_ops
-
     prior = git_ops.get_gh_token_env()
     git_ops.set_gh_token_env(build_gh_env(token))
     try:
@@ -117,7 +124,7 @@ def _scoped_gh_token(token: str) -> Generator[None, None, None]:
         git_ops.set_gh_token_env(prior)
 
 
-def mint_installation_token(app_id: int, private_key: str, owner: str, repo: str) -> str:
+def mint_installation_token(repo_dir: Path, app_id: int, private_key: str, owner: str, repo: str) -> tuple[str, str]:
     """Exchange App credentials for a scoped installation access token.
 
     Mints an App JWT, lists the App's installations to find the one owned by
@@ -127,13 +134,17 @@ def mint_installation_token(app_id: int, private_key: str, owner: str, repo: str
     singleton value is restored.
 
     Args:
+        repo_dir: Working directory for the ``gh`` subprocesses.
         app_id: Numeric GitHub App ID.
         private_key: PEM-encoded RSA private key for RS256 JWT signing.
         owner: Repository owner (org or user) whose installation to use.
         repo: Repository name (used only for error context).
 
     Returns:
-        The scoped installation access token string.
+        A ``(token, identity)`` tuple: the scoped installation access token and
+        the App's ``"{slug}[bot]"`` identity from the matched installation's
+        ``app_slug`` field, or ``"unknown"`` if the slug is absent (identity is
+        cosmetic and never fails the mint).
 
     Raises:
         ValueError: If listing installations fails, returns invalid JSON, has no
@@ -142,21 +153,16 @@ def mint_installation_token(app_id: int, private_key: str, owner: str, repo: str
     """
     jwt_token = mint_jwt(app_id, private_key)
     with _scoped_gh_token(jwt_token):
-        installation_id = _find_installation_id(owner, repo)
-        return _exchange_for_token(installation_id, owner, repo)
+        installation_id, identity = _find_installation(repo_dir, owner, repo)
+        return _exchange_for_token(repo_dir, installation_id, owner, repo), identity
 
 
-def _find_installation_id(owner: str, repo: str) -> int:
-    """List App installations and return the id owned by *owner*."""
-    # --paginate walks all pages; --jq '.[]' flattens each page's array to NDJSON
-    # so the combined stdout is one JSON object per line regardless of page count.
-    proc = _run_gh(Path("."), ["api", "--paginate", "--jq", ".[]", "/app/installations"])
-    if proc.returncode != 0:
-        raise ValueError(f"failed to list App installations: {proc.stderr.strip()}")
+def _find_installation(repo_dir: Path, owner: str, repo: str) -> tuple[int, str]:
+    """List App installations and return ``(id, "{slug}[bot]")`` for *owner*."""
     try:
-        installations = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"App installations list returned invalid JSON: {exc}") from exc
+        installations = git_ops.gh_api(repo_dir, "/app/installations", paginate=True, jq=".[]")
+    except git_ops.GitError as exc:
+        raise ValueError(f"failed to list App installations: {exc}") from exc
 
     for entry in installations:
         account = entry.get("account") or {}
@@ -165,84 +171,104 @@ def _find_installation_id(owner: str, repo: str) -> int:
             installation_id = entry.get("id")
             if not isinstance(installation_id, int):
                 raise ValueError(f"installation for {owner!r} is missing an integer id")
-            return installation_id
+            slug = entry.get("app_slug")
+            identity = f"{slug}[bot]" if isinstance(slug, str) and slug else "unknown"
+            return installation_id, identity
     raise ValueError(f"no App installation found for owner {owner!r} (repo {owner}/{repo})")
 
 
-def _exchange_for_token(installation_id: int, owner: str, repo: str) -> str:
+def _exchange_for_token(repo_dir: Path, installation_id: int, owner: str, repo: str) -> str:
     """Exchange an installation id for a scoped access token."""
-    proc = _run_gh(
-        Path("."),
-        ["api", "--method", "POST", f"/app/installations/{installation_id}/access_tokens"],
-    )
-    if proc.returncode != 0:
-        raise ValueError(f"failed to mint installation token for {owner}/{repo}: {proc.stderr.strip()}")
     try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"installation token response returned invalid JSON: {exc}") from exc
+        payload = git_ops.gh_api(
+            repo_dir, f"/app/installations/{installation_id}/access_tokens", method="POST"
+        )
+    except git_ops.GitError as exc:
+        raise ValueError(f"failed to mint installation token for {owner}/{repo}: {exc}") from exc
 
-    token = payload.get("token")
+    token = payload.get("token") if isinstance(payload, dict) else None
     if not isinstance(token, str) or not token:
         raise ValueError(f"installation token response for {owner}/{repo} is missing the 'token' field")
     return token
 
 
-def resolve_identity(
-    token: str | None = None,
-    credentials: AppCredentials | None = None,
-) -> str:
-    """Resolve the active GitHub login for banner display.
-
-    When *credentials* are provided the lookup uses ``GET /app`` (authenticated
-    with a freshly minted App JWT) and returns ``"{slug}[bot]"``.  Installation
-    tokens cannot access ``GET /user``, so the token path is skipped in that
-    case.  When only *token* is provided the lookup runs under that token.
-    Otherwise the lookup uses the ambient ``gh`` authentication.
+def resolve_user_identity(repo_dir: Path) -> str:
+    """Resolve the ambient ``gh``-authenticated user login via ``GET /user``.
 
     Args:
-        token: Optional installation/access token to authenticate the lookup.
-        credentials: Optional App credentials; when present, the App slug is
-            fetched via ``GET /app`` instead of ``GET /user``.
+        repo_dir: Working directory for the ``gh`` subprocess.
 
     Returns:
-        The GitHub login string, or the literal ``"unknown"`` if the lookup
-        fails for any reason. Identity display is cosmetic and must never abort
-        a run, so this function never raises.
+        The login string, or the literal ``"unknown"`` if the lookup fails
+        for any reason. Identity display is cosmetic and must never abort a
+        run, so this function never raises.
     """
-    if credentials is not None:
-        return _read_app_slug(credentials.app_id, credentials.private_key)
-    if token is not None:
-        with _scoped_gh_token(token):
-            return _read_user_login()
-    return _read_user_login()
-
-
-def _read_app_slug(app_id: int, private_key: str) -> str:
-    """Read ``gh api /app`` slug, returning ``"{slug}[bot]"`` or ``"unknown"`` on failure."""
     try:
-        jwt_token = mint_jwt(app_id, private_key)
-        with _scoped_gh_token(jwt_token):
-            proc = _run_gh(Path("."), ["api", "/app"])
-            if proc.returncode != 0:
-                return "unknown"
-            slug = json.loads(proc.stdout).get("slug")
-    except Exception:  # noqa: BLE001 - identity display is cosmetic; never abort a run
-        return "unknown"
-    if isinstance(slug, str) and slug:
-        return f"{slug}[bot]"
-    return "unknown"
-
-
-def _read_user_login() -> str:
-    """Read ``gh api /user`` login, returning ``"unknown"`` on any failure."""
-    try:
-        proc = _run_gh(Path("."), ["api", "/user"])
-        if proc.returncode != 0:
-            return "unknown"
-        login = json.loads(proc.stdout).get("login")
+        login = git_ops.gh_api(repo_dir, "/user").get("login")
     except Exception:  # noqa: BLE001 - identity display is cosmetic; never abort a run
         return "unknown"
     if isinstance(login, str) and login:
         return login
     return "unknown"
+
+
+def resolve_run_identity(target_dir: Path, pr_repo: str | None, *, is_posting: bool) -> str:
+    """Resolve the active GitHub identity for a run, minting App tokens if configured.
+
+    Without App credentials, returns the ambient ``gh`` identity. With
+    credentials, mints a scoped installation token, injects it into every
+    ``gh`` subprocess via the ``git_ops`` token singleton, and returns the
+    App identity captured during minting. When the owner/repo cannot be determined and the
+    run is not posting, falls back to the ambient identity; when posting,
+    that is a hard abort so ``gh`` never silently falls back to ambient auth.
+
+    Args:
+        target_dir: Resolved target directory for ``gh repo view`` fallback.
+        pr_repo: Optional ``"owner/repo"`` override, preferred when set.
+        is_posting: Whether the run posts to GitHub (comments, reviews,
+            feedback replies) and therefore requires a scoped token.
+
+    Returns:
+        The resolved GitHub login, or ``"unknown"`` when the (cosmetic)
+        identity lookup fails.
+
+    Raises:
+        GitHubAppError: On partial/malformed credentials, undeterminable
+            owner/repo while posting, or minting/injection failure.
+    """
+    try:
+        credentials = resolve_credentials()
+    except ValueError as exc:
+        raise GitHubAppError(str(exc)) from exc
+    if credentials is None:
+        return resolve_user_identity(target_dir)
+
+    owner_repo = _owner_repo_for(pr_repo, target_dir)
+    if owner_repo is None:
+        if is_posting:
+            raise GitHubAppError("Cannot determine owner/repo for installation token minting")
+        return resolve_user_identity(target_dir)
+
+    owner, repo = owner_repo
+    try:
+        token, identity = mint_installation_token(
+            target_dir, credentials.app_id, credentials.private_key, owner, repo
+        )
+        git_ops.set_gh_token_env(build_gh_env(token))
+    except Exception as exc:
+        raise GitHubAppError(f"App token resolution failed: {exc}") from exc
+
+    return identity
+
+
+def _owner_repo_for(pr_repo: str | None, target_dir: Path) -> tuple[str, str] | None:
+    """Determine ``(owner, repo)`` for installation-token minting.
+
+    Prefers *pr_repo* (``"owner/repo"``) when set; otherwise derives it from
+    ``gh repo view``. Returns None when it cannot be determined.
+    """
+    if pr_repo and "/" in pr_repo:
+        owner, _, repo = pr_repo.partition("/")
+        if owner and repo:
+            return owner, repo
+    return git_ops.gh_repo_view(target_dir)
