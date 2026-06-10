@@ -11,13 +11,17 @@ import pytest
 
 from daydream import git_ops, pr_review
 from daydream.pr_review import (
+    DAYDREAM_FOOTER,
     ParsedIssue,
     PRInfo,
+    _format_body_section,
+    _format_inline_body,
     _parse_hunks,
     alt_issues_to_parsed,
     build_payload,
     classify,
     extract_anchors,
+    parse_finding_markers,
     parsed_issues_from_items,
     snap_to_hunk,
 )
@@ -67,6 +71,25 @@ def test_inline_body_has_footer_and_tags() -> None:
     # Collapsible AI agent prompt.
     assert "🔮 Prompt for AI Agents" in body
     assert "<details>" in body
+
+
+def test_inline_body_carries_parseable_marker() -> None:
+    issue = ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="ab12" * 16)
+    body = _format_inline_body(issue)
+    assert parse_finding_markers(body) == ["ab12" * 16]
+    assert DAYDREAM_FOOTER in body  # marker does not displace the footer
+
+
+def test_no_marker_without_fingerprint() -> None:
+    assert parse_finding_markers(
+        _format_inline_body(ParsedIssue(path="a.py", line=3, title="T", body="B"))
+    ) == []
+
+
+def test_body_section_markers_one_per_fingerprinted_issue() -> None:
+    issues = [ParsedIssue(path="a.py", line=None, title=f"T{i}", body="B",
+                          fingerprint=f"{i:064x}") for i in range(2)]
+    assert parse_finding_markers(_format_body_section(issues)) == [f"{i:064x}" for i in range(2)]
 
 
 def test_alt_issues_to_parsed_produces_one_per_file() -> None:

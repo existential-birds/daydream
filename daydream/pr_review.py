@@ -8,8 +8,10 @@ Flow:
     2. Parse issues (from canonical merged items or alt-issue dicts).
     3. Resolve each issue to a real head-SHA line via anchor grep.
     4. Classify into inline (line within a diff hunk) vs body-only.
-    5. Build a single review payload, show a summary, ask y/n.
-    6. On yes, POST to `/repos/<owner>/<repo>/pulls/<num>/reviews`.
+    5. Render comment bodies, embedding a hidden `daydream-finding` marker
+       per fingerprinted issue (cross-run dedup; see `finding_marker`).
+    6. Build a single review payload, show a summary, ask y/n.
+    7. On yes, POST to `/repos/<owner>/<repo>/pulls/<num>/reviews`.
 
 Everything is best-effort: failures warn and return, never raise.
 """
@@ -167,6 +169,21 @@ DAYDREAM_REPO_URL = "https://github.com/existential-birds/daydream"
 DAYDREAM_FOOTER = (
     f"<sub>🧙 Posted by [daydream v{daydream.__version__}]({DAYDREAM_REPO_URL})</sub>"
 )
+
+# Hidden HTML-comment marker embedded in posted comment bodies so later runs
+# can recognise their own findings (cross-run dedup). Invisible in rendered
+# markdown, present in the raw body fetched via the API.
+FINDING_MARKER_RE = re.compile(r"<!-- daydream-finding: ([0-9a-f]{64}) -->")
+
+
+def finding_marker(fingerprint: str) -> str:
+    """Render the hidden finding marker comment for a fingerprint."""
+    return f"<!-- daydream-finding: {fingerprint} -->"
+
+
+def parse_finding_markers(text: str) -> list[str]:
+    """Return all finding fingerprints embedded in ``text``, in order."""
+    return FINDING_MARKER_RE.findall(text)
 
 
 def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
@@ -592,6 +609,8 @@ def _format_inline_body(issue: ParsedIssue) -> str:
     agent_prompt = _build_agent_prompt(issue)
     parts.append(agent_prompt)
     parts.append(DAYDREAM_FOOTER)
+    if issue.fingerprint:
+        parts.append(finding_marker(issue.fingerprint))
     return "\n\n".join(parts).strip()
 
 
@@ -661,6 +680,8 @@ def _format_body_section(body_only: list[ParsedIssue]) -> str:
             if issue.body:
                 parts.append(f"\n{issue.body}\n")
             parts.append(_build_agent_prompt(issue))
+            if issue.fingerprint:
+                parts.append(finding_marker(issue.fingerprint))
             if i < len(file_issues) - 1:
                 parts.append("\n---\n")
         parts.append("\n</blockquote></details>")
