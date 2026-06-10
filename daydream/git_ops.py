@@ -258,6 +258,7 @@ def _run_gh(
         GitError: If the subprocess machinery fails for any other reason
             (missing ``gh``, OS-level error).
     """
+    token_env = get_gh_token_env()
     try:
         return subprocess.run(  # noqa: S603 - arguments are not user-controlled
             ["gh", *args],  # noqa: S607 - gh is a trusted command
@@ -267,7 +268,7 @@ def _run_gh(
             timeout=timeout,
             shell=False,
             check=False,
-            env={**os.environ, **get_gh_token_env()} if get_gh_token_env() is not None else None,
+            env={**os.environ, **token_env} if token_env is not None else None,
         )
     except subprocess.TimeoutExpired as exc:
         raise GitTimeoutError(f"gh {' '.join(args)} timed out after {timeout}s") from exc
