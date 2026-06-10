@@ -74,6 +74,16 @@ def command_text() -> str:
     return (TEMPLATES_DIR / "daydream-command.yml").read_text(encoding="utf-8")
 
 
+@pytest.fixture(scope="module")
+def post_wf() -> dict[str, Any]:
+    return load_workflow(TEMPLATES_DIR / "daydream-post.yml")
+
+
+@pytest.fixture(scope="module")
+def post_text() -> str:
+    return (TEMPLATES_DIR / "daydream-post.yml").read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # daydream-review.yml (Phase A — unprivileged analyze)
 # ---------------------------------------------------------------------------
@@ -199,3 +209,83 @@ def test_command_match_is_exact_and_body_env_only(command_wf: dict[str, Any]) ->
     assert step["env"]["BOT_HANDLE"] == "${{ vars.DAYDREAM_BOT_HANDLE }}"
     assert '(^|[[:space:]])@${BOT_HANDLE}[[:space:]]+review([[:space:]]|$)' in step["run"]
     assert "github.event" not in step["run"]
+
+
+# ---------------------------------------------------------------------------
+# daydream-post.yml (Phase B — privileged post, never touches PR code)
+# ---------------------------------------------------------------------------
+
+
+def test_post_workflow_token_is_least_privilege(post_wf: dict[str, Any], post_text: str) -> None:
+    step = next(
+        s for s in post_wf["jobs"]["post"]["steps"] if "create-github-app-token" in s.get("uses", "")
+    )
+    grants = {k: v for k, v in step["with"].items() if k.startswith("permission-")}
+    assert grants == {
+        "permission-pull-requests": "write",
+        "permission-contents": "read",
+        "permission-metadata": "read",
+    }  # footgun 3, exactly
+    for job in post_wf["jobs"].values():  # never logged: token reaches
+        for s in job["steps"]:  # gh via env:, not echo/run
+            assert "steps.token.outputs.token" not in s.get("run", "")
+    # Phase B holds App material only — the analyze key never appears here.
+    assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
+
+
+def test_post_workflow_never_checks_out_pr_code(post_wf: dict[str, Any], post_text: str) -> None:
+    checkouts = [
+        s
+        for job in post_wf["jobs"].values()
+        for s in job["steps"]
+        if "actions/checkout" in s.get("uses", "")
+    ]
+    for step in checkouts:  # core invariant
+        assert "workflow_run" not in str(step.get("with", {}).get("ref", ""))
+    assert wf_on(post_wf)["workflow_run"]["workflows"] == ["Daydream Review"]
+    assert wf_on(post_wf)["workflow_run"]["types"] == ["completed"]
+
+
+def test_post_workflow_derives_target_from_event_only(
+    post_wf: dict[str, Any], post_text: str
+) -> None:
+    assert "github.event.workflow_run.head_sha" in post_text  # footgun 1: event-derived
+    assert "post-findings" in post_text and "--head-sha" in post_text
+    # Spike Step 2 revision: on the workflow_dispatch shape the event's
+    # head_sha is the default-branch tip, so the derive step must fetch the
+    # LIVE PR from the API — the GitHub API is the trust anchor, never the
+    # artifact alone.
+    derive = next(s for s in job_steps(post_wf, "post") if s.get("id") == "target")
+    assert "repos/" in derive["run"] and "/pulls/" in derive["run"]
+
+
+def test_post_workflow_gate_and_permissions(post_wf: dict[str, Any]) -> None:
+    # GITHUB_TOKEN only downloads the artifact; the App token carries writes.
+    assert post_wf["permissions"] == {"actions": "read"}
+    assert post_wf["jobs"]["post"]["if"] == "github.event.workflow_run.conclusion == 'success'"
+
+
+def test_post_workflow_downloads_artifact_from_triggering_run(post_wf: dict[str, Any]) -> None:
+    downloads = [
+        s for s in job_steps(post_wf, "post") if "actions/download-artifact" in s.get("uses", "")
+    ]
+    assert len(downloads) == 1
+    assert downloads[0]["with"]["name"] == "daydream-findings"
+    assert downloads[0]["with"]["run-id"] == "${{ github.event.workflow_run.id }}"
+
+
+def test_post_workflow_surfaces_failures(post_wf: dict[str, Any]) -> None:
+    # Post-job failure: a final if: failure() step comments via the minted
+    # token, values via env only.
+    failure_steps = [s for s in job_steps(post_wf, "post") if s.get("if") == "failure()"]
+    assert len(failure_steps) == 1
+    step = failure_steps[0]
+    assert step["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"
+    assert "daydream review failed" in step["run"]
+    assert "${{" not in step["run"]  # values via env, never interpolation
+    # Analyze failure: routes to the surface job instead of a silent skip.
+    surface = post_wf["jobs"]["surface-analyze-failure"]
+    assert surface["if"] == "github.event.workflow_run.conclusion == 'failure'"
+    comment_steps = [s for s in surface["steps"] if "daydream review failed" in s.get("run", "")]
+    assert len(comment_steps) == 1
+    assert comment_steps[0]["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"
