@@ -12,6 +12,9 @@ top-level ``TARGET`` positional):
 - ``daydream feedback <pr#>`` — apply bot PR-review comments
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
 - ``daydream bench`` — score deep-review findings against the offline benchmark
+- ``daydream post-findings <artifact>`` — validate a Phase A findings artifact
+  against event-derived facts and post new findings to the PR (the privileged,
+  unattended Phase B poster for the Actions trigger surface)
 - ``daydream corpus <sub-verb>`` — the data-pipeline namespace:
     - ``corpus harvest`` — walk the archive and append one bitemporal
       annotation (outcome label + intrinsic reward) per indexed run
@@ -51,7 +54,7 @@ from daydream.ui import (
 # Verb-first dispatch table. ``_first_verb`` classifies the leading argv token;
 # anything that isn't an explicit verb (bare path, leading flag, empty argv)
 # falls through to the ``review`` golden path via the default-verb shim.
-KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench"}
+KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench", "post-findings"}
 
 
 def _first_verb(argv: list[str]) -> str:
@@ -1268,6 +1271,85 @@ def _handle_corpus_command(argv: list[str]) -> int:
     return int(handler(argv[1:]))
 
 
+def _build_post_findings_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream post-findings <artifact> --pr ... --head-sha ... --repo ...``.
+
+    The privileged Phase B poster is an unattended CI verb: it takes the
+    findings artifact produced by ``--findings-out`` plus the event-derived
+    target facts, and posts when validation passes — no prompting.
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream post-findings",
+        description=(
+            "Validate a Phase A findings artifact against event-derived facts and "
+            "post new findings to the PR (privileged Phase B poster; unattended)."
+        ),
+    )
+    parser.add_argument(
+        "artifact",
+        type=Path,
+        metavar="ARTIFACT",
+        help="Path to the findings artifact written by --findings-out.",
+    )
+    parser.add_argument(
+        "--pr",
+        type=int,
+        required=True,
+        dest="pr_number",
+        metavar="N",
+        help="Event-derived target PR number.",
+    )
+    parser.add_argument(
+        "--head-sha",
+        type=str,
+        required=True,
+        dest="head_sha",
+        metavar="SHA",
+        help="Event-derived PR head SHA the artifact must declare.",
+    )
+    parser.add_argument(
+        "--repo",
+        type=str,
+        required=True,
+        dest="repo",
+        metavar="OWNER/REPO",
+        help="Event-derived repository slug the artifact must declare.",
+    )
+    return parser
+
+
+def _handle_post_findings_command(argv: list[str]) -> int:
+    """Handle ``daydream post-findings <artifact> --pr N --head-sha SHA --repo OWNER/REPO``.
+
+    Delegates to :func:`daydream.pr_review.post_findings_from_artifact` —
+    validate (confused-deputy gate, before any GitHub write), reconcile
+    against prior comments, minimize stale findings, post new ones. Sync: no
+    agent work, no ATIF trajectory.
+
+    Args:
+        argv: The argument vector after the ``post-findings`` verb.
+
+    Returns:
+        ``0`` on success (including "no new findings"); ``1`` on validation,
+        inventory, or post failure.
+    """
+    from daydream import pr_review
+    from daydream.ui import create_console
+
+    parser = _build_post_findings_parser()
+    args = parser.parse_args(argv)
+    if "/" not in args.repo:
+        parser.error(f"--repo must be an OWNER/REPO slug, got {args.repo!r}")
+
+    return pr_review.post_findings_from_artifact(
+        args.artifact,
+        pr_number=args.pr_number,
+        head_sha=args.head_sha,
+        repo=args.repo,
+        console=create_console(),
+    )
+
+
 def main() -> None:
     """Run the CLI entry point.
 
@@ -1283,6 +1365,8 @@ def main() -> None:
         - ``summarize`` — print run-info markdown for a trajectory
         - ``bench`` — score deep-review findings against the offline benchmark
         - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label``)
+        - ``post-findings`` — validate a findings artifact and post new
+          findings to the PR (privileged Phase B poster; unattended)
 
     Returns:
         None: This function does not return; it exits via sys.exit().
@@ -1320,6 +1404,13 @@ def main() -> None:
         # ``run_bench`` is sync — short-circuit before anyio.run.
         if verb == "bench":
             sys.exit(_handle_bench_command(argv[1:]))
+
+        # ``post-findings`` is the privileged Phase B poster: validate a
+        # findings artifact against event-derived facts, reconcile against
+        # prior comments, and post new findings. Sync — no agent work, no
+        # ATIF trajectory (CLAUDE.md enumerates the agent flows).
+        if verb == "post-findings":
+            sys.exit(_handle_post_findings_command(argv[1:]))
 
         config = _parse_args()
         if verb == "feedback":
