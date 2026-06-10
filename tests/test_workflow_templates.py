@@ -289,3 +289,25 @@ def test_post_workflow_surfaces_failures(post_wf: dict[str, Any]) -> None:
     comment_steps = [s for s in surface["steps"] if "daydream review failed" in s.get("run", "")]
     assert len(comment_steps) == 1
     assert comment_steps[0]["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"
+
+
+# ---------------------------------------------------------------------------
+# Injection scan — footgun 2, all templates (env:-only event data in run:)
+# ---------------------------------------------------------------------------
+
+
+_EVENT_INTERP = re.compile(
+    r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}"
+)
+
+
+@pytest.mark.parametrize("wf_path", sorted(TEMPLATES_DIR.glob("*.yml")), ids=lambda p: p.name)
+def test_no_event_data_interpolated_into_run_steps(wf_path) -> None:
+    wf = load_workflow(wf_path)
+    for job_name, job in wf["jobs"].items():
+        for step in job["steps"]:
+            if "run" in step:
+                assert not _EVENT_INTERP.search(step["run"]), (
+                    f"{wf_path.name}:{job_name}: event data must reach run: via env:, "
+                    f"never ${{{{ }}}} interpolation"
+                )
