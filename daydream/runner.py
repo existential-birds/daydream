@@ -18,8 +18,8 @@ subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
 """
 
 import os
-import sys
 import shutil
+import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
