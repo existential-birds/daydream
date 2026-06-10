@@ -52,8 +52,9 @@ class ParsedIssue:
         is_cross_stack: True when the issue spans multiple stacks.
         confidence: Normalised HIGH / MEDIUM / LOW, if known.
         severity: Normalised high / medium / low, if known.
-        fingerprint: Deterministic SHA256 identity for cross-run dedup. Only set
-            on canonical merged findings; None on other construction paths.
+        fingerprint: Deterministic SHA256 identity for cross-run dedup. Set on
+            canonical merged findings and alt-review issues; None on other
+            construction paths.
     """
 
     path: str
@@ -174,6 +175,11 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
     Alt issues have a `files: list[str]` field and no line hint. When
     multiple files are listed we emit one issue per file (classifier will
     fold file-level issues into the review body).
+
+    Every emitted issue carries a stable cross-run ``fingerprint`` computed
+    from the file path, title, and description (``recommendation`` is
+    excluded from identity), so the per-file fan-out yields one distinct
+    fingerprint per file.
     """
     out: list[ParsedIssue] = []
     for raw in alt_issues:
@@ -204,6 +210,7 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
                     body=body,
                     confidence=confidence,
                     severity=severity,
+                    fingerprint=compute_fingerprint(str(path), title, description),
                 )
             )
     return out
