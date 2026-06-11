@@ -27,6 +27,7 @@ from daydream import config, git_ops
 from daydream.agent import console
 from daydream.git_ops import GitError
 from daydream.github_app import AppCredentials, GitHubAppError, exchange_manifest_code
+from daydream.templates import workflow_template_files
 from daydream.ui import print_info
 
 # Events the #147 workflow templates consume (daydream-review.yml →
@@ -313,3 +314,70 @@ def deposit_secrets(
         git_ops.gh_variable_set(repo_dir, config.BOT_HANDLE_VAR, bot_handle, **scope_kwargs)
     except GitError as exc:
         raise GitHubAppError(f"Failed to set variable {config.BOT_HANDLE_VAR}: {exc}") from exc
+
+
+# Returned by :func:`land_workflows` when all three workflow files already exist
+# verbatim, so no branch/PR was opened. Deliberately not a URL (does not start
+# with ``http``) so the caller can distinguish a no-op from a freshly opened PR.
+WORKFLOWS_ALREADY_INSTALLED = "already-installed"
+
+_WORKFLOWS_DIR = ".github/workflows"
+
+_PR_TITLE = "Add Daydream review-bot workflows"
+_PR_BODY = (
+    "Adds the Daydream self-hosted review-bot GitHub Actions workflows.\n\n"
+    "These workflows run code review in your own Actions runners under your "
+    "GitHub App identity. Review the setup guide before merging:\n\n"
+    "- Setup guide: `docs/self-hosted-bot-setup.md`\n"
+    "- Security model: see the *Security model* section of that guide.\n\n"
+    "Merging this PR makes the bot live on this repository."
+)
+
+
+def land_workflows(repo_dir: Path, *, branch: str) -> str:
+    """Copy the packaged workflow templates and open a reviewable PR.
+
+    Copies each :func:`daydream.templates.workflow_template_files` into
+    ``<repo>/.github/workflows/``, then creates *branch*, commits **only** the
+    three workflow files, pushes the branch, and opens a pull request against
+    the repository's default branch. Never commits to or pushes the default
+    branch — the workflows always land via a reviewable PR.
+
+    Idempotent: a template whose target file already exists with identical
+    content is skipped. When all three already match, no branch or PR is
+    created and the :data:`WORKFLOWS_ALREADY_INSTALLED` sentinel is returned
+    (distinguishable from a PR URL).
+
+    Args:
+        repo_dir: Repository working directory (ambient ``gh``/``git`` context).
+        branch: The branch name to create the workflow files on.
+
+    Returns:
+        The opened PR's URL, or :data:`WORKFLOWS_ALREADY_INSTALLED` when every
+        workflow file already exists verbatim.
+
+    Raises:
+        GitError: If a git/``gh`` operation (branch, commit, push, PR) fails.
+        BranchNotFoundError: If the default branch cannot be resolved.
+    """
+    workflows_dir = repo_dir / _WORKFLOWS_DIR
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+
+    copied: list[Path] = []
+    for template in workflow_template_files():
+        target = workflows_dir / template.name
+        content = template.read_text()
+        if target.exists() and target.read_text() == content:
+            continue
+        target.write_text(content)
+        copied.append(Path(_WORKFLOWS_DIR) / template.name)
+
+    if not copied:
+        print_info(console, "Workflow files already present; skipping branch/PR.")
+        return WORKFLOWS_ALREADY_INSTALLED
+
+    base = git_ops.default_branch(repo_dir)
+    git_ops.create_branch(repo_dir, branch)
+    git_ops.commit_paths(repo_dir, copied, _PR_TITLE)
+    git_ops.push_branch(repo_dir, branch)
+    return git_ops.gh_pr_create(repo_dir, head=branch, base=base, title=_PR_TITLE, body=_PR_BODY)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream import bot_setup, config
+from daydream import bot_setup, config, git_ops
 from daydream.github_app import AppCredentials, GitHubAppError
 from tests.harness.fake_gh import FakeGh, install_fake_gh
 
@@ -89,3 +89,49 @@ def test_deposit_sets_three_secrets_and_handle_var_with_pem_off_argv(
     assert set_names == set(config.SETUP_SECRET_NAMES)
     assert fake_gh.variable_set_calls()[-1].name == config.BOT_HANDLE_VAR
     assert all("BEGIN RSA" not in " ".join(c.argv) for c in fake_gh.secret_set_calls())
+
+
+# --- Task 7: land_workflows -------------------------------------------------
+
+
+def test_land_workflows_writes_three_files_on_branch_and_opens_pr(
+    fake_gh: FakeGh, repo_with_origin: Path
+) -> None:
+    """land_workflows copies the templates on a new branch, pushes, opens a PR."""
+    fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/3")
+    url = bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot")
+    wf = repo_with_origin / ".github/workflows"
+    assert {p.name for p in wf.glob("*.yml")} == {
+        "daydream-review.yml",
+        "daydream-command.yml",
+        "daydream-post.yml",
+    }
+    assert git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
+    assert git_ops.current_branch(repo_with_origin) != git_ops.default_branch(repo_with_origin)
+    assert url == "https://github.com/o/r/pull/3"
+
+
+def test_land_workflows_idempotent_returns_sentinel_when_all_present(
+    fake_gh: FakeGh, repo_with_origin: Path
+) -> None:
+    """If all three templates already exist verbatim, skip branch/PR and signal it.
+
+    The "already installed" sentinel must be distinguishable from a PR URL so
+    the caller can surface the no-op without parsing a fake URL.
+    """
+    wf = repo_with_origin / ".github/workflows"
+    wf.mkdir(parents=True)
+    from daydream.templates import workflow_template_files
+
+    for template in workflow_template_files():
+        (wf / template.name).write_text(template.read_text())
+
+    default = git_ops.default_branch(repo_with_origin)
+    result = bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot")
+
+    assert result == bot_setup.WORKFLOWS_ALREADY_INSTALLED
+    # The sentinel must be distinguishable from any PR URL the caller surfaces.
+    assert not result.startswith("http")
+    # No branch/PR side effects: still on the default branch, branch not pushed.
+    assert git_ops.current_branch(repo_with_origin) == default
+    assert not git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
