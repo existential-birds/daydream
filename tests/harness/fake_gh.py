@@ -300,6 +300,14 @@ class FakeGh:
         """Make ``gh variable list --json name`` return *names*."""
         self.set_response("variable-list", value=names)
 
+    def serve_installations(self, installations: list[dict[str, Any]]) -> None:
+        """Make ``gh api /app/installations`` return *installations*.
+
+        Each installation should carry an ``account.login`` so the verify
+        doctor's App-installed check can confirm the target owner appears.
+        """
+        self.set_response("GET", "/app/installations", value=installations)
+
     def serve_prior_threads(self, *, fingerprints: list[str], thread_ids: list[str]) -> None:
         """Serve a prior-thread inventory: one unresolved inline thread per fingerprint."""
         nodes = [

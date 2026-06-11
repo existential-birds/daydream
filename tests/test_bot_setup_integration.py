@@ -10,10 +10,22 @@ the code-exchange behavior is testable without real GitHub: the test drives
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import bot_setup, config, git_ops
-from daydream.github_app import AppCredentials, GitHubAppError
+from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV, AppCredentials, GitHubAppError
 from tests.harness.fake_gh import FakeGh, install_fake_gh
+
+
+def _real_pem() -> str:
+    """Generate a real RSA PEM so ``mint_jwt`` can sign a valid App JWT."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
 
 
 @pytest.fixture
@@ -135,3 +147,57 @@ def test_land_workflows_idempotent_returns_sentinel_when_all_present(
     # No branch/PR side effects: still on the default branch, branch not pushed.
     assert git_ops.current_branch(repo_with_origin) == default
     assert not git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
+
+
+# --- Task 8: run_verify (the doctor) ----------------------------------------
+
+
+def test_verify_reports_missing_secret_with_remediation(fake_gh: FakeGh, git_repo: Path) -> None:
+    """N=1 missing secret → ok is False and the failed check names it + remediation."""
+    fake_gh.serve_secret_list(["DAYDREAM_APP_ID", "ANTHROPIC_API_KEY"])  # PRIVATE_KEY absent
+    fake_gh.serve_variable_list(["DAYDREAM_BOT_HANDLE"])
+    fake_gh.serve_installations([{"account": {"login": "o"}}])
+    result = bot_setup.run_verify(git_repo, scope=bot_setup.Scope(repo="o/r"))
+    assert result.ok is False
+    failed = [c for c in result.checks if not c.passed]
+    assert any("DAYDREAM_APP_PRIVATE_KEY" in c.detail for c in failed)
+
+
+def test_verify_healthy_install_passes_all_checks(
+    fake_gh: FakeGh, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A complete install (creds + secrets + var + installed App + workflows) → ok is True.
+
+    Exercises every required check on its passing shape, and — with local App
+    creds present — drives the App-installed (``/app/installations``) and
+    permission (``GET /app``) checks through the real ``gh`` subprocess seam.
+    """
+    from tests.conftest import _commit, _git
+
+    pem = _real_pem()
+    monkeypatch.setenv(APP_ID_ENV, "7")
+    monkeypatch.setenv(APP_PRIVATE_KEY_ENV, pem)
+
+    # All three secrets + the handle variable deposited.
+    fake_gh.serve_secret_list(list(config.SETUP_SECRET_NAMES))
+    fake_gh.serve_variable_list([config.BOT_HANDLE_VAR])
+    # The App is installed on the target owner.
+    fake_gh.serve_installations([{"account": {"login": "o"}}])
+    # The App grants at least the required permissions.
+    fake_gh.set_response("GET", "/app", value={"permissions": dict(config.APP_PERMISSIONS), "slug": "acme-bot"})
+
+    # The three workflow files exist on the default branch.
+    wf = git_repo / ".github/workflows"
+    wf.mkdir(parents=True)
+    from daydream.templates import workflow_template_files
+
+    for template in workflow_template_files():
+        (wf / template.name).write_text(template.read_text())
+    _git(git_repo, "add", ".github/workflows")
+    _commit(git_repo, "add workflows")
+
+    result = bot_setup.run_verify(git_repo, scope=bot_setup.Scope(repo="o/r"))
+    assert result.ok is True
+    assert all(c.passed for c in result.checks)
+    # The App-installed check actually consulted the installations endpoint.
+    assert fake_gh.calls("GET", "/app/installations")

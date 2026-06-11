@@ -26,7 +26,17 @@ from urllib.parse import parse_qs, urlparse
 from daydream import config, git_ops
 from daydream.agent import console
 from daydream.git_ops import GitError
-from daydream.github_app import AppCredentials, GitHubAppError, exchange_manifest_code
+from daydream.github_app import (
+    APP_ID_ENV,
+    APP_PRIVATE_KEY_ENV,
+    AppCredentials,
+    GitHubAppError,
+    _scoped_gh_token,
+    exchange_manifest_code,
+    get_app_metadata,
+    mint_jwt,
+    resolve_credentials,
+)
 from daydream.templates import workflow_template_files
 from daydream.ui import print_info
 
@@ -381,3 +391,241 @@ def land_workflows(repo_dir: Path, *, branch: str) -> str:
     git_ops.commit_paths(repo_dir, copied, _PR_TITLE)
     git_ops.push_branch(repo_dir, branch)
     return git_ops.gh_pr_create(repo_dir, head=branch, base=base, title=_PR_TITLE, body=_PR_BODY)
+
+
+@dataclass(frozen=True)
+class Check:
+    """One verify-doctor check outcome.
+
+    Attributes:
+        name: Short check identifier (e.g. ``"secrets"``).
+        passed: True when the check passed (a skipped optional check is
+            reported as passed with an explanatory *detail*).
+        detail: Human-readable result. On failure it names the exact missing
+            secret/variable/file/permission **and** the remediation.
+        required: When False, the check is informational and does not affect
+            :attr:`VerifyResult.ok` (used for checks skipped because no local
+            App credentials are available to read App-level state).
+    """
+
+    name: str
+    passed: bool
+    detail: str
+    required: bool = True
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    """Aggregate outcome of :func:`run_verify`.
+
+    Attributes:
+        checks: The ordered per-check results.
+        ok: True iff every *required* check passed.
+    """
+
+    checks: tuple[Check, ...]
+
+    @property
+    def ok(self) -> bool:
+        """True when every required check passed (skipped optionals ignored)."""
+        return all(c.passed for c in self.checks if c.required)
+
+
+def _owner_of(scope: Scope) -> str:
+    """Resolve the target owner login from a repo/org scope."""
+    if scope.org:
+        return scope.org
+    # scope.repo is "owner/repo" (Scope validates exactly one is set).
+    return (scope.repo or "").split("/", 1)[0]
+
+
+def _check_app_installed(repo_dir: Path, scope: Scope, creds: AppCredentials | None) -> Check:
+    """Check (1): the App is installed on the target owner.
+
+    Reads ``GET /app/installations`` under an App JWT and confirms the target
+    owner appears. Skipped (reported as a passing, non-required note) when no
+    local App credentials are available to authenticate the App-level read.
+    """
+    if creds is None:
+        return Check(
+            name="app_installed",
+            passed=True,
+            detail=(
+                "Skipped: no local App credentials "
+                f"({APP_ID_ENV}/{APP_PRIVATE_KEY_ENV}) to read installations. "
+                "Export them to verify the App is installed on the target."
+            ),
+            required=False,
+        )
+    owner = _owner_of(scope)
+    jwt_token = mint_jwt(creds.app_id, creds.private_key)
+    bearer = {"Authorization": f"Bearer {jwt_token}"}
+    try:
+        with _scoped_gh_token(jwt_token):
+            installations = git_ops.gh_api(repo_dir, "/app/installations", headers=bearer)
+    except GitError as exc:
+        return Check(
+            name="app_installed",
+            passed=False,
+            detail=f"Could not read App installations: {exc}. Confirm the App credentials are valid.",
+        )
+    logins = {
+        (inst.get("account") or {}).get("login")
+        for inst in (installations if isinstance(installations, list) else [])
+    }
+    if owner in logins:
+        return Check(name="app_installed", passed=True, detail=f"App is installed on '{owner}'.")
+    return Check(
+        name="app_installed",
+        passed=False,
+        detail=(
+            f"App is not installed on '{owner}'. Install it via "
+            f"https://github.com/settings/installations (or the org's settings)."
+        ),
+    )
+
+
+def _check_secrets_and_var(repo_dir: Path, scope: Scope) -> Check:
+    """Check (2): all required secrets + the bot-handle variable are present."""
+    scope_kwargs = scope._secret_kwargs()
+    try:
+        secrets = set(git_ops.gh_secret_list(repo_dir, **scope_kwargs))
+        variables = set(git_ops.gh_variable_list(repo_dir, **scope_kwargs))
+    except GitError as exc:
+        return Check(
+            name="secrets",
+            passed=False,
+            detail=f"Could not list secrets/variables: {exc}. Confirm gh is authenticated for the target.",
+        )
+
+    missing_secrets = [name for name in config.SETUP_SECRET_NAMES if name not in secrets]
+    var_missing = config.BOT_HANDLE_VAR not in variables
+    if not missing_secrets and not var_missing:
+        return Check(
+            name="secrets",
+            passed=True,
+            detail=f"All {len(config.SETUP_SECRET_NAMES)} secrets and {config.BOT_HANDLE_VAR} are set.",
+        )
+
+    parts: list[str] = []
+    if missing_secrets:
+        parts.append(
+            "Missing secret(s): "
+            + ", ".join(missing_secrets)
+            + f" — set via `gh secret set <NAME> {_scope_flag(scope)}`."
+        )
+    if var_missing:
+        parts.append(
+            f"Missing variable {config.BOT_HANDLE_VAR} — "
+            f"set via `gh variable set {config.BOT_HANDLE_VAR} {_scope_flag(scope)}`."
+        )
+    return Check(name="secrets", passed=False, detail=" ".join(parts))
+
+
+def _check_permissions(repo_dir: Path, creds: AppCredentials | None) -> Check:
+    """Check (3): App permissions are a superset of the required set."""
+    if creds is None:
+        return Check(
+            name="permissions",
+            passed=True,
+            detail=(
+                "Skipped: no local App credentials "
+                f"({APP_ID_ENV}/{APP_PRIVATE_KEY_ENV}) to read App permissions."
+            ),
+            required=False,
+        )
+    try:
+        meta = get_app_metadata(repo_dir, creds.app_id, creds.private_key)
+    except GitHubAppError as exc:
+        return Check(
+            name="permissions",
+            passed=False,
+            detail=f"Could not read App permissions: {exc}. Confirm the App credentials are valid.",
+        )
+    granted = meta.get("permissions") or {}
+    missing = [name for name in config.APP_PERMISSIONS if granted.get(name) != config.APP_PERMISSIONS[name]]
+    if not missing:
+        return Check(name="permissions", passed=True, detail="App grants all required permissions.")
+    detail = ", ".join(f"{name}={config.APP_PERMISSIONS[name]}" for name in missing)
+    return Check(
+        name="permissions",
+        passed=False,
+        detail=(
+            f"App is missing required permission(s): {detail}. "
+            "Update the App's permissions in its GitHub settings and re-accept the install."
+        ),
+    )
+
+
+def _check_workflows(repo_dir: Path) -> Check:
+    """Check (4): the three workflow files exist on the default branch."""
+    try:
+        base = git_ops.default_branch(repo_dir)
+    except git_ops.BranchNotFoundError as exc:
+        return Check(
+            name="workflows",
+            passed=False,
+            detail=f"Could not resolve the default branch: {exc}.",
+        )
+
+    missing: list[str] = []
+    for template in workflow_template_files():
+        path = f"{_WORKFLOWS_DIR}/{template.name}"
+        try:
+            git_ops.show(repo_dir, base, path)
+        except GitError:
+            missing.append(path)
+    if not missing:
+        return Check(name="workflows", passed=True, detail=f"All workflow files present on '{base}'.")
+    return Check(
+        name="workflows",
+        passed=False,
+        detail=(
+            f"Missing workflow file(s) on '{base}': "
+            + ", ".join(missing)
+            + " — run `daydream setup` (or merge the setup PR) to land them."
+        ),
+    )
+
+
+def _scope_flag(scope: Scope) -> str:
+    """Render the ``gh`` scope flag for a remediation hint."""
+    if scope.org:
+        return f"--org {scope.org}"
+    return f"--repo {scope.repo}"
+
+
+def run_verify(repo_dir: Path, *, scope: Scope) -> VerifyResult:
+    """Run the read-only setup doctor against the target scope.
+
+    Runs four checks and aggregates them into a :class:`VerifyResult`:
+
+    1. **App installed** — the App appears in ``GET /app/installations`` for the
+       target owner (skipped, non-required, when no local App credentials are
+       available to authenticate the read).
+    2. **Secrets & variable** — every :data:`config.SETUP_SECRET_NAMES` secret
+       and the :data:`config.BOT_HANDLE_VAR` variable exist at the scope.
+    3. **Permissions** — the App grants a superset of
+       :data:`config.APP_PERMISSIONS` (skipped, non-required, without creds).
+    4. **Workflows** — the three packaged workflow files exist on the default
+       branch.
+
+    This is strictly read-only: it never sets a secret, variable, or file. Each
+    failed required check's ``detail`` names the exact missing element and the
+    remediation; :attr:`VerifyResult.ok` is True iff every required check passed.
+
+    Args:
+        repo_dir: Repository working directory (ambient ``gh``/``git`` context).
+        scope: Repo- or org-scoped target (exactly one).
+
+    Returns:
+        The aggregated :class:`VerifyResult`.
+    """
+    creds = resolve_credentials()
+    checks = (
+        _check_app_installed(repo_dir, scope, creds),
+        _check_secrets_and_var(repo_dir, scope),
+        _check_permissions(repo_dir, creds),
+        _check_workflows(repo_dir),
+    )
+    return VerifyResult(checks=checks)
