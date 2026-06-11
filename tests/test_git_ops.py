@@ -1021,3 +1021,74 @@ def test_gh_api_jq_invalid_line_raises_git_error(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(git_ops, "_run_gh", lambda *a, **k: _Proc())
     with pytest.raises(git_ops.GitError, match="invalid JSON"):
         git_ops.gh_api(tmp_path, "/app/installations", jq=".[]")
+
+
+# --- gh secret/variable/PR primitives (Task 2) ------------------------------
+
+from tests.harness.fake_gh import FakeGh, install_fake_gh  # noqa: E402
+
+
+@pytest.fixture
+def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
+    """Install the fake ``gh`` binary on PATH for real-path subprocess tests."""
+    return install_fake_gh(tmp_path / "fake-gh-bin", monkeypatch)
+
+
+def test_gh_secret_set_passes_value_on_stdin_never_argv(fake_gh: FakeGh, git_repo: Path) -> None:
+    git_ops.gh_secret_set(
+        git_repo,
+        "DAYDREAM_APP_PRIVATE_KEY",
+        "-----BEGIN KEY-----\nx\n",
+        repo_slug="o/r",
+    )
+    call = fake_gh.secret_set_calls()[-1]
+    assert call.name == "DAYDREAM_APP_PRIVATE_KEY" and call.repo == "o/r"
+    assert "BEGIN KEY" not in " ".join(call.argv)  # PEM never in process args
+    assert "BEGIN KEY" in call.stdin
+
+
+def test_gh_secret_set_org_scope_threads_org_flag(fake_gh: FakeGh, git_repo: Path) -> None:
+    git_ops.gh_secret_set(git_repo, "DAYDREAM_APP_ID", "42", org="acme")
+    call = fake_gh.secret_set_calls()[-1]
+    assert call.name == "DAYDREAM_APP_ID" and call.org == "acme" and call.repo is None
+    assert "--org" in call.argv and "acme" in call.argv
+    assert "42" in call.stdin
+
+
+def test_gh_secret_set_requires_exactly_one_scope(fake_gh: FakeGh, git_repo: Path) -> None:
+    with pytest.raises(GitError):
+        git_ops.gh_secret_set(git_repo, "X", "v")
+    with pytest.raises(GitError):
+        git_ops.gh_secret_set(git_repo, "X", "v", org="acme", repo_slug="o/r")
+
+
+def test_gh_variable_set_uses_body_flag(fake_gh: FakeGh, git_repo: Path) -> None:
+    git_ops.gh_variable_set(git_repo, "DAYDREAM_BOT_HANDLE", "acme-bot", repo_slug="o/r")
+    call = fake_gh.variable_set_calls()[-1]
+    assert call.name == "DAYDREAM_BOT_HANDLE" and call.repo == "o/r"
+    assert "--body" in call.argv and "acme-bot" in call.argv
+
+
+def test_gh_secret_list_returns_names(fake_gh: FakeGh, git_repo: Path) -> None:
+    fake_gh.serve_secret_list(["DAYDREAM_APP_ID", "ANTHROPIC_API_KEY"])
+    assert git_ops.gh_secret_list(git_repo, repo_slug="o/r") == [
+        "DAYDREAM_APP_ID",
+        "ANTHROPIC_API_KEY",
+    ]
+
+
+def test_gh_variable_list_returns_names(fake_gh: FakeGh, git_repo: Path) -> None:
+    fake_gh.serve_variable_list(["DAYDREAM_BOT_HANDLE"])
+    assert git_ops.gh_variable_list(git_repo, org="acme") == ["DAYDREAM_BOT_HANDLE"]
+
+
+def test_gh_pr_create_returns_url(fake_gh: FakeGh, git_repo: Path) -> None:
+    fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/9")
+    url = git_ops.gh_pr_create(git_repo, head="b", base="main", title="t", body="b")
+    assert url == "https://github.com/o/r/pull/9"
+
+
+def test_gh_pr_create_failure_raises_git_error(fake_gh: FakeGh, git_repo: Path) -> None:
+    # No "pr-create" response configured → the shim exits non-zero.
+    with pytest.raises(GitError):
+        git_ops.gh_pr_create(git_repo, head="b", base="main", title="t", body="b")

@@ -237,6 +237,7 @@ def _run_gh(
     args: list[str],
     *,
     timeout: int = 60,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``gh`` in *repo* with hardened defaults.
 
@@ -244,6 +245,9 @@ def _run_gh(
         repo: Repository working directory.
         args: Arguments after ``gh``.
         timeout: Subprocess timeout in seconds.
+        input_text: Optional text piped to the subprocess on **stdin** (used to
+            pass secret values via ``gh secret set --body-file -`` so the value
+            never appears in the process argument vector).
 
     The subprocess environment is sourced from the module ``_gh_token_env``
     singleton when set (via :func:`set_gh_token_env`), so ``gh`` authenticates
@@ -268,6 +272,7 @@ def _run_gh(
             timeout=timeout,
             shell=False,
             check=False,
+            input=input_text,
             env={**os.environ, **token_env} if token_env is not None else None,
         )
     except subprocess.TimeoutExpired as exc:
@@ -1404,3 +1409,144 @@ def gh_api(
     finally:
         if succeeded:
             tmp_path.unlink(missing_ok=True)
+
+
+# --- gh secret / variable / PR primitives ------------------------------------
+
+
+def _scope_args(org: str | None, repo_slug: str | None) -> list[str]:
+    """Build the ``--org``/``--repo`` scope flags, requiring exactly one.
+
+    Raises:
+        GitError: If neither or both of *org* and *repo_slug* are provided.
+    """
+    if (org is None) == (repo_slug is None):
+        raise GitError("exactly one of org or repo_slug must be provided")
+    return ["--org", org] if org is not None else ["--repo", repo_slug or ""]
+
+
+def gh_secret_set(
+    repo: Path,
+    name: str,
+    value: str,
+    *,
+    org: str | None = None,
+    repo_slug: str | None = None,
+) -> None:
+    """Set an Actions secret via ``gh secret set <name> --body-file -``.
+
+    The *value* is piped on **stdin** (never the argument vector) so secret
+    material such as a PEM private key cannot leak into process listings.
+
+    Args:
+        repo: Repository working directory (ambient ``gh`` auth context).
+        name: The secret name.
+        value: The secret value; piped on stdin via ``--body-file -``.
+        org: Set at the organization scope (``--org``).
+        repo_slug: Set at the repository scope (``--repo <owner/repo>``).
+
+    Raises:
+        GitError: If neither/both scopes are given, or the ``gh`` call fails.
+    """
+    args = ["secret", "set", name, "--body-file", "-", *_scope_args(org, repo_slug)]
+    proc = _run_gh(repo, args, timeout=60, input_text=value)
+    if proc.returncode != 0:
+        raise _gh_error_for(f"gh secret set {name} failed: {proc.stderr.strip()}", proc.stderr)
+
+
+def gh_variable_set(
+    repo: Path,
+    name: str,
+    value: str,
+    *,
+    org: str | None = None,
+    repo_slug: str | None = None,
+) -> None:
+    """Set an Actions variable via ``gh variable set <name> --body <value>``.
+
+    Variables are non-secret handles, so the value is passed via ``--body``.
+
+    Args:
+        repo: Repository working directory.
+        name: The variable name.
+        value: The variable value.
+        org: Set at the organization scope (``--org``).
+        repo_slug: Set at the repository scope (``--repo <owner/repo>``).
+
+    Raises:
+        GitError: If neither/both scopes are given, or the ``gh`` call fails.
+    """
+    args = ["variable", "set", name, "--body", value, *_scope_args(org, repo_slug)]
+    proc = _run_gh(repo, args, timeout=60)
+    if proc.returncode != 0:
+        raise _gh_error_for(f"gh variable set {name} failed: {proc.stderr.strip()}", proc.stderr)
+
+
+def _gh_name_list(repo: Path, kind: str, org: str | None, repo_slug: str | None) -> list[str]:
+    """Run ``gh <kind> list --json name`` and return the names."""
+    args = [kind, "list", "--json", "name", *_scope_args(org, repo_slug)]
+    proc = _run_gh(repo, args, timeout=60)
+    if proc.returncode != 0:
+        raise _gh_error_for(f"gh {kind} list failed: {proc.stderr.strip()}", proc.stderr)
+    try:
+        entries = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise GitError(f"gh {kind} list returned invalid JSON: {exc}") from exc
+    return [entry["name"] for entry in entries]
+
+
+def gh_secret_list(repo: Path, *, org: str | None = None, repo_slug: str | None = None) -> list[str]:
+    """Return the names of Actions secrets at the given scope.
+
+    Args:
+        repo: Repository working directory.
+        org: List at the organization scope (``--org``).
+        repo_slug: List at the repository scope (``--repo <owner/repo>``).
+
+    Returns:
+        The secret names (values are not exposed by ``gh secret list``).
+
+    Raises:
+        GitError: If neither/both scopes are given, or the ``gh`` call fails.
+    """
+    return _gh_name_list(repo, "secret", org, repo_slug)
+
+
+def gh_variable_list(repo: Path, *, org: str | None = None, repo_slug: str | None = None) -> list[str]:
+    """Return the names of Actions variables at the given scope.
+
+    Args:
+        repo: Repository working directory.
+        org: List at the organization scope (``--org``).
+        repo_slug: List at the repository scope (``--repo <owner/repo>``).
+
+    Returns:
+        The variable names.
+
+    Raises:
+        GitError: If neither/both scopes are given, or the ``gh`` call fails.
+    """
+    return _gh_name_list(repo, "variable", org, repo_slug)
+
+
+def gh_pr_create(repo: Path, *, head: str, base: str, title: str, body: str) -> str:
+    """Open a pull request via ``gh pr create`` and return its URL.
+
+    Args:
+        repo: Repository working directory.
+        head: The head branch to open the PR from.
+        base: The base branch to merge into.
+        title: The PR title.
+        body: The PR body.
+
+    Returns:
+        The PR URL ``gh`` prints on success.
+
+    Raises:
+        GitError: If the ``gh pr create`` call fails (stderr included).
+    """
+    args = ["pr", "create", "--head", head, "--base", base, "--title", title, "--body", body]
+    proc = _run_gh(repo, args, timeout=60)
+    if proc.returncode != 0:
+        raise _gh_error_for(f"gh pr create failed: {proc.stderr.strip()}", proc.stderr)
+    return proc.stdout.strip()
