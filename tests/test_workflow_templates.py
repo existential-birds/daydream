@@ -1,6 +1,6 @@
 """Structure tests for the shipped GitHub Actions workflow templates.
 
-Parses each template under ``templates/workflows/`` with ``yaml.safe_load`` and
+Parses each template under ``daydream/templates/workflows/`` with ``yaml.safe_load`` and
 asserts on the parsed tree; raw-text assertions ("this string never appears")
 read the file directly. PyYAML parses the bare ``on:`` key as boolean ``True``;
 ``wf_on()`` normalizes it back.
@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 import yaml
 
-TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "workflows"
+TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "daydream" / "templates" / "workflows"
 
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 
