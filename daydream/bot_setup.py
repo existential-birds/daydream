@@ -14,10 +14,12 @@ the code-exchange behavior is testable without real GitHub: drive
 
 from __future__ import annotations
 
+import getpass
 import html
 import json
 import os
 import shutil
+import sys
 import threading
 import webbrowser
 from dataclasses import dataclass
@@ -725,6 +727,35 @@ def _wait_for_install_click() -> None:
     input("Press Enter once you have installed the App on the target...")
 
 
+def _prompt_for_anthropic_key() -> str | None:
+    """Prompt the operator for their ``ANTHROPIC_API_KEY`` when it is not preset.
+
+    The key is bound for deposit as an Actions secret, so asking for it inline
+    keeps the "one command" promise instead of stranding a new operator on a
+    pre-flight error. Input is read with :func:`getpass.getpass` so the secret
+    is never echoed to the terminal or shell history.
+
+    Isolated as a module-level seam so the real-path test can drive
+    :func:`run_setup` without blocking on real stdin.
+
+    Returns:
+        The entered key (stripped, non-empty), or ``None`` when stdin is not a
+        TTY (unattended/CI run) or the operator cancels — so the caller falls
+        back to a clean pre-flight error rather than blocking or guessing.
+    """
+    if not sys.stdin.isatty():
+        return None
+    print_info(
+        console,
+        f"{_ANTHROPIC_KEY_ENV} is not set. Enter it now — it will be stored as an Actions secret.",
+    )
+    try:
+        entered = getpass.getpass(f"{_ANTHROPIC_KEY_ENV} (input hidden): ")
+    except (EOFError, KeyboardInterrupt):
+        return None
+    return entered.strip() or None
+
+
 def run_setup(
     target_dir: Path,
     *,
@@ -737,7 +768,8 @@ def run_setup(
     Orchestrates the full-auto path:
 
     1. **Pre-flight** — ``gh`` is on ``PATH`` and the ``ANTHROPIC_API_KEY`` is
-       resolvable (explicit arg or environment).
+       resolvable (explicit arg, environment, or an interactive hidden prompt;
+       a non-interactive stdin without the key fails cleanly here).
     2. **Register** — unless the credentials are already deposited (idempotency)
        and *force* is not set, register the App via
        :func:`register_app_via_manifest` (the localhost browser handshake).
@@ -772,10 +804,13 @@ def run_setup(
 
     resolved_key = anthropic_key or os.environ.get(_ANTHROPIC_KEY_ENV)
     if not resolved_key:
+        resolved_key = _prompt_for_anthropic_key()
+    if not resolved_key:
         print_error(
             console,
             "ANTHROPIC_API_KEY missing",
-            f"Set {_ANTHROPIC_KEY_ENV} in the environment (or pass it) before running setup.",
+            f"Set {_ANTHROPIC_KEY_ENV} in the environment (or pass it) before running setup, "
+            "or run interactively to be prompted for it.",
         )
         return 1
 

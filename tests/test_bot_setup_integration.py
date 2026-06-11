@@ -266,6 +266,76 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     assert git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
 
 
+def test_setup_prompts_for_anthropic_key_when_absent_and_deposits_it(
+    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``daydream setup`` with no ``ANTHROPIC_API_KEY`` in the env prompts for it.
+
+    A new operator should not be stranded on a pre-flight error: when the key
+    is absent, setup prompts (hidden input) and deposits what the operator
+    enters. Mocks the manifest seam and the prompt seam only; asserts the
+    observable outcome — the ``ANTHROPIC_API_KEY`` secret is set with the
+    prompted value (read off the recorded stdin, never argv) and setup exits 0.
+    """
+    pem = _real_pem()
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "daydream.bot_setup.register_app_via_manifest",
+        lambda repo, org=None: (AppCredentials(7, pem), "acme-bot"),
+    )
+    monkeypatch.setattr("daydream.bot_setup._prompt_for_anthropic_key", lambda: "sk-ant-prompted")
+    fake_gh.serve_installations([{"account": {"login": "o"}}])
+    fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/6")
+
+    code = cli_main(["setup", str(repo_with_origin), "--repo", "o/r"])
+
+    assert code == 0
+    key_calls = [c for c in fake_gh.secret_set_calls() if c.name == "ANTHROPIC_API_KEY"]
+    assert len(key_calls) == 1
+    assert key_calls[0].stdin.strip() == "sk-ant-prompted"
+    assert "sk-ant-prompted" not in " ".join(key_calls[0].argv)
+
+
+def test_setup_fails_cleanly_when_key_absent_and_noninteractive(
+    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No key + a non-interactive stdin → clean pre-flight exit 1, nothing deposited.
+
+    Unattended/CI runs must not block on a prompt; the prompt seam returns
+    ``None`` for a non-TTY stdin so the orchestrator surfaces the pre-flight
+    error and never registers an App or sets a secret.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("daydream.bot_setup._prompt_for_anthropic_key", lambda: None)
+    register_called = False
+
+    def _fail_register(repo: Path, org: str | None = None) -> tuple[AppCredentials, str]:
+        nonlocal register_called
+        register_called = True
+        raise AssertionError("registration must not run before the key pre-flight passes")
+
+    monkeypatch.setattr("daydream.bot_setup.register_app_via_manifest", _fail_register)
+
+    code = cli_main(["setup", str(repo_with_origin), "--repo", "o/r"])
+
+    assert code == 1
+    assert register_called is False
+    assert fake_gh.secret_set_calls() == []
+
+
+def test_prompt_for_anthropic_key_returns_none_on_non_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prompt seam returns None (never blocks) when stdin is not a TTY."""
+    monkeypatch.setattr("daydream.bot_setup.sys.stdin.isatty", lambda: False)
+    assert bot_setup._prompt_for_anthropic_key() is None
+
+
+def test_prompt_for_anthropic_key_reads_hidden_input_on_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a TTY the seam returns the hidden-entered key, stripped."""
+    monkeypatch.setattr("daydream.bot_setup.sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("daydream.bot_setup.getpass.getpass", lambda prompt="": "  sk-ant-typed  ")
+    assert bot_setup._prompt_for_anthropic_key() == "sk-ant-typed"
+
+
 def test_setup_verify_flag_exits_nonzero_when_incomplete(
     fake_gh: FakeGh, git_repo: Path
 ) -> None:
