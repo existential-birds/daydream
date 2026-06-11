@@ -523,6 +523,51 @@ def test_worktree_add_and_remove_round_trip(tmp_path: Path) -> None:
     assert not wt.exists()
 
 
+# --- branch / commit / push primitives (Task 3) -----------------------------
+
+
+def test_commit_paths_on_new_branch_pushes_to_origin(repo_with_origin: Path) -> None:
+    (repo_with_origin / ".github/workflows").mkdir(parents=True)
+    (repo_with_origin / ".github/workflows/daydream-review.yml").write_text("name: x\n")
+    git_ops.create_branch(repo_with_origin, "daydream/setup")
+    git_ops.commit_paths(
+        repo_with_origin,
+        [Path(".github/workflows/daydream-review.yml")],
+        "add bot workflows",
+    )
+    git_ops.push_branch(repo_with_origin, "daydream/setup")
+    assert git_ops.ref_exists(repo_with_origin, "origin/daydream/setup")
+
+
+def test_create_branch_raises_when_branch_exists(repo_with_origin: Path) -> None:
+    git_ops.create_branch(repo_with_origin, "daydream/dup")
+    _git(repo_with_origin, "checkout", "main")
+    with pytest.raises(GitError):
+        git_ops.create_branch(repo_with_origin, "daydream/dup")
+
+
+def test_commit_paths_commits_only_named_paths(repo_with_origin: Path) -> None:
+    """commit_paths stages only the named files — never a blanket ``-A``."""
+    git_ops.create_branch(repo_with_origin, "daydream/selective")
+    (repo_with_origin / "tracked.txt").write_text("staged\n")
+    (repo_with_origin / "untouched.txt").write_text("left behind\n")
+    git_ops.commit_paths(repo_with_origin, [Path("tracked.txt")], "add tracked only")
+    # The committed tree contains tracked.txt but not untouched.txt.
+    committed = _git(repo_with_origin, "show", "--name-only", "--format=", "HEAD").split()
+    assert committed == ["tracked.txt"]
+    # untouched.txt is still an uncommitted, untracked file.
+    assert "untouched.txt" in _git(repo_with_origin, "status", "--porcelain")
+
+
+def test_push_branch_failure_raises_git_error(git_repo: Path) -> None:
+    """push_branch propagates a push failure (no ``origin`` remote) as GitError."""
+    git_ops.create_branch(git_repo, "daydream/no-remote")
+    (git_repo / "f.txt").write_text("x\n")
+    git_ops.commit_paths(git_repo, [Path("f.txt")], "add f")
+    with pytest.raises(GitError):
+        git_ops.push_branch(git_repo, "daydream/no-remote")
+
+
 # --- Error type identity ----------------------------------------------------
 
 

@@ -1169,6 +1169,67 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
         raise GitError(f"git worktree remove {path} failed: {proc.stderr.strip()}")
 
 
+def create_branch(repo: Path, name: str) -> None:
+    """Create and check out a new branch *name* via ``git checkout -b``.
+
+    Args:
+        repo: Repository working directory.
+        name: The branch name to create and switch to.
+
+    Raises:
+        GitError: If the branch already exists (``git checkout -b`` refuses to
+            overwrite it) or the checkout otherwise fails. The caller decides
+            whether to reuse or force the branch.
+    """
+    proc = _run_git(repo, ["checkout", "-b", name], timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git checkout -b {name} failed in {repo}: {proc.stderr.strip()}")
+
+
+def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
+    """Stage only *paths* and commit them with *message*.
+
+    Stages exactly the named paths via ``git add <paths…>`` (never ``-A`` /
+    ``--all``) so only the intended files are committed, then commits with
+    ``git commit -m <message>``.
+
+    Args:
+        repo: Repository working directory.
+        paths: Repo-relative paths to stage and commit. Must be non-empty.
+        message: The commit message.
+
+    Raises:
+        GitError: If *paths* is empty, or the ``git add`` / ``git commit`` call
+            fails.
+    """
+    if not paths:
+        raise GitError("commit_paths requires at least one path")
+    add = _run_git(repo, ["add", "--", *(str(p) for p in paths)], timeout=30, retries=0)
+    if add.returncode != 0:
+        raise GitError(f"git add {paths} failed in {repo}: {add.stderr.strip()}")
+    commit = _run_git(repo, ["commit", "-m", message], timeout=30, retries=0)
+    if commit.returncode != 0:
+        raise GitError(f"git commit failed in {repo}: {commit.stderr.strip()}")
+
+
+def push_branch(repo: Path, branch: str, *, remote: str = "origin") -> None:
+    """Push *branch* to *remote*, setting upstream tracking.
+
+    Runs ``git push -u <remote> <branch>``.
+
+    Args:
+        repo: Repository working directory.
+        branch: The branch to push.
+        remote: Remote name. Defaults to ``"origin"``.
+
+    Raises:
+        GitError: If the push fails (propagates stderr).
+    """
+    proc = _run_git(repo, ["push", "-u", remote, branch], timeout=60, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git push -u {remote} {branch} failed in {repo}: {proc.stderr.strip()}")
+
+
 # --- gh wrappers -------------------------------------------------------------
 
 
