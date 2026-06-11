@@ -18,12 +18,16 @@ import html
 import json
 import threading
 import webbrowser
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from daydream import config
+from daydream import config, git_ops
+from daydream.agent import console
+from daydream.git_ops import GitError
 from daydream.github_app import AppCredentials, GitHubAppError, exchange_manifest_code
+from daydream.ui import print_info
 
 # Events the #147 workflow templates consume (daydream-review.yml →
 # pull_request, daydream-command.yml → issue_comment, daydream-post.yml →
@@ -221,3 +225,91 @@ def register_app_via_manifest(repo_dir: Path, *, org: str | None = None) -> tupl
             the manifest-code exchange failed.
     """
     return _ManifestListener(repo_dir=repo_dir, org=org).serve()
+
+
+@dataclass(frozen=True)
+class Scope:
+    """Target scope for deposited Actions secrets/variables.
+
+    Exactly one of *repo* or *org* must be set; the orchestrator threads it to
+    the ``gh`` ``--repo``/``--org`` flags. Validated at construction so an
+    ambiguous/empty scope can never reach a ``gh`` call.
+
+    Attributes:
+        repo: ``owner/repo`` slug for a repository-scoped deposit, else None.
+        org: Organization login for an org-scoped deposit, else None.
+    """
+
+    repo: str | None = None
+    org: str | None = None
+
+    def __post_init__(self) -> None:
+        if bool(self.repo) == bool(self.org):
+            raise ValueError("Scope requires exactly one of repo='owner/repo' or org='name'")
+
+    def _secret_kwargs(self) -> dict[str, str]:
+        """Map the scope to the ``gh_secret_set``/``gh_variable_set`` keyword."""
+        if self.repo:
+            return {"repo_slug": self.repo}
+        return {"org": self.org} if self.org else {}
+
+
+def deposit_secrets(
+    repo_dir: Path,
+    creds: AppCredentials,
+    *,
+    anthropic_key: str,
+    bot_handle: str,
+    scope: Scope,
+) -> None:
+    """Deposit the App credentials and bot handle as Actions secrets/variables.
+
+    Sets the three :data:`config.SETUP_SECRET_NAMES` secrets
+    (``DAYDREAM_APP_ID`` = the numeric App id, ``DAYDREAM_APP_PRIVATE_KEY`` =
+    the PEM, ``ANTHROPIC_API_KEY`` = the operator key) via
+    :func:`git_ops.gh_secret_set` (value piped on stdin, never argv), and the
+    :data:`config.BOT_HANDLE_VAR` Actions variable via
+    :func:`git_ops.gh_variable_set`, threading *scope* to ``--repo``/``--org``.
+
+    Idempotent: ``gh`` overwrites an existing secret/variable, so a re-run is
+    safe. Pre-existing secrets are listed first and logged by name only —
+    secret *values* are never logged. The PEM is passed on stdin so it cannot
+    leak into process listings.
+
+    Args:
+        repo_dir: Working directory (ambient ``gh`` auth context).
+        creds: The App credentials (``app_id``, ``private_key``).
+        anthropic_key: The operator's ``ANTHROPIC_API_KEY`` value.
+        bot_handle: The bot's login handle for ``DAYDREAM_BOT_HANDLE``.
+        scope: Repo- or org-scoped target (exactly one).
+
+    Raises:
+        GitHubAppError: If any ``gh`` set call fails — named so no partial,
+            silently-incomplete deposit is reported as success.
+    """
+    scope_kwargs = scope._secret_kwargs()
+    secret_values = {
+        "DAYDREAM_APP_ID": str(creds.app_id),
+        "DAYDREAM_APP_PRIVATE_KEY": creds.private_key,
+        "ANTHROPIC_API_KEY": anthropic_key,
+    }
+
+    try:
+        existing = set(git_ops.gh_secret_list(repo_dir, **scope_kwargs))
+    except GitError as exc:
+        raise GitHubAppError(f"Could not list existing secrets: {exc}") from exc
+
+    already = [name for name in config.SETUP_SECRET_NAMES if name in existing]
+    if already:
+        print_info(console, f"Overwriting existing secrets: {', '.join(already)}")
+
+    for name in config.SETUP_SECRET_NAMES:
+        try:
+            git_ops.gh_secret_set(repo_dir, name, secret_values[name], **scope_kwargs)
+        except GitError as exc:
+            raise GitHubAppError(f"Failed to set secret {name}: {exc}") from exc
+
+    try:
+        git_ops.gh_variable_set(repo_dir, config.BOT_HANDLE_VAR, bot_handle, **scope_kwargs)
+    except GitError as exc:
+        raise GitHubAppError(f"Failed to set variable {config.BOT_HANDLE_VAR}: {exc}") from exc
