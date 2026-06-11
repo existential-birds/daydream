@@ -13,31 +13,19 @@ GitHub App identity — no maintainer server, no third-party service.
 
 ## Install
 
-1. **Register a GitHub App** (or reuse the one from your daydream App setup)
-   and install it on the target repository. The App must request these
-   repository permissions:
-   - **Pull requests: read & write** — posting and minimizing review comments
-   - **Contents: read** — required by the posting token's least-privilege trio
-   - **Metadata: read** — implicit baseline
-   - **Actions: read & write** — the command workflow mints a dispatch token
-     with `actions: write`, because a `workflow_dispatch` made with the
-     built-in `GITHUB_TOKEN` never fires the downstream `workflow_run`
-     trigger, so the post workflow would never run on the `@<bot> review`
-     path. (Chain verified PAT-vs-`GITHUB_TOKEN`; final live confirmation of
-     the App-token dispatch is tracked for the sandbox acceptance run.)
-2. **Copy the three workflow files** into the target repository's
-   `.github/workflows/` directory.
-3. **Add three repository secrets** (Settings → Secrets and variables →
-   Actions → Secrets):
-   - `DAYDREAM_APP_ID` — the App's numeric ID
-   - `DAYDREAM_APP_PRIVATE_KEY` — the App's PEM private key, pasted verbatim
-   - `ANTHROPIC_API_KEY` — used only by the unprivileged review job
-4. **Add one repository variable** (Settings → Secrets and variables →
-   Actions → Variables):
-   - `DAYDREAM_BOT_HANDLE` — the mention handle the command workflow matches,
-     without the `@` (e.g. `daydream-review` for `@daydream-review review`)
-   - Optional: `DAYDREAM_AUTO_REVIEW` — set to `false` to disable auto-review
-     on PR open; the `@<bot> review` command keeps working.
+Do not copy these steps by hand from here — follow one of the two canonical
+paths, which install these same files and the same secret/variable names:
+
+- **CLI (recommended):** `daydream setup /path/to/repo --repo OWNER/REPO`
+  registers the App, deposits the secrets and the `DAYDREAM_BOT_HANDLE`
+  variable, and opens a PR adding these three workflow files. Add `--verify` to
+  audit an existing install.
+- **Browser-only (no terminal):** see the ordered guide,
+  [`docs/self-hosted-bot-setup.md`](../../../docs/self-hosted-bot-setup.md).
+
+The setup guide is the single source of truth for the step-by-step install
+(App permissions, the three secrets, the bot-handle variable, and the PEM
+download). The sections below document what these workflows *do* once installed.
 
 ## Trigger matrix
 
@@ -62,7 +50,8 @@ No single job ever holds both PR code and the App private key:
   artifact (`findings.json`), never code.
 - **Daydream Command** never checks out code, so it may hold App credentials:
   it mints a short-lived App token with exactly `actions: write` to dispatch
-  the review (see Install step 1).
+  the review (this is why the App requests `Actions: read & write` — see the
+  setup guide's App-permissions step).
 - **Phase B (Daydream Post)** holds the App key but only ever checks out the
   base repo's default branch (trusted code). It mints a token with exactly
   `pull-requests: write, contents: read, metadata: read`, downloads the
