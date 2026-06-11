@@ -54,7 +54,7 @@ from daydream.ui import (
 # Verb-first dispatch table. ``_first_verb`` classifies the leading argv token;
 # anything that isn't an explicit verb (bare path, leading flag, empty argv)
 # falls through to the ``review`` golden path via the default-verb shim.
-KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench", "post-findings"}
+KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench", "post-findings", "setup"}
 
 
 def _first_verb(argv: list[str]) -> str:
@@ -1348,6 +1348,94 @@ def _handle_post_findings_command(argv: list[str]) -> int:
     )
 
 
+def _build_setup_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream setup <target> --repo o/r | --org name [--verify] [--force]``.
+
+    The ``setup`` verb takes an operator from nothing to a live self-hosted
+    review bot: register the GitHub App via the manifest browser flow, deposit
+    credentials as Actions secrets, and land the workflows via a reviewable PR.
+    ``--verify`` runs the read-only doctor instead. ``--repo`` and ``--org`` are
+    mutually exclusive (exactly one is the deposit scope).
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream setup",
+        description=(
+            "Set up a self-hosted Daydream review bot: register the GitHub App, "
+            "deposit credentials as Actions secrets, and land the workflows via a PR."
+        ),
+    )
+    parser.add_argument(
+        "target",
+        type=Path,
+        metavar="TARGET",
+        help="Path to the repository working directory to set the bot up in.",
+    )
+    scope_group = parser.add_mutually_exclusive_group(required=True)
+    scope_group.add_argument(
+        "--repo",
+        type=str,
+        dest="repo",
+        metavar="OWNER/REPO",
+        help="Deposit secrets/variables and install at repository scope.",
+    )
+    scope_group.add_argument(
+        "--org",
+        type=str,
+        dest="org",
+        metavar="NAME",
+        help="Deposit secrets/variables and install at organization scope.",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Run the read-only setup doctor instead of performing setup.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-register the App even if credentials are already deposited.",
+    )
+    return parser
+
+
+def _handle_setup_command(argv: list[str]) -> int:
+    """Handle ``daydream setup <target> --repo o/r | --org name [--verify] [--force]``.
+
+    Dispatches to :func:`daydream.bot_setup.run_verify` (when ``--verify``) or
+    :func:`daydream.bot_setup.run_setup`. Sync: the App-from-manifest leg runs a
+    local browser handshake, not agent work, so there is no ATIF trajectory.
+    ``GitHubAppError``/``GitError`` are caught here and surfaced via
+    :func:`print_error` — never a traceback to the user.
+
+    Args:
+        argv: The argument vector after the ``setup`` verb.
+
+    Returns:
+        ``0`` on success; ``1`` on a verify failure or any setup error.
+    """
+    from daydream import bot_setup
+    from daydream.git_ops import GitError
+    from daydream.github_app import GitHubAppError
+
+    parser = _build_setup_parser()
+    args = parser.parse_args(argv)
+    if args.repo is not None and "/" not in args.repo:
+        parser.error(f"--repo must be an OWNER/REPO slug, got {args.repo!r}")
+
+    scope = bot_setup.Scope(repo=args.repo, org=args.org)
+    target = args.target
+
+    try:
+        if args.verify:
+            result = bot_setup.run_verify(target, scope=scope)
+            bot_setup.print_verify_result(result)
+            return 0 if result.ok else 1
+        return bot_setup.run_setup(target, scope=scope, force=args.force, anthropic_key=None)
+    except (GitHubAppError, GitError) as exc:
+        print_error(console, "Setup failed", str(exc))
+        return 1
+
+
 def main() -> None:
     """Run the CLI entry point.
 
@@ -1365,6 +1453,8 @@ def main() -> None:
         - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label``)
         - ``post-findings`` — validate a findings artifact and post new
           findings to the PR (privileged Phase B poster; unattended)
+        - ``setup`` — register the review-bot GitHub App, deposit credentials,
+          and land the workflows via a PR (``--verify`` for the doctor)
 
     Returns:
         None: This function does not return; it exits via sys.exit().
@@ -1406,6 +1496,11 @@ def main() -> None:
         # ``post-findings`` is sync — short-circuit before anyio.run.
         if verb == "post-findings":
             sys.exit(_handle_post_findings_command(argv[1:]))
+
+        # ``setup`` is sync — short-circuit before anyio.run. The
+        # App-from-manifest leg is a local browser handshake, not agent work.
+        if verb == "setup":
+            sys.exit(_handle_setup_command(argv[1:]))
 
         config = _parse_args()
         if verb == "feedback":

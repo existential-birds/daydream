@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import html
 import json
+import os
+import shutil
 import threading
 import webbrowser
 from dataclasses import dataclass
@@ -38,7 +40,10 @@ from daydream.github_app import (
     resolve_credentials,
 )
 from daydream.templates import workflow_template_files
-from daydream.ui import print_info
+from daydream.ui import print_error, print_info, print_success, print_warning
+
+_ANTHROPIC_KEY_ENV = "ANTHROPIC_API_KEY"
+_SETUP_BRANCH = "daydream/setup-bot"
 
 # Events the #147 workflow templates consume (daydream-review.yml →
 # pull_request, daydream-command.yml → issue_comment, daydream-post.yml →
@@ -629,3 +634,196 @@ def run_verify(repo_dir: Path, *, scope: Scope) -> VerifyResult:
         _check_workflows(repo_dir),
     )
     return VerifyResult(checks=checks)
+
+
+def print_verify_result(result: VerifyResult) -> None:
+    """Render a :class:`VerifyResult` to the console (one line per check).
+
+    Passed checks print as a success line; failed required checks print as an
+    error naming the missing element and remediation; skipped optional checks
+    print as a dim/info note. The CLI handler maps :attr:`VerifyResult.ok` to
+    the process exit code separately.
+    """
+    for check in result.checks:
+        if check.passed and check.required:
+            print_success(console, f"[{check.name}] {check.detail}")
+        elif check.passed:
+            print_info(console, f"[{check.name}] {check.detail}")
+        else:
+            print_error(console, f"[{check.name}] check failed", check.detail)
+    if result.ok:
+        print_success(console, "All required checks passed; the bot is configured.")
+    else:
+        print_warning(console, "Setup is incomplete; address the failed checks above.")
+
+
+def _confirm_installation(repo_dir: Path, scope: Scope, creds: AppCredentials) -> bool:
+    """Return True once the App is installed on the target owner.
+
+    Re-checks ``GET /app/installations`` under the App JWT. If the owner is not
+    yet present, prints the install URL, blocks on the manual **Install** click
+    via the :func:`_wait_for_install_click` seam, then re-checks once more.
+
+    The installations read is attempted first, so an install that already
+    happened (e.g. an org-wide App) is auto-satisfied without prompting — this
+    is what lets the real-path test drive the full-auto flow without blocking
+    on stdin.
+
+    Args:
+        repo_dir: Working directory (``gh`` subprocess context).
+        scope: Repo- or org-scoped target (the owner is derived from it).
+        creds: The freshly registered App credentials (App-JWT auth).
+
+    Returns:
+        True if the owner appears in the installations after at most one wait.
+    """
+    owner = _owner_of(scope)
+    if _owner_installed(repo_dir, owner, creds):
+        return True
+
+    install_url = (
+        f"https://github.com/organizations/{scope.org}/settings/installations"
+        if scope.org
+        else "https://github.com/settings/installations"
+    )
+    print_info(
+        console,
+        f"Install the new App on '{owner}' to finish: {install_url}",
+    )
+    _wait_for_install_click()
+    return _owner_installed(repo_dir, owner, creds)
+
+
+def _owner_installed(repo_dir: Path, owner: str, creds: AppCredentials) -> bool:
+    """True when *owner* appears in ``GET /app/installations`` under the App JWT.
+
+    Raises:
+        GitHubAppError: If the installations read fails (so a transport error is
+            never silently read as "not installed").
+    """
+    jwt_token = mint_jwt(creds.app_id, creds.private_key)
+    bearer = {"Authorization": f"Bearer {jwt_token}"}
+    try:
+        with _scoped_gh_token(jwt_token):
+            installations = git_ops.gh_api(repo_dir, "/app/installations", headers=bearer)
+    except GitError as exc:
+        raise GitHubAppError(f"Could not read App installations: {exc}") from exc
+    logins = {
+        (inst.get("account") or {}).get("login")
+        for inst in (installations if isinstance(installations, list) else [])
+    }
+    return owner in logins
+
+
+def _wait_for_install_click() -> None:
+    """Block until the operator confirms the manual GitHub App Install click.
+
+    Isolated as a module-level seam so the real-path test can drive
+    :func:`run_setup` without blocking on real stdin (the happy path
+    auto-satisfies the installations re-check before this is reached).
+    """
+    input("Press Enter once you have installed the App on the target...")
+
+
+def run_setup(
+    target_dir: Path,
+    *,
+    scope: Scope,
+    force: bool,
+    anthropic_key: str | None,
+) -> int:
+    """Take an operator from nothing to a landed self-hosted review bot.
+
+    Orchestrates the full-auto path:
+
+    1. **Pre-flight** — ``gh`` is on ``PATH`` and the ``ANTHROPIC_API_KEY`` is
+       resolvable (explicit arg or environment).
+    2. **Register** — unless the credentials are already deposited (idempotency)
+       and *force* is not set, register the App via
+       :func:`register_app_via_manifest` (the localhost browser handshake).
+    3. **Install** — confirm the App is installed on the target owner, blocking
+       on the manual Install click when it is not yet present.
+    4. **Deposit** — :func:`deposit_secrets` writes the three secrets + handle.
+    5. **Land** — :func:`land_workflows` opens a reviewable PR with the three
+       workflow files (never pushing to the default branch).
+
+    Args:
+        target_dir: Repository working directory.
+        scope: Repo- or org-scoped deposit target (exactly one).
+        force: Re-register the App even if credentials are already deposited.
+        anthropic_key: The ``ANTHROPIC_API_KEY`` value, or None to read it from
+            the environment.
+
+    Returns:
+        ``0`` on success (including a no-op when workflows already exist); ``1``
+        on a recoverable failure surfaced to the operator.
+
+    Raises:
+        GitHubAppError: Propagated from registration/deposit on hard failure.
+        GitError: Propagated from the git/``gh`` landing operations.
+    """
+    if shutil.which("gh") is None:
+        print_error(
+            console,
+            "gh not found",
+            "The GitHub CLI (`gh`) must be installed and authenticated. See https://cli.github.com/.",
+        )
+        return 1
+
+    resolved_key = anthropic_key or os.environ.get(_ANTHROPIC_KEY_ENV)
+    if not resolved_key:
+        print_error(
+            console,
+            "ANTHROPIC_API_KEY missing",
+            f"Set {_ANTHROPIC_KEY_ENV} in the environment (or pass it) before running setup.",
+        )
+        return 1
+
+    already = set(git_ops.gh_secret_list(target_dir, **scope._secret_kwargs()))
+    creds_present = all(name in already for name in config.SETUP_SECRET_NAMES)
+
+    if creds_present and not force:
+        print_info(
+            console,
+            "App credentials already deposited; skipping registration (use --force to re-register).",
+        )
+        creds, slug = resolve_credentials(), None
+        if creds is None:
+            print_error(
+                console,
+                "Cannot reuse credentials",
+                (
+                    f"Secrets exist at the target but {APP_ID_ENV}/{APP_PRIVATE_KEY_ENV} are not "
+                    "set locally to confirm the install. Re-run with --force, or export them."
+                ),
+            )
+            return 1
+    else:
+        creds, slug = register_app_via_manifest(target_dir, org=scope.org)
+        print_success(console, f"Registered GitHub App '{slug}'.")
+
+    if not _confirm_installation(target_dir, scope, creds):
+        print_error(
+            console,
+            "App not installed",
+            f"The App is still not installed on '{_owner_of(scope)}'. Install it, then re-run setup.",
+        )
+        return 1
+
+    bot_handle = f"{slug}[bot]" if slug else _owner_of(scope)
+    deposit_secrets(
+        target_dir,
+        creds,
+        anthropic_key=resolved_key,
+        bot_handle=bot_handle,
+        scope=scope,
+    )
+    print_success(console, "Deposited App credentials and bot handle as Actions secrets/variables.")
+
+    pr_url = land_workflows(target_dir, branch=_SETUP_BRANCH)
+    if pr_url == WORKFLOWS_ALREADY_INSTALLED:
+        print_info(console, "Workflow files already present on this repository; nothing to land.")
+    else:
+        print_success(console, f"Opened workflow PR: {pr_url}")
+        print_info(console, "Merge the PR to go live — the bot reviews PRs once it lands on the default branch.")
+    return 0

@@ -7,13 +7,15 @@ the code-exchange behavior is testable without real GitHub: the test drives
 ``_handle_code`` directly, monkeypatching only the manifest-code exchange.
 """
 
+import json
+import sys
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from daydream import bot_setup, config, git_ops
+from daydream import bot_setup, cli, config, git_ops
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV, AppCredentials, GitHubAppError
 from tests.harness.fake_gh import FakeGh, install_fake_gh
 
@@ -201,3 +203,80 @@ def test_verify_healthy_install_passes_all_checks(
     assert all(c.passed for c in result.checks)
     # The App-installed check actually consulted the installations endpoint.
     assert fake_gh.calls("GET", "/app/installations")
+
+
+# --- Task 9: CLI `setup` verb + run_setup orchestrator ----------------------
+
+
+def cli_main(argv: list[str]) -> int:
+    """Drive ``cli.main`` with ``argv`` (the production entrypoint) and return its exit code."""
+    saved = sys.argv
+    sys.argv = ["daydream", *argv]
+    try:
+        cli.main()
+    except SystemExit as exc:  # main() always exits via sys.exit
+        return int(exc.code or 0)
+    finally:
+        sys.argv = saved
+    raise AssertionError("cli.main() must exit via sys.exit")
+
+
+def _pr_create_calls(fake_gh: FakeGh) -> list[dict]:
+    """Read the recorded ``gh pr create`` invocations from the shim's call log."""
+    path = fake_gh.bin_dir / "calls.jsonl"
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("kind") == "pr create"
+    ]
+
+
+def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
+    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end ``daydream setup`` (full-auto) through cli.main: secrets land, PR opens.
+
+    Mocks ONLY the live browser/manifest seam. The App-from-manifest leg
+    returns freshly minted creds with a real PEM so the install re-check can
+    mint a valid App JWT; the fake ``gh`` shows the App already installed on
+    the target owner, so the manual-Install wait is auto-satisfied (no stdin
+    block). Asserts observable outcomes: exit 0, the three canonical secrets
+    set, and a PR created (the bot goes live on merge).
+    """
+    pem = _real_pem()
+    monkeypatch.setattr(
+        "daydream.bot_setup.register_app_via_manifest",
+        lambda repo, org=None: (AppCredentials(7, pem), "acme-bot"),
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    # App already installed on the owner → the Install-click wait is satisfied.
+    fake_gh.serve_installations([{"account": {"login": "o"}}])
+    fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/5")
+
+    code = cli_main(["setup", str(repo_with_origin), "--repo", "o/r"])
+
+    assert code == 0
+    assert {c.name for c in fake_gh.secret_set_calls()} == set(config.SETUP_SECRET_NAMES)
+    assert fake_gh.variable_set_calls()[-1].name == config.BOT_HANDLE_VAR
+    # The bot goes live on merge: a reviewable PR was opened on a non-default branch.
+    pr_calls = _pr_create_calls(fake_gh)
+    assert len(pr_calls) == 1
+    assert git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
+
+
+def test_setup_verify_flag_exits_nonzero_when_incomplete(
+    fake_gh: FakeGh, git_repo: Path
+) -> None:
+    """``daydream setup <dir> --repo o/r --verify`` on an incomplete install exits 1.
+
+    No secrets, no variable → the doctor's required checks fail → the handler
+    surfaces a non-zero exit and never registers an App or sets a secret.
+    """
+    fake_gh.serve_secret_list([])
+    fake_gh.serve_variable_list([])
+
+    assert cli_main(["setup", str(git_repo), "--repo", "o/r", "--verify"]) == 1
+    # Read-only doctor: nothing was deposited.
+    assert fake_gh.secret_set_calls() == []
