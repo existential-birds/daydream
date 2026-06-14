@@ -22,6 +22,7 @@ revised by Task 0 spike findings):
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -311,3 +312,39 @@ def test_no_event_data_interpolated_into_run_steps(wf_path) -> None:
                     f"{wf_path.name}:{job_name}: event data must reach run: via env:, "
                     f"never ${{{{ }}}} interpolation"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Install-pin drift guard — the bot must install a pinned daydream release,
+# never the moving `main` tip (a stale uv cache or main/template drift would
+# otherwise feed operators a daydream whose CLI no longer matches the workflow).
+# This test fails on release until the template pin is bumped in lockstep with
+# the package version — closing the gap that broke a live install.
+# ---------------------------------------------------------------------------
+
+
+_INSTALL_RE = re.compile(
+    r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?"
+)
+
+
+def _package_version() -> str:
+    """Read the declared package version from pyproject.toml (the single source)."""
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    return data["project"]["version"]
+
+
+@pytest.mark.parametrize("name", ["daydream-review.yml", "daydream-post.yml"])
+def test_daydream_install_is_pinned_to_current_release_tag(name: str) -> None:
+    text = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
+    refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
+    assert refs, f"{name} must install daydream via `uv tool install git+…`"
+    expected = f"@v{_package_version()}"
+    for ref in refs:
+        assert ref == expected, (
+            f"{name} pins the daydream install to {ref or '(unpinned main)'}, "
+            f"but must pin to {expected}. An unpinned/stale install lets the bot run a "
+            f"daydream whose CLI has drifted from this workflow. Bump the template pin in "
+            f"lockstep with the package version on every release."
+        )
