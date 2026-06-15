@@ -9,15 +9,21 @@ actually reference.
 
 from __future__ import annotations
 
+import subprocess
+import tempfile
+import zipfile
 from pathlib import Path
 
 from daydream import config
 from daydream.templates import workflow_template_files
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_EXPECTED_TEMPLATES = {"daydream-review.yml", "daydream-command.yml", "daydream-post.yml"}
+
 
 def test_all_three_workflows_ship_in_package() -> None:
     names = {p.name for p in workflow_template_files()}
-    assert names == {"daydream-review.yml", "daydream-command.yml", "daydream-post.yml"}
+    assert names == _EXPECTED_TEMPLATES
 
 
 def test_workflows_reference_the_canonical_secret_and_var_names() -> None:
@@ -33,3 +39,31 @@ def test_browser_guide_documents_canonical_names_and_pem_limit() -> None:
         assert name in guide
     assert "download" in guide.lower() and "pem" in guide.lower()  # honest PEM-floor stated
     assert "Use this template" not in guide  # no maintainer-hosted repo
+
+
+def test_yaml_templates_present_in_built_wheel() -> None:
+    """Build a real wheel and confirm the YAML templates are included as package data.
+
+    The editable-install tests above exercise importlib.resources against the
+    source tree; they would pass even if the [tool.hatch.build.targets.wheel]
+    include glob were missing or mis-typed. This test catches that gap: it
+    builds an actual wheel in a temp directory and inspects the zip archive to
+    verify each template lands at the expected path inside the distribution.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(
+            ["uv", "build", "--wheel", "--out-dir", tmp],
+            cwd=_REPO_ROOT,
+            check=True,
+            capture_output=True,
+        )
+        wheels = list(Path(tmp).glob("*.whl"))
+        assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+        with zipfile.ZipFile(wheels[0]) as zf:
+            names_in_wheel = {Path(n).name for n in zf.namelist() if n.endswith(".yml")}
+        assert _EXPECTED_TEMPLATES <= names_in_wheel, (
+            f"Built wheel is missing YAML templates. "
+            f"Found: {names_in_wheel!r}. "
+            f"Expected all of: {_EXPECTED_TEMPLATES!r}. "
+            f"Check [tool.hatch.build.targets.wheel] include in pyproject.toml."
+        )

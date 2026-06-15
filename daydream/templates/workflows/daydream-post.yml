@@ -64,6 +64,7 @@ jobs:
           permission-metadata: read
 
       - name: Download findings artifact
+        id: download
         uses: actions/download-artifact@v4
         with:
           name: daydream-findings
@@ -119,7 +120,7 @@ jobs:
             --pr "$PR_NUMBER" --head-sha "$HEAD_SHA" --repo "$REPO"
 
       - name: Surface failure on the PR
-        if: failure()
+        if: failure() && steps.download.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ github.repository }}

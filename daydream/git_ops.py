@@ -1186,6 +1186,29 @@ def create_branch(repo: Path, name: str) -> None:
         raise GitError(f"git checkout -b {name} failed in {repo}: {proc.stderr.strip()}")
 
 
+def checkout_branch(repo: Path, name: str) -> None:
+    """Switch to an existing local branch *name*, or track it from origin.
+
+    Uses ``git checkout <name>`` when the branch exists locally (``refs/heads/<name>``),
+    or ``git checkout -b <name> origin/<name>`` when it exists only on the remote.
+
+    Args:
+        repo: Repository working directory.
+        name: An existing branch name (local or ``origin/<name>``).
+
+    Raises:
+        GitError: If the checkout fails, or the branch does not exist either
+            locally or on the remote.
+    """
+    local = _run_git(repo, ["rev-parse", "--verify", f"refs/heads/{name}"], timeout=5)
+    if local.returncode == 0:
+        proc = _run_git(repo, ["checkout", name], timeout=30, retries=0)
+    else:
+        proc = _run_git(repo, ["checkout", "-b", name, f"origin/{name}"], timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git checkout {name} failed in {repo}: {proc.stderr.strip()}")
+
+
 def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
     """Stage only *paths* and commit them with *message*.
 
@@ -1207,7 +1230,23 @@ def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
     add = _run_git(repo, ["add", "--", *(str(p) for p in paths)], timeout=30, retries=0)
     if add.returncode != 0:
         raise GitError(f"git add {paths} failed in {repo}: {add.stderr.strip()}")
-    commit = _run_git(repo, ["commit", "-m", message], timeout=30, retries=0)
+    # git commit fails with "Author identity unknown" when neither a local nor a
+    # global user.email / user.name is configured (common in fresh CI environments).
+    # Inject fallback values via -c only when the repo has no identity set; if the
+    # user already has an identity configured, git config will return it and we leave
+    # the commit command untouched.
+    identity_ok = (
+        _run_git(repo, ["config", "user.email"], timeout=5).returncode == 0
+        and _run_git(repo, ["config", "user.name"], timeout=5).returncode == 0
+    )
+    commit_args = ["commit", "-m", message]
+    if not identity_ok:
+        commit_args = [
+            "-c", "user.email=daydream@localhost",
+            "-c", "user.name=daydream",
+            *commit_args,
+        ]
+    commit = _run_git(repo, commit_args, timeout=30, retries=0)
     if commit.returncode != 0:
         raise GitError(f"git commit failed in {repo}: {commit.stderr.strip()}")
 
@@ -1319,6 +1358,24 @@ def gh_pr_diff(repo: Path, pr: int) -> str:
     return proc.stdout
 
 
+def split_owner_repo(slug: str) -> tuple[str, str] | None:
+    """Split an ``"owner/repo"`` slug into its components.
+
+    Args:
+        slug: A GitHub ``"owner/repo"`` string.
+
+    Returns:
+        A ``(owner, repo)`` tuple when *slug* contains exactly one ``"/"``
+        and both parts are non-empty, or ``None`` otherwise.
+    """
+    if "/" not in slug:
+        return None
+    owner, _, repo = slug.partition("/")
+    if not owner or not repo:
+        return None
+    return owner, repo
+
+
 def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     """Return the ``(owner, name)`` slug for the current repository.
 
@@ -1336,13 +1393,7 @@ def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     )
     if proc.returncode != 0:
         return None
-    slug = proc.stdout.strip()
-    if "/" not in slug:
-        return None
-    owner, _, name = slug.partition("/")
-    if not owner or not name:
-        return None
-    return owner, name
+    return split_owner_repo(proc.stdout.strip())
 
 
 def _gh_error_for(message: str, stderr: str) -> GitError:
@@ -1590,7 +1641,9 @@ def gh_variable_list(repo: Path, *, org: str | None = None, repo_slug: str | Non
     return _gh_name_list(repo, "variable", org, repo_slug)
 
 
-def gh_pr_create(repo: Path, *, head: str, base: str, title: str, body: str) -> str:
+def gh_pr_create(
+    repo: Path, *, head: str, base: str, title: str, body: str, repo_slug: str | None = None
+) -> str:
     """Open a pull request via ``gh pr create`` and return its URL.
 
     Args:
@@ -1599,6 +1652,8 @@ def gh_pr_create(repo: Path, *, head: str, base: str, title: str, body: str) -> 
         base: The base branch to merge into.
         title: The PR title.
         body: The PR body.
+        repo_slug: Explicit ``owner/repo`` target (``--repo``).  When *None*
+            the ambient ``gh`` context (cwd) is used.
 
     Returns:
         The PR URL ``gh`` prints on success.
@@ -1607,6 +1662,8 @@ def gh_pr_create(repo: Path, *, head: str, base: str, title: str, body: str) -> 
         GitError: If the ``gh pr create`` call fails (stderr included).
     """
     args = ["pr", "create", "--head", head, "--base", base, "--title", title, "--body", body]
+    if repo_slug is not None:
+        args += ["--repo", repo_slug]
     proc = _run_gh(repo, args, timeout=60)
     if proc.returncode != 0:
         raise _gh_error_for(f"gh pr create failed: {proc.stderr.strip()}", proc.stderr)

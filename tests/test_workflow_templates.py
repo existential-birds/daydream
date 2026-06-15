@@ -208,7 +208,7 @@ def test_command_match_is_exact_and_body_env_only(command_wf: dict[str, Any]) ->
     step = matches[0]
     assert step["env"]["BODY"] == "${{ github.event.comment.body }}"  # footgun 2
     assert step["env"]["BOT_HANDLE"] == "${{ vars.DAYDREAM_BOT_HANDLE }}"
-    assert '(^|[[:space:]])@${BOT_HANDLE}[[:space:]]+review([[:space:]]|$)' in step["run"]
+    assert '(^|[[:space:]])@${ESCAPED_HANDLE}[[:space:]]+review([[:space:]]|$)' in step["run"]
     assert "github.event" not in step["run"]
 
 
@@ -277,8 +277,9 @@ def test_post_workflow_downloads_artifact_from_triggering_run(post_wf: dict[str,
 
 def test_post_workflow_surfaces_failures(post_wf: dict[str, Any]) -> None:
     # Post-job failure: a final if: failure() step comments via the minted
-    # token, values via env only.
-    failure_steps = [s for s in job_steps(post_wf, "post") if s.get("if") == "failure()"]
+    # token, values via env only. The condition may include additional guards
+    # (e.g. checking that the download succeeded) beyond the bare failure().
+    failure_steps = [s for s in job_steps(post_wf, "post") if "failure()" in str(s.get("if", ""))]
     assert len(failure_steps) == 1
     step = failure_steps[0]
     assert step["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"

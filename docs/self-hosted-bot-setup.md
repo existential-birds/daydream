@@ -19,10 +19,12 @@ Either way, when you are done you can confirm the install with:
 daydream setup /path/to/repo --repo OWNER/REPO --verify
 ```
 
-`--verify` is read-only. It checks that the App is installed, all three secrets
-and the bot-handle variable are present, the App's permissions are sufficient,
-and the three workflow files exist — and it exits non-zero, naming each missing
-piece, if anything is wrong. It works for installs done by **either** path.
+`--verify` is read-only. It checks that the App is installed, all three secret
+names and the bot-handle variable are present (note: it can confirm the secret
+names exist but cannot read or validate their values), the App's permissions
+are sufficient, and the three workflow files exist — and it exits non-zero,
+naming each missing piece, if anything is wrong. It works for installs done by
+**either** path.
 
 ---
 

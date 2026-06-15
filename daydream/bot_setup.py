@@ -208,7 +208,7 @@ class _ManifestListener:
         thread.start()
         try:
             webbrowser.open(f"http://localhost:{port}/")
-            self._done.wait()
+            self._done.wait(timeout=300)  # 5-minute bound; avoids indefinite hang if browser flow is abandoned
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -394,9 +394,15 @@ def land_workflows(repo_dir: Path, *, branch: str) -> str:
         return WORKFLOWS_ALREADY_INSTALLED
 
     base = git_ops.default_branch(repo_dir)
-    git_ops.create_branch(repo_dir, branch)
+    if git_ops.branch_exists(repo_dir, branch):
+        git_ops.checkout_branch(repo_dir, branch)
+    else:
+        git_ops.create_branch(repo_dir, branch)
     git_ops.commit_paths(repo_dir, copied, _PR_TITLE)
     git_ops.push_branch(repo_dir, branch)
+    existing_prs = git_ops.gh_pr_list_for_branch(repo_dir, branch)
+    if existing_prs:
+        return existing_prs[0]["url"]
     return git_ops.gh_pr_create(repo_dir, head=branch, base=base, title=_PR_TITLE, body=_PR_BODY)
 
 
@@ -443,7 +449,28 @@ def _owner_of(scope: Scope) -> str:
     if scope.org:
         return scope.org
     # scope.repo is "owner/repo" (Scope validates exactly one is set).
-    return (scope.repo or "").split("/", 1)[0]
+    parsed = git_ops.split_owner_repo(scope.repo or "")
+    return parsed[0] if parsed is not None else ""
+
+
+def _bot_handle_for(slug: str | None, scope: Scope) -> str:
+    """Return the bot handle to deposit: the App slug when known, else the scope owner."""
+    return slug if slug else _owner_of(scope)
+
+
+def _installed_owner_logins(repo_dir: Path, jwt_token: str) -> set[str | None]:
+    """Return the set of account logins from ``GET /app/installations``.
+
+    Callers are responsible for catching :class:`GitError` and converting it
+    to their own error type or return value as appropriate.
+    """
+    bearer = {"Authorization": f"Bearer {jwt_token}"}
+    with _scoped_gh_token(jwt_token):
+        installations = git_ops.gh_api(repo_dir, "/app/installations", headers=bearer)
+    return {
+        (inst.get("account") or {}).get("login")
+        for inst in (installations if isinstance(installations, list) else [])
+    }
 
 
 def _check_app_installed(repo_dir: Path, scope: Scope, creds: AppCredentials | None) -> Check:
@@ -466,20 +493,14 @@ def _check_app_installed(repo_dir: Path, scope: Scope, creds: AppCredentials | N
         )
     owner = _owner_of(scope)
     jwt_token = mint_jwt(creds.app_id, creds.private_key)
-    bearer = {"Authorization": f"Bearer {jwt_token}"}
     try:
-        with _scoped_gh_token(jwt_token):
-            installations = git_ops.gh_api(repo_dir, "/app/installations", headers=bearer)
+        logins = _installed_owner_logins(repo_dir, jwt_token)
     except GitError as exc:
         return Check(
             name="app_installed",
             passed=False,
             detail=f"Could not read App installations: {exc}. Confirm the App credentials are valid.",
         )
-    logins = {
-        (inst.get("account") or {}).get("login")
-        for inst in (installations if isinstance(installations, list) else [])
-    }
     if owner in logins:
         return Check(name="app_installed", passed=True, detail=f"App is installed on '{owner}'.")
     return Check(
@@ -550,7 +571,13 @@ def _check_permissions(repo_dir: Path, creds: AppCredentials | None) -> Check:
             detail=f"Could not read App permissions: {exc}. Confirm the App credentials are valid.",
         )
     granted = meta.get("permissions") or {}
-    missing = [name for name in config.APP_PERMISSIONS if granted.get(name) != config.APP_PERMISSIONS[name]]
+    _LEVELS = {"none": 0, "read": 1, "write": 2, "admin": 3}
+    missing = [
+        name
+        for name in config.APP_PERMISSIONS
+        if _LEVELS.get(granted.get(name, "none"), 0)
+        < _LEVELS.get(config.APP_PERMISSIONS[name], 0)
+    ]
     if not missing:
         return Check(name="permissions", passed=True, detail="App grants all required permissions.")
     detail = ", ".join(f"{name}={config.APP_PERMISSIONS[name]}" for name in missing)
@@ -579,7 +606,7 @@ def _check_workflows(repo_dir: Path) -> Check:
     for template in workflow_template_files():
         path = f"{_WORKFLOWS_DIR}/{template.name}"
         try:
-            git_ops.show(repo_dir, base, path)
+            git_ops.show(repo_dir, f"origin/{base}", path)
         except GitError:
             missing.append(path)
     if not missing:
@@ -704,16 +731,10 @@ def _owner_installed(repo_dir: Path, owner: str, creds: AppCredentials) -> bool:
             never silently read as "not installed").
     """
     jwt_token = mint_jwt(creds.app_id, creds.private_key)
-    bearer = {"Authorization": f"Bearer {jwt_token}"}
     try:
-        with _scoped_gh_token(jwt_token):
-            installations = git_ops.gh_api(repo_dir, "/app/installations", headers=bearer)
+        logins = _installed_owner_logins(repo_dir, jwt_token)
     except GitError as exc:
         raise GitHubAppError(f"Could not read App installations: {exc}") from exc
-    logins = {
-        (inst.get("account") or {}).get("login")
-        for inst in (installations if isinstance(installations, list) else [])
-    }
     return owner in logins
 
 
@@ -822,7 +843,7 @@ def run_setup(
             console,
             "App credentials already deposited; skipping registration (use --force to re-register).",
         )
-        creds, slug = resolve_credentials(), None
+        creds = resolve_credentials()
         if creds is None:
             print_error(
                 console,
@@ -833,6 +854,10 @@ def run_setup(
                 ),
             )
             return 1
+        try:
+            slug = get_app_metadata(target_dir, creds.app_id, creds.private_key).get("slug") or None
+        except GitHubAppError:
+            slug = None
     else:
         creds, slug = register_app_via_manifest(target_dir, org=scope.org)
         print_success(console, f"Registered GitHub App '{slug}'.")
@@ -845,7 +870,7 @@ def run_setup(
         )
         return 1
 
-    bot_handle = f"{slug}[bot]" if slug else _owner_of(scope)
+    bot_handle = _bot_handle_for(slug, scope)
     deposit_secrets(
         target_dir,
         creds,

@@ -361,8 +361,8 @@ def _owner_repo_for(pr_repo: str | None, target_dir: Path) -> tuple[str, str] | 
     Prefers *pr_repo* (``"owner/repo"``) when set; otherwise derives it from
     ``gh repo view``. Returns None when it cannot be determined.
     """
-    if pr_repo and "/" in pr_repo:
-        owner, _, repo = pr_repo.partition("/")
-        if owner and repo:
-            return owner, repo
+    if pr_repo:
+        parsed = git_ops.split_owner_repo(pr_repo)
+        if parsed is not None:
+            return parsed
     return git_ops.gh_repo_view(target_dir)

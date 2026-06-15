@@ -166,13 +166,18 @@ def test_verify_reports_missing_secret_with_remediation(fake_gh: FakeGh, git_rep
 
 
 def test_verify_healthy_install_passes_all_checks(
-    fake_gh: FakeGh, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A complete install (creds + secrets + var + installed App + workflows) → ok is True.
 
     Exercises every required check on its passing shape, and — with local App
     creds present — drives the App-installed (``/app/installations``) and
     permission (``GET /app``) checks through the real ``gh`` subprocess seam.
+
+    Uses ``repo_with_origin`` (has a bare remote) so the workflows check can
+    resolve ``origin/main`` via ``git show origin/main:.github/workflows/…``.
+    The workflows are committed to local ``main`` and pushed to origin so the
+    check passes.
     """
     from tests.conftest import _commit, _git
 
@@ -189,16 +194,19 @@ def test_verify_healthy_install_passes_all_checks(
     fake_gh.set_response("GET", "/app", value={"permissions": dict(config.APP_PERMISSIONS), "slug": "acme-bot"})
 
     # The three workflow files exist on the default branch.
-    wf = git_repo / ".github/workflows"
+    # _check_workflows resolves them via `git show origin/<base>:<path>`, so
+    # the commit must be pushed to the bare remote (origin).
+    wf = repo_with_origin / ".github/workflows"
     wf.mkdir(parents=True)
     from daydream.templates import workflow_template_files
 
     for template in workflow_template_files():
         (wf / template.name).write_text(template.read_text())
-    _git(git_repo, "add", ".github/workflows")
-    _commit(git_repo, "add workflows")
+    _git(repo_with_origin, "add", ".github/workflows")
+    _commit(repo_with_origin, "add workflows")
+    _git(repo_with_origin, "push", "origin", "main")
 
-    result = bot_setup.run_verify(git_repo, scope=bot_setup.Scope(repo="o/r"))
+    result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
     assert result.ok is True
     assert all(c.passed for c in result.checks)
     # The App-installed check actually consulted the installations endpoint.
@@ -350,3 +358,30 @@ def test_setup_verify_flag_exits_nonzero_when_incomplete(
     assert cli_main(["setup", str(git_repo), "--repo", "o/r", "--verify"]) == 1
     # Read-only doctor: nothing was deposited.
     assert fake_gh.secret_set_calls() == []
+
+
+# --- _bot_handle_for unit tests ---------------------------------------------
+
+
+def test_bot_handle_for_returns_slug_when_slug_is_set() -> None:
+    """When a slug is available it takes priority over the scope owner."""
+    scope = bot_setup.Scope(repo="owner/repo")
+    assert bot_setup._bot_handle_for("acme-bot", scope) == "acme-bot"
+
+
+def test_bot_handle_for_falls_back_to_repo_owner_when_slug_is_none() -> None:
+    """With no slug, the owner extracted from the repo slug is used."""
+    scope = bot_setup.Scope(repo="owner/repo")
+    assert bot_setup._bot_handle_for(None, scope) == "owner"
+
+
+def test_bot_handle_for_falls_back_to_org_when_slug_is_none() -> None:
+    """With no slug and an org scope, the org login is used."""
+    scope = bot_setup.Scope(org="acme-org")
+    assert bot_setup._bot_handle_for(None, scope) == "acme-org"
+
+
+def test_bot_handle_for_returns_slug_over_org_when_slug_is_set() -> None:
+    """Slug wins even when the scope is org-scoped."""
+    scope = bot_setup.Scope(org="acme-org")
+    assert bot_setup._bot_handle_for("my-app-bot", scope) == "my-app-bot"
