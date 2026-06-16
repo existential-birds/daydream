@@ -329,9 +329,10 @@ def _resolve_copy_entries(source: Path) -> list[Path]:
     pyproject = source / "pyproject.toml"
     if pyproject.is_file():
         data = load_toml_or_empty(pyproject)
-        override = (
-            data.get("tool", {}).get("daydream", {}).get("workspace", {}).get("copy")
-        )
+        tool = data.get("tool")
+        daydream_cfg = tool.get("daydream") if isinstance(tool, dict) else None
+        workspace_cfg = daydream_cfg.get("workspace") if isinstance(daydream_cfg, dict) else None
+        override = workspace_cfg.get("copy") if isinstance(workspace_cfg, dict) else None
         if isinstance(override, list):
             return [Path(p) for p in override if isinstance(p, str)]
 

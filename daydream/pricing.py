@@ -142,7 +142,11 @@ def load_user_prices(path: Path | None = None) -> dict[str, ModelPrice]:
         if env_path:
             path = Path(env_path)
         else:
-            path = Path.home() / ".daydream" / "prices.toml"
+            try:
+                path = Path.home() / ".daydream" / "prices.toml"
+            except RuntimeError as exc:
+                logger.warning("daydream prices: could not resolve home directory — ignoring (%s)", exc)
+                return {}
 
     data = load_toml_or_empty(path)
     raw_prices = data.get("prices")

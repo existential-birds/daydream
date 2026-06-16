@@ -241,6 +241,22 @@ def test_load_user_prices_negative_inf_value_skips_entry(
     assert any("non-finite" in rec.message for rec in caplog.records)
 
 
+def test_load_user_prices_unresolvable_home_returns_empty(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When the default path is used and Path.home() raises, yield {} — never raise."""
+    monkeypatch.delenv("DAYDREAM_PRICES_FILE", raising=False)
+
+    def _raise() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", staticmethod(_raise))
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices()
+    assert loaded == {}
+    assert any("could not resolve home directory" in rec.message.lower() for rec in caplog.records)
+
+
 def test_resolve_prices_override_wins_per_model() -> None:
     """resolve_prices applies overrides per-model, leaving other built-ins intact."""
     override = ModelPrice(input=1.0, cached_input=0.1, output=2.0)

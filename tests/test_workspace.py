@@ -322,6 +322,26 @@ def test_copy_pyproject_override(tmp_path: Path) -> None:
     assert (dest / "local" / "secrets.toml").read_text() == "token = 'x'\n"
 
 
+def test_copy_pyproject_non_table_tool_falls_back_to_defaults(tmp_path: Path) -> None:
+    """A valid TOML with a non-table ``tool`` value must not raise; defaults apply."""
+    repo, _ = _make_repo_with_origin(tmp_path)
+    (repo / ".gitignore").write_text(".env\n")
+    _git(repo, "add", ".gitignore")
+    _commit(repo, "ignore env")
+
+    # `tool` is a scalar string here — a chained .get() would raise AttributeError.
+    (repo / "pyproject.toml").write_text('tool = "not-a-table"\n')
+    (repo / ".env").write_text("SECRET=1\n")
+
+    dest = tmp_path / "ephemeral"
+    dest.mkdir()
+
+    copied = copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
+    rel = {str(p) for p in copied}
+    assert ".env" in rel
+    assert (dest / ".env").read_text() == "SECRET=1\n"
+
+
 # --- 8. extra paths combine -------------------------------------------------
 
 
