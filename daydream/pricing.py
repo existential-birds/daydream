@@ -27,11 +27,13 @@ Exports:
 from __future__ import annotations
 
 import logging
+import math
 import os
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from daydream.config_file import load_toml_or_empty
 
 logger = logging.getLogger(__name__)
 
@@ -64,34 +66,6 @@ MODEL_PRICES: dict[str, ModelPrice] = {
 }
 
 
-def _load_toml(path: Path) -> dict[str, Any]:
-    """Parse a TOML file into a dict, returning {} when absent or malformed.
-
-    Mirrors the resilient pattern in ``config_file.py`` but never raises: the
-    price loader must never break cost synthesis over a bad user file.
-
-    Args:
-        path: Path to the TOML file.
-
-    Returns:
-        The parsed table, or an empty dict if the file is absent or malformed.
-
-    Raises:
-        Never. Malformed TOML is logged and yields ``{}``.
-    """
-    if not path.is_file():
-        return {}
-    try:
-        with path.open("rb") as handle:
-            return tomllib.load(handle)
-    except tomllib.TOMLDecodeError as exc:
-        logger.warning("daydream prices: malformed TOML in %s — ignoring (%s)", path, exc)
-        return {}
-    except OSError as exc:
-        logger.warning("daydream prices: could not read %s — ignoring (%s)", path, exc)
-        return {}
-
-
 def _coerce_price(model: str, table: Any) -> ModelPrice | None:
     """Coerce one ``[prices."<model>"]`` table into a ModelPrice, or None.
 
@@ -120,6 +94,9 @@ def _coerce_price(model: str, table: Any) -> ModelPrice | None:
             logger.warning("daydream prices: %r field %r is non-numeric (%r) — skipping", model, name, value)
             return None
         coerced = float(value)
+        if not math.isfinite(coerced):
+            logger.warning("daydream prices: %r field %r is non-finite (%r) — skipping", model, name, value)
+            return None
         if coerced < 0:
             logger.warning("daydream prices: %r field %r is negative (%r) — skipping", model, name, value)
             return None
@@ -167,7 +144,7 @@ def load_user_prices(path: Path | None = None) -> dict[str, ModelPrice]:
         else:
             path = Path.home() / ".daydream" / "prices.toml"
 
-    data = _load_toml(path)
+    data = load_toml_or_empty(path)
     raw_prices = data.get("prices")
     if not isinstance(raw_prices, dict):
         if raw_prices is not None:

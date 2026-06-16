@@ -199,6 +199,48 @@ def test_load_user_prices_negative_value_skips_entry(
     assert any("negative" in rec.message for rec in caplog.records)
 
 
+def test_load_user_prices_nan_value_skips_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A nan price value is logged and skips the entry."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."nan-model"]\ninput = nan\noutput = 2.0\n',
+    )
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices(path=prices_file)
+    assert loaded == {}
+    assert any("non-finite" in rec.message for rec in caplog.records)
+
+
+def test_load_user_prices_inf_value_skips_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A +inf or -inf price value is logged and skips the entry."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."inf-model"]\ninput = inf\noutput = 2.0\n',
+    )
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices(path=prices_file)
+    assert loaded == {}
+    assert any("non-finite" in rec.message for rec in caplog.records)
+
+
+def test_load_user_prices_negative_inf_value_skips_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """-inf is rejected as non-finite (not as negative) and skips the entry."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."neginf-model"]\ninput = -inf\noutput = 2.0\n',
+    )
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices(path=prices_file)
+    assert loaded == {}
+    assert any("non-finite" in rec.message for rec in caplog.records)
+
+
 def test_resolve_prices_override_wins_per_model() -> None:
     """resolve_prices applies overrides per-model, leaving other built-ins intact."""
     override = ModelPrice(input=1.0, cached_input=0.1, output=2.0)

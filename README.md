@@ -209,7 +209,7 @@ environment-variable tier — `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
 
 When a backend does not report a USD cost directly (notably Codex), daydream
 synthesizes cost from token counts using a price table. Anthropic-backed runs use
-the cost the Claude SDK already supplies and never pass through this path.
+the cost the Claude SDK already supplies and typically do not pass through this path.
 
 Per-model cost is resolved in this order, highest first:
 
