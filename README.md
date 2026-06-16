@@ -205,6 +205,38 @@ per-backend table in `daydream/config.py`. The same order applies to backend
 selection via `--backend` / config / the `claude` fallback. (There is no
 environment-variable tier — `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
 
+### Cost Pricing
+
+When a backend does not report a USD cost directly (notably Codex), daydream
+synthesizes cost from token counts using a price table. Anthropic-backed runs use
+the cost the Claude SDK already supplies and never pass through this path.
+
+Per-model cost is resolved in this order, highest first:
+
+**backend-reported `cost_usd` > user `prices.toml` > built-in price table > `—` (with footnote).**
+
+A model present in neither the user file nor the built-in table renders `—` with
+the "not in the price table" footnote rather than a fabricated cost.
+
+To override or extend the built-in prices, create `~/.daydream/prices.toml`. The
+`DAYDREAM_PRICES_FILE` environment variable overrides that path (a test seam and
+power-user escape hatch). The schema is one `[prices."<model>"]` table per model;
+each requires `input` and `output` (USD per 1M tokens) and accepts an optional
+`cached_input` that defaults to `input`. All prices must be non-negative. Overrides
+replace a built-in entry wholesale per model — there is no per-field merge.
+
+```toml
+# ~/.daydream/prices.toml — USD per 1M tokens. User entries override built-ins per-model.
+[prices."gpt-5.5"]
+input = 4.50
+cached_input = 0.45
+output = 27.00
+
+[prices."my-custom-model"]
+input = 2.00
+output = 8.00        # cached_input optional → defaults to input
+```
+
 ## GitHub App Identity
 
 By default, GitHub reads and writes (PR comments, feedback replies) run under
