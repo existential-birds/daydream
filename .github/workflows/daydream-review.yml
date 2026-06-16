@@ -91,11 +91,14 @@ jobs:
       - name: Install daydream
         run: uv tool install git+https://github.com/existential-birds/daydream
 
-      # Codex backend: daydream spawns `codex exec` as a subprocess, so the
-      # CLI must be on PATH and authenticated. Node/npm are preinstalled on the
-      # GitHub-hosted runner.
+      # Codex backend: daydream spawns `codex exec` as a subprocess, so the CLI
+      # must be on PATH. `codex exec` authenticates directly from OPENAI_API_KEY
+      # in the step env (set below) — no persisted `codex login` state on disk.
+      # Pinned because the backend parses `codex exec --experimental-json`
+      # output, whose event shape can change between CLI releases. Node/npm are
+      # preinstalled on the GitHub-hosted runner.
       - name: Install Codex CLI
-        run: npm install -g @openai/codex
+        run: npm install -g @openai/codex@0.139.0
 
       - name: Run daydream review
         env:
@@ -104,7 +107,6 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
         run: |
-          printenv OPENAI_API_KEY | codex login --with-api-key
           mkdir -p findings
           daydream --review --backend codex --non-interactive --pr-number "$PR_NUMBER" \
             --findings-out findings/findings.json --base "origin/$BASE_REF" .
