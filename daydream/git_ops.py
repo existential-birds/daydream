@@ -237,6 +237,7 @@ def _run_gh(
     args: list[str],
     *,
     timeout: int = 60,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``gh`` in *repo* with hardened defaults.
 
@@ -244,6 +245,9 @@ def _run_gh(
         repo: Repository working directory.
         args: Arguments after ``gh``.
         timeout: Subprocess timeout in seconds.
+        input_text: Optional text piped to the subprocess on **stdin** (used to
+            pass secret values via ``gh secret set --body-file -`` so the value
+            never appears in the process argument vector).
 
     The subprocess environment is sourced from the module ``_gh_token_env``
     singleton when set (via :func:`set_gh_token_env`), so ``gh`` authenticates
@@ -268,6 +272,7 @@ def _run_gh(
             timeout=timeout,
             shell=False,
             check=False,
+            input=input_text,
             env={**os.environ, **token_env} if token_env is not None else None,
         )
     except subprocess.TimeoutExpired as exc:
@@ -1164,6 +1169,106 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
         raise GitError(f"git worktree remove {path} failed: {proc.stderr.strip()}")
 
 
+def create_branch(repo: Path, name: str) -> None:
+    """Create and check out a new branch *name* via ``git checkout -b``.
+
+    Args:
+        repo: Repository working directory.
+        name: The branch name to create and switch to.
+
+    Raises:
+        GitError: If the branch already exists (``git checkout -b`` refuses to
+            overwrite it) or the checkout otherwise fails. The caller decides
+            whether to reuse or force the branch.
+    """
+    proc = _run_git(repo, ["checkout", "-b", name], timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git checkout -b {name} failed in {repo}: {proc.stderr.strip()}")
+
+
+def checkout_branch(repo: Path, name: str) -> None:
+    """Switch to an existing local branch *name*, or track it from origin.
+
+    Uses ``git checkout <name>`` when the branch exists locally (``refs/heads/<name>``),
+    or ``git checkout -b <name> origin/<name>`` when it exists only on the remote.
+
+    Args:
+        repo: Repository working directory.
+        name: An existing branch name (local or ``origin/<name>``).
+
+    Raises:
+        GitError: If the checkout fails, or the branch does not exist either
+            locally or on the remote.
+    """
+    local = _run_git(repo, ["rev-parse", "--verify", f"refs/heads/{name}"], timeout=5)
+    if local.returncode == 0:
+        proc = _run_git(repo, ["checkout", name], timeout=30, retries=0)
+    else:
+        proc = _run_git(repo, ["checkout", "-b", name, f"origin/{name}"], timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git checkout {name} failed in {repo}: {proc.stderr.strip()}")
+
+
+def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
+    """Stage only *paths* and commit them with *message*.
+
+    Stages exactly the named paths via ``git add <paths…>`` (never ``-A`` /
+    ``--all``) so only the intended files are committed, then commits with
+    ``git commit -m <message>``.
+
+    Args:
+        repo: Repository working directory.
+        paths: Repo-relative paths to stage and commit. Must be non-empty.
+        message: The commit message.
+
+    Raises:
+        GitError: If *paths* is empty, or the ``git add`` / ``git commit`` call
+            fails.
+    """
+    if not paths:
+        raise GitError("commit_paths requires at least one path")
+    add = _run_git(repo, ["add", "--", *(str(p) for p in paths)], timeout=30, retries=0)
+    if add.returncode != 0:
+        raise GitError(f"git add {paths} failed in {repo}: {add.stderr.strip()}")
+    # git commit fails with "Author identity unknown" when neither a local nor a
+    # global user.email / user.name is configured (common in fresh CI environments).
+    # Inject fallback values via -c only when the repo has no identity set; if the
+    # user already has an identity configured, git config will return it and we leave
+    # the commit command untouched.
+    identity_ok = (
+        _run_git(repo, ["config", "user.email"], timeout=5).returncode == 0
+        and _run_git(repo, ["config", "user.name"], timeout=5).returncode == 0
+    )
+    commit_args = ["commit", "-m", message]
+    if not identity_ok:
+        commit_args = [
+            "-c", "user.email=daydream@localhost",
+            "-c", "user.name=daydream",
+            *commit_args,
+        ]
+    commit = _run_git(repo, commit_args, timeout=30, retries=0)
+    if commit.returncode != 0:
+        raise GitError(f"git commit failed in {repo}: {commit.stderr.strip()}")
+
+
+def push_branch(repo: Path, branch: str, *, remote: str = "origin") -> None:
+    """Push *branch* to *remote*, setting upstream tracking.
+
+    Runs ``git push -u <remote> <branch>``.
+
+    Args:
+        repo: Repository working directory.
+        branch: The branch to push.
+        remote: Remote name. Defaults to ``"origin"``.
+
+    Raises:
+        GitError: If the push fails (propagates stderr).
+    """
+    proc = _run_git(repo, ["push", "-u", remote, branch], timeout=60, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git push -u {remote} {branch} failed in {repo}: {proc.stderr.strip()}")
+
+
 # --- gh wrappers -------------------------------------------------------------
 
 
@@ -1253,6 +1358,24 @@ def gh_pr_diff(repo: Path, pr: int) -> str:
     return proc.stdout
 
 
+def split_owner_repo(slug: str) -> tuple[str, str] | None:
+    """Split an ``"owner/repo"`` slug into its components.
+
+    Args:
+        slug: A GitHub ``"owner/repo"`` string.
+
+    Returns:
+        A ``(owner, repo)`` tuple when *slug* contains exactly one ``"/"``
+        and both parts are non-empty, or ``None`` otherwise.
+    """
+    if "/" not in slug:
+        return None
+    owner, _, repo = slug.partition("/")
+    if not owner or not repo:
+        return None
+    return owner, repo
+
+
 def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     """Return the ``(owner, name)`` slug for the current repository.
 
@@ -1270,13 +1393,7 @@ def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     )
     if proc.returncode != 0:
         return None
-    slug = proc.stdout.strip()
-    if "/" not in slug:
-        return None
-    owner, _, name = slug.partition("/")
-    if not owner or not name:
-        return None
-    return owner, name
+    return split_owner_repo(proc.stdout.strip())
 
 
 def _gh_error_for(message: str, stderr: str) -> GitError:
@@ -1404,3 +1521,150 @@ def gh_api(
     finally:
         if succeeded:
             tmp_path.unlink(missing_ok=True)
+
+
+# --- gh secret / variable / PR primitives ------------------------------------
+
+
+def _scope_args(org: str | None, repo_slug: str | None) -> list[str]:
+    """Build the ``--org``/``--repo`` scope flags, requiring exactly one.
+
+    Raises:
+        GitError: If neither or both of *org* and *repo_slug* are provided.
+    """
+    if (org is None) == (repo_slug is None):
+        raise GitError("exactly one of org or repo_slug must be provided")
+    return ["--org", org] if org is not None else ["--repo", repo_slug or ""]
+
+
+def gh_secret_set(
+    repo: Path,
+    name: str,
+    value: str,
+    *,
+    org: str | None = None,
+    repo_slug: str | None = None,
+) -> None:
+    """Set an Actions secret via ``gh secret set <name> --body-file -``.
+
+    The *value* is piped on **stdin** (never the argument vector) so secret
+    material such as a PEM private key cannot leak into process listings.
+
+    Args:
+        repo: Repository working directory (ambient ``gh`` auth context).
+        name: The secret name.
+        value: The secret value; piped on stdin via ``--body-file -``.
+        org: Set at the organization scope (``--org``).
+        repo_slug: Set at the repository scope (``--repo <owner/repo>``).
+
+    Raises:
+        GitError: If neither/both scopes are given, or the ``gh`` call fails.
+    """
+    args = ["secret", "set", name, "--body-file", "-", *_scope_args(org, repo_slug)]
+    proc = _run_gh(repo, args, timeout=60, input_text=value)
+    if proc.returncode != 0:
+        raise _gh_error_for(f"gh secret set {name} failed: {proc.stderr.strip()}", proc.stderr)
+
+
+def gh_variable_set(
+    repo: Path,
+    name: str,
+    value: str,
+    *,
+    org: str | None = None,
+    repo_slug: str | None = None,
+) -> None:
+    """Set an Actions variable via ``gh variable set <name> --body <value>``.
+
+    Variables are non-secret handles, so the value is passed via ``--body``.
+
+    Args:
+        repo: Repository working directory.
+        name: The variable name.
+        value: The variable value.
+        org: Set at the organization scope (``--org``).
+        repo_slug: Set at the repository scope (``--repo <owner/repo>``).
+
+    Raises:
+        GitError: If neither/both scopes are given, or the ``gh`` call fails.
+    """
+    args = ["variable", "set", name, "--body", value, *_scope_args(org, repo_slug)]
+    proc = _run_gh(repo, args, timeout=60)
+    if proc.returncode != 0:
+        raise _gh_error_for(f"gh variable set {name} failed: {proc.stderr.strip()}", proc.stderr)
+
+
+def _gh_name_list(repo: Path, kind: str, org: str | None, repo_slug: str | None) -> list[str]:
+    """Run ``gh <kind> list --json name`` and return the names."""
+    args = [kind, "list", "--json", "name", *_scope_args(org, repo_slug)]
+    proc = _run_gh(repo, args, timeout=60)
+    if proc.returncode != 0:
+        raise _gh_error_for(f"gh {kind} list failed: {proc.stderr.strip()}", proc.stderr)
+    try:
+        entries = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise GitError(f"gh {kind} list returned invalid JSON: {exc}") from exc
+    return [entry["name"] for entry in entries]
+
+
+def gh_secret_list(repo: Path, *, org: str | None = None, repo_slug: str | None = None) -> list[str]:
+    """Return the names of Actions secrets at the given scope.
+
+    Args:
+        repo: Repository working directory.
+        org: List at the organization scope (``--org``).
+        repo_slug: List at the repository scope (``--repo <owner/repo>``).
+
+    Returns:
+        The secret names (values are not exposed by ``gh secret list``).
+
+    Raises:
+        GitError: If neither/both scopes are given, or the ``gh`` call fails.
+    """
+    return _gh_name_list(repo, "secret", org, repo_slug)
+
+
+def gh_variable_list(repo: Path, *, org: str | None = None, repo_slug: str | None = None) -> list[str]:
+    """Return the names of Actions variables at the given scope.
+
+    Args:
+        repo: Repository working directory.
+        org: List at the organization scope (``--org``).
+        repo_slug: List at the repository scope (``--repo <owner/repo>``).
+
+    Returns:
+        The variable names.
+
+    Raises:
+        GitError: If neither/both scopes are given, or the ``gh`` call fails.
+    """
+    return _gh_name_list(repo, "variable", org, repo_slug)
+
+
+def gh_pr_create(
+    repo: Path, *, head: str, base: str, title: str, body: str, repo_slug: str | None = None
+) -> str:
+    """Open a pull request via ``gh pr create`` and return its URL.
+
+    Args:
+        repo: Repository working directory.
+        head: The head branch to open the PR from.
+        base: The base branch to merge into.
+        title: The PR title.
+        body: The PR body.
+        repo_slug: Explicit ``owner/repo`` target (``--repo``).  When *None*
+            the ambient ``gh`` context (cwd) is used.
+
+    Returns:
+        The PR URL ``gh`` prints on success.
+
+    Raises:
+        GitError: If the ``gh pr create`` call fails (stderr included).
+    """
+    args = ["pr", "create", "--head", head, "--base", base, "--title", title, "--body", body]
+    if repo_slug is not None:
+        args += ["--repo", repo_slug]
+    proc = _run_gh(repo, args, timeout=60)
+    if proc.returncode != 0:
+        raise _gh_error_for(f"gh pr create failed: {proc.stderr.strip()}", proc.stderr)
+    return proc.stdout.strip()

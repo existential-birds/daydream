@@ -5,6 +5,11 @@ supplies the App credentials via the ``DAYDREAM_APP_ID`` and
 ``DAYDREAM_APP_PRIVATE_KEY`` environment variables; this module turns those into
 a short-lived RS256 JWT, exchanges that JWT for a scoped installation access
 token, and resolves the active GitHub identity for banner display.
+
+This module also supports the App-from-manifest registration flow: exchanging
+a manifest-conversion code for a newly created App's credentials
+(:func:`exchange_manifest_code`) and reading an App's metadata
+(:func:`get_app_metadata`).
 """
 
 from __future__ import annotations
@@ -203,6 +208,81 @@ def _exchange_for_token(repo_dir: Path, installation_id: int, owner: str, repo: 
     return token
 
 
+def exchange_manifest_code(repo_dir: Path, code: str) -> tuple[AppCredentials, str]:
+    """Exchange a GitHub App-manifest code for the created App's credentials.
+
+    Completing the App-from-manifest flow yields a temporary ``code`` that is
+    itself the credential; ``POST /app-manifests/{code}/conversions`` is
+    unauthenticated and returns the new App's ``id``, ``pem`` private key, and
+    ``slug``.
+
+    Args:
+        repo_dir: Working directory for the ``gh`` subprocess.
+        code: The temporary manifest-conversion code from the callback.
+
+    Returns:
+        A ``(credentials, slug)`` tuple: the App's id/PEM as
+        :class:`AppCredentials`, and its ``slug``.
+
+    Raises:
+        GitHubAppError: If the conversion call fails, or the response is missing
+            an integer ``id`` or a ``pem`` field. The missing field is named and
+            never substituted with a placeholder.
+    """
+    try:
+        payload = git_ops.gh_api(repo_dir, f"/app-manifests/{code}/conversions", method="POST")
+    except git_ops.GitError as exc:
+        raise GitHubAppError(f"failed to exchange App manifest code: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise GitHubAppError("App manifest conversion response is not a JSON object")
+
+    app_id = payload.get("id")
+    if not isinstance(app_id, int):
+        raise GitHubAppError("App manifest conversion response is missing an integer 'id' field")
+
+    private_key = payload.get("pem")
+    if not isinstance(private_key, str) or not private_key:
+        raise GitHubAppError("App manifest conversion response is missing the 'pem' field")
+
+    slug = payload.get("slug")
+    slug = slug if isinstance(slug, str) and slug else "unknown"
+
+    return AppCredentials(app_id=app_id, private_key=private_key), slug
+
+
+def get_app_metadata(repo_dir: Path, app_id: int, private_key: str) -> dict:
+    """Read the authenticated App's metadata (``permissions``, ``slug``) via ``GET /app``.
+
+    Mints an App JWT, then calls ``GET /app`` with an explicit
+    ``Authorization: Bearer`` header (the only scheme GitHub accepts for App
+    JWTs); the JWT is injected as ``GH_TOKEN`` via the ``git_ops`` token
+    singleton for the duration of the call and restored afterward.
+
+    Args:
+        repo_dir: Working directory for the ``gh`` subprocess.
+        app_id: Numeric GitHub App ID.
+        private_key: PEM-encoded RSA private key for RS256 JWT signing.
+
+    Returns:
+        The parsed ``/app`` object, carrying ``permissions`` and ``slug``.
+
+    Raises:
+        GitHubAppError: If the call fails or returns a non-object payload.
+    """
+    jwt_token = mint_jwt(app_id, private_key)
+    bearer = {"Authorization": f"Bearer {jwt_token}"}
+    with _scoped_gh_token(jwt_token):
+        try:
+            payload = git_ops.gh_api(repo_dir, "/app", headers=bearer)
+        except git_ops.GitError as exc:
+            raise GitHubAppError(f"failed to read App metadata: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise GitHubAppError("App metadata response is not a JSON object")
+    return payload
+
+
 def resolve_user_identity(repo_dir: Path) -> str:
     """Resolve the ambient ``gh``-authenticated user login via ``GET /user``.
 
@@ -281,8 +361,8 @@ def _owner_repo_for(pr_repo: str | None, target_dir: Path) -> tuple[str, str] | 
     Prefers *pr_repo* (``"owner/repo"``) when set; otherwise derives it from
     ``gh repo view``. Returns None when it cannot be determined.
     """
-    if pr_repo and "/" in pr_repo:
-        owner, _, repo = pr_repo.partition("/")
-        if owner and repo:
-            return owner, repo
+    if pr_repo:
+        parsed = git_ops.split_owner_repo(pr_repo)
+        if parsed is not None:
+            return parsed
     return git_ops.gh_repo_view(target_dir)

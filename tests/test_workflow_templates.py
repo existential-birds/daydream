@@ -1,6 +1,6 @@
 """Structure tests for the shipped GitHub Actions workflow templates.
 
-Parses each template under ``templates/workflows/`` with ``yaml.safe_load`` and
+Parses each template under ``daydream/templates/workflows/`` with ``yaml.safe_load`` and
 asserts on the parsed tree; raw-text assertions ("this string never appears")
 read the file directly. PyYAML parses the bare ``on:`` key as boolean ``True``;
 ``wf_on()`` normalizes it back.
@@ -22,13 +22,14 @@ revised by Task 0 spike findings):
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "workflows"
+TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "daydream" / "templates" / "workflows"
 
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 
@@ -207,7 +208,7 @@ def test_command_match_is_exact_and_body_env_only(command_wf: dict[str, Any]) ->
     step = matches[0]
     assert step["env"]["BODY"] == "${{ github.event.comment.body }}"  # footgun 2
     assert step["env"]["BOT_HANDLE"] == "${{ vars.DAYDREAM_BOT_HANDLE }}"
-    assert '(^|[[:space:]])@${BOT_HANDLE}[[:space:]]+review([[:space:]]|$)' in step["run"]
+    assert '(^|[[:space:]])@${ESCAPED_HANDLE}[[:space:]]+review([[:space:]]|$)' in step["run"]
     assert "github.event" not in step["run"]
 
 
@@ -276,8 +277,9 @@ def test_post_workflow_downloads_artifact_from_triggering_run(post_wf: dict[str,
 
 def test_post_workflow_surfaces_failures(post_wf: dict[str, Any]) -> None:
     # Post-job failure: a final if: failure() step comments via the minted
-    # token, values via env only.
-    failure_steps = [s for s in job_steps(post_wf, "post") if s.get("if") == "failure()"]
+    # token, values via env only. The condition may include additional guards
+    # (e.g. checking that the download succeeded) beyond the bare failure().
+    failure_steps = [s for s in job_steps(post_wf, "post") if "failure()" in str(s.get("if", ""))]
     assert len(failure_steps) == 1
     step = failure_steps[0]
     assert step["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"
@@ -311,3 +313,39 @@ def test_no_event_data_interpolated_into_run_steps(wf_path) -> None:
                     f"{wf_path.name}:{job_name}: event data must reach run: via env:, "
                     f"never ${{{{ }}}} interpolation"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Install-pin drift guard — the bot must install a pinned daydream release,
+# never the moving `main` tip (a stale uv cache or main/template drift would
+# otherwise feed operators a daydream whose CLI no longer matches the workflow).
+# This test fails on release until the template pin is bumped in lockstep with
+# the package version — closing the gap that broke a live install.
+# ---------------------------------------------------------------------------
+
+
+_INSTALL_RE = re.compile(
+    r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?"
+)
+
+
+def _package_version() -> str:
+    """Read the declared package version from pyproject.toml (the single source)."""
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    return data["project"]["version"]
+
+
+@pytest.mark.parametrize("name", ["daydream-review.yml", "daydream-post.yml"])
+def test_daydream_install_is_pinned_to_current_release_tag(name: str) -> None:
+    text = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
+    refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
+    assert refs, f"{name} must install daydream via `uv tool install git+…`"
+    expected = f"@v{_package_version()}"
+    for ref in refs:
+        assert ref == expected, (
+            f"{name} pins the daydream install to {ref or '(unpinned main)'}, "
+            f"but must pin to {expected}. An unpinned/stale install lets the bot run a "
+            f"daydream whose CLI has drifted from this workflow. Bump the template pin in "
+            f"lockstep with the package version on every release."
+        )

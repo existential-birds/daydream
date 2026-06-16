@@ -116,3 +116,20 @@ UNKNOWN_SKILL_PATTERN = r"Unknown skill: ([\w:-]+)"
 # the orchestrator, never selected from the CLI.
 STRUCTURE_SKILL: str = "beagle-core:review-structure"
 STRUCTURE_STACK_NAME: str = "structure"
+
+# Self-hosted review-bot setup constants — single source of truth shared by the
+# ``daydream setup`` orchestrator, the packaged workflow YAML, and the browser
+# guide. Drift between these names and the workflow templates is guarded by
+# ``tests/test_templates_packaging.py``.
+SETUP_SECRET_NAMES: tuple[str, ...] = (
+    "DAYDREAM_APP_ID",
+    "DAYDREAM_APP_PRIVATE_KEY",
+    "ANTHROPIC_API_KEY",
+)
+BOT_HANDLE_VAR: str = "DAYDREAM_BOT_HANDLE"
+APP_PERMISSIONS: dict[str, str] = {
+    "pull_requests": "write",
+    "contents": "read",
+    "metadata": "read",
+    "actions": "write",
+}

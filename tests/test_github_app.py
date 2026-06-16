@@ -14,7 +14,10 @@ import pytest
 from daydream import git_ops
 from daydream.github_app import (
     AppCredentials,
+    GitHubAppError,
     build_gh_env,
+    exchange_manifest_code,
+    get_app_metadata,
     mint_installation_token,
     mint_jwt,
     resolve_credentials,
@@ -237,3 +240,83 @@ def test_resolve_user_identity_returns_unknown_on_failure():
     """A failed user lookup is non-fatal — return 'unknown', never raise."""
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("boom")):
         assert resolve_user_identity(Path("/tmp")) == "unknown"
+
+
+_TEST_PEM = _real_pem()
+
+
+def test_exchange_manifest_code_returns_credentials_and_slug():
+    """POST the manifest code conversion and read id/pem/slug into AppCredentials."""
+
+    def fake_gh_api(repo, endpoint, **kw):
+        assert endpoint == "/app-manifests/abc123/conversions" and kw["method"] == "POST"
+        return {"id": 42, "pem": "-----BEGIN RSA PRIVATE KEY-----\nx\n", "slug": "acme-bot"}
+
+    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
+        creds, slug = exchange_manifest_code(Path("."), "abc123")
+    assert creds.app_id == 42 and "BEGIN RSA" in creds.private_key and slug == "acme-bot"
+
+
+def test_exchange_manifest_code_raises_when_id_missing():
+    """A conversion missing the App id aborts naming the field — no placeholder."""
+    with patch("daydream.git_ops.gh_api", return_value={"pem": "x", "slug": "acme-bot"}):
+        with pytest.raises(GitHubAppError, match="id"):
+            exchange_manifest_code(Path("."), "abc123")
+
+
+def test_exchange_manifest_code_raises_when_id_not_int():
+    """A non-integer App id aborts naming the field — never coerce a placeholder."""
+    with patch("daydream.git_ops.gh_api", return_value={"id": "not-int", "pem": "x", "slug": "s"}):
+        with pytest.raises(GitHubAppError, match="id"):
+            exchange_manifest_code(Path("."), "abc123")
+
+
+def test_exchange_manifest_code_raises_when_pem_missing():
+    """A conversion missing the PEM aborts naming the field — no placeholder key."""
+    with patch("daydream.git_ops.gh_api", return_value={"id": 42, "slug": "acme-bot"}):
+        with pytest.raises(GitHubAppError, match="pem"):
+            exchange_manifest_code(Path("."), "abc123")
+
+
+def test_exchange_manifest_code_wraps_gh_api_failure():
+    """A gh api failure (GitError) surfaces as GitHubAppError, never silent."""
+    with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 422")):
+        with pytest.raises(GitHubAppError):
+            exchange_manifest_code(Path("."), "abc123")
+
+
+def test_get_app_metadata_returns_permissions():
+    """get_app_metadata mints a JWT and returns the parsed /app object."""
+    with patch(
+        "daydream.git_ops.gh_api",
+        side_effect=lambda *a, **k: {"permissions": {"pull_requests": "write"}, "slug": "acme-bot"},
+    ):
+        meta = get_app_metadata(Path("."), 42, _TEST_PEM)
+    assert meta["permissions"]["pull_requests"] == "write"
+
+
+def test_get_app_metadata_uses_bearer_jwt_and_clears_env():
+    """The /app call carries an explicit Bearer JWT, and the token env is restored."""
+    seen = {}
+
+    def fake_gh_api(repo, endpoint, **kw):
+        seen["endpoint"] = endpoint
+        seen["headers"] = kw.get("headers")
+        seen["env"] = git_ops.get_gh_token_env()
+        return {"permissions": {"pull_requests": "write"}, "slug": "acme-bot"}
+
+    git_ops.reset_gh_token_env()
+    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
+        get_app_metadata(Path("."), 42, _TEST_PEM)
+
+    assert seen["endpoint"] == "/app"
+    assert seen["headers"]["Authorization"].startswith("Bearer ey")
+    assert seen["env"] is not None  # JWT scoped during the call
+    assert git_ops.get_gh_token_env() is None  # restored after
+
+
+def test_get_app_metadata_wraps_gh_api_failure():
+    """A gh api failure (GitError) surfaces as GitHubAppError, never silent."""
+    with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 401")):
+        with pytest.raises(GitHubAppError):
+            get_app_metadata(Path("."), 42, _TEST_PEM)

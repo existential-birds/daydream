@@ -32,6 +32,14 @@ import pytest
 
 from daydream.pr_review import finding_marker
 
+
+def _argv_opt(argv: list[str], name: str) -> str | None:
+    """Return the value following ``name`` in *argv*, or None."""
+    for i, tok in enumerate(argv):
+        if tok == name and i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
 _EMPTY_THREADS_RESPONSE: dict[str, Any] = {
     "data": {
         "repository": {
@@ -87,8 +95,56 @@ def _parse(argv):
     return method, (endpoint or "").lstrip("/"), payload
 
 
+def _opt(argv, name):
+    """Return the value following ``name`` in argv, or None."""
+    for i, tok in enumerate(argv):
+        if tok == name and i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def _record(kind, argv, stdin):
+    with CALLS.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"kind": kind, "argv": argv, "stdin": stdin}) + "\\n")
+
+
+def _handle_set(kind, argv):
+    """Handle ``secret set`` / ``variable set``. Value via stdin or --body."""
+    name = argv[2] if len(argv) > 2 and not argv[2].startswith("-") else None
+    body = _opt(argv, "--body")
+    stdin = "" if body is not None else sys.stdin.read()
+    _record(kind + " set", argv, stdin)
+    return 0
+
+
+def _handle_list(kind, argv):
+    """Handle ``secret list`` / ``variable list`` with ``--json name``."""
+    _record(kind + " list", argv, "")
+    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
+    names = responses.get(kind + "-list", [])
+    print(json.dumps([{"name": n} for n in names]))
+    return 0
+
+
+def _handle_pr_create(argv):
+    _record("pr create", argv, "")
+    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
+    url = responses.get("pr-create")
+    if url is None:
+        sys.stderr.write("fake gh: no pr-create response configured\\n")
+        return 1
+    print(url)
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
+    if argv[:2] in (["secret", "set"], ["variable", "set"]):
+        return _handle_set(argv[0], argv)
+    if argv[:2] in (["secret", "list"], ["variable", "list"]):
+        return _handle_list(argv[0], argv)
+    if argv[:2] == ["pr", "create"]:
+        return _handle_pr_create(argv)
     if not argv or argv[0] != "api":
         sys.stderr.write("fake gh: unsupported invocation: %r\\n" % (argv,))
         return 1
@@ -130,7 +186,7 @@ if __name__ == "__main__":
 
 @dataclass
 class GhCall:
-    """One recorded ``gh`` invocation.
+    """One recorded ``gh api`` invocation.
 
     Attributes:
         endpoint: Endpoint with any leading slash stripped (``graphql`` for
@@ -140,6 +196,25 @@ class GhCall:
 
     endpoint: str
     payload: Any
+
+
+@dataclass
+class GhSetCall:
+    """One recorded ``gh secret set`` / ``gh variable set`` invocation.
+
+    Attributes:
+        name: The secret/variable name (first positional after ``set``).
+        org: The ``--org`` scope value, or None.
+        repo: The ``--repo`` scope value, or None.
+        argv: The full argv (after ``gh``) — assert PEM material never appears.
+        stdin: The value piped on stdin (for ``--body-file -`` secrets).
+    """
+
+    name: str | None
+    org: str | None
+    repo: str | None
+    argv: list[str]
+    stdin: str
 
 
 class FakeGh:
@@ -160,6 +235,8 @@ class FakeGh:
         wanted_endpoint = endpoint.lstrip("/") if endpoint is not None else None
         for line in self._calls_path.read_text(encoding="utf-8").splitlines():
             record = json.loads(line)
+            if "method" not in record:  # non-api record (secret/variable/pr)
+                continue
             if record["method"] != method.upper():
                 continue
             if wanted_endpoint is not None and record["endpoint"] != wanted_endpoint:
@@ -167,13 +244,69 @@ class FakeGh:
             out.append(GhCall(endpoint=record["endpoint"], payload=record["payload"]))
         return out
 
+    def _set_calls(self, kind: str) -> list[GhSetCall]:
+        out: list[GhSetCall] = []
+        if not self._calls_path.exists():
+            return out
+        for line in self._calls_path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record.get("kind") != kind:
+                continue
+            argv = record["argv"]
+            name = argv[2] if len(argv) > 2 and not argv[2].startswith("-") else None
+            out.append(
+                GhSetCall(
+                    name=name,
+                    org=_argv_opt(argv, "--org"),
+                    repo=_argv_opt(argv, "--repo"),
+                    argv=argv,
+                    stdin=record.get("stdin", ""),
+                )
+            )
+        return out
+
+    def secret_set_calls(self) -> list[GhSetCall]:
+        """Return recorded ``gh secret set`` invocations in order."""
+        return self._set_calls("secret set")
+
+    def variable_set_calls(self) -> list[GhSetCall]:
+        """Return recorded ``gh variable set`` invocations in order."""
+        return self._set_calls("variable set")
+
     # --- canned-response configuration ---------------------------------------
 
-    def set_response(self, method: str, endpoint: str, value: Any) -> None:
-        """Configure the canned response for ``method endpoint``."""
+    def set_response(self, method: str, endpoint: str | None = None, value: Any = None) -> None:
+        """Configure a canned response.
+
+        Two call shapes are supported:
+        - ``set_response(method, endpoint, value)`` — keys the ``gh api``
+          response under ``"<METHOD> <endpoint>"`` (existing behavior).
+        - ``set_response("pr-create", value=...)`` — keys a non-api response
+          (e.g. the PR URL the ``gh pr create`` shim prints) under the bare
+          ``method`` token.
+        """
         responses = self._read_responses()
-        responses[f"{method.upper()} {endpoint.lstrip('/')}"] = value
+        if endpoint is None:
+            responses[method] = value
+        else:
+            responses[f"{method.upper()} {endpoint.lstrip('/')}"] = value
         self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
+
+    def serve_secret_list(self, names: list[str]) -> None:
+        """Make ``gh secret list --json name`` return *names*."""
+        self.set_response("secret-list", value=names)
+
+    def serve_variable_list(self, names: list[str]) -> None:
+        """Make ``gh variable list --json name`` return *names*."""
+        self.set_response("variable-list", value=names)
+
+    def serve_installations(self, installations: list[dict[str, Any]]) -> None:
+        """Make ``gh api /app/installations`` return *installations*.
+
+        Each installation should carry an ``account.login`` so the verify
+        doctor's App-installed check can confirm the target owner appears.
+        """
+        self.set_response("GET", "/app/installations", value=installations)
 
     def serve_prior_threads(self, *, fingerprints: list[str], thread_ids: list[str]) -> None:
         """Serve a prior-thread inventory: one unresolved inline thread per fingerprint."""
