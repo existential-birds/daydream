@@ -59,11 +59,12 @@ def test_yaml_templates_present_in_built_wheel() -> None:
         )
         wheels = list(Path(tmp).glob("*.whl"))
         assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+        expected_paths = {f"daydream/templates/workflows/{name}" for name in _EXPECTED_TEMPLATES}
         with zipfile.ZipFile(wheels[0]) as zf:
-            names_in_wheel = {Path(n).name for n in zf.namelist() if n.endswith(".yml")}
-        assert _EXPECTED_TEMPLATES <= names_in_wheel, (
+            names_in_wheel = set(zf.namelist())
+        assert expected_paths <= names_in_wheel, (
             f"Built wheel is missing YAML templates. "
-            f"Found: {names_in_wheel!r}. "
-            f"Expected all of: {_EXPECTED_TEMPLATES!r}. "
+            f"Found YAML entries: {sorted(n for n in names_in_wheel if n.endswith('.yml'))!r}. "
+            f"Expected paths: {sorted(expected_paths)!r}. "
             f"Check [tool.hatch.build.targets.wheel] include in pyproject.toml."
         )
