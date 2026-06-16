@@ -132,3 +132,144 @@ def test_non_json_file_rejected(
     assert rc != 0
     err = capsys.readouterr().err
     assert ".json" in err
+
+
+# --- User-overridable pricing through the summarize entrypoint ----------------
+
+# Model name deliberately absent from built-in MODEL_PRICES (gpt-5.5,
+# gpt-5.5-pro, gpt-5-codex, gpt-5.3-codex), so the only way the cost cell can
+# render a dollar value is via a user-supplied price override.
+_CUSTOM_MODEL = "my-custom-model"
+
+# Chosen so the synthesized cost lands on a clean string the renderer emits:
+#   uncached_input = 100_000, cached = 0, output = 50_000
+#   input price 10.0/1M, output price 20.0/1M  ->
+#   100_000 * 10 / 1e6 + 50_000 * 20 / 1e6 = 1.00 + 1.00 = $2.00
+_PROMPT_TOKENS = 100_000
+_CACHED_TOKENS = 0
+_COMPLETION_TOKENS = 50_000
+_INPUT_PRICE = 10.0
+_OUTPUT_PRICE = 20.0
+_EXPECTED_COST_CELL = "$2.00"
+
+
+def _write_custom_model_trajectory(tmp_path: Path) -> Path:
+    """Write a minimal ATIF v1.6 trajectory with one priced-but-unknown step.
+
+    The single agent step carries token metrics, NO ``cost_usd``, and a
+    ``model_name`` not present in built-in ``MODEL_PRICES`` — so the cost cell
+    can only resolve to a dollar value when a user price override is loaded.
+    """
+    traj = {
+        "schema_version": "ATIF-v1.6",
+        "session_id": "fixture-custom-model-summarize",
+        "agent": {
+            "name": "daydream",
+            "version": "0.14.0",
+            "model_name": _CUSTOM_MODEL,
+        },
+        "steps": [
+            {
+                "step_id": 1,
+                "timestamp": "2026-05-02T00:00:00.000000Z",
+                "source": "user",
+                "message": "review",
+                "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"},
+            },
+            {
+                "step_id": 2,
+                "timestamp": "2026-05-02T00:00:01.000000Z",
+                "source": "agent",
+                "model_name": _CUSTOM_MODEL,
+                "message": "Reviewed.",
+                "tool_calls": [
+                    {"tool_call_id": "r1", "function_name": "Read", "arguments": {}}
+                ],
+                "observation": {"results": [{"source_call_id": "r1", "content": "ok"}]},
+                "metrics": {
+                    "prompt_tokens": _PROMPT_TOKENS,
+                    "completion_tokens": _COMPLETION_TOKENS,
+                    "cached_tokens": _CACHED_TOKENS,
+                    "cost_usd": None,
+                },
+                "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"},
+            },
+        ],
+        "final_metrics": {
+            "total_prompt_tokens": _PROMPT_TOKENS,
+            "total_completion_tokens": _COMPLETION_TOKENS,
+            "total_cached_tokens": _CACHED_TOKENS,
+            "total_steps": 2,
+        },
+    }
+    traj_path = tmp_path / "trajectory.json"
+    traj_path.write_text(json.dumps(traj), encoding="utf-8")
+    return traj_path
+
+
+def _write_prices_toml(tmp_path: Path) -> Path:
+    """Write a prices.toml covering the custom model with clean values."""
+    prices_path = tmp_path / "prices.toml"
+    prices_path.write_text(
+        f'[prices."{_CUSTOM_MODEL}"]\n'
+        f"input = {_INPUT_PRICE}\n"
+        f"output = {_OUTPUT_PRICE}\n",
+        encoding="utf-8",
+    )
+    return prices_path
+
+
+def test_summarize_uses_user_price_override_for_unknown_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POSITIVE: a prices.toml override makes the cost cell render a real $ value.
+
+    Drives the production ``summarize`` entrypoint with DAYDREAM_PRICES_FILE
+    pointing at a TOML that prices a model absent from built-in MODEL_PRICES.
+    Asserts on the rendered markdown only: the synthesized cost cell and the
+    absence of the unknown-model footnote.
+    """
+    traj = _write_custom_model_trajectory(tmp_path)
+    prices_file = _write_prices_toml(tmp_path)
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
+
+    rc = summarize(traj)
+    assert rc == 0
+    out = capsys.readouterr().out
+
+    # Rollup cost line and the per-phase Fix/Review row both carry the synthesized $2.00.
+    assert f"- **Cost:** {_EXPECTED_COST_CELL}" in out
+    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
+    assert _EXPECTED_COST_CELL in review_row
+    assert "| — |" not in review_row
+    # No footnote — the model WAS priced via the override.
+    assert "not in the price table" not in out
+
+
+def test_summarize_unknown_model_no_prices_renders_dash_and_footnote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """NEGATIVE: with no price override the cost cell is — and the footnote appears.
+
+    Same trajectory, but DAYDREAM_PRICES_FILE is unset, so the custom model is
+    unpriced: the cost cell degrades to ``—`` and the renderer emits the
+    'not in the price table' footnote naming the model.
+    """
+    traj = _write_custom_model_trajectory(tmp_path)
+    # Point at a nonexistent file: neutralizes both a stray env var AND the
+    # ~/.daydream/prices.toml home-dir fallback, so no price table loads.
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "no-such-prices.toml"))
+
+    rc = summarize(traj)
+    assert rc == 0
+    out = capsys.readouterr().out
+
+    assert "- **Cost:** —" in out
+    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
+    assert "| — |" in review_row
+    assert _EXPECTED_COST_CELL not in review_row
+    assert f"<sub>Cost unavailable: model `{_CUSTOM_MODEL}` is not in the price table.</sub>" in out
