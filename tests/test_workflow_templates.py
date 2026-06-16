@@ -397,3 +397,25 @@ def test_repo_review_runs_codex_backend_non_interactive(repo_review_wf: dict[str
     run = daydream_runs[0]["run"]
     assert "--backend codex" in run
     assert "--non-interactive" in run
+
+
+def test_repo_review_authenticates_codex_before_run(repo_review_wf: dict[str, Any]) -> None:
+    # `codex exec` does NOT read OPENAI_API_KEY from the environment for its own
+    # model-API auth (CLI 0.139.0): without persisted auth state it sends no
+    # bearer and every call 401s. Auth must be persisted via an explicit
+    # `codex login --with-api-key` step before the review runs, and the review
+    # step must NOT re-declare the secret (auth flows through $CODEX_HOME/auth.json).
+    steps = job_steps(repo_review_wf, "analyze")
+    login_steps = [s for s in steps if "codex login --with-api-key" in s.get("run", "")]
+    assert len(login_steps) == 1, "expected exactly one `codex login --with-api-key` step"
+    login = login_steps[0]
+    assert "OPENAI_API_KEY" in login["env"]
+
+    # The login step must come before the daydream review step so auth.json
+    # exists when `codex exec` runs.
+    login_idx = steps.index(login)
+    review_idx = next(i for i, s in enumerate(steps) if "daydream --review" in s.get("run", ""))
+    assert login_idx < review_idx, "Codex auth must be persisted before the review step runs"
+
+    # The review step authenticates via auth.json, not a redundant env secret.
+    assert "OPENAI_API_KEY" not in steps[review_idx].get("env", {})
