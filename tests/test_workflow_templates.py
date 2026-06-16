@@ -30,6 +30,7 @@ import pytest
 import yaml
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "daydream" / "templates" / "workflows"
+REPO_WORKFLOWS_DIR = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 
@@ -349,3 +350,50 @@ def test_daydream_install_is_pinned_to_current_release_tag(name: str) -> None:
             f"daydream whose CLI has drifted from this workflow. Bump the template pin in "
             f"lockstep with the package version on every release."
         )
+
+
+# ---------------------------------------------------------------------------
+# .github/workflows/daydream-review.yml (live repo dogfood workflow — Codex)
+#
+# The repo's own review CI has intentionally diverged from the shipped template:
+# operators get the Anthropic-backed template, but daydream dogfoods itself on the
+# Codex backend (Anthropic disallows subscription auth for automations). The
+# template tests above never load this file, so its Codex contract is asserted
+# here directly.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def repo_review_wf() -> dict[str, Any]:
+    return load_workflow(REPO_WORKFLOWS_DIR / "daydream-review.yml")
+
+
+@pytest.fixture(scope="module")
+def repo_review_text() -> str:
+    return (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
+
+
+def test_repo_review_only_secret_is_openai_api_key(repo_review_text: str) -> None:
+    assert set(_SECRET_REF_RE.findall(repo_review_text)) == {"OPENAI_API_KEY"}
+
+
+def test_repo_review_installs_codex_cli(repo_review_wf: dict[str, Any]) -> None:
+    codex_installs = [
+        s
+        for s in job_steps(repo_review_wf, "analyze")
+        if "Codex" in s.get("name", "") and "npm install -g @openai/codex" in s.get("run", "")
+    ]
+    assert len(codex_installs) == 1
+    # The backend parses `codex exec --experimental-json` output, whose event
+    # shape can drift between CLI releases, so the install must be version-pinned.
+    assert "npm install -g @openai/codex@" in codex_installs[0]["run"]
+
+
+def test_repo_review_runs_codex_backend_non_interactive(repo_review_wf: dict[str, Any]) -> None:
+    daydream_runs = [
+        s for s in job_steps(repo_review_wf, "analyze") if "daydream --review" in s.get("run", "")
+    ]
+    assert len(daydream_runs) == 1
+    run = daydream_runs[0]["run"]
+    assert "--backend codex" in run
+    assert "--non-interactive" in run
