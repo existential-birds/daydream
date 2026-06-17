@@ -49,9 +49,12 @@ No single job ever holds both PR code and the App private key:
   as its only secret, no App material anywhere. Its output is a passive data
   artifact (`findings.json`), never code.
 - **Daydream Command** never checks out code, so it may hold App credentials:
-  it mints a short-lived App token with exactly `actions: write` to dispatch
-  the review (this is why the App requests `Actions: read & write` — see the
-  setup guide's App-permissions step).
+  it mints a short-lived App token with `actions: write` (to dispatch the
+  review) plus `pull-requests: write` (to post the 👀 reaction as the bot
+  identity, not `github-actions[bot]`). Both writes flow through the App token,
+  so the job's default GITHUB_TOKEN is unprivileged (`permissions: {}`). This is
+  why the App requests `Actions: read & write` and `Pull requests: read & write`
+  — see the setup guide's App-permissions step.
 - **Phase B (Daydream Post)** holds the App key but only ever checks out the
   base repo's default branch (trusted code). It mints a token with exactly
   `pull-requests: write, contents: read, metadata: read`, downloads the
