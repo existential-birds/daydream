@@ -92,17 +92,26 @@ jobs:
         run: uv tool install git+https://github.com/existential-birds/daydream
 
       # Codex backend: daydream spawns `codex exec` as a subprocess, so the CLI
-      # must be on PATH. `codex exec` authenticates directly from OPENAI_API_KEY
-      # in the step env (set below) — no persisted `codex login` state on disk.
-      # Pinned because the backend parses `codex exec --experimental-json`
-      # output, whose event shape can change between CLI releases. Node/npm are
-      # preinstalled on the GitHub-hosted runner.
+      # must be on PATH. Pinned because the backend parses `codex exec
+      # --experimental-json` output, whose event shape can change between CLI
+      # releases. Node/npm are preinstalled on the GitHub-hosted runner.
       - name: Install Codex CLI
         run: npm install -g @openai/codex@0.139.0
 
-      - name: Run daydream review
+      # `codex exec` does NOT read OPENAI_API_KEY from the environment for its
+      # own model-API auth (verified against CLI 0.139.0): with the key set but
+      # no auth state on disk, `codex login status` reports "Not logged in" and
+      # requests go out with no bearer → 401. It requires persisted auth in
+      # $CODEX_HOME/auth.json. Pipe the key into `codex login --with-api-key`
+      # (the documented non-interactive path) so the review step authenticates
+      # with no ChatGPT login state on disk.
+      - name: Authenticate Codex CLI
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: printenv OPENAI_API_KEY | codex login --with-api-key
+
+      - name: Run daydream review
+        env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}

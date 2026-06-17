@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import secrets
 import shutil
-import tomllib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,6 +26,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from daydream import git_ops
+from daydream.config_file import load_toml_or_empty
 from daydream.git_ops import BranchNotFoundError, GitError
 
 _logger = logging.getLogger(__name__)
@@ -328,13 +328,11 @@ def _resolve_copy_entries(source: Path) -> list[Path]:
     """
     pyproject = source / "pyproject.toml"
     if pyproject.is_file():
-        try:
-            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError):
-            data = {}
-        override = (
-            data.get("tool", {}).get("daydream", {}).get("workspace", {}).get("copy")
-        )
+        data = load_toml_or_empty(pyproject)
+        tool = data.get("tool")
+        daydream_cfg = tool.get("daydream") if isinstance(tool, dict) else None
+        workspace_cfg = daydream_cfg.get("workspace") if isinstance(daydream_cfg, dict) else None
+        override = workspace_cfg.get("copy") if isinstance(workspace_cfg, dict) else None
         if isinstance(override, list):
             return [Path(p) for p in override if isinstance(p, str)]
 

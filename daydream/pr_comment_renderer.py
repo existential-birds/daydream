@@ -35,7 +35,7 @@ from pathlib import Path
 
 import daydream
 from daydream.atif import Step, Trajectory
-from daydream.pricing import compute_cost
+from daydream.pricing import ModelPrice, compute_cost, load_user_prices, resolve_prices
 from daydream.timeutil import parse_iso_timestamp
 
 # Display labels for each phase key used in Step.extra['daydream_phase'].
@@ -209,7 +209,11 @@ def render_run_info_block(trajectory_paths: list[Path]) -> str:
         trajectories = _load_trajectories(trajectory_paths)
         if not trajectories:
             return _render_fallback()
-        agg = _aggregate(trajectories)
+        # Build the effective price table ONCE (built-ins + user overrides
+        # from prices.toml). Inside the try so any load failure degrades to
+        # the fallback block rather than escaping the never-raises contract.
+        prices = resolve_prices(load_user_prices())
+        agg = _aggregate(trajectories, prices)
         if not agg.phases:
             return _render_fallback()
         return _render(agg)
@@ -236,7 +240,7 @@ def _load_trajectories(paths: list[Path]) -> list[Trajectory]:
     return out
 
 
-def _aggregate(trajectories: list[Trajectory]) -> _RunAgg:
+def _aggregate(trajectories: list[Trajectory], prices: dict[str, ModelPrice]) -> _RunAgg:
     """Walk every step in every trajectory, summing into per-phase rollups.
 
     ATIF v1.6 spec: ``Step.model_name`` omission implies the model defined in
@@ -248,6 +252,12 @@ def _aggregate(trajectories: list[Trajectory]) -> _RunAgg:
     must not pollute the per-phase model set. The fallback is still threaded
     into :func:`_accumulate_metrics` so the cost path can attempt pricing
     (and fall through to ``cost_unknown`` when the label is generic).
+
+    Args:
+        trajectories: Parsed ATIF trajectories to roll up.
+        prices: Effective model price table (built-ins merged with user
+            overrides) threaded into :func:`_accumulate_metrics` for cost
+            synthesis.
     """
     agg = _RunAgg()
     for traj in trajectories:
@@ -270,7 +280,7 @@ def _aggregate(trajectories: list[Trajectory]) -> _RunAgg:
             effective_model = step.model_name or agent_default_model
             if effective_model and effective_model not in _GENERIC_MODEL_LABELS:
                 phase.models.add(effective_model)
-            _accumulate_metrics(agg, phase, step, fallback_model=agent_default_model)
+            _accumulate_metrics(agg, phase, step, fallback_model=agent_default_model, prices=prices)
     return agg
 
 
@@ -292,6 +302,7 @@ def _accumulate_metrics(
     step: Step,
     *,
     fallback_model: str | None = None,
+    prices: dict[str, ModelPrice],
 ) -> None:
     """Add this step's token + cost contribution into the phase aggregate.
 
@@ -314,6 +325,17 @@ def _accumulate_metrics(
     implies the root-level :attr:`Agent.model_name`. Callers thread that
     value in via ``fallback_model`` so cost synthesis can land on the
     intended model when the step itself doesn't carry an explicit id.
+
+    Args:
+        agg: Whole-run rollup; ``unknown_models`` is updated when a model
+            cannot be priced.
+        phase: Per-phase aggregate to accumulate this step's tokens/cost into.
+        step: The ATIF step whose metrics are being folded in.
+        fallback_model: Model id to use when ``step.model_name`` is omitted
+            (the root-level :attr:`Agent.model_name`).
+        prices: Effective model price table (built-ins merged with user
+            overrides) passed to :func:`daydream.pricing.compute_cost` for
+            cost synthesis.
     """
     metrics = step.metrics
     if metrics is None:
@@ -342,6 +364,7 @@ def _accumulate_metrics(
         input_tokens=uncached_input,
         cached_input_tokens=cached,
         output_tokens=completion,
+        prices=prices,
     )
     if synth is None:
         phase.cost_unknown = True

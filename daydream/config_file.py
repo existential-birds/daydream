@@ -63,6 +63,35 @@ class DaydreamFileConfig:
         return self.phases.get(phase, {}).get("backend")
 
 
+def load_toml_or_empty(path: Path) -> dict[str, Any]:
+    """Parse a TOML file into a dict, returning {} when absent or malformed.
+
+    Never raises: callers that must not break on a bad user file (e.g. price
+    overrides, workspace copy config) use this instead of the error-raising
+    :func:`_load_toml`.
+
+    Args:
+        path: Path to the TOML file.
+
+    Returns:
+        The parsed table, or an empty dict if the file is absent or malformed.
+
+    Raises:
+        Never. Malformed TOML is logged as a warning and yields ``{}``.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        logger.warning("daydream: malformed TOML in %s — ignoring (%s)", path, exc)
+        return {}
+    except OSError as exc:
+        logger.warning("daydream: could not read %s — ignoring (%s)", path, exc)
+        return {}
+
+
 def _load_toml(path: Path) -> dict[str, Any]:
     """Parse a TOML file into a dict.
 

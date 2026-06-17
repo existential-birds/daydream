@@ -1,10 +1,17 @@
 """Tests for the OpenAI cost-synthesis price table."""
 
 from dataclasses import fields
+from pathlib import Path
 
 import pytest
 
-from daydream.pricing import MODEL_PRICES, ModelPrice, compute_cost
+from daydream.pricing import (
+    MODEL_PRICES,
+    ModelPrice,
+    compute_cost,
+    load_user_prices,
+    resolve_prices,
+)
 
 
 def test_compute_cost_gpt55_baseline() -> None:
@@ -83,3 +90,203 @@ def test_cached_tokens_priced_separately_from_input() -> None:
     # Concrete values: 100K * $5/1M = $0.50; 100K * $0.50/1M = $0.05
     assert input_only == pytest.approx(0.50)
     assert cached_only == pytest.approx(0.05)
+
+
+# --- User-overridable pricing -------------------------------------------------
+
+
+def _write(path: Path, content: str) -> Path:
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def test_load_user_prices_valid_parse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A valid prices.toml yields the parsed ModelPrice via the env-var path."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."my-model"]\ninput = 2.0\ncached_input = 0.5\noutput = 8.0\n',
+    )
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
+    loaded = load_user_prices()
+    assert loaded == {"my-model": ModelPrice(input=2.0, cached_input=0.5, output=8.0)}
+
+
+def test_load_user_prices_explicit_path_arg(tmp_path: Path) -> None:
+    """The explicit path argument is honored without any env var set."""
+    prices_file = _write(
+        tmp_path / "p.toml",
+        '[prices."explicit"]\ninput = 1.0\noutput = 3.0\n',
+    )
+    loaded = load_user_prices(path=prices_file)
+    assert loaded == {"explicit": ModelPrice(input=1.0, cached_input=1.0, output=3.0)}
+
+
+def test_load_user_prices_override_builtin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A user entry keyed to a built-in model name is loaded as an override."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."gpt-5.5"]\ninput = 1.0\ncached_input = 0.1\noutput = 2.0\n',
+    )
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
+    loaded = load_user_prices()
+    assert loaded["gpt-5.5"] == ModelPrice(input=1.0, cached_input=0.1, output=2.0)
+
+
+def test_load_user_prices_add_new_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A user entry for an unknown model is loaded as a new entry."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."brand-new"]\ninput = 9.0\noutput = 90.0\n',
+    )
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
+    loaded = load_user_prices()
+    assert "brand-new" in loaded
+    assert "brand-new" not in MODEL_PRICES
+
+
+def test_load_user_prices_cached_input_defaults_to_input(tmp_path: Path) -> None:
+    """Omitting cached_input defaults it to the input price."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."m"]\ninput = 4.0\noutput = 12.0\n',
+    )
+    loaded = load_user_prices(path=prices_file)
+    assert loaded["m"].cached_input == 4.0
+
+
+def test_load_user_prices_malformed_toml_returns_empty(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Malformed TOML logs a warning and yields {} — never raises."""
+    bad = _write(tmp_path / "prices.toml", "this is = = not toml")
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices(path=bad)
+    assert loaded == {}
+    assert any("malformed" in rec.message.lower() for rec in caplog.records)
+
+
+def test_load_user_prices_absent_file_returns_empty(tmp_path: Path) -> None:
+    """An absent file yields {} without raising."""
+    assert load_user_prices(path=tmp_path / "nope.toml") == {}
+
+
+def test_load_user_prices_missing_required_field_skips_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An entry missing a required field is logged and skipped."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."has-output"]\noutput = 5.0\n[prices."ok"]\ninput = 1.0\noutput = 2.0\n',
+    )
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices(path=prices_file)
+    assert "has-output" not in loaded
+    assert "ok" in loaded
+    assert any("missing required field" in rec.message for rec in caplog.records)
+
+
+def test_load_user_prices_negative_value_skips_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A negative price value is logged and skips the entry."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."neg"]\ninput = -1.0\noutput = 2.0\n',
+    )
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices(path=prices_file)
+    assert loaded == {}
+    assert any("negative" in rec.message for rec in caplog.records)
+
+
+def test_load_user_prices_nan_value_skips_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A nan price value is logged and skips the entry."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."nan-model"]\ninput = nan\noutput = 2.0\n',
+    )
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices(path=prices_file)
+    assert loaded == {}
+    assert any("non-finite" in rec.message for rec in caplog.records)
+
+
+def test_load_user_prices_inf_value_skips_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A +inf or -inf price value is logged and skips the entry."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."inf-model"]\ninput = inf\noutput = 2.0\n',
+    )
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices(path=prices_file)
+    assert loaded == {}
+    assert any("non-finite" in rec.message for rec in caplog.records)
+
+
+def test_load_user_prices_negative_inf_value_skips_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """-inf is rejected as non-finite (not as negative) and skips the entry."""
+    prices_file = _write(
+        tmp_path / "prices.toml",
+        '[prices."neginf-model"]\ninput = -inf\noutput = 2.0\n',
+    )
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices(path=prices_file)
+    assert loaded == {}
+    assert any("non-finite" in rec.message for rec in caplog.records)
+
+
+def test_load_user_prices_unresolvable_home_returns_empty(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When the default path is used and Path.home() raises, yield {} — never raise."""
+    monkeypatch.delenv("DAYDREAM_PRICES_FILE", raising=False)
+
+    def _raise() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", staticmethod(_raise))
+    with caplog.at_level("WARNING"):
+        loaded = load_user_prices()
+    assert loaded == {}
+    assert any("could not resolve home directory" in rec.message.lower() for rec in caplog.records)
+
+
+def test_resolve_prices_override_wins_per_model() -> None:
+    """resolve_prices applies overrides per-model, leaving other built-ins intact."""
+    override = ModelPrice(input=1.0, cached_input=0.1, output=2.0)
+    merged = resolve_prices({"gpt-5.5": override})
+    assert merged["gpt-5.5"] == override
+    # A non-overridden built-in is preserved unchanged.
+    assert merged["gpt-5-codex"] == MODEL_PRICES["gpt-5-codex"]
+
+
+def test_resolve_prices_none_returns_builtin_copy() -> None:
+    """resolve_prices(None) returns the built-in table contents."""
+    assert resolve_prices() == MODEL_PRICES
+
+
+def test_compute_cost_uses_override_prices() -> None:
+    """compute_cost(..., prices=...) looks up in the override table, not MODEL_PRICES."""
+    prices = resolve_prices({"gpt-5.5": ModelPrice(input=1.0, cached_input=0.1, output=2.0)})
+    cost = compute_cost(
+        model="gpt-5.5",
+        input_tokens=1_000_000,
+        cached_input_tokens=0,
+        output_tokens=0,
+        prices=prices,
+    )
+    assert cost == pytest.approx(1.0)
+    # Built-in (no prices arg) still uses the $5.00 input rate.
+    builtin = compute_cost(
+        model="gpt-5.5",
+        input_tokens=1_000_000,
+        cached_input_tokens=0,
+        output_tokens=0,
+    )
+    assert builtin == pytest.approx(5.0)
