@@ -418,12 +418,18 @@ def test_assemble_malformed_verdicts_flags_format_invalid(tmp_path: Path):
     assert inputs.format_valid is False
 
 
-def _seed_archived_deep_run(archive_dir: Path, session_id: str, *, merged_at: str) -> Path:
+def _seed_archived_deep_run(
+    archive_dir: Path, session_id: str, *, merged_at: str, source_path: Path | None = None
+) -> Path:
     """Seed a deep-run bronze bundle and index it under ``archive_dir``.
 
     ``_seed_deep_bronze`` + ``upsert_run`` (plan note): writes the bronze
     artifacts beside the archive and registers the indexed manifest row that
     :func:`run_harvest` walks. Returns the run directory.
+
+    When ``source_path`` is supplied it is recorded on the manifest so
+    :func:`_resolve_repo_for_row` resolves a working tree for the row (the
+    caller seeds a ``.git`` dir there), making ``clone_resolved`` True.
     """
     run_dir = _seed_deep_bronze(archive_dir, verdict="consistent", grounding=1.0)
     upsert_run(
@@ -441,6 +447,7 @@ def _seed_archived_deep_run(archive_dir: Path, session_id: str, *, merged_at: st
             grounding_rate=1.0,
             changed_files=["app.py"],
             archive_path=str(run_dir),
+            source_path=str(source_path) if source_path else None,
         ),
     )
     return run_dir
@@ -555,7 +562,8 @@ async def test_harvest_relinks_orphan_run_and_labels_it(tmp_path, archive_dir, m
     assert json.loads(row["outcome_labels"]) == ["contested"]  # now labelable (was orphan)
 
 
-async def test_harvest_fork_pr_404_degrades_not_drops(tmp_path, archive_dir, monkeypatch):
+@pytest.mark.parametrize("with_clone", [False, True])
+async def test_harvest_fork_pr_404_degrades_not_drops(tmp_path, archive_dir, monkeypatch, with_clone):
     """Real-path: a benign ``pulls/<n>`` 404 degrades to the local posterior.
 
     A fork-PR (or deleted-PR) fetch raises ``GitError`` with an HTTP 404. The
@@ -570,13 +578,24 @@ async def test_harvest_fork_pr_404_degrades_not_drops(tmp_path, archive_dir, mon
          stamps ``"merged"``/``"closed"``; the benign 404 instead routes through
          ``_build_rubric_local`` (``posterior_source="local_branch"``), so no
          fabricated ``merged=False`` PR rubric ever drove the label.
-      2. The persisted label is EMPTY (``"unknown"``), NOT ``"rejected"``. No git
-         clone resolves for this seeding, so the local-commit check has no repo to
-         inspect; ``build_annotation`` is told ``clone_resolved=False`` and forces
-         ``"unknown"`` rather than the false-negative ``"rejected"`` that #166
-         exists to eliminate.
+      2. The persisted label is EMPTY (``"unknown"``), NOT ``"rejected"``.
+
+    Parametrized over ``with_clone``:
+      * ``False`` — no working tree resolves; ``clone_resolved=False`` already
+        forces ``"unknown"`` (the original no-clone case).
+      * ``True`` — a git working tree IS resolved (``source_path`` carries a
+        ``.git`` dir), so ``clone_resolved=True``. The #166 invariant must STILL
+        force ``"unknown"``: a PR-shaped row whose merge evidence was merely
+        unavailable is ineligible for the PR-less commit walk, which on this
+        branch-less row would otherwise emit the false-negative ``"rejected"``.
     """
-    _seed_archived_deep_run(archive_dir, "s-fork", merged_at="2026-02-01T00:00:00+00:00")
+    source_path = None
+    if with_clone:
+        source_path = tmp_path / "clone"
+        (source_path / ".git").mkdir(parents=True)
+    _seed_archived_deep_run(
+        archive_dir, "s-fork", merged_at="2026-02-01T00:00:00+00:00", source_path=source_path
+    )
 
     def _gh_fork_404(repo: str, endpoint: str, **kwargs: Any) -> Any:
         if re.search(r"/pulls/\d+", endpoint):

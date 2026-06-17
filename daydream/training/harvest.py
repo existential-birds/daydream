@@ -431,7 +431,13 @@ def _build_rubric_local(
     commit applied the fix" from "we could not look". Forcing ``"unknown"``
     avoids mislabeling such a row ``"rejected"``.
     """
-    if not clone_resolved:
+    # Invariant: the local-commit posterior is valid ONLY for PR-less runs. A
+    # PR-shaped row that degraded here (benign gh fetch failure) is ineligible
+    # for the commit walk — its merge evidence was merely unavailable, so emit
+    # "unknown" before touching git rather than risk a "rejected" false negative.
+    if _row_is_pr(row):
+        local = LocalCommitAppliedSignal(verdict="unknown")
+    elif not clone_resolved:
         local = LocalCommitAppliedSignal(verdict="unknown")
     else:
         try:
@@ -626,13 +632,8 @@ def build_annotation(
             except RateLimitError:
                 raise
             except GitError:
-                # A secondary gh call (e.g. comment_resolution_signal) failed
-                # after we already confirmed the PR merge status. Degrade to
-                # the local-branch posterior but force clone_resolved=False so
-                # the local-commit check is skipped: we must not let a git
-                # "rejected" verdict overwrite a merge we already observed.
                 rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
-                    row, repo_clone=repo_clone, clone_resolved=False
+                    row, repo_clone=repo_clone, clone_resolved=clone_resolved
                 )
             else:
                 valid_at = rubric.pr_merge.merged_at
