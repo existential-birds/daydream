@@ -446,6 +446,67 @@ def _seed_archived_deep_run(archive_dir: Path, session_id: str, *, merged_at: st
     return run_dir
 
 
+def _seed_orphan_run(
+    archive_dir: Path, bronze_parent: Path, *, session_id: str, head_sha: str = "orphsha"
+) -> Path:
+    """Seed an orphan deep run (no PR linkage) and index it under ``archive_dir``.
+
+    Mirrors :func:`_seed_archived_deep_run` but writes the orphan manifest shape
+    the re-link path consumes: ``pr_number``/``pr_repo`` are ``None`` and the row
+    carries only a ``branch``/``head_sha``. Bronze artifacts go under
+    ``bronze_parent``; returns the run directory.
+    """
+    run_dir = _seed_deep_bronze(bronze_parent, verdict="consistent", grounding=1.0)
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id=session_id,
+            archived_at="2026-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            branch="feat/x",
+            head_sha=head_sha,
+            base_branch="main",
+            pr_number=None,
+            pr_repo=None,
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(run_dir),
+        ),
+    )
+    return run_dir
+
+
+def _seed_pr_runs(archive_dir: Path, bronze_parent: Path, count: int) -> None:
+    """Seed ``count`` PR-attached deep runs (sessions ``s1``..``sN``, ``pr_number`` 1..N).
+
+    Each run gets its own bronze dir under ``bronze_parent/<session_id>`` so the
+    index carries ``count`` distinct rows; ``pr_number`` matches the session index
+    so a fake ``_gh_api`` can identify the row from the PR endpoint.
+    """
+    for pr_number in range(1, count + 1):
+        sid = f"s{pr_number}"
+        run_dir = _seed_deep_bronze(bronze_parent / sid, verdict="consistent", grounding=1.0)
+        upsert_run(
+            archive_dir,
+            Manifest(
+                session_id=sid,
+                archived_at="2026-01-01T00:00:00Z",
+                run_flow="normal",
+                backend="claude",
+                repo_slug="org/repo",
+                pr_repo="org/repo",
+                pr_number=pr_number,
+                head_sha="abc",
+                base_branch="main",
+                grounding_rate=1.0,
+                changed_files=["app.py"],
+                archive_path=str(run_dir),
+            ),
+        )
+
+
 async def test_harvest_writes_one_annotation(tmp_path, archive_dir, monkeypatch):
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
     monkeypatch.setattr("daydream.training.harvest._gh_api", _fake_gh_merged("2026-02-01T00:00:00+00:00"))
@@ -483,25 +544,7 @@ async def test_harvest_relinks_orphan_run_and_labels_it(tmp_path, archive_dir, m
     through the PR path. Drives ``run_harvest`` end-to-end and asserts both the
     persisted linkage and the resulting ``contested`` label.
     """
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    upsert_run(
-        archive_dir,
-        Manifest(
-            session_id="s-orph",
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            branch="feat/x",
-            head_sha="orphsha",
-            base_branch="main",
-            pr_number=None,
-            pr_repo=None,
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(run_dir),
-        ),
-    )
+    _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph")
     monkeypatch.setattr(
         "daydream.training.harvest._gh_api",
         _fake_gh_orphan_relink("2026-02-01T00:00:00+00:00"),
@@ -569,25 +612,7 @@ async def test_harvest_orphan_422_degrades_not_drops(tmp_path, archive_dir, monk
     observation exists), the linkage was NOT applied, and — with no resolvable
     clone — the label degrades to ``"unknown"`` (empty), never ``"rejected"``.
     """
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    upsert_run(
-        archive_dir,
-        Manifest(
-            session_id="s-orph-422",
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            branch="feat/x",
-            head_sha="orphsha",
-            base_branch="main",
-            pr_number=None,
-            pr_repo=None,
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(run_dir),
-        ),
-    )
+    _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph-422")
 
     def _gh_unpushed_422(repo: str, endpoint: str, **kwargs: Any) -> Any:
         if "/commits/" in endpoint and endpoint.endswith("/pulls"):
@@ -622,25 +647,7 @@ async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_l
     if the guard is broken the function will actually write to the DB and the
     DB-state assertions below will catch it.
     """
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    upsert_run(
-        archive_dir,
-        Manifest(
-            session_id="s-orph-dry",
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            branch="feat/x",
-            head_sha="orphsha",
-            base_branch="main",
-            pr_number=None,
-            pr_repo=None,
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(run_dir),
-        ),
-    )
+    _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph-dry")
 
     monkeypatch.setattr(
         "daydream.training.harvest._gh_api",
@@ -671,25 +678,7 @@ async def test_harvest_leaves_true_local_run_unlinked(tmp_path, archive_dir, mon
     stays unlinked and must not be force-linked or errored — it flows the
     existing local-branch posterior path unchanged.
     """
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    upsert_run(
-        archive_dir,
-        Manifest(
-            session_id="s-local",
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            branch="feat/x",
-            head_sha="localsha",
-            base_branch="main",
-            pr_number=None,
-            pr_repo=None,
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(run_dir),
-        ),
-    )
+    _seed_orphan_run(archive_dir, tmp_path, session_id="s-local", head_sha="localsha")
 
     def _gh_no_pr(repo: str, endpoint: str, **kwargs: Any) -> Any:
         if endpoint.endswith("/pulls") and "/commits/" in endpoint:
@@ -724,25 +713,7 @@ async def test_re_harvest_appends_on_version_bump(tmp_path, archive_dir, monkeyp
 async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(tmp_path, archive_dir, monkeypatch):
     # Two distinct sessions with distinct PR numbers (so the gh endpoint identifies
     # the session), each with its own bronze run dir so the index has two rows.
-    for sid, pr_number in (("s1", 1), ("s2", 2)):
-        run_dir = _seed_deep_bronze(tmp_path / sid, verdict="consistent", grounding=1.0)
-        upsert_run(
-            archive_dir,
-            Manifest(
-                session_id=sid,
-                archived_at="2026-01-01T00:00:00Z",
-                run_flow="normal",
-                backend="claude",
-                repo_slug="org/repo",
-                pr_repo="org/repo",
-                pr_number=pr_number,
-                head_sha="abc",
-                base_branch="main",
-                grounding_rate=1.0,
-                changed_files=["app.py"],
-                archive_path=str(run_dir),
-            ),
-        )
+    _seed_pr_runs(archive_dir, tmp_path, 2)
     # The first row (PR 1) fully succeeds; the second (PR 2) triggers an exhausted
     # rate-limit on every gh call so the harvest loop must abort cleanly.
     merged = _fake_gh_merged("2026-02-01T00:00:00+00:00")
@@ -920,26 +891,7 @@ async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(tmp_pat
     # _build_rubric_local (posterior_source="local_branch"), so their persisted
     # pr_state is None (NOT a fabricated "merged"/"closed" PR rubric) — the
     # observable proof that no merged=False PR rubric drove their label.
-    for pr_number in range(1, 11):
-        sid = f"s{pr_number}"
-        run_dir = _seed_deep_bronze(tmp_path / sid, verdict="consistent", grounding=1.0)
-        upsert_run(
-            archive_dir,
-            Manifest(
-                session_id=sid,
-                archived_at="2026-01-01T00:00:00Z",
-                run_flow="normal",
-                backend="claude",
-                repo_slug="org/repo",
-                pr_repo="org/repo",
-                pr_number=pr_number,
-                head_sha="abc",
-                base_branch="main",
-                grounding_rate=1.0,
-                changed_files=["app.py"],
-                archive_path=str(run_dir),
-            ),
-        )
+    _seed_pr_runs(archive_dir, tmp_path, 10)
 
     merged = _fake_gh_merged("2026-02-01T00:00:00+00:00")
 
