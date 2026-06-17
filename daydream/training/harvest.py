@@ -77,6 +77,7 @@ injection seams.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -381,6 +382,25 @@ def _row_is_pr(row: dict[str, Any]) -> bool:
     return bool(row.get("pr_repo")) and row.get("pr_number") is not None
 
 
+# HTTP statuses that mean the PR/commit is *genuinely absent* (permanent), so a
+# row may degrade to its local posterior: a fork or deleted PR (404) or a head
+# SHA that was never pushed (422). Every other gh failure — server 5xx, auth,
+# timeout — is transient and must propagate so the per-row resume retries it
+# rather than caching a degraded label (#166).
+_BENIGN_PR_ABSENCE_STATUSES = (404, 422)
+
+
+def _is_benign_pr_absence(exc: GitError) -> bool:
+    """Return ``True`` when a ``gh`` ``GitError`` means the PR is genuinely absent.
+
+    Classification is on the HTTP status embedded in the ``gh`` failure message
+    (``... (HTTP 404)``); a failure with no recognizable status is treated as
+    transient (not benign), so it propagates rather than silently degrading.
+    """
+    match = re.search(r"\bHTTP (\d{3})\b", str(exc))
+    return match is not None and int(match.group(1)) in _BENIGN_PR_ABSENCE_STATUSES
+
+
 def _build_rubric_pr(
     row: dict[str, Any],
     *,
@@ -610,13 +630,17 @@ def build_annotation(
             )
         except RateLimitError:
             raise
-        except GitError:
-            # Benign PR-merge-status fetch failure (fork PR 404, unpushed-SHA
-            # 422): degrade to the local-branch posterior. The catch is
+        except GitError as exc:
+            # Only a *benign* PR-merge-status fetch failure (fork PR 404,
+            # unpushed-SHA 422) degrades to the local-branch posterior; a
+            # transient server/auth failure propagates so the run is retried
+            # rather than cached with a degraded label. The catch is also
             # intentionally narrow — only ``pr_merge_signal`` sits inside this
             # try block so that a GitError from ``comment_resolution_signal``
             # (raised *after* we know the PR is merged) cannot silently
             # relabel a confirmed-merged PR as "rejected".
+            if not _is_benign_pr_absence(exc):
+                raise
             rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
                 row, repo_clone=repo_clone, clone_resolved=clone_resolved
             )
@@ -631,21 +655,35 @@ def build_annotation(
                 )
             except RateLimitError:
                 raise
-            except GitError:
+            except GitError as exc:
+                if not _is_benign_pr_absence(exc):
+                    raise
                 rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
                     row, repo_clone=repo_clone, clone_resolved=clone_resolved
                 )
             else:
                 valid_at = rubric.pr_merge.merged_at
-                reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
-                pooled, prior_n = reviewer_set_penalty_prior(
-                    archive_dir,
-                    reviewer_logins,
-                    before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    exclude_session=row["session_id"],
-                    repo_slug=row.get("repo_slug"),
-                )
-                outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
+                try:
+                    reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
+                except RateLimitError:
+                    raise
+                except GitError:
+                    # The PR outcome is already decided; the reviewer-set prior
+                    # only refines it. A failure on this auxiliary lookup must
+                    # not drop an already-labeled row, so degrade to an empty
+                    # reviewer set / no prior and keep the resolved label.
+                    reviewer_logins = []
+                    outcome_prior = None
+                    prior_n = 0
+                else:
+                    pooled, prior_n = reviewer_set_penalty_prior(
+                        archive_dir,
+                        reviewer_logins,
+                        before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        exclude_session=row["session_id"],
+                        repo_slug=row.get("repo_slug"),
+                    )
+                    outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
     else:
         rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
             row, repo_clone=repo_clone, clone_resolved=clone_resolved
@@ -905,12 +943,15 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                 except RateLimitError:
                     raise
                 except GitError as exc:
-                    # Benign PR-fetch failure (e.g. fork PR 404, unpushed-SHA
-                    # 422): the PR is genuinely unresolvable, not rate-limited.
-                    # Degrade to the local-branch posterior rather than dropping
-                    # the run. The row stays ``pr_number=None`` and flows through
-                    # ``build_annotation``'s local branch. Surface the skip
-                    # without counting it as an error.
+                    # Only a benign PR-fetch failure (fork PR 404, unpushed-SHA
+                    # 422) means the PR is genuinely unresolvable; degrade to the
+                    # local-branch posterior rather than dropping the run. The
+                    # row stays ``pr_number=None`` and flows through
+                    # ``build_annotation``'s local branch. A transient
+                    # server/auth failure propagates to the per-row handler so
+                    # resume retries it instead of caching a degraded label.
+                    if not _is_benign_pr_absence(exc):
+                        raise
                     print_warning(
                         console,
                         f"harvest: PR link lookup failed for session {row['session_id']}; "

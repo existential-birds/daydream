@@ -891,37 +891,65 @@ def test_pr_coverage_helper_counts_decisive(tmp_path: Path):
     assert cov["pr_attached"] == 3 and cov["decisive"] == 2  # accepted+rejected, not unknown
 
 
-async def test_harvest_degrades_giterror_on_comments_after_successful_merge_fetch(
-    tmp_path, archive_dir, monkeypatch
-):
-    """Real-path: /pulls/{n} succeeds but /comments raises GitError → degrade, not drop.
+async def test_harvest_propagates_transient_giterror_for_retry(tmp_path, archive_dir, monkeypatch):
+    """Real-path: a transient GitError (HTTP 500) on /comments propagates, not degrades.
 
-    The ``except GitError`` block in ``build_annotation`` wraps the entire
-    ``_build_rubric_pr`` call (which includes both the merge fetch and the
-    subsequent comments/reviews fetches).  Previous fakes short-circuited
-    ``/comments`` and ``/reviews`` to ``[]``, leaving the degrade-after-
-    successful-merge path unexercised.  This test drives it directly:
-    the merge fetch returns ``merged=True``; the comments endpoint then
-    raises ``GitError``; the row must still be annotated (not dropped),
-    ``errors == 0``, and ``pr_state is None`` (local-branch rubric, not a
-    fabricated PR rubric).
+    ``/pulls/{n}`` succeeds (merged) but the ``/comments`` fetch raises a
+    transient HTTP 500. Unlike a benign 404/422 (PR genuinely absent), a server
+    error is *recoverable*: degrading it to the local posterior and caching the
+    row "done" would permanently lose the merge evidence. Per #166 the row must
+    instead surface as a hard error and stay un-cached so a later resume retries
+    it. Drives ``run_harvest`` end-to-end and asserts the row is counted in
+    ``errors``, is NOT annotated, and is NOT marked done in the resume cache.
     """
-    _seed_archived_deep_run(archive_dir, "s-comments-err", merged_at="2026-02-01T00:00:00+00:00")
+    _seed_archived_deep_run(archive_dir, "s-transient-500", merged_at="2026-02-01T00:00:00+00:00")
+    cache_dir = tmp_path / "c"
 
-    def _gh_merge_ok_comments_fail(repo: str, endpoint: str, **kwargs: Any) -> Any:
+    def _gh_merge_ok_comments_500(repo: str, endpoint: str, **kwargs: Any) -> Any:
         if re.search(r"/pulls/\d+$", endpoint):
             return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
         if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
             raise GitError("gh: Internal Server Error (HTTP 500)")
         return {}
 
-    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_merge_ok_comments_fail)
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_merge_ok_comments_500)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir))
+
+    assert summary["errors"] == 1  # transient 500 propagated, not degraded
+    assert latest_label_observation(archive_dir, "s-transient-500") is None  # not annotated
+    # Resume contract: the failed row is NOT cached "done", so a later run retries it.
+    done = BackfillCache(cache_dir=cache_dir, inner=_gh_merge_ok_comments_500).completed_sessions()
+    assert "s-transient-500" not in done
+
+
+async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(tmp_path, archive_dir, monkeypatch):
+    """Real-path: a GitError on the ``/reviews`` lookup must not drop a labeled row.
+
+    ``/pulls/{n}`` resolves the PR outcome (merged → ``accepted``) and
+    ``/comments`` succeeds, but the auxiliary ``/reviews`` lookup feeding the
+    reviewer-set prior raises ``GitError``. Because the PR outcome is already
+    decided, the row must still be annotated with its resolved label (degrading
+    only the optional prior), not dropped as a hard error through the per-row
+    catch-all. Drives ``run_harvest`` end-to-end.
+    """
+    _seed_archived_deep_run(archive_dir, "s-reviews-err", merged_at="2026-02-01T00:00:00+00:00")
+
+    def _gh_reviews_fail(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/reviews"):
+            raise GitError("gh: Internal Server Error (HTTP 500)")
+        if endpoint.endswith("/comments"):
+            return []
+        return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_reviews_fail)
     summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
 
-    assert summary["errors"] == 0  # GitError on /comments degraded, not counted as error
-    obs = latest_label_observation(archive_dir, "s-comments-err")
-    assert obs is not None  # annotated, not dropped
-    assert obs["pr_state"] is None  # local-branch rubric: no fabricated PR pr_state
+    assert summary["errors"] == 0  # reviewer-lookup failure degraded, row not dropped
+    obs = latest_label_observation(archive_dir, "s-reviews-err")
+    assert obs is not None  # still annotated
+    assert obs["pr_state"] == "merged"  # resolved PR outcome preserved (not degraded to local)
+    row = query_runs(archive_dir, "session_id = ?", ("s-reviews-err",))[0]
+    assert json.loads(row["outcome_labels"]) == ["accepted"]  # merged-PR label kept
 
 
 async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(tmp_path, archive_dir, monkeypatch):
