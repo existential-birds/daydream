@@ -412,17 +412,28 @@ def _build_rubric_local(
     row: dict[str, Any],
     *,
     repo_clone: Path,
+    clone_resolved: bool = True,
 ) -> Rubric:
-    """Compose signals for a PR-less row (local-branch posterior)."""
-    try:
-        local = local_commit_applied_signal(
-            row,
-            repo_clone=repo_clone,
-            commits_since_fetcher=_commits_since,
-            file_at_fetcher=_file_at,
-        )
-    except (FileNotFoundError, OSError):
+    """Compose signals for a PR-less row (local-branch posterior).
+
+    When ``clone_resolved`` is ``False`` no real git working tree was
+    obtained for the row (the orchestrator passes the archive dir as a
+    placeholder), so the local-commit check cannot distinguish "no follow-up
+    commit applied the fix" from "we could not look". Forcing ``"unknown"``
+    avoids mislabeling such a row ``"rejected"``.
+    """
+    if not clone_resolved:
         local = LocalCommitAppliedSignal(verdict="unknown")
+    else:
+        try:
+            local = local_commit_applied_signal(
+                row,
+                repo_clone=repo_clone,
+                commits_since_fetcher=_commits_since,
+                file_at_fetcher=_file_at,
+            )
+        except (FileNotFoundError, OSError):
+            local = LocalCommitAppliedSignal(verdict="unknown")
     pr_merge = PRMergeSignal(merged=False, merged_at=None)
     comments = CommentResolutionSignal(total=0, replied=0, unresolved=0)
     return Rubric(
@@ -503,6 +514,7 @@ def build_annotation(
     gh_api: Any,
     repo_clone: Path,
     window_days: int,
+    clone_resolved: bool = True,
 ) -> AnnotationPayload:
     """Build one run's bitemporal annotation payload (pure of DB writes).
 
@@ -542,6 +554,10 @@ def build_annotation(
         repo_clone: Local clone root for the fix-applied / local-commit
             cascades.
         window_days: Lookback window for the fix-applied cascade.
+        clone_resolved: Whether a real git working tree was obtained for the
+            row. When ``False`` the local-branch posterior is forced to
+            ``"unknown"`` rather than risking a ``"rejected"`` mislabel from a
+            commit check that had no repository to inspect.
 
     Returns:
         A frozen :class:`AnnotationPayload`. ``valid_at`` is the PR merge
@@ -555,24 +571,37 @@ def build_annotation(
             orchestrator isolates per-row).
     """
     if _row_is_pr(row):
-        rubric = _build_rubric_pr(
-            row,
-            gh_api=gh_api,
-            repo_clone=repo_clone,
-            window_days=window_days,
-        )
-        valid_at = rubric.pr_merge.merged_at
-        reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
-        pooled, prior_n = reviewer_set_penalty_prior(
-            archive_dir,
-            reviewer_logins,
-            before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            exclude_session=row["session_id"],
-            repo_slug=row.get("repo_slug"),
-        )
-        outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
+        try:
+            rubric = _build_rubric_pr(
+                row,
+                gh_api=gh_api,
+                repo_clone=repo_clone,
+                window_days=window_days,
+            )
+            valid_at = rubric.pr_merge.merged_at
+            reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
+            pooled, prior_n = reviewer_set_penalty_prior(
+                archive_dir,
+                reviewer_logins,
+                before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                exclude_session=row["session_id"],
+                repo_slug=row.get("repo_slug"),
+            )
+            outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
+        except RateLimitError:
+            raise
+        except GitError:
+            # Benign PR-posterior fetch failure (fork PR 404, unpushed-SHA 422):
+            # degrade to the local-branch posterior. Fabricating a PR-review
+            # rubric with ``merged=False`` would be mislabeled "rejected" by
+            # ``derive_outcome_label``, so reuse the local fallback instead.
+            rubric = _build_rubric_local(row, repo_clone=repo_clone, clone_resolved=clone_resolved)
+            valid_at = None
+            reviewer_logins = []
+            outcome_prior = None
+            prior_n = 0
     else:
-        rubric = _build_rubric_local(row, repo_clone=repo_clone)
+        rubric = _build_rubric_local(row, repo_clone=repo_clone, clone_resolved=clone_resolved)
         valid_at = None
         reviewer_logins = []
         outcome_prior = None
@@ -827,7 +856,23 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
             # inside the per-row ``try`` so a lookup error isolates to this row
             # (and ``RateLimitError`` propagates to the abort handler unchanged).
             if not _row_is_pr(row):
-                link = pr_link_signal(row, gh_api=gh_api_callable)
+                try:
+                    link = pr_link_signal(row, gh_api=gh_api_callable)
+                except RateLimitError:
+                    raise
+                except GitError:
+                    # Benign PR-fetch failure (e.g. fork PR 404, unpushed-SHA
+                    # 422): the PR is genuinely unresolvable, not rate-limited.
+                    # Degrade to the local-branch posterior rather than dropping
+                    # the run. The row stays ``pr_number=None`` and flows through
+                    # ``build_annotation``'s local branch. Surface the skip
+                    # without counting it as an error.
+                    print_warning(
+                        console,
+                        f"harvest: PR link lookup failed for session {row['session_id']}; "
+                        "degrading to local-branch posterior",
+                    )
+                    link = None
                 if link is not None:
                     number, slug = link
                     row["pr_number"] = number
@@ -841,6 +886,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                 gh_api=gh_api_callable,
                 repo_clone=row_repo_clone or config.archive_dir,
                 window_days=config.fix_applied_window_days,
+                clone_resolved=row_repo_clone is not None,
             )
             if config.dry_run:
                 summary["would_annotate"] += 1

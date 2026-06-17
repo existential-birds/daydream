@@ -512,6 +512,101 @@ async def test_harvest_relinks_orphan_run_and_labels_it(tmp_path, archive_dir, m
     assert json.loads(row["outcome_labels"]) == ["contested"]  # now labelable (was orphan)
 
 
+async def test_harvest_fork_pr_404_degrades_not_drops(tmp_path, archive_dir, monkeypatch):
+    """Real-path: a benign ``pulls/<n>`` 404 degrades to the local posterior.
+
+    A fork-PR (or deleted-PR) fetch raises ``GitError`` with an HTTP 404. The
+    fix catches benign ``GitError`` in ``build_annotation``'s PR-posterior block
+    and falls back to ``_build_rubric_local`` rather than dropping the run as a
+    hard error. Drives ``run_harvest`` end-to-end and asserts the fix's central
+    contract: the run is still ANNOTATED (not dropped) and the benign 404 is NOT
+    counted as an error (``errors == 0``).
+
+    The degrade is proven observably on two axes:
+      1. ``pr_state`` is ``None`` on the persisted observation — a real PR rubric
+         stamps ``"merged"``/``"closed"``; the benign 404 instead routes through
+         ``_build_rubric_local`` (``posterior_source="local_branch"``), so no
+         fabricated ``merged=False`` PR rubric ever drove the label.
+      2. The persisted label is EMPTY (``"unknown"``), NOT ``"rejected"``. No git
+         clone resolves for this seeding, so the local-commit check has no repo to
+         inspect; ``build_annotation`` is told ``clone_resolved=False`` and forces
+         ``"unknown"`` rather than the false-negative ``"rejected"`` that #166
+         exists to eliminate.
+    """
+    _seed_archived_deep_run(archive_dir, "s-fork", merged_at="2026-02-01T00:00:00+00:00")
+
+    def _gh_fork_404(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if re.search(r"/pulls/\d+", endpoint):
+            raise GitError("gh: Not Found (HTTP 404)")
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
+            return []
+        return {}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_fork_404)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0  # benign 404 degraded; not a hard error
+    obs = latest_label_observation(archive_dir, "s-fork")
+    assert obs is not None  # still annotated (not dropped)
+    # pr_state is None on the local-branch rubric (not "merged"/"closed"):
+    # observable proof the fix degraded to the local path rather than
+    # fabricating a merged=False PR rubric.
+    assert obs["pr_state"] is None
+    # The central #166 contract: NOT mislabeled "rejected". With no resolvable
+    # clone the local posterior is "unknown" → empty outcome_labels.
+    row = query_runs(archive_dir, "session_id = ?", ("s-fork",))[0]
+    assert json.loads(row["outcome_labels"]) == []
+
+
+async def test_harvest_orphan_422_degrades_not_drops(tmp_path, archive_dir, monkeypatch):
+    """Real-path: a benign ``commits/<sha>/pulls`` 422 degrades to local.
+
+    An orphan run whose head SHA was never pushed yields an HTTP 422 from the
+    ``commits/{sha}/pulls`` link probe. The fix catches benign ``GitError`` at
+    the orphan re-link site and degrades to the local-branch posterior (the row
+    stays ``pr_number=None``) instead of dropping the run. Drives ``run_harvest``
+    end-to-end and asserts the run is still annotated (``errors == 0``, a label
+    observation exists), the linkage was NOT applied, and — with no resolvable
+    clone — the label degrades to ``"unknown"`` (empty), never ``"rejected"``.
+    """
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id="s-orph-422",
+            archived_at="2026-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            branch="feat/x",
+            head_sha="orphsha",
+            base_branch="main",
+            pr_number=None,
+            pr_repo=None,
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(run_dir),
+        ),
+    )
+
+    def _gh_unpushed_422(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if "/commits/" in endpoint and endpoint.endswith("/pulls"):
+            raise GitError("gh: No commit found for SHA (HTTP 422)")
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
+            return []
+        return {}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_unpushed_422)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0  # benign 422 degraded; not a hard error
+    assert latest_label_observation(archive_dir, "s-orph-422") is not None  # annotated via local path
+    row = query_runs(archive_dir, "session_id = ?", ("s-orph-422",))[0]
+    assert row["pr_number"] is None and row["pr_repo"] is None  # linkage NOT applied
+    # No resolvable clone → local posterior is "unknown", never "rejected".
+    assert json.loads(row["outcome_labels"]) == []
+
+
 async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_link(
     tmp_path, archive_dir, monkeypatch
 ):
@@ -806,15 +901,25 @@ def test_pr_coverage_helper_counts_decisive(tmp_path: Path):
     assert cov["pr_attached"] == 3 and cov["decisive"] == 2  # accepted+rejected, not unknown
 
 
-async def test_harvest_meets_80pct_coverage_on_mixed_archive(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(tmp_path, archive_dir, monkeypatch):
     # Seed 10 PR-attached runs with distinct pr_number 1..10, each with its own
     # bronze run dir so the index carries ten rows. A fake _gh_api branches on the
     # PR number embedded in the endpoint: PRs 1..8 report merged (decisive ->
-    # "accepted"); PRs 9..10 raise a plain GitError so build_annotation fails and
-    # the harvest's per-row isolation skips them WITHOUT aborting (a RateLimitError
-    # would abort the whole sweep — see test_harvest_aborts_cleanly_on_rate_limit).
-    # The two skipped rows leave no label observation, so they project to
-    # unlabeled/non-decisive, making 80% a real bar rather than trivially 100%.
+    # "accepted"); PRs 9..10 raise a benign GitError (e.g. fork PR 404) which
+    # build_annotation now DEGRADES to the local-branch posterior instead of
+    # dropping the run as a hard error (a RateLimitError would still abort the
+    # whole sweep — see test_harvest_aborts_cleanly_on_rate_limit).
+    #
+    # PRE-FIX CONTRACT (the bug): PRs 9..10 raised GitError out of
+    # build_annotation, so per-row isolation counted errors == 2 and left two
+    # rows unannotated (pr_attached coverage 8/10).
+    #
+    # POST-FIX CONTRACT (asserted here): the benign GitError is swallowed and the
+    # row is annotated through the local-branch path, so errors == 0 and
+    # annotated == 10 — no run is dropped. The degraded rows route through
+    # _build_rubric_local (posterior_source="local_branch"), so their persisted
+    # pr_state is None (NOT a fabricated "merged"/"closed" PR rubric) — the
+    # observable proof that no merged=False PR rubric drove their label.
     for pr_number in range(1, 11):
         sid = f"s{pr_number}"
         run_dir = _seed_deep_bronze(tmp_path / sid, verdict="consistent", grounding=1.0)
@@ -842,9 +947,10 @@ async def test_harvest_meets_80pct_coverage_on_mixed_archive(tmp_path, archive_d
         match = re.search(r"/pulls/(\d+)", endpoint)
         number = int(match.group(1)) if match else 0
         if number >= 9:
-            # Non-rate-limit failure: per-row isolation skips this run (no
-            # annotation written) and the harvest loop CONTINUES rather than aborting.
-            raise GitError(f"unresolvable evidence for PR {number}")
+            # Benign (non-rate-limit) PR-fetch failure: build_annotation degrades
+            # this run to the local-branch posterior, annotating it rather than
+            # dropping it. The harvest loop CONTINUES (no abort, no error).
+            raise GitError(f"gh: Not Found (HTTP 404) for PR {number}")
         return merged(repo, endpoint, **kw)
 
     monkeypatch.setattr("daydream.training.harvest._gh_api", _gh)
@@ -852,7 +958,29 @@ async def test_harvest_meets_80pct_coverage_on_mixed_archive(tmp_path, archive_d
     summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
 
     assert summary["aborted"] == 0  # the GitError rows did NOT abort the sweep
-    assert summary["annotated"] == 8 and summary["errors"] == 2
+    # All 10 rows annotate now: 8 via the PR path ("accepted"), 2 degraded to the
+    # local-branch path. Benign GitError no longer counts as an error or a drop.
+    assert summary["annotated"] == 10 and summary["errors"] == 0
+
+    # The 8 PR-path rows are decisive "accepted" with a merged pr_state; the 2
+    # degraded rows carry pr_state None (local-branch rubric) — observable proof
+    # they degraded to the local path rather than a fabricated PR rubric.
+    accepted_pr_state = latest_label_observation(archive_dir, "s1")["pr_state"]
+    assert accepted_pr_state == "merged"
+    assert json.loads(query_runs(archive_dir, "session_id = ?", ("s1",))[0]["outcome_labels"]) == ["accepted"]
+    for sid in ("s9", "s10"):
+        degraded = latest_label_observation(archive_dir, sid)
+        assert degraded is not None  # annotated, not dropped
+        assert degraded["pr_state"] is None  # local-branch rubric, not a PR rubric
+        # No resolvable clone for the degraded rows → "unknown", NOT the
+        # false-negative "rejected" that #166 exists to eliminate.
+        assert json.loads(query_runs(archive_dir, "session_id = ?", (sid,))[0]["outcome_labels"]) == []
+
+    # Coverage stays honest: all 10 rows are PR-attached, the 8 merged rows are
+    # decisive ("accepted"), and the 2 degraded "unknown" rows are NON-decisive,
+    # so coverage is 8/10 — the 80% bar holds without inflating it via a bogus
+    # "rejected" on the rows we genuinely could not judge.
     cov = pr_attached_label_coverage(archive_dir)
-    assert cov["pr_attached"] == 10
-    assert cov["coverage"] >= 0.8
+    assert cov["pr_attached"] == 10  # every row stays PR-attached and annotated
+    assert cov["decisive"] == 8  # only the 8 merged rows are decisive; "unknown" is not
+    assert cov["coverage"] == 0.8 and cov["coverage"] >= 0.8
