@@ -872,6 +872,39 @@ def test_pr_coverage_helper_counts_decisive(tmp_path: Path):
     assert cov["pr_attached"] == 3 and cov["decisive"] == 2  # accepted+rejected, not unknown
 
 
+async def test_harvest_degrades_giterror_on_comments_after_successful_merge_fetch(
+    tmp_path, archive_dir, monkeypatch
+):
+    """Real-path: /pulls/{n} succeeds but /comments raises GitError → degrade, not drop.
+
+    The ``except GitError`` block in ``build_annotation`` wraps the entire
+    ``_build_rubric_pr`` call (which includes both the merge fetch and the
+    subsequent comments/reviews fetches).  Previous fakes short-circuited
+    ``/comments`` and ``/reviews`` to ``[]``, leaving the degrade-after-
+    successful-merge path unexercised.  This test drives it directly:
+    the merge fetch returns ``merged=True``; the comments endpoint then
+    raises ``GitError``; the row must still be annotated (not dropped),
+    ``errors == 0``, and ``pr_state is None`` (local-branch rubric, not a
+    fabricated PR rubric).
+    """
+    _seed_archived_deep_run(archive_dir, "s-comments-err", merged_at="2026-02-01T00:00:00+00:00")
+
+    def _gh_merge_ok_comments_fail(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if re.search(r"/pulls/\d+$", endpoint):
+            return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
+            raise GitError("gh: Internal Server Error (HTTP 500)")
+        return {}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_merge_ok_comments_fail)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0  # GitError on /comments degraded, not counted as error
+    obs = latest_label_observation(archive_dir, "s-comments-err")
+    assert obs is not None  # annotated, not dropped
+    assert obs["pr_state"] is None  # local-branch rubric: no fabricated PR pr_state
+
+
 async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(tmp_path, archive_dir, monkeypatch):
     # Seed 10 PR-attached runs with distinct pr_number 1..10, each with its own
     # bronze run dir so the index carries ten rows. A fake _gh_api branches on the
@@ -935,4 +968,4 @@ async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(tmp_pat
     cov = pr_attached_label_coverage(archive_dir)
     assert cov["pr_attached"] == 10  # every row stays PR-attached and annotated
     assert cov["decisive"] == 8  # only the 8 merged rows are decisive; "unknown" is not
-    assert cov["coverage"] == 0.8 and cov["coverage"] >= 0.8
+    assert cov["coverage"] == 0.8

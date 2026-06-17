@@ -387,11 +387,20 @@ def _build_rubric_pr(
     gh_api: Any,
     repo_clone: Path,
     window_days: int,
+    pr_merge: PRMergeSignal | None = None,
 ) -> Rubric:
-    """Compose all four signals for a row that originated from a PR."""
+    """Compose all four signals for a row that originated from a PR.
+
+    Args:
+        pr_merge: Pre-fetched :class:`PRMergeSignal`. When supplied
+            (already resolved by the caller before the catch boundary),
+            ``pr_merge_signal`` is not called again. When ``None`` it is
+            fetched here as before.
+    """
     changed_files = _row_changed_files(row)
     signal_row = {**row, "changed_files": changed_files}
-    pr_merge = pr_merge_signal(signal_row, gh_api=gh_api)
+    if pr_merge is None:
+        pr_merge = pr_merge_signal(signal_row, gh_api=gh_api)
     comments = comment_resolution_signal(signal_row, gh_api=gh_api)
     fix = _safe_fix_applied(
         signal_row,
@@ -412,7 +421,7 @@ def _build_rubric_local(
     row: dict[str, Any],
     *,
     repo_clone: Path,
-    clone_resolved: bool = True,
+    clone_resolved: bool = False,
 ) -> Rubric:
     """Compose signals for a PR-less row (local-branch posterior).
 
@@ -506,6 +515,23 @@ class AnnotationPayload:
     has_posterior: bool
 
 
+def _degrade_to_local(
+    row: dict[str, Any],
+    *,
+    repo_clone: Path,
+    clone_resolved: bool,
+) -> tuple[Any, None, list[str], None, int]:
+    """Build a local-branch rubric and return the degraded posterior state.
+
+    Used when a PR-path fetch fails benignly (fork PR 404, unpushed-SHA 422)
+    or when the row has no PR at all.  Returns a 5-tuple
+    ``(rubric, valid_at, reviewer_logins, outcome_prior, prior_n)`` with the
+    non-PR defaults so callers can unpack uniformly.
+    """
+    rubric = _build_rubric_local(row, repo_clone=repo_clone, clone_resolved=clone_resolved)
+    return rubric, None, [], None, 0
+
+
 def build_annotation(
     row: dict[str, Any],
     *,
@@ -572,40 +598,57 @@ def build_annotation(
     """
     if _row_is_pr(row):
         try:
-            rubric = _build_rubric_pr(
-                row,
+            _pr_merge = pr_merge_signal(
+                {**row, "changed_files": _row_changed_files(row)},
                 gh_api=gh_api,
-                repo_clone=repo_clone,
-                window_days=window_days,
             )
-            valid_at = rubric.pr_merge.merged_at
-            reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
-            pooled, prior_n = reviewer_set_penalty_prior(
-                archive_dir,
-                reviewer_logins,
-                before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                exclude_session=row["session_id"],
-                repo_slug=row.get("repo_slug"),
-            )
-            outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
         except RateLimitError:
             raise
         except GitError:
-            # Benign PR-posterior fetch failure (fork PR 404, unpushed-SHA 422):
-            # degrade to the local-branch posterior. Fabricating a PR-review
-            # rubric with ``merged=False`` would be mislabeled "rejected" by
-            # ``derive_outcome_label``, so reuse the local fallback instead.
-            rubric = _build_rubric_local(row, repo_clone=repo_clone, clone_resolved=clone_resolved)
-            valid_at = None
-            reviewer_logins = []
-            outcome_prior = None
-            prior_n = 0
+            # Benign PR-merge-status fetch failure (fork PR 404, unpushed-SHA
+            # 422): degrade to the local-branch posterior. The catch is
+            # intentionally narrow — only ``pr_merge_signal`` sits inside this
+            # try block so that a GitError from ``comment_resolution_signal``
+            # (raised *after* we know the PR is merged) cannot silently
+            # relabel a confirmed-merged PR as "rejected".
+            rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
+                row, repo_clone=repo_clone, clone_resolved=clone_resolved
+            )
+        else:
+            try:
+                rubric = _build_rubric_pr(
+                    row,
+                    gh_api=gh_api,
+                    repo_clone=repo_clone,
+                    window_days=window_days,
+                    pr_merge=_pr_merge,
+                )
+            except RateLimitError:
+                raise
+            except GitError:
+                # A secondary gh call (e.g. comment_resolution_signal) failed
+                # after we already confirmed the PR merge status. Degrade to
+                # the local-branch posterior but force clone_resolved=False so
+                # the local-commit check is skipped: we must not let a git
+                # "rejected" verdict overwrite a merge we already observed.
+                rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
+                    row, repo_clone=repo_clone, clone_resolved=False
+                )
+            else:
+                valid_at = rubric.pr_merge.merged_at
+                reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
+                pooled, prior_n = reviewer_set_penalty_prior(
+                    archive_dir,
+                    reviewer_logins,
+                    before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    exclude_session=row["session_id"],
+                    repo_slug=row.get("repo_slug"),
+                )
+                outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
     else:
-        rubric = _build_rubric_local(row, repo_clone=repo_clone, clone_resolved=clone_resolved)
-        valid_at = None
-        reviewer_logins = []
-        outcome_prior = None
-        prior_n = 0
+        rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
+            row, repo_clone=repo_clone, clone_resolved=clone_resolved
+        )
 
     outcome_label = derive_outcome_label(rubric)
     labels = [outcome_label] if outcome_label != "unknown" else []
@@ -860,7 +903,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                     link = pr_link_signal(row, gh_api=gh_api_callable)
                 except RateLimitError:
                     raise
-                except GitError:
+                except GitError as exc:
                     # Benign PR-fetch failure (e.g. fork PR 404, unpushed-SHA
                     # 422): the PR is genuinely unresolvable, not rate-limited.
                     # Degrade to the local-branch posterior rather than dropping
@@ -870,7 +913,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                     print_warning(
                         console,
                         f"harvest: PR link lookup failed for session {row['session_id']}; "
-                        "degrading to local-branch posterior",
+                        f"degrading to local-branch posterior: {type(exc).__name__}: {exc}",
                     )
                     link = None
                 if link is not None:
