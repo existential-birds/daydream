@@ -47,9 +47,12 @@ Annotation builder:
   from the outcome label + prior), asserts the breakdown carries the canonical
   :data:`~daydream.training.reward.REWARD_VERSION` before it can be written to
   canonical storage, and returns a frozen :class:`AnnotationPayload`. It is
-  *pure of DB writes* — the orchestrator persists the payload. Reviewer-signal,
-  prior-query, posterior-fetch, and git errors propagate to the caller, which
-  isolates per-row.
+  *pure of DB writes* — the orchestrator persists the payload. Error policy:
+  ``RateLimitError`` propagates (the orchestrator aborts cleanly and preserves
+  its resume marker); a *benign* PR-merge-status fetch failure (fork PR 404,
+  unpushed-SHA 422) degrades the row to its local-branch posterior; every other
+  reviewer-signal, prior-query, posterior-fetch, and git error propagates to the
+  caller, which isolates per-row.
 * ``valid_at`` is the PR merge timestamp for PR rows and ``None`` for
   non-PR/local rows (the write layer collapses ``None`` → ``observed_at``).
 
@@ -618,9 +621,16 @@ def build_annotation(
     Raises:
         AssertionError: When the scored breakdown does not carry the canonical
             ``REWARD_VERSION`` (a non-default-weights override leaked in).
-        Exception: Any reviewer-signal, prior-query, posterior-fetch
-            (``gh_api``), or git error propagates unchanged to the caller (the
-            orchestrator isolates per-row).
+        RateLimitError: Propagated unchanged so the orchestrator can abort the
+            sweep cleanly and preserve its resume marker.
+        Exception: A *benign* PR-merge-status fetch failure (fork PR 404,
+            unpushed-SHA 422) is caught and degrades the row to its local-branch
+            posterior rather than raising. Every other reviewer-signal,
+            prior-query, posterior-fetch (``gh_api``), or git error propagates
+            unchanged to the caller (the orchestrator isolates per-row). Once the
+            merge status is confirmed, a later ``comment_resolution_signal``
+            failure also propagates (the confirmed merge evidence is never
+            discarded).
     """
     if _row_is_pr(row):
         try:
@@ -645,45 +655,40 @@ def build_annotation(
                 row, repo_clone=repo_clone, clone_resolved=clone_resolved
             )
         else:
+            # The merge status is confirmed, so the PR provably exists. A
+            # GitError from the secondary comment fetch therefore cannot mean
+            # "PR absent" (a benign 404/422); it is transient and must propagate
+            # so the row is retried, rather than discarding the confirmed
+            # PRMergeSignal (and its valid_at) by degrading to a local posterior.
+            rubric = _build_rubric_pr(
+                row,
+                gh_api=gh_api,
+                repo_clone=repo_clone,
+                window_days=window_days,
+                pr_merge=_pr_merge,
+            )
+            valid_at = rubric.pr_merge.merged_at
             try:
-                rubric = _build_rubric_pr(
-                    row,
-                    gh_api=gh_api,
-                    repo_clone=repo_clone,
-                    window_days=window_days,
-                    pr_merge=_pr_merge,
-                )
+                reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
             except RateLimitError:
                 raise
-            except GitError as exc:
-                if not _is_benign_pr_absence(exc):
-                    raise
-                rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
-                    row, repo_clone=repo_clone, clone_resolved=clone_resolved
-                )
+            except GitError:
+                # The PR outcome is already decided; the reviewer-set prior
+                # only refines it. A failure on this auxiliary lookup must
+                # not drop an already-labeled row, so degrade to an empty
+                # reviewer set / no prior and keep the resolved label.
+                reviewer_logins = []
+                outcome_prior = None
+                prior_n = 0
             else:
-                valid_at = rubric.pr_merge.merged_at
-                try:
-                    reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
-                except RateLimitError:
-                    raise
-                except GitError:
-                    # The PR outcome is already decided; the reviewer-set prior
-                    # only refines it. A failure on this auxiliary lookup must
-                    # not drop an already-labeled row, so degrade to an empty
-                    # reviewer set / no prior and keep the resolved label.
-                    reviewer_logins = []
-                    outcome_prior = None
-                    prior_n = 0
-                else:
-                    pooled, prior_n = reviewer_set_penalty_prior(
-                        archive_dir,
-                        reviewer_logins,
-                        before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        exclude_session=row["session_id"],
-                        repo_slug=row.get("repo_slug"),
-                    )
-                    outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
+                pooled, prior_n = reviewer_set_penalty_prior(
+                    archive_dir,
+                    reviewer_logins,
+                    before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    exclude_session=row["session_id"],
+                    repo_slug=row.get("repo_slug"),
+                )
+                outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
     else:
         rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
             row, repo_clone=repo_clone, clone_resolved=clone_resolved

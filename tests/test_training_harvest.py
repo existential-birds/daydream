@@ -922,6 +922,38 @@ async def test_harvest_propagates_transient_giterror_for_retry(tmp_path, archive
     assert "s-transient-500" not in done
 
 
+async def test_harvest_does_not_discard_confirmed_merge_on_benign_comment_error(
+    tmp_path, archive_dir, monkeypatch
+):
+    """Real-path: a 404 on /comments after a confirmed merge propagates, not degrades.
+
+    ``/pulls/{n}`` succeeds (merged) but the ``/comments`` fetch raises a benign
+    HTTP 404. Once the merge status is confirmed the PR provably exists, so a
+    404 on its comments sub-resource cannot mean "PR absent" — it is transient.
+    The old behavior degraded such a row to a local-branch posterior, discarding
+    the confirmed ``PRMergeSignal`` (and its ``valid_at``) and caching an
+    ``unknown`` label. The row must instead surface as a hard error and stay
+    un-cached so a later resume retries it and recovers the merge evidence.
+    """
+    _seed_archived_deep_run(archive_dir, "s-merge-comments-404", merged_at="2026-02-01T00:00:00+00:00")
+    cache_dir = tmp_path / "c"
+
+    def _gh_merge_ok_comments_404(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if re.search(r"/pulls/\d+$", endpoint):
+            return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
+            raise GitError("gh: Not Found (HTTP 404)")
+        return {}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_merge_ok_comments_404)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir))
+
+    assert summary["errors"] == 1  # benign comment 404 propagated, merge evidence not discarded
+    assert latest_label_observation(archive_dir, "s-merge-comments-404") is None  # not annotated
+    done = BackfillCache(cache_dir=cache_dir, inner=_gh_merge_ok_comments_404).completed_sessions()
+    assert "s-merge-comments-404" not in done
+
+
 async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(tmp_path, archive_dir, monkeypatch):
     """Real-path: a GitError on the ``/reviews`` lookup must not drop a labeled row.
 
