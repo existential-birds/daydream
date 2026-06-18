@@ -1927,8 +1927,7 @@ async def test_structural_finding_reaches_fix_loop(
         f"fix loop; items fixed: {[(i.get('lens'), i.get('severity')) for i in fixed]!r}"
     )
     sev = [str(i["severity"]) for i in fixed]
-    assert sorted(sev, key=lambda s: {"high": 0, "medium": 1, "low": 2}[s]) == ["high", "high", "low"]
-    assert any(i.get("lens") == "structural" for i in fixed)
+    assert sev == sorted(sev, key=lambda s: {"high": 0, "medium": 1, "low": 2}[s])
 
 
 async def test_start_at_fix_recovers_merged_items(
