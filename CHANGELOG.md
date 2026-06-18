@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-06-18
+
+### Added
+
+- **github_app:** Run under operator GitHub App identity with scoped token injection ([#159](https://github.com/existential-birds/daydream/pull/159))
+
+  Daydream can now act as a self-hosted review bot using the operator's own GitHub App. Reviews are authored under the App's identity with a short-lived, repo-scoped installation token injected at runtime, so the maintainer never exposes a personal access token.
+
+- **bot:** Actions trigger surface — @-mention / auto-on-PR review via privilege split ([#160](https://github.com/existential-birds/daydream/pull/160))
+
+  Adds GitHub Actions trigger wiring so a review runs either when the bot is @-mentioned on a PR or automatically on PR open/update. A privilege split keeps the untrusted PR-triggered job read-only while a separate trusted job posts results.
+
+- **bot_setup:** One-command self-hosted review-bot setup and distribution ([#161](https://github.com/existential-birds/daydream/pull/161))
+
+  Bundles the workflow templates and a guided setup flow so an operator can stand up a white-label PR review bot in their own repository with a single command.
+
+- **pricing:** User-overridable model price table ([#165](https://github.com/existential-birds/daydream/pull/165))
+
+  Per-model token prices can now be overridden via config so cost metrics stay accurate as provider pricing changes, without waiting for a daydream release.
+
+### Changed
+
+- **cli:** Verb-first redesign with config-file phase control ([#141](https://github.com/existential-birds/daydream/pull/141))
+
+  **Breaking.** The CLI is now verb-first (`daydream review`, `daydream corpus …`), with a default review shim so `daydream /path` still works. Per-phase `--model`/`--backend` flags are removed in favor of `[tool.daydream]` / `[tool.daydream.phases.<phase>]` config in `pyproject.toml` or `.daydream.toml` (precedence: CLI global `--model`/`--backend` > config file > built-in default). The data pipeline verbs are namespaced under `corpus` (`daydream corpus harvest`/`build`/`label`), `--max-iterations` folds into `--loop [N]`, advanced flags hide behind `--help-all`, and non-interactive mode auto-detects from a non-TTY/CI environment.
+
+- **deep:** Sonnet-first per-stack review with a scoped Opus arbiter ([#175](https://github.com/existential-birds/daydream/pull/175))
+
+  Per-stack reviews now run on Sonnet by default with a scoped Opus arbiter pass, cutting review cost and latency while preserving finding quality.
+
+### Fixed
+
+- **git_ops:** Retry transient git timeouts and distinguish them from genuine errors ([#142](https://github.com/existential-birds/daydream/pull/142))
+
+- **training:** Correct run-level label attribution — footer-not-bot and archive-time PR linkage ([#149](https://github.com/existential-birds/daydream/pull/149))
+
+- **ui:** Render Task-family tools with resolved labels in both render paths ([#150](https://github.com/existential-birds/daydream/pull/150))
+
+- **codex:** Real-path harness infrastructure and Codex backend fixes ([#158](https://github.com/existential-birds/daydream/pull/158))
+
+- **training:** Harden harvest PR-signal labeling; de-cruft and parallelize the test suite ([#174](https://github.com/existential-birds/daydream/pull/174))
+
+### Security
+
+- **deps:** Bump `cryptography`, `python-multipart`, and `starlette` in the uv group ([#162](https://github.com/existential-birds/daydream/pull/162))
+
 ## [0.19.0] - 2026-06-04
 
 ### Added
@@ -555,7 +601,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.19.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/existential-birds/daydream/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/existential-birds/daydream/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/existential-birds/daydream/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/existential-birds/daydream/compare/v0.16.0...v0.17.0
