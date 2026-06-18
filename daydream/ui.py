@@ -174,6 +174,12 @@ PHASE_SUBTITLES = {
         "questioning the obvious",
         "the road not taken",
     ],
+    "ARBITRATE": [
+        "weighing the contested",
+        "a second, sharper look",
+        "settling the divergence",
+        "the deciding voice",
+    ],
     "ENVISION": [
         "shaping the path forward",
         "drawing the map",

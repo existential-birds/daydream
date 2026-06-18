@@ -64,6 +64,15 @@ def per_stack_records_path(deep_dir_path: Path, stack_name: str) -> Path:
     return deep_dir_path / f"stack-{stack_name}-records.json"
 
 
+def arbiter_input_path(deep_dir_path: Path) -> Path:
+    """Scoped-arbiter input findings JSON (issue #168).
+
+    The high-severity / contested per-stack records selected for the Opus
+    arbiter, each tagged with an ``arb_id`` the arbiter echoes back.
+    """
+    return deep_dir_path / "arbiter-input.json"
+
+
 def dedup_candidates_path(deep_dir_path: Path) -> Path:
     """Dedup pre-filter candidate-pairs output (D-27)."""
     return deep_dir_path / "dedup-candidates.json"

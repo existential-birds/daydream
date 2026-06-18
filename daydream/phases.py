@@ -738,6 +738,36 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# Per-stack parse schema (issue #168). Identical to FEEDBACK_SCHEMA but carries a
+# required ``severity`` so the scoped Opus arbiter can select high-severity /
+# contested findings *before* the merge. The shared FEEDBACK_SCHEMA stays
+# severity-free (the shallow loop and PR-feedback parse paths never need it);
+# only deep-mode's pre-merge per-stack parse opts into this richer record shape.
+PER_STACK_RECORD_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "description": {"type": "string"},
+                    "file": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["id", "description", "file", "line", "severity", "confidence", "rationale"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["issues"],
+    "additionalProperties": False,
+}
+
 ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1389,6 +1419,7 @@ async def phase_parse_feedback(
     work: WorkContext,
     *,
     input_path: Path | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Phase 2: Parse feedback from review output and return validated items.
 
@@ -1402,6 +1433,11 @@ async def phase_parse_feedback(
             When provided, reads that path instead — used by deep-mode's
             pre-merge parse stage to iterate per-stack outputs without
             overwriting each other at the shared REVIEW_OUTPUT_FILE location.
+        output_schema: Optional structured-output schema. Defaults to
+            ``FEEDBACK_SCHEMA``. Deep-mode's pre-merge per-stack parse passes
+            ``PER_STACK_RECORD_SCHEMA`` so each record carries ``severity`` for
+            the scoped Opus arbiter (issue #168). When the schema requires a
+            ``severity`` field, the prompt instructs the agent to extract it.
 
     Returns:
         List of validated feedback items with id, description, file, line
@@ -1413,6 +1449,17 @@ async def phase_parse_feedback(
     print_phase_hero(console, "REFLECT", phase_subtitle("REFLECT"))
     print_dim(console, f"Model: {backend.model}")
 
+    schema = output_schema if output_schema is not None else FEEDBACK_SCHEMA
+    wants_severity = "severity" in schema["properties"]["issues"]["items"]["properties"]
+    severity_field = ', "severity": "high|medium|low"' if wants_severity else ""
+    severity_hint = (
+        "\nAlso set a `severity` of high | medium | low for each issue, taken from the "
+        "review's own severity/priority label. Default to medium when the review gives "
+        "no explicit severity.\n"
+        if wants_severity
+        else ""
+    )
+
     # Use absolute path to prevent model hallucination of paths from training data
     review_output_path = input_path if input_path is not None else work.repo / REVIEW_OUTPUT_FILE
     prompt = f"""Read the review output file at {review_output_path}.
@@ -1421,16 +1468,16 @@ Extract ONLY actionable issues that need fixing. Skip these sections entirely:
 - "Good Patterns" or "Strengths"
 - "Summary" sections
 - Any positive observations
-
+{severity_hint}
 For each issue found, return a JSON object with this structure:
 {{"issues": [
-  {{"id": 1, "description": "Brief description of the issue", "file": "path/to/file.py", "line": 42}}
+  {{"id": 1, "description": "Brief description of the issue", "file": "path/to/file.py", "line": 42{severity_field}}}
 ]}}
 
 If there are no actionable issues, return: {{"issues": []}}
 """
 
-    result, _ = await run_agent(backend, work.repo, prompt, output_schema=FEEDBACK_SCHEMA, phase=DaydreamPhase.PARSE)
+    result, _ = await run_agent(backend, work.repo, prompt, output_schema=schema, phase=DaydreamPhase.PARSE)
 
     if not isinstance(result, dict) or "issues" not in result:
         # When structured output and JSON fallback both fail (e.g. empty
@@ -2500,6 +2547,111 @@ async def phase_per_stack_reviews(
         recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
 
     return results, failures
+
+
+ARBITER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "arb_id": {"type": "integer"},
+                    "keep": {"type": "boolean"},
+                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "description": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["arb_id", "keep", "severity", "confidence", "description", "rationale"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["findings"],
+    "additionalProperties": False,
+}
+
+
+async def phase_arbiter_review(
+    backend: Backend,
+    work: WorkContext,
+    *,
+    selected_records: list[dict[str, Any]],
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    exploration_dir: Path | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Re-review high-severity / contested per-stack findings with the arbiter (#168).
+
+    Runs a single heavyweight (Opus by default) agent over only the findings the
+    cheaper per-stack reviewers flagged as high-severity or contested. The
+    arbiter adjudicates -- confirming, re-ranking, sharpening, or rejecting each
+    -- but never discovers new findings. The result re-keys onto the input by
+    ``arb_id`` so the caller can revise / drop the originating records before the
+    cross-stack merge.
+
+    Args:
+        backend: The Backend to execute against (resolved via phase ``arbiter``).
+        work: Workspace context; ``work.repo`` is the agent cwd.
+        selected_records: Per-stack records selected for arbitration. Each is
+            tagged with a fresh 1-based ``arb_id`` before being written to the
+            arbiter input artifact; the originals are left untouched.
+        diff_path: Path to the full diff on disk.
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        exploration_dir: Optional pre-scan exploration directory.
+
+    Returns:
+        Mapping of ``arb_id`` -> adjudicated finding dict with keys ``keep``,
+        ``severity``, ``confidence``, ``description``, ``rationale``. Missing
+        ``arb_id``s (the agent dropped a row) are treated by the caller as
+        ``keep=False``.
+
+    """
+    from daydream.deep.artifacts import arbiter_input_path, deep_dir
+    from daydream.deep.prompts import build_arbiter_prompt
+
+    print_phase_hero(console, "ARBITRATE", phase_subtitle("ARBITRATE"))
+    print_dim(console, f"Model: {backend.model}")
+    print_info(console, f"Arbitrating {len(selected_records)} high-severity/contested finding(s)")
+
+    dd = deep_dir(work.repo)
+    input_path = arbiter_input_path(dd)
+    arbiter_input = [
+        {
+            "arb_id": i,
+            "file": rec.get("file"),
+            "line": rec.get("line"),
+            "severity": rec.get("severity"),
+            "confidence": rec.get("confidence"),
+            "description": rec.get("description"),
+            "rationale": rec.get("rationale"),
+        }
+        for i, rec in enumerate(selected_records, start=1)
+    ]
+    input_path.write_text(json.dumps(arbiter_input, indent=2))
+
+    prompt = build_arbiter_prompt(
+        arbiter_input_path=input_path,
+        diff_path=diff_path,
+        intent_path=intent_path,
+        alternatives_path=alternatives_path,
+        exploration_dir=exploration_dir,
+    )
+    result, _ = await run_agent(backend, work.repo, prompt, output_schema=ARBITER_SCHEMA, phase=DaydreamPhase.DEEP)
+
+    if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
+        raise ValueError(f"Arbiter returned no findings list (got {type(result).__name__})")
+
+    verdicts: dict[int, dict[str, Any]] = {}
+    for finding in result["findings"]:
+        arb_id = finding.get("arb_id")
+        if isinstance(arb_id, int):
+            verdicts[arb_id] = finding
+    return verdicts
 
 
 async def phase_cross_stack_merge(

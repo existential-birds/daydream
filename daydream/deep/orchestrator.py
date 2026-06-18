@@ -27,6 +27,7 @@ from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
 from daydream.config import REVIEW_OUTPUT_FILE, SKILL_MAP, STRUCTURE_STACK_NAME
+from daydream.deep.arbiter import select_arbiter_targets
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
 )
@@ -44,7 +45,10 @@ from daydream.deep.artifacts import (
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.phases import (
+    FEEDBACK_SCHEMA,
+    PER_STACK_RECORD_SCHEMA,
     phase_alternative_review,
+    phase_arbiter_review,
     phase_commit_push,
     phase_cross_stack_merge,
     phase_fix,
@@ -284,6 +288,74 @@ def _candidate_pair_to_json(pair: Any) -> dict[str, Any]:
     return data
 
 
+def _apply_arbiter_verdicts(
+    records: list[dict[str, Any]],
+    sources: list[str],
+    targets: list[int],
+    verdicts: dict[int, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Fold arbiter verdicts back into the per-stack record set (#168).
+
+    Each selected record (``targets[k]`` for 1-based ``arb_id = k + 1``) is
+    either revised in place (severity/confidence/description/rationale updated)
+    or dropped when the arbiter rejected it (``keep`` false, or no verdict
+    returned for its ``arb_id``). Non-selected records pass through untouched.
+    ``file``/``line`` are never changed -- the arbiter adjudicates, it does not
+    re-target findings.
+
+    Returns:
+        New ``(records, sources)`` with rejected records removed and surviving
+        selected records carrying the arbiter's fields. Positional alignment
+        between the two lists is preserved.
+    """
+    revised: dict[int, dict[str, Any]] = {}
+    dropped: set[int] = set()
+    for offset, record_index in enumerate(targets):
+        verdict = verdicts.get(offset + 1)
+        if verdict is None or not verdict.get("keep", False):
+            dropped.add(record_index)
+            continue
+        revised[record_index] = {
+            **records[record_index],
+            "severity": verdict.get("severity", records[record_index].get("severity")),
+            "confidence": verdict.get("confidence", records[record_index].get("confidence")),
+            "description": verdict.get("description", records[record_index].get("description")),
+            "rationale": verdict.get("rationale", records[record_index].get("rationale")),
+        }
+
+    new_records: list[dict[str, Any]] = []
+    new_sources: list[str] = []
+    for i, (record, source) in enumerate(zip(records, sources, strict=True)):
+        if i in dropped:
+            continue
+        new_records.append(revised.get(i, record))
+        new_sources.append(source)
+    return new_records, new_sources
+
+
+def _rewrite_stack_records(
+    deep_dir_path: Path,
+    stack_record_paths: list[Path],
+    records: list[dict[str, Any]],
+    sources: list[str],
+) -> None:
+    """Persist arbiter-revised records back to each per-stack records file (#168).
+
+    The cross-stack merge reads per-stack records by path, so arbitration must
+    be reflected on disk, not just in memory. Every language stack file is
+    rewritten with its surviving records (an emptied stack becomes ``[]`` rather
+    than retaining stale pre-arbitration content).
+    """
+    by_stack: dict[str, list[dict[str, Any]]] = {}
+    for path in stack_record_paths:
+        name = path.name.removeprefix("stack-").removesuffix("-records.json")
+        by_stack[name] = []
+    for record, source in zip(records, sources, strict=True):
+        by_stack.setdefault(source, []).append(record)
+    for name, stack_records in by_stack.items():
+        per_stack_records_path(deep_dir_path, name).write_text(json.dumps(stack_records, indent=2))
+
+
 async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """Execute the deep-review pipeline (D-07).
 
@@ -463,7 +535,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             if config.start_at not in ("merge", "fix"):
                 print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
                 per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
-                    _resolve_backend(config, "review", backend_cache),
+                    _resolve_backend(config, "per_stack_review", backend_cache),
                     work,
                     stacks,
                     diff_path=diff_path,
@@ -535,10 +607,19 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     # order is independent of parallel-task completion order, keeping
                     # the merge prompt and global issue numbering reproducible.
                     for stack_name, output_path in sorted(per_stack_outputs.items()):
+                        # Language stacks carry severity so the scoped arbiter can
+                        # select high/contested findings (#168). The structural
+                        # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
+                        # high-conviction by construction and is partitioned out of
+                        # arbitration/dedup below, defaulting to high at merge.
+                        record_schema = (
+                            FEEDBACK_SCHEMA if stack_name == STRUCTURE_STACK_NAME else PER_STACK_RECORD_SCHEMA
+                        )
                         records = await phase_parse_feedback(
                             _resolve_backend(config, "parse", backend_cache),
                             work,
                             input_path=output_path,
+                            output_schema=record_schema,
                         )
                         records_path = per_stack_records_path(dd, stack_name)
                         records_path.write_text(json.dumps(records, indent=2))
@@ -567,6 +648,31 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     record_sources = [src for _, src in kept_pairs]
                 else:
                     structural_records_path = None
+
+                # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
+                # a single heavyweight arbiter now re-reviews ONLY the
+                # high-severity / contested findings and writes its verdicts back
+                # into the per-stack records before merge. Skipped on a
+                # `--start-at merge` resume (records are already final on disk)
+                # and when nothing qualifies (the common, cheap case).
+                if config.start_at != "merge":
+                    arbiter_targets = select_arbiter_targets(all_records, record_sources)
+                    if arbiter_targets:
+                        verdicts = await phase_arbiter_review(
+                            _resolve_backend(config, "arbiter", backend_cache),
+                            work,
+                            selected_records=[all_records[i] for i in arbiter_targets],
+                            diff_path=diff_path,
+                            intent_path=intent_p,
+                            alternatives_path=alts_p,
+                            exploration_dir=exploration_dir,
+                        )
+                        all_records, record_sources = _apply_arbiter_verdicts(
+                            all_records, record_sources, arbiter_targets, verdicts
+                        )
+                        _rewrite_stack_records(
+                            dd, per_stack_records_paths, all_records, record_sources
+                        )
 
                 # Dedup pre-filter (D-27).
                 alt_issues_for_dedup: list[dict[str, Any]] = (

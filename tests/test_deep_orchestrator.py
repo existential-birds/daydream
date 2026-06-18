@@ -30,9 +30,24 @@ class _StubBackend:
 
     model = "mock-model"
 
-    def __init__(self, target: Path, *, is_codex: bool = False) -> None:
+    def __init__(
+        self,
+        target: Path,
+        *,
+        is_codex: bool = False,
+        shared_calls: list[dict[str, Any]] | None = None,
+    ) -> None:
         self._target = target
         self._is_codex = is_codex
+        # When set, every execute() call is also appended (model-tagged) to this
+        # shared list so a per-(name, model) factory can capture which model ran
+        # each phase even though backends are cached by (name, model) (#168).
+        self._shared = shared_calls
+        # #168 knobs: per-stack parse severity to emit (drives arbiter selection),
+        # and whether the merge agent echoes the on-disk per-stack records (so the
+        # rendered artifact reflects arbiter revisions instead of fixed items).
+        self.parse_severity: str | None = None
+        self.merge_echo_records: bool = False
         self.calls: list[dict[str, Any]] = []
         # Verdict the recommendation-verifier branch emits for issue_id=1; flip to
         # "contradicts" to exercise verdict propagation into the phase_fix prompt.
@@ -56,14 +71,16 @@ class _StubBackend:
         max_turns: Any = None,
         read_only: bool = False,
     ):
-        self.calls.append(
-            {
-                "cwd": cwd,
-                "prompt": prompt,
-                "output_schema": output_schema,
-                "agents": agents,
-            }
-        )
+        call = {
+            "cwd": cwd,
+            "prompt": prompt,
+            "output_schema": output_schema,
+            "agents": agents,
+            "model": self.model,
+        }
+        self.calls.append(call)
+        if self._shared is not None:
+            self._shared.append(call)
         pl = prompt.lower()
 
         # TTT alternative-review -> structured output. Checked BEFORE intent: the
@@ -120,21 +137,68 @@ class _StubBackend:
             return
 
         if "extract only actionable issues" in pl:  # phase_parse_feedback
+            issue: dict[str, Any] = {"id": 1, "description": "Sample issue", "file": "api.py", "line": 1}
+            # Deep per-stack parse requests severity (PER_STACK_RECORD_SCHEMA, #168);
+            # emit the configured severity so a test can drive arbiter selection.
+            # The structural stack parses with FEEDBACK_SCHEMA (no severity prompt),
+            # so it never gets one -- matching production.
+            if self.parse_severity is not None and "severity" in pl:
+                issue["severity"] = self.parse_severity
+                issue["confidence"] = "MEDIUM"
+                issue["rationale"] = "stub"
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {"id": 1, "description": "Sample issue", "file": "api.py", "line": 1}
-                    ]
-                },
-                continuation=None,
-            )
+            yield ResultEvent(structured_output={"issues": [issue]}, continuation=None)
+            return
+
+        # Scoped Opus arbiter (#168). Reads the arbiter-input.json path the prompt
+        # points at, echoes every arb_id back with keep=true, and stamps the
+        # description so the arbitrated finding is observable downstream.
+        if "you are the arbiter" in pl:
+            in_match = re.search(r"listed in (\S+arbiter-input\.json)", prompt)
+            findings: list[dict[str, Any]] = []
+            if in_match is not None:
+                arb_inputs = json.loads(Path(in_match.group(1)).read_text())
+                for entry in arb_inputs:
+                    findings.append(
+                        {
+                            "arb_id": entry["arb_id"],
+                            "keep": True,
+                            "severity": entry.get("severity") or "high",
+                            "confidence": entry.get("confidence") or "HIGH",
+                            "description": f"ARBITRATED: {entry.get('description')}",
+                            "rationale": "arbiter second opinion",
+                        }
+                    )
+            yield TextEvent(text="")
+            yield ResultEvent(structured_output={"findings": findings}, continuation=None)
             return
 
         # Cross-stack merge -> schema-validated item list; the host appends
         # structural findings, normalizes ids, and renders review-output.md.
         if "cross-stack merge agent" in pl:
             yield TextEvent(text="")
+            if self.merge_echo_records:
+                # Echo the on-disk per-stack records as merged items so the
+                # rendered artifact reflects any arbiter revisions (#168).
+                echoed: list[dict[str, Any]] = []
+                next_id = 1
+                for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
+                    for rec in json.loads(Path(path_str).read_text()):
+                        echoed.append(
+                            {
+                                "id": next_id,
+                                "lens": "per-stack",
+                                "file": rec.get("file"),
+                                "line": rec.get("line"),
+                                "severity": rec.get("severity", "medium"),
+                                "description": rec.get("description"),
+                                "confidence": rec.get("confidence", "MEDIUM"),
+                                "rationale": rec.get("rationale", "rationale"),
+                            }
+                        )
+                        next_id += 1
+                yield ResultEvent(structured_output={"items": echoed}, continuation=None)
+                return
             if self.merge_items is not None:
                 yield ResultEvent(
                     structured_output={"items": self.merge_items},
@@ -285,6 +349,38 @@ def _install_stub_backend(
         # Disable exploration pre-scan so it doesn't add extra backend calls.
         monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     return stub
+
+
+def _install_model_capturing_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    *,
+    parse_severity: str | None = None,
+    merge_echo_records: bool = False,
+) -> list[dict[str, Any]]:
+    """Patch create_backend with a per-(name, model) stub factory (#168).
+
+    Each phase resolves its own model, so the orchestrator's (name, model)
+    backend cache produces a distinct stub instance per model. Every instance
+    shares one model-tagged call list, letting a test assert which model ran
+    each phase — the observable proof that the per-stack fan-out runs on Sonnet,
+    the merge on Opus, and the arbiter on Opus exactly when it should.
+
+    Returns the shared, model-tagged call list (one dict per execute()).
+    """
+    shared_calls: list[dict[str, Any]] = []
+
+    def factory(name: str, model: str | None = None) -> _StubBackend:
+        stub = _StubBackend(target, shared_calls=shared_calls)
+        stub.model = model  # type: ignore[assignment]
+        stub.parse_severity = parse_severity
+        stub.merge_echo_records = merge_echo_records
+        return stub
+
+    monkeypatch.setattr("daydream.runner.create_backend", factory)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    return shared_calls
 
 
 async def _run_deep(target: Path, *, start_at: str = "review") -> int:
@@ -1950,3 +2046,64 @@ async def test_deep_run_reports_persistent_git_timeout_distinctly(
     assert "Git Error" not in titles, (
         f"a timeout was misreported as the generic base-branch error: {errors!r}"
     )
+
+
+# Issue #168: Sonnet-first per-stack review with a scoped Opus arbiter.
+
+
+async def test_per_stack_sonnet_merge_opus_and_arbiter_on_high_severity(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#168 real-path: drive runner.run through the production entrypoint and
+    assert observable model targeting + the arbitrated finding on disk.
+
+    The per-stack parse emits ``high`` severity, so the scoped arbiter must fire
+    exactly once on Opus; the rendered merge artifact must reflect its revision.
+    """
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch, multi_stack_target, parse_severity="high", merge_echo_records=True
+    )
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    def models_where(predicate: Any) -> list[str | None]:
+        return [c["model"] for c in calls if predicate(c["prompt"].lower())]
+
+    # (a) Per-stack fan-out created with a Sonnet model id (N>1 multi-stack).
+    per_stack_models = models_where(lambda pl: "you are reviewing the" in pl and "stack" in pl)
+    assert len(per_stack_models) >= 2, f"expected an N>1 fan-out, got {per_stack_models!r}"
+    assert set(per_stack_models) == {"claude-sonnet-4-6"}
+
+    # (b) Merge backend created with an Opus model id.
+    assert models_where(lambda pl: "cross-stack merge agent" in pl) == ["claude-opus-4-8"]
+
+    # (c) Opus arbiter created exactly once when a high-severity record exists.
+    assert models_where(lambda pl: "you are the arbiter" in pl) == ["claude-opus-4-8"]
+
+    # The rendered merge artifact on disk reflects the arbitrated finding.
+    report = (multi_stack_target / ".review-output.md").read_text()
+    assert "ARBITRATED:" in report, f"arbitrated finding missing from report:\n{report}"
+
+
+async def test_no_arbiter_when_all_findings_low_and_uncontested(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#168 real-path: when every per-stack finding is low/uncontested, NO Opus
+    arbiter backend is created — but Sonnet still runs the per-stack fan-out."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch, multi_stack_target, parse_severity="low", merge_echo_records=True
+    )
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
+    assert arbiter_calls == [], "arbiter must not run on low/uncontested findings"
+
+    per_stack_models = {
+        c["model"] for c in calls if "you are reviewing the" in c["prompt"].lower() and "stack" in c["prompt"].lower()
+    }
+    assert per_stack_models == {"claude-sonnet-4-6"}
