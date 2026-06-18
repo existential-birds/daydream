@@ -10,7 +10,7 @@ typecheck:
 	uv run mypy daydream tests
 
 test:
-	uv run pytest -v
+	uv run pytest -n auto
 
 # Run all CI checks locally
 check: lint typecheck test

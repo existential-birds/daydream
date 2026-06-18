@@ -243,6 +243,11 @@ def _rate_limit_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+async def _row_spacing_sleep(seconds: float) -> None:
+    """Pause ``seconds`` between rows to spread ``gh`` calls (seam for tests to stub)."""
+    await anyio.sleep(seconds)
+
+
 def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
     """Proxy to :func:`daydream.git_ops.gh_api` keyed by ``repo`` slug.
 
@@ -993,6 +998,6 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
             continue
 
         if not config.dry_run:
-            await anyio.sleep(config.gh_request_spacing_sec)
+            await _row_spacing_sleep(config.gh_request_spacing_sec)
 
     return summary
