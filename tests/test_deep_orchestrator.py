@@ -264,11 +264,13 @@ class _StubBackend:
         if pl.startswith("fix this issue"):
             m = re.search(r"^File: (.+)$", prompt, re.M)
             fixed_file = m.group(1).strip() if m else "unknown"
-            if self.fix_fail_file is not None and fixed_file == self.fix_fail_file:
-                raise RuntimeError(f"stub fix failure for {fixed_file}")
+            # phase_fix emits an absolute path when the file exists on disk; the stub keys fixes by basename.
+            fixed_name = Path(fixed_file).name
+            if self.fix_fail_file is not None and fixed_name == self.fix_fail_file:
+                raise RuntimeError(f"stub fix failure for {fixed_name}")
             (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
-            (cwd / f".fixed-{fixed_file.replace('/', '_').replace('.', '_')}").write_text("applied\n")
-            if self.fix_append_path is not None and fixed_file == self.fix_append_path.name:
+            (cwd / f".fixed-{fixed_name.replace('.', '_')}").write_text("applied\n")
+            if self.fix_append_path is not None and fixed_name == self.fix_append_path.name:
                 tok = re.search(r"marker-\d+", prompt)
                 cur = self.fix_append_path.read_text() if self.fix_append_path.exists() else ""
                 await anyio.sleep(0)  # deterministic interleave point

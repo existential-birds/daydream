@@ -55,16 +55,23 @@ _logger = logging.getLogger(__name__)
 
 TEST_OUTPUT_TAIL_LINES = 100
 
+# Generous for a real fix yet bounds a flailing agent that's globbing $HOME after a missed Read.
+FIX_MAX_TURNS = 25
+
 
 def _build_fix_prompt(
     test_output: str,
     feedback_items: list[dict[str, Any]] | None = None,
+    *,
+    repo: Path | None = None,
 ) -> str:
     """Build an enriched prompt for the fix agent with test output and file context.
 
     Args:
         test_output: Raw test output text.
         feedback_items: Optional list of feedback items with 'file' keys.
+        repo: Optional repo root; listed files are mapped to absolute paths when
+            they exist under it, so the fix agent's first Read hits.
 
     Returns:
         Prompt string with truncated test output and file list.
@@ -81,6 +88,8 @@ def _build_fix_prompt(
 
     if feedback_items:
         files = sorted({item["file"] for item in feedback_items if "file" in item})
+        if repo is not None:
+            files = [str(repo / f) if (repo / f).is_file() else f for f in files]
         if files:
             file_list = "\n".join(f"- {f}" for f in files)
             parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
@@ -1631,6 +1640,8 @@ async def phase_fix(
     """
     description = item.get("description", "No description")
     file_path = item.get("file", "Unknown file")
+    resolved = work.repo / file_path
+    file_ref = str(resolved) if resolved.is_file() else file_path
     line = item.get("line", "Unknown")
 
     console.print()
@@ -1639,7 +1650,7 @@ async def phase_fix(
     prompt = f"""Fix this issue:
 {description}
 
-File: {file_path}
+File: {file_ref}
 Line: {line}
 
 Make the minimal change needed. Do NOT change error handling semantics
@@ -1683,7 +1694,7 @@ findings with extra skepticism here.
                 "commit message.\n"
             )
 
-    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
+    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS)
     print_fix_complete(console, item_num, total)
 
 
@@ -1699,7 +1710,9 @@ async def phase_fix_parallel(
     Items are grouped by ``file`` (preserving the caller's severity ordering).
     Each file-group becomes one task that applies its items serially, while
     distinct files run concurrently under an ``anyio.CapacityLimiter``. Same-file
-    serialization removes read-modify-write races; commit stays serial and after.
+    serialization prevents concurrent writes to the *same named file*; it does
+    not guarantee disjoint edits if an agent touches files other than the one
+    named in the item's ``file`` key. Commit stays serial and after.
 
     Args:
         backend: The Backend to execute against (shared across tasks).
@@ -1907,8 +1920,10 @@ async def phase_test_and_heal(
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             console.print()
             print_info(console, "Launching agent to fix test failures (auto)...")
-            fix_prompt = _build_fix_prompt(output, feedback_items)
-            _, _ = await run_agent(backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX)
+            fix_prompt = _build_fix_prompt(output, feedback_items, repo=work.repo)
+            _, _ = await run_agent(
+                backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            )
             retries_used += 1
             continuation = None
             continue
@@ -1958,8 +1973,10 @@ async def phase_test_and_heal(
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            fix_prompt = _build_fix_prompt(output, feedback_items)
-            _, _ = await run_agent(backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX)
+            fix_prompt = _build_fix_prompt(output, feedback_items, repo=work.repo)
+            _, _ = await run_agent(
+                backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            )
             retries_used += 1
             continuation = None
             continue

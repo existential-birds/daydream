@@ -87,6 +87,79 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_phase_test_and_heal_fix_prompt_absolute_path_and_turn_budget(
+    tmp_path, monkeypatch, make_work,
+):
+    """Driving the heal loop to a fix attempt passes an absolute path + FIX_MAX_TURNS.
+
+    Root bug being guarded: the heal fix prompt listed repo-relative paths so the
+    fix agent's first Read missed and it flailed globbing $HOME unbounded. The fix
+    maps listed files to absolute under the repo and caps the run at FIX_MAX_TURNS.
+    """
+    from daydream.phases import FIX_MAX_TURNS, phase_test_and_heal
+
+    for name in ("print_phase_hero", "print_info", "print_success", "print_warning",
+                 "print_menu", "print_error"):
+        monkeypatch.setattr(f"daydream.phases.{name}", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    # Real file under the repo so the relative feedback path maps to absolute.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "handler.py").write_text("# real\n")
+
+    call_count = 0
+    captured_prompts: list[str] = []
+    captured_max_turns: list[int | None] = []
+
+    class RecordingBackend:
+        model = "test-model"
+
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
+            nonlocal call_count
+            call_count += 1
+            captured_prompts.append(prompt)
+            captured_max_turns.append(max_turns)
+            if call_count == 1:
+                yield TextEvent(text="1 failed, 0 passed")
+                yield ResultEvent(structured_output=None, continuation=None)
+            elif call_count == 2:
+                yield TextEvent(text="Fixed")
+                yield ResultEvent(structured_output=None, continuation=None)
+            else:
+                yield TextEvent(text="All 1 tests passed")
+                yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    choices = iter(["2"])  # fail -> fix-and-retry -> pass
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"))
+
+    feedback_items = [{"id": 1, "description": "Bug", "file": "src/handler.py", "line": 10}]
+
+    success, retries = await phase_test_and_heal(
+        RecordingBackend(), make_work(tmp_path), feedback_items=feedback_items,
+    )
+
+    assert success is True
+    assert retries == 1
+    assert call_count == 3
+
+    fix_prompt = captured_prompts[1]
+    abs_path = str(tmp_path / "src" / "handler.py")
+    assert abs_path in fix_prompt, "Fix prompt must list the absolute path so the first Read hits"
+    assert "- src/handler.py" not in fix_prompt
+    # The FIX run_agent call (2nd execute) carries the turn budget; test runs do not.
+    assert captured_max_turns[1] == FIX_MAX_TURNS
+
+
+@pytest.mark.asyncio
 async def test_phase_parse_feedback_empty_response_returns_empty_list(tmp_path, monkeypatch, make_work):
     """When the agent returns empty text (schema miss), treat as no issues."""
     from daydream.phases import phase_parse_feedback
@@ -193,6 +266,117 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(tmp_pa
     assert "the contract wins" in fix_prompt
 
 
+@pytest.mark.asyncio
+async def test_phase_fix_resolves_existing_file_to_absolute_path(tmp_path, monkeypatch, make_work):
+    """phase_fix hands the agent an absolute path when the file exists under work.repo."""
+    from daydream.phases import phase_fix
+
+    monkeypatch.setattr("daydream.phases.print_fix_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_fix_complete", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    target = tmp_path / "src" / "handler.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"x")
+
+    captured_prompts: list[str] = []
+
+    class CapturingBackend:
+        model = "test-model"
+
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
+            captured_prompts.append(prompt)
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    item = {"id": 1, "description": "Off-by-one", "file": "src/handler.py", "line": 42}
+
+    await phase_fix(CapturingBackend(), make_work(tmp_path), item, 1, 1)
+
+    assert len(captured_prompts) == 1
+    fix_prompt = captured_prompts[0]
+    assert str(tmp_path / "src" / "handler.py") in fix_prompt
+    assert "File: src/handler.py" not in fix_prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_falls_back_to_relative_path_when_missing(tmp_path, monkeypatch, make_work):
+    """When the file does not exist under work.repo, the relative path is preserved."""
+    from daydream.phases import phase_fix
+
+    monkeypatch.setattr("daydream.phases.print_fix_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_fix_complete", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    captured_prompts: list[str] = []
+
+    class CapturingBackend:
+        model = "test-model"
+
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
+            captured_prompts.append(prompt)
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    item = {"id": 1, "description": "Missing file", "file": "src/nonexistent.py", "line": 7}
+
+    await phase_fix(CapturingBackend(), make_work(tmp_path), item, 1, 1)
+
+    assert len(captured_prompts) == 1
+    assert "File: src/nonexistent.py" in captured_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_passes_turn_budget(tmp_path, monkeypatch, make_work):
+    """phase_fix caps a flailing agent with the FIX_MAX_TURNS turn budget."""
+    from daydream.phases import FIX_MAX_TURNS, phase_fix
+
+    monkeypatch.setattr("daydream.phases.print_fix_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_fix_complete", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    captured_max_turns: list[int | None] = []
+
+    class CapturingBackend:
+        model = "test-model"
+
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
+            captured_max_turns.append(max_turns)
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    item = {"id": 1, "description": "Bug", "file": "src/handler.py", "line": 1}
+
+    await phase_fix(CapturingBackend(), make_work(tmp_path), item, 1, 1)
+
+    assert captured_max_turns == [FIX_MAX_TURNS]
+    assert FIX_MAX_TURNS == 25
+
+
 class TestBuildFixPrompt:
     """Tests for _build_fix_prompt helper."""
 
@@ -255,6 +439,33 @@ class TestBuildFixPrompt:
 
         assert "Files modified" not in result
         assert "Focus on the files" not in result
+
+    def test_repo_maps_existing_file_to_absolute(self, tmp_path):
+        from daydream.phases import _build_fix_prompt
+
+        (tmp_path / "daydream").mkdir()
+        (tmp_path / "daydream" / "x.py").write_text("# real file\n")
+        items = [{"id": 1, "description": "Bug", "file": "daydream/x.py", "line": 10}]
+
+        abs_result = _build_fix_prompt("test failed", items, repo=tmp_path)
+        abs_path = str(tmp_path / "daydream" / "x.py")
+        assert f"- {abs_path}" in abs_result
+        # Relative form must NOT appear once mapped.
+        assert "- daydream/x.py" not in abs_result
+
+        # Without repo, the same item stays repo-relative (back-compat).
+        rel_result = _build_fix_prompt("test failed", items)
+        assert "- daydream/x.py" in rel_result
+        assert abs_path not in rel_result
+
+    def test_repo_leaves_missing_file_relative(self, tmp_path):
+        from daydream.phases import _build_fix_prompt
+
+        items = [{"id": 1, "description": "Bug", "file": "src/ghost.py", "line": 1}]
+        result = _build_fix_prompt("test failed", items, repo=tmp_path)
+        # File does not exist under repo → left as-is, not fabricated absolute.
+        assert "- src/ghost.py" in result
+        assert str(tmp_path / "src" / "ghost.py") not in result
 
 
 def test_git_diff_returns_diff(tmp_path):
