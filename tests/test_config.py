@@ -32,7 +32,7 @@ def test_phase_default_models_claude_tier_assignments():
     for phase in ("review", "wonder", "envision", "merge", "intent", "pr_feedback"):
         assert claude[phase] == "claude-opus-4-8"
     # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW
-    for phase in ("fix", "test", "exploration"):
+    for phase in ("fix", "test", "exploration", "per_stack_review"):
         assert claude[phase] == "claude-sonnet-4-6"
 
 

@@ -110,8 +110,11 @@ def total_agent_count(stack_count: int) -> int:
     """Return the D-30 agent count formula.
 
     Formula: 2 (TTT intent + alternative-review) + N per-stack reviews
-    + N per-stack parse passes + 1 cross-stack merge. The fix-gate agents
-    are user-gated and excluded from the pre-flight estimate.
+    + N per-stack parse passes + 1 cross-stack merge + 1 conditional
+    arbiter (Opus pass over high-severity / contested findings). The
+    arbiter fires when qualifying findings exist; the pre-flight estimate
+    always includes it so users aren't surprised by the extra Opus call.
+    The fix-gate agents are user-gated and excluded from the estimate.
 
     Args:
         stack_count: Number of detected stack assignments (including the
@@ -120,7 +123,7 @@ def total_agent_count(stack_count: int) -> int:
     Returns:
         Total agent invocation count surfaced in the pre-flight notice.
     """
-    return 2 + stack_count + stack_count + 1
+    return 2 + stack_count + stack_count + 1 + 1
 
 
 def get_installed_skills() -> set[str] | None:
@@ -308,11 +311,37 @@ def _apply_arbiter_verdicts(
         selected records carrying the arbiter's fields. Positional alignment
         between the two lists is preserved.
     """
+    import warnings
+
     revised: dict[int, dict[str, Any]] = {}
     dropped: set[int] = set()
     for offset, record_index in enumerate(targets):
-        verdict = verdicts.get(offset + 1)
-        if verdict is None or not verdict.get("keep", False):
+        arb_id = offset + 1
+        verdict = verdicts.get(arb_id)
+        if verdict is None:
+            # Arbiter returned no verdict for this arb_id -- warn so the drop
+            # is visible rather than silent, then treat as rejected (keep=False).
+            warnings.warn(
+                f"Arbiter returned no verdict for arb_id={arb_id} "
+                f"(record_index={record_index}); dropping record as unreviewed.",
+                stacklevel=2,
+            )
+            dropped.add(record_index)
+            continue
+        if verdict.get("arb_id") != arb_id:
+            # Secondary key guard: the arb_id field in the verdict must match the
+            # key we looked it up by.  A mismatch means the arbiter emitted a
+            # finding with a wrong arb_id, which would silently bind the verdict
+            # to the wrong record.  Warn and drop rather than mis-apply.
+            warnings.warn(
+                f"Arbiter verdict arb_id mismatch: expected arb_id={arb_id} "
+                f"but verdict contains arb_id={verdict.get('arb_id')!r} "
+                f"(record_index={record_index}); dropping record as unreviewed.",
+                stacklevel=2,
+            )
+            dropped.add(record_index)
+            continue
+        if not verdict.get("keep", False):
             dropped.add(record_index)
             continue
         revised[record_index] = {
@@ -346,14 +375,19 @@ def _rewrite_stack_records(
     rewritten with its surviving records (an emptied stack becomes ``[]`` rather
     than retaining stale pre-arbitration content).
     """
-    by_stack: dict[str, list[dict[str, Any]]] = {}
-    for path in stack_record_paths:
-        name = path.name.removeprefix("stack-").removesuffix("-records.json")
-        by_stack[name] = []
+    by_stack: dict[Path, list[dict[str, Any]]] = {path: [] for path in stack_record_paths}
     for record, source in zip(records, sources, strict=True):
-        by_stack.setdefault(source, []).append(record)
-    for name, stack_records in by_stack.items():
-        per_stack_records_path(deep_dir_path, name).write_text(json.dumps(stack_records, indent=2))
+        # `source` may be a bare stack name ("python") on a fresh run, or a
+        # filename ("stack-python-records.json") on resume.  Normalise to a
+        # Path so both formats resolve to the same key already in `by_stack`.
+        if source.endswith("-records.json"):
+            dest = deep_dir_path / source
+        else:
+            dest = per_stack_records_path(deep_dir_path, source)
+        if dest in by_stack:
+            by_stack[dest].append(record)
+    for dest_path, stack_records in by_stack.items():
+        dest_path.write_text(json.dumps(stack_records, indent=2))
 
 
 async def run_deep(config: RunConfig, work: WorkContext) -> int:

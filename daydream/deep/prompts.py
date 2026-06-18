@@ -7,6 +7,7 @@ prompts. Per-stack agents only see their own stack's files + TTT context (D-10).
 Public builders:
     - build_per_stack_prompt: per-language stack scoped review.
     - build_structural_prompt: repo-wide structural-maintainability meta-stack.
+    - build_arbiter_prompt: scoped Opus arbiter for cross-stack conflict resolution.
     - build_merge_prompt: cross-stack merge into a unified report.
     - build_verification_prompt: recommendation-verifier agent prompt.
     - build_generic_fallback_prompt: fallback for files without a dedicated stack.

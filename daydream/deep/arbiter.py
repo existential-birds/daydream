@@ -70,7 +70,7 @@ def select_arbiter_targets(
 
     for indices in by_location.values():
         stacks = {sources[i] for i in indices}
-        severities = {_severity(records[i]) for i in indices}
+        severities = {_severity(records[i]) for i in indices if _severity(records[i])}
         if len(stacks) >= 2 and len(severities) >= 2:
             selected.update(indices)
 

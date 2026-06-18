@@ -1,5 +1,6 @@
 """Phase functions for the review and fix loop."""
 
+import copy
 import json
 import logging
 from datetime import datetime
@@ -743,30 +744,17 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
 # contested findings *before* the merge. The shared FEEDBACK_SCHEMA stays
 # severity-free (the shallow loop and PR-feedback parse paths never need it);
 # only deep-mode's pre-merge per-stack parse opts into this richer record shape.
-PER_STACK_RECORD_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "issues": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer"},
-                    "description": {"type": "string"},
-                    "file": {"type": "string"},
-                    "line": {"type": "integer"},
-                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
-                    "rationale": {"type": "string"},
-                },
-                "required": ["id", "description", "file", "line", "severity", "confidence", "rationale"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["issues"],
-    "additionalProperties": False,
+#
+# Derived from FEEDBACK_SCHEMA to avoid silent drift: we deep-copy the base
+# schema and inject the extra ``severity`` field into the items sub-schema.
+PER_STACK_RECORD_SCHEMA: dict[str, Any] = copy.deepcopy(FEEDBACK_SCHEMA)
+PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity"] = {
+    "type": "string",
+    "enum": ["high", "medium", "low"],
 }
+PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
+    "id", "description", "file", "line", "severity", "confidence", "rationale"
+]
 
 ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -1450,11 +1438,16 @@ async def phase_parse_feedback(
     print_dim(console, f"Model: {backend.model}")
 
     schema = output_schema if output_schema is not None else FEEDBACK_SCHEMA
-    wants_severity = "severity" in schema["properties"]["issues"]["items"]["properties"]
+    wants_severity = "severity" in (
+        schema.get("properties", {})
+        .get("issues", {})
+        .get("items", {})
+        .get("properties", {})
+    )
     severity_field = ', "severity": "high|medium|low"' if wants_severity else ""
     severity_hint = (
         "\nAlso set a `severity` of high | medium | low for each issue, taken from the "
-        "review's own severity/priority label. Default to medium when the review gives "
+        "review's own severity/priority label. Default to high when the review gives "
         "no explicit severity.\n"
         if wants_severity
         else ""

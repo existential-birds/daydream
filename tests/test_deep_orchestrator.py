@@ -34,9 +34,11 @@ class _StubBackend:
         self,
         target: Path,
         *,
+        model: str = "mock-model",
         is_codex: bool = False,
         shared_calls: list[dict[str, Any]] | None = None,
     ) -> None:
+        self.model = model
         self._target = target
         self._is_codex = is_codex
         # When set, every execute() call is also appended (model-tagged) to this
@@ -371,8 +373,7 @@ def _install_model_capturing_stubs(
     shared_calls: list[dict[str, Any]] = []
 
     def factory(name: str, model: str | None = None) -> _StubBackend:
-        stub = _StubBackend(target, shared_calls=shared_calls)
-        stub.model = model  # type: ignore[assignment]
+        stub = _StubBackend(target, model=model or "mock-model", shared_calls=shared_calls)
         stub.parse_severity = parse_severity
         stub.merge_echo_records = merge_echo_records
         return stub
@@ -683,9 +684,9 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     assert len(captured) == 1, "pre-flight notice must fire exactly once"
     notice = captured[0]
     assert len(notice["stages"]) == 5
-    # Agent count = 2 TTT + N per-stack + N parse + 1 merge; fixture yields N=4
-    # (python + react + generic + structure), so 2 + 2*4 + 1 = 11.
-    assert notice["agent_count"] == 11
+    # Agent count = 2 TTT + N per-stack + N parse + 1 merge + 1 arbiter;
+    # fixture yields N=4 (python + react + generic + structure), so 2 + 2*4 + 1 + 1 = 12.
+    assert notice["agent_count"] == 12
     assert len(notice["stack_lines"]) >= 1
     # No Codex caveat on Claude backend.
     assert notice["codex_in_use"] is False
