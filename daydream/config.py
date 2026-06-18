@@ -42,8 +42,14 @@ DEFAULT_EXPLORATION_MODEL = "claude-sonnet-4-6"
 #
 # Claude tiering:
 #   - cheap (haiku):   PARSE
-#   - mid   (sonnet):  FIX, TEST, EXPLORATION
-#   - heavy (opus):    REVIEW, WONDER, ENVISION, MERGE, INTENT, PR_FEEDBACK
+#   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW
+#   - heavy (opus):    REVIEW, WONDER, ENVISION, MERGE, INTENT, PR_FEEDBACK, ARBITER
+#
+# ``per_stack_review`` and ``arbiter`` split the deep per-stack fan-out off the
+# heavy ``review`` tier (issue #168): the N per-stack reviewers run on Sonnet
+# while a single Opus arbiter re-reviews only the high-severity/contested
+# findings they surface. ``per_stack_review`` is independently overridable from
+# ``review``/``wonder``/``merge``.
 #
 # Codex side defaults to ``gpt-5.5`` across the board in v1; per-phase tiering
 # for codex is deferred until concrete model picks across the codex lineup are
@@ -55,7 +61,9 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "test": "claude-sonnet-4-6",
         "verify": "claude-sonnet-4-6",
         "exploration": "claude-sonnet-4-6",
+        "per_stack_review": "claude-sonnet-4-6",
         "review": "claude-opus-4-8",
+        "arbiter": "claude-opus-4-8",
         "wonder": "claude-opus-4-8",
         "envision": "claude-opus-4-8",
         "merge": "claude-opus-4-8",
@@ -68,7 +76,9 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "test": "gpt-5.5",
         "verify": "gpt-5.5",
         "exploration": "gpt-5.5",
+        "per_stack_review": "gpt-5.5",
         "review": "gpt-5.5",
+        "arbiter": "gpt-5.5",
         "wonder": "gpt-5.5",
         "envision": "gpt-5.5",
         "merge": "gpt-5.5",

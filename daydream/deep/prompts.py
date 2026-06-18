@@ -7,6 +7,7 @@ prompts. Per-stack agents only see their own stack's files + TTT context (D-10).
 Public builders:
     - build_per_stack_prompt: per-language stack scoped review.
     - build_structural_prompt: repo-wide structural-maintainability meta-stack.
+    - build_arbiter_prompt: scoped Opus arbiter for cross-stack conflict resolution.
     - build_merge_prompt: cross-stack merge into a unified report.
     - build_verification_prompt: recommendation-verifier agent prompt.
     - build_generic_fallback_prompt: fallback for files without a dedicated stack.
@@ -173,6 +174,66 @@ def build_structural_prompt(
     )
     parts.append(f"/{STRUCTURE_SKILL}")
     parts.append(f"Write your full review to {output_path}.")
+    return "\n\n".join(parts)
+
+
+def build_arbiter_prompt(
+    *,
+    arbiter_input_path: Path,
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    exploration_dir: Path | None = None,
+) -> str:
+    """Assemble the scoped Opus arbiter prompt (issue #168).
+
+    The arbiter re-reviews ONLY the high-severity / contested findings that the
+    cheaper Sonnet per-stack reviewers surfaced. It is an adjudicator, not a
+    discoverer: it may downgrade, confirm, sharpen, or reject each finding, but
+    it must not invent new ones (new discovery is the per-stack reviewers' job;
+    the arbiter can only re-rank what they found).
+
+    Args:
+        arbiter_input_path: JSON file of the selected findings. Each entry
+            carries an ``arb_id`` the arbiter must echo back, plus the original
+            ``file``/``line``/``severity``/``confidence``/``description``.
+        diff_path: Path to the full diff on disk.
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        exploration_dir: Pre-scan exploration directory (if available).
+
+    Returns:
+        Assembled prompt string.
+    """
+    parts: list[str] = []
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
+    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts.append(
+        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
+        f"do NOT run `git diff` without a base ref -- on a clean branch that "
+        f"returns empty and hides committed changes."
+    )
+    parts.append(
+        "You are the arbiter. The cheaper per-stack reviewers flagged the "
+        f"high-severity and contested findings listed in {arbiter_input_path}. "
+        "Re-review each one against the actual code (Read/Grep/Bash) and the "
+        "diff. You are adjudicating their work, NOT starting a fresh review: do "
+        "not introduce findings that are not in the input list."
+    )
+    parts.append(
+        "Return a single JSON object matching the structured-output schema: "
+        '{"findings": [ ... ]}. Emit exactly one entry per input finding, echoing '
+        "its `arb_id` unchanged. For each:\n"
+        "  - keep: true if the finding is real and actionable; false to reject a "
+        "false positive or a non-issue (rejected findings are dropped entirely).\n"
+        "  - severity: your adjudicated high | medium | low (you may change it).\n"
+        "  - confidence: your adjudicated HIGH | MEDIUM | LOW.\n"
+        "  - description: a sharpened one-line summary (keep it about the same "
+        "finding; do not repurpose the slot for a different issue).\n"
+        "  - rationale: why it matters, grounded in what you actually read."
+    )
     return "\n\n".join(parts)
 
 

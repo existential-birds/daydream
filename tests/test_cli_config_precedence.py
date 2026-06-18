@@ -31,6 +31,30 @@ def test_model_precedence_cli_over_file_over_table(monkeypatch, tmp_path: Path) 
     assert _resolved_model(cfg2, "parse") == "claude-haiku-4-5"   # falls through to table default
 
 
+def test_per_stack_review_and_arbiter_resolution(tmp_path: Path) -> None:
+    """#168: the per-stack fan-out and arbiter resolve as independent phase keys.
+
+    ``per_stack_review`` defaults to Sonnet (split off the Opus ``review`` tier)
+    and ``arbiter`` to Opus, and a ``[tool.daydream.phases.per_stack_review]``
+    file override resolves through ``_resolved_model`` without disturbing
+    ``review``.
+    """
+    bare = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
+    assert _resolved_model(bare, "per_stack_review") == "claude-sonnet-4-6"  # table default
+    assert _resolved_model(bare, "arbiter") == "claude-opus-4-8"             # table default
+    assert _resolved_model(bare, "review") == "claude-opus-4-8"              # unchanged
+
+    fc = DaydreamFileConfig(
+        model=None,
+        backend=None,
+        phases={"per_stack_review": {"model": "file-psr"}},
+    )
+    cfg = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=fc)
+    assert _resolved_model(cfg, "per_stack_review") == "file-psr"   # file phase override wins
+    assert _resolved_model(cfg, "review") == "claude-opus-4-8"      # review untouched by the override
+    assert _resolved_model(cfg, "arbiter") == "claude-opus-4-8"     # arbiter untouched
+
+
 def test_backend_precedence_mirrors_model(tmp_path: Path) -> None:
     """Backend resolves through the same tiers as model, so the two stay symmetric."""
     fc = DaydreamFileConfig(model=None, backend="file-global", phases={"fix": {"backend": "file-fix"}})

@@ -30,9 +30,30 @@ class _StubBackend:
 
     model = "mock-model"
 
-    def __init__(self, target: Path, *, is_codex: bool = False) -> None:
+    def __init__(
+        self,
+        target: Path,
+        *,
+        model: str = "mock-model",
+        is_codex: bool = False,
+        shared_calls: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.model = model
         self._target = target
         self._is_codex = is_codex
+        # When set, every execute() call is also appended (model-tagged) to this
+        # shared list so a per-(name, model) factory can capture which model ran
+        # each phase even though backends are cached by (name, model) (#168).
+        self._shared = shared_calls
+        # #168 knobs: per-stack parse severity to emit (drives arbiter selection),
+        # and whether the merge agent echoes the on-disk per-stack records (so the
+        # rendered artifact reflects arbiter revisions instead of fixed items).
+        self.parse_severity: str | None = None
+        self.merge_echo_records: bool = False
+        # When True, the arbiter branch returns an empty findings list (omits every
+        # verdict), simulating a truncated/lazy Opus response so a test can assert
+        # the selected high-severity record fails open and survives (#175).
+        self.arbiter_omit_verdicts: bool = False
         self.calls: list[dict[str, Any]] = []
         # Verdict the recommendation-verifier branch emits for issue_id=1; flip to
         # "contradicts" to exercise verdict propagation into the phase_fix prompt.
@@ -56,14 +77,16 @@ class _StubBackend:
         max_turns: Any = None,
         read_only: bool = False,
     ):
-        self.calls.append(
-            {
-                "cwd": cwd,
-                "prompt": prompt,
-                "output_schema": output_schema,
-                "agents": agents,
-            }
-        )
+        call = {
+            "cwd": cwd,
+            "prompt": prompt,
+            "output_schema": output_schema,
+            "agents": agents,
+            "model": self.model,
+        }
+        self.calls.append(call)
+        if self._shared is not None:
+            self._shared.append(call)
         pl = prompt.lower()
 
         # TTT alternative-review -> structured output. Checked BEFORE intent: the
@@ -120,21 +143,68 @@ class _StubBackend:
             return
 
         if "extract only actionable issues" in pl:  # phase_parse_feedback
+            issue: dict[str, Any] = {"id": 1, "description": "Sample issue", "file": "api.py", "line": 1}
+            # Deep per-stack parse requests severity (PER_STACK_RECORD_SCHEMA, #168);
+            # emit the configured severity so a test can drive arbiter selection.
+            # The structural stack parses with FEEDBACK_SCHEMA (no severity prompt),
+            # so it never gets one -- matching production.
+            if self.parse_severity is not None and "severity" in pl:
+                issue["severity"] = self.parse_severity
+                issue["confidence"] = "MEDIUM"
+                issue["rationale"] = "stub"
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {"id": 1, "description": "Sample issue", "file": "api.py", "line": 1}
-                    ]
-                },
-                continuation=None,
-            )
+            yield ResultEvent(structured_output={"issues": [issue]}, continuation=None)
+            return
+
+        # Scoped Opus arbiter (#168). Reads the arbiter-input.json path the prompt
+        # points at, echoes every arb_id back with keep=true, and stamps the
+        # description so the arbitrated finding is observable downstream.
+        if "you are the arbiter" in pl:
+            in_match = re.search(r"listed in (\S+arbiter-input\.json)", prompt)
+            findings: list[dict[str, Any]] = []
+            if in_match is not None and not self.arbiter_omit_verdicts:
+                arb_inputs = json.loads(Path(in_match.group(1)).read_text())
+                for entry in arb_inputs:
+                    findings.append(
+                        {
+                            "arb_id": entry["arb_id"],
+                            "keep": True,
+                            "severity": entry.get("severity") or "high",
+                            "confidence": entry.get("confidence") or "HIGH",
+                            "description": f"ARBITRATED: {entry.get('description')}",
+                            "rationale": "arbiter second opinion",
+                        }
+                    )
+            yield TextEvent(text="")
+            yield ResultEvent(structured_output={"findings": findings}, continuation=None)
             return
 
         # Cross-stack merge -> schema-validated item list; the host appends
         # structural findings, normalizes ids, and renders review-output.md.
         if "cross-stack merge agent" in pl:
             yield TextEvent(text="")
+            if self.merge_echo_records:
+                # Echo the on-disk per-stack records as merged items so the
+                # rendered artifact reflects any arbiter revisions (#168).
+                echoed: list[dict[str, Any]] = []
+                next_id = 1
+                for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
+                    for rec in json.loads(Path(path_str).read_text()):
+                        echoed.append(
+                            {
+                                "id": next_id,
+                                "lens": "per-stack",
+                                "file": rec.get("file"),
+                                "line": rec.get("line"),
+                                "severity": rec.get("severity", "medium"),
+                                "description": rec.get("description"),
+                                "confidence": rec.get("confidence", "MEDIUM"),
+                                "rationale": rec.get("rationale", "rationale"),
+                            }
+                        )
+                        next_id += 1
+                yield ResultEvent(structured_output={"items": echoed}, continuation=None)
+                return
             if self.merge_items is not None:
                 yield ResultEvent(
                     structured_output={"items": self.merge_items},
@@ -285,6 +355,39 @@ def _install_stub_backend(
         # Disable exploration pre-scan so it doesn't add extra backend calls.
         monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     return stub
+
+
+def _install_model_capturing_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    *,
+    parse_severity: str | None = None,
+    merge_echo_records: bool = False,
+    arbiter_omit_verdicts: bool = False,
+) -> list[dict[str, Any]]:
+    """Patch create_backend with a per-(name, model) stub factory (#168).
+
+    Each phase resolves its own model, so the orchestrator's (name, model)
+    backend cache produces a distinct stub instance per model. Every instance
+    shares one model-tagged call list, letting a test assert which model ran
+    each phase — the observable proof that the per-stack fan-out runs on Sonnet,
+    the merge on Opus, and the arbiter on Opus exactly when it should.
+
+    Returns the shared, model-tagged call list (one dict per execute()).
+    """
+    shared_calls: list[dict[str, Any]] = []
+
+    def factory(name: str, model: str | None = None) -> _StubBackend:
+        stub = _StubBackend(target, model=model or "mock-model", shared_calls=shared_calls)
+        stub.parse_severity = parse_severity
+        stub.merge_echo_records = merge_echo_records
+        stub.arbiter_omit_verdicts = arbiter_omit_verdicts
+        return stub
+
+    monkeypatch.setattr("daydream.runner.create_backend", factory)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    return shared_calls
 
 
 async def _run_deep(target: Path, *, start_at: str = "review") -> int:
@@ -587,9 +690,9 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     assert len(captured) == 1, "pre-flight notice must fire exactly once"
     notice = captured[0]
     assert len(notice["stages"]) == 5
-    # Agent count = 2 TTT + N per-stack + N parse + 1 merge; fixture yields N=4
-    # (python + react + generic + structure), so 2 + 2*4 + 1 = 11.
-    assert notice["agent_count"] == 11
+    # Agent count = 2 TTT + N per-stack + N parse + 1 merge + 1 arbiter;
+    # fixture yields N=4 (python + react + generic + structure), so 2 + 2*4 + 1 + 1 = 12.
+    assert notice["agent_count"] == 12
     assert len(notice["stack_lines"]) >= 1
     # No Codex caveat on Claude backend.
     assert notice["codex_in_use"] is False
@@ -1950,3 +2053,179 @@ async def test_deep_run_reports_persistent_git_timeout_distinctly(
     assert "Git Error" not in titles, (
         f"a timeout was misreported as the generic base-branch error: {errors!r}"
     )
+
+
+# Issue #168: Sonnet-first per-stack review with a scoped Opus arbiter.
+
+
+async def test_per_stack_sonnet_merge_opus_and_arbiter_on_high_severity(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#168 real-path: drive runner.run through the production entrypoint and
+    assert observable model targeting + the arbitrated finding on disk.
+
+    The per-stack parse emits ``high`` severity, so the scoped arbiter must fire
+    exactly once on Opus; the rendered merge artifact must reflect its revision.
+    """
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch, multi_stack_target, parse_severity="high", merge_echo_records=True
+    )
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    def models_where(predicate: Any) -> list[str | None]:
+        return [c["model"] for c in calls if predicate(c["prompt"].lower())]
+
+    # (a) Per-stack fan-out created with a Sonnet model id (N>1 multi-stack).
+    per_stack_models = models_where(lambda pl: "you are reviewing the" in pl and "stack" in pl)
+    assert len(per_stack_models) >= 2, f"expected an N>1 fan-out, got {per_stack_models!r}"
+    assert set(per_stack_models) == {"claude-sonnet-4-6"}
+
+    # (b) Merge backend created with an Opus model id.
+    assert models_where(lambda pl: "cross-stack merge agent" in pl) == ["claude-opus-4-8"]
+
+    # (c) Opus arbiter created exactly once when a high-severity record exists.
+    assert models_where(lambda pl: "you are the arbiter" in pl) == ["claude-opus-4-8"]
+
+    # The rendered merge artifact on disk reflects the arbitrated finding.
+    report = (multi_stack_target / ".review-output.md").read_text()
+    assert "ARBITRATED:" in report, f"arbitrated finding missing from report:\n{report}"
+
+
+async def test_arbiter_missing_verdict_retains_high_severity_finding(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#175 real-path: a truncated/lazy arbiter that omits every verdict must NOT
+    delete the high-severity finding it was selected to protect.
+
+    The arbiter fires (high severity), but its stub returns an empty findings
+    list -- no verdict for any arb_id. Fail-open means the original record is
+    retained unchanged and survives into the rendered merge artifact.
+    """
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch,
+        multi_stack_target,
+        parse_severity="high",
+        merge_echo_records=True,
+        arbiter_omit_verdicts=True,
+    )
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    # The arbiter still ran (high severity selects it) ...
+    arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
+    assert arbiter_calls, "arbiter must run on a high-severity finding"
+
+    # ... but with no verdict returned, the finding is retained, not dropped.
+    report = (multi_stack_target / ".review-output.md").read_text()
+    # The un-arbitrated description survives (no ARBITRATED: prefix was applied).
+    assert "ARBITRATED:" not in report
+    deep_dir = multi_stack_target / ".daydream" / "deep"
+    records = [
+        rec
+        for path in deep_dir.glob("stack-*-records.json")
+        for rec in json.loads(path.read_text())
+    ]
+    assert any(r.get("severity") == "high" for r in records), (
+        f"high-severity record must survive a missing arbiter verdict:\n{records}"
+    )
+
+
+async def test_no_arbiter_when_all_findings_low_and_uncontested(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#168 real-path: when every per-stack finding is low/uncontested, NO Opus
+    arbiter backend is created — but Sonnet still runs the per-stack fan-out."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch, multi_stack_target, parse_severity="low", merge_echo_records=True
+    )
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
+    assert arbiter_calls == [], "arbiter must not run on low/uncontested findings"
+
+    per_stack_models = {
+        c["model"] for c in calls if "you are reviewing the" in c["prompt"].lower() and "stack" in c["prompt"].lower()
+    }
+    assert per_stack_models == {"claude-sonnet-4-6"}
+
+
+def _prime_merge_resume_records(deep: Path, *, python_severity: str | None) -> None:
+    """Write the per-stack records a `--start-at merge` resume needs on disk.
+
+    Every detected stack (python, react, generic, structure) must have a records
+    file or be a recorded failure, else the resume guard returns 1. The python
+    record optionally carries ``python_severity`` to drive arbiter selection.
+    """
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    py_record: dict[str, Any] = {"id": 1, "description": "py issue", "file": "api.py", "line": 1}
+    if python_severity is not None:
+        py_record["severity"] = python_severity
+        py_record["confidence"] = "HIGH"
+        py_record["rationale"] = "stub"
+    (deep / "stack-python-records.json").write_text(json.dumps([py_record]))
+    (deep / "stack-react-records.json").write_text(
+        json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1}])
+    )
+    (deep / "stack-generic-records.json").write_text(
+        json.dumps([{"id": 1, "description": "docs issue", "file": "README.md", "line": 1}])
+    )
+    (deep / "stack-structure-records.json").write_text(
+        json.dumps([{"id": 1, "description": "structural issue", "file": "api.py", "line": 1}])
+    )
+
+
+async def test_merge_resume_reruns_arbiter_when_marker_absent(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#175 real-path: a `--start-at merge` resume whose on-disk records carry a
+    high-severity finding and NO completion marker must re-run the arbiter.
+
+    A crash between the parse write and the arbiter rewrite leaves unarbitrated
+    high-severity records on disk; trusting them at merge would bypass the
+    quality gate exactly on the riskiest findings.
+    """
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target, merge_echo_records=True)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    _prime_merge_resume_records(deep, python_severity="high")
+    assert not (deep / "arbiter-complete.marker").exists()
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+
+    arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
+    assert arbiter_calls, "arbiter must re-run on merge resume when no completion marker exists"
+    assert (deep / "arbiter-complete.marker").is_file(), "completion marker must be written after arbitration"
+
+    report = (multi_stack_target / ".review-output.md").read_text()
+    assert "ARBITRATED:" in report, f"arbitrated finding missing from merge-resume report:\n{report}"
+
+
+async def test_merge_resume_skips_arbiter_when_marker_present(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#175 real-path: when the completion marker proves the records were already
+    finalised, a `--start-at merge` resume must NOT re-run the arbiter."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target, merge_echo_records=True)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    _prime_merge_resume_records(deep, python_severity="high")
+    (deep / "arbiter-complete.marker").write_text("")
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+
+    arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
+    assert arbiter_calls == [], "arbiter must not re-run when the completion marker is present"

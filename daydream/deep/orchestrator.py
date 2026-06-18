@@ -27,10 +27,12 @@ from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
 from daydream.config import REVIEW_OUTPUT_FILE, SKILL_MAP, STRUCTURE_STACK_NAME
+from daydream.deep.arbiter import select_arbiter_targets
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
 )
 from daydream.deep.artifacts import (
+    arbiter_complete_path,
     check_deep_artifacts,
     dedup_candidates_path,
     deep_dir,
@@ -44,7 +46,10 @@ from daydream.deep.artifacts import (
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.phases import (
+    FEEDBACK_SCHEMA,
+    PER_STACK_RECORD_SCHEMA,
     phase_alternative_review,
+    phase_arbiter_review,
     phase_commit_push,
     phase_cross_stack_merge,
     phase_fix,
@@ -106,8 +111,11 @@ def total_agent_count(stack_count: int) -> int:
     """Return the D-30 agent count formula.
 
     Formula: 2 (TTT intent + alternative-review) + N per-stack reviews
-    + N per-stack parse passes + 1 cross-stack merge. The fix-gate agents
-    are user-gated and excluded from the pre-flight estimate.
+    + N per-stack parse passes + 1 cross-stack merge + 1 conditional
+    arbiter (Opus pass over high-severity / contested findings). The
+    arbiter fires when qualifying findings exist; the pre-flight estimate
+    always includes it so users aren't surprised by the extra Opus call.
+    The fix-gate agents are user-gated and excluded from the estimate.
 
     Args:
         stack_count: Number of detected stack assignments (including the
@@ -116,7 +124,7 @@ def total_agent_count(stack_count: int) -> int:
     Returns:
         Total agent invocation count surfaced in the pre-flight notice.
     """
-    return 2 + stack_count + stack_count + 1
+    return 2 + stack_count + stack_count + 1 + 1
 
 
 def get_installed_skills() -> set[str] | None:
@@ -282,6 +290,109 @@ def _candidate_pair_to_json(pair: Any) -> dict[str, Any]:
     if isinstance(data.get("alt_files"), tuple):
         data["alt_files"] = list(data["alt_files"])
     return data
+
+
+def _apply_arbiter_verdicts(
+    records: list[dict[str, Any]],
+    sources: list[str],
+    targets: list[int],
+    verdicts: dict[int, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Fold arbiter verdicts back into the per-stack record set (#168).
+
+    Each selected record (``targets[k]`` for 1-based ``arb_id = k + 1``) is
+    revised in place (severity/confidence/description/rationale updated) when the
+    arbiter keeps it, and dropped only on an explicit ``keep:false`` verdict. A
+    missing verdict or an ``arb_id`` mismatch fails open: the original record is
+    retained unchanged (with a warning), because a record reaches arbitration
+    precisely because it is high-severity or contested, so a truncated/lazy
+    arbiter response must not silently delete it. Non-selected records pass
+    through untouched. ``file``/``line`` are never changed -- the arbiter
+    adjudicates, it does not re-target findings.
+
+    Returns:
+        New ``(records, sources)`` with explicitly rejected records removed and
+        surviving selected records carrying the arbiter's fields. Positional
+        alignment between the two lists is preserved.
+    """
+    import warnings
+
+    revised: dict[int, dict[str, Any]] = {}
+    dropped: set[int] = set()
+    for offset, record_index in enumerate(targets):
+        arb_id = offset + 1
+        verdict = verdicts.get(arb_id)
+        if verdict is None:
+            # Arbiter returned no verdict for this arb_id -- fail open: retain the
+            # original record unchanged so a truncated/lazy arbiter response cannot
+            # silently delete a high-severity or contested finding. Only an explicit
+            # keep=False below drops a record.
+            warnings.warn(
+                f"Arbiter returned no verdict for arb_id={arb_id} "
+                f"(record_index={record_index}); retaining original record unchanged.",
+                stacklevel=2,
+            )
+            continue
+        if verdict.get("arb_id") != arb_id:
+            # Secondary key guard: the arb_id field in the verdict must match the
+            # key we looked it up by.  A mismatch means the arbiter emitted a
+            # finding with a wrong arb_id, which would silently bind the verdict
+            # to the wrong record.  Warn and fail open (retain the original) rather
+            # than mis-apply or drop.
+            warnings.warn(
+                f"Arbiter verdict arb_id mismatch: expected arb_id={arb_id} "
+                f"but verdict contains arb_id={verdict.get('arb_id')!r} "
+                f"(record_index={record_index}); retaining original record unchanged.",
+                stacklevel=2,
+            )
+            continue
+        if not verdict.get("keep", False):
+            dropped.add(record_index)
+            continue
+        revised[record_index] = {
+            **records[record_index],
+            "severity": verdict.get("severity", records[record_index].get("severity")),
+            "confidence": verdict.get("confidence", records[record_index].get("confidence")),
+            "description": verdict.get("description", records[record_index].get("description")),
+            "rationale": verdict.get("rationale", records[record_index].get("rationale")),
+        }
+
+    new_records: list[dict[str, Any]] = []
+    new_sources: list[str] = []
+    for i, (record, source) in enumerate(zip(records, sources, strict=True)):
+        if i in dropped:
+            continue
+        new_records.append(revised.get(i, record))
+        new_sources.append(source)
+    return new_records, new_sources
+
+
+def _rewrite_stack_records(
+    deep_dir_path: Path,
+    stack_record_paths: list[Path],
+    records: list[dict[str, Any]],
+    sources: list[str],
+) -> None:
+    """Persist arbiter-revised records back to each per-stack records file (#168).
+
+    The cross-stack merge reads per-stack records by path, so arbitration must
+    be reflected on disk, not just in memory. Every language stack file is
+    rewritten with its surviving records (an emptied stack becomes ``[]`` rather
+    than retaining stale pre-arbitration content).
+    """
+    by_stack: dict[Path, list[dict[str, Any]]] = {path: [] for path in stack_record_paths}
+    for record, source in zip(records, sources, strict=True):
+        # `source` may be a bare stack name ("python") on a fresh run, or a
+        # filename ("stack-python-records.json") on resume.  Normalise to a
+        # Path so both formats resolve to the same key already in `by_stack`.
+        if source.endswith("-records.json"):
+            dest = deep_dir_path / source
+        else:
+            dest = per_stack_records_path(deep_dir_path, source)
+        if dest in by_stack:
+            by_stack[dest].append(record)
+    for dest_path, stack_records in by_stack.items():
+        dest_path.write_text(json.dumps(stack_records, indent=2))
 
 
 async def run_deep(config: RunConfig, work: WorkContext) -> int:
@@ -463,7 +574,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             if config.start_at not in ("merge", "fix"):
                 print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
                 per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
-                    _resolve_backend(config, "review", backend_cache),
+                    _resolve_backend(config, "per_stack_review", backend_cache),
                     work,
                     stacks,
                     diff_path=diff_path,
@@ -535,10 +646,19 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     # order is independent of parallel-task completion order, keeping
                     # the merge prompt and global issue numbering reproducible.
                     for stack_name, output_path in sorted(per_stack_outputs.items()):
+                        # Language stacks carry severity so the scoped arbiter can
+                        # select high/contested findings (#168). The structural
+                        # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
+                        # high-conviction by construction and is partitioned out of
+                        # arbitration/dedup below, defaulting to high at merge.
+                        record_schema = (
+                            FEEDBACK_SCHEMA if stack_name == STRUCTURE_STACK_NAME else PER_STACK_RECORD_SCHEMA
+                        )
                         records = await phase_parse_feedback(
                             _resolve_backend(config, "parse", backend_cache),
                             work,
                             input_path=output_path,
+                            output_schema=record_schema,
                         )
                         records_path = per_stack_records_path(dd, stack_name)
                         records_path.write_text(json.dumps(records, indent=2))
@@ -567,6 +687,35 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     record_sources = [src for _, src in kept_pairs]
                 else:
                     structural_records_path = None
+
+                # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
+                # a single heavyweight arbiter now re-reviews ONLY the
+                # high-severity / contested findings and writes its verdicts back
+                # into the per-stack records before merge. A `--start-at merge`
+                # resume re-runs arbitration from the on-disk records UNLESS the
+                # completion marker proves a prior run already finalised them
+                # (#175): a crash between the parse write and the rewrite would
+                # otherwise let unarbitrated high-severity findings reach merge.
+                arbiter_marker = arbiter_complete_path(dd)
+                if config.start_at != "merge" or not arbiter_marker.is_file():
+                    arbiter_targets = select_arbiter_targets(all_records, record_sources)
+                    if arbiter_targets:
+                        verdicts = await phase_arbiter_review(
+                            _resolve_backend(config, "arbiter", backend_cache),
+                            work,
+                            selected_records=[all_records[i] for i in arbiter_targets],
+                            diff_path=diff_path,
+                            intent_path=intent_p,
+                            alternatives_path=alts_p,
+                            exploration_dir=exploration_dir,
+                        )
+                        all_records, record_sources = _apply_arbiter_verdicts(
+                            all_records, record_sources, arbiter_targets, verdicts
+                        )
+                        _rewrite_stack_records(
+                            dd, per_stack_records_paths, all_records, record_sources
+                        )
+                    arbiter_marker.write_text("")
 
                 # Dedup pre-filter (D-27).
                 alt_issues_for_dedup: list[dict[str, Any]] = (

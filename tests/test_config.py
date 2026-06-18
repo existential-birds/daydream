@@ -8,8 +8,8 @@ from daydream.config import (
 )
 
 PHASE_NAMES = {
-    "review", "parse", "fix", "test", "verify", "exploration",
-    "intent", "wonder", "envision", "merge", "pr_feedback",
+    "review", "per_stack_review", "arbiter", "parse", "fix", "test", "verify",
+    "exploration", "intent", "wonder", "envision", "merge", "pr_feedback",
 }
 
 
@@ -31,9 +31,19 @@ def test_phase_default_models_claude_tier_assignments():
     # Expensive tier: REVIEW, WONDER, ENVISION, MERGE, INTENT, PR_FEEDBACK
     for phase in ("review", "wonder", "envision", "merge", "intent", "pr_feedback"):
         assert claude[phase] == "claude-opus-4-8"
-    # Mid tier: FIX, TEST, EXPLORATION
-    for phase in ("fix", "test", "exploration"):
+    # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW
+    for phase in ("fix", "test", "exploration", "per_stack_review"):
         assert claude[phase] == "claude-sonnet-4-6"
+
+
+def test_per_stack_review_and_arbiter_split():
+    """#168: per-stack fan-out defaults to Sonnet; the arbiter stays on Opus."""
+    claude = PHASE_DEFAULT_MODELS["claude"]
+    assert claude["per_stack_review"] == "claude-sonnet-4-6"
+    assert claude["arbiter"] == "claude-opus-4-8"
+    codex = PHASE_DEFAULT_MODELS["codex"]
+    assert codex["per_stack_review"] == "gpt-5.5"
+    assert codex["arbiter"] == "gpt-5.5"
 
 
 def test_phase_default_models_codex_uses_gpt_5_5_for_every_phase():
