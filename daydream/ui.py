@@ -26,9 +26,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
-# =============================================================================
 # Color Theme (Dracula-based)
-# =============================================================================
 
 NEON_COLORS = {
     "background": "#282A36",
@@ -64,9 +62,7 @@ NEON_THEME = Theme({
     "neon.string": NEON_COLORS["orange"],
 })
 
-# =============================================================================
 # Reusable Style Constants
-# =============================================================================
 # Pre-defined Style objects for use with Text.append() and other Rich components
 # that require Style objects rather than theme strings.
 
@@ -226,9 +222,7 @@ def create_console() -> Console:
     return Console(theme=NEON_THEME)
 
 
-# =============================================================================
 # Header Component
-# =============================================================================
 
 
 def print_header(console: Console, text: str) -> None:
@@ -251,9 +245,7 @@ def print_header(console: Console, text: str) -> None:
     console.print(header_panel)
 
 
-# =============================================================================
 # ASCII Art Header Component
-# =============================================================================
 
 # Gradient colors for ASCII art header (cyan -> pink -> purple)
 ASCII_GRADIENT_COLORS = [
@@ -318,7 +310,6 @@ def _get_gradient_color(position: float) -> str:
         Hex color string at the given position.
 
     """
-    # Clamp position
     position = max(0.0, min(1.0, position))
 
     # Map position to gradient array index
@@ -335,9 +326,7 @@ def _get_gradient_color(position: float) -> str:
     )
 
 
-# =============================================================================
 # Phase Hero Component (ASCII Art Banners)
-# =============================================================================
 
 
 def print_phase_hero(
@@ -415,9 +404,7 @@ def print_phase_hero(
     console.print(panel)
 
 
-# =============================================================================
 # Phase Component (Simple)
-# =============================================================================
 
 
 def print_phase(
@@ -456,9 +443,7 @@ def print_phase(
     console.print(panel)
 
 
-# =============================================================================
 # Pill Badge Component
-# =============================================================================
 
 
 def pill(text: str, bg_color: str, fg_color: str) -> Text:
@@ -487,9 +472,7 @@ def pill(text: str, bg_color: str, fg_color: str) -> Text:
     return result
 
 
-# =============================================================================
 # Tool Call Component
-# =============================================================================
 
 # Patterns for harvesting the assigned task id out of an originating tool's result string.
 _LAUNCH_TASK_ID_PATTERN = re.compile(r"\bCommand running in background with ID:\s*([A-Za-z0-9]+)\b")
@@ -665,9 +648,7 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
     return result
 
 
-# =============================================================================
 # Shared Tool Display Helpers
-# =============================================================================
 
 
 def _format_label_and_id_str(label: str | None, task_id: str, *, id_prefix: str = "") -> str:
@@ -744,9 +725,8 @@ def _build_tool_header(
     """
     content = Text()
 
-    # Background-task tools reference an opaque task_id; lead with the resolved
-    # label (when known) and demote the id to a dim suffix. Never surface the
-    # mechanical block/timeout plumbing.
+    # Background-task tools: lead with the resolved label, demote the opaque
+    # task_id to a dim suffix, and never surface block/timeout plumbing.
     if name in _BACKGROUND_TASK_TOOLS:
         header_line = Text()
         header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
@@ -756,10 +736,8 @@ def _build_tool_header(
         content.append_text(header_line)
         return content
 
-    # Todo-list tools. TaskCreate leads with its own ``subject`` (description
-    # renders below as a Markdown body via _build_tool_body_extras). TaskGet /
-    # TaskUpdate lead with the resolved subject and demote the numeric id;
-    # TaskUpdate appends the meaningful status change. Never surface plumbing.
+    # Todo-list tools lead with the todo subject and demote the numeric id;
+    # TaskUpdate appends its status change. Never surface plumbing.
     if name in _TODO_TASK_TOOLS:
         header_line = Text()
         header_line.append("\U0001f3a0 ", style=STYLE_ORANGE)  # 🎠
@@ -1205,9 +1183,7 @@ def print_tool_call(
     console.print(panel)
 
 
-# =============================================================================
 # Tool Result Component
-# =============================================================================
 
 # Patterns for syntax highlighting in tool output
 _FILE_PATH_PATTERN = re.compile(r"(\.?/?(?:[\w.-]+/)*[\w.-]+\.\w+)")
@@ -1487,9 +1463,7 @@ def print_tool_result(
     console.print(panel)
 
 
-# =============================================================================
 # Thinking Component
-# =============================================================================
 
 
 class LiveThinkingPanel:
@@ -1580,9 +1554,7 @@ def print_thinking(console: Console, content: str, max_length: int = 300) -> Non
     panel.show(duration=0.5)  # Brief animation before settling
 
 
-# =============================================================================
 # Feedback Table Component
-# =============================================================================
 
 
 def print_feedback_table(console: Console, items: list[dict[str, object]]) -> None:
@@ -1632,9 +1604,7 @@ def print_feedback_table(console: Console, items: list[dict[str, object]]) -> No
     console.print(table)
 
 
-# =============================================================================
 # Error Component
-# =============================================================================
 
 
 def print_error(console: Console, title: str, message: str) -> None:
@@ -1660,9 +1630,7 @@ def print_error(console: Console, title: str, message: str) -> None:
     console.print(panel)
 
 
-# =============================================================================
 # Warning Component
-# =============================================================================
 
 
 def print_warning(console: Console, message: str) -> None:
@@ -1682,9 +1650,7 @@ def print_warning(console: Console, message: str) -> None:
     console.print(panel)
 
 
-# =============================================================================
 # Success Component
-# =============================================================================
 
 
 def print_success(console: Console, message: str) -> None:
@@ -1698,9 +1664,7 @@ def print_success(console: Console, message: str) -> None:
     console.print(f"[neon.success]✔[/] [neon.green]{message}[/]")
 
 
-# =============================================================================
 # Cost Component
-# =============================================================================
 
 
 def print_cost(console: Console, cost_usd: float) -> None:
@@ -1714,9 +1678,7 @@ def print_cost(console: Console, cost_usd: float) -> None:
     console.print(f"[neon.cyan]💰[/] [neon.dim]${cost_usd:.4f}[/]")
 
 
-# =============================================================================
 # Info Component
-# =============================================================================
 
 
 def print_info(console: Console, message: str) -> None:
@@ -1761,13 +1723,9 @@ def print_dim(console: Console, message: str) -> None:
     console.print(f"[neon.dim]{message}[/]")
 
 
-# =============================================================================
 # Agent Text Component
-# =============================================================================
 
-# =============================================================================
 # Agent Text State Class
-# =============================================================================
 
 
 class AgentTextState:
@@ -1905,17 +1863,14 @@ def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
     return result
 
 
-# =============================================================================
 # Agent Text Helpers
-# =============================================================================
 
 # Constants for agent text styling
 AGENT_TEXT_BG = "#051208"  # Very dark green background
 AGENT_TEXT_FG = NEON_COLORS["green"]  # Neon green text
 
-# Pattern to detect markdown headers anywhere in text (not just at line start)
-# Matches 1-6 consecutive hashes followed by whitespace and a non-whitespace char
-# This handles both proper line-start headers AND inline headers from streaming
+# Detect markdown headers anywhere in text, not just line-start, to catch inline
+# headers produced by streaming.
 _MARKDOWN_HEADER_PATTERN = re.compile(r"#{1,6}\s+\S")
 
 
@@ -1966,9 +1921,7 @@ def _render_agent_lines_with_gradient(
     return highlighted
 
 
-# =============================================================================
 # AgentTextRenderer Class (Live Panel with buffering)
-# =============================================================================
 
 
 class AgentTextRenderer:
@@ -2233,9 +2186,7 @@ def print_iteration_divider(console: Console, iteration: int, max_iterations: in
     console.print()
 
 
-# =============================================================================
 # Summary Component
-# =============================================================================
 
 
 @dataclass
@@ -2305,9 +2256,7 @@ def print_summary(console: Console, data: SummaryData) -> None:
     console.print(table)
 
 
-# =============================================================================
 # Issue Table Component
-# =============================================================================
 
 
 def print_issues_table(console: Console, issues: list[dict]) -> None:
@@ -2357,9 +2306,7 @@ def print_issues_table(console: Console, issues: list[dict]) -> None:
             console.print(Text(f"  Files: {files_str}", style=STYLE_DIM))
 
 
-# =============================================================================
 # Menu Component
-# =============================================================================
 
 
 def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> None:
@@ -2389,9 +2336,7 @@ def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> 
     console.print(panel)
 
 
-# =============================================================================
 # Prompt Component
-# =============================================================================
 
 
 def prompt_user(console: Console, message: str, default: str = "") -> str:
@@ -2431,9 +2376,7 @@ def prompt_user(console: Console, message: str, default: str = "") -> str:
     return user_input if user_input else default
 
 
-# =============================================================================
 # NeonThrobber Class
-# =============================================================================
 
 
 class NeonThrobber:
@@ -2565,9 +2508,7 @@ class CrazySpinner:
         self._frame = 0
 
 
-# =============================================================================
 # LiveToolPanel Class
-# =============================================================================
 
 
 class LiveToolPanel:
@@ -2949,9 +2890,7 @@ class LiveToolPanel:
             self._live = None
 
 
-# =============================================================================
 # LiveToolPanelRegistry Class
-# =============================================================================
 
 
 class _ActivePanelsGroup:
@@ -3012,9 +2951,8 @@ class LiveToolPanelRegistry:
         self._live: Live | None = None
         self._group = _ActivePanelsGroup(self)
         self._task_labels: dict[str, str] = {}  # keyed by _task_label_ns_key(name, id)
-        # Originating-call args by tool_use_id, populated on every ToolStartEvent
-        # (both render modes) so result→label correlation does not depend on a
-        # panel having been created (the callback render path creates no panels).
+        # Originating-call args by tool_use_id, populated on every ToolStartEvent so
+        # result→label correlation works even when no panel was created (callback path).
         self._call_args: dict[str, tuple[str, dict[str, object]]] = {}
 
     # Tool names whose panels should scroll inline rather than pin via Live.
@@ -3221,9 +3159,7 @@ class LiveToolPanelRegistry:
         self._call_args.clear()
         self._task_labels.clear()
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
 
     def _ensure_live(self) -> None:
         """Start the shared ``Live`` if there are active panels."""
@@ -3277,9 +3213,7 @@ class LiveToolPanelRegistry:
         self._ensure_live()
 
 
-# =============================================================================
 # ShutdownPanel Class
-# =============================================================================
 
 
 @dataclass
@@ -3460,9 +3394,7 @@ def set_shutdown_panel(panel: ShutdownPanel | None) -> None:
     _shutdown_panel = panel
 
 
-# =============================================================================
 # Convenience Functions
-# =============================================================================
 
 
 def get_status_style(status: str) -> Style:
@@ -3522,9 +3454,7 @@ def render_ttt_plan(console: Console, plan: dict) -> None:
             console.print(Text.assemble((line, STYLE_DIM), (" (ungrounded)", "yellow")))
 
 
-# =============================================================================
 # Deep-review Mode UI (D-30, D-31, D-44)
-# =============================================================================
 
 
 def print_stage_progress(console: Console, current: int, total: int, name: str) -> None:

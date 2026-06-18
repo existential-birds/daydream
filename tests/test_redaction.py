@@ -123,10 +123,8 @@ def test_redactor_scrubs_git_url_credentials() -> None:
     url = "git+https://oauth2:ghp_realtoken123@github.com/user/repo.git"
     out = Redactor().redact_step(_user_step(url))
     assert isinstance(out.message, str)
-    # Both username and credential disappear from the output.
     assert "ghp_realtoken123" not in out.message
     assert "oauth2" not in out.message
-    # Both replacement tokens appear between https:// and @.
     assert "[REDACTED_USER]" in out.message
     assert "[REDACTED_API_KEY]" in out.message
     # Host and path preserved (debugging/replay value).
@@ -290,9 +288,7 @@ def test_redact_arguments_preserves_dict_structure_for_nested_values() -> None:
     (rather than the parsed Python structure) whenever redaction changed any
     text — corrupting every MultiEdit / nested MCP arguments value.
     """
-    # Use a redaction-triggering API key (a Bearer token in a path) so we
-    # exercise the redaction-changed-the-text branch — the original bug only
-    # fires when redaction modifies the serialized form.
+    # Path triggers redaction so we exercise the redaction-changed-the-text branch (the bug only fires then).
     nested_value = [
         {"path": "/Users/alice/repo/file.py", "edit_type": "replace"},
         {"path": "/Users/alice/repo/other.py", "edit_type": "delete"},
@@ -300,15 +296,12 @@ def test_redact_arguments_preserves_dict_structure_for_nested_values() -> None:
     arguments = {"edits": nested_value}
     out = Redactor()._redact_arguments(arguments)
 
-    # Crucially: out["edits"] must be a list of dicts (the Python structure),
-    # NOT a JSON-encoded string. CR-01 was that the inverted ternary stored
-    # the redacted-string into the dict whenever redaction changed anything.
+    # out["edits"] must stay a list of dicts, NOT a JSON-encoded string (CR-01 stored the string).
     assert isinstance(out["edits"], list), (
         f"Expected list, got {type(out['edits']).__name__}: {out['edits']!r}"
     )
     assert len(out["edits"]) == 2
     assert all(isinstance(item, dict) for item in out["edits"])
-    # The username was redacted (USERNAME_PATH rule fires) — alice must not appear.
     serialized_back = str(out["edits"])
     assert "alice" not in serialized_back
     assert "[REDACTED_USER]" in serialized_back
@@ -365,7 +358,6 @@ def test_env_var_pattern_does_not_match_substring_lookalikes(non_secret: str) ->
     out = Redactor().redact_step(_user_step(non_secret))
     assert isinstance(out.message, str)
     assert "[REDACTED_ENV_VAR]" not in out.message
-    # The original value must be present (not redacted)
     name, _, value = non_secret.partition("=")
     assert value in out.message, f"Expected {value!r} preserved in {out.message!r}"
 
@@ -432,7 +424,6 @@ def test_redactor_failure_mode_wipes_all_text_bearing_fields(
     serialized = str(out.model_dump())
     for leak in ("sk-leak1", "sk-leak2", "sk-leak3", "sk-leak4"):
         assert leak not in serialized, f"{leak} leaked through fallback: {serialized!r}"
-    # Each text-bearing field must contain the failure marker
     assert out.message == "[REDACTION_FAILED]"
     assert out.reasoning_content == "[REDACTION_FAILED]"
     assert out.tool_calls is not None
@@ -466,18 +457,15 @@ def test_redactor_scrubs_text_content_parts() -> None:
     out = Redactor().redact_step(step)
     assert isinstance(out.message, list)
     assert len(out.message) == 3
-    # First text part: secret redacted
     assert out.message[0].type == "text"
     first_text = out.message[0].text
     assert first_text is not None  # type='text' guarantees text is populated
     assert "sk-test-secret123abc" not in first_text
     assert "[REDACTED_API_KEY]" in first_text
-    # Image part: unchanged
     assert out.message[1].type == "image"
     image_source = out.message[1].source
     assert image_source is not None  # type='image' guarantees source is populated
     assert image_source.path == "screenshot.png"
-    # Second text part: clean, no redaction tokens injected
     assert out.message[2].type == "text"
     assert out.message[2].text == "clean text"
 

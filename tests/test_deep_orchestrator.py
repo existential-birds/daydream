@@ -34,23 +34,16 @@ class _StubBackend:
         self._target = target
         self._is_codex = is_codex
         self.calls: list[dict[str, Any]] = []
-        # Verdict the recommendation-verifier stub branch emits for issue_id=1.
-        # Default "consistent" keeps existing tests' behavior unchanged; tests
-        # exercising the contradicts path flip this to "contradicts" so the
-        # verdict propagates into the phase_fix prompt via the orchestrator.
+        # Verdict the recommendation-verifier branch emits for issue_id=1; flip to
+        # "contradicts" to exercise verdict propagation into the phase_fix prompt.
         self.verifier_verdict: str = "consistent"
         self.verifier_unverified_assumptions: list[str] = []
-        # Counts test-suite invocations so a test can make the FIRST run report
-        # a failure (driving the heal loop into choice "2") and the SECOND run
-        # report a pass. Default 0 keeps existing tests unchanged.
+        # Counts test-suite invocations so a test can fail the FIRST run (driving
+        # the heal loop into choice "2") and pass the SECOND.
         self.test_suite_calls: int = 0
-        # When True, the default test-suite branch reports failure on the first
-        # call and success thereafter. Off by default so existing tests (which
-        # never reach the real test-and-heal loop) are unaffected.
+        # When True, the test-suite branch fails the first call and passes after.
         self.fail_first_test_run: bool = False
-        # Optional override for the cross-stack merge agent's structured item
-        # list. When None the default three-item payload is emitted; tests that
-        # need a controlled severity mix set this to their own item list.
+        # Override for the merge agent's item list (None -> default three-item payload).
         self.merge_items: list[dict[str, Any]] | None = None
 
     async def execute(
@@ -73,9 +66,8 @@ class _StubBackend:
         )
         pl = prompt.lower()
 
-        # TTT alternative-review phase -> structured output.
-        # (Checked BEFORE intent because the alt prompt embeds the intent summary
-        # which contains the word "intent", defeating a naive substring check.)
+        # TTT alternative-review -> structured output. Checked BEFORE intent: the
+        # alt prompt embeds the intent summary, defeating a naive substring check.
         if "would you have done this differently" in pl or "evaluate the implementation" in pl:
             yield TextEvent(text="")
             yield ResultEvent(
@@ -95,8 +87,7 @@ class _StubBackend:
             )
             return
 
-        # TTT intent phase -> plain text. Discriminator: "understand the intent"
-        # + "commit log:" are both unique to build_intent_prompt.
+        # TTT intent phase -> plain text. Discriminator unique to build_intent_prompt.
         if "understand the intent of these changes" in pl:
             yield TextEvent(text="The PR updates greetings across stacks.")
             yield ResultEvent(structured_output=None, continuation=None)
@@ -115,7 +106,6 @@ class _StubBackend:
 
             m = _M()  # type: ignore[assignment]
         if m is not None:
-            # Extract the output path the prompt asks the agent to write.
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
             if out_match is not None:
                 raw = out_match.group(1).rstrip(".")
@@ -129,8 +119,7 @@ class _StubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # phase_parse_feedback -> structured output.
-        if "extract only actionable issues" in pl:
+        if "extract only actionable issues" in pl:  # phase_parse_feedback
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output={
@@ -142,9 +131,8 @@ class _StubBackend:
             )
             return
 
-        # Cross-stack merge -> return a schema-validated item list. The host
-        # (phase_cross_stack_merge) appends structural findings, normalizes ids,
-        # writes merged-items.json, and renders review-output.md from it.
+        # Cross-stack merge -> schema-validated item list; the host appends
+        # structural findings, normalizes ids, and renders review-output.md.
         if "cross-stack merge agent" in pl:
             yield TextEvent(text="")
             if self.merge_items is not None:
@@ -192,23 +180,18 @@ class _StubBackend:
             )
             return
 
-        # phase_fix -> apply the fix. The stub "applies" the edit by writing a
-        # sentinel file in the repo, an observable consequence the real-path
-        # --yes test asserts on (proving the fix gate auto-approved, not merely
-        # that resolve_gate was called). Keyed on the phase_fix prompt opener.
+        # phase_fix -> "apply" the edit by writing a sentinel file, the observable
+        # consequence the --yes real-path test asserts the fix gate auto-approved.
         if pl.startswith("fix this issue"):
             (cwd / ".daydream-fix-applied").write_text("applied\n")
             yield TextEvent(text="Applied the fix.")
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # Recommendation verifier (issue #83). Discriminator: build_verification_prompt
-        # always embeds the schema constant name "RECOMMENDATION_VERDICTS_SCHEMA" in
-        # the prompt text (via json.dumps). This is structural — tied to the schema
-        # constant, not to agent-role wording — so prompt rewording won't silently
-        # break this branch. phase_verify_recommendations persists the structured
-        # output to `.daydream/deep/recommendation-verdicts.json` itself, so the stub
-        # only needs to emit a well-formed payload.
+        # Recommendation verifier (#83). Discriminator is the schema constant name
+        # embedded by build_verification_prompt — structural, so rewording won't
+        # break this branch. The stub only emits a well-formed payload; the phase
+        # persists it to recommendation-verdicts.json itself.
         if "RECOMMENDATION_VERDICTS_SCHEMA" in prompt:
             yield TextEvent(text="")
             yield ResultEvent(
@@ -226,11 +209,9 @@ class _StubBackend:
             )
             return
 
-        # Test-and-heal test-suite run. The prompt is constant
-        # ("Run the project's test suite. Report if tests pass or fail."), so a
-        # call counter drives the result: when fail_first_test_run is set, the
-        # FIRST run reports a failure (so detect_test_success() is False and the
-        # heal loop reaches choice "2") and subsequent runs report a pass.
+        # Test-and-heal run. The prompt is constant, so a call counter drives the
+        # result: with fail_first_test_run set, the FIRST run fails (heal loop
+        # reaches choice "2") and subsequent runs pass.
         if "run the project's test suite" in pl:
             self.test_suite_calls += 1
             if self.fail_first_test_run and self.test_suite_calls == 1:
@@ -240,7 +221,7 @@ class _StubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # Default: empty text + no structured output.
+        # Default: empty.
         yield TextEvent(text="")
         yield ResultEvent(structured_output=None, continuation=None)
 
@@ -255,10 +236,9 @@ def _silence(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence interactive UI helpers in deep orchestrator + phases."""
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    # phase_understand_intent calls prompt_user("Is this understanding correct?", "y")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-    # resolve_or_prompt in agent.py calls prompt_user from its own namespace;
-    # patch it there too so gates that go through resolve_or_prompt don't block on stdin.
+    # resolve_or_prompt routes through agent.prompt_user; patch it too so those
+    # gates don't block on stdin.
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
 
 
@@ -295,15 +275,14 @@ def _install_stub_backend(
     """
     stub = _StubBackend(target, is_codex=is_codex)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: stub)
-    # When is_codex=True, the orchestrator's isinstance(backend, CodexBackend)
-    # check needs to succeed. Patch CodexBackend to our stub's class so the
-    # isinstance check fires without needing a real Codex dependency.
+    # Patch CodexBackend to the stub's class so the orchestrator's isinstance check
+    # fires without a real Codex dependency.
     if is_codex:
         monkeypatch.setattr("daydream.deep.orchestrator.CodexBackend", _StubBackend, raising=False)
     if pin_skill_availability:
-        # Return None -> orchestrator falls back to set(SKILL_MAP.keys())
+        # None -> orchestrator falls back to set(SKILL_MAP.keys()).
         monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
-        # Disable exploration pre-scan so it doesn't add extra backend calls
+        # Disable exploration pre-scan so it doesn't add extra backend calls.
         monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     return stub
 
@@ -311,8 +290,7 @@ def _install_stub_backend(
 async def _run_deep(target: Path, *, start_at: str = "review") -> int:
     from daydream.runner import RunConfig, run
 
-    # cleanup=False suppresses the interactive cleanup prompt in runner.run().
-    # Deep is the default; no shallow flag set.
+    # cleanup=False suppresses the interactive cleanup prompt; deep is the default.
     config = RunConfig(target=str(target), start_at=start_at, cleanup=False)
     return await run(config)
 
@@ -325,8 +303,7 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    # Classify each call by inspecting prompt content. Alt is checked before
-    # intent because the alt prompt embeds the intent summary text.
+    # Alt checked before intent: the alt prompt embeds the intent summary text.
     order: list[str] = []
     for call in stub.calls:
         pl = call["prompt"].lower()
@@ -357,7 +334,7 @@ async def test_fresh_context_per_stage(multi_stack_target: Path, monkeypatch: py
     assert exit_code == 0
     # At minimum: intent + alternatives + 3 per-stack + 3 parse + 1 merge = 9 distinct calls.
     assert len(stub.calls) >= 9
-    # Each stage fires a distinct Backend.execute call -- prompts must be unique.
+    # Each stage fires a distinct execute call -- prompts must be unique.
     prompts = [c["prompt"] for c in stub.calls]
     assert len(set(prompts)) == len(prompts)
 
@@ -373,12 +350,10 @@ async def test_artifacts_on_disk(multi_stack_target: Path, monkeypatch: pytest.M
     deep = multi_stack_target / ".daydream" / "deep"
     assert (deep / "intent.md").exists()
     assert (deep / "alternatives.json").exists()
-    # At least one per-stack review and one per-stack records JSON.
     review_files = list(deep.glob("stack-*-review.md"))
     records_files = list(deep.glob("stack-*-records.json"))
     assert review_files, "expected at least one stack-*-review.md"
     assert records_files, "expected at least one stack-*-records.json"
-    # Dedup candidates.
     assert (deep / "dedup-candidates.json").exists()
 
 
@@ -390,12 +365,11 @@ async def test_per_stack_context_isolation(multi_stack_target: Path, monkeypatch
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    # Find per-stack prompts.
     per_stack_prompts = [
         c["prompt"] for c in stub.calls if "you are reviewing the" in c["prompt"].lower()
     ]
     assert per_stack_prompts, "expected per-stack prompts"
-    # Each per-stack prompt should mention its own stack's file but NOT foreign files.
+    # Each prompt should mention its own stack's file but NOT foreign files.
     python_prompt = next(
         (p for p in per_stack_prompts if "api.py" in p and "the python stack" in p.lower()),
         None,
@@ -448,10 +422,8 @@ async def test_doc_review_notice(multi_stack_target: Path, monkeypatch: pytest.M
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    # In the multi-stack fixture the diff is mixed (python + react + md), so the
-    # generic bucket is NOT docs-only and the notice is NOT expected. The contract
-    # is: a generic-fallback prompt is emitted for README.md and it mentions the
-    # file.
+    # The fixture's diff is mixed, so the generic bucket is NOT docs-only (no
+    # notice). Contract: a generic-fallback prompt is emitted for README.md.
     fallback_prompts = [
         c["prompt"] for c in stub.calls if "you are reviewing the generic-fallback stack" in c["prompt"].lower()
     ]
@@ -470,7 +442,6 @@ async def test_pre_merge_parse_per_stack(multi_stack_target: Path, monkeypatch: 
     parse_calls = [
         c for c in stub.calls if "extract only actionable issues" in c["prompt"].lower()
     ]
-    # At least as many parse calls as per-stack outputs.
     per_stack_outputs = list((multi_stack_target / ".daydream" / "deep").glob("stack-*-review.md"))
     assert len(parse_calls) >= len(per_stack_outputs)
     records = list((multi_stack_target / ".daydream" / "deep").glob("stack-*-records.json"))
@@ -501,7 +472,7 @@ async def test_report_format_flat_numbered(multi_stack_target: Path, monkeypatch
     text = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert "## Issues" in text
     assert "## Cross-Stack Issues" in text
-    # Numbering continues: stub writes 1., 2. in ## Issues then 3. in ## Cross-Stack Issues.
+    # Numbering continues: 1., 2. in ## Issues then 3. in ## Cross-Stack Issues.
     assert "3." in text.split("## Cross-Stack Issues", 1)[1]
 
 
@@ -522,29 +493,24 @@ async def test_cross_stack_prefix(multi_stack_target: Path, monkeypatch: pytest.
 async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-28: Y/n prompt after merge decides whether to apply fixes."""
     _install_stub_backend(monkeypatch, multi_stack_target)
-    # The fix gate now routes through resolve_gate; under a non-TTY/CI run it
-    # short-circuits to its safe default (decline) WITHOUT prompting. This test
-    # asserts the interactive prompt path, so pin interactivity on.
+    # The fix gate short-circuits to decline under non-TTY/CI; this test asserts
+    # the interactive prompt path, so pin interactivity on.
     _force_interactive(monkeypatch)
 
     asked: list[str] = []
 
     def _record_prompt(console, message, default=""):
         asked.append(message)
-        # Decline the fix gate.
-        return "n"
+        return "n"  # decline the fix gate
 
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    # resolve_or_prompt in agent.py calls prompt_user from its own namespace; patch it
-    # there too so the interactive gate is captured and returns "n".
+    # resolve_or_prompt routes through agent.prompt_user; capture it there.
     monkeypatch.setattr("daydream.agent.prompt_user", _record_prompt)
-    # phase_understand_intent also calls prompt_user; always confirm.
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
-    # At least one prompt message must mention the fix gate.
     assert any("fix" in msg.lower() or "apply" in msg.lower() for msg in asked)
 
 
@@ -571,11 +537,9 @@ async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytes
 
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    # The fix gate routes through resolve_or_prompt -> daydream.agent.prompt_user,
-    # so observe that namespace; under --yes it must never be reached.
+    # The fix gate routes through agent.prompt_user; under --yes it must never
+    # be reached. The intent gate must also be suppressed -- fail loudly if hit.
     monkeypatch.setattr("daydream.agent.prompt_user", _record_prompt)
-    # phase_understand_intent also calls prompt_user; assume="yes" should also
-    # suppress that gate, so patch it to fail loudly if it is ever reached.
     monkeypatch.setattr(
         "daydream.phases.prompt_user",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("phases.prompt_user called under --yes")),
@@ -590,7 +554,6 @@ async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytes
     exit_code = await run(config)
 
     assert exit_code == 0
-    # The fix gate never prompted.
     assert not any(
         "apply" in msg.lower() or "fix" in msg.lower() for msg, _ in prompt_calls
     ), f"fix gate prompted under --yes: {prompt_calls}"
@@ -623,13 +586,10 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     assert exit_code == 0
     assert len(captured) == 1, "pre-flight notice must fire exactly once"
     notice = captured[0]
-    # Exactly 5 stages.
     assert len(notice["stages"]) == 5
-    # Agent count: 2 TTT + N per-stack + N parse + 1 merge. The multi-stack
-    # fixture's diff yields N=4 (python + react + generic + structure
-    # meta-stack), so the formula 2 + 2*4 + 1 = 11.
+    # Agent count = 2 TTT + N per-stack + N parse + 1 merge; fixture yields N=4
+    # (python + react + generic + structure), so 2 + 2*4 + 1 = 11.
     assert notice["agent_count"] == 11
-    # Stacks surfaced.
     assert len(notice["stack_lines"]) >= 1
     # No Codex caveat on Claude backend.
     assert notice["codex_in_use"] is False
@@ -668,7 +628,7 @@ async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch
     assert exit_code == 0
 
     per_stack_calls = [c for c in stub.calls if "you are reviewing the" in c["prompt"].lower()]
-    # detect_stacks on the fixture yields at least 2 non-generic buckets + 1 generic = 3.
+    # Fixture yields >= 2 non-generic buckets + 1 generic.
     assert len(per_stack_calls) >= 2
 
 
@@ -688,7 +648,6 @@ async def test_resume_overwrites(multi_stack_target: Path, monkeypatch: pytest.M
     exit_code = await _run_deep(multi_stack_target, start_at="per-stack")
     assert exit_code == 0
 
-    # The stub writes a new review -- STALE CONTENT must be gone.
     assert "STALE CONTENT" not in old.read_text()
 
 
@@ -710,17 +669,15 @@ async def test_resume_merge_consumes_saved_records(
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "intent.md").write_text("primed intent")
     (deep / "alternatives.json").write_text("[]")
-    # Prime saved records but intentionally NOT the review.md files -- the
-    # resume path must consume records.json directly.
+    # Prime records but NOT the review.md files -- resume must consume records.json.
     (deep / "stack-python-records.json").write_text(
         json.dumps([{"id": 1, "description": "py issue", "file": "api.py", "line": 1}])
     )
     (deep / "stack-react-records.json").write_text(
         json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1}])
     )
-    # Markdown routes to the generic bucket; prime its records too so the
-    # merge-resume validation (every detected stack must have records or be
-    # in failed_stacks) passes.
+    # Markdown routes to the generic bucket; prime its records so merge-resume
+    # validation (every detected stack must have records or be a failure) passes.
     (deep / "stack-generic-records.json").write_text(
         json.dumps([{"id": 1, "description": "docs issue", "file": "README.md", "line": 1}])
     )
@@ -734,11 +691,10 @@ async def test_resume_merge_consumes_saved_records(
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
 
-    # Parse phase must NOT have been invoked (records already on disk).
+    # Parse phase must NOT run (records already on disk).
     parse_calls = [c for c in stub.calls if "extract only actionable issues" in c["prompt"].lower()]
     assert parse_calls == [], f"unexpected parse invocations on merge resume: {len(parse_calls)}"
 
-    # Merge agent must have run and produced the merged report.
     merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert len(merge_calls) == 1
     from daydream.config import REVIEW_OUTPUT_FILE
@@ -760,10 +716,8 @@ async def test_stage_ui_surfacing(multi_stack_target: Path, monkeypatch: pytest.
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
-    # At least 5 distinct stage boundaries announced.
     stage_numbers = {c[0] for c in progress_calls}
     assert stage_numbers == {1, 2, 3, 4, 5}
-    # Total is always 5.
     assert all(c[1] == 5 for c in progress_calls)
 
 
@@ -932,8 +886,7 @@ async def test_merge_prompt_lists_records_in_sorted_order(
     assert merge_prompts, "merge agent was not invoked"
     prompt = merge_prompts[0]
 
-    # build_merge_prompt writes records under "Per-stack parsed records:" as
-    # "  - <path>" lines.
+    # Records appear under "Per-stack parsed records:" as "  - <path>" lines.
     lines = prompt.splitlines()
     start = next((i for i, line in enumerate(lines) if "per-stack parsed records:" in line.lower()), None)
     assert start is not None, "merge prompt missing per-stack records block"
@@ -966,8 +919,8 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-    # Wrap the stub's execute so the REACT per-stack prompt raises. Everything
-    # else (TTT, parse, merge, other stacks) keeps the stub's normal behavior.
+    # Wrap execute so only the REACT per-stack prompt raises; everything else
+    # keeps the stub's normal behavior.
     original_execute = stub.execute
 
     def _maybe_fail(
@@ -1145,7 +1098,6 @@ async def test_orchestrator_threads_structural_records_to_merge(
 
     def _capture_merge(**kwargs):
         captured_merge.update(kwargs)
-        # Delegate to real builder so the merge agent still gets a usable prompt.
         return _real_build_merge(**kwargs)
 
     def _capture_dedup(records, alt_issues):
@@ -1206,12 +1158,10 @@ async def test_orchestrator_threads_structural_records_to_merge(
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
 
-    # (1) Merge prompt received structural_records_path pointing at the
-    #     structural records file inside the deep artifact dir.
+    # (1) Merge prompt received structural_records_path; per_stack_records_paths
+    #     must NOT include the structural file (it rides as its own argument).
     assert captured_merge.get("structural_records_path") is not None
     assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
-    # And the per_stack_records_paths kwarg must NOT include the structural file
-    # (it rides as its own argument now).
     per_stack_paths = captured_merge["per_stack_records_paths"]
     assert all(
         p.name != "stack-structure-records.json" for p in per_stack_paths
@@ -1288,10 +1238,9 @@ async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
         p.name != "stack-structure-records.json" for p in per_stack_paths
     ), f"structural records must be partitioned out (fresh run): {per_stack_paths}"
 
-    # The fresh-run path populates record_sources with the stack_name string,
-    # so the partition removes every entry whose source == 'structure'.
+    # Fresh-run populates record_sources with stack_name, so the partition drops
+    # every entry whose source == 'structure'; sources stay parallel to records.
     assert "structure" not in captured_record_dedup["sources"]
-    # Sources stay parallel to records after filtering.
     assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
 
 
@@ -1317,9 +1266,8 @@ async def test_resume_fix_skips_pr_post(
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _spy)
 
-    # Prime every artifact the fix-resume gate needs. The verifier and fix gate
-    # both read the canonical merged-items.json, so prime it alongside the
-    # human-readable markdown report.
+    # Prime the fix-resume artifacts: the verifier and fix gate both read the
+    # canonical merged-items.json, so prime it alongside the markdown report.
     deep = multi_stack_target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "intent.md").write_text("primed intent")
@@ -1372,15 +1320,12 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
         seen_phases.append(phase)
         return original(config, phase, cache)
 
-    # The deep orchestrator does `from daydream.runner import _resolve_backend`
-    # inside run_deep, so patching daydream.runner._resolve_backend intercepts
-    # every call site once the orchestrator is wired to per-phase resolution.
+    # run_deep imports _resolve_backend from daydream.runner, so patching it there
+    # intercepts every call site under per-phase resolution.
     monkeypatch.setattr("daydream.runner._resolve_backend", spy)
 
-    # Silence interactive UI but accept the fix gate so fix/test/commit run.
-    # The fix gate routes through resolve_gate; pin interactivity so the "y"
-    # prompt stub is honoured instead of short-circuiting to the unattended
-    # decline default.
+    # Accept the fix gate so fix/test/commit run; pin interactivity so the "y"
+    # stub is honoured instead of the unattended decline default.
     _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
@@ -1395,8 +1340,8 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
-    # Stub the fix, test_and_heal, and commit_push phases so they don't try to
-    # mutate the workspace / run tests, but still trigger their resolver call.
+    # Stub fix/test_and_heal/commit_push so they don't mutate the workspace or run
+    # tests, but still trigger their resolver call.
     async def _stub_fix(backend, work, item, idx, total):  # noqa: ARG001
         return None
 
@@ -1437,8 +1382,8 @@ async def test_verifier_runs_after_merge_before_fix(
     """
     from daydream.deep.artifacts import verdicts_path
 
-    # Silence interactive UI but accept the fix gate so the fix loop runs.
-    # Pin interactivity so the resolve_gate fix gate honours the "y" stub.
+    # Accept the fix gate so the fix loop runs; pin interactivity so the gate
+    # honours the "y" stub.
     _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
@@ -1448,9 +1393,8 @@ async def test_verifier_runs_after_merge_before_fix(
 
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-    # Suppress non-idempotent PR post and don't actually mutate the workspace
-    # in test_and_heal / commit_push. phase_fix is left REAL so the verdict
-    # propagation into the fix prompt is observable via stub.calls.
+    # Suppress the PR post and don't mutate the workspace in test_and_heal /
+    # commit_push. phase_fix stays REAL so verdict propagation is observable.
     async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
         return None
 
@@ -1467,7 +1411,6 @@ async def test_verifier_runs_after_merge_before_fix(
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    # Tag each call by stage (mirrors the test_pipeline_order pattern).
     merge_idx: int | None = None
     verifier_idx: int | None = None
     first_fix_idx: int | None = None
@@ -1514,7 +1457,7 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
     feedback item, the orchestrator attaches the verdict and phase_fix inlines
     `Verifier verdict: contradicts` into the fix-agent prompt.
     """
-    # Pin interactivity so the resolve_gate fix gate honours the "y" stub.
+    # Pin interactivity so the fix gate honours the "y" stub.
     _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
@@ -1523,8 +1466,8 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    # Flip the verdict the stub returns; parsed feedback uses id=1, so this
-    # entry matches and the orchestrator attaches verifier_verdict to it.
+    # Parsed feedback uses id=1, so this verdict matches and the orchestrator
+    # attaches it to that item.
     stub.verifier_verdict = "contradicts"
     stub.verifier_unverified_assumptions = [
         "assumes endpoint returns JSON",
@@ -1581,23 +1524,20 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    # This test drives the REAL interactive heal menu; pin interactivity on so
-    # the auto non-interactive resolution (non-TTY pytest stdin) does not bypass it.
+    # Drives the REAL interactive heal menu; pin interactivity so non-TTY pytest
+    # stdin doesn't auto-resolve to non-interactive and bypass it.
     _force_interactive(monkeypatch)
-    # Apply-fixes gate routes through resolve_or_prompt → agent.prompt_user.
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
-    # phases.prompt_user is shared: intent-confirmation needs "y"; the
-    # test-and-heal menu ("Choice") needs "2" (fix-and-retry). Dispatch on the
-    # message arg (second positional: prompt_user(console, message, default)).
+    # phases.prompt_user is shared: intent-confirmation needs "y"; the heal menu
+    # ("Choice") needs "2" (fix-and-retry). Dispatch on the message arg.
     def _phases_prompt(console: Any, message: str, default: str = "") -> str:  # noqa: ARG001
         return "2" if "Choice" in message else "y"
 
     monkeypatch.setattr("daydream.phases.prompt_user", _phases_prompt)
 
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    # Make the FIRST test-suite run fail and the SECOND pass.
-    stub.fail_first_test_run = True
+    stub.fail_first_test_run = True  # first run fails, second passes
 
     async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
         return None
@@ -1606,15 +1546,14 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
         return None
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-    # phase_test_and_heal is left REAL so feedback_items must flow through it.
+    # phase_test_and_heal stays REAL so feedback_items must flow through it.
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0, "deep run did not complete -- heal loop should pass on the second test run"
 
-    # The heal fix prompt is the one _build_fix_prompt produces. Without the
-    # orchestrator threading feedback_items, it would lack "api.py" and the
-    # scope instruction -- this is the regression-distinguishing assertion.
+    # Without the orchestrator threading feedback_items, the _build_fix_prompt
+    # output would lack "api.py" and the scope instruction -- the regression check.
     heal_prompts = [c["prompt"] for c in stub.calls if c["prompt"].startswith("The tests failed.")]
     assert heal_prompts, "heal loop did not dispatch a fix prompt -- choice '2' path not reached"
     heal_prompt = heal_prompts[0]
@@ -1626,7 +1565,7 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
         "scope instruction missing from heal fix prompt -- feedback_items not "
         f"honored; prompt was: {heal_prompt!r}"
     )
-    # The first test-suite call failed, the second passed: exactly two runs.
+    # First call failed, second passed: exactly two runs.
     assert stub.test_suite_calls == 2, (
         f"expected 2 test-suite runs (fail then pass), saw {stub.test_suite_calls}"
     )
@@ -1644,21 +1583,17 @@ async def test_structural_finding_reaches_fix_loop(
     markdown re-parse), and items MUST arrive severity-ordered (high before low,
     stable within a tier).
     """
-    # Pin interactivity so the resolve_gate fix gate honours the "y" stub.
+    # Pin interactivity so the fix gate honours the "y" stub.
     _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    # Accept the apply-fixes gate so the fix loop runs.
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    # Controlled merge output: one per-stack(high), one per-stack(low). The
-    # structure meta-stack's parsed records get appended by
-    # phase_cross_stack_merge as lens="structural", severity="high" -- giving the
-    # plan's required mix of one structural(high), one per-stack(high), one
-    # per-stack(low).
+    # One per-stack(high) + one per-stack(low); phase_cross_stack_merge appends
+    # the structure meta-stack as structural(high), giving the required mix.
     stub.merge_items = [
         {
             "id": 1,
@@ -1728,12 +1663,11 @@ async def test_start_at_fix_recovers_merged_items(
     """
     from daydream.config import REVIEW_OUTPUT_FILE
 
-    # Pin interactivity so the resolve_gate fix gate honours the "y" stub.
+    # Pin interactivity so the fix gate honours the "y" stub.
     _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    # Accept the apply-fixes gate so the fix loop runs.
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
@@ -1758,9 +1692,8 @@ async def test_start_at_fix_recovers_merged_items(
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
-    # Prime the fix-resume prerequisites EXCEPT the canonical markdown report.
-    # Only the deep-dir merged-items.json exists -- no review-output.md anywhere
-    # (neither target_dir/.review-output.md nor deep/review-output.md).
+    # Prime fix-resume prerequisites EXCEPT the canonical markdown report -- only
+    # the deep-dir merged-items.json exists, no review-output.md anywhere.
     deep = multi_stack_target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "intent.md").write_text("primed intent")
@@ -1799,21 +1732,12 @@ async def test_start_at_fix_recovers_merged_items(
     )
 
 
-# --- Real-path integration: non-interactive / EOF-safe apply-fixes gate -----
-#
-# Both tests drive the REAL deep pipeline through ``runner.run`` -> ``run_deep``
-# to the only deep-mode prompt -- ``prompt_user(console, "Apply fixes now? ...",
-# "n")`` at orchestrator.py:657. The real ``ui.prompt_user`` is left in place
-# (NOT mocked) so the production gate path is genuinely exercised: in
-# non-interactive mode it must short-circuit on ``get_non_interactive()`` and
-# return the safe default; in interactive mode an EOF on stdin must be caught
-# and resolved to the same safe default. Only the backend (and the
-# non-idempotent PR post) are mocked; the noise-only UI helpers are silenced.
-#
-# Observable assertions (CLAUDE.md S3.1): exit code 0, the "report written ...
-# exiting" success path was taken (return BEFORE phase_fix), and phase_fix was
-# never invoked (fixes-not-applied). A spy on phase_fix proves the fix loop
-# never ran; ``builtins.input`` is rigged to fail the test if stdin is touched.
+# Real-path integration: non-interactive / EOF-safe apply-fixes gate.
+# Both tests drive the REAL deep pipeline to the apply-fixes prompt with the real
+# ui.prompt_user (NOT mocked): non-interactive must short-circuit on
+# get_non_interactive(); interactive must catch EOF on stdin. Both resolve to the
+# safe default. Only the backend and PR post are mocked. A phase_fix spy proves
+# the fix loop never ran; builtins.input fails the test if stdin is touched.
 
 
 def _silence_gate_noise(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1862,7 +1786,7 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
 
     monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _spy_fix)
 
-    # Any stdin read at all is a bug in non-interactive mode -- fail loudly.
+    # Any stdin read in non-interactive mode is a bug -- fail loudly.
     def _forbidden_input(*_a: Any, **_kw: Any) -> str:
         raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
 
@@ -1877,12 +1801,9 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     finally:
         reset_state()
 
-    # Observable outcome 1: the run declined and exited cleanly.
     assert exit_code == 0
-    # Observable outcome 2: NO fix phase ran (fixes-not-applied).
     assert fix_calls == [], f"phase_fix ran despite the gate declining: {fix_calls!r}"
-    # Observable outcome 3: the gate's "report written ... exiting" path was
-    # taken -- the merged report exists on disk (written before the return 0).
+    # The gate's "report written ... exiting" path ran (report on disk before return 0).
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).is_file(), (
         "merged report missing -- the apply-fixes gate's success/exit path did not run"
     )
@@ -1920,19 +1841,16 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
 
     monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _spy_fix)
 
-    # Every stdin read raises EOFError (simulates closed / non-interactive stdin
-    # without setting the non_interactive flag).
+    # Every stdin read raises EOFError (closed stdin without the non_interactive flag).
     def _eof_input(*_a: Any, **_kw: Any) -> str:
         raise EOFError("simulated closed stdin")
 
     monkeypatch.setattr("builtins.input", _eof_input)
 
-    # Pin interactivity ON so this genuinely exercises the interactive EOF branch
-    # (input() -> EOFError), not the auto non-interactive short-circuit that the
-    # non-TTY pytest stdin would otherwise trigger.
+    # Pin interactivity ON so this exercises the interactive EOF branch, not the
+    # auto non-interactive short-circuit non-TTY pytest stdin would trigger.
     _force_interactive(monkeypatch)
 
-    # Sanity: this exercises the interactive branch, NOT the flag short-circuit.
     reset_state()
     try:
         assert get_non_interactive() is False
@@ -1942,17 +1860,14 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     finally:
         reset_state()
 
-    # Observable outcome 1: declined cleanly, no EOFError propagated.
     assert exit_code == 0
-    # Observable outcome 2: NO fix phase ran (safe default = decline).
     assert fix_calls == [], f"phase_fix ran despite EOF at the gate: {fix_calls!r}"
-    # Observable outcome 3: the merged report was written before the exit.
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).is_file(), (
         "merged report missing -- the apply-fixes gate's success/exit path did not run"
     )
 
 
-# --- Git timeout under load (issue #120) ------------------------------------
+# Git timeout under load (issue #120)
 
 
 async def test_deep_run_recovers_from_transient_git_timeout(
@@ -1979,8 +1894,8 @@ async def test_deep_run_recovers_from_transient_git_timeout(
 
     def flaky_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         cmd = args[0] if args else kwargs.get("args", [])
-        # Only trip on a real `git` invocation (these go through the retry
-        # path); leave any `gh` call untouched so the test is deterministic.
+        # Trip only on a real `git` invocation (these retry); leave `gh` untouched
+        # so the test stays deterministic.
         is_git = isinstance(cmd, (list, tuple)) and len(cmd) and cmd[0] == "git"
         if is_git and not state["timed_out_once"]:
             state["timed_out_once"] = True
@@ -1994,9 +1909,8 @@ async def test_deep_run_recovers_from_transient_git_timeout(
     from daydream.config import REVIEW_OUTPUT_FILE
 
     assert state["timed_out_once"], "the injected git timeout never fired"
-    # Observable outcome: the run survived the timeout and exited cleanly...
+    # Survived the timeout, exited cleanly, and progressed past the diff preamble.
     assert exit_code == 0
-    # ...and progressed past the diff preamble to write the merged report.
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).is_file()
 
 
@@ -2029,9 +1943,8 @@ async def test_deep_run_reports_persistent_git_timeout_distinctly(
 
     exit_code = await _run_deep(multi_stack_target)
 
-    # Observable outcome: the run aborts...
+    # Aborts with the timeout-specific title, NOT the misleading base-branch error.
     assert exit_code == 1
-    # ...with the timeout-specific title, NOT the misleading base-branch error.
     titles = [t for t, _ in errors]
     assert "Git Timeout" in titles, f"expected a distinct Git Timeout error, got {errors!r}"
     assert "Git Error" not in titles, (

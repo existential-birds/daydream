@@ -297,7 +297,6 @@ def create_backend(name: str, model: str | None = None) -> Backend:
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude' or 'codex'.")
 
 
-# Re-export ClaudeBackend at package level for convenience
 from daydream.backends.claude import ClaudeBackend  # noqa: E402
 
 __all__ = [

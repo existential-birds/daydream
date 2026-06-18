@@ -356,13 +356,6 @@ def _is_gitignored(repo: Path, relative_path: str) -> bool:
     return git_ops.check_ignore(repo, relative_path)
 
 
-# --- Stage 3 helpers --------------------------------------------------------
-#
-# These two helpers are kept tightly scoped on purpose: Stage 3 needs them
-# threaded through phases.py without growing this module. Stage 4 will hook
-# ``open_workspace`` into the CLI and may rework the in-place builder.
-
-
 def make_in_place_workcontext(target: Path) -> WorkContext:
     """Construct a :class:`WorkContext` for an in-place run.
 

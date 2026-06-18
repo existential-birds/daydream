@@ -30,12 +30,9 @@ import pytest
 FIXTURE_MODEL_ID = "fixture-model-id"
 
 
-# ---------------------------------------------------------------------------
-# Fake SDK message types (real-shape: AssistantMessage carries .model, no
-# .usage; ResultMessage carries .total_cost_usd + .usage). ClaudeBackend.execute
-# does isinstance() against the symbols imported into daydream.backends.claude;
-# we monkeypatch those symbols to point at these so isinstance returns True.
-# ---------------------------------------------------------------------------
+# Fake SDK message types (real-shape: AssistantMessage carries .model, no .usage;
+# ResultMessage carries .total_cost_usd + .usage). Monkeypatched over the symbols
+# ClaudeBackend.execute isinstance-checks so they match.
 
 
 @dataclass
@@ -89,13 +86,9 @@ class FakeResultMessage:
     result: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# Fake ClaudeSDKClient. Inspects each query() prompt, picks a canned response,
-# and emulates the agent's tool-use side effects (writing per-stack review
-# files and the merged review report) so downstream phases do not crash on
-# missing files. We mock only the SDK boundary; the side-effect file writes
-# stand in for the Bash/Write tool calls a real agent would have made.
-# ---------------------------------------------------------------------------
+# Fake ClaudeSDKClient: picks a canned response per query() prompt and emulates
+# the agent's tool-use file writes (per-stack + merged reports) so downstream
+# phases don't crash on missing files. Only the SDK boundary is mocked.
 
 
 _OUTPUT_PATH_RE = re.compile(r"to ([^\s]+\.(?:md|json))")
@@ -161,7 +154,6 @@ class _FakeSDKClient:
             out.write_text(_MERGED_REPORT)
         elif name.startswith("stack-") and name.endswith("-review.md"):
             out.write_text(_PER_STACK_REPORT)
-        # alternatives.json / intent.md / records.json are written by Python.
 
     async def receive_response(self) -> Any:
         for msg in self._build_messages(self._prompt):
@@ -225,12 +217,8 @@ class _FakeSDKClient:
         """
         pl = prompt.lower()
 
-        # Exploration specialist prompts (pattern-scanner, dependency-tracer,
-        # test-mapper). These run inside ``maybe_fork`` from
-        # ``exploration_runner.pre_scan`` and are the production-bug path:
-        # the parent recorder's ``agent_model_name`` is still the generic
-        # backend label when ``create_dispatch_step`` runs, so the resulting
-        # 'Exploration' row in the rollup table renders 'unknown' / '$0.00'.
+        # Exploration specialists run under maybe_fork; the production-bug path
+        # where the 'Exploration' rollup row renders 'unknown' / '$0.00'.
         if "pattern-scanner" in pl:
             return _FakeSDKClient._exploration_messages(
                 {"conventions": [], "guidelines": []},
@@ -250,9 +238,8 @@ class _FakeSDKClient:
                 tool_input={"file_path": "tests/test_foo.py"},
             )
 
-        # phase_alternative_review uses ALTERNATIVE_REVIEW_SCHEMA: the
-        # ResultMessage MUST carry structured_output with the right shape
-        # or phase_alternative_review crashes / returns an empty list.
+        # phase_alternative_review (ALTERNATIVE_REVIEW_SCHEMA): ResultMessage
+        # must carry structured_output of the right shape or it returns [].
         if "architectural alternatives" in pl or (
             "alternative" in pl and "intent" in pl and "given" in pl
         ):
@@ -272,8 +259,8 @@ class _FakeSDKClient:
                 ),
             ]
 
-        # phase_parse_feedback uses FEEDBACK_SCHEMA: ResultMessage must
-        # carry structured_output with the right shape.
+        # phase_parse_feedback (FEEDBACK_SCHEMA): ResultMessage must carry
+        # structured_output of the right shape.
         if "extract only actionable issues" in pl or "read the review output file" in pl:
             return [
                 FakeAssistantMessage(
@@ -308,10 +295,9 @@ class _FakeSDKClient:
                 ),
             ]
 
-        # phase_cross_stack_merge uses MERGED_ITEMS_SCHEMA: the ResultMessage
-        # MUST carry a structured item list. The host renders review-output.md
-        # from it (no agent file-write step). One per-stack item keeps the
-        # rendered report (and thus the PR comment) non-empty.
+        # phase_cross_stack_merge (MERGED_ITEMS_SCHEMA): ResultMessage carries
+        # the structured item list the host renders review-output.md from. One
+        # item keeps the rendered report (and PR comment) non-empty.
         if "cross-stack merge agent" in pl:
             return [
                 FakeAssistantMessage(
@@ -342,7 +328,7 @@ class _FakeSDKClient:
                 ),
             ]
 
-        # phase_per_stack_reviews: free-form text; report files are written by
+        # phase_per_stack_reviews: free-form text; reports written by
         # _maybe_write_artifact via prompt scan.
         return [
             FakeAssistantMessage(
@@ -360,9 +346,7 @@ class _FakeSDKClient:
         ]
 
 
-# ---------------------------------------------------------------------------
 # Repo + monkeypatch fixtures.
-# ---------------------------------------------------------------------------
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -407,20 +391,18 @@ def deep_target_multi(tmp_path: Path) -> Path:
     _git(repo, "init", "-b", "main")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
-    # Seed five Python files on main so the tree-sitter index has something
-    # to resolve; enough room to mutate four of them on the branch.
+    # Seed five Python files on main so the tree-sitter index can resolve them.
     for name in ("foo.py", "bar.py", "baz.py", "qux.py", "quux.py"):
         (repo / name).write_text(f"def {name[:-3]}():\n    return 1\n")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "init")
     _git(repo, "checkout", "-b", "feature")
-    # Mutate four of the five so count_changed_files >= 4 -> tier="parallel".
+    # Mutate four so count_changed_files >= 4 -> tier="parallel".
     for name in ("foo.py", "bar.py", "baz.py", "qux.py"):
         (repo / name).write_text(f"def {name[:-3]}():\n    return 2\n")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "tweak four files")
-    # Sanity: verify diff count up-front so a future refactor that breaks the
-    # threshold trips loudly here, not silently downstream.
+    # Assert diff count up-front so a threshold-breaking refactor trips here.
     diff_out = subprocess.run(  # noqa: S603 - controlled args
         ["git", "diff", "--name-only", "main..HEAD"],  # noqa: S607
         cwd=repo,
@@ -465,12 +447,9 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# gh / PR plumbing patches. _post() short-circuits without an open PR; we
-# patch find_open_pr to return a fake PRInfo and _submit_review to capture
-# the payload (the ONLY allowed non-SDK mock per the brief — it stands in
-# for the gh-CLI subprocess that would otherwise post to GitHub).
-# ---------------------------------------------------------------------------
+# gh / PR plumbing patches: find_open_pr returns a fake PRInfo and _submit_review
+# captures the payload (the only allowed non-SDK mock per the brief — it stands
+# in for the gh-CLI subprocess that would post to GitHub).
 
 
 @dataclass
@@ -514,9 +493,7 @@ def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
     return captured
 
 
-# ---------------------------------------------------------------------------
 # Misc: silence Rich UI noise + answer interactive prompts.
-# ---------------------------------------------------------------------------
 
 
 _UI_FUNCS: tuple[str, ...] = (
@@ -564,8 +541,7 @@ def _answer_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
     which calls prompt_user from its own (agent) namespace. We dispatch on the
     question text so the fix gate gets "n" (skip fixes) and PR-post gets "y".
     """
-    # Force interactive mode so resolve_gate defers to prompt_user instead of
-    # short-circuiting to the safe_default=False decline.
+    # Force interactive mode so resolve_gate defers to prompt_user.
     monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
 
@@ -587,23 +563,19 @@ def _answer_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     def _agent_prompt(console, message: str, default: str = "") -> str:  # noqa: ARG001
-        # Fix gate: decline so the flow proceeds to PR post without applying fixes.
+        # Decline the fix gate (proceed to PR post without fixes); approve PR post.
         if "apply fixes" in message.lower() or "apply fix" in message.lower():
             return "n"
-        # PR post gate: approve so _submit_review is reached.
         if "post these" in message.lower() or "pr review" in message.lower():
             return "y"
-        # All other gates (phase understand intent, intent confirmation, etc.)
-        return "y"
+        return "y"  # all other gates (intent confirmation, etc.)
 
     monkeypatch.setattr(
         "daydream.agent.prompt_user", _agent_prompt, raising=False,
     )
 
 
-# ---------------------------------------------------------------------------
 # Markdown extraction helpers.
-# ---------------------------------------------------------------------------
 
 
 def _line_starting(markdown: str, prefix: str) -> str:
@@ -618,7 +590,6 @@ def _line_starting(markdown: str, prefix: str) -> str:
 def _phase_rows(markdown: str) -> list[str]:
     rows: list[str] = []
     for line in markdown.splitlines():
-        # Header / separator rows start with "| Phase" or "|---".
         if line.startswith("|") and not line.startswith("| Phase") and not line.startswith("|---"):
             rows.append(line)
     return rows
@@ -628,9 +599,7 @@ def _row_cells(row: str) -> list[str]:
     return [c.strip() for c in row.strip("|").split("|")]
 
 
-# ---------------------------------------------------------------------------
 # The test.
-# ---------------------------------------------------------------------------
 
 
 async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
@@ -662,16 +631,11 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
 
     config = RunConfig(
         target=str(deep_target),
-        # Deep is the default for output_mode="loop" + non-shallow.
         cleanup=False,
         archive=False,
     )
-    # The single-file diff means count_changed_files == 1 -> select_tier
-    # returns "skip", so the orchestrator constructs a fresh
-    # ExplorationContext() without invoking the backend. We do NOT pre-
-    # populate exploration_context — letting the orchestrator's natural
-    # pre-scan path run is part of the integration coverage. (Reference to
-    # ExplorationContext silenced for the linter below.)
+    # Single-file diff -> select_tier "skip": the orchestrator's natural
+    # pre-scan path runs unpopulated. (ExplorationContext kept for the linter.)
     _ = ExplorationContext
 
     exit_code = await run(config)
@@ -747,15 +711,8 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
         )
 
 
-# ---------------------------------------------------------------------------
-# Exploration-row reproduction test.
-#
-# The single-file fixture above exercises ``select_tier(...) == "skip"`` and
-# never spawns the exploration sub-recorders. Production reports the
-# Exploration row rendering as ``unknown / 4 / 53 / 0 / 0 / 0 / $0.00`` —
-# that lives behind ``select_tier(...) in ("single", "parallel")``. This
-# test forces the parallel tier and asserts on the broken row.
-# ---------------------------------------------------------------------------
+# Exploration-row reproduction test: forces the parallel tier (which the
+# single-file fixture skips) so the broken Exploration rollup row is exercised.
 
 
 async def test_deep_run_exploration_row_has_real_model_and_metrics(
@@ -800,8 +757,7 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
     body = payload["body"]
     assert isinstance(body, str)
 
-    # Print rendered markdown so any future failure trace shows what we
-    # observed. (Kept as -s diagnostics; harmless when assertions pass.)
+    # Print rendered markdown so a future failure trace shows what we observed.
     print("\n=== RENDERED PR COMMENT BODY ===")
     print(body)
     print("=== END RENDERED PR COMMENT BODY ===\n")

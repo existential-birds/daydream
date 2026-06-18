@@ -47,12 +47,8 @@ from daydream.trajectory import (
     TrajectoryRecorder,
 )
 
-# ---------------------------------------------------------------------------
-# Fake SDK message types matching the REAL claude_agent_sdk shapes.
-# ``ClaudeBackend.execute`` does ``isinstance(msg, AssistantMessage)`` etc.
-# against the symbols imported into ``daydream.backends.claude``; we patch
-# those symbols to point at these fake classes so isinstance returns True.
-# ---------------------------------------------------------------------------
+# Fake SDK message types matching real claude_agent_sdk shapes. We patch the
+# symbols imported into daydream.backends.claude so its isinstance checks pass.
 
 
 @dataclass
@@ -110,11 +106,8 @@ class FakeResultMessage:
     result: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# Per-test FakeClient factory: lets each test queue a specific message
-# sequence then monkeypatch ``ClaudeSDKClient`` to a class whose instances
-# replay it.
-# ---------------------------------------------------------------------------
+# Per-test FakeClient factory: each test queues a message sequence, then patches
+# ClaudeSDKClient to a class whose instances replay it.
 
 
 class _FakeClientBase:
@@ -173,10 +166,8 @@ def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
         path=tmp_path / ".daydream" / "trajectory.json",
         run_flow=DaydreamRunFlow.TTT,
         target_dir=tmp_path,
-        # Production runner now passes ``agent_model_name=""`` — the single
-        # config.model field was removed in favor of per-phase model fields.
-        # The recorder gets the backend alias only as a fallback for legacy
-        # callers; daydream stamps the resolved model on each Step explicitly.
+        # Backend alias is only a legacy fallback; daydream stamps the resolved
+        # model on each Step explicitly (config.model was replaced by per-phase fields).
         agent_model_name="claude",
         session_id="test",
     )
@@ -209,11 +200,6 @@ def _phase_row(markdown: str, label: str) -> str:
         if line.startswith(needle):
             return line
     raise AssertionError(f"No phase row {label!r} in markdown:\n{markdown}")
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 FIXTURE_MODEL_ID = "fixture-sdk-model-id"
@@ -260,9 +246,8 @@ async def test_render_uses_real_sdk_model_id_not_backend_alias(
         f"Bug A: expected real SDK model id {FIXTURE_MODEL_ID!r} in Model line, "
         f"got: {model_line!r}\n\nFull markdown:\n{markdown}"
     )
-    # Sanity: the renderer should NOT be showing the backend alias verbatim
-    # as a literal model name. (Substring match on "claude" alone is unsafe
-    # because the real id begins with "claude-"; check the line exactly.)
+    # Exact-line check: real id begins with "claude-", so a substring match on
+    # "claude" alone would be unsafe.
     assert model_line.strip() != "- **Model:** claude", (
         f"Bug A: Model line is the backend alias instead of the SDK model id: {model_line!r}"
     )
@@ -310,9 +295,8 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
     recorder = _make_recorder(tmp_path)
     target_path = recorder.path
     async with recorder:
-        # Each phase gets its own monkeypatch / FakeClient via the SDK
-        # symbol patching. Reapplying patch_sdk between phases re-routes
-        # ClaudeSDKClient so the second run_agent() picks up the new stream.
+        # Reapplying patch_sdk between phases re-routes ClaudeSDKClient so the
+        # second run_agent() picks up the new stream.
         patch_sdk(review_messages)
         backend = ClaudeBackend(model="opus")
         await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
@@ -323,9 +307,7 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
 
     assert target_path.exists()
     traj_data = json.loads(target_path.read_text())
-    # Sanity hint for failure diagnostics: surface what the trajectory
-    # actually has on each agent step so the assertion message tells the
-    # whole story.
+    # Surface per-step metrics for failure diagnostics.
     agent_steps = [s for s in traj_data["steps"] if s["source"] == "agent"]
     per_step_metrics = [s.get("metrics") for s in agent_steps]
 
@@ -340,11 +322,8 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
         f"  cost line: {cost_line!r}\n"
         f"  full markdown:\n{markdown}"
     )
-    # Tokens must show non-zero in / out — the renderer's rollup template
-    # is ``"<in> in [(<cached> cached, <pct> hit) ]→ <out> out"``. With
-    # Bug B/C every metrics dict is missing → totals collapse to 0/0,
-    # which renders as ``"0 in → 0 out"`` (no thousand separator on 0).
-    # Use word-boundary regex so ``"500 in"`` doesn't substring-match.
+    # Tokens must be non-zero in/out. With Bug B/C totals collapse to "0 in → 0 out";
+    # word-boundary regex avoids matching e.g. "500 in".
     assert not re.search(r"(?<!\d)0 in\b", tokens_line), (
         f"Bug B/C: rollup input tokens are zero — per-step metrics never landed.\n"
         f"  per-step metrics: {per_step_metrics}\n"
@@ -358,8 +337,7 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
         f"  full markdown:\n{markdown}"
     )
 
-    # Per-phase table rows should also carry non-zero cost + tokens for
-    # both Review and Fix.
+    # Per-phase rows must carry non-zero cost + tokens for both Review and Fix.
     review_row = _phase_row(markdown, "Review")
     fix_row = _phase_row(markdown, "Fix")
     assert "$0.00" not in review_row, (
@@ -370,18 +348,15 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
         f"Bug B/C: Fix row shows $0.00 cost.\n  row: {fix_row!r}\n"
         f"  per-step metrics: {per_step_metrics}"
     )
-    # 6-column layout: Phase | Model | Tools | Input (cached) | Output | Cost
-    # Only 3 numeric columns (Input, Output, Cost). We spot-check Output!=0
-    # as a canary — real token counts are >=100 in our fixture.
+    # 6-column layout: Phase | Model | Tools | Input (cached) | Output | Cost.
+    # Spot-check Output != 0 as a canary (fixture counts are >= 100).
     for label, row in (("Review", review_row), ("Fix", fix_row)):
         cells = [c.strip() for c in row.strip("|").split("|")]
-        # cells: [Phase, Model, Tools, Input (cached), Output, Cost]
         assert cells[4] != "0", (
             f"Bug B/C: {label} row has Output=0.\n  row: {row!r}\n"
             f"  per-step metrics: {per_step_metrics}"
         )
-        # Inline parenthetical cache percentage must appear when cached
-        # tokens are non-zero — format is e.g. "5,000 (40%)".
+        # Cache-percentage parenthetical (e.g. "5,000 (40%)") appears when cached > 0.
         assert re.search(r"\(\d+%\)", cells[3]), (
             f"Bug B/C: {label} row missing cache-percentage parenthetical.\n"
             f"  input cell: {cells[3]!r}\n  row: {row!r}\n"

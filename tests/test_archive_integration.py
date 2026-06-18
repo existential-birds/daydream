@@ -56,11 +56,7 @@ def _add_user_step(recorder: TrajectoryRecorder) -> None:
     recorder.steps.append(step)
 
 
-# ---------------------------------------------------------------------------
-# 1. on_write callback fires on normal write
-# ---------------------------------------------------------------------------
-
-
+# on_write callback fires on normal write
 async def test_on_write_fires_on_normal_write(tmp_path: Path) -> None:
     """on_write is called with (recorder, 'complete') when trajectory has steps."""
     callback_calls: list[tuple[str, str]] = []
@@ -76,11 +72,7 @@ async def test_on_write_fires_on_normal_write(tmp_path: Path) -> None:
     assert callback_calls[0] == (recorder.session_id, "complete")
 
 
-# ---------------------------------------------------------------------------
-# 2. on_write does NOT fire on empty trajectory
-# ---------------------------------------------------------------------------
-
-
+# on_write does NOT fire on empty trajectory
 async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> None:
     """Empty trajectories skip _write entirely, so on_write must not be called."""
     callback_calls: list[tuple[str, str]] = []
@@ -90,17 +82,13 @@ async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> Non
 
     recorder = _make_recorder(tmp_path, on_write=on_write)
     async with recorder:
-        pass  # no steps added
+        pass
 
     assert len(callback_calls) == 0
     assert not (tmp_path / ".daydream" / "trajectory.json").exists()
 
 
-# ---------------------------------------------------------------------------
-# 3. Full archive round-trip via on_write
-# ---------------------------------------------------------------------------
-
-
+# Full archive round-trip via on_write
 async def test_full_archive_round_trip(tmp_path: Path, archive_dir: Path) -> None:
     """_make_archive_callback wires archive_run through on_write, producing manifest + SQLite row."""
     from daydream.runner import RunConfig, _make_archive_callback
@@ -135,10 +123,8 @@ async def test_full_archive_round_trip(tmp_path: Path, archive_dir: Path) -> Non
     async with recorder:
         _add_user_step(recorder)
 
-    # Verify trajectory was written
     assert (daydream_dir / "trajectory.json").exists()
 
-    # Verify archive bundle was created
     run_dir = archive_dir / "runs" / recorder.session_id
     assert run_dir.is_dir()
 
@@ -150,7 +136,6 @@ async def test_full_archive_round_trip(tmp_path: Path, archive_dir: Path) -> Non
     assert manifest["run"]["flow"] == "normal"
     assert manifest["run"]["skill"] == "python"
 
-    # Verify SQLite index has the row
     db_path = archive_dir / "index.db"
     assert db_path.exists()
     conn = sqlite3.connect(str(db_path))
@@ -216,11 +201,7 @@ async def test_archive_populates_wall_clock_without_eval(tmp_path: Path, archive
     assert manifest["metrics"]["wall_clock_seconds"] == 8.5
 
 
-# ---------------------------------------------------------------------------
-# 4. on_write failure does not raise
-# ---------------------------------------------------------------------------
-
-
+# on_write failure does not raise
 async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
     """If on_write raises, the context manager exits cleanly and trajectory is still written."""
 
@@ -239,11 +220,7 @@ async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
     assert len(data["steps"]) == 1
 
 
-# ---------------------------------------------------------------------------
-# 5. CLI --no-archive flag
-# ---------------------------------------------------------------------------
-
-
+# CLI --no-archive flag
 def test_cli_no_archive_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--no-archive sets config.archive to False."""
     from daydream.cli import _parse_args
@@ -253,11 +230,7 @@ def test_cli_no_archive_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.archive is False
 
 
-# ---------------------------------------------------------------------------
-# 6. CLI --eval flag
-# ---------------------------------------------------------------------------
-
-
+# CLI --eval flag
 def test_cli_eval_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--eval sets config.run_eval to True."""
     from daydream.cli import _parse_args
@@ -267,11 +240,7 @@ def test_cli_eval_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.run_eval is True
 
 
-# ---------------------------------------------------------------------------
-# 7. CLI defaults for archive and eval
-# ---------------------------------------------------------------------------
-
-
+# CLI defaults for archive and eval
 def test_cli_defaults_archive_and_eval(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without --no-archive or --eval, archive=True and run_eval=False."""
     from daydream.cli import _parse_args

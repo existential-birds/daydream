@@ -153,7 +153,7 @@ def detect_stacks(
     assigned: dict[str, str] = {}  # path -> stack_name
     ambiguous: list[str] = []
 
-    # Pass 1: unambiguous routing (extension + .md pinning + config default).
+    # Unambiguous routing (extension + .md pinning + config default).
     for path in changed_files:
         base = _basename(path)
         suffix = _ext(path)
@@ -176,7 +176,7 @@ def detect_stacks(
         # Otherwise ambiguous — resolved in pass 3.
         ambiguous.append(path)
 
-    # Pass 2: promote config files whose owner stack is present in the diff (D-13).
+    # Promote config files whose owner stack is present in the diff (D-13).
     present_stacks = {s for s in assigned.values() if s != GENERIC_STACK}
     for path in list(assigned.keys()):
         base = _basename(path)
@@ -187,7 +187,7 @@ def detect_stacks(
     # Refresh present stacks after promotion.
     present_stacks = {s for s in assigned.values() if s != GENERIC_STACK}
 
-    # Pass 3: ambiguous files (D-12).
+    # Ambiguous files (D-12).
     for path in ambiguous:
         if len(present_stacks) == 1:
             # D-12 single-stack shortcut: unconditional join.
@@ -199,13 +199,12 @@ def detect_stacks(
         nearest = _nearest_ancestor_stack(path, assigned)
         assigned[path] = nearest if nearest is not None else GENERIC_STACK
 
-    # Pass 4: missing-skill fallthrough (D-16) — move files of any stack without an
+    # Missing-skill fallthrough (D-16): move files of any stack without an
     # installed skill into generic.
     for path, stack in list(assigned.items()):
         if stack != GENERIC_STACK and stack not in skill_availability:
             assigned[path] = GENERIC_STACK
 
-    # Group -> StackAssignment.
     groups: dict[str, list[str]] = {}
     for path, stack in assigned.items():
         groups.setdefault(stack, []).append(path)

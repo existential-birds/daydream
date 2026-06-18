@@ -30,18 +30,13 @@ def strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE.sub("", text)
 
 
-# =============================================================================
 # Mock Backends
-# =============================================================================
 
 
-# The former prompt-dispatching ``MockBackend`` was consolidated onto the shared
-# ``PhaseDispatchBackend`` (tests/harness/phase_backend.py): both classified the
-# same four shallow phases off the same prompt substrings. ``emit_cost=True``
-# preserves the old default-event shape (a CostEvent on non-structured turns);
-# the per-iteration parse queue [[issue]] yields one issue on the first parse,
-# matching the old hard-coded single-issue dispatch. The structured PARSE issue
-# id/file/line are observably identical (id=1, main.py:1).
+# The prompt-dispatching MockBackend was consolidated onto the shared
+# PhaseDispatchBackend (tests/harness/phase_backend.py). emit_cost=True preserves
+# the old CostEvent-on-non-structured-turns shape; parse_results=[[issue]] yields
+# one issue on the first parse, matching the old single-issue dispatch.
 _FULL_FLOW_ISSUE = {"id": 1, "description": "Add type hints to function", "file": "main.py", "line": 1}
 
 
@@ -67,9 +62,7 @@ class MockBackendWithEvents:
         return f"/{skill_key}" + (f" {args}" if args else "")
 
 
-# =============================================================================
 # Fixtures
-# =============================================================================
 
 
 @pytest.fixture
@@ -83,7 +76,6 @@ def mock_backend(monkeypatch):
 @pytest.fixture
 def mock_ui(monkeypatch):
     """Patch UI functions that require user input."""
-    # Skip commit prompt by returning "n"
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *args, **kwargs: "n")
     monkeypatch.setattr("daydream.runner.prompt_user", lambda *args, **kwargs: "n")
 
@@ -101,11 +93,9 @@ def target_project(tmp_path: Path) -> Path:
     project = tmp_path / "test_project"
     project.mkdir()
 
-    # Create a simple Python file
     (project / "main.py").write_text("def hello():\n    return 'world'\n")
 
-    # Create review output that phase_review would normally create
-    # (our mock doesn't actually write files, so we pre-create it)
+    # Pre-create the review output phase_review would write (the mock doesn't).
     review_content = """# Code Review
 
 ## Issues Found
@@ -137,8 +127,7 @@ Found 1 issue to address.
         ["git", "commit", "-m", "init"],
         cwd=project, capture_output=True, check=True,
     )
-    # Move off main so the WrongBranchError guard doesn't fire when
-    # tests run with default (no --branch) configuration.
+    # Move off main so the WrongBranchError guard doesn't fire on default runs.
     subprocess.run(
         ["git", "checkout", "-b", "feature"],
         cwd=project, capture_output=True, check=True,
@@ -193,7 +182,6 @@ async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    # Speed up print_thinking animation
     monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
 
     output = StringIO()
@@ -204,25 +192,20 @@ async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch):
 
     await run_agent(backend, Path("/tmp"), "Test prompt for Glob tool", phase=DaydreamPhase.REVIEW)
 
-    # Verify the console output contains expected elements
     output_text = output.getvalue()
     plain_text = strip_ansi(output_text)
 
-    # Verify thinking panel is displayed (LiveThinkingPanel with spinner in title)
     assert "Thinking" in plain_text
     assert "Analyzing the project structure" in plain_text
 
-    # Verify agent text is displayed (AgentTextRenderer with spinner cursor)
     assert "I'll search for Python files" in plain_text
 
-    # Verify Glob header is displayed (mystical format: "Glob scrying... **/*.py")
     assert "Glob" in plain_text
     assert "**/*.py" in plain_text
 
-    # Verify file count is displayed (normal mode shows output section)
+    # Normal mode shows the output section with the file count.
     assert "Found 3 files" in plain_text
 
-    # Verify filenames are displayed
     assert "main.py" in plain_text
     assert "helper.py" in plain_text
     assert "test_main.py" in plain_text
@@ -245,25 +228,22 @@ async def test_glob_tool_panel_singular_file_count(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    # Speed up print_thinking animation
     monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
 
     output = StringIO()
     test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
     monkeypatch.setattr("daydream.agent.console", test_console)
 
-    # Normal mode to see output section
-    set_quiet_mode(False)
+    set_quiet_mode(False)  # normal mode shows the output section
 
     await run_agent(backend, Path("/tmp"), "Test prompt", phase=DaydreamPhase.REVIEW)
 
     output_text = output.getvalue()
 
-    # Verify singular "file" (not "files")
+    # Singular "file", not "files".
     assert "Found 1 file" in output_text
     assert "Found 1 files" not in output_text
 
-    # Verify the filename is displayed
     assert "main.py" in output_text
 
 
@@ -273,7 +253,7 @@ async def test_glob_tool_panel_truncates_long_results(monkeypatch):
     from daydream.agent import run_agent, set_quiet_mode
 
     tool_use_id = "test-glob-truncate-789"
-    # Create 25 files (more than max_lines=20 passed from _build_result_content_internal)
+    # 25 files exceeds max_lines=20 from _build_result_content_internal.
     mock_files = [f"/project/src/module{i}.py" for i in range(25)]
     glob_result = "\n".join(mock_files)
 
@@ -286,25 +266,20 @@ async def test_glob_tool_panel_truncates_long_results(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    # Speed up print_thinking animation
     monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
 
     output = StringIO()
     test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
     monkeypatch.setattr("daydream.agent.console", test_console)
 
-    # Normal mode to see output section
-    set_quiet_mode(False)
+    set_quiet_mode(False)  # normal mode shows the output section
 
     await run_agent(backend, Path("/tmp"), "Test prompt", phase=DaydreamPhase.REVIEW)
 
     output_text = output.getvalue()
 
-    # Verify the total file count is displayed
     assert "Found 25 files" in output_text
-
-    # Verify truncation indicator (25 total - 20 displayed = 5 more)
-    assert "and 5 more" in output_text
+    assert "and 5 more" in output_text  # 25 total - 20 displayed
 
 
 @pytest.mark.asyncio
@@ -324,7 +299,6 @@ async def test_quiet_mode_shows_header_only(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    # Speed up print_thinking animation
     monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
 
     output = StringIO()
@@ -338,18 +312,14 @@ async def test_quiet_mode_shows_header_only(monkeypatch):
     output_text = output.getvalue()
     plain_text = strip_ansi(output_text)
 
-    # Verify header is displayed (mystical format: "Read beholding... /path")
     assert "Read" in plain_text
     assert "/project/main.py" in plain_text
 
-    # Verify NO output section in quiet mode (header only)
+    # Quiet mode: header only — no output section, no content.
     assert "Output" not in plain_text
-
-    # Content should NOT be displayed in quiet mode
     assert "hello" not in plain_text
     assert "world" not in plain_text
 
-    # Verify panel border characters are present
     assert "╭" in output_text or "│" in output_text
 
 
@@ -369,7 +339,6 @@ async def test_quiet_mode_empty_result_shows_header_only(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    # Speed up print_thinking animation
     monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
 
     output = StringIO()
@@ -382,13 +351,8 @@ async def test_quiet_mode_empty_result_shows_header_only(monkeypatch):
 
     output_text = output.getvalue()
 
-    # Verify header is displayed
     assert "Bash" in output_text
-
-    # Verify NO output section in quiet mode (header only)
-    assert "Output" not in output_text
-
-    # Verify panel border is present
+    assert "Output" not in output_text  # quiet mode: header only
     assert "╭" in output_text or "│" in output_text
 
 
@@ -408,11 +372,10 @@ async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    # Speed up print_thinking animation
     monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
 
     output = StringIO()
-    # Force truecolor to get consistent RGB color codes across environments
+    # Force truecolor for consistent RGB color codes across environments.
     test_console = Console(
         file=output, force_terminal=True, width=120, theme=NEON_THEME, color_system="truecolor"
     )
@@ -424,18 +387,10 @@ async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch):
 
     output_text = output.getvalue()
 
-    # Verify header is displayed
     assert "Bash" in output_text
-
-    # Verify NO error content in quiet mode (header only)
-    # The red border color indicates error status
-    assert "Command failed" not in output_text
-
-    # Verify panel border is present (red color is applied via ANSI codes)
+    assert "Command failed" not in output_text  # quiet mode: header only, no error body
     assert "╭" in output_text or "│" in output_text
-
-    # Verify ANSI styling is present (exact color sequence varies by terminal/theme)
-    assert "\x1b[" in output_text
+    assert "\x1b[" in output_text  # ANSI styling present (red border)
 
 
 @pytest.mark.asyncio
@@ -458,7 +413,6 @@ async def test_skill_tool_panel_collapses_output(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    # Speed up print_thinking animation
     monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
 
     output = StringIO()
@@ -472,15 +426,12 @@ async def test_skill_tool_panel_collapses_output(monkeypatch):
     output_text = output.getvalue()
     plain_text = strip_ansi(output_text)
 
-    # Verify Skill header is displayed with skill name (gradient-styled)
     assert "Skill" in plain_text
     assert "review-python" in plain_text
 
-    # Verify NO Output panel is displayed for Skill tool calls
-    # The skill result should be suppressed since the header already shows the skill name
+    # No Output panel: the header already shows the skill name, so the redundant
+    # "Launching skill:" result is suppressed.
     assert "Output" not in plain_text
-
-    # Verify "Launching skill:" text is NOT displayed (the redundant output)
     assert "Launching skill:" not in plain_text
 
 
@@ -494,7 +445,7 @@ async def test_concurrent_tool_panels_display_results(monkeypatch):
     """
     from daydream.agent import run_agent, set_quiet_mode
 
-    # Simulate 3 concurrent commands (all started before any complete)
+    # 3 concurrent commands: all started before any complete.
     events = [
         ToolStartEvent(id="cmd-1", name="shell", input={"command": "git diff -- file1.py"}),
         ToolStartEvent(id="cmd-2", name="shell", input={"command": "git diff -- file2.py"}),
@@ -521,12 +472,11 @@ async def test_concurrent_tool_panels_display_results(monkeypatch):
     output_text = output.getvalue()
     plain_text = strip_ansi(output_text)
 
-    # All three results should appear in the output
+    # All three results and commands appear.
     assert "+added line in file1" in plain_text
     assert "+added line in file2" in plain_text
     assert "+added line in file3" in plain_text
 
-    # All three commands should be shown
     assert "git diff -- file1.py" in plain_text
     assert "git diff -- file2.py" in plain_text
     assert "git diff -- file3.py" in plain_text
@@ -538,7 +488,6 @@ async def test_run_comment_full_flow(tmp_path, monkeypatch):
     import os
     import subprocess
 
-    # Set up a git repo with a branch
     env = {**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"}
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
@@ -633,7 +582,6 @@ async def test_run_comment_full_flow(tmp_path, monkeypatch):
 
     assert exit_code == 0
     assert call_count == 3
-    # Plan file should exist in .daydream/
     daydream_dir = tmp_path / ".daydream"
     assert daydream_dir.exists()
     plan_files = list(daydream_dir.glob("plan-*.md"))
@@ -685,10 +633,9 @@ async def test_run_comment_does_not_prompt_for_skill(tmp_path, monkeypatch):
     monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.console", type("C", (), {"print": lambda *a, **kw: None})())
 
-    # confirm intent
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")  # confirm intent
 
-    # This should NOT be called — if skill prompt_user is called, fail
+    # Trap: skill selection must never prompt in --comment mode.
     def runner_prompt_trap(*args, **kwargs):
         raise AssertionError("Should not prompt for skill selection in --comment mode")
     monkeypatch.setattr("daydream.runner.prompt_user", runner_prompt_trap)
@@ -698,9 +645,7 @@ async def test_run_comment_does_not_prompt_for_skill(tmp_path, monkeypatch):
     assert exit_code == 0
 
 
-# =============================================================================
 # Phase 02-04: Pre-scan exploration wiring
-# =============================================================================
 
 
 @pytest.mark.asyncio

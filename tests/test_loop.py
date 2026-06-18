@@ -116,14 +116,13 @@ async def test_loop_exits_on_zero_issues(loop_target, mock_ui_loop, monkeypatch)
     exit_code = await run(config)
 
     assert exit_code == 0
-    assert backend._parse_call == 2  # called parse twice
+    assert backend._parse_call == 2
 
 
 @pytest.mark.asyncio
 async def test_loop_respects_max_iterations(loop_target, mock_ui_loop, monkeypatch):
     """Always returns issues -> stops at max_iterations, exits 1."""
     issue = {"id": 1, "description": "Persistent issue", "file": "main.py", "line": 1}
-    # 3 iterations, all return the same issue
     backend = loop_mock_backend(review_results=[[issue], [issue], [issue]])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
@@ -161,7 +160,7 @@ async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch
 
     assert exit_code == 1
     assert backend._parse_call == 1  # stopped after first iteration
-    assert len(reverted) == 1  # revert was called
+    assert len(reverted) == 1
 
 
 @pytest.mark.asyncio
@@ -169,12 +168,10 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
     """Stats accumulate across iterations."""
     issue1 = {"id": 1, "description": "Issue A", "file": "main.py", "line": 1}
     issue2 = {"id": 2, "description": "Issue B", "file": "main.py", "line": 2}
-    # Iteration 1: 2 issues, Iteration 2: 1 issue, Iteration 3: 0 issues
     backend = loop_mock_backend(review_results=[[issue1, issue2], [issue1], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
 
-    # Capture summary data
     captured_summary = {}
 
     import daydream.runner as runner_mod
@@ -220,14 +217,13 @@ async def test_loop_false_single_pass(loop_target, mock_ui_loop, monkeypatch):
 
     assert exit_code == 0
     assert backend._parse_call == 1  # single pass only
-    assert backend.commit_calls == []  # no iteration commits in single-pass
+    assert backend.commit_calls == []
 
 
 @pytest.mark.asyncio
 async def test_loop_commits_between_iterations(loop_target, mock_ui_loop, monkeypatch):
     """Each successful iteration commits changes before the next review."""
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
-    # Iteration 1: issue found, Iteration 2: issue found, Iteration 3: clean
     backend = loop_mock_backend(review_results=[[issue], [issue], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
@@ -263,7 +259,7 @@ async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeyp
     exit_code = await run(config)
 
     assert exit_code == 1
-    assert backend.commit_calls == []  # no commit on failure
+    assert backend.commit_calls == []
 
 
 @pytest.mark.asyncio
@@ -294,7 +290,7 @@ async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkey
     exit_code = await run(config)
 
     assert exit_code == 1
-    assert captured_summary["fixes_applied"] == 0  # reverted fixes excluded
+    assert captured_summary["fixes_applied"] == 0
 
 
 @pytest.mark.asyncio
@@ -312,14 +308,13 @@ async def test_loop_no_commit_on_clean_first_iteration(loop_target, mock_ui_loop
     exit_code = await run(config)
 
     assert exit_code == 0
-    assert backend.commit_calls == []  # nothing to commit
+    assert backend.commit_calls == []
 
 
 @pytest.mark.asyncio
 async def test_loop_rejects_dirty_working_tree(loop_target, mock_ui_loop, monkeypatch):
     """Loop mode aborts with exit code 1 when the working tree is dirty."""
 
-    # Dirty the working tree
     (loop_target / "untracked.py").write_text("dirty")
 
     backend = loop_mock_backend(review_results=[[]])
@@ -342,7 +337,6 @@ def test_revert_uncommitted_changes(tmp_path):
 
     from daydream.phases import revert_uncommitted_changes
 
-    # Set up a git repo with one committed file
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
@@ -360,7 +354,6 @@ def test_revert_uncommitted_changes(tmp_path):
         cwd=tmp_path, capture_output=True, check=True,
     )
 
-    # Dirty the working tree
     tracked.write_text("modified")
     untracked = tmp_path / "new_file.py"
     untracked.write_text("junk")
@@ -383,7 +376,6 @@ async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_lo
     import subprocess
 
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
-    # Iteration 1: issue found, Iteration 2: clean review
     backend = loop_mock_backend(review_results=[[issue], []])
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
@@ -396,18 +388,13 @@ async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_lo
     exit_code = await run(config)
     assert exit_code == 0
 
-    # Should have two review prompts (one per iteration)
     assert len(backend.review_prompts) == 2
 
-    # Iteration 1: should diff against base branch (main)
     assert "git diff main...HEAD" in backend.review_prompts[0]
 
-    # Iteration 2: should diff against a commit SHA, not main
     prompt2 = backend.review_prompts[1]
     assert "main...HEAD" not in prompt2
-    # The SHA is a 40-char hex string embedded in the prompt
     assert "git diff " in prompt2
-    # Extract and validate the SHA format
     import re
     sha_match = re.search(r"git diff ([0-9a-f]{40})\.\.\.HEAD", prompt2)
     assert sha_match is not None, f"Expected SHA-based diff in prompt: {prompt2}"
@@ -424,13 +411,11 @@ async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_lo
 async def test_loop_diff_base_unchanged_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
     """When tests fail, diff_base stays None — next iteration (if any) uses full branch diff."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    # Two iterations of issues, tests always fail
     backend = loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
     monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
 
-    # Track _get_head_sha calls
     sha_calls: list[Path] = []
     original_get_head_sha = None
 

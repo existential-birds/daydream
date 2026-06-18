@@ -310,10 +310,8 @@ def _build_record(
         "archive_relative_path": "diff.patch",
     }
 
-    # The label comes from the as_of-pinned silver annotation, NOT the
-    # denormalized runs.outcome_labels cache. No annotation ⇒ unlabeled.
-    # The leakage guard (drop_label) forces unlabeled when the annotation's
-    # outcome is posterior to as_of (future leakage); intrinsic reward stays.
+    # Label from the as_of-pinned silver annotation (NOT runs.outcome_labels);
+    # drop_label forces unlabeled when the outcome is posterior to as_of.
     labels = [] if drop_label else _annotation_labels(annotation, manifest_row.get("session_id"))
 
     manifest_dict = manifest or {}
@@ -324,12 +322,9 @@ def _build_record(
         changed = []
 
     # base_sha is READ from the manifest only — harvest materializes it.
-    # build-corpus performs no git and no write-back (pure projection).
 
-    # review-output.md lives at the archive root for shallow-loop runs but
-    # only under deep/ for deep-mode runs. _read_review_output tries root
-    # first (back-compat), then deep/; OSError (non-missing I/O failure) is
-    # preserved as a warn-and-continue here.
+    # review-output.md: root for shallow runs, deep/ for deep runs;
+    # _read_review_output tries root first. OSError warns and continues.
     review_output: str | None
     try:
         review_output = _read_review_output(archive_path)
@@ -361,32 +356,18 @@ def _build_record(
         "trajectory_ref": {"archive_relative_path": "trajectory.json"},
     }
 
-    # Optional reward fields from the pinned annotation. The schema models
-    # ``composite_reward`` as ``["number", "null"]`` (nullable), so it is
-    # written unconditionally; ``reward`` is ``type: object`` (not nullable),
-    # so the key is omitted entirely when absent rather than written as
-    # ``None``. additionalProperties is false, so additive-field discipline —
-    # only insert optional keys when present — is what keeps every record valid
-    # against schema/v1.json.
-    # No transform: ``reward`` is ``reward_json`` parsed verbatim, so a labeled
-    # run's ``PosteriorBreakdown.to_dict()`` carries ``posterior_cost`` and an
-    # unlabeled run's ``RewardBreakdown.to_dict()`` does not. That presence/
-    # absence is the population discriminator (C3). ``composite_reward`` is the
-    # pure intrinsic composite either way (C5: posterior is a sibling field).
+    # Optional reward fields. composite_reward is nullable (written always);
+    # reward is omitted when absent (additionalProperties:false). reward is
+    # reward_json verbatim, so "posterior_cost" in reward is the population
+    # discriminator (C3); composite_reward is the pure intrinsic composite (C5).
     reward, composite_reward = _annotation_reward(annotation, manifest_row.get("session_id"))
     record["composite_reward"] = composite_reward
     if reward is not None:
         record["reward"] = reward
 
-    # Rubric + posterior_source are additive optional fields. The schema models
-    # ``rubric`` as ``type: object`` and ``posterior_source`` as an enum string
-    # — neither nullable — so each key is written only when a value is present.
-    # Read rubric_json from the as_of-pinned annotation, NOT from the
-    # denormalized runs.rubric_json cache.  The cache is always the current
-    # human-first winner (no as_of constraint), so a human annotation appended
-    # after the corpus pin would retroactively change this field and break
-    # as_of reproducibility.  The label_observations row already carries
-    # rubric_json (it is self-describing per the silver-layer contract).
+    # rubric + posterior_source are additive optionals (written only when present).
+    # Read rubric_json from the as_of-pinned annotation, NOT the runs.rubric_json
+    # cache — the cache has no as_of constraint and would break reproducibility.
     raw_rubric = annotation.get("rubric_json") if annotation is not None else None
     parsed_rubric: dict | None = None
     if isinstance(raw_rubric, str) and raw_rubric:
@@ -409,9 +390,7 @@ def _build_record(
     return record
 
 
-# ---------------------------------------------------------------------------
 # Filter + query pipeline (Wave 4)
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -463,12 +442,9 @@ class CorpusFilters:
     min_reward: float | None = None
 
 
-# Inverse of REVIEW_SKILLS with dual keys: both the full skill string
-# (e.g. "beagle-python:review-python") AND the short stack name
-# (e.g. "python") map to the lowercase stack label. Built at import time
-# from a single pass over ``REVIEW_SKILLS.items()`` so ``_stack_for_skill``
-# remains a single dict lookup regardless of which form the manifest
-# stored.
+# Inverse of REVIEW_SKILLS with dual keys: both the full skill string and the
+# short stack name map to the lowercase stack label, so _stack_for_skill is one
+# dict lookup regardless of which form the manifest stored.
 _SKILL_TO_STACK: dict[str, str] = {}
 for _choice, _skill in REVIEW_SKILLS.items():
     _short = _choice.name.lower()
@@ -618,9 +594,7 @@ def _query_index(archive_dir: Path, filters: CorpusFilters) -> list[dict[str, An
     return survivors
 
 
-# ---------------------------------------------------------------------------
 # Stratification (Wave 5)
-# ---------------------------------------------------------------------------
 
 
 def _stratify(records: list[dict], max_stack_share: float) -> list[dict]:
@@ -686,9 +660,7 @@ def _stratify(records: list[dict], max_stack_share: float) -> list[dict]:
     return sorted(out, key=lambda r: r["session_id"])
 
 
-# ---------------------------------------------------------------------------
 # End-to-end orchestration (Wave 6)
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -935,20 +907,10 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     # 4. Apply label-independent SQL filters.
     rows = _query_index(archive_dir, config.filters)
 
-    # 5. Resolve the pinned annotation per row, apply the admission gate, and
-    #    build records. The label/reward come from the silver annotation, never
-    #    the denormalized runs.outcome_labels cache.
-    #
-    #    C3 population separation: this is a pure per-row projection. There is
-    #    NO cross-row aggregate over rewards/breakdowns here — each record's
-    #    reward dict is emitted independently and the only aggregate downstream
-    #    (``_stratify``) groups by ``stack``, never by reward. Labeled and
-    #    unlabeled populations are therefore never mixed into a single mean.
-    #    Future SQL consumers that DO aggregate over rewards must split the
-    #    populations first; the ``has_posterior`` boolean column on the ``runs``
-    #    mirror (archive/index.py) is the guard for that split, and within a
-    #    JSONL record ``"posterior_cost" in record["reward"]`` is the equivalent
-    #    discriminator.
+    # 5. Resolve the pinned annotation per row, apply the admission gate, build
+    #    records. Label/reward come from the silver annotation, never the
+    #    denormalized runs.outcome_labels cache. C3: pure per-row projection with
+    #    no cross-row reward aggregate, so labeled/unlabeled populations never mix.
     records: list[dict[str, Any]] = []
     # Map each emitted session to the labeler/reward versions on its pinned
     # annotation so the lineage manifest reports the versions actually included.
@@ -1055,12 +1017,9 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
         raise
     shutil.copyfile(SCHEMA_V1_PATH, config.out_path.parent / "schema.json")
 
-    # 9. Lineage manifest — write ``lineage.json`` beside the JSONL pinning the
-    #    provenance of this snapshot. The included set drives the content-address
-    #    (``trajectory_set_hash``); versions reflect the annotations actually
-    #    emitted (post-stratify). ``as_of`` echoes the config pin, falling back to
-    #    the resolved write-time when unpinned. Skipped on dry_run (handled above).
-    #    Also skipped when the corpus is empty — an empty-set hash is misleading.
+    # 9. Lineage manifest beside the JSONL: the included set drives the
+    #    content-address; versions reflect the post-stratify annotations; as_of
+    #    falls back to write-time. Skipped when empty (an empty-set hash misleads).
     if not records:
         print_info(console, f"Wrote 0 records to {config.out_path} — skipping lineage manifest")
         return {

@@ -37,9 +37,7 @@ FORBIDDEN_ATTRS: set[str] = {
     "debug_log",  # AgentState.debug_log
 }
 
-# String-literal forbidden prefixes — re-introduction of any of these
-# via raw print() / logger.info() / etc. would resurrect the legacy
-# debug-log format.
+# String-literal forbidden prefixes — re-introducing any would resurrect the legacy log format.
 FORBIDDEN_PREFIXES: tuple[str, ...] = (
     "[REVERT]",
     "[PARSE_FAIL]",
@@ -93,8 +91,7 @@ def _all_py_files() -> list[Path]:
 )
 def test_no_legacy_debug_logging_references(py_file: Path) -> None:
     """CUT-08: every .py file is free of forbidden debug-logging symbols and prefixes."""
-    # Self-exclude: this file references the forbidden literals in
-    # constants and docstrings; scanning itself would always fail.
+    # Self-exclude: this file references the forbidden literals; scanning itself always fails.
     if py_file.resolve() == Path(__file__).resolve():
         return
 
@@ -104,20 +101,17 @@ def test_no_legacy_debug_logging_references(py_file: Path) -> None:
     rel = py_file.relative_to(PROJECT_ROOT)
 
     for node in ast.walk(tree):
-        # 1. Name (catches direct references, e.g. _log_debug, even when
-        # the import was top-level: every actual call is a Name node).
+        # Name: catches direct references (every actual call is a Name node).
         if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
             pytest.fail(f"{rel}:{node.lineno}: forbidden Name reference '{node.id}'")
 
-        # 2. Attribute (catches state.debug_log, _state.debug_log, any
-        # .debug_log access regardless of base object).
+        # Attribute: catches any .debug_log access regardless of base object.
         if isinstance(node, ast.Attribute) and (
             node.attr in FORBIDDEN_NAMES or node.attr in FORBIDDEN_ATTRS
         ):
             pytest.fail(f"{rel}:{node.lineno}: forbidden Attribute '.{node.attr}'")
 
-        # 3. ImportFrom (catches lazy imports inside function bodies —
-        # the canonical Pitfall 13 case).
+        # ImportFrom: catches lazy imports inside function bodies (Pitfall 13 case).
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name in FORBIDDEN_NAMES:
@@ -125,8 +119,7 @@ def test_no_legacy_debug_logging_references(py_file: Path) -> None:
                         f"{rel}:{node.lineno}: forbidden ImportFrom alias '{alias.name}'"
                     )
 
-        # 4. String literal constants — catch re-introduction of legacy
-        # log prefixes via raw print(), logger.info(), etc.
+        # String constants: catch legacy log prefixes re-introduced via raw print()/logger.
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             for prefix in FORBIDDEN_PREFIXES:
                 if prefix in node.value:

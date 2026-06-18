@@ -112,9 +112,8 @@ def _archive_run_inner(
     # 1. Copy artifact bundle
     _copy_bundle(target_dir, run_dir, recorder)
 
-    # 2. Capture git context — prefer pre-resolved WorkContext values
-    #    over re-deriving from disk (HEAD may have moved, base branch
-    #    detection can fail in ephemeral worktrees, etc.).
+    # 2. Capture git context — prefer pre-resolved WorkContext over re-deriving
+    #    from disk (HEAD may have moved; base-branch detection fails in worktrees).
     git_ctx = capture_git_context(target_dir)
     if work is not None:
         git_ctx.base_branch = work.base_branch

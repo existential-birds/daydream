@@ -315,15 +315,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     )
     from daydream.ui import phase_subtitle, print_dim, print_phase_hero
 
-    # Per-phase backends are resolved on demand via `_resolve_backend(config,
-    # phase, backend_cache)`. The cache reuses one Backend instance per
-    # (backend_name, resolved_model) tuple so identical phases share an
-    # instance while phases that resolve to different models stay isolated.
+    # Cache one Backend instance per (backend_name, resolved_model) so phases that
+    # resolve to the same model share an instance and differing models stay isolated.
     backend_cache: dict[tuple[str, str | None], Backend] = {}
 
     target_dir = work.repo
 
-    # ------ Preamble (mirrors run_trust) ------
+    # Preamble (mirrors run_trust).
     try:
         diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
     except GitTimeoutError as exc:
@@ -371,7 +369,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
-        # ------ Resume gate (D-34, D-36, D-37) ------
+        # Resume gate (D-34, D-36, D-37).
         if config.start_at in ("per-stack", "merge", "fix"):
             try:
                 check_deep_artifacts(config.start_at, dd)
@@ -379,7 +377,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 print_error(console, "Missing Deep Artifact", str(exc))
                 return 1
 
-        # ------ Stack detection (from diff file list) ------
+        # Stack detection (from diff file list).
         changed_files = _diff_changed_files(diff)
         installed = get_installed_skills()
         # Optimistic fallback when detection fails: SDK-level MissingSkillError is
@@ -388,7 +386,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         skill_availability = installed if installed is not None else set(SKILL_MAP.keys())
         stacks = detect_stacks(changed_files, skill_availability=skill_availability)
 
-        # ------ Pre-flight notice (D-30, D-31) ------
+        # Pre-flight notice (D-30, D-31).
         stack_lines = [_stack_preflight_line(s) for s in stacks]
         # Review-centric preflight: the cost_usd=None caveat fires when the
         # review-phase backend is Codex. Other per-phase backends may differ
@@ -403,7 +401,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             exploration_available=EXPLORATION_AVAILABLE,
         )
 
-        # ------ Exploration pre-scan (D-43) ------
+        # Exploration pre-scan (D-43).
         exploration_dir: Path | None = None
         if not EXPLORATION_AVAILABLE:
             print_warning(
@@ -437,7 +435,6 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             intent_p = _intent_path(dd)
             alts_p = _alternatives_path(dd)
 
-            # ------ Stage 1 + 2: TTT ------
             if config.start_at not in ("per-stack", "merge", "fix"):
                 print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
                 intent_summary = await phase_understand_intent(
@@ -462,7 +459,6 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     dd, intent_summary=intent_summary, alt_issues=alt_issues
                 )
 
-            # ------ Stage 3: per-stack fan-out ------
             failed_stacks: dict[str, str] = {}
             if config.start_at not in ("merge", "fix"):
                 print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
@@ -502,7 +498,6 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     except json.JSONDecodeError:
                         failed_stacks = {}
 
-            # ------ Stage 4: pre-merge parse + dedup + cross-stack merge ------
             if config.start_at != "fix":
                 print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
 
@@ -510,11 +505,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 all_records: list[dict[str, Any]] = []
                 record_sources: list[str] = []
                 if config.start_at == "merge":
-                    # Resume: validate a records file exists for every detected
-                    # stack (except ones explicitly in `failed_stacks`). A bare
-                    # `dd.glob` could silently drop a current stack whose prior
-                    # records file is absent, producing an authoritative-looking
-                    # merged report that is missing an entire language bucket.
+                    # Resume: require a records file per detected stack (except ones in
+                    # `failed_stacks`). A bare glob would silently drop a stack whose
+                    # records file is absent, yielding a merged report missing a bucket.
                     expected_paths: list[Path] = []
                     missing_stacks: list[str] = []
                     for stack in stacks:
@@ -534,17 +527,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     for records_path in sorted(expected_paths):
                         records = json.loads(records_path.read_text())
                         per_stack_records_paths.append(records_path)
-                        # Derive stack name from the records filename
-                        # (e.g. "stack-python-records.json" -> "stack-python-records.json").
                         source_name = records_path.name
                         all_records.extend(records)
                         record_sources.extend(source_name for _ in records)
                 else:
-                    # Pre-merge parse pass (D-21).
-                    # Sort by stack_name so merge input order doesn't depend on the
-                    # completion order of the parallel per-stack tasks that
-                    # populated `per_stack_outputs` -- keeps the merge prompt and
-                    # global issue numbering reproducible across runs.
+                    # Pre-merge parse pass (D-21). Sort by stack_name so merge input
+                    # order is independent of parallel-task completion order, keeping
+                    # the merge prompt and global issue numbering reproducible.
                     for stack_name, output_path in sorted(per_stack_outputs.items()):
                         records = await phase_parse_feedback(
                             _resolve_backend(config, "parse", backend_cache),
@@ -557,16 +546,11 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                         all_records.extend(records)
                         record_sources.extend(stack_name for _ in records)
 
-                # Partition out the structural meta-stack records BEFORE dedup.
-                # The structural lens carries different convictions than the
-                # language stacks (file-size budgets, layering, canonical-helper
-                # gaps); collapsing it into the language-stack dedup pool would
-                # silently demote those findings into the global ## Issues list.
-                # Resume populates record_sources with the records filename
-                # (e.g. "stack-structure-records.json"); fresh-run populates it
-                # with the stack_name ("structure"). Filter both forms together
-                # to preserve the record_sources[i] / all_records[i] index
-                # invariant.
+                # Partition structural meta-stack records out before dedup: its lens
+                # (file-size budgets, layering, canonical-helper gaps) differs from the
+                # language stacks and collapsing it into their dedup pool would demote
+                # those findings. Filter both record_sources forms (resume=filename,
+                # fresh-run=stack_name) together to preserve the index invariant.
                 structural_path_candidate = per_stack_records_path(dd, STRUCTURE_STACK_NAME)
                 if structural_path_candidate in per_stack_records_paths:
                     structural_records_path: Path | None = structural_path_candidate
@@ -614,16 +598,12 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     structural_records_path=structural_records_path,
                 )
 
-            # ------ Stage 5: optional fix gate (D-28, D-29) ------
             print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
             merged_report = target_dir / REVIEW_OUTPUT_FILE
 
-            # The canonical source of truth is merged-items.json (the fix gate,
-            # verifier, and PR posting all read it). The markdown review-output.md
-            # is render-only. So the missing-input guard keys on the JSON, not the
-            # markdown: "no JSON at all" -> fail loudly; "markdown absent but JSON
-            # present" -> proceed (a --start-at fix resume where the deep-dir JSON
-            # survived but the canonical-markdown copy never ran must NOT bail).
+            # merged-items.json is the canonical source of truth; review-output.md is
+            # render-only. The missing-input guard keys on the JSON so a --start-at fix
+            # resume with surviving JSON but absent markdown proceeds rather than bailing.
             items_file = merged_items_path(dd)
             if not items_file.is_file():
                 print_error(
@@ -633,11 +613,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 )
                 return 1
 
-            # Best-effort recover the human-readable markdown for the exit message
-            # below (render-only). Recover from the deep-dir copy when the canonical
-            # file is absent (e.g. phase_cross_stack_merge rendered into
-            # .daydream/deep/ but the copy to the canonical path didn't run during a
-            # --start-at fix resume). Its absence is non-fatal.
+            # Best-effort recover the render-only markdown from the deep-dir copy for
+            # the exit message when the canonical file is absent (e.g. a --start-at fix
+            # resume where the copy to the canonical path never ran). Non-fatal.
             if not merged_report.exists():
                 from daydream.deep.artifacts import merged_report_path
 
@@ -645,12 +623,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 if deep_copy.exists():
                     merged_report.write_text(deep_copy.read_text())
 
-            # Recommendation verification (issue #83). Runs unconditionally as
-            # a sub-step of the fix gate, so a `--start-at fix` resume still
-            # produces verdicts. The verifier is read-only and idempotent;
-            # writes `recommendation-verdicts.json` inside `dd`. Must precede
-            # both `post_review_to_pr_from_report` and the y/N gate so verdicts
-            # are available regardless of resume entry point.
+            # Recommendation verification (issue #83). Runs unconditionally so a
+            # --start-at fix resume still produces verdicts; read-only and idempotent.
+            # Must precede both PR posting and the y/N gate regardless of resume entry.
             verdicts_file, verdicts_payload = await phase_verify_recommendations(
                 _resolve_backend(config, "verify", backend_cache),
                 work,
@@ -684,15 +659,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 print_success(console, f"Report written to {merged_report}. Exiting.")
                 return 0
 
-            # Read the canonical merged items directly -- the single source of
-            # truth produced by the cross-stack merge. This replaces an LLM
-            # re-parse of the markdown report, which silently dropped structural
-            # findings (they live under ## Structural Review, which the
-            # FEEDBACK_SCHEMA parse never extracted). Structural findings are
-            # ordinary tagged items here, so they reach phase_fix like any other.
-            # Presence of `items_file` was already validated by the missing-input
-            # guard above (the canonical JSON is the source of truth, not the
-            # render-only markdown).
+            # Read canonical merged items directly (validated above). Replaces an LLM
+            # re-parse of the markdown, which silently dropped structural findings; here
+            # they are ordinary tagged items that reach phase_fix like any other.
             items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
             if not items:
                 print_success(console, "No actionable items -- done.")
@@ -702,10 +671,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # tier so equal-severity items keep their canonical merge order.
             items = severity_sorted(items)
 
-            # Attach verifier verdicts to feedback items by `id`. `phase_fix`
-            # already reads `verifier_verdict` / `evidence` keys (advisory) and
-            # augments its prompt when present; items without a matching
-            # verdict are left untouched.
+            # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
             verdicts_payload = verdicts_payload if isinstance(verdicts_payload, dict) else {"verdicts": []}
             items = _attach_verdicts(items, verdicts_payload)
             matched_ids = [i["id"] for i in items if i.get("verifier_verdict") is not None]
@@ -716,11 +682,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 and i.get("verifier_verdict") is None
                 and i.get("lens") != "structural"
             ]
-            # Structural-lens findings are deterministic and verdict-exempt: the
-            # verifier never issues a verdict for them, so they appear in neither
-            # `matched_ids` nor `unmatched_ids`. They are still fixed, so itemize
-            # them here -- otherwise the "X/Y matched" ratio reads as a total and
-            # silently under-counts the items the fix loop below iterates.
+            # Structural findings are verdict-exempt (in neither matched nor unmatched)
+            # but still fixed; itemize them so the "X/Y matched" ratio isn't read as a
+            # total that under-counts the items the fix loop iterates.
             structural_ids = [i.get("id") for i in items if i.get("lens") == "structural"]
             # Leftovers (no verdict, non-structural, missing/non-int id) so the
             # buckets always reconcile to len(items); surfaced only when present.
@@ -770,9 +734,8 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         finally:
             exploration_cleanup = target_dir / ".daydream" / "exploration"
             if exploration_cleanup.is_dir():
-                # Best-effort cleanup: an rmtree failure here would otherwise
-                # escape the finally and replace the run's real exit code with a
-                # cleanup exception, hiding the actual outcome from the caller.
+                # Best-effort: a raised rmtree here would escape the finally and
+                # replace the run's real exit code with a cleanup exception.
                 try:
                     shutil.rmtree(exploration_cleanup)
                 except OSError as exc:

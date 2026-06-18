@@ -86,20 +86,16 @@ async def test_backend_conformance(loader: Loader) -> None:
     event is emitted, and per-driver metrics deltas honor the allow-list."""
     events = [e async for e in loader(CANONICAL_SCRIPT)]
 
-    # Vocabulary: the documented AgentEvent shapes are all present.
     types = _vocabulary(events)
     assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= types
 
-    # Pairing: every ToolResultEvent id pairs with a prior ToolStartEvent id.
     starts = {e.id for e in events if isinstance(e, ToolStartEvent)}
     results = {e.id for e in events if isinstance(e, ToolResultEvent)}
     assert results <= starts
 
-    # Metrics: at least one metrics-bearing event.
     assert any(isinstance(e, (MetricsEvent, CostEvent)) for e in events)
 
-    # Per-driver metrics deltas consult the allow-list rather than demanding
-    # strict cross-driver equivalence.
+    # Per-driver metrics deltas consult the allow-list, not strict cross-driver equivalence.
     driver = _driver(loader)
     deltas = KNOWN_DELTAS[driver]
     metrics = [e for e in events if isinstance(e, MetricsEvent)]

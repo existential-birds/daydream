@@ -89,9 +89,7 @@ def post_text() -> str:
     return (TEMPLATES_DIR / "daydream-post.yml").read_text(encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
 # daydream-review.yml (Phase A — unprivileged analyze)
-# ---------------------------------------------------------------------------
 
 
 def test_review_workflow_is_unprivileged(review_wf: dict[str, Any], review_text: str) -> None:
@@ -160,9 +158,7 @@ def test_review_run_step_takes_event_data_via_env_only(review_wf: dict[str, Any]
     assert "${{" not in run  # event data reaches run: via env:, never interpolation
 
 
-# ---------------------------------------------------------------------------
 # daydream-command.yml (gatekeeper — privileged dispatch, never touches code)
-# ---------------------------------------------------------------------------
 
 
 def test_command_workflow_gates_and_never_touches_code(
@@ -177,8 +173,7 @@ def test_command_workflow_gates_and_never_touches_code(
 
 
 def test_command_workflow_default_token_is_unprivileged(command_wf: dict[str, Any]) -> None:
-    # Both writes (reaction + dispatch) flow through the App token, so the
-    # default GITHUB_TOKEN needs no permissions at all.
+    # Both writes flow through the App token, so the default GITHUB_TOKEN needs none.
     assert command_wf["permissions"] == {}
 
 
@@ -191,18 +186,16 @@ def test_command_app_token_mints_actions_and_pull_requests_write(command_wf: dic
     assert len(mints) == 1
     with_ = mints[0]["with"]
     grants = {k: v for k, v in with_.items() if k.startswith("permission-")}
-    # actions: write dispatches the review (spike Step 1); pull-requests: write
-    # posts the 👀 reaction (spike Step 4). Least privilege for this job's two
-    # operations — exactly these, nothing more.
+    # actions: write dispatches the review; pull-requests: write posts the 👀
+    # reaction. Least privilege — exactly these two, nothing more.
     assert grants == {"permission-actions": "write", "permission-pull-requests": "write"}
     assert with_["app-id"] == "${{ secrets.DAYDREAM_APP_ID }}"
     assert with_["private-key"] == "${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}"
 
 
 def test_command_reaction_is_attributed_to_bot_identity(command_wf: dict[str, Any]) -> None:
-    # The bug this guards: a reaction signed by ${{ github.token }} posts as
-    # github-actions[bot], not the operator's bot. It must use the minted App
-    # token, and the mint must precede the reaction so the token exists.
+    # Guards: a reaction signed by github.token posts as github-actions[bot], not
+    # the operator's bot. Must use the minted App token, minted before the reaction.
     steps = job_steps(command_wf, "dispatch")
     reactions = [s for s in steps if "content=eyes" in s.get("run", "")]
     assert len(reactions) == 1
@@ -234,9 +227,7 @@ def test_command_match_is_exact_and_body_env_only(command_wf: dict[str, Any]) ->
     assert "github.event" not in step["run"]
 
 
-# ---------------------------------------------------------------------------
 # daydream-post.yml (Phase B — privileged post, never touches PR code)
-# ---------------------------------------------------------------------------
 
 
 def test_post_workflow_token_is_least_privilege(post_wf: dict[str, Any], post_text: str) -> None:
@@ -274,10 +265,8 @@ def test_post_workflow_derives_target_from_event_only(
 ) -> None:
     assert "github.event.workflow_run.head_sha" in post_text  # footgun 1: event-derived
     assert "post-findings" in post_text and "--head-sha" in post_text
-    # Spike Step 2 revision: on the workflow_dispatch shape the event's
-    # head_sha is the default-branch tip, so the derive step must fetch the
-    # LIVE PR from the API — the GitHub API is the trust anchor, never the
-    # artifact alone.
+    # On workflow_dispatch the event head_sha is the default-branch tip, so the
+    # derive step must fetch the LIVE PR from the API (the trust anchor).
     derive = next(s for s in job_steps(post_wf, "post") if s.get("id") == "target")
     assert "repos/" in derive["run"] and "/pulls/" in derive["run"]
 
@@ -315,9 +304,7 @@ def test_post_workflow_surfaces_failures(post_wf: dict[str, Any]) -> None:
     assert comment_steps[0]["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"
 
 
-# ---------------------------------------------------------------------------
 # Injection scan — footgun 2, all templates (env:-only event data in run:)
-# ---------------------------------------------------------------------------
 
 
 _EVENT_INTERP = re.compile(
@@ -337,13 +324,9 @@ def test_no_event_data_interpolated_into_run_steps(wf_path) -> None:
                 )
 
 
-# ---------------------------------------------------------------------------
-# Install-pin drift guard — the bot must install a pinned daydream release,
-# never the moving `main` tip (a stale uv cache or main/template drift would
-# otherwise feed operators a daydream whose CLI no longer matches the workflow).
-# This test fails on release until the template pin is bumped in lockstep with
-# the package version — closing the gap that broke a live install.
-# ---------------------------------------------------------------------------
+# Install-pin drift guard: the bot must install a pinned daydream release, never
+# the moving `main` tip (drift would feed operators a CLI that no longer matches
+# the workflow). Fails on release until the template pin is bumped in lockstep.
 
 
 _INSTALL_RE = re.compile(
@@ -373,15 +356,10 @@ def test_daydream_install_is_pinned_to_current_release_tag(name: str) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# .github/workflows/daydream-review.yml (live repo dogfood workflow — Codex)
-#
-# The repo's own review CI has intentionally diverged from the shipped template:
-# operators get the Anthropic-backed template, but daydream dogfoods itself on the
-# Codex backend (Anthropic disallows subscription auth for automations). The
-# template tests above never load this file, so its Codex contract is asserted
-# here directly.
-# ---------------------------------------------------------------------------
+# .github/workflows/daydream-review.yml (live repo dogfood workflow — Codex).
+# The repo's review CI diverges from the shipped template: operators get the
+# Anthropic template, but daydream dogfoods itself on Codex (Anthropic disallows
+# subscription auth for automations). Its Codex contract is asserted here.
 
 
 @pytest.fixture(scope="module")
@@ -405,8 +383,8 @@ def test_repo_review_installs_codex_cli(repo_review_wf: dict[str, Any]) -> None:
         if "Codex" in s.get("name", "") and "npm install -g @openai/codex" in s.get("run", "")
     ]
     assert len(codex_installs) == 1
-    # The backend parses `codex exec --experimental-json` output, whose event
-    # shape can drift between CLI releases, so the install must be version-pinned.
+    # The backend parses `codex exec --experimental-json`, whose event shape can
+    # drift between CLI releases, so the install must be version-pinned.
     assert "npm install -g @openai/codex@" in codex_installs[0]["run"]
 
 
@@ -421,19 +399,16 @@ def test_repo_review_runs_codex_backend_non_interactive(repo_review_wf: dict[str
 
 
 def test_repo_review_authenticates_codex_before_run(repo_review_wf: dict[str, Any]) -> None:
-    # `codex exec` does NOT read OPENAI_API_KEY from the environment for its own
-    # model-API auth (CLI 0.139.0): without persisted auth state it sends no
-    # bearer and every call 401s. Auth must be persisted via an explicit
-    # `codex login --with-api-key` step before the review runs, and the review
-    # step must NOT re-declare the secret (auth flows through $CODEX_HOME/auth.json).
+    # `codex exec` does NOT read OPENAI_API_KEY for its own model-API auth (CLI
+    # 0.139.0): without persisted auth every call 401s. Auth must be persisted via
+    # an explicit `codex login --with-api-key` step before the review runs.
     steps = job_steps(repo_review_wf, "analyze")
     login_steps = [s for s in steps if "codex login --with-api-key" in s.get("run", "")]
     assert len(login_steps) == 1, "expected exactly one `codex login --with-api-key` step"
     login = login_steps[0]
     assert "OPENAI_API_KEY" in login["env"]
 
-    # The login step must come before the daydream review step so auth.json
-    # exists when `codex exec` runs.
+    # Login must precede the review step so auth.json exists when `codex exec` runs.
     login_idx = steps.index(login)
     review_idx = next(i for i, s in enumerate(steps) if "daydream --review" in s.get("run", ""))
     assert login_idx < review_idx, "Codex auth must be persisted before the review step runs"

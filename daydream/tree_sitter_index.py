@@ -183,7 +183,6 @@ def _parse_diff_name_status(diff_text: str) -> list[_DiffEntry]:
     while i < len(lines):
         line = lines[i]
         if line.startswith("diff --git "):
-            # Parse `diff --git a/PATH b/PATH`
             parts = line.split(" b/", 1)
             path: str | None = None
             if len(parts) == 2:

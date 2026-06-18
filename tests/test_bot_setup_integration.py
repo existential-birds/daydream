@@ -144,9 +144,8 @@ def test_land_workflows_idempotent_returns_sentinel_when_all_present(
     result = bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot")
 
     assert result == bot_setup.WORKFLOWS_ALREADY_INSTALLED
-    # The sentinel must be distinguishable from any PR URL the caller surfaces.
+    # Sentinel must be distinguishable from a PR URL; no branch/PR side effects.
     assert not result.startswith("http")
-    # No branch/PR side effects: still on the default branch, branch not pushed.
     assert git_ops.current_branch(repo_with_origin) == default
     assert not git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
 
@@ -188,14 +187,11 @@ def test_verify_healthy_install_passes_all_checks(
     # All three secrets + the handle variable deposited.
     fake_gh.serve_secret_list(list(config.SETUP_SECRET_NAMES))
     fake_gh.serve_variable_list([config.BOT_HANDLE_VAR])
-    # The App is installed on the target owner.
     fake_gh.serve_installations([{"account": {"login": "o"}}])
-    # The App grants at least the required permissions.
     fake_gh.set_response("GET", "/app", value={"permissions": dict(config.APP_PERMISSIONS), "slug": "acme-bot"})
 
-    # The three workflow files exist on the default branch.
-    # _check_workflows resolves them via `git show origin/<base>:<path>`, so
-    # the commit must be pushed to the bare remote (origin).
+    # _check_workflows resolves files via `git show origin/<base>:<path>`, so the
+    # commit must be pushed to the bare remote (origin).
     wf = repo_with_origin / ".github/workflows"
     wf.mkdir(parents=True)
     from daydream.templates import workflow_template_files

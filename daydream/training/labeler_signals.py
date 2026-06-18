@@ -28,12 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-# Version-stable prefix shared across all daydream releases.  Matching only
-# this prefix means comments posted by older or newer versions of daydream are
-# still recognised even when their embedded version string differs from the
-# currently-installed package.  (The full DAYDREAM_FOOTER constant from
-# daydream.pr_review embeds the current version number and therefore fails to
-# match historical comments posted by a different release.)
+# Version-stable footer prefix: matching only this prefix (not the full
+# version-pinned DAYDREAM_FOOTER) recognises comments from any daydream release.
 _DAYDREAM_FOOTER_PREFIX = "<sub>🧙 Posted by [daydream v"
 
 
@@ -59,9 +55,7 @@ def _is_daydream_comment(comment: dict[str, Any]) -> bool:
     return _DAYDREAM_FOOTER_PREFIX in (comment.get("body") or "")
 
 
-# ---------------------------------------------------------------------------
 # Result dataclasses
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -126,9 +120,7 @@ class LocalCommitAppliedSignal:
     verdict: Literal["applied", "rejected", "unknown"]
 
 
-# ---------------------------------------------------------------------------
 # Diff parsing helpers
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -192,9 +184,7 @@ def _hunk_lines_present(added_lines: tuple[str, ...], post_content: str) -> bool
     return all(line in haystack_lines for line in added_lines)
 
 
-# ---------------------------------------------------------------------------
 # Signal extractors
-# ---------------------------------------------------------------------------
 
 
 def pr_merge_signal(

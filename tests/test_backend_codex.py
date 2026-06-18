@@ -70,11 +70,9 @@ async def test_tool_use_events():
     tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
     texts = [e for e in events if isinstance(e, TextEvent)]
 
-    # Reasoning → ThinkingEvent
     assert len(thinking) == 1
     assert thinking[0].text == "Let me run a command"
 
-    # command_execution → ToolStart + ToolResult
     assert any(ts.name == "shell" and ts.input == {"command": "ls -la"} for ts in tool_starts)
     assert any(tr.output == "file.py\ntest.py" and not tr.is_error for tr in tool_results)
 
@@ -82,7 +80,6 @@ async def test_tool_use_events():
     assert any(ts.name == "patch" for ts in tool_starts)
     assert any("main.py" in tr.output for tr in tool_results)
 
-    # agent_message → TextEvent
     assert any(t.text == "Done!" for t in texts)
 
 
@@ -128,10 +125,8 @@ async def test_continuation_token_resumes():
         async for _ in backend.execute(Path("/tmp"), "Continue", continuation=token):
             pass
 
-        # Verify 'resume' and thread_id appear in the args
         call_args = mock_exec.call_args
         flat_args = list(call_args.args) if call_args.args else []
-        # asyncio.create_subprocess_exec takes *args
         assert "resume" in flat_args
         assert "th_prev" in flat_args
 
@@ -149,7 +144,6 @@ async def test_codex_read_only_uses_read_only_sandbox():
         flat_args = list(mock_exec.call_args.args)
         assert "read-only" in flat_args
         assert "danger-full-access" not in flat_args
-        # --sandbox immediately precedes the mode
         assert flat_args[flat_args.index("--sandbox") + 1] == "read-only"
 
 
@@ -237,7 +231,6 @@ async def test_streamed_structured_output_via_item_updated():
         "issues": [{"id": 1, "description": "Missing type hint", "file": "app.py", "line": 10}]
     }
 
-    # Text should also be yielded as a TextEvent
     text_events = [e for e in events if isinstance(e, TextEvent)]
     assert len(text_events) == 1
 
@@ -273,12 +266,10 @@ async def test_toplevel_text_field():
         async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
             events.append(event)
 
-    # reasoning with top-level text → ThinkingEvent
     thinking = [e for e in events if isinstance(e, ThinkingEvent)]
     assert len(thinking) == 1
     assert "read the review" in thinking[0].text
 
-    # agent_message with top-level text containing JSON → structured output
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1
     assert result_events[0].structured_output == {
@@ -292,7 +283,6 @@ async def test_toplevel_text_field():
         ]
     }
 
-    # Also emitted as TextEvent
     text_events = [e for e in events if isinstance(e, TextEvent)]
     assert len(text_events) == 1
 
@@ -444,7 +434,6 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
 
 def test_format_skill_invocation():
     backend = CodexBackend(model="fixture-model")
-    # Should strip namespace prefix and use $ syntax
     result = backend.format_skill_invocation("beagle-python:review-python")
     assert result == "$review-python"
 

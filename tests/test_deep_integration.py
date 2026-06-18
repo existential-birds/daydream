@@ -44,9 +44,7 @@ class _DeepMockBackend:
 
         pl = prompt.lower()
 
-        # Intent prompt contains "intent of these changes" + "understand".
-        # Must be checked BEFORE the alternative branch because the alt-review
-        # prompt also contains "intent".
+        # Checked before the alt branch: the alt-review prompt also contains "intent".
         if "understand" in pl and "intent" in pl:
             self.calls.append("intent")
             yield TextEvent(text="Intent summary stub.")
@@ -62,11 +60,9 @@ class _DeepMockBackend:
             yield ResultEvent(structured_output={"issues": []}, continuation=None)
             return
 
-        # Structural meta-stack prompt contains "you are the structural reviewer".
-        # Must be checked BEFORE the per-stack branch: the structural prompt does
-        # NOT contain "you are reviewing the ... stack" but DOES embed the
-        # `stack-structure-review.md` output path, so it would otherwise fall
-        # through to the "other" fallback and never produce a review artifact.
+        # Checked before per-stack: the structural prompt lacks "you are reviewing the
+        # ... stack" but embeds the stack-structure-review.md path, so it would
+        # otherwise fall through to the "other" fallback and write no artifact.
         if "structural reviewer" in pl:
             self.calls.append("structure")
             m = re.search(r"stack-(\S+?)-review\.md", prompt)
@@ -100,10 +96,8 @@ class _DeepMockBackend:
         if "read the review output file" in pl or "extract only actionable issues" in pl:
             self.calls.append("parse")
             yield TextEvent(text="")
-            # When parsing the STRUCTURAL review file, return a structural
-            # finding. The merge phase appends these (tagged lens="structural")
-            # to the canonical item list, which renders the ## Structural Review
-            # section. Other stacks yield no actionable issues.
+            # Parsing the structural review yields a finding (tagged lens="structural"
+            # in merge, rendering the ## Structural Review section); other stacks yield none.
             if "stack-structure-review.md" in prompt:
                 yield ResultEvent(
                     structured_output={
@@ -122,11 +116,8 @@ class _DeepMockBackend:
                 yield ResultEvent(structured_output={"issues": []}, continuation=None)
             return
 
-        # Cross-stack merge prompt contains "cross-stack merge agent". Return a
-        # schema item list; the host appends structural findings and renders the
-        # report. Per-stack/cross-stack lenses are empty here (no language-stack
-        # issues in this fixture) so the canonical report carries only the
-        # Python-appended structural section.
+        # Merge: return an empty item list (no language-stack issues in this fixture),
+        # so the host's canonical report carries only the appended structural section.
         if "cross-stack merge agent" in pl:
             self.calls.append("merge")
             yield TextEvent(text="")
@@ -252,9 +243,8 @@ async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch) -> Non
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists(), (
         "merged report missing after Codex-shape run"
     )
-    # Parity guarantee: if any stage had passed agents=, the mock would have
-    # raised NotImplementedError and run_deep would NOT have reached exit 0.
-    # Extra belt-and-braces assertion:
+    # Parity guarantee: any stage passing agents= would have raised
+    # NotImplementedError above; this asserts it directly too.
     assert all(a in (None, False, [], {}, 0, "") for a in backend.agents_kwargs_seen), (
         f"agents kwarg was passed somewhere: {backend.agents_kwargs_seen}"
     )

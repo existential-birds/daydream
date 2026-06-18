@@ -136,15 +136,11 @@ def test_non_json_file_rejected(
 
 # --- User-overridable pricing through the summarize entrypoint ----------------
 
-# Model name deliberately absent from built-in MODEL_PRICES (gpt-5.5,
-# gpt-5.5-pro, gpt-5-codex, gpt-5.3-codex), so the only way the cost cell can
-# render a dollar value is via a user-supplied price override.
+# Deliberately absent from built-in MODEL_PRICES, so the cost cell can only
+# render a dollar value via a user-supplied price override.
 _CUSTOM_MODEL = "my-custom-model"
 
-# Chosen so the synthesized cost lands on a clean string the renderer emits:
-#   uncached_input = 100_000, cached = 0, output = 50_000
-#   input price 10.0/1M, output price 20.0/1M  ->
-#   100_000 * 10 / 1e6 + 50_000 * 20 / 1e6 = 1.00 + 1.00 = $2.00
+# Chosen so cost lands on a clean string: 100_000*10/1e6 + 50_000*20/1e6 = $2.00.
 _PROMPT_TOKENS = 100_000
 _CACHED_TOKENS = 0
 _COMPLETION_TOKENS = 50_000

@@ -30,11 +30,7 @@ from daydream.prompts.exploration_subagents import (
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
 
-# ---------------------------------------------------------------------------
 # Subagent prompt sanity checks (Plan 03)
-# ---------------------------------------------------------------------------
-
-
 def test_pattern_scanner_prompt_includes_guideline_files():
     assert "CLAUDE.md" in PATTERN_SCANNER_SYSTEM_PROMPT
 
@@ -78,11 +74,7 @@ def test_schemas_are_valid_objects():
         assert isinstance(schema["required"], list)
 
 
-# ---------------------------------------------------------------------------
 # Orchestrator helpers and mock backend
-# ---------------------------------------------------------------------------
-
-
 _VALID_ENVELOPE: dict[str, Any] = {
     "pattern_scanner": {
         "conventions": [
@@ -148,11 +140,7 @@ class _SpecialistMockBackend:
 _AgentsRecordingMockBackend = _SpecialistMockBackend
 
 
-# ---------------------------------------------------------------------------
 # Pure helpers
-# ---------------------------------------------------------------------------
-
-
 def test_count_changed_files_counts_unique_paths():
     assert count_changed_files("") == 0
     one = (FIXTURES / "trivial_single.diff").read_text()
@@ -178,11 +166,7 @@ def test_envelope_schema_includes_three_subagent_keys():
     assert EXPLORATION_ENVELOPE_SCHEMA["type"] == "object"
 
 
-# ---------------------------------------------------------------------------
 # Orchestrator tier dispatch
-# ---------------------------------------------------------------------------
-
-
 def test_skip_tier_no_subagents(tmp_path):
     diff_text = (FIXTURES / "trivial_single.diff").read_text()
     backend = _SpecialistMockBackend()
@@ -216,11 +200,10 @@ def test_parallel_tier_launches_three_agents(tmp_path):
     assert len(backend.execute_calls) == 3
     schemas = {call["schema"]["type"] for call in backend.execute_calls}
     assert len(schemas) >= 1  # All are "object" type
-    # Verify no agents= was passed and no raw diff leaked into specialist prompts
+    # No agents= passed and no raw diff leaked into specialist prompts.
     for call in backend.execute_calls:
         assert call["agents"] is None
         assert "<diff>" not in call["prompt"]
-    # Results merged correctly
     assert any(c.name == "snake_case" for c in ctx.conventions)
     assert any(f.path == "tests/test_a.py" for f in ctx.affected_files)
     assert "use type hints" in ctx.guidelines

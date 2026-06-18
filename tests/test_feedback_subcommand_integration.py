@@ -44,27 +44,23 @@ async def test_feedback_subcommand_argv_to_body(
     from daydream import cli
     from daydream.runner import run_feedback
 
-    # 1. Parse raw argv through the REAL feedback subparser.
     config = cli._parse_args(
         ["feedback", str(PR_NUMBER), "--bot", BOT, str(multi_stack_target)]
     )
 
-    # 2. Assert the subcommand parse routed correctly into RunConfig.
     assert config.bot == BOT
     assert config.pr_number == PR_NUMBER
     assert config.target == str(multi_stack_target)
 
-    # 3. Patch ONLY the Backend seam + silence interactive prompts.
     _silence(monkeypatch)
     stub = _PRFeedbackStubBackend()
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: stub)
 
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
-    # 4. Call the REAL body — no _run_pr_feedback / _dispatch / phase stub.
+    # Call the REAL body — no _run_pr_feedback / _dispatch / phase stub.
     exit_code = await run_feedback(config, config.pr_number)
 
-    # 5. Observable outcomes (same as Task 1).
     assert exit_code == 0
 
     api_text = (multi_stack_target / "api.py").read_text()
@@ -99,18 +95,16 @@ async def test_feedback_subcommand_non_interactive_argv_to_body(
     from daydream.agent import get_non_interactive, reset_state
     from daydream.runner import run_feedback
 
-    # 1. Parse argv WITH --non-interactive through the REAL feedback subparser.
-    #    Pre-fix this raised SystemExit (unrecognized argument).
+    # Pre-fix this raised SystemExit (unrecognized argument).
     config = cli._parse_args(
         ["feedback", str(PR_NUMBER), "--bot", BOT, "--non-interactive", str(multi_stack_target)]
     )
 
-    # 2. The subparser accepted the flag AND threaded it into RunConfig.
     assert config.non_interactive is True
     assert config.bot == BOT
     assert config.pr_number == PR_NUMBER
 
-    # 3. Patch ONLY the Backend seam. No _silence — stdin must never be touched.
+    # No _silence — stdin must never be touched.
     stub = _PRFeedbackStubBackend()
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: stub)
 
@@ -121,12 +115,10 @@ async def test_feedback_subcommand_non_interactive_argv_to_body(
 
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
-    # 4. Call the REAL body. run() applies set_non_interactive(config.non_interactive).
-    #    reset_state() in finally so the global non_interactive flag never bleeds
-    #    into a later test (run() sets but does not reset module state).
+    # reset_state() in finally so the global non_interactive flag never bleeds into a
+    # later test (run() sets but does not reset module state).
     try:
         exit_code = await run_feedback(config, config.pr_number)
-        # 5. Observable outcomes: the flag was honored end-to-end and the body ran.
         assert exit_code == 0
         assert get_non_interactive() is True, "set_non_interactive was not applied from the feedback config"
     finally:

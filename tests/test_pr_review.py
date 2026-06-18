@@ -26,8 +26,7 @@ from daydream.pr_review import (
     snap_to_hunk,
 )
 
-# gh-gated marker: gh isn't always installed in CI, so tests that need to
-# stub out gh's subprocess (rather than use real git) are skipped if missing.
+# gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
 _gh_available = shutil.which("gh") is not None
 gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed")
 

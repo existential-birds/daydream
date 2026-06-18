@@ -110,12 +110,7 @@ class MockBackend:
         return f"/{skill_key}"
 
 
-# -----------------------------------------------------------------------------
-# Test 1 — ROADMAP Success Criterion 1
-# Claude-style metrics populated on every agent step; user/agent source split.
-# -----------------------------------------------------------------------------
-
-
+# Test 1 — ROADMAP #1: Claude metrics on every agent step; user/agent source split.
 async def test_claude_metrics_populated_on_every_agent_step(tmp_path: Path) -> None:
     """Roadmap #1 — every agent step has prompt_tokens + completion_tokens populated."""
     target_path = tmp_path / ".daydream" / "trajectory.json"
@@ -164,12 +159,7 @@ async def test_claude_metrics_populated_on_every_agent_step(tmp_path: Path) -> N
             assert metrics["cached_tokens"] <= metrics["prompt_tokens"]
 
 
-# -----------------------------------------------------------------------------
-# Test 2 — ROADMAP Success Criterion 2
-# Every step has ISO 8601 timestamp ending in Z + valid extra labels.
-# -----------------------------------------------------------------------------
-
-
+# Test 2 — ROADMAP #2: ISO 8601 Z-suffixed timestamp + valid extra labels per step.
 async def test_every_step_has_timestamp_and_extra_labels(tmp_path: Path) -> None:
     """Roadmap #2 — ISO 8601 Z-suffixed timestamps + valid daydream_phase/run_flow extras."""
     target_path = tmp_path / ".daydream" / "trajectory.json"
@@ -221,12 +211,7 @@ async def test_every_step_has_timestamp_and_extra_labels(tmp_path: Path) -> None
     assert all(s["extra"]["daydream_run_flow"] == "pr" for s in traj["steps"])
 
 
-# -----------------------------------------------------------------------------
-# Test 3 — ROADMAP Success Criterion 3
-# ToolCall is paired with ObservationResult in the same step (CORE-06).
-# -----------------------------------------------------------------------------
-
-
+# Test 3 — ROADMAP #3: ToolCall paired with ObservationResult in the same step (CORE-06).
 async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) -> None:
     """Roadmap #3 — ToolCall.tool_call_id == ObservationResult.source_call_id, same step."""
     target_path = tmp_path / ".daydream" / "trajectory.json"
@@ -248,9 +233,8 @@ async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) ->
         await run_agent(backend, tmp_path, "test it", phase=DaydreamPhase.TEST)
 
     traj = json.loads(target_path.read_text())
-    # The vendored validator's validate_tool_call_references check is the
-    # primary guard — a dangling ToolCall or unmatched ObservationResult
-    # makes this False.
+    # validate_tool_call_references is the primary guard: a dangling ToolCall or
+    # unmatched ObservationResult makes this False.
     assert validate(traj) is True
 
     found_pair = False
@@ -263,18 +247,12 @@ async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) ->
         for tc in tool_calls:
             for r in results:
                 if tc["tool_call_id"] == r["source_call_id"]:
+                    # CORE-06: pair lives in the SAME step (this loop iterates one step).
                     found_pair = True
-                    # CORE-06: pair lives in the SAME step (this loop body
-                    # iterates inside one step; that is the assertion).
     assert found_pair
 
 
-# -----------------------------------------------------------------------------
-# Test 4 — ROADMAP Success Criterion 4
-# FinalMetrics totals equal the sum of per-step Metrics (no running-totals leak).
-# -----------------------------------------------------------------------------
-
-
+# Test 4 — ROADMAP #4: FinalMetrics totals == sum of per-step Metrics (no running leak).
 async def test_final_metrics_equals_sum_of_per_step_metrics(tmp_path: Path) -> None:
     """Roadmap #4 — multi-turn assertion: feed two MetricsEvents; FinalMetrics == sum."""
     target_path = tmp_path / ".daydream" / "trajectory.json"
@@ -327,21 +305,14 @@ async def test_final_metrics_equals_sum_of_per_step_metrics(tmp_path: Path) -> N
     sum_cost = sum(s["metrics"]["cost_usd"] for s in metric_steps)
 
     final = traj["final_metrics"]
-    # No running-totals leak: totals MUST equal sum of per-step Metrics.
     assert final["total_prompt_tokens"] == sum_prompt == 360
     assert final["total_completion_tokens"] == sum_completion == 90
     assert final["total_cached_tokens"] == sum_cached == 60
-    # cost_usd uses approx for floating-point arithmetic.
-    assert abs(final["total_cost_usd"] - sum_cost) < 1e-9
+    assert abs(final["total_cost_usd"] - sum_cost) < 1e-9  # approx for float arithmetic
     assert abs(final["total_cost_usd"] - 0.0045) < 1e-9
 
 
-# -----------------------------------------------------------------------------
-# Test 5 — ROADMAP Success Criterion 5
-# ContextVar propagation + autouse fixture + no-recorder no-op.
-# -----------------------------------------------------------------------------
-
-
+# Test 5 — ROADMAP #5: ContextVar propagation + autouse fixture + no-recorder no-op.
 async def test_no_recorder_clean_no_op(tmp_path: Path) -> None:
     """Roadmap #5 — direct run_agent without a recorder is a clean no-op."""
     backend = MockBackend(
@@ -355,10 +326,8 @@ async def test_no_recorder_clean_no_op(tmp_path: Path) -> None:
     assert isinstance(out, str)
     assert "ok" in out
     assert cont is None
-    # The autouse fixture cleared the ContextVar at test entry; no recorder
-    # was ever installed, so it must remain None.
+    # Autouse fixture cleared the ContextVar; no recorder installed, so it stays None.
     assert get_current_recorder() is None
-    # And no trajectory file was written when no recorder was active.
     assert not (tmp_path / ".daydream" / "trajectory.json").exists()
 
 
@@ -371,12 +340,7 @@ def test_autouse_fixture_present() -> None:
     )
 
 
-# -----------------------------------------------------------------------------
-# Test 6 — Pitfall 4
-# Minimal user step has no agent-only fields after JSON-roundtrip.
-# -----------------------------------------------------------------------------
-
-
+# Test 6 — Pitfall 4: minimal user step has no agent-only fields after JSON-roundtrip.
 async def test_user_step_has_no_agent_only_fields(tmp_path: Path) -> None:
     """Pitfall 4 — user Step has no agent-only fields after JSON serialization.
 
@@ -415,7 +379,6 @@ async def test_user_step_has_no_agent_only_fields(tmp_path: Path) -> None:
         "observation",
         "reasoning_effort",
     ):
-        # Either absent (preferred) or explicitly None — both honor Pitfall 4.
         assert forbidden not in user or user[forbidden] is None, (
             f"User step must not have {forbidden!r} field"
         )

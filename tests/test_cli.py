@@ -42,8 +42,7 @@ def test_invalid_backend_rejected(monkeypatch):
 
 
 def test_review_backend_override_via_config_file():
-    # Per-phase backend overrides moved from CLI flags to the config file
-    # (cli-verb-redesign Task 8). The resolver still honours a phase override.
+    # Per-phase backend overrides moved to the config file (Task 8); resolver still honours them.
     fc = DaydreamFileConfig(backend="claude", phases={"review": {"backend": "codex"}})
     config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
     assert _resolved_backend_name(config, "review") == "codex"
@@ -189,9 +188,7 @@ def test_ignore_paths_repeatable(monkeypatch):
     assert config.ignore_paths == [".planning", "vendor"]
 
 
-# ---------------------------------------------------------------------------
 # Consolidated CLI surface (worktree-isolation refactor)
-# ---------------------------------------------------------------------------
 
 
 def test_parse_args_branch_and_base(monkeypatch):
@@ -360,9 +357,7 @@ def test_print_issues_table_renders():
     assert "Missing test" in output
 
 
-# ---------------------------------------------------------------------------
 # Per-phase model overrides — config-file path (cli-verb-redesign Task 8)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -375,8 +370,7 @@ def test_print_issues_table_renders():
     ],
 )
 def test_per_phase_model_set_via_config_file(phase, value):
-    # Per-phase model overrides moved from CLI flags to the config file; the
-    # resolver still honours a phase override read from the file.
+    # Per-phase model overrides moved to the config file; resolver still honours them.
     fc = DaydreamFileConfig(phases={phase: {"model": value}})
     config = RunConfig(target="/tmp/project", backend=None, model=None, file_config=fc)
     assert _resolved_model(config, phase) == value
@@ -391,9 +385,7 @@ def test_no_per_phase_model_flag_leaves_field_none(tmp_path):
     assert config.exploration_model is None
 
 
-# ---------------------------------------------------------------------------
 # Per-phase model/backend flags removed (cli-verb-redesign Task 8 — config-only)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -436,9 +428,7 @@ def test_global_model_still_works(tmp_path):
     assert _parse_args(["--model", "claude-opus-4-8", str(tmp_path)]).model == "claude-opus-4-8"
 
 
-# ---------------------------------------------------------------------------
 # Global --model flag (cli-verb-redesign Task 2 — re-added as a global override)
-# ---------------------------------------------------------------------------
 
 
 def test_global_model_flag_populates_runconfig(tmp_path):
@@ -452,14 +442,10 @@ def test_runconfig_has_model_field():
     assert config.model is None
 
 
-# ---------------------------------------------------------------------------
-# corpus build exit-code regression guard (Task 11 / corpus-pipeline-architecture)
-# ---------------------------------------------------------------------------
-# Tier-3 subprocess test: drives the real CLI entry point through `uv run`
-# against an empty archive directory and asserts a clean exit 0. This catches
-# regressions where post-projection cleanup paths (signal handlers, atexit
-# hooks, warnings escalation) leak a non-zero exit even though
-# `_handle_build_corpus_command` itself returned 0.
+# corpus build exit-code regression guard (Task 11 / corpus-pipeline-architecture).
+# Tier-3 subprocess test driving the real CLI through `uv run` against an empty
+# archive: catches cleanup paths (signal handlers, atexit, warnings) leaking a
+# non-zero exit even when _handle_build_corpus_command returned 0.
 
 
 def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
@@ -479,9 +465,7 @@ def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # corpus harvest / build subcommand wiring (Task 11 / corpus-pipeline-architecture)
-# ---------------------------------------------------------------------------
 
 
 def test_harvest_and_build_corpus_dispatch(monkeypatch, tmp_path):

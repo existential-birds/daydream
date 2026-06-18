@@ -74,13 +74,8 @@ class AgentState:
     current_backends: list[Backend] = field(default_factory=list)
 
 
-# Module-level Singletons
-# =======================
-# This module uses a singleton pattern for global state management. The module
-# is imported once, creating these instances which persist for the process lifetime.
-# Access and modify state through the getter/setter functions below (get_state,
-# set_quiet_mode, etc.) rather than accessing _state directly.
-# Use reset_state() to restore defaults between test runs or CLI invocations.
+# Module-level singletons: access/mutate via the getter/setter functions below,
+# never _state directly. reset_state() restores defaults between test runs.
 
 _state = AgentState()
 console = create_console()
@@ -293,8 +288,7 @@ def detect_test_success(output: str) -> bool:
 
     output_lower = output.lower()
 
-    # Extract ALL counts — tolerate "N failed" and "N tests failed" with any separator.
-    # Using finditer so a later non-zero count cannot be hidden by an earlier "0 failed".
+    # finditer so a later non-zero count isn't hidden by an earlier "0 failed".
     failed_counts = [
         int(match.group(1).replace(",", ""))
         for match in re.finditer(r"(\d[\d,]*)\s+(?:tests?\s+)?fail(?:ed|ures?)\b", output_lower)
@@ -304,12 +298,11 @@ def detect_test_success(output: str) -> bool:
         for match in re.finditer(r"(\d[\d,]*)\s+(?:tests?\s+)?passed\b", output_lower)
     ]
 
-    # Any non-zero failure count means failure, full stop.
     if any(count > 0 for count in failed_counts):
         return False
 
-    # Hard negative signals win over success sentinels — a traceback or assertion error
-    # later in the output must not be masked by an earlier "all tests pass" phrase.
+    # Hard negative signals win over success sentinels — a late traceback must not be
+    # masked by an earlier "all tests pass" phrase.
     error_patterns = [
         r"tests? failing",
         r"test failure",
@@ -403,10 +396,8 @@ async def run_agent(
 
     _state.current_backends.append(backend)
     try:
-        # The registry owns the task_id→label correlation used by both render
-        # modes; it is created unconditionally. In callback mode only its
-        # label-correlation methods (note_call/observe_result/resolve_call_label)
-        # are used — no panels or Live display are created.
+        # Created unconditionally for task_id→label correlation; in callback mode
+        # only its label methods run — no panels or Live display.
         tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
         if not use_callback:
             agent_renderer = AgentTextRenderer(console)
@@ -420,10 +411,9 @@ async def run_agent(
             print_error(console, "Backend Init Error", f"{type(exc).__name__}: {exc}")
             raise
 
-        # Open Invocation scope when a recorder is active. nullcontext keeps
-        # the with-shape uniform when no recorder is present (CORE-09 no-op).
-        # D-19: ZERO ATIF model construction in this module — only inv.observe()
-        # and inv.observe_user_step() are called against the recorder surface.
+        # Open Invocation scope when a recorder is active; nullcontext keeps the
+        # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
+        # here — only inv.observe()/inv.observe_user_step() against the recorder.
         recorder = get_current_recorder()
         invocation_cm: Any = (
             recorder.invocation(phase=phase) if recorder is not None else nullcontext(None)
@@ -437,7 +427,6 @@ async def run_agent(
                 if isinstance(event, TextEvent):
                     output_parts.append(event.text)
 
-                    # Check for missing skill error
                     skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
                     if skill_match:
                         if not use_callback:
@@ -466,9 +455,8 @@ async def run_agent(
 
                 elif isinstance(event, ToolStartEvent):
                     if progress_callback is not None:
-                        # Record the originating call so a backgrounded launch's
-                        # result can later resolve a Task-family label, then emit a
-                        # plumbing-free, label-aware progress line.
+                        # Record the originating call so a backgrounded launch's result
+                        # can later resolve a Task-family label for the progress line.
                         tool_registry.note_call(event.id, event.name, event.input)
                         label = tool_registry.resolve_call_label(event.name, event.input)
                         progress_callback(format_callback_progress(event.name, event.input, label))
@@ -482,8 +470,8 @@ async def run_agent(
 
                 elif isinstance(event, ToolResultEvent):
                     if use_callback:
-                        # Populate the task_id→label map in callback mode too, so a
-                        # later TaskOutput/TaskStop resolves its originating label.
+                        # Populate the task_id→label map in callback mode too, so a later
+                        # TaskOutput/TaskStop resolves its originating label.
                         tool_registry.observe_result(event.id, event.output)
                     else:
                         tool_registry.observe_result(event.id, event.output)
@@ -497,8 +485,7 @@ async def run_agent(
                         inv.observe(event)
 
                 elif isinstance(event, MetricsEvent):
-                    # Phase 2 EVNT-02 / MAP-06. MetricsEvent has no UI
-                    # rendering — recorder-only. Inserted BEFORE the
+                    # EVNT-02 / MAP-06: recorder-only, no UI. Must precede the
                     # CostEvent branch so isinstance order is correct.
                     if inv is not None:
                         inv.observe(event)
@@ -552,7 +539,7 @@ async def run_agent(
         return structured_result, result_continuation
     if output_schema is not None:
         raw = "".join(output_parts)
-        # Fallback: try to JSON-parse the raw text when structured output failed
+        # Fallback: JSON-parse the raw text when structured output failed.
         if raw.strip():
             try:
                 parsed = json.loads(raw)

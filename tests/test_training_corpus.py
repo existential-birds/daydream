@@ -168,13 +168,8 @@ def test_record_with_reward_validates_against_schema(tmp_path, archive_dir):
     jsonschema.validate(json.loads(out.read_text().splitlines()[0]), schema)
 
 
-# ---------------------------------------------------------------------------
 # Migrated from tests/test_training_export.py — the §9 fixture matrix drives
-# run_build_corpus end-to-end against a real SQLite index (now with silver
-# annotations seeded by build_fixture_archive).
-# ---------------------------------------------------------------------------
-
-
+# run_build_corpus end-to-end against a real SQLite index (silver annotations seeded by build_fixture_archive).
 def test_export_emits_valid_jsonl(tmp_path: Path) -> None:
     """Every emitted line is valid JSON and validates against schema v1."""
     build_fixture_archive(tmp_path)
@@ -296,12 +291,7 @@ def test_unlabeled_run_at_as_of_is_dropped(tmp_path: Path, archive_dir: Path) ->
     assert out.read_text() == ""
 
 
-# ---------------------------------------------------------------------------
-# CLI surface — exercise the build-corpus handler (wired to run_build_corpus)
-# without spawning a subprocess.
-# ---------------------------------------------------------------------------
-
-
+# CLI surface — exercise the build-corpus handler (wired to run_build_corpus) without spawning a subprocess.
 def test_cli_build_corpus_end_to_end(tmp_path: Path, archive_dir: Path) -> None:
     """Handler exits 0, writes JSONL + schema.json, every line parses."""
     from daydream.cli import _handle_build_corpus_command
@@ -371,15 +361,8 @@ def test_cli_build_corpus_passes_as_of_and_min_reward(tmp_path: Path, archive_di
     assert args.min_reward == 0.5
 
 
-# ---------------------------------------------------------------------------
-# C3 — typed population separation: pin the intrinsic-only comparison and the
-# posterior_cost discriminator. These are invariants of the post-C5 storage
-# contract (the stored composite_reward IS the pure intrinsic composite; the
-# posterior rides along as a sibling field), pinned here so a future change to
-# either contract fails loudly rather than silently mixing populations.
-# ---------------------------------------------------------------------------
-
-
+# C3 — typed population separation: pin the intrinsic-only comparison and the posterior_cost discriminator.
+# Post-C5 contract: stored composite_reward IS the pure intrinsic composite; posterior rides along as a sibling.
 def _ann_with_posterior_reward_json() -> dict[str, Any]:
     """Annotation row for a labeled (PR-outcome) run.
 

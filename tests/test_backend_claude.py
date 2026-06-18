@@ -17,7 +17,7 @@ from daydream.backends import (
 )
 from daydream.backends.claude import ClaudeAgentError, ClaudeBackend
 
-# --- Mock SDK types (same pattern as test_integration.py) ---
+# Mock SDK types (same pattern as test_integration.py)
 
 
 @dataclass
@@ -195,7 +195,6 @@ async def test_execute_yields_text_and_result(patch_sdk):
     async for event in backend.execute(Path("/tmp"), "Say hello"):
         events.append(event)
 
-    # Should have TextEvent, CostEvent, ResultEvent
     text_events = [e for e in events if isinstance(e, TextEvent)]
     cost_events = [e for e in events if isinstance(e, CostEvent)]
     result_events = [e for e in events if isinstance(e, ResultEvent)]
@@ -229,7 +228,7 @@ async def test_execute_yields_tool_events(patch_sdk):
     assert len(tool_result_events) == 1
     assert tool_result_events[0].output == "file.py"
     assert tool_result_events[0].is_error is False
-    assert tool_start_events[0].id == tool_result_events[0].id  # Verify ID correlation
+    assert tool_start_events[0].id == tool_result_events[0].id
 
 
 @pytest.mark.asyncio
@@ -334,19 +333,16 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
     assert matcher.hooks  # at least one callback registered
     guard = matcher.hooks[0]
 
-    # File-mutating tool → deny.
     deny_write = await guard(
         {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {}
     )
     assert deny_write["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    # Mutating Bash → deny.
     deny_bash = await guard(
         {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}, None, {}
     )
     assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    # Read-only Bash + allowlisted inspection tool → allow (no deny decision).
     allow_bash = await guard(
         {"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}, None, {}
     )
@@ -354,8 +350,7 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
     allow_read = await guard({"tool_name": "Read", "tool_input": {"file_path": "x"}}, None, {})
     assert "hookSpecificOutput" not in allow_read
 
-    # Unknown/future tool → deny (fail-closed; a narrow deny-list matcher would
-    # never present this to the guard and it would slip through unchecked).
+    # Fail-closed: a narrow deny-list matcher would never present an unknown tool to the guard.
     deny_unknown = await guard({"tool_name": "FutureMutator", "tool_input": {}}, None, {})
     assert deny_unknown["hookSpecificOutput"]["permissionDecision"] == "deny"
 
@@ -379,19 +374,16 @@ async def test_read_only_guard_denies_mutation_allows_inspection():
     """The registered guard callback denies Write and non-read-only Bash, allows read-only Bash."""
     from daydream.backends.claude import _read_only_guard
 
-    # File-mutating tool → deny
     deny_write = await _read_only_guard(
         {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {},
     )
     assert deny_write["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    # Mutating Bash → deny
     deny_bash = await _read_only_guard(
         {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}, None, {},
     )
     assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    # Read-only Bash → allow (empty dict, no deny decision)
     allow_bash = await _read_only_guard(
         {"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}, None, {},
     )
@@ -461,7 +453,6 @@ async def test_execute_passes_agents_dict_to_options(patch_sdk):
         "pattern-scanner": pattern_scanner,
         "dependency-tracer": dependency_tracer,
     }
-    # No key rewriting
     assert "explorer-0" not in opts.agents
     assert "explorer-1" not in opts.agents
 
@@ -494,7 +485,7 @@ def test_backend_protocol_agents_param_is_dict_typed():
     assert "dict[str, AgentDefinition]" in annotation_str
 
 
-# --- Helpers for TurnEndEvent tests (Task 6) ---
+# Helpers for TurnEndEvent tests (Task 6)
 
 
 def _assistant_message(*, text: str, message_id: str) -> MockAssistantMessage:

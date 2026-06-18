@@ -74,7 +74,6 @@ def test_bench_acceptance_2pr_subset_real_run():
     evals_path = repo / "results" / _MODEL.replace("/", "_") / "evaluations.json"
     assert data_path.exists(), f"missing corpus: {data_path}"
 
-    # MARTIAN_* must be exported by the caller (never hard-coded).
     assert os.environ.get("MARTIAN_API_KEY"), "export MARTIAN_API_KEY before running"
 
     cmd = [
@@ -89,16 +88,15 @@ def test_bench_acceptance_2pr_subset_real_run():
         "--score",
     ]
 
-    # --- Step 1: first real run injects + scores 2 PRs. ---
     first = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ})
     assert first.returncode == 0, f"first run failed: {first.stdout}\n{first.stderr}"
 
-    # Step 2 contract (a): benchmark_data.json gained daydream reviews for 2 PRs.
+    # Contract (a): benchmark_data.json gained daydream reviews for 2 PRs.
     data = json.loads(data_path.read_text())
     injected = _grafana_daydream_reviews(data)
     assert len(injected) == 2, f"expected 2 daydream reviews, got {list(injected)}"
 
-    # Step 2 contract (b): evaluations.json has numeric daydream leaves.
+    # Contract (b): evaluations.json has numeric daydream leaves.
     evals = json.loads(evals_path.read_text())
     daydream_leaves = {
         url: tools["daydream"] for url, tools in evals.items() if "daydream" in tools
@@ -110,15 +108,13 @@ def test_bench_acceptance_2pr_subset_real_run():
         assert isinstance(leaf.get("precision"), (int, float)), url
         assert isinstance(leaf.get("recall"), (int, float)), url
 
-    # Step 2 contract (c): aggregate line printed with scored count.
-    # Normalize whitespace: the Rich console wraps long lines at its detected
-    # width (no TTY under capture → a default width), so assertions must not
-    # depend on where a line happens to wrap.
+    # Contract (c): aggregate line printed with scored count. Normalize whitespace because
+    # Rich wraps long lines at its detected width, so assertions must not depend on wrap points.
     out = " ".join(first.stdout.split())
     assert "daydream aggregate over 2 PR(s)" in out, first.stdout
     assert "precision=" in out and "recall=" in out, first.stdout
 
-    # --- Step 4: re-run is incremental — zero new reviews, exit 0. ---
+    # Re-run is incremental — zero new reviews, exit 0.
     before = data_path.read_text()
     second = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ})
     assert second.returncode == 0, f"re-run failed: {second.stdout}\n{second.stderr}"

@@ -238,9 +238,8 @@ async def pre_scan(
 
     results: dict[str, Any] = {}
 
-    # Cap exploration subagents at 15 turns to prevent context blowup.
-    # Without this, agents on large repos exhaust their context window,
-    # hit compression, and lose track of their task (D-06 graceful degradation).
+    # Cap subagents at 15 turns: on large repos they otherwise exhaust their
+    # context window and lose track of the task (D-06 graceful degradation).
     specialist_max_turns = 15
     recorder = get_current_recorder()
 
@@ -256,13 +255,10 @@ async def pre_scan(
             except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
                 pass
 
-    # Only pass actually-changed file paths to the test-mapper and
-    # pattern-scanner.  The full import-expanded list (static_files) is
-    # correct for the dependency-tracer (it needs the import graph), but
-    # the other two specialists interpret the list as "files to process"
-    # and will attempt per-file tool calls for every entry.  On large
-    # monorepos the import-expanded list can be 10K+ files, causing the
-    # test-mapper to run for 50+ minutes instead of 2.
+    # Pass only actually-changed paths to the test-mapper and pattern-scanner:
+    # they treat the list as "files to process" and fan out a tool call per
+    # entry, so the import-expanded static_files (10K+ on monorepos) would make
+    # them run 50+ minutes. The dependency-tracer still gets static_files.
     changed_paths = sorted({m.group(1) for m in _DIFF_HEADER_RE.finditer(diff_text)})
 
     with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS):

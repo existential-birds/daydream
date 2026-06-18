@@ -257,10 +257,8 @@ def test_copy_default_only_copies_gitignored(tmp_path: Path) -> None:
     _git(repo, "add", ".gitignore")
     _commit(repo, "ignore env")
 
-    # Two files: one gitignored, one tracked-but-named .env-style.
     (repo / ".env").write_text("SECRET=1\n")
-    # Tracked .env file with a different name is NOT in the default glob, so
-    # use the same default name but track it via add+commit before copy.
+    # Tracked, non-default-glob name: must not be copied.
     (repo / ".env.committed").write_text("PUBLIC=1\n")
     _git(repo, "add", ".env.committed")
     _commit(repo, "tracked env-style")
