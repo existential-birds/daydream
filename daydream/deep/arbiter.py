@@ -14,6 +14,10 @@ A record is selected when EITHER:
 
 Low/medium uncontested findings never reach the arbiter — that is the whole
 point of the cost split.
+
+Residual risk: a genuinely-high issue that a cheaper per-stack model under-ranked
+as an isolated, uncontested medium/low at a unique location is also never
+arbitrated — an accepted cost trade-off of the high-OR-contested selection scope.
 """
 
 from __future__ import annotations

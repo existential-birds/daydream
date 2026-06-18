@@ -2583,7 +2583,8 @@ async def phase_arbiter_review(
     cheaper per-stack reviewers flagged as high-severity or contested. The
     arbiter adjudicates -- confirming, re-ranking, sharpening, or rejecting each
     -- but never discovers new findings. The result re-keys onto the input by
-    ``arb_id`` so the caller can revise / drop the originating records before the
+    ``arb_id`` so the caller can revise (keep), drop (explicit ``keep:false``), or
+    retain-unchanged (missing verdict) the originating records before the
     cross-stack merge.
 
     Args:
@@ -2599,9 +2600,10 @@ async def phase_arbiter_review(
 
     Returns:
         Mapping of ``arb_id`` -> adjudicated finding dict with keys ``keep``,
-        ``severity``, ``confidence``, ``description``, ``rationale``. Missing
-        ``arb_id``s (the agent dropped a row) are treated by the caller as
-        ``keep=False``.
+        ``severity``, ``confidence``, ``description``, ``rationale``. A missing
+        ``arb_id`` (the agent dropped or truncated a row) is fail-open: the caller
+        retains the original record unchanged with a warning, since arbitration
+        targets are the high-severity / contested findings worth protecting.
 
     """
     from daydream.deep.artifacts import arbiter_input_path, deep_dir

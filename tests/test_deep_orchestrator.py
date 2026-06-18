@@ -50,6 +50,10 @@ class _StubBackend:
         # rendered artifact reflects arbiter revisions instead of fixed items).
         self.parse_severity: str | None = None
         self.merge_echo_records: bool = False
+        # When True, the arbiter branch returns an empty findings list (omits every
+        # verdict), simulating a truncated/lazy Opus response so a test can assert
+        # the selected high-severity record fails open and survives (#175).
+        self.arbiter_omit_verdicts: bool = False
         self.calls: list[dict[str, Any]] = []
         # Verdict the recommendation-verifier branch emits for issue_id=1; flip to
         # "contradicts" to exercise verdict propagation into the phase_fix prompt.
@@ -158,7 +162,7 @@ class _StubBackend:
         if "you are the arbiter" in pl:
             in_match = re.search(r"listed in (\S+arbiter-input\.json)", prompt)
             findings: list[dict[str, Any]] = []
-            if in_match is not None:
+            if in_match is not None and not self.arbiter_omit_verdicts:
                 arb_inputs = json.loads(Path(in_match.group(1)).read_text())
                 for entry in arb_inputs:
                     findings.append(
@@ -359,6 +363,7 @@ def _install_model_capturing_stubs(
     *,
     parse_severity: str | None = None,
     merge_echo_records: bool = False,
+    arbiter_omit_verdicts: bool = False,
 ) -> list[dict[str, Any]]:
     """Patch create_backend with a per-(name, model) stub factory (#168).
 
@@ -376,6 +381,7 @@ def _install_model_capturing_stubs(
         stub = _StubBackend(target, model=model or "mock-model", shared_calls=shared_calls)
         stub.parse_severity = parse_severity
         stub.merge_echo_records = merge_echo_records
+        stub.arbiter_omit_verdicts = arbiter_omit_verdicts
         return stub
 
     monkeypatch.setattr("daydream.runner.create_backend", factory)
@@ -2088,6 +2094,47 @@ async def test_per_stack_sonnet_merge_opus_and_arbiter_on_high_severity(
     assert "ARBITRATED:" in report, f"arbitrated finding missing from report:\n{report}"
 
 
+async def test_arbiter_missing_verdict_retains_high_severity_finding(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#175 real-path: a truncated/lazy arbiter that omits every verdict must NOT
+    delete the high-severity finding it was selected to protect.
+
+    The arbiter fires (high severity), but its stub returns an empty findings
+    list -- no verdict for any arb_id. Fail-open means the original record is
+    retained unchanged and survives into the rendered merge artifact.
+    """
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch,
+        multi_stack_target,
+        parse_severity="high",
+        merge_echo_records=True,
+        arbiter_omit_verdicts=True,
+    )
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    # The arbiter still ran (high severity selects it) ...
+    arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
+    assert arbiter_calls, "arbiter must run on a high-severity finding"
+
+    # ... but with no verdict returned, the finding is retained, not dropped.
+    report = (multi_stack_target / ".review-output.md").read_text()
+    # The un-arbitrated description survives (no ARBITRATED: prefix was applied).
+    assert "ARBITRATED:" not in report
+    deep_dir = multi_stack_target / ".daydream" / "deep"
+    records = [
+        rec
+        for path in deep_dir.glob("stack-*-records.json")
+        for rec in json.loads(path.read_text())
+    ]
+    assert any(r.get("severity") == "high" for r in records), (
+        f"high-severity record must survive a missing arbiter verdict:\n{records}"
+    )
+
+
 async def test_no_arbiter_when_all_findings_low_and_uncontested(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2108,3 +2155,77 @@ async def test_no_arbiter_when_all_findings_low_and_uncontested(
         c["model"] for c in calls if "you are reviewing the" in c["prompt"].lower() and "stack" in c["prompt"].lower()
     }
     assert per_stack_models == {"claude-sonnet-4-6"}
+
+
+def _prime_merge_resume_records(deep: Path, *, python_severity: str | None) -> None:
+    """Write the per-stack records a `--start-at merge` resume needs on disk.
+
+    Every detected stack (python, react, generic, structure) must have a records
+    file or be a recorded failure, else the resume guard returns 1. The python
+    record optionally carries ``python_severity`` to drive arbiter selection.
+    """
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    py_record: dict[str, Any] = {"id": 1, "description": "py issue", "file": "api.py", "line": 1}
+    if python_severity is not None:
+        py_record["severity"] = python_severity
+        py_record["confidence"] = "HIGH"
+        py_record["rationale"] = "stub"
+    (deep / "stack-python-records.json").write_text(json.dumps([py_record]))
+    (deep / "stack-react-records.json").write_text(
+        json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1}])
+    )
+    (deep / "stack-generic-records.json").write_text(
+        json.dumps([{"id": 1, "description": "docs issue", "file": "README.md", "line": 1}])
+    )
+    (deep / "stack-structure-records.json").write_text(
+        json.dumps([{"id": 1, "description": "structural issue", "file": "api.py", "line": 1}])
+    )
+
+
+async def test_merge_resume_reruns_arbiter_when_marker_absent(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#175 real-path: a `--start-at merge` resume whose on-disk records carry a
+    high-severity finding and NO completion marker must re-run the arbiter.
+
+    A crash between the parse write and the arbiter rewrite leaves unarbitrated
+    high-severity records on disk; trusting them at merge would bypass the
+    quality gate exactly on the riskiest findings.
+    """
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target, merge_echo_records=True)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    _prime_merge_resume_records(deep, python_severity="high")
+    assert not (deep / "arbiter-complete.marker").exists()
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+
+    arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
+    assert arbiter_calls, "arbiter must re-run on merge resume when no completion marker exists"
+    assert (deep / "arbiter-complete.marker").is_file(), "completion marker must be written after arbitration"
+
+    report = (multi_stack_target / ".review-output.md").read_text()
+    assert "ARBITRATED:" in report, f"arbitrated finding missing from merge-resume report:\n{report}"
+
+
+async def test_merge_resume_skips_arbiter_when_marker_present(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#175 real-path: when the completion marker proves the records were already
+    finalised, a `--start-at merge` resume must NOT re-run the arbiter."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target, merge_echo_records=True)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    _prime_merge_resume_records(deep, python_severity="high")
+    (deep / "arbiter-complete.marker").write_text("")
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+
+    arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
+    assert arbiter_calls == [], "arbiter must not re-run when the completion marker is present"

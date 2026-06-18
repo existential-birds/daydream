@@ -32,6 +32,7 @@ from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
 )
 from daydream.deep.artifacts import (
+    arbiter_complete_path,
     check_deep_artifacts,
     dedup_candidates_path,
     deep_dir,
@@ -300,16 +301,19 @@ def _apply_arbiter_verdicts(
     """Fold arbiter verdicts back into the per-stack record set (#168).
 
     Each selected record (``targets[k]`` for 1-based ``arb_id = k + 1``) is
-    either revised in place (severity/confidence/description/rationale updated)
-    or dropped when the arbiter rejected it (``keep`` false, or no verdict
-    returned for its ``arb_id``). Non-selected records pass through untouched.
-    ``file``/``line`` are never changed -- the arbiter adjudicates, it does not
-    re-target findings.
+    revised in place (severity/confidence/description/rationale updated) when the
+    arbiter keeps it, and dropped only on an explicit ``keep:false`` verdict. A
+    missing verdict or an ``arb_id`` mismatch fails open: the original record is
+    retained unchanged (with a warning), because a record reaches arbitration
+    precisely because it is high-severity or contested, so a truncated/lazy
+    arbiter response must not silently delete it. Non-selected records pass
+    through untouched. ``file``/``line`` are never changed -- the arbiter
+    adjudicates, it does not re-target findings.
 
     Returns:
-        New ``(records, sources)`` with rejected records removed and surviving
-        selected records carrying the arbiter's fields. Positional alignment
-        between the two lists is preserved.
+        New ``(records, sources)`` with explicitly rejected records removed and
+        surviving selected records carrying the arbiter's fields. Positional
+        alignment between the two lists is preserved.
     """
     import warnings
 
@@ -319,27 +323,28 @@ def _apply_arbiter_verdicts(
         arb_id = offset + 1
         verdict = verdicts.get(arb_id)
         if verdict is None:
-            # Arbiter returned no verdict for this arb_id -- warn so the drop
-            # is visible rather than silent, then treat as rejected (keep=False).
+            # Arbiter returned no verdict for this arb_id -- fail open: retain the
+            # original record unchanged so a truncated/lazy arbiter response cannot
+            # silently delete a high-severity or contested finding. Only an explicit
+            # keep=False below drops a record.
             warnings.warn(
                 f"Arbiter returned no verdict for arb_id={arb_id} "
-                f"(record_index={record_index}); dropping record as unreviewed.",
+                f"(record_index={record_index}); retaining original record unchanged.",
                 stacklevel=2,
             )
-            dropped.add(record_index)
             continue
         if verdict.get("arb_id") != arb_id:
             # Secondary key guard: the arb_id field in the verdict must match the
             # key we looked it up by.  A mismatch means the arbiter emitted a
             # finding with a wrong arb_id, which would silently bind the verdict
-            # to the wrong record.  Warn and drop rather than mis-apply.
+            # to the wrong record.  Warn and fail open (retain the original) rather
+            # than mis-apply or drop.
             warnings.warn(
                 f"Arbiter verdict arb_id mismatch: expected arb_id={arb_id} "
                 f"but verdict contains arb_id={verdict.get('arb_id')!r} "
-                f"(record_index={record_index}); dropping record as unreviewed.",
+                f"(record_index={record_index}); retaining original record unchanged.",
                 stacklevel=2,
             )
-            dropped.add(record_index)
             continue
         if not verdict.get("keep", False):
             dropped.add(record_index)
@@ -686,10 +691,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
                 # a single heavyweight arbiter now re-reviews ONLY the
                 # high-severity / contested findings and writes its verdicts back
-                # into the per-stack records before merge. Skipped on a
-                # `--start-at merge` resume (records are already final on disk)
-                # and when nothing qualifies (the common, cheap case).
-                if config.start_at != "merge":
+                # into the per-stack records before merge. A `--start-at merge`
+                # resume re-runs arbitration from the on-disk records UNLESS the
+                # completion marker proves a prior run already finalised them
+                # (#175): a crash between the parse write and the rewrite would
+                # otherwise let unarbitrated high-severity findings reach merge.
+                arbiter_marker = arbiter_complete_path(dd)
+                if config.start_at != "merge" or not arbiter_marker.is_file():
                     arbiter_targets = select_arbiter_targets(all_records, record_sources)
                     if arbiter_targets:
                         verdicts = await phase_arbiter_review(
@@ -707,6 +715,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                         _rewrite_stack_records(
                             dd, per_stack_records_paths, all_records, record_sources
                         )
+                    arbiter_marker.write_text("")
 
                 # Dedup pre-filter (D-27).
                 alt_issues_for_dedup: list[dict[str, Any]] = (

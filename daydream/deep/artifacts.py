@@ -73,6 +73,19 @@ def arbiter_input_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "arbiter-input.json"
 
 
+def arbiter_complete_path(deep_dir_path: Path) -> Path:
+    """Marker proving the scoped arbiter pass finalised the per-stack records (#175).
+
+    Written only once the on-disk ``stack-*-records.json`` are known-final for a
+    fresh run -- either after ``_rewrite_stack_records`` persists the arbiter's
+    verdicts, or when nothing qualified for arbitration. Its presence lets a
+    ``--start-at merge`` resume trust the records; its absence forces arbitration
+    to re-run from disk so an interrupted arbiter pass cannot leak unarbitrated
+    high-severity findings into the merge.
+    """
+    return deep_dir_path / "arbiter-complete.marker"
+
+
 def dedup_candidates_path(deep_dir_path: Path) -> Path:
     """Dedup pre-filter candidate-pairs output (D-27)."""
     return deep_dir_path / "dedup-candidates.json"
