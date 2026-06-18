@@ -214,17 +214,12 @@ def build_manifest(
     """
     totals = recorder._final_totals  # noqa: SLF001 - intentional access to recorder internals
 
-    # Deferred import to avoid a module-level cycle: archive.manifest →
-    # runner → (lazy) archive.  Importing here keeps the call-site semantics
-    # identical while breaking the top-level cycle.
+    # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
     from daydream.runner import _resolved_backend_name  # noqa: PLC0415 - deferred import avoids cycle
 
-    # Resolve the effective backend through the full precedence chain
-    # (per-phase flag → config.backend → file-config phase → file-config global → "claude")
-    # so the manifest records the backend that was *actually* used rather than the raw
-    # config value (which is None when the backend came from file-config).
-    # "review" is used as the representative phase — consistent with how the
-    # orchestrator prints the default backend.
+    # Resolve the effective backend through the full precedence chain so the manifest
+    # records what was actually used (raw config.backend is None when set via file-config);
+    # "review" is the representative phase the orchestrator also prints as the default.
     backend_used = _resolved_backend_name(config, "review")
 
     m = Manifest(
@@ -258,9 +253,8 @@ def build_manifest(
         archive_path=str(archive_path),
     )
 
-    # Wall-clock is derivable from step timestamps alone, so populate it for
-    # every run — not just --eval runs. When --eval ran, its fork-inclusive
-    # disk-based value (see eval.analyzer.analyze_timing) takes precedence.
+    # Derivable from step timestamps, so populated for every run; the --eval
+    # fork-inclusive value (eval.analyzer.analyze_timing) takes precedence below.
     m.wall_clock_seconds = recorder.compute_wall_clock_seconds()
 
     if evaluation:

@@ -46,16 +46,9 @@ from daydream.atif import (
 from daydream.timeutil import parse_iso_timestamp
 from daydream.ui import create_console, print_error, print_warning
 
-# Run-directory layout (single source of truth)
-# =============================================
-# Live + archive trajectories share an identical on-disk shape:
-#
-#   <root>/runs/<session_id>/trajectory.json
-#   <root>/runs/<session_id>/trajectories/<descriptor>.json
-#
-# Live: ``root = <target>/.daydream``. Archive: ``root = <archive>/`` per
-# ``daydream.archive``. The recorder constructs and writes both paths via
-# ``default_trajectory_path`` and ``_sibling_path_for``.
+# Run-directory layout. Live + archive trajectories share an identical on-disk
+# shape (<root>/runs/<session_id>/trajectory.json and .../trajectories/<descriptor>.json);
+# live root is <target>/.daydream, archive root is per daydream.archive.
 _RUNS_SUBDIR = "runs"
 _TRAJECTORIES_SUBDIR = "trajectories"
 _DAYDREAM_DIRNAME = ".daydream"
@@ -72,17 +65,10 @@ _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "c
 # until the first agent turn streams back.
 _GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", ""})
 
-# Redaction patterns (REDA-01..04)
-# =================================
-# Compiled-regex module constants matching the daydream/ui.py style. Order
-# inside _REDACTION_RULES matters: URL-credential rule MUST run before the
-# bare API-key rule so the captured credential isn't re-matched by it; the
-# PEM rule runs before the env-var rule so `VAR=-----BEGIN RSA PRIVATE KEY...`
-# collapses to `VAR=[REDACTED_PEM_KEY]` instead of the env-var rule consuming
-# only `-----BEGIN` and leaking the key body; the env-var rule runs before
-# bare API-key so `OPENAI_API_KEY=sk-1234` becomes
-# `OPENAI_API_KEY=[REDACTED_ENV_VAR]` (key name preserved per D-03) rather
-# than leaking the `OPENAI_API_KEY=` prefix.
+# Redaction patterns (REDA-01..04). Order in _REDACTION_RULES matters: URL-credential
+# before bare API-key (so the captured credential isn't re-matched), PEM before env-var
+# (so `VAR=<PEM>` collapses whole instead of leaking the key body), env-var before bare
+# API-key (so `OPENAI_API_KEY=sk-1234` keeps its name per D-03).
 _URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)([^:@/\s]+):([^@/\s]+)@")
 _API_KEY_PATTERN = re.compile(
     r"\b(?:sk-[A-Za-z0-9_\-]{6,}|ghp_[A-Za-z0-9]{6,}|ghs_[A-Za-z0-9]{6,}|xoxb-[A-Za-z0-9\-]{6,}|AKIA[A-Z0-9]{16})\b"
@@ -105,15 +91,9 @@ _ENV_VAR_PATTERN = re.compile(
     r"\b((?:[A-Z][A-Z0-9]*_)*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|API_?KEY|APIKEY|AUTH)(?:_[A-Z0-9]+)*)\s*=\s*([^\s\n\r;]+)"  # noqa: E501 - secret-segment alternation
 )
 _REDACTION_RULES: tuple[tuple[Any, str], ...] = (
-    # 1) URL-credential rule first — captures user:token before bare API-key rule sees the token.
     (_URL_CREDENTIAL_PATTERN, r"\1[REDACTED_USER]:[REDACTED_API_KEY]@"),
-    # 2) PEM private-key blocks — collapse the multi-line body before the
-    #    env-var rule (which would otherwise consume only `-----BEGIN` of a
-    #    `VAR=<PEM>` assignment) and the bare API-key rule see it.
     (_PEM_KEY_PATTERN, "[REDACTED_PEM_KEY]"),
-    # 3) Env-var rule — preserves the key name, replaces only the value.
     (_ENV_VAR_PATTERN, r"\1=[REDACTED_ENV_VAR]"),
-    # 4) Bare API keys / JWT / username paths — order between these does not conflict.
     (_API_KEY_PATTERN, "[REDACTED_API_KEY]"),
     (_JWT_PATTERN, "[REDACTED_JWT]"),
     (_USERNAME_PATH_PATTERN, r"\1[REDACTED_USER]"),
@@ -344,16 +324,10 @@ class Redactor:
             return step.model_copy(update=safe_updates)
 
 
-# Module-level Singletons
-# =======================
-# This module uses a ContextVar (NOT a module-level dataclass instance per
-# PROJECT.md Constraints "propagated via ContextVar (not AgentState)") for
-# trajectory recorder propagation. Access via ``get_current_recorder()`` ONLY;
-# never import ``_RECORDER_VAR`` directly. The setter is implicit via
-# ``TrajectoryRecorder.__aenter__`` / ``__aexit__``. Test isolation goes
-# through ``_reset_recorder_for_tests()`` from the autouse conftest fixture
-# (CORE-10 / D-17, wired in Plan 07).
-
+# Recorder propagation uses a ContextVar (not a module-level dataclass, per
+# PROJECT.md "propagated via ContextVar (not AgentState)"). Access via
+# get_current_recorder() ONLY; never import _RECORDER_VAR directly. Test isolation
+# goes through _reset_recorder_for_tests() (CORE-10 / D-17).
 _RECORDER_VAR: ContextVar["TrajectoryRecorder | None"] = ContextVar(
     "_RECORDER_VAR", default=None,
 )

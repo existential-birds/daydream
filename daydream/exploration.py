@@ -134,7 +134,6 @@ class ExplorationContext:
         """Write exploration results as markdown files for on-demand agent access."""
         exploration_dir.mkdir(parents=True, exist_ok=True)
 
-        # affected_files.md
         if self.affected_files:
             lines = ["# Affected Files\n", "Files relevant to the current review, discovered by exploration.\n",
                      "| File | Role | Summary |", "|------|------|---------|"]
@@ -144,7 +143,6 @@ class ExplorationContext:
         else:
             (exploration_dir / "affected_files.md").write_text("# Affected Files\n\nNo data collected.\n")
 
-        # conventions.md
         if self.conventions or self.guidelines:
             lines = ["# Codebase Conventions\n", "Conventions detected during pre-scan exploration.\n"]
             if self.conventions:
@@ -164,7 +162,6 @@ class ExplorationContext:
         else:
             (exploration_dir / "conventions.md").write_text("# Codebase Conventions\n\nNo data collected.\n")
 
-        # dependencies.md
         if self.dependencies:
             lines = ["# Dependencies\n", "Import and call relationships between files.\n",
                      "| Source | Relationship | Target |", "|--------|-------------|--------|"]
@@ -174,7 +171,6 @@ class ExplorationContext:
         else:
             (exploration_dir / "dependencies.md").write_text("# Dependencies\n\nNo data collected.\n")
 
-        # summary.md
         summary_lines = ["# Exploration Summary\n", "Pre-scan exploration results for the current review.\n",
                          "| File | Contents |", "|------|----------|"]
         if self.affected_files:

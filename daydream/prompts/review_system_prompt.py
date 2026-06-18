@@ -397,7 +397,6 @@ impact through the codebase using `files_importing()`.
     )
 
 
-# Convenience function for simple usage
 def get_review_prompt(
     file_count: int,
     total_tokens: int,

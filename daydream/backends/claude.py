@@ -33,11 +33,9 @@ from daydream.backends import (
     TurnEndEvent,
 )
 
-# Read-only Bash allowlist for the enforced read-only profile (the failure
-# summarizer). A command is permitted only if it begins with one of these
-# prefixes AND contains no shell-chaining metacharacters that could smuggle in
-# a mutating command. Mirrored in the summarizer prompt prose
-# (``daydream/phases.py``). Conservative by design: any chain → deny.
+# Read-only Bash allowlist (failure summarizer): permitted only if the command
+# begins with one of these prefixes AND has no shell-chaining metacharacter that
+# could smuggle in a mutation. Mirrored in the summarizer prompt (phases.py).
 READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
     "ls",
     "cat",
@@ -49,24 +47,19 @@ READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
 )
 
 # Chaining metacharacters that can append a second, non-allowlisted command.
-# Used in docstrings / comments for human readability.
 _CHAIN_METACHARS: tuple[str, ...] = (";", "&&", "||", "|", "`", "$(")
 
-# Single-character danger tokens checked against shlex output in
-# _is_read_only_command.  shlex (non-posix) splits multi-char operators like
-# ``&&`` and ``$(`` into their constituent characters, so we check at the
-# single-character level.  All of these are safe inside quoted strings (shlex
-# returns the whole quoted chunk as one token).
+# Single-char danger tokens checked against shlex output: shlex (non-posix)
+# splits ``&&``/``$(`` into single chars, so we check per-char. Safe inside
+# quotes (shlex returns a quoted chunk as one token).
 _DANGEROUS_TOKENS: frozenset[str] = frozenset({"|", ";", "&", "`", "$"})
 
-# Hook matcher for the read-only guard. Use ``.*`` so the hook fires for
-# EVERY tool call — the guard then explicitly allows only the safe set and
-# denies everything else (fail-closed). A deny-list of mutating tools was
-# fail-open: any tool not on the list would slip through unchecked.
+# ``.*`` fires the guard for EVERY tool call so it can fail-closed (allow only
+# the safe set); a deny-list of mutating tools was fail-open.
 _READ_ONLY_HOOK_MATCHER = ".*"
 
-# Tools that are unconditionally permitted under the read-only profile
-# (Bash is handled separately via the command allowlist).
+# Tools unconditionally permitted under the read-only profile (Bash handled
+# separately via the command allowlist).
 _READ_ONLY_ALLOWED_TOOLS: frozenset[str] = frozenset(
     {"Read", "Grep", "Glob", "StructuredOutput"}
 )
@@ -102,17 +95,12 @@ def _is_read_only_command(cmd: str) -> bool:
         return False
     if "\n" in cmd or "\r" in cmd:
         return False
-    # Lex in non-posix mode so quoted strings are returned as single tokens
-    # (with their quote characters intact).  Unquoted shell special characters
-    # appear as individual bare tokens.  Multi-character metacharacters like
-    # ``&&``, ``||``, and ``$(`` are emitted as their constituent characters
-    # (e.g. ``&``, ``&``), so we check for the individual dangerous characters
-    # rather than the multi-char strings.  See ``_DANGEROUS_TOKENS``.
+    # Non-posix lex: quoted strings stay single tokens; unquoted metacharacters
+    # appear as individual bare chars (``&&`` → ``&``, ``&``). See _DANGEROUS_TOKENS.
     try:
         tokens = list(shlex.shlex(stripped, posix=False))
     except ValueError:
-        # Malformed quoting — deny.
-        return False
+        return False  # Malformed quoting — deny.
     for tok in tokens:
         if tok in _DANGEROUS_TOKENS:
             return False
@@ -155,7 +143,6 @@ async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> H
         )
     if tool_name in _READ_ONLY_ALLOWED_TOOLS:
         return {}
-    # Any tool not on the allow-list, or unparseable input → deny.
     return _read_only_deny(
         f"read-only summarizer: tool {tool_name!r} is blocked (non-mutating contract)"
     )
@@ -211,10 +198,8 @@ class ClaudeBackend:
             else None
         )
 
-        # Enforced read-only profile (failure summarizer): register a PreToolUse
-        # guard hook that denies file-mutating tools and non-allowlisted Bash.
-        # The hook — NOT allowed_tools — is the enforcement: under
-        # bypassPermissions the tool list does not restrict the toolset.
+        # Read-only profile: the PreToolUse hook — NOT allowed_tools — is the
+        # enforcement, since bypassPermissions leaves the tool list unrestricted.
         options = ClaudeAgentOptions(
             cwd=str(cwd),
             permission_mode="bypassPermissions",
@@ -235,16 +220,12 @@ class ClaudeBackend:
             options.agents = agents
 
         structured_result: Any = None
-        # Track the most recently observed AssistantMessage.model so we can
-        # stamp the real SDK model id (e.g. ``claude-opus-4-5-20250901``) on
-        # the trailing CostEvent. The trajectory recorder uses this to
-        # upgrade the generic ``"claude"`` backend label to the actual id.
+        # Latest AssistantMessage.model, stamped on the trailing CostEvent so the
+        # recorder can upgrade the generic ``"claude"`` label to the real SDK id.
         last_assistant_model: str | None = None
-        # StructuredOutput ToolUseBlocks are intentionally skipped (the
-        # structured result is captured via ResultMessage.structured_output
-        # instead).  Track their IDs so the corresponding ToolResultBlocks
-        # in the subsequent UserMessage are also skipped — otherwise the
-        # trajectory recorder logs them as unmatched_tool_results.
+        # StructuredOutput ToolUseBlocks are skipped (result comes via
+        # ResultMessage.structured_output); track their IDs so the matching
+        # ToolResultBlocks aren't logged as unmatched_tool_results.
         skipped_tool_ids: set[str] = set()
 
         async with ClaudeSDKClient(options=options) as client:
@@ -253,8 +234,6 @@ class ClaudeBackend:
                 await client.query(prompt)
                 async for msg in client.receive_response():
                     if isinstance(msg, AssistantMessage):
-                        # Real SDK AssistantMessage has a ``model: str`` field
-                        # (no ``usage``); see backends/__init__.py docstring.
                         msg_model = getattr(msg, "model", None)
                         if isinstance(msg_model, str) and msg_model:
                             last_assistant_model = msg_model
@@ -265,11 +244,8 @@ class ClaudeBackend:
                                 yield ThinkingEvent(text=block.thinking)
                             elif isinstance(block, ToolUseBlock):
                                 if block.name == "StructuredOutput":
-                                    # Explicitly assert the invariant: StructuredOutput must
-                                    # be in _READ_ONLY_ALLOWED_TOOLS so the read_only guard
-                                    # hook permits it by design, not incidentally.  If the
-                                    # set ever drifts, this fires before the silent passthrough
-                                    # becomes a latent mutation hole.
+                                    # Drift guard: StructuredOutput must stay in the read-only
+                                    # allow-set, else this passthrough becomes a mutation hole.
                                     assert "StructuredOutput" in _READ_ONLY_ALLOWED_TOOLS, (
                                         "StructuredOutput must remain in _READ_ONLY_ALLOWED_TOOLS "
                                         "to preserve the read_only non-mutation contract"
@@ -281,18 +257,10 @@ class ClaudeBackend:
                                     name=block.name,
                                     input=block.input or {},
                                 )
-                        # Phase 2 (EVNT-06): emit MetricsEvent per AssistantMessage
-                        # keyed by message_id (D-04 maps MetricsEvent -> open Step).
-                        # cost_usd is unavailable per-message (only on ResultMessage)
-                        # — leave None per Claude's Discretion in CONTEXT.md.
-                        # EVNT-02 field names: MetricsEvent uses `prompt_tokens` /
-                        # `completion_tokens` (the ATIF/Metrics-side names). The SDK
-                        # boundary keys are `input_tokens` / `output_tokens`; rename
-                        # at this boundary. Skip emission when either is missing —
-                        # EVNT-02 types both as int (not Optional) so a partial
-                        # usage dict would yield a malformed event. `getattr` keeps
-                        # us defensive against older test mocks that pre-date the
-                        # SDK's `usage` field on AssistantMessage.
+                        # EVNT-06: MetricsEvent per AssistantMessage keyed by message_id.
+                        # Rename SDK input/output_tokens → prompt/completion_tokens; cost_usd
+                        # is None per-message (only on ResultMessage). Skip when either token
+                        # count is missing (EVNT-02 types both as required int).
                         msg_usage = getattr(msg, "usage", None)
                         if (
                             msg_usage is not None
@@ -307,7 +275,6 @@ class ClaudeBackend:
                                 cost_usd=None,
                                 model_name=last_assistant_model,
                             )
-                        # TurnEndEvent closes the recorder's Step for THIS assistant turn.
                         yield TurnEndEvent(message_id=getattr(msg, "message_id", "") or "")
 
                     elif isinstance(msg, UserMessage):
@@ -329,16 +296,9 @@ class ClaudeBackend:
                             raise ClaudeAgentError(f"Claude agent run failed: {detail}")
                         if msg.structured_output is not None:
                             structured_result = msg.structured_output
-                        # Phase 2 (EVNT-04, EVNT-05): emit CostEvent whenever cost OR
-                        # usage data is available. Previously this branch dropped
-                        # input_tokens / output_tokens / cached_tokens (always None).
-                        # Trust per-call semantics for SDK 0.1.52 (D-14); if Phase 5
-                        # TEST-06 finds the SDK reports cumulative, the fix lands
-                        # there. cached_tokens is a SUBSET of input_tokens, NOT
-                        # additive (D-15) — pass cache_read_input_tokens through
-                        # directly. `getattr` keeps us defensive against older test
-                        # mocks that pre-date the SDK's `usage` field on
-                        # ResultMessage.
+                        # EVNT-04/05: emit CostEvent when cost OR usage is available.
+                        # Per-call semantics trusted for SDK 0.1.52 (D-14). cached_tokens
+                        # is a SUBSET of input_tokens, not additive (D-15).
                         result_usage = getattr(msg, "usage", None)
                         if msg.total_cost_usd is not None or result_usage is not None:
                             usage = result_usage or {}

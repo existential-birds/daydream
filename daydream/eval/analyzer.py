@@ -19,9 +19,7 @@ from pathlib import Path
 
 from daydream.timeutil import parse_iso_timestamp
 
-# ---------------------------------------------------------------------------
 # Trajectory loading
-# ---------------------------------------------------------------------------
 
 def _latest_main_trajectory(daydream_dir: Path) -> Path | None:
     """Return the most recent main trajectory by mtime, or None.
@@ -94,9 +92,7 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
     return {"main": main, "forked": forked}
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 def _parse_iso_ts(ts: str) -> datetime:
     return parse_iso_timestamp(ts)
@@ -165,9 +161,7 @@ def _path_matches(absolute: str, relative: str) -> bool:
     return absolute.endswith(relative) or absolute.endswith("/" + relative)
 
 
-# ---------------------------------------------------------------------------
 # Analysis functions
-# ---------------------------------------------------------------------------
 
 def analyze_costs(trajectories: dict) -> dict:
     """Cost and token breakdown across all agents.
@@ -535,9 +529,7 @@ def analyze_training_signals(
     }
 
 
-# ---------------------------------------------------------------------------
 # Top-level entry point
-# ---------------------------------------------------------------------------
 
 def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> dict:
     """Run full quantitative analysis on a .daydream directory.

@@ -15,16 +15,12 @@ from typing import Any
 from daydream.pr_comment_renderer import _PHASE_LABELS, _format_duration, render_run_info_block
 from daydream.trajectory import DaydreamPhase
 
-# Fixture trajectory files committed under tests/fixtures/trajectories/.
-# Those small-but-realistic files cover Claude (cost_usd present) and
-# Codex (cost_usd null, synthesized via pricing.compute_cost). Tests that
-# need a *specific* shape (mixed-model, unknown-model, missing data) build
-# their trajectory inline via _write_trajectory below.
+# Committed fixtures cover Claude (cost_usd present) and Codex (cost_usd null,
+# synthesized via pricing). Tests needing a specific shape build inline via _write_trajectory.
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "trajectories"
 _SINGLE_PHASE = _FIXTURE_DIR / "single_phase_claude.json"
 _MULTI_PHASE_CODEX = _FIXTURE_DIR / "multi_phase_codex.json"
 _SIBLING_FIX = _FIXTURE_DIR / "sibling_fix.json"
-# S2 e2e fixtures — see tests/fixtures/trajectories/ for the JSON.
 _MULTI_PHASE_CLAUDE = _FIXTURE_DIR / "multi_phase_claude.json"
 _MIXED_MODELS = _FIXTURE_DIR / "mixed_models.json"
 _CODEX_WITH_CACHED = _FIXTURE_DIR / "codex_with_cached.json"
@@ -98,13 +94,10 @@ def _write_trajectory(
     return p
 
 
-# ---------------------------------------------------------------------------
 # M1 — visible rollup
-# ---------------------------------------------------------------------------
 def test_m1_visible_rollup_includes_required_fields() -> None:
     """Rollup must list Model, Cost, Tokens, Steps/tool calls (Mode line dropped)."""
     out = render_run_info_block([_SINGLE_PHASE])
-    # Mode line is no longer rendered anywhere.
     assert "- **Mode:**" not in out
     assert "- **Model:** claude-sonnet-4-5" in out
     assert "- **Cost:** $0.13" in out
@@ -112,24 +105,18 @@ def test_m1_visible_rollup_includes_required_fields() -> None:
     assert "- **Steps / tool calls:** 1 / 2" in out
 
 
-# ---------------------------------------------------------------------------
 # M2 — collapsed per-phase table
-# ---------------------------------------------------------------------------
 def test_m2_per_phase_breakdown_is_collapsed_table() -> None:
     """Per-phase breakdown is a markdown table inside <details>."""
     out = render_run_info_block([_MULTI_PHASE_CODEX])
     assert "<details><summary>Per-phase breakdown</summary>" in out
     assert "</details>" in out
-    # Header row with all required columns.
     assert "| Phase | Model | Tools | Input (cached) | Output | Cost |" in out
-    # Both phases present.
     assert "| Review |" in out
     assert "| Fix |" in out
 
 
-# ---------------------------------------------------------------------------
 # M4 — uniform field set
-# ---------------------------------------------------------------------------
 def test_m4_uniform_layout() -> None:
     """Section headers/columns are stable across separate calls."""
     a = render_run_info_block([_SINGLE_PHASE])
@@ -137,13 +124,10 @@ def test_m4_uniform_layout() -> None:
         assert label in a
     header = "| Phase | Model | Tools | Input (cached) | Output | Cost |"
     assert header in a
-    # Mode line is gone everywhere.
     assert "- **Mode:**" not in a
 
 
-# ---------------------------------------------------------------------------
 # M5 — cost source per backend
-# ---------------------------------------------------------------------------
 def test_m5_cost_source_per_backend(tmp_path: Path) -> None:
     """Claude steps use Metrics.cost_usd verbatim; Codex steps synthesize from pricing.
 
@@ -186,9 +170,7 @@ def test_m5_cost_source_per_backend(tmp_path: Path) -> None:
     assert "- **Cost:** $5.50" in out
 
 
-# ---------------------------------------------------------------------------
 # M6 — unknown-model fallback
-# ---------------------------------------------------------------------------
 def test_m6_unknown_model_renders_dash_and_footnote(tmp_path: Path) -> None:
     """Unknown OpenAI model: rollup '—', per-phase '—', footnote names the model."""
     p = _write_trajectory(
@@ -212,14 +194,12 @@ def test_m6_unknown_model_renders_dash_and_footnote(tmp_path: Path) -> None:
     )
     out = render_run_info_block([p])
     assert "- **Cost:** —" in out
-    assert "| —" in out  # per-phase cost cell ends with —
+    assert "| —" in out
     assert "mystery-model" in out
     assert "not in the price table" in out
 
 
-# ---------------------------------------------------------------------------
 # M7 — mixed-model label
-# ---------------------------------------------------------------------------
 def test_m7_mixed_models_render_breakdown_pointer(tmp_path: Path) -> None:
     """Two phases on different models -> rollup Model = 'mixed — see breakdown'."""
     p = _write_trajectory(
@@ -240,9 +220,7 @@ def test_m7_mixed_models_render_breakdown_pointer(tmp_path: Path) -> None:
     assert "- **Model:** mixed — see breakdown" in out
 
 
-# ---------------------------------------------------------------------------
 # M8 — cached-tokens awareness in the rollup
-# ---------------------------------------------------------------------------
 def test_m8_cache_hit_ratio_rendered_when_input_nonzero(tmp_path: Path) -> None:
     """Cache-hit ratio is computed from (cached / input) and shown next to cached count."""
     p = _write_trajectory(
@@ -271,23 +249,18 @@ def test_m8_cache_hit_ratio_rendered_when_input_nonzero(tmp_path: Path) -> None:
     assert "10,000 in (6,700 cached, 67% hit)" in out
 
 
-# ---------------------------------------------------------------------------
 # M9 — missing-trajectory fallback
-# ---------------------------------------------------------------------------
 def test_m9_missing_trajectory_renders_fallback(tmp_path: Path) -> None:
     """No paths, missing path, or malformed JSON -> 'run details unavailable' + footer."""
-    # Empty list.
     out = render_run_info_block([])
-    assert "- **Mode:**" not in out  # Mode line dropped
+    assert "- **Mode:**" not in out
     assert "*run details unavailable*" in out
     assert "<sub>Generated by daydream v" in out
 
-    # Path that doesn't exist.
     out2 = render_run_info_block([tmp_path / "nope.json"])
     assert "*run details unavailable*" in out2
     assert "<sub>Generated by daydream v" in out2
 
-    # Malformed JSON.
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
     out3 = render_run_info_block([bad])
@@ -297,13 +270,11 @@ def test_m9_missing_trajectory_renders_fallback(tmp_path: Path) -> None:
     assert "<sub>Generated by daydream v" in out3
 
 
-# ---------------------------------------------------------------------------
 # M10 — number formatting
-# ---------------------------------------------------------------------------
 def test_m10_number_formatting_rules(tmp_path: Path) -> None:
     """Thousand separators on >=1,000; sub-cent cost renders <$0.01; cache-hit
     omitted when input == 0."""
-    # Sub-cent cost.
+    # Sub-cent cost
     p = _write_trajectory(
         tmp_path,
         name="subcent.json",
@@ -390,25 +361,18 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
     assert "0 in → 10 out" in out3
 
 
-# ---------------------------------------------------------------------------
 # Baseline single-phase render
-# ---------------------------------------------------------------------------
 def test_single_phase_run_renders_baseline() -> None:
     """The baseline single-phase Claude trajectory renders all sections cleanly."""
     out = render_run_info_block([_SINGLE_PHASE])
-    # Rollup starts with the Model line (Mode line removed).
     assert out.startswith("- **Model:**")
     assert "<details><summary>Per-phase breakdown</summary>" in out
-    # Block ends with the version footer the renderer now owns.
     assert out.rstrip().endswith("</sub>")
-    # Single 'Review' phase row only.
     assert out.count("| Review |") == 1
     assert "| Fix |" not in out
 
 
-# ---------------------------------------------------------------------------
 # Purity / idempotence
-# ---------------------------------------------------------------------------
 def test_renderer_is_pure_idempotent() -> None:
     """Calling the renderer twice with identical inputs returns identical output.
 
@@ -421,9 +385,7 @@ def test_renderer_is_pure_idempotent() -> None:
     assert a == b
 
 
-# ---------------------------------------------------------------------------
 # S2 — deep-mode multi-trajectory aggregation
-# ---------------------------------------------------------------------------
 def test_aggregates_across_multiple_trajectory_files() -> None:
     """Sibling fork trajectories sum into the parent's per-phase rollup.
 
@@ -449,9 +411,7 @@ def test_aggregates_across_multiple_trajectory_files() -> None:
     assert "2,500" in fix_row
 
 
-# ---------------------------------------------------------------------------
 # Mode line is gone — assert it never renders.
-# ---------------------------------------------------------------------------
 def test_mode_line_never_renders() -> None:
     """The Mode rollup line was removed; no caller-controlled label appears."""
     out = render_run_info_block([_SINGLE_PHASE])
@@ -459,12 +419,8 @@ def test_mode_line_never_renders() -> None:
     assert "**Mode:**" not in out
 
 
-# ---------------------------------------------------------------------------
-# S2 — End-to-end fixture-driven scenarios. Each test loads a committed
-# trajectory file (see tests/fixtures/trajectories/) and asserts the whole
-# rendered block, top to bottom, against the realistic shape a reviewer
-# would actually see in a GitHub PR comment.
-# ---------------------------------------------------------------------------
+# S2 — End-to-end fixture-driven scenarios: load a committed trajectory and
+# assert the whole rendered block against the shape a reviewer sees in a PR comment.
 def test_e2e_single_phase_claude_renders_full_block() -> None:
     """Single Claude review: rollup + 1-row table + footer, no footnote.
 
@@ -646,9 +602,7 @@ def test_e2e_corrupted_trajectory_falls_back() -> None:
     assert "<sub>Generated by daydream v" in out
 
 
-# ---------------------------------------------------------------------------
 # Regression: corrupt-metrics bleed (CodeRabbit #3 on PR #66)
-# ---------------------------------------------------------------------------
 def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
     """cached_tokens > prompt_tokens must be clamped to prompt at aggregation.
 
@@ -729,9 +683,7 @@ def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
     assert "% hit" not in out
 
 
-# ---------------------------------------------------------------------------
 # Regression: ATIF v1.6 root-agent model fallback (CodeRabbit #2 on PR #66)
-# ---------------------------------------------------------------------------
 def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
     """ATIF v1.6: step.model_name=None implies Trajectory.agent.model_name.
 
@@ -783,9 +735,7 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
     assert "not in the price table" not in out
 
 
-# ---------------------------------------------------------------------------
 # Duration formatting
-# ---------------------------------------------------------------------------
 def test_format_duration_none_renders_dash() -> None:
     assert _format_duration(None) == "—"
 
@@ -816,9 +766,7 @@ def test_format_duration_hours() -> None:
     assert _format_duration(7380.0) == "2h 3m"
 
 
-# ---------------------------------------------------------------------------
 # Duration in rollup and phase table
-# ---------------------------------------------------------------------------
 def test_duration_in_rollup() -> None:
     """Rollup must include a Duration line derived from step timestamps."""
     out = render_run_info_block([_SINGLE_PHASE])
@@ -882,9 +830,7 @@ def test_deep_mode_latency_aggregates_across_forks() -> None:
     assert "- **Duration:** 2m 1s" in out
 
 
-# ---------------------------------------------------------------------------
 # PHASE_LABELS completeness
-# ---------------------------------------------------------------------------
 def test_phase_labels_covers_all_daydream_phases() -> None:
     """Every DaydreamPhase member must have a display label in _PHASE_LABELS."""
     for phase in DaydreamPhase:

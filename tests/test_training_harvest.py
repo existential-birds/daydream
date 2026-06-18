@@ -182,17 +182,15 @@ def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_pat
 
 
 def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
-    # A not-merged PR row → derive_outcome_label == "rejected". Its bronze
-    # (consistent verdict, full grounding) yields a positive intrinsic composite.
-    # Under C5 the posterior reject penalty is a SIBLING field — it does NOT
-    # deduct from the stored composite, which stays pure intrinsic. The penalty
-    # surfaces via false_positive_penalty / posterior_cost in reward_json.
+    # Not-merged PR -> "rejected". Under C5 the reject penalty is a SIBLING field
+    # (false_positive_penalty / posterior_cost), not a deduction from the stored
+    # composite, which stays pure intrinsic.
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
 
-    # Intrinsic-only baseline: same production inputs scored with no posterior.
+    # Intrinsic-only baseline: same inputs scored with no posterior.
     intrinsic_inputs = assemble_scoring_inputs(run_dir, row)
     intrinsic_only_composite = score_trajectory(intrinsic_inputs).composite
 
@@ -205,16 +203,13 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
     breakdown = json.loads(payload.reward_json)
     assert breakdown["false_positive_penalty"] == 1.0
     assert breakdown["posterior_cost"] == 0.5  # sibling: max(0, 1.0 − 0.5 default prior)
-    # Composite is pure intrinsic — the reject label does not fold into it.
-    assert payload.composite_reward == intrinsic_only_composite
+    assert payload.composite_reward == intrinsic_only_composite  # pure intrinsic
 
 
 def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path, archive_dir):
-    # Exercises the production wiring of reviewer_set_penalty_prior (not monkeypatched).
-    # The gh responder returns a real reviewer login ("alice") so reviewer_logins_signal
-    # yields ["alice"] and the DB query runs.  The archive is fresh (no prior history),
-    # so reviewer_set_penalty_prior returns (None, 0) — the empty-pool path — and the
-    # reducer applies the 0.5 default prior.
+    # Production wiring of reviewer_set_penalty_prior (not monkeypatched): reviewer
+    # "alice" makes the DB query run, but the fresh archive yields the empty-pool
+    # path (None, 0), so the reducer applies the 0.5 default prior.
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = {"session_id": "s_rej_prod", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
@@ -225,8 +220,7 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path, ar
     assert payload.labels == ["rejected"]
     assert payload.has_posterior is True
     rb = json.loads(payload.reward_json)
-    # Empty pool → reviewer_set_penalty_prior returns (None, 0) → outcome_prior stays None,
-    # prior_n == 0, and the 0.5 default is used: posterior_cost == max(0, 1.0 − 0.5) == 0.5.
+    # Empty pool -> (None, 0) -> default 0.5: posterior_cost == max(0, 1.0 − 0.5).
     assert rb["outcome_prior"] is None
     assert rb["outcome_prior_n"] == 0
     assert rb["posterior_cost"] == 0.5
@@ -247,14 +241,10 @@ def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_pat
 
 
 def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path, archive_dir):
-    # End-to-end: seed a prior label_observation for "alice" in the archive
-    # (past valid_at) then call build_annotation for a rejected PR whose reviewer
-    # is "alice".  The production reviewer_set_penalty_prior DB query must find
-    # the seeded row, so prior_n >= 1 (pool is non-empty) even though n < 10
-    # (below the sufficiency threshold).  This exercises the before_valid_at
-    # filtering path against a non-empty archive — the gap identified in the
-    # cross-stack finding where the existing empty-pool test cannot detect a
-    # before_valid_at='' bug.
+    # Seed a past label_observation for "alice", then annotate a rejected PR with
+    # the same reviewer: the DB query must find the seeded row (prior_n >= 1, pool
+    # non-empty) even at n < 10. Exercises before_valid_at filtering against a
+    # non-empty archive — the gap the empty-pool test cannot detect.
     prior_session_id = "s_prior_alice"
     upsert_run(
         archive_dir,
@@ -306,10 +296,8 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path, arch
     )
     assert payload.labels == ["rejected"]
     rb = json.loads(payload.reward_json)
-    # The seeded prior row is found: pool is non-empty (prior_n >= 1).
-    # n < 10 (sufficiency threshold) so outcome_prior is None, but
-    # prior_n must reflect the pool count — proving the DB query ran
-    # against real history rather than an empty archive.
+    # Seeded prior row found (prior_n >= 1); n < 10 so outcome_prior is None, but
+    # prior_n reflecting the pool proves the query ran against real history.
     assert rb["outcome_prior_n"] >= 1, (
         f"expected prior_n >= 1 from seeded archive, got {rb['outcome_prior_n']}"
     )
@@ -318,7 +306,7 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path, arch
 
 
 def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(tmp_path, monkeypatch):
-    monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.8, 12))  # >=10 -> empirical
+    monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.8, 12))  # n>=10 -> empirical
     monkeypatch.setattr(harvest, "reviewer_logins_signal", lambda *a, **k: ["alice", "carol"])
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
@@ -353,11 +341,10 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path, monkeypatch)
     # consulted; still a PosteriorBreakdown when the local verdict maps to a label.
     from daydream.training.labeler_signals import LocalCommitAppliedSignal
 
-    # Force a mapped local verdict ("rejected") so the posterior axis is present.
+    # Mapped local verdict "rejected" so the posterior axis is present.
     monkeypatch.setattr(
         harvest, "local_commit_applied_signal", lambda *a, **k: LocalCommitAppliedSignal(verdict="rejected")
     )
-    # The pooled-prior query must never run for a PR-less row.
     monkeypatch.setattr(
         harvest, "reviewer_set_penalty_prior",
         lambda *a, **k: pytest.fail("reviewer_set_penalty_prior must not be called for a local row"),
@@ -377,7 +364,7 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path, monkeypatch)
 
 
 def test_build_annotation_asserts_canonical_version(tmp_path, monkeypatch):
-    # Force a non-canonical reward_version into the breakdown -> write must be refused.
+    # Non-canonical reward_version -> the write must be refused.
     def _custom_version_score(*args, **kwargs):
         from daydream.training.reward import RewardWeights
         return score_trajectory(*args, **{**kwargs, "weights": RewardWeights(w_correctness=0.99)})
@@ -418,12 +405,18 @@ def test_assemble_malformed_verdicts_flags_format_invalid(tmp_path: Path):
     assert inputs.format_valid is False
 
 
-def _seed_archived_deep_run(archive_dir: Path, session_id: str, *, merged_at: str) -> Path:
+def _seed_archived_deep_run(
+    archive_dir: Path, session_id: str, *, merged_at: str, source_path: Path | None = None
+) -> Path:
     """Seed a deep-run bronze bundle and index it under ``archive_dir``.
 
     ``_seed_deep_bronze`` + ``upsert_run`` (plan note): writes the bronze
     artifacts beside the archive and registers the indexed manifest row that
     :func:`run_harvest` walks. Returns the run directory.
+
+    When ``source_path`` is supplied it is recorded on the manifest so
+    :func:`_resolve_repo_for_row` resolves a working tree for the row (the
+    caller seeds a ``.git`` dir there), making ``clone_resolved`` True.
     """
     run_dir = _seed_deep_bronze(archive_dir, verdict="consistent", grounding=1.0)
     upsert_run(
@@ -441,9 +434,71 @@ def _seed_archived_deep_run(archive_dir: Path, session_id: str, *, merged_at: st
             grounding_rate=1.0,
             changed_files=["app.py"],
             archive_path=str(run_dir),
+            source_path=str(source_path) if source_path else None,
         ),
     )
     return run_dir
+
+
+def _seed_orphan_run(
+    archive_dir: Path, bronze_parent: Path, *, session_id: str, head_sha: str = "orphsha"
+) -> Path:
+    """Seed an orphan deep run (no PR linkage) and index it under ``archive_dir``.
+
+    Mirrors :func:`_seed_archived_deep_run` but writes the orphan manifest shape
+    the re-link path consumes: ``pr_number``/``pr_repo`` are ``None`` and the row
+    carries only a ``branch``/``head_sha``. Bronze artifacts go under
+    ``bronze_parent``; returns the run directory.
+    """
+    run_dir = _seed_deep_bronze(bronze_parent, verdict="consistent", grounding=1.0)
+    upsert_run(
+        archive_dir,
+        Manifest(
+            session_id=session_id,
+            archived_at="2026-01-01T00:00:00Z",
+            run_flow="normal",
+            backend="claude",
+            repo_slug="org/repo",
+            branch="feat/x",
+            head_sha=head_sha,
+            base_branch="main",
+            pr_number=None,
+            pr_repo=None,
+            grounding_rate=1.0,
+            changed_files=["app.py"],
+            archive_path=str(run_dir),
+        ),
+    )
+    return run_dir
+
+
+def _seed_pr_runs(archive_dir: Path, bronze_parent: Path, count: int) -> None:
+    """Seed ``count`` PR-attached deep runs (sessions ``s1``..``sN``, ``pr_number`` 1..N).
+
+    Each run gets its own bronze dir under ``bronze_parent/<session_id>`` so the
+    index carries ``count`` distinct rows; ``pr_number`` matches the session index
+    so a fake ``_gh_api`` can identify the row from the PR endpoint.
+    """
+    for pr_number in range(1, count + 1):
+        sid = f"s{pr_number}"
+        run_dir = _seed_deep_bronze(bronze_parent / sid, verdict="consistent", grounding=1.0)
+        upsert_run(
+            archive_dir,
+            Manifest(
+                session_id=sid,
+                archived_at="2026-01-01T00:00:00Z",
+                run_flow="normal",
+                backend="claude",
+                repo_slug="org/repo",
+                pr_repo="org/repo",
+                pr_number=pr_number,
+                head_sha="abc",
+                base_branch="main",
+                grounding_rate=1.0,
+                changed_files=["app.py"],
+                archive_path=str(run_dir),
+            ),
+        )
 
 
 async def test_harvest_writes_one_annotation(tmp_path, archive_dir, monkeypatch):
@@ -483,25 +538,7 @@ async def test_harvest_relinks_orphan_run_and_labels_it(tmp_path, archive_dir, m
     through the PR path. Drives ``run_harvest`` end-to-end and asserts both the
     persisted linkage and the resulting ``contested`` label.
     """
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    upsert_run(
-        archive_dir,
-        Manifest(
-            session_id="s-orph",
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            branch="feat/x",
-            head_sha="orphsha",
-            base_branch="main",
-            pr_number=None,
-            pr_repo=None,
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(run_dir),
-        ),
-    )
+    _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph")
     monkeypatch.setattr(
         "daydream.training.harvest._gh_api",
         _fake_gh_orphan_relink("2026-02-01T00:00:00+00:00"),
@@ -510,6 +547,95 @@ async def test_harvest_relinks_orphan_run_and_labels_it(tmp_path, archive_dir, m
     row = query_runs(archive_dir, "session_id = ?", ("s-orph",))[0]
     assert row["pr_number"] == 7 and row["pr_repo"] == "org/repo"  # linkage persisted
     assert json.loads(row["outcome_labels"]) == ["contested"]  # now labelable (was orphan)
+
+
+@pytest.mark.parametrize("with_clone", [False, True])
+async def test_harvest_fork_pr_404_degrades_not_drops(tmp_path, archive_dir, monkeypatch, with_clone):
+    """Real-path: a benign ``pulls/<n>`` 404 degrades to the local posterior.
+
+    A fork-PR (or deleted-PR) fetch raises ``GitError`` with an HTTP 404. The
+    fix catches benign ``GitError`` in ``build_annotation``'s PR-posterior block
+    and falls back to ``_build_rubric_local`` rather than dropping the run as a
+    hard error. Drives ``run_harvest`` end-to-end and asserts the fix's central
+    contract: the run is still ANNOTATED (not dropped) and the benign 404 is NOT
+    counted as an error (``errors == 0``).
+
+    The degrade is proven observably on two axes:
+      1. ``pr_state`` is ``None`` on the persisted observation — a real PR rubric
+         stamps ``"merged"``/``"closed"``; the benign 404 instead routes through
+         ``_build_rubric_local`` (``posterior_source="local_branch"``), so no
+         fabricated ``merged=False`` PR rubric ever drove the label.
+      2. The persisted label is EMPTY (``"unknown"``), NOT ``"rejected"``.
+
+    Parametrized over ``with_clone``:
+      * ``False`` — no working tree resolves; ``clone_resolved=False`` already
+        forces ``"unknown"`` (the original no-clone case).
+      * ``True`` — a git working tree IS resolved (``source_path`` carries a
+        ``.git`` dir), so ``clone_resolved=True``. The #166 invariant must STILL
+        force ``"unknown"``: a PR-shaped row whose merge evidence was merely
+        unavailable is ineligible for the PR-less commit walk, which on this
+        branch-less row would otherwise emit the false-negative ``"rejected"``.
+    """
+    source_path = None
+    if with_clone:
+        source_path = tmp_path / "clone"
+        (source_path / ".git").mkdir(parents=True)
+    _seed_archived_deep_run(
+        archive_dir, "s-fork", merged_at="2026-02-01T00:00:00+00:00", source_path=source_path
+    )
+
+    def _gh_fork_404(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if re.search(r"/pulls/\d+", endpoint):
+            raise GitError("gh: Not Found (HTTP 404)")
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
+            return []
+        return {}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_fork_404)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0  # benign 404 degraded; not a hard error
+    obs = latest_label_observation(archive_dir, "s-fork")
+    assert obs is not None  # still annotated (not dropped)
+    # pr_state is None on the local-branch rubric (not "merged"/"closed"):
+    # observable proof the fix degraded to the local path rather than
+    # fabricating a merged=False PR rubric.
+    assert obs["pr_state"] is None
+    # The central #166 contract: NOT mislabeled "rejected". With no resolvable
+    # clone the local posterior is "unknown" → empty outcome_labels.
+    row = query_runs(archive_dir, "session_id = ?", ("s-fork",))[0]
+    assert json.loads(row["outcome_labels"]) == []
+
+
+async def test_harvest_orphan_422_degrades_not_drops(tmp_path, archive_dir, monkeypatch):
+    """Real-path: a benign ``commits/<sha>/pulls`` 422 degrades to local.
+
+    An orphan run whose head SHA was never pushed yields an HTTP 422 from the
+    ``commits/{sha}/pulls`` link probe. The fix catches benign ``GitError`` at
+    the orphan re-link site and degrades to the local-branch posterior (the row
+    stays ``pr_number=None``) instead of dropping the run. Drives ``run_harvest``
+    end-to-end and asserts the run is still annotated (``errors == 0``, a label
+    observation exists), the linkage was NOT applied, and — with no resolvable
+    clone — the label degrades to ``"unknown"`` (empty), never ``"rejected"``.
+    """
+    _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph-422")
+
+    def _gh_unpushed_422(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if "/commits/" in endpoint and endpoint.endswith("/pulls"):
+            raise GitError("gh: No commit found for SHA (HTTP 422)")
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
+            return []
+        return {}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_unpushed_422)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0  # benign 422 degraded; not a hard error
+    assert latest_label_observation(archive_dir, "s-orph-422") is not None  # annotated via local path
+    row = query_runs(archive_dir, "session_id = ?", ("s-orph-422",))[0]
+    assert row["pr_number"] is None and row["pr_repo"] is None  # linkage NOT applied
+    # No resolvable clone → local posterior is "unknown", never "rejected".
+    assert json.loads(row["outcome_labels"]) == []
 
 
 async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_link(
@@ -527,25 +653,7 @@ async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_l
     if the guard is broken the function will actually write to the DB and the
     DB-state assertions below will catch it.
     """
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    upsert_run(
-        archive_dir,
-        Manifest(
-            session_id="s-orph-dry",
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            branch="feat/x",
-            head_sha="orphsha",
-            base_branch="main",
-            pr_number=None,
-            pr_repo=None,
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(run_dir),
-        ),
-    )
+    _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph-dry")
 
     monkeypatch.setattr(
         "daydream.training.harvest._gh_api",
@@ -576,25 +684,7 @@ async def test_harvest_leaves_true_local_run_unlinked(tmp_path, archive_dir, mon
     stays unlinked and must not be force-linked or errored — it flows the
     existing local-branch posterior path unchanged.
     """
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
-    upsert_run(
-        archive_dir,
-        Manifest(
-            session_id="s-local",
-            archived_at="2026-01-01T00:00:00Z",
-            run_flow="normal",
-            backend="claude",
-            repo_slug="org/repo",
-            branch="feat/x",
-            head_sha="localsha",
-            base_branch="main",
-            pr_number=None,
-            pr_repo=None,
-            grounding_rate=1.0,
-            changed_files=["app.py"],
-            archive_path=str(run_dir),
-        ),
-    )
+    _seed_orphan_run(archive_dir, tmp_path, session_id="s-local", head_sha="localsha")
 
     def _gh_no_pr(repo: str, endpoint: str, **kwargs: Any) -> Any:
         if endpoint.endswith("/pulls") and "/commits/" in endpoint:
@@ -627,29 +717,9 @@ async def test_re_harvest_appends_on_version_bump(tmp_path, archive_dir, monkeyp
 
 
 async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(tmp_path, archive_dir, monkeypatch):
-    # Two distinct sessions with distinct PR numbers (so the gh endpoint identifies
-    # the session), each with its own bronze run dir so the index has two rows.
-    for sid, pr_number in (("s1", 1), ("s2", 2)):
-        run_dir = _seed_deep_bronze(tmp_path / sid, verdict="consistent", grounding=1.0)
-        upsert_run(
-            archive_dir,
-            Manifest(
-                session_id=sid,
-                archived_at="2026-01-01T00:00:00Z",
-                run_flow="normal",
-                backend="claude",
-                repo_slug="org/repo",
-                pr_repo="org/repo",
-                pr_number=pr_number,
-                head_sha="abc",
-                base_branch="main",
-                grounding_rate=1.0,
-                changed_files=["app.py"],
-                archive_path=str(run_dir),
-            ),
-        )
-    # The first row (PR 1) fully succeeds; the second (PR 2) triggers an exhausted
-    # rate-limit on every gh call so the harvest loop must abort cleanly.
+    # Two PR rows; PR 1 succeeds, PR 2 hits an exhausted rate-limit on every gh
+    # call so the harvest loop must abort cleanly.
+    _seed_pr_runs(archive_dir, tmp_path, 2)
     merged = _fake_gh_merged("2026-02-01T00:00:00+00:00")
 
     def _gh(repo, endpoint, **kw):
@@ -682,9 +752,7 @@ def test_gh_api_backoff_retries_then_succeeds(monkeypatch):
     assert len(slept) == 2
 
 
-# ---------------------------------------------------------------------------
 # _resolve_repo_for_row
-# ---------------------------------------------------------------------------
 
 
 def test_resolve_repo_for_row_prefers_source_path(tmp_path: Path):
@@ -763,9 +831,7 @@ def test_resolve_repo_for_row_fetch_failure_returns_cached_path(tmp_path: Path, 
     assert result == cached_repo
 
 
-# ---------------------------------------------------------------------------
 # pr_attached_label_coverage
-# ---------------------------------------------------------------------------
 
 
 def _make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
@@ -806,35 +872,106 @@ def test_pr_coverage_helper_counts_decisive(tmp_path: Path):
     assert cov["pr_attached"] == 3 and cov["decisive"] == 2  # accepted+rejected, not unknown
 
 
-async def test_harvest_meets_80pct_coverage_on_mixed_archive(tmp_path, archive_dir, monkeypatch):
-    # Seed 10 PR-attached runs with distinct pr_number 1..10, each with its own
-    # bronze run dir so the index carries ten rows. A fake _gh_api branches on the
-    # PR number embedded in the endpoint: PRs 1..8 report merged (decisive ->
-    # "accepted"); PRs 9..10 raise a plain GitError so build_annotation fails and
-    # the harvest's per-row isolation skips them WITHOUT aborting (a RateLimitError
-    # would abort the whole sweep — see test_harvest_aborts_cleanly_on_rate_limit).
-    # The two skipped rows leave no label observation, so they project to
-    # unlabeled/non-decisive, making 80% a real bar rather than trivially 100%.
-    for pr_number in range(1, 11):
-        sid = f"s{pr_number}"
-        run_dir = _seed_deep_bronze(tmp_path / sid, verdict="consistent", grounding=1.0)
-        upsert_run(
-            archive_dir,
-            Manifest(
-                session_id=sid,
-                archived_at="2026-01-01T00:00:00Z",
-                run_flow="normal",
-                backend="claude",
-                repo_slug="org/repo",
-                pr_repo="org/repo",
-                pr_number=pr_number,
-                head_sha="abc",
-                base_branch="main",
-                grounding_rate=1.0,
-                changed_files=["app.py"],
-                archive_path=str(run_dir),
-            ),
-        )
+async def test_harvest_propagates_transient_giterror_for_retry(tmp_path, archive_dir, monkeypatch):
+    """Real-path: a transient GitError (HTTP 500) on /comments propagates, not degrades.
+
+    ``/pulls/{n}`` succeeds (merged) but the ``/comments`` fetch raises a
+    transient HTTP 500. Unlike a benign 404/422 (PR genuinely absent), a server
+    error is *recoverable*: degrading it to the local posterior and caching the
+    row "done" would permanently lose the merge evidence. Per #166 the row must
+    instead surface as a hard error and stay un-cached so a later resume retries
+    it. Drives ``run_harvest`` end-to-end and asserts the row is counted in
+    ``errors``, is NOT annotated, and is NOT marked done in the resume cache.
+    """
+    _seed_archived_deep_run(archive_dir, "s-transient-500", merged_at="2026-02-01T00:00:00+00:00")
+    cache_dir = tmp_path / "c"
+
+    def _gh_merge_ok_comments_500(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if re.search(r"/pulls/\d+$", endpoint):
+            return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
+            raise GitError("gh: Internal Server Error (HTTP 500)")
+        return {}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_merge_ok_comments_500)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir))
+
+    assert summary["errors"] == 1  # transient 500 propagated, not degraded
+    assert latest_label_observation(archive_dir, "s-transient-500") is None  # not annotated
+    # Resume contract: the failed row is NOT cached "done", so a later run retries it.
+    done = BackfillCache(cache_dir=cache_dir, inner=_gh_merge_ok_comments_500).completed_sessions()
+    assert "s-transient-500" not in done
+
+
+async def test_harvest_does_not_discard_confirmed_merge_on_benign_comment_error(
+    tmp_path, archive_dir, monkeypatch
+):
+    """Real-path: a 404 on /comments after a confirmed merge propagates, not degrades.
+
+    ``/pulls/{n}`` succeeds (merged) but the ``/comments`` fetch raises a benign
+    HTTP 404. Once the merge status is confirmed the PR provably exists, so a
+    404 on its comments sub-resource cannot mean "PR absent" — it is transient.
+    The old behavior degraded such a row to a local-branch posterior, discarding
+    the confirmed ``PRMergeSignal`` (and its ``valid_at``) and caching an
+    ``unknown`` label. The row must instead surface as a hard error and stay
+    un-cached so a later resume retries it and recovers the merge evidence.
+    """
+    _seed_archived_deep_run(archive_dir, "s-merge-comments-404", merged_at="2026-02-01T00:00:00+00:00")
+    cache_dir = tmp_path / "c"
+
+    def _gh_merge_ok_comments_404(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if re.search(r"/pulls/\d+$", endpoint):
+            return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
+        if endpoint.endswith("/comments") or endpoint.endswith("/reviews"):
+            raise GitError("gh: Not Found (HTTP 404)")
+        return {}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_merge_ok_comments_404)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir))
+
+    assert summary["errors"] == 1  # benign comment 404 propagated, merge evidence not discarded
+    assert latest_label_observation(archive_dir, "s-merge-comments-404") is None  # not annotated
+    done = BackfillCache(cache_dir=cache_dir, inner=_gh_merge_ok_comments_404).completed_sessions()
+    assert "s-merge-comments-404" not in done
+
+
+async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(tmp_path, archive_dir, monkeypatch):
+    """Real-path: a GitError on the ``/reviews`` lookup must not drop a labeled row.
+
+    ``/pulls/{n}`` resolves the PR outcome (merged → ``accepted``) and
+    ``/comments`` succeeds, but the auxiliary ``/reviews`` lookup feeding the
+    reviewer-set prior raises ``GitError``. Because the PR outcome is already
+    decided, the row must still be annotated with its resolved label (degrading
+    only the optional prior), not dropped as a hard error through the per-row
+    catch-all. Drives ``run_harvest`` end-to-end.
+    """
+    _seed_archived_deep_run(archive_dir, "s-reviews-err", merged_at="2026-02-01T00:00:00+00:00")
+
+    def _gh_reviews_fail(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/reviews"):
+            raise GitError("gh: Internal Server Error (HTTP 500)")
+        if endpoint.endswith("/comments"):
+            return []
+        return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_reviews_fail)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0  # reviewer-lookup failure degraded, row not dropped
+    obs = latest_label_observation(archive_dir, "s-reviews-err")
+    assert obs is not None  # still annotated
+    assert obs["pr_state"] == "merged"  # resolved PR outcome preserved (not degraded to local)
+    row = query_runs(archive_dir, "session_id = ?", ("s-reviews-err",))[0]
+    assert json.loads(row["outcome_labels"]) == ["accepted"]  # merged-PR label kept
+
+
+async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(tmp_path, archive_dir, monkeypatch):
+    # 10 PR rows: PRs 1..8 merged ("accepted"); PRs 9..10 raise a benign GitError
+    # (e.g. fork-PR 404). The fix DEGRADES 9..10 to the local-branch posterior
+    # instead of dropping them: errors == 0, annotated == 10. Degraded rows route
+    # through _build_rubric_local, so their pr_state is None (NOT a fabricated PR
+    # rubric) — observable proof no merged=False rubric drove their label.
+    _seed_pr_runs(archive_dir, tmp_path, 10)
 
     merged = _fake_gh_merged("2026-02-01T00:00:00+00:00")
 
@@ -842,9 +979,8 @@ async def test_harvest_meets_80pct_coverage_on_mixed_archive(tmp_path, archive_d
         match = re.search(r"/pulls/(\d+)", endpoint)
         number = int(match.group(1)) if match else 0
         if number >= 9:
-            # Non-rate-limit failure: per-row isolation skips this run (no
-            # annotation written) and the harvest loop CONTINUES rather than aborting.
-            raise GitError(f"unresolvable evidence for PR {number}")
+            # Benign PR-fetch failure: degraded to local posterior, sweep continues.
+            raise GitError(f"gh: Not Found (HTTP 404) for PR {number}")
         return merged(repo, endpoint, **kw)
 
     monkeypatch.setattr("daydream.training.harvest._gh_api", _gh)
@@ -852,7 +988,24 @@ async def test_harvest_meets_80pct_coverage_on_mixed_archive(tmp_path, archive_d
     summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
 
     assert summary["aborted"] == 0  # the GitError rows did NOT abort the sweep
-    assert summary["annotated"] == 8 and summary["errors"] == 2
+    # All 10 annotate: 8 PR-path "accepted", 2 degraded to local-branch.
+    assert summary["annotated"] == 10 and summary["errors"] == 0
+
+    # 8 PR-path rows: decisive "accepted", merged pr_state; 2 degraded rows:
+    # pr_state None (local rubric) — proof they took the local path.
+    accepted_pr_state = latest_label_observation(archive_dir, "s1")["pr_state"]
+    assert accepted_pr_state == "merged"
+    assert json.loads(query_runs(archive_dir, "session_id = ?", ("s1",))[0]["outcome_labels"]) == ["accepted"]
+    for sid in ("s9", "s10"):
+        degraded = latest_label_observation(archive_dir, sid)
+        assert degraded is not None  # annotated, not dropped
+        assert degraded["pr_state"] is None  # local-branch rubric, not a PR rubric
+        # No resolvable clone -> "unknown", NOT the false-negative "rejected" #166 eliminates.
+        assert json.loads(query_runs(archive_dir, "session_id = ?", (sid,))[0]["outcome_labels"]) == []
+
+    # Coverage stays honest at 8/10: 8 merged decisive, 2 degraded "unknown"
+    # non-decisive — the 80% bar holds without a bogus "rejected".
     cov = pr_attached_label_coverage(archive_dir)
-    assert cov["pr_attached"] == 10
-    assert cov["coverage"] >= 0.8
+    assert cov["pr_attached"] == 10  # every row stays PR-attached and annotated
+    assert cov["decisive"] == 8  # only the 8 merged rows are decisive; "unknown" is not
+    assert cov["coverage"] == 0.8

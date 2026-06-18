@@ -135,7 +135,6 @@ class _PRFeedbackStubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # Default: no-op.
         yield TextEvent(text="")
         yield ResultEvent(structured_output=None, continuation=None)
 
@@ -148,8 +147,7 @@ class _PRFeedbackStubBackend:
         pass
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        # Mirror ClaudeBackend: append args when present so the dispatch (and
-        # the test) can read --pr / --bot out of the prompt the agent receives.
+        # Mirror ClaudeBackend: append args so the test can read --pr/--bot from the prompt.
         result = f"/{skill_key}"
         if args:
             result = f"{result} {args}"

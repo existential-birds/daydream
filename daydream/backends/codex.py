@@ -49,11 +49,9 @@ def _unwrap_shell_command(command: str) -> str:
     if not m:
         return command
     inner = m.group(1)
-    # Strip surrounding quotes if present
     if (inner.startswith('"') and inner.endswith('"')) or (inner.startswith("'") and inner.endswith("'")):
         inner = inner[1:-1]
-    # Strip leading "cd /some/path &&" if present
-    inner = _CD_PREFIX_RE.sub("", inner)
+    inner = _CD_PREFIX_RE.sub("", inner)  # Strip leading "cd /some/path &&".
     return inner.strip()
 
 
@@ -112,10 +110,8 @@ class CodexBackend:
                 "Codex backend does not support exploration subagents; use --backend claude for exploration."
             )
 
-        # Enforced read-only profile (failure summarizer): the read-only sandbox
-        # blocks all working-tree/index/ref mutation while permitting read-only
-        # git inspection. Accepted residual (Task 0 spike): it does not block
-        # `git commit`; the working tree — the incident's danger — is protected.
+        # Read-only sandbox blocks working-tree/index/ref mutation but (accepted
+        # residual, Task 0 spike) not `git commit`; the working tree is protected.
         sandbox_mode = "read-only" if read_only else "danger-full-access"
         args = [
             "codex",
@@ -141,22 +137,11 @@ class CodexBackend:
         last_agent_text: str | None = None
         structured_result: Any = None
 
-        # Event correlation state
-        # ─────────────────────────────────────────────────────────────────────
-        # Codex JSONL events arrive as item.started → item.updated* → item.completed
-        # sequences. Two challenges require explicit correlation tracking:
-        #
-        # 1. Missing IDs: Some item.started events lack an `id` field, but the
-        #    corresponding item.completed must emit a ToolResultEvent with the
-        #    same ID as the ToolStartEvent. We generate a UUID at item.started
-        #    and store it keyed by item type + unique content (e.g., command text).
-        #    On item.completed, we look up and pop that ID to maintain pairing.
-        #
-        # 2. Incremental text: For agent_message and reasoning items, text may
-        #    arrive incrementally via item.updated events (each containing a delta),
-        #    while item.completed may have empty text. We accumulate deltas by
-        #    item ID during updates, then join them on completion if needed.
-        # ─────────────────────────────────────────────────────────────────────
+        # Event correlation state. Codex events arrive item.started → updated* →
+        # completed. (1) Some item.started lack an `id`, so we synthesize a UUID
+        # keyed by type+content and pop it on completion to pair start/result.
+        # (2) agent_message/reasoning text may stream as item.updated deltas with
+        # an empty item.completed, so we accumulate deltas by id and join them.
         pending_item_ids: dict[str, str] = {}  # "type:content" → generated UUID
         updated_text: dict[str, list[str]] = {}  # item_id → [text deltas]
 
@@ -173,12 +158,10 @@ class CodexBackend:
             self._processes.append(proc)
             self._process = proc
 
-            # Write prompt to stdin and close immediately
             if proc.stdin:
                 proc.stdin.write(prompt.encode())
                 proc.stdin.close()
 
-            # Read JSONL events line by line
             while True:
                 if proc.stdout is None:
                     break
@@ -241,7 +224,7 @@ class CodexBackend:
 
                     if item_type == "agent_message":
                         text = self._extract_text(item)
-                        # Fall back to text accumulated from item.updated deltas
+                        # Fall back to text accumulated from item.updated deltas.
                         if not text:
                             item_id = item.get("id", "")
                             parts = updated_text.pop(item_id, [])
@@ -249,8 +232,7 @@ class CodexBackend:
                         if text:
                             last_agent_text = text
                             yield TextEvent(text=text)
-                            # Codex has no per-message id surface — message_id
-                            # stays empty (D-04 correlator unused for Codex).
+                            # Codex has no per-message id; message_id stays empty (D-04).
                             yield TurnEndEvent(message_id="")
 
                     elif item_type == "reasoning":
@@ -287,7 +269,7 @@ class CodexBackend:
                             )
 
                     elif item_type == "file_change":
-                        # file_change has no item.started — emit synthetic pair
+                        # file_change has no item.started — emit a synthetic pair.
                         item_id = item.get("id", str(uuid.uuid4()))
                         file_path = item.get("file_path", "unknown")
                         action = item.get("action", "modified")
@@ -321,21 +303,11 @@ class CodexBackend:
 
                 elif event_type == "turn.completed":
                     usage = event.get("usage", {})
-                    # Phase 2 (EVNT-07): emit MetricsEvent for the turn. Codex
-                    # has no per-message id surface so the message id is the
-                    # empty string. Codex does not report cost_usd — D-16 says
-                    # leave it as None and DO NOT synthesize cost from a
-                    # token-price table (Pitfall 6, ATIF Metrics fields all
-                    # optional). Codex DOES emit cached_input_tokens on
-                    # turn.completed.usage (codex-rs/protocol/src/protocol.rs
-                    # TokenUsage.cached_input_tokens) — surface it so cache-hit
-                    # ratios work for the Codex backend (refs #65, K4).
-                    # EVNT-02 field names: MetricsEvent uses prompt_tokens /
-                    # completion_tokens (ATIF/Metrics-side names). Codex's SDK
-                    # boundary keys are input_tokens / output_tokens; rename
-                    # here. Skip emission when either is missing — EVNT-02 types
-                    # both as int (required, not Optional). CostEvent below
-                    # carries the partial-data signal.
+                    # EVNT-07: MetricsEvent per turn (empty message_id — Codex has no
+                    # per-message id). cost_usd stays None — DO NOT synthesize from a
+                    # token-price table (D-16). cached_input_tokens IS surfaced (#65, K4).
+                    # Rename input/output_tokens → prompt/completion; skip if either
+                    # missing (EVNT-02 requires both). CostEvent below carries partials.
                     cached_tokens = usage.get("cached_input_tokens")
                     if usage.get("input_tokens") is not None and usage.get("output_tokens") is not None:
                         yield MetricsEvent(
@@ -354,14 +326,13 @@ class CodexBackend:
                         model_name=self.model,
                     )
 
-                    # Parse structured output from last agent message if schema was provided
                     if output_schema and last_agent_text:
                         try:
                             structured_result = json.loads(last_agent_text)
                         except json.JSONDecodeError:
                             pass
 
-                    # Fallback: check for result/output field directly on turn.completed
+                    # Fallback: result/output field directly on turn.completed.
                     if output_schema and structured_result is None:
                         for key in ("result", "output"):
                             raw = event.get(key)
@@ -438,7 +409,6 @@ class CodexBackend:
             Formatted skill invocation string.
 
         """
-        # Strip namespace prefix: "beagle-python:review-python" → "review-python"
         if ":" in skill_key:
             skill_name = skill_key.split(":")[-1]
         else:
@@ -456,11 +426,11 @@ class CodexBackend:
         Codex items may carry text either as a top-level ``text`` field
         or inside ``content`` blocks (with type ``text`` or ``output_text``).
         """
-        # Top-level text field (real Codex CLI format)
+        # Top-level text field (real Codex CLI format).
         top = item.get("text")
         if isinstance(top, str) and top:
             return top
-        # Content-block format (legacy / alternative)
+        # Content-block format (legacy / alternative).
         content = item.get("content", [])
         parts = []
         for block in content:

@@ -107,7 +107,6 @@ async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
 
     parent_traj = _read_trajectory(recorder.path)
 
-    # Dispatch step has 2 refs
     dispatch_steps = [
         s for s in parent_traj["steps"]
         if s["source"] == "agent" and "Dispatching" in s.get("message", "")
@@ -121,7 +120,6 @@ async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
 
     assert atif_validate(parent_traj) is True
 
-    # Both children valid and inherit run_flow "deep"
     for child in children:
         child_traj = _read_trajectory(child.path)
         assert atif_validate(child_traj) is True
@@ -152,7 +150,6 @@ async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> N
     parent_traj = _read_trajectory(recorder.path)
     assert atif_validate(parent_traj) is True
 
-    # Dispatch step has 3 refs
     dispatch_steps = [
         s for s in parent_traj["steps"]
         if s["source"] == "agent" and "Dispatching" in s.get("message", "")
@@ -171,7 +168,6 @@ async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> N
                 descriptors_found.add(desc)
     assert descriptors_found == set(descriptors)
 
-    # All 3 children pass validation and inherit the parent's session_id.
     for child in children:
         child_traj = _read_trajectory(child.path)
         assert atif_validate(child_traj) is True
@@ -189,11 +185,9 @@ async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> N
     children: list[TrajectoryRecorder] = []
 
     async with recorder:
-        # Parent gets a step first
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             _observe_text_and_result(inv, "parent-step-1")
 
-        # Fork 2 children, each producing 3 steps
         for desc in ("child-a", "child-b"):
             async with recorder.fork(desc) as child:
                 children.append(child)
@@ -207,7 +201,6 @@ async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> N
     parent_step_ids = [s["step_id"] for s in parent_traj["steps"]]
     assert parent_step_ids == list(range(1, len(parent_step_ids) + 1))
 
-    # Each child has step_ids starting at 1
     all_child_ids: list[list[int]] = []
     for child in children:
         child_traj = _read_trajectory(child.path)
@@ -216,8 +209,7 @@ async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> N
         assert child_ids == list(range(1, len(child_ids) + 1))
         all_child_ids.append(child_ids)
 
-    # Both children independently number from 1 (they overlap, which is correct
-    # since they're in separate files)
+    # Both children independently number from 1 (overlap is correct: separate files).
     assert all_child_ids[0][0] == 1
     assert all_child_ids[1][0] == 1
 
@@ -227,7 +219,6 @@ async def test_parent_final_metrics_excludes_sibling_steps(tmp_path: Path) -> No
     recorder = _make_recorder(tmp_path)
 
     async with recorder:
-        # Parent invocation with known metrics
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="parent-text"))
             inv.observe(MetricsEvent(
@@ -239,7 +230,6 @@ async def test_parent_final_metrics_excludes_sibling_steps(tmp_path: Path) -> No
             ))
             inv.observe(ResultEvent(structured_output=None, continuation=None))
 
-        # Child with much larger metrics
         async with recorder.fork("fix-0") as child:
             async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                 inv.observe(TextEvent(text="child-text"))
@@ -274,14 +264,11 @@ async def test_continuation_appends_to_same_trajectory_no_sibling(tmp_path: Path
     assert recorder.path.exists()
     traj = _read_trajectory(recorder.path)
 
-    # No sibling files
     traj_dir = tmp_path / ".daydream" / "trajectories"
     assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
 
-    # All steps in one file with sequential step_ids
     step_ids = [s["step_id"] for s in traj["steps"]]
     assert step_ids == list(range(1, len(step_ids) + 1))
 
-    # 2 invocations each producing 1 agent step = 2 steps
-    # (user steps only appear when run_agent calls observe_user_step)
+    # 2 invocations × 1 agent step = 2 (user steps only via run_agent's observe_user_step).
     assert len(step_ids) == 2

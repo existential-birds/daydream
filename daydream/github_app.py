@@ -159,10 +159,9 @@ def mint_installation_token(repo_dir: Path, app_id: int, private_key: str, owner
             ``token`` field.
     """
     jwt_token = mint_jwt(app_id, private_key)
-    # GitHub only accepts App JWTs with the Bearer scheme, but gh sends the
-    # token scheme for GH_TOKEN. The explicit Bearer header does the real
-    # authentication; GH_TOKEN is still set so gh runs without ambient auth
-    # (CI) and never falls back to a different identity.
+    # GitHub only accepts App JWTs as Bearer (gh sends GH_TOKEN as token scheme),
+    # so the explicit Bearer header authenticates; GH_TOKEN is set only so gh
+    # runs without ambient auth in CI rather than falling back to another identity.
     bearer = {"Authorization": f"Bearer {jwt_token}"}
     with _scoped_gh_token(jwt_token):
         installation_id, identity = _find_installation(repo_dir, owner, repo, bearer)

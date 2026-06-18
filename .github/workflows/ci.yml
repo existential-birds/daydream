@@ -40,4 +40,4 @@ jobs:
         run: docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7 -color .github/workflows/*.yml daydream/templates/workflows/*.yml
 
       - name: Run tests
-        run: uv run pytest -v
+        run: uv run pytest -n auto

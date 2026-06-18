@@ -16,7 +16,9 @@ GitHub App identity — no maintainer server, no third-party service.
 1. **Register a GitHub App** (or reuse the one from your daydream App setup)
    and install it on the target repository. The App must request these
    repository permissions:
-   - **Pull requests: read & write** — posting and minimizing review comments
+   - **Pull requests: read & write** — posting and minimizing review comments,
+     and the command workflow's 👀 acknowledgement reaction (signed by the App
+     token so it shows as the bot, not `github-actions[bot]`)
    - **Contents: read** — required by the posting token's least-privilege trio
    - **Metadata: read** — implicit baseline
    - **Actions: read & write** — the command workflow mints a dispatch token
@@ -61,8 +63,11 @@ No single job ever holds both PR code and the App private key:
   as its only secret, no App material anywhere. Its output is a passive data
   artifact (`findings.json`), never code.
 - **Daydream Command** never checks out code, so it may hold App credentials:
-  it mints a short-lived App token with exactly `actions: write` to dispatch
-  the review (see Install step 1).
+  it mints a short-lived App token with `actions: write` (to dispatch the
+  review — see Install step 1) plus `pull-requests: write` (to post the 👀
+  reaction as the bot identity, not `github-actions[bot]`). Both writes flow
+  through the App token, so the job's default GITHUB_TOKEN is unprivileged
+  (`permissions: {}`).
 - **Phase B (Daydream Post)** holds the App key but only ever checks out the
   base repo's default branch (trusted code). It mints a token with exactly
   `pull-requests: write, contents: read, metadata: read`, downloads the

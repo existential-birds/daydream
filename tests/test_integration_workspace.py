@@ -220,10 +220,8 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     assert str(worktree_path_at_dispatch["repo"]).startswith(
         str(repo_with_origin / ".daydream" / "worktrees")
     )
-    # Cleanup: the worktree directory is removed (or empty) after exit.
+    # Cleanup: the worktree directory is removed after exit.
     if worktree_path_at_dispatch["repo"].exists():
-        # Some platforms leave the empty parent dir behind — that's fine, just
-        # confirm the worktree itself is gone.
         pytest.fail(
             f"ephemeral worktree {worktree_path_at_dispatch['repo']} not removed"
         )

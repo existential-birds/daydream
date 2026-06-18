@@ -25,10 +25,7 @@ if TYPE_CHECKING:
     from daydream.exploration import FileInfo
 
 
-# ---------------------------------------------------------------------------
 # JSON Schemas (mirror style of FEEDBACK_SCHEMA in daydream/phases.py)
-# ---------------------------------------------------------------------------
-
 PATTERN_SCANNER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -120,10 +117,7 @@ def _schema_block(schema: dict[str, Any]) -> str:
     return "Return ONLY a JSON object matching this schema:\n```json\n" + json.dumps(schema, indent=2) + "\n```"
 
 
-# ---------------------------------------------------------------------------
 # System prompts (static role description used by AgentDefinition.prompt)
-# ---------------------------------------------------------------------------
-
 PATTERN_SCANNER_SYSTEM_PROMPT = """You are the **pattern-scanner** specialist. Your job is to detect the
 conventions and house style of a codebase so the review agent does not
 recommend changes that contradict existing patterns.
@@ -157,11 +151,7 @@ Emit a FileInfo entry with role="test" for each test file you find.
 """ + _schema_block(TEST_MAPPER_SCHEMA)
 
 
-# ---------------------------------------------------------------------------
 # Dynamic prompt builders (per-run prompts injecting diff + affected files)
-# ---------------------------------------------------------------------------
-
-
 def build_pattern_scanner_prompt(affected_files: list[str], diff_ref: str) -> str:
     """Build the per-run pattern-scanner prompt.
 
@@ -270,10 +260,7 @@ work file-by-file so your context stays small.
 """
 
 
-# ---------------------------------------------------------------------------
 # AgentDefinition registry consumed by the orchestrator (Plan 04)
-# ---------------------------------------------------------------------------
-
 EXPLORATION_AGENTS: dict[str, AgentDefinition] = {
     "pattern-scanner": AgentDefinition(
         description="Detects codebase conventions and reads guideline files (CLAUDE.md, ruff.toml, etc).",

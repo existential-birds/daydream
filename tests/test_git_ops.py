@@ -783,10 +783,8 @@ def test_diff_paths_raises_on_invalid_ref(tmp_path: Path) -> None:
 
 
 # --- gh_api(input_data=...) and gh_pr_view(pr=None) -------------------------
-#
-# These tests exercise wrapper logic, not gh itself: they monkeypatch the
-# subprocess call to capture argv shape and to drive success/failure paths
-# deterministically. Real gh would require network and GitHub auth.
+# These tests exercise wrapper logic, not gh itself: subprocess is monkeypatched
+# to capture argv and drive success/failure paths deterministically.
 
 
 def test_gh_api_input_data_passes_tempfile_and_cleans_up(
@@ -797,10 +795,9 @@ def test_gh_api_input_data_passes_tempfile_and_cleans_up(
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured["cmd"] = cmd
-        # The --input arg is the path right after `--input` in the argv.
         idx = cmd.index("--input")
         captured["input_path"] = cmd[idx + 1]
-        # Confirm the tempfile exists at call time and contains our payload.
+        # Confirm the tempfile exists at call time and holds our payload.
         captured["payload"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(
             args=cmd, returncode=0, stdout='{"ok": true}', stderr=""

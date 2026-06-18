@@ -1344,7 +1344,6 @@ async def phase_review(
     skill_invocation = backend.format_skill_invocation(skill)
 
     if diff_base:
-        # Incremental review: only review changes since the last iteration commit
         diff_instruction = (
             f"\nReview ONLY the changes since commit {diff_base}. "
             f"Use `git diff {diff_base}...HEAD` to get the diff.\n"
@@ -1742,12 +1741,9 @@ async def phase_test_and_heal(
             )
         else:
             prompt = "Run the project's test suite. Report if tests pass or fail."
-        # USE-ONCE RESET: test_command_override is consumed by the prompt
-        # construction above (lines ~1314-1324) and must be cleared before
-        # run_agent executes so the *next* loop iteration falls back to the
-        # default test-suite prompt.  This reset MUST stay between prompt
-        # construction and the bottom-of-loop branches that may re-assign
-        # test_command_override (choice "1" → setup investigator, line ~1367).
+        # Use-once: clear after consuming above so the next iteration falls back
+        # to the default prompt. Must stay before the bottom-of-loop branches that
+        # may re-assign test_command_override (choice "1" → setup investigator).
         test_command_override = None
 
         output, continuation = await run_agent(
@@ -1815,12 +1811,8 @@ async def phase_test_and_heal(
                 print_info(console, f"Setup investigator verdict: {v} — {reason}")
 
                 if v == "replace" and isinstance(suggested, str) and suggested.strip():
-                    # Show the sanitized command the user would actually run
-                    # *before* asking them to approve it. Sanitization (same
-                    # transform used for the retry prompt) collapses
-                    # whitespace and strips backticks so the preview matches
-                    # what gets pinned and any fence-break attempts are
-                    # visible.
+                    # Show the sanitized command (same transform as the retry prompt)
+                    # before asking approval, so the preview matches what gets pinned.
                     sanitized_preview = _sanitize_suggested_command(suggested)
                     print_info(
                         console, f"Suggested command: {sanitized_preview}",
@@ -1942,11 +1934,9 @@ async def _do_commit(
 
     await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
 
-    # --- Post-commit trailer verification ---
-    # The agent may omit trailers despite being asked.  Verify and amend if
-    # missing so that daydream_commits() can always find them.
-    # Only verify when the agent actually created a new commit; otherwise we
-    # would silently amend the user's prior commit.
+    # Post-commit trailer verification: the agent may omit trailers, so amend if
+    # missing (daydream_commits() relies on them). Only when a new commit was
+    # created — otherwise we would silently amend the user's prior commit.
     try:
         sha_after = git_ops.head_sha(work.repo)
     except GitError:
@@ -2397,9 +2387,7 @@ async def phase_generate_plan(
     return plan_path, result
 
 
-# -------------------------
 # Deep-mode: per-stack fan-out
-# -------------------------
 
 
 async def phase_per_stack_reviews(

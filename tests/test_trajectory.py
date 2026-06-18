@@ -50,9 +50,7 @@ def _read_trajectory(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-# ---------------------------------------------------------------------------
 # Behavior 1: TextEvent + ResultEvent → exactly one agent Step with that text
-# ---------------------------------------------------------------------------
 
 
 async def test_text_event_then_result_produces_one_agent_step(tmp_path: Path) -> None:
@@ -70,9 +68,7 @@ async def test_text_event_then_result_produces_one_agent_step(tmp_path: Path) ->
     assert agent_steps[0]["message"] == "Hello world"
 
 
-# ---------------------------------------------------------------------------
 # Behavior 2: Two consecutive TextEvent chunks coalesce into one step (D-03)
-# ---------------------------------------------------------------------------
 
 
 async def test_text_event_chunks_coalesce_into_one_step(tmp_path: Path) -> None:
@@ -91,10 +87,8 @@ async def test_text_event_chunks_coalesce_into_one_step(tmp_path: Path) -> None:
     assert agent_steps[0]["message"] == "Hello world"
 
 
-# ---------------------------------------------------------------------------
 # Behavior 2b: ResultEvent flushes accumulated text; new text starts a new step
 # (TEST-02 gap fill: explicit flush-on-result-boundary)
-# ---------------------------------------------------------------------------
 
 
 async def test_result_event_flushes_text_and_starts_new_step(tmp_path: Path) -> None:
@@ -116,10 +110,8 @@ async def test_result_event_flushes_text_and_starts_new_step(tmp_path: Path) -> 
     assert agent_steps[1]["message"] == "second chunk"
 
 
-# ---------------------------------------------------------------------------
 # Behavior 3: ToolStart + ToolResult → tool_call & observation in SAME step
 # (CORE-06, Pitfall 3)
-# ---------------------------------------------------------------------------
 
 
 async def test_tool_call_and_result_land_on_same_step(tmp_path: Path) -> None:
@@ -141,10 +133,8 @@ async def test_tool_call_and_result_land_on_same_step(tmp_path: Path) -> None:
     assert step["observation"]["results"][0]["source_call_id"] == "tool-1"
 
 
-# ---------------------------------------------------------------------------
 # Behavior 4: User step has source="user" and NO agent-only fields
 # (Pitfall 4)
-# ---------------------------------------------------------------------------
 
 
 async def test_user_step_omits_agent_only_fields(tmp_path: Path) -> None:
@@ -169,9 +159,7 @@ async def test_user_step_omits_agent_only_fields(tmp_path: Path) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
 # Behavior 5: MetricsEvent attaches Metrics; cached_tokens is a SUBSET (D-15)
-# ---------------------------------------------------------------------------
 
 
 async def test_metrics_event_cached_tokens_is_subset_not_added(tmp_path: Path) -> None:
@@ -201,10 +189,8 @@ async def test_metrics_event_cached_tokens_is_subset_not_added(tmp_path: Path) -
     assert metrics["completion_tokens"] == 80
 
 
-# ---------------------------------------------------------------------------
 # Behavior 6: dispatch exception is caught at the recorder boundary; run continues
 # (Architecture Q7)
-# ---------------------------------------------------------------------------
 
 
 async def test_dispatch_failure_is_caught_and_run_continues(
@@ -215,10 +201,9 @@ async def test_dispatch_failure_is_caught_and_run_continues(
 
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            # First observation succeeds
             inv.observe(TextEvent(text="before-failure"))
 
-            # Force a single dispatch failure by monkeypatching _dispatch.
+            # Force a single dispatch failure on the next observe().
             original_dispatch = inv._dispatch
             call_count = {"n": 0}
 
@@ -232,11 +217,9 @@ async def test_dispatch_failure_is_caught_and_run_continues(
 
             # This call's dispatch raises; observe() must catch it.
             inv.observe(TextEvent(text="will-fail"))
-            # And the next event must dispatch normally.
             inv.observe(TextEvent(text="after-failure"))
             inv.observe(ResultEvent(structured_output=None, continuation=None))
 
-    # The run did not crash. The trajectory was written.
     traj = _read_trajectory(recorder.path)
     assert atif_validate(traj, validate_images=False) is True
     agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
@@ -247,9 +230,7 @@ async def test_dispatch_failure_is_caught_and_run_continues(
     assert "will-fail" not in agent_steps[0]["message"]
 
 
-# ---------------------------------------------------------------------------
 # Recorder-level Behavior A: clean exit writes a schema-valid JSON file
-# ---------------------------------------------------------------------------
 
 
 async def test_recorder_writes_schema_valid_trajectory_on_clean_exit(tmp_path: Path) -> None:
@@ -265,9 +246,7 @@ async def test_recorder_writes_schema_valid_trajectory_on_clean_exit(tmp_path: P
     assert atif_validate(recorder.path, validate_images=False) is True
 
 
-# ---------------------------------------------------------------------------
 # Recorder-level Behavior B: sequential step_id across two invocations (Pitfall 1)
-# ---------------------------------------------------------------------------
 
 
 async def test_step_ids_sequential_across_two_invocations(tmp_path: Path) -> None:
@@ -288,10 +267,8 @@ async def test_step_ids_sequential_across_two_invocations(tmp_path: Path) -> Non
     assert len(step_ids) == 2
 
 
-# ---------------------------------------------------------------------------
 # Recorder-level Behavior C: write failure on __aexit__ degrades with warning
 # (D-11)
-# ---------------------------------------------------------------------------
 
 
 async def test_write_failure_degrades_with_warning(
@@ -319,9 +296,7 @@ async def test_write_failure_degrades_with_warning(
     assert any("Trajectory write failed" in m for m in warnings_emitted)
 
 
-# ---------------------------------------------------------------------------
 # Recorder-level Behavior D: FinalMetrics totals are sum of per-step Metrics
-# ---------------------------------------------------------------------------
 
 
 async def test_final_metrics_totals_match_per_step_sum(tmp_path: Path) -> None:
@@ -352,9 +327,7 @@ async def test_final_metrics_totals_match_per_step_sum(tmp_path: Path) -> None:
     assert fm["total_steps"] == len(traj["steps"])
 
 
-# ---------------------------------------------------------------------------
 # Recorder-level Behavior E: ContextVar is set inside, cleared after
-# ---------------------------------------------------------------------------
 
 
 async def test_context_var_set_inside_and_cleared_after(tmp_path: Path) -> None:
@@ -369,9 +342,7 @@ async def test_context_var_set_inside_and_cleared_after(tmp_path: Path) -> None:
     assert get_current_recorder() is None
 
 
-# ---------------------------------------------------------------------------
 # Recorder-level Behavior F (CORE-08): Trajectory.agent identity baked in
-# ---------------------------------------------------------------------------
 
 
 async def test_trajectory_agent_identity_is_daydream(tmp_path: Path) -> None:
@@ -395,9 +366,7 @@ async def test_trajectory_agent_identity_is_daydream(tmp_path: Path) -> None:
     assert traj["agent"]["model_name"] == "opus"
 
 
-# ---------------------------------------------------------------------------
 # Bonus: schema_version + session_id present and well-formed
-# ---------------------------------------------------------------------------
 
 
 async def test_schema_version_and_session_id_present(tmp_path: Path) -> None:
@@ -414,9 +383,7 @@ async def test_schema_version_and_session_id_present(tmp_path: Path) -> None:
     assert len(traj["session_id"]) > 0
 
 
-# ---------------------------------------------------------------------------
 # Sanity: now_iso, Redactor, Invocation public surface
-# ---------------------------------------------------------------------------
 
 
 def test_now_iso_ends_with_z() -> None:
@@ -473,9 +440,7 @@ def test_invocation_has_no_parent_field() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # No-recorder no-op (CORE-09)
-# ---------------------------------------------------------------------------
 
 
 def test_no_recorder_no_op_get_current_returns_none() -> None:
@@ -483,9 +448,7 @@ def test_no_recorder_no_op_get_current_returns_none() -> None:
     assert get_current_recorder() is None
 
 
-# ---------------------------------------------------------------------------
 # compute_wall_clock_seconds: derived from step timestamps, no --eval needed
-# ---------------------------------------------------------------------------
 
 
 def _append_step_at(recorder: TrajectoryRecorder, ts: str) -> None:
@@ -527,9 +490,7 @@ def test_compute_wall_clock_seconds_no_steps_is_none(tmp_path: Path) -> None:
     assert recorder.compute_wall_clock_seconds() is None
 
 
-# ===========================================================================
 # Fork / Sibling / Continuation tests (Phase 3, SUBA-01..09)
-# ===========================================================================
 
 
 def _observe_text_and_result(inv: Any, text: str = "output") -> None:
@@ -538,9 +499,7 @@ def _observe_text_and_result(inv: Any, text: str = "output") -> None:
     inv.observe(ResultEvent(structured_output=None, continuation=None))
 
 
-# ---------------------------------------------------------------------------
 # SUBA-07: ContextVar isolation inside fork
-# ---------------------------------------------------------------------------
 
 
 async def test_fork_contextvar_isolation(tmp_path: Path) -> None:
@@ -556,9 +515,7 @@ async def test_fork_contextvar_isolation(tmp_path: Path) -> None:
         assert get_current_recorder() is recorder
 
 
-# ---------------------------------------------------------------------------
 # SUBA-06: Sibling inherits session_id
-# ---------------------------------------------------------------------------
 
 
 async def test_sibling_inherits_session_id(tmp_path: Path) -> None:
@@ -579,9 +536,7 @@ async def test_sibling_inherits_session_id(tmp_path: Path) -> None:
     assert parent_traj["session_id"] == recorder.session_id
 
 
-# ---------------------------------------------------------------------------
 # SUBA-06: Sibling file path format
-# ---------------------------------------------------------------------------
 
 
 async def test_sibling_file_path_format(tmp_path: Path) -> None:
@@ -604,9 +559,7 @@ async def test_sibling_file_path_format(tmp_path: Path) -> None:
     assert expected.exists()
 
 
-# ---------------------------------------------------------------------------
 # SUBA-08: Step ID isolation across siblings
-# ---------------------------------------------------------------------------
 
 
 async def test_step_id_isolation_across_siblings(tmp_path: Path) -> None:
@@ -631,9 +584,7 @@ async def test_step_id_isolation_across_siblings(tmp_path: Path) -> None:
     assert child_ids[0] == 1
 
 
-# ---------------------------------------------------------------------------
 # SUBA-09: Parent FinalMetrics exclude children
-# ---------------------------------------------------------------------------
 
 
 async def test_parent_metrics_exclude_children(tmp_path: Path) -> None:
@@ -664,9 +615,7 @@ async def test_parent_metrics_exclude_children(tmp_path: Path) -> None:
     assert child_traj["final_metrics"]["total_prompt_tokens"] == 200
 
 
-# ---------------------------------------------------------------------------
 # SUBA-02: Dispatch step has subagent_trajectory_ref
-# ---------------------------------------------------------------------------
 
 
 async def test_dispatch_step_has_subagent_trajectory_ref(tmp_path: Path) -> None:
@@ -693,9 +642,7 @@ async def test_dispatch_step_has_subagent_trajectory_ref(tmp_path: Path) -> None
     assert ref["session_id"] == recorder.session_id
 
 
-# ---------------------------------------------------------------------------
 # Dispatch step uses relative path (starts with "trajectories/")
-# ---------------------------------------------------------------------------
 
 
 async def test_dispatch_step_uses_relative_path(tmp_path: Path) -> None:
@@ -719,9 +666,7 @@ async def test_dispatch_step_uses_relative_path(tmp_path: Path) -> None:
     assert ref["trajectory_path"].endswith(".json")
 
 
-# ---------------------------------------------------------------------------
 # Dispatch step no-op when no siblings
-# ---------------------------------------------------------------------------
 
 
 async def test_dispatch_step_noop_when_no_siblings(tmp_path: Path) -> None:
@@ -735,9 +680,7 @@ async def test_dispatch_step_noop_when_no_siblings(tmp_path: Path) -> None:
         assert len(recorder.steps) == steps_before
 
 
-# ---------------------------------------------------------------------------
 # _safe_descriptor slugification
-# ---------------------------------------------------------------------------
 
 
 def test_safe_descriptor_slugification() -> None:
@@ -761,9 +704,7 @@ def test_safe_descriptor_rejects_degenerate_inputs() -> None:
         _safe_descriptor("   ")
 
 
-# ---------------------------------------------------------------------------
 # SUBA-01: Sequential phases produce single file
-# ---------------------------------------------------------------------------
 
 
 async def test_sequential_phases_single_file(tmp_path: Path) -> None:
@@ -785,9 +726,7 @@ async def test_sequential_phases_single_file(tmp_path: Path) -> None:
     assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
 
 
-# ---------------------------------------------------------------------------
 # SUBA-05: Continuation appends no sibling
-# ---------------------------------------------------------------------------
 
 
 async def test_continuation_appends_no_sibling(tmp_path: Path) -> None:
@@ -808,9 +747,7 @@ async def test_continuation_appends_no_sibling(tmp_path: Path) -> None:
     assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
 
 
-# ---------------------------------------------------------------------------
 # Fork write failure degrades gracefully
-# ---------------------------------------------------------------------------
 
 
 async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
@@ -837,9 +774,7 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
     assert recorder.path.exists()
 
 
-# ---------------------------------------------------------------------------
 # Pitfall 6: Fork child with no steps produces no file
-# ---------------------------------------------------------------------------
 
 
 async def test_fork_child_no_steps_no_file(tmp_path: Path) -> None:
@@ -856,9 +791,7 @@ async def test_fork_child_no_steps_no_file(tmp_path: Path) -> None:
     assert len(recorder._registered_siblings) == 0
 
 
-# ---------------------------------------------------------------------------
 # Multiple forks all registered
-# ---------------------------------------------------------------------------
 
 
 async def test_multiple_forks_all_registered(tmp_path: Path) -> None:
@@ -887,9 +820,7 @@ async def test_multiple_forks_all_registered(tmp_path: Path) -> None:
         assert len(r["subagent_trajectory_ref"]) == 1
 
 
-# ---------------------------------------------------------------------------
 # Fork validator accepts both parent and child
-# ---------------------------------------------------------------------------
 
 
 async def test_fork_validator_accepts_both(tmp_path: Path) -> None:
@@ -910,9 +841,7 @@ async def test_fork_validator_accepts_both(tmp_path: Path) -> None:
     assert atif_validate(child_traj, validate_images=False) is True
 
 
-# ===========================================================================
 # write_partial tests (CLI-03, D-07 SIGINT partial flush)
-# ===========================================================================
 
 
 async def test_write_partial_writes_partial_file_with_partial_flag(tmp_path: Path) -> None:
@@ -987,9 +916,7 @@ async def test_write_partial_failure_emits_warning_does_not_raise(
     assert any("Partial trajectory write failed" in m for m in warnings_emitted)
 
 
-# ---------------------------------------------------------------------------
 # Regression: WR-01 — write_partial must capture Invocation in-flight steps
-# ---------------------------------------------------------------------------
 
 
 async def test_write_partial_captures_in_flight_invocation_steps(tmp_path: Path) -> None:
@@ -1018,7 +945,6 @@ async def test_write_partial_captures_in_flight_invocation_steps(tmp_path: Path)
 
     data = json.loads(partial_path.read_text(encoding="utf-8"))
     assert data.get("extra", {}).get("partial") is True
-    # Steps from the in-flight invocation must be included
     assert len(data["steps"]) >= 2, (
         f"Partial trajectory missing in-flight steps: {data['steps']!r}"
     )
@@ -1056,9 +982,7 @@ async def test_write_partial_no_double_count_after_invocation_exit(tmp_path: Pat
     )
 
 
-# ---------------------------------------------------------------------------
 # Regression: WR-02 — get_signal_recorder reads module-level stack, not ContextVar
-# ---------------------------------------------------------------------------
 
 
 async def test_get_signal_recorder_returns_active_recorder(tmp_path: Path) -> None:
@@ -1098,9 +1022,7 @@ async def test_get_signal_recorder_returns_innermost_for_nested_recorders(
     assert get_signal_recorder() is None
 
 
-# ---------------------------------------------------------------------------
 # Regression: forked child recorders must be visible to signal handler
-# ---------------------------------------------------------------------------
 
 
 async def test_forked_child_visible_to_signal_handler(tmp_path: Path) -> None:

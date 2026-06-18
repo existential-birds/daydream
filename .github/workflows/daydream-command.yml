@@ -5,20 +5,23 @@
 # hold App credentials without violating the locked privilege split (no job
 # ever holds both PR code and the App key).
 #
-# Why the App token for the dispatch (Task 0 spike, Step 1): a run dispatched
-# with GITHUB_TOKEN completes without ever firing the downstream
-# `workflow_run` trigger, so daydream-post.yml would never run on the
-# `@<bot> review` path. The dispatch is therefore made with a short-lived App
-# installation token minted with exactly `actions: write` — the token reaches
-# `gh` via `env:` only and never appears in a `run:` body or log.
+# Why the App token (Task 0 spike, Step 1): a run dispatched with GITHUB_TOKEN
+# completes without ever firing the downstream `workflow_run` trigger, so
+# daydream-post.yml would never run on the `@<bot> review` path. The dispatch is
+# therefore made with a short-lived App installation token. The SAME token also
+# posts the 👀 reaction, so the acknowledgement is attributed to the bot
+# identity (`<bot>[bot]`) rather than the generic `github-actions[bot]`.
 #
-# GITHUB_TOKEN permissions (Task 0 spike, Step 4): the 👀 reaction on a PR
-# comment needs `pull-requests: write` (`issues: write` is neither sufficient
-# nor necessary, even though the endpoint lives under /issues/).
+# The token is minted with exactly `actions: write` (for the dispatch) plus
+# `pull-requests: write` (for the reaction — Task 0 spike Step 4: `issues: write`
+# is neither sufficient nor necessary even though the endpoint lives under
+# /issues/). It reaches `gh` via `env:` only and never appears in a `run:` body
+# or log. This job declares `permissions: {}` because the default GITHUB_TOKEN
+# is no longer used for anything — both writes flow through the App token.
 #
 # Setup: repo variable DAYDREAM_BOT_HANDLE (the mention handle, no `@`),
-# secrets DAYDREAM_APP_ID / DAYDREAM_APP_PRIVATE_KEY; the App must request
-# the `actions: write` repository permission.
+# secrets DAYDREAM_APP_ID / DAYDREAM_APP_PRIVATE_KEY; the App must request the
+# `actions: write` and `pull_requests: write` repository permissions.
 
 name: Daydream Command
 
@@ -26,8 +29,7 @@ on:
   issue_comment:
     types: [created]
 
-permissions:
-  pull-requests: write
+permissions: {}
 
 jobs:
   dispatch:
@@ -46,28 +48,35 @@ jobs:
           BODY: ${{ github.event.comment.body }}
           BOT_HANDLE: ${{ vars.DAYDREAM_BOT_HANDLE }}
         run: |
-          if printf '%s' "$BODY" | grep -Eq "(^|[[:space:]])@${BOT_HANDLE}[[:space:]]+review([[:space:]]|$)"; then
+          # Single-quoted sed script holds literal regex metacharacters, not shell expansions.
+          # shellcheck disable=SC2016
+          ESCAPED_HANDLE=$(printf '%s' "$BOT_HANDLE" | sed 's/[].[\*^$()+?{}|\\]/\\&/g')
+          if printf '%s' "$BODY" | grep -Eq "(^|[[:space:]])@${ESCAPED_HANDLE}[[:space:]]+review([[:space:]]|$)"; then
             echo "matched=true" >> "$GITHUB_OUTPUT"
           else
             echo "matched=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Acknowledge with eyes reaction
-        if: steps.match.outputs.matched == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          COMMENT_ID: ${{ github.event.comment.id }}
-        run: gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes
-
-      - name: Mint dispatch token
+      # Mint the App token BEFORE acknowledging, so the 👀 reaction is signed by
+      # the bot identity rather than github-actions[bot]. The same token carries
+      # the dispatch below. The token never appears in a `run:` body.
+      - name: Mint app token
         id: token
         if: steps.match.outputs.matched == 'true'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           app-id: ${{ secrets.DAYDREAM_APP_ID }}
           private-key: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
           permission-actions: write
+          permission-pull-requests: write
+
+      - name: Acknowledge with eyes reaction
+        if: steps.match.outputs.matched == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes
 
       - name: Dispatch review workflow
         if: steps.match.outputs.matched == 'true'

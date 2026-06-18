@@ -58,8 +58,7 @@ def patch_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         yield work
 
     monkeypatch.setattr("daydream.runner.open_workspace", _fake_open_workspace)
-    # Force the in-place fallback path off — every call goes through the fake
-    # context manager. Avoids ambiguity about which code path was exercised.
+    # Force the in-place fallback off so every call goes through the fake CM.
     monkeypatch.setattr("daydream.runner.git_ops.is_inside_worktree", lambda _p: True)
     return work
 
@@ -333,8 +332,7 @@ class TestResolveBackendPhaseModel:
         assert backend.model == "gpt-5.5"
 
     def test_backend_override_uses_overridden_backends_table(self):
-        # review_backend=codex (config/programmatic) while default is claude:
-        # resolver should look up the codex table for review, not the claude one.
+        # review_backend=codex while default is claude: resolver must use the codex table.
         config = RunConfig(backend="claude", review_backend="codex")
         backend = runner._resolve_backend(config, "review")
         assert backend.model == "gpt-5.5"  # codex REVIEW default (v1)
@@ -762,9 +760,8 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkey
 
     assert commit_calls == [], "a commit ran despite tests failing"
 
-    # Exactly two test-backend calls -- the failing test run and the read-only
-    # summarizer. The mutating heal fix agent (which carries _build_fix_prompt's
-    # "Analyze the failures and fix them") was never launched.
+    # Exactly two test-backend calls: the failing test run + the read-only
+    # summarizer. The mutating heal fix agent was never launched.
     assert len(test_backend.captured_prompts) == 2
     assert "read-only failure-summarizer" in test_backend.captured_prompts[1]
     assert all(
@@ -880,9 +877,8 @@ async def test_yes_shallow_failing_tests_bounded_fix_and_abort(monkeypatch, tmp_
 
     assert commit_calls == [], "a commit ran despite tests failing"
 
-    # Exactly four test-backend calls: fail → fix → fail → summarizer.
-    # The fix prompt (call 2) carries the repair instruction; the summarizer
-    # (call 4) ran read-only. No 5th call (bounded-loop guard fired).
+    # Exactly four test-backend calls: fail → fix → fail → summarizer. No 5th
+    # call (bounded-loop guard fired); call 4 ran read-only.
     assert len(test_backend.captured_prompts) == 4, test_backend.captured_prompts
     assert "Analyze the failures and fix them" in test_backend.captured_prompts[1]
     assert "read-only failure-summarizer" in test_backend.captured_prompts[3]

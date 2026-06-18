@@ -92,16 +92,13 @@ from daydream.ui import (
 )
 from daydream.workspace import WorkContext, open_workspace
 
-# Stage 4 — output mode for the consolidated CLI surface. ``loop`` runs the
-# full review→fix→test cycle, ``comment`` posts inline PR comments and exits,
-# ``review`` writes a report to terminal/markdown and exits.
+# Output mode: ``loop`` runs review→fix→test; ``comment`` posts inline PR
+# comments and exits; ``review`` writes a report and exits.
 OutputMode = Literal["loop", "comment", "review"]
 
 
-# Shallow reviews emit ``confidence`` (not ``severity``). Map it onto the
-# canonical ``severity`` axis so the shallow fix loop orders findings the same
-# way the deep pipeline does, without changing shallow reviewers or
-# ``FEEDBACK_SCHEMA``.
+# Shallow reviews emit ``confidence``; map it onto the canonical ``severity``
+# axis so the shallow fix loop orders findings like the deep pipeline.
 _CONFIDENCE_TO_SEVERITY = {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}
 
 
@@ -443,7 +440,7 @@ def _get_head_sha(cwd: Path) -> str | None:
         return None
 
 
-# --- Public entry points ----------------------------------------------------
+# Public entry points
 
 
 async def run(config: RunConfig | None = None) -> int:
@@ -467,11 +464,8 @@ async def run(config: RunConfig | None = None) -> int:
 
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
-    # Quiet mode tweak: Codex backends need their shell output visible because
-    # those commands ARE the user-facing signal. Done before any backend is
-    # constructed so per-phase backends inherit the right setting. Resolve each
-    # phase's backend through the full precedence chain (CLI/config-file)
-    # so a codex backend selected via config still disables quiet mode.
+    # Codex backends need shell output visible (the commands ARE the signal), so
+    # disable quiet when any phase resolves to codex. Done before backend construction.
     quiet = config.quiet
     if quiet:
         codex_in_use = any(
@@ -481,20 +475,13 @@ async def run(config: RunConfig | None = None) -> int:
         if codex_in_use:
             quiet = False
     set_quiet_mode(quiet)
-    # Resolve the interactivity axis from three sources, in precedence order:
-    #   1. explicit ``--non-interactive`` flag (config.non_interactive) wins,
-    #   2. else a non-TTY stdin (piped/detached) implies unattended,
-    #   3. else a truthy ``CI`` env var implies unattended.
-    # The result feeds set_non_interactive before any phase that can prompt runs.
+    # Interactivity (--non-interactive flag, else non-TTY stdin, else CI) and the
+    # orthogonal ``assume`` axis (--yes) both feed ``resolve_gate`` at each gate.
     set_non_interactive(not _resolve_interactive(config))
-    # Interaction has a second, orthogonal axis: ``assume`` (``--yes``) supplies a
-    # forced gate answer regardless of TTY. The two feed ``resolve_gate`` at each
-    # yes/no gate. Set alongside non_interactive so every gate sees both axes.
     set_assume(config.assume)
 
-    # Resolve target directory (from config or prompt). Done outside the
-    # workspace context manager so that path-validation errors short-circuit
-    # before we incur any git work.
+    # Resolve target dir outside the workspace context so path-validation errors
+    # short-circuit before any git work.
     if config.target is not None:
         target_dir = Path(config.target).resolve()
     else:
@@ -505,12 +492,9 @@ async def run(config: RunConfig | None = None) -> int:
         print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
         return 1
 
-    # Resolve the active GitHub identity once and store it on config so every
-    # flow can read it from config.identity. Under App credentials this also
-    # mints + injects the installation token into every ``gh`` subprocess via
-    # the git_ops singleton. Every hard-abort case (partial credentials,
-    # undeterminable owner/repo while posting, minting failure) surfaces as
-    # GitHubAppError.
+    # Resolve the active GitHub identity once onto config.identity. Under App
+    # credentials this also mints + injects the installation token into every ``gh``
+    # subprocess; every hard-abort case surfaces as GitHubAppError.
     is_posting = config.bot is not None or config.output_mode in ("comment", "review")
     try:
         identity = github_app.resolve_run_identity(target_dir, config.pr_repo, is_posting=is_posting)
@@ -519,16 +503,12 @@ async def run(config: RunConfig | None = None) -> int:
         return 1
     config.identity = identity
 
-    # ``--comment`` and ``--review`` skip the test phase, so they also skip
-    # the .env copy mechanism in ephemeral mode (workspace.copy_files_into_ephemeral).
+    # ``--comment``/``--review`` skip the test phase, hence the .env copy too.
     skip_tests = config.output_mode != "loop"
 
-    # Stage 4.2: removed the silent fallback to ``make_in_place_workcontext``.
     # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
-    # ``NotAWorktreeError`` (a ``GitError``) caught below, so the user sees a
-    # loud error instead of a confusing "no diff found" downstream. The
-    # ``WrongBranchError`` check lives in ``_dispatch`` (loop modes only) and
-    # propagates up to :func:`daydream.cli.main` for the user-facing message.
+    # ``NotAWorktreeError`` (a ``GitError``) caught below — a loud error instead of
+    # a confusing "no diff found". ``WrongBranchError`` is raised in ``_dispatch``.
     try:
         async with open_workspace(
             source=target_dir,
@@ -565,7 +545,7 @@ async def run_feedback(config: RunConfig, pr: int) -> int:
     return await run(config)
 
 
-# --- Dispatch ---------------------------------------------------------------
+# Dispatch
 
 
 async def _dispatch(work: WorkContext, config: RunConfig) -> int:
@@ -593,12 +573,9 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     if config.output_mode == "review":
         return await _run_review(work, config)
 
-    # output_mode == "loop"
-    # Stage 4.2 — guard against the silent-failure case where the user runs
-    # ``daydream`` from a worktree that's checked out to the base branch with
-    # no ``--branch`` and no ``--worktree``. There's nothing to review against
-    # itself; raise loudly so cli.main() (and ``run()``'s except clause) can
-    # render the actionable message.
+    # output_mode == "loop". Guard the silent-failure case: a worktree on the
+    # base branch with no --branch/--worktree has nothing to review against
+    # itself, so raise loudly for cli.main() to render.
     if (
         config.branch is None
         and not config.force_worktree
@@ -616,12 +593,11 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
 
     if config.shallow:
         return await _run_loop_shallow(work, config)
-    # Default: deep multi-stack pipeline. Pass ``--shallow`` to opt into the
-    # single-stack flow.
+    # Default: deep multi-stack pipeline (--shallow opts into single-stack).
     return await _run_loop_deep(work, config)
 
 
-# --- Helper: PR feedback flow ----------------------------------------------
+# Helper: PR feedback flow
 
 
 async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
@@ -669,10 +645,8 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
-        # Phase 1: Fetch PR feedback
         await phase_fetch_pr_feedback(review_backend, work, pr_number, bot)
 
-        # Phase 2: Parse feedback (reused from normal flow)
         try:
             feedback_items = await phase_parse_feedback(parse_backend, work)
         except ValueError:
@@ -683,8 +657,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
             print_info(console, "No actionable feedback found in PR comments.")
             return 0
 
-        # Phase 3: Fix issues sequentially to avoid concurrent access to a
-        # single mutable backend instance.
+        # Fix sequentially to avoid concurrent access to one mutable backend.
         results: list[FixResult] = []
         total_items = len(feedback_items)
         for idx, item in enumerate(feedback_items, start=1):
@@ -694,7 +667,6 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
             except Exception as e:
                 results.append((item, False, f"{type(e).__name__}: {e}"))
 
-        # If all fixes failed, abort
         successful = [r for r in results if r[1]]
         failed = [r for r in results if not r[1]]
 
@@ -706,7 +678,6 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
             )
             return 1
 
-        # Phase 4: Commit and push (no user prompt)
         try:
             await phase_commit_push_auto(
                 review_backend, work, items=[item for item, _ok, _err in results if _ok],
@@ -715,14 +686,12 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
             print_error(console, "Commit/Push Failed", str(e))
             return 1
 
-        # Phase 5: Respond to PR comments
         try:
             await phase_respond_pr_feedback(review_backend, work, pr_number, bot, results)
         except Exception as e:
             print_warning(console, f"Failed to respond to PR comments: {e}")
             print_info(console, "Fixes were already pushed successfully.")
 
-        # Summary
         console.print()
         print_success(
             console,
@@ -733,7 +702,7 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         return 0
 
 
-# --- Helper: comment mode (--comment) --------------------------------------
+# Helper: comment mode (--comment)
 
 
 async def _run_comment(work: WorkContext, config: RunConfig) -> int:
@@ -760,7 +729,7 @@ async def _run_comment(work: WorkContext, config: RunConfig) -> int:
     return await _run_review_or_comment(work, config, post_to_pr=True)
 
 
-# --- Helper: review mode (--review) ----------------------------------------
+# Helper: review mode (--review)
 
 
 async def _run_review(work: WorkContext, config: RunConfig) -> int:
@@ -879,8 +848,7 @@ async def _run_review_or_comment(
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
-        # Pre-scan exploration: populate config.exploration_context before phase 1.
-        # Skip when already pre-populated (e.g. injected by caller or tests).
+        # Pre-scan exploration, unless already populated (injected by caller/tests).
         if config.exploration_context is None:
             tier = select_tier(count_changed_files(diff or ""))
             if tier == "skip":
@@ -904,20 +872,18 @@ async def _run_review_or_comment(
         if config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
 
-        # Phase 1: Understand intent
         intent_summary = await phase_understand_intent(
             backend, work, diff_path, log, branch,
             exploration_dir=exploration_dir,
         )
 
-        # Phase 2: Alternative review
         issues = await phase_alternative_review(
             backend, work, diff_path, intent_summary,
             exploration_dir=exploration_dir,
         )
 
-        # Phase A artifact emission (--findings-out, review mode only).
-        # Runs before the zero-issues early return.
+        # Phase A artifact emission (--findings-out, review only); before the
+        # zero-issues early return.
         if not post_to_pr and config.findings_out is not None:
             rc = _emit_findings_artifact(target_dir, config, issues)
             if rc != 0:
@@ -927,10 +893,8 @@ async def _run_review_or_comment(
             print_success(console, "No issues found — the implementation looks good!")
             return 0
 
-        # Phase 3: Generate plan.
-        # For ``--comment`` mode, ENVISION is skipped by default (extra
-        # latency for a prompt-only flow). ``--plan`` opts back in and
-        # feeds the structured plan into the PR comment prompt.
+        # Generate plan. ``--comment`` skips ENVISION by default (latency for a
+        # prompt-only flow); ``--plan`` opts back in and feeds it to the comment prompt.
         plan_data: dict[str, Any] | None = None
         skip_plan = post_to_pr and not config.plan
         try:
@@ -945,9 +909,8 @@ async def _run_review_or_comment(
             if exploration_cleanup.is_dir():
                 shutil.rmtree(exploration_cleanup)
 
-        # Optionally post findings as inline PR review comments. Only the
-        # ``--comment`` path enters this branch; ``--review`` exits with the
-        # plan written to disk.
+        # Post findings as inline PR comments (``--comment`` only; ``--review``
+        # exits with the plan on disk).
         if post_to_pr:
             from daydream.pr_review import post_review_to_pr_from_alt_issues
 
@@ -958,7 +921,7 @@ async def _run_review_or_comment(
         return 0
 
 
-# --- Helper: shallow loop (single-stack review-fix-test) -------------------
+# Helper: shallow loop (single-stack review-fix-test)
 
 
 async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
@@ -1018,10 +981,8 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             print_error(console, "Missing Review File", str(e))
             return 1
 
-    # Cleanup setting. An explicit ``--cleanup/--no-cleanup`` (config.cleanup)
-    # wins outright. Otherwise route the yes/no gate through resolve_gate:
-    # ``--yes`` enables cleanup; an unattended run keeps the review output
-    # (safe_default=False); an interactive run prompts.
+    # Explicit --cleanup/--no-cleanup wins; otherwise gate it (unattended keeps
+    # the review output, safe_default=False).
     if config.cleanup is not None:
         cleanup_enabled = config.cleanup
     else:
@@ -1033,7 +994,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             default="n",
         )
 
-    # Backends (per-phase overrides).
     backend_cache: dict[tuple[str, str | None], Backend] = {}
     review_backend = _resolve_backend(config, "review", backend_cache)
     parse_backend = _resolve_backend(config, "parse", backend_cache)
@@ -1064,9 +1024,8 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             print_skipped_phases(console, config.start_at)
         console.print()
 
-        # Pre-scan exploration: populate config.exploration_context before
-        # the first phase_review() call. Only runs when starting at "review"
-        # (later start phases skip review, so exploration would be wasted).
+        # Pre-scan exploration before the first review; only when starting at
+        # "review" (later start phases skip review, so it'd be wasted).
         if config.start_at == "review" and config.exploration_context is None:
             diff_text = _git_diff(target_dir, exclude=config.ignore_paths) or ""
             tier = select_tier(count_changed_files(diff_text))
@@ -1107,7 +1066,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 (target_dir / REVIEW_OUTPUT_FILE).unlink(missing_ok=True)
                 print_iteration_divider(console, iteration, config.max_iterations)
 
-            # Phase 1: Review
             assert skill is not None, "skill must be set when starting at review phase"
             await phase_review(
                 review_backend, work, skill, diff_base=diff_base,
@@ -1115,7 +1073,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 exclude=config.ignore_paths,
             )
 
-            # Phase 2: Parse feedback
             items = await phase_parse_feedback(parse_backend, work)
 
             if not items:
@@ -1125,7 +1082,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             # Canonicalize onto the lens/severity axes, then fix high→low.
             items = severity_sorted(to_canonical_shallow(items))
 
-            # Phase 3: Fix
             print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
             print_dim(console, f"Model: {fix_backend.model}")
             fixes_count = 0
@@ -1133,7 +1089,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 await phase_fix(fix_backend, work, item, i, len(items))
                 fixes_count += 1
 
-            # Phase 4: Test
             passed, retries = await phase_test_and_heal(test_backend, work, feedback_items=items)
 
             if not passed:
@@ -1144,18 +1099,17 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                     print_warning(console, "Failed to revert changes")
                 return items, fixes_count, retries, False, False  # should_continue=False (failed)
 
-            # Record the pre-commit SHA so the next iteration reviews
-            # the changes introduced by this iteration's commit.
+            # Record the pre-commit SHA so the next iteration reviews this
+            # iteration's changes.
             diff_base = _get_head_sha(target_dir)
 
-            # Commit iteration changes so the next review sees a clean tree
+            # Commit so the next review sees a clean tree.
             await phase_commit_iteration(fix_backend, work, iteration)
 
             return items, fixes_count, retries, True, True  # should_continue=True
 
         if config.loop:
-            # Guard: loop mode reverts uncommitted changes on failure,
-            # so refuse to start if the working tree is dirty.
+            # Loop mode reverts uncommitted changes on failure; refuse a dirty tree.
             try:
                 porcelain = git_ops.status_porcelain(target_dir)
             except GitError:
@@ -1175,7 +1129,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 exp_parent.mkdir(exist_ok=True)
                 exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
 
-            # --- Loop mode: repeat review-parse-fix-test ---
             while iteration < config.max_iterations:
                 iteration += 1
 
@@ -1211,19 +1164,16 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                         f"Reached max iterations ({config.max_iterations}), "
                         f"{len(unique_issues)} unique issues found across all iterations",
                     )
-                    # Mark as failed when max iterations reached with unresolved issues
                     tests_passed = False
 
         else:
-            # --- Single-pass mode (existing behavior) ---
-
+            # Single-pass mode.
             # Materialise exploration to disk so phase prompts can reference files.
             if config.exploration_context is not None:
                 exp_parent = target_dir / ".daydream"
                 exp_parent.mkdir(exist_ok=True)
                 exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
 
-            # Phase 1: Review
             if config.start_at == "review":
                 assert skill is not None, "skill must be set when starting at review phase"
                 try:
@@ -1236,7 +1186,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                     _print_missing_skill_error(e.skill_name)
                     return 1
 
-            # Phase 2: Parse feedback
             if config.start_at in ("review", "parse", "fix"):
                 try:
                     feedback_items = await phase_parse_feedback(parse_backend, work)
@@ -1247,7 +1196,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 # Canonicalize onto the lens/severity axes, then fix high→low.
                 feedback_items = severity_sorted(to_canonical_shallow(feedback_items))
 
-            # Phase 3: Fix
             if config.start_at in ("review", "parse", "fix"):
                 if feedback_items:
                     print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
@@ -1258,13 +1206,11 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 else:
                     print_info(console, "No feedback items found, skipping fix phase")
 
-            # Phase 4: Test
             tests_passed, test_retries = await phase_test_and_heal(
                 test_backend, work, feedback_items=feedback_items
             )
             iteration = 1
 
-        # Print summary
         print_summary(
             console,
             SummaryData(
@@ -1279,17 +1225,13 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             ),
         )
 
-        # Clean up exploration files before exit
         exploration_cleanup = target_dir / ".daydream" / "exploration"
         if exploration_cleanup.is_dir():
             shutil.rmtree(exploration_cleanup)
 
-        # Commit if tests passed. Commit/push gate across the two interaction
-        # axes. The unattended safe default is to auto-commit (safe_default=True):
-        # the interactive prompt's own default is "decline", which would silently
-        # drop a green run's commit when stdin is not a TTY. ``--yes`` also
-        # auto-commits; a forced ``--no`` skips the commit; an interactive run
-        # with no assumption gets the y/N prompt.
+        # Commit gate. Unattended auto-commits (safe_default=True) so a green run's
+        # commit isn't silently dropped on non-TTY stdin; --yes auto-commits, a
+        # forced --no skips, an interactive run gets the y/N prompt.
         if tests_passed:
             commit_decision = resolve_gate(
                 assume=get_assume(),
@@ -1313,7 +1255,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             return 1
 
 
-# --- Helper: deep loop (multi-stack pipeline) ------------------------------
+# Helper: deep loop (multi-stack pipeline)
 
 
 async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:

@@ -658,10 +658,9 @@ def _build_agent_prompt(issue: ParsedIssue) -> str:
     loc = f"`{issue.path}`"
     if issue.line:
         loc += f" around line {issue.line}"
-    # Combine title and body into a condensed instruction.
     instruction = issue.title
     if issue.body:
-        # Take the first meaningful line of the body as additional context.
+        # First meaningful body line as added context.
         first_line = issue.body.strip().split("\n")[0].strip()
         if first_line and first_line != issue.title:
             instruction = f"{instruction}: {first_line}" if instruction else first_line

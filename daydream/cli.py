@@ -93,9 +93,8 @@ def _signal_handler(signum: int, frame: object) -> None:
     signal_name = signal.Signals(signum).name
     set_shutdown_requested(True)
 
-    # Flush partial trajectory before tearing down (D-07). write_partial is
-    # synchronous and exception-safe — it cannot crash the shutdown path even
-    # if the disk is full or path is unwritable.
+    # Flush partial trajectory before tearing down (D-07); write_partial is sync
+    # and exception-safe, so it can't crash the shutdown path.
     recorder = get_signal_recorder()
     if recorder is not None:
         recorder.write_partial()
@@ -293,7 +292,6 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         description="Project as-of-pinned annotations into JSONL training records (one object per run).",
     )
 
-    # Required output path.
     parser.add_argument(
         "--out",
         type=Path,
@@ -302,7 +300,7 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         help="Output .jsonl path",
     )
 
-    # ---- Filters (post-applied AFTER exclusion list) ----
+    # Filters (post-applied AFTER exclusion list)
     parser.add_argument(
         "--skill",
         type=str,
@@ -343,7 +341,7 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         help="Match manifest.status exactly (default: 'complete')",
     )
 
-    # ---- Stratification ----
+    # Stratification
     parser.add_argument(
         "--stratify-by",
         type=str,
@@ -360,7 +358,7 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         help="Per-stack cap fraction in (0, 1] (default: 0.6)",
     )
 
-    # ---- Opt-ins ----
+    # Opt-ins
     parser.add_argument(
         "--allow-copyleft",
         action="append",
@@ -375,7 +373,7 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         help="Disable the C9 default of accepted-only label filtering",
     )
 
-    # ---- Diagnostic ----
+    # Diagnostic
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -389,7 +387,7 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         help="Write schema.json next to --out, skip records",
     )
 
-    # ---- Bitemporal pin ----
+    # Bitemporal pin
     parser.add_argument(
         "--as-of",
         type=str,
@@ -424,12 +422,10 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
     parser = _build_build_corpus_parser()
     args = parser.parse_args(argv)
 
-    # Validate --max-stack-share is in (0, 1].
     if not (0.0 < args.max_stack_share <= 1.0):
         print_error(create_console(), "Invalid --max-stack-share", "Must be in (0, 1].")
         return 1
 
-    # Validate --min-grounding is in [0, 1] when set.
     if args.min_grounding is not None and not (0.0 <= args.min_grounding <= 1.0):
         print_error(create_console(), "Invalid --min-grounding", "Must be in [0, 1].")
         return 1
@@ -571,7 +567,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
              "Use `daydream feedback <pr#>` for the PR feedback flow.",
     )
 
-    # ---- Output mode (mutually exclusive; default = fix-loop) ----
+    # Output mode (mutually exclusive; default = fix-loop)
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument(
         "--comment",
@@ -588,7 +584,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Review and write a report to terminal/markdown, then exit.",
     )
 
-    # ---- Selection ----
+    # Selection
     parser.add_argument(
         "--branch",
         default=None,
@@ -602,7 +598,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Base ref to compare against (default: PR base if any, else origin/HEAD).",
     )
 
-    # ---- Modifiers ----
+    # Modifiers
     parser.add_argument(
         "--worktree",
         action="store_true",
@@ -654,7 +650,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         if full_help else argparse.SUPPRESS,
     )
 
-    # ---- Skill selection (overrides auto-detect) ----
+    # Skill selection (overrides auto-detect)
     parser.add_argument(
         "-s", "--skill",
         choices=["python", "react", "elixir", "go", "rust", "ios"],
@@ -662,7 +658,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Force a specific review skill (default: auto-detect from changed files)",
     )
 
-    # ---- Cleanup / phase resume ----
+    # Cleanup / phase resume
     cleanup_group = parser.add_mutually_exclusive_group()
     cleanup_group.add_argument(
         "--cleanup",
@@ -732,8 +728,8 @@ def _normalize_loop_argv(raw_argv: list[str]) -> list[str]:
         A new argv list with bare ``--loop`` rewritten to ``--loop=5``.
     """
     def _looks_like_int(s: str) -> bool:
-        # Use int() — the same parser argparse applies via type=int — so the
-        # pre-scan and the argument parser agree on what counts as an integer.
+        # int() — the same parser argparse applies via type=int — so pre-scan and
+        # argparse agree on what counts as an integer.
         try:
             int(s)
             return True
@@ -744,26 +740,18 @@ def _normalize_loop_argv(raw_argv: list[str]) -> list[str]:
     for i, token in enumerate(raw_argv):
         if token == "--loop":
             nxt = raw_argv[i + 1] if i + 1 < len(raw_argv) else None
-            # Accept both positive bare digits ("5") and negative/signed
-            # integers ("-3", "+2") so argparse receives the literal value
-            # and can apply type=int validation (including our post-parse
-            # positive-count check).  Only pin the default when the next
-            # token is absent, a flag, or a clearly non-numeric string.
+            # Pass signed integers through so argparse applies type=int validation;
+            # pin the default only when the next token is absent, a flag, or non-int.
             if nxt is None or not _looks_like_int(nxt):
-                # Bare --loop (end, before a flag, or before a non-int target):
-                # pin the default count so the next token stays a positional.
                 normalized.append("--loop=5")
                 continue
         normalized.append(token)
     return normalized
 
 
-# Removed per-phase model/backend flags → their config-file replacement. The
-# per-phase overrides moved out of the CLI surface into
-# ``[tool.daydream.phases.<phase>]`` (pyproject.toml / .daydream.toml). The
-# ``RunConfig`` fields they used to set (``review_model``, ``fix_backend``, …)
-# remain — still read by ``_resolve_backend`` and settable via the config file —
-# they are simply no longer CLI-settable.
+# Removed per-phase model/backend flags → their config-file replacement in
+# ``[tool.daydream.phases.<phase>]``. The RunConfig fields they set remain
+# (still read by ``_resolve_backend``, settable via config) — just not CLI-settable.
 _REMOVED_PHASE_FLAGS: dict[str, str] = {
     "--review-backend": "[tool.daydream.phases.review] backend = \"...\"",
     "--fix-backend": "[tool.daydream.phases.fix] backend = \"...\"",
@@ -816,24 +804,18 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     """
     raw_argv = sys.argv[1:] if argv is None else list(argv)
 
-    # Default-verb shim: an explicit leading ``review`` token is equivalent to
-    # the bare ``daydream <target>`` form. Strip it so both parse identically
-    # against the main review parser (positional TARGET unchanged).
+    # Default-verb shim: strip an explicit leading ``review`` so it parses
+    # identically to the bare ``daydream <target>`` form.
     if raw_argv and raw_argv[0] == "review":
         raw_argv = raw_argv[1:]
 
-    # Manual subcommand dispatch: argparse subparsers eat the first positional
-    # which conflicts with our positional TARGET. So we pop "feedback" off the
-    # front ourselves and route to a dedicated parser.
+    # Manual subcommand dispatch: argparse subparsers would eat the first
+    # positional (conflicts with TARGET), so route "feedback" to its own parser.
     if raw_argv and raw_argv[0] == "feedback":
         feedback_parser = _build_feedback_parser()
         _reject_removed_phase_flags(feedback_parser, raw_argv[1:])
         feedback_args = feedback_parser.parse_intermixed_args(raw_argv[1:])
         return _build_feedback_config(feedback_args)
-
-    # ``summarize`` is dispatched in main() before _parse_args is called, so
-    # we never reach this branch from the summarize path. Kept here only as
-    # a guard for callers that hand crafted-argv to _parse_args directly.
 
     raw_argv = _normalize_loop_argv(raw_argv)
 
@@ -841,67 +823,60 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     _reject_removed_phase_flags(parser, raw_argv)
     args = parser.parse_args(raw_argv)
 
-    # ----- Reject purely numeric TARGET (likely meant `daydream feedback N`) -----
+    # Reject purely numeric TARGET (likely meant `daydream feedback N`)
     if args.target is not None and args.target.lstrip("-").isdigit():
         parser.error(
             f"target '{args.target}' looks like a PR number — "
             f"did you mean: daydream feedback {args.target}?"
         )
 
-    # ----- Resolve output mode -----
+    # Resolve output mode
     output_mode: str = "loop"
     if args.comment:
         output_mode = "comment"
     elif args.review:
         output_mode = "review"
 
-    # ``--yes`` auto-answers the fix/commit gates; ``--review``/``--comment`` run
-    # no fix phase, so the flag has nothing to answer there. Reject it rather than
-    # silently ignore it.
+    # ``--yes`` answers the fix/commit gates, which --review/--comment don't run;
+    # reject rather than silently ignore.
     if args.assume == "yes" and output_mode != "loop":
         parser.error("--yes has no effect with --review/--comment (no fix phase to auto-apply)")
 
     if args.findings_out is not None and output_mode != "review":
         parser.error("--findings-out requires --review (Phase A findings artifact emission)")
 
-    # ttt/per-stack/merge are deep-pipeline resume stages; they don't apply
-    # to shallow runs.
+    # ttt/per-stack/merge are deep-pipeline resume stages; not valid for shallow.
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
         parser.error(f"--start-at {args.start_at} is not valid with --shallow")
 
-    # parse and test resume points are ambiguous under deep (default) mode —
-    # the deep pipeline has two parse points and no single test phase.
+    # parse/test resume points are ambiguous under deep mode (two parse points,
+    # no single test phase).
     if not args.shallow and args.start_at in ("parse", "test"):
         parser.error(
             f"--start-at {args.start_at} is not supported in deep mode "
             "(use --shallow, or --start-at fix to resume after the merged report)"
         )
 
-    # ``--loop`` takes an optional count (``--loop`` ⇒ 5, ``--loop N`` ⇒ N).
-    # ``args.loop`` is None when the flag is absent.
+    # ``--loop`` carries an optional count (bare ⇒ 5); None when absent.
     loop = args.loop is not None
     max_iterations = args.loop if args.loop is not None else 5
 
     if loop and max_iterations < 1:
         parser.error("--loop count must be positive")
 
-    # Validate --loop incompatibilities
     if loop and output_mode != "loop":
         parser.error("--loop cannot be combined with --review/--comment")
     if loop and args.start_at != "review":
         parser.error("--loop requires starting at review phase (incompatible with --start-at)")
 
-    # Detect repo slug and PR number for trajectory/archive metadata.
     # Attribute provenance to the target checkout, not the invoking cwd —
     # daydream may run from one repo against a checkout of another.
     target_repo = Path(args.target) if args.target else Path.cwd()
     pr_repo = _detect_repo_slug(target_repo)
-    # An explicit --pr-number pins the target PR (and the --findings-out
-    # artifact's declared target); otherwise auto-detect from the branch.
+    # Explicit --pr-number pins the target PR; otherwise auto-detect from branch.
     pr_number = args.pr_number if args.pr_number is not None else _auto_detect_pr_number(target_repo)
 
-    # Low-precedence model/backend source: [tool.daydream] / .daydream.toml at
-    # the target repo root, consulted by ``_resolve_backend`` below CLI and env.
+    # Low-precedence model/backend source consulted by ``_resolve_backend``.
     file_config = load_file_config(target_repo)
 
     return RunConfig(
@@ -909,8 +884,8 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         skill=args.skill,
         model=args.model,
         file_config=file_config,
-        # Per-phase model/backend overrides are config-file-only (no CLI flags).
-        # Left None here so the config file is the sole low-precedence source.
+        # Per-phase overrides are config-file-only; left None so config is the
+        # sole low-precedence source.
         exploration_model=None,
         review_model=None,
         parse_model=None,
@@ -1466,12 +1441,8 @@ def main() -> None:
     """
     _install_signal_handlers()
 
-    # Verb-first dispatch. ``_first_verb`` classifies the leading token; bare
-    # paths, leading flags, and empty argv all fall through to ``review``.
-    # The non-``review`` verbs are short-circuited here (their handlers own
-    # their own parsers and exit codes); ``review`` flows into ``_parse_args``
-    # which applies the default-verb shim (an explicit leading ``review`` is
-    # equivalent to a bare target).
+    # Verb-first dispatch: non-``review`` verbs are short-circuited here (each
+    # owns its parser and exit code); everything else flows into ``_parse_args``.
     argv = sys.argv[1:]
     verb = _first_verb(argv)
     try:
@@ -1481,24 +1452,17 @@ def main() -> None:
             summarize_args = summarize_parser.parse_args(argv[1:])
             sys.exit(_run_summarize(summarize_args))
 
-        # ``corpus`` namespaces the data-pipeline sub-verbs
-        # (``harvest`` / ``build`` / ``label``). Each handler owns its own
-        # parser and exit code; a bare ``daydream corpus`` prints help and
-        # exits 2. All three are sync (SQLite + filesystem, no agent work).
+        # ``corpus`` namespaces the data-pipeline sub-verbs; all sync (SQLite +
+        # filesystem, no agent work), so short-circuit before anyio.run.
         if verb == "corpus":
             sys.exit(_handle_corpus_command(argv[1:]))
 
-        # ``bench`` scores deep-review findings against the offline benchmark.
-        # ``run_bench`` is sync — short-circuit before anyio.run.
         if verb == "bench":
             sys.exit(_handle_bench_command(argv[1:]))
 
-        # ``post-findings`` is sync — short-circuit before anyio.run.
         if verb == "post-findings":
             sys.exit(_handle_post_findings_command(argv[1:]))
 
-        # ``setup`` is sync — short-circuit before anyio.run. The
-        # App-from-manifest leg is a local browser handshake, not agent work.
         if verb == "setup":
             sys.exit(_handle_setup_command(argv[1:]))
 
@@ -1512,22 +1476,18 @@ def main() -> None:
     except KeyboardInterrupt:
         panel = get_shutdown_panel()
         if panel is not None:
-            # Complete agent termination step if it was added
             panel.complete_last_step()
-            # Add final step
             panel.add_step("Aborted by user", status="completed")
             panel.finish()
             set_shutdown_panel(None)
         sys.exit(130)
     except git_ops.WrongBranchError as exc:
-        # Stage 4.2 — loud branch validation. ``runner.run`` re-raises this
-        # so ``cli.main`` owns the user-facing rendering for the
-        # silent-failure case where cwd is on the base branch.
+        # ``runner.run`` re-raises so cli.main owns the user-facing rendering for
+        # the silent-failure case where cwd is on the base branch.
         console.print()
         print_error(console, "Wrong Branch", str(exc))
         sys.exit(1)
     except Exception as e:
-        # Clean up any active shutdown panel
         panel = get_shutdown_panel()
         if panel is not None:
             panel.finish()

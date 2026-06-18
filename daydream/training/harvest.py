@@ -47,9 +47,12 @@ Annotation builder:
   from the outcome label + prior), asserts the breakdown carries the canonical
   :data:`~daydream.training.reward.REWARD_VERSION` before it can be written to
   canonical storage, and returns a frozen :class:`AnnotationPayload`. It is
-  *pure of DB writes* — the orchestrator persists the payload. Reviewer-signal,
-  prior-query, posterior-fetch, and git errors propagate to the caller, which
-  isolates per-row.
+  *pure of DB writes* — the orchestrator persists the payload. Error policy:
+  ``RateLimitError`` propagates (the orchestrator aborts cleanly and preserves
+  its resume marker); a *benign* PR-merge-status fetch failure (fork PR 404,
+  unpushed-SHA 422) degrades the row to its local-branch posterior; every other
+  reviewer-signal, prior-query, posterior-fetch, and git error propagates to the
+  caller, which isolates per-row.
 * ``valid_at`` is the PR merge timestamp for PR rows and ``None`` for
   non-PR/local rows (the write layer collapses ``None`` → ``observed_at``).
 
@@ -77,6 +80,7 @@ injection seams.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -201,15 +205,13 @@ def assemble_scoring_inputs(run_dir: Path, row: dict[str, Any]) -> ScoringInputs
         if isinstance(verdicts, list):
             verifier_verdicts = verdicts
     except FileNotFoundError:
-        # Shallow run — no structured verdicts. Nothing failed to parse.
+        # Shallow run — no structured verdicts; nothing failed to parse.
         pass
     except json.JSONDecodeError:
-        # Present but malformed structured artifact ⇒ format gate floors.
+        # Present but malformed ⇒ format gate floors.
         format_valid = False
 
-    # Per-stack records are structural bronze too: a present-but-malformed
-    # records file also trips the format gate, even though it doesn't feed a
-    # reward axis in the minimal reducer.
+    # A present-but-malformed records file also trips the format gate.
     if deep_dir.is_dir():
         for records_path in sorted(deep_dir.glob(_RECORDS_GLOB)):
             try:
@@ -227,14 +229,10 @@ def assemble_scoring_inputs(run_dir: Path, row: dict[str, Any]) -> ScoringInputs
     )
 
 
-# ---------------------------------------------------------------------------
 # git / gh wrappers — module-level so they double as monkeypatch seams.
-# ---------------------------------------------------------------------------
 
-# Bounded rate-limit backoff for the gh seam. When GitHub returns a rate-limit
-# error, ``_gh_api`` sleeps and retries up to ``_MAX_RATE_LIMIT_RETRIES`` times,
-# honoring a parsed ``Retry-After`` (capped at ``_MAX_BACKOFF_SEC``) and falling
-# back to ``_DEFAULT_BACKOFF_SEC`` when none is supplied.
+# Bounded rate-limit backoff for the gh seam (honors parsed Retry-After, capped
+# at _MAX_BACKOFF_SEC, falling back to _DEFAULT_BACKOFF_SEC when absent).
 _DEFAULT_BACKOFF_SEC = 30.0
 _MAX_BACKOFF_SEC = 120.0
 _MAX_RATE_LIMIT_RETRIES = 5
@@ -243,6 +241,11 @@ _MAX_RATE_LIMIT_RETRIES = 5
 def _rate_limit_sleep(seconds: float) -> None:
     """Sleep ``seconds`` between rate-limit retries (seam for tests to stub)."""
     time.sleep(seconds)
+
+
+async def _row_spacing_sleep(seconds: float) -> None:
+    """Pause ``seconds`` between rows to spread ``gh`` calls (seam for tests to stub)."""
+    await anyio.sleep(seconds)
 
 
 def _gh_api(repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -316,9 +319,7 @@ def _file_at(repo: Path, path: str, sha: str) -> str:
         return ""
 
 
-# ---------------------------------------------------------------------------
 # Rubric assembly — PR vs local-branch (harvest's own, formerly in labeler.py)
-# ---------------------------------------------------------------------------
 
 
 _FIX_APPLIED_STUB = FixAppliedSignal(
@@ -381,17 +382,43 @@ def _row_is_pr(row: dict[str, Any]) -> bool:
     return bool(row.get("pr_repo")) and row.get("pr_number") is not None
 
 
+# HTTP statuses meaning the PR/commit is genuinely absent (fork/deleted PR 404,
+# unpushed-SHA 422) so a row may degrade to its local posterior; every other gh
+# failure is transient and must propagate so resume retries, not mislabel (#166).
+_BENIGN_PR_ABSENCE_STATUSES = (404, 422)
+
+
+def _is_benign_pr_absence(exc: GitError) -> bool:
+    """Return ``True`` when a ``gh`` ``GitError`` means the PR is genuinely absent.
+
+    Classification is on the HTTP status embedded in the ``gh`` failure message
+    (``... (HTTP 404)``); a failure with no recognizable status is treated as
+    transient (not benign), so it propagates rather than silently degrading.
+    """
+    match = re.search(r"\bHTTP (\d{3})\b", str(exc))
+    return match is not None and int(match.group(1)) in _BENIGN_PR_ABSENCE_STATUSES
+
+
 def _build_rubric_pr(
     row: dict[str, Any],
     *,
     gh_api: Any,
     repo_clone: Path,
     window_days: int,
+    pr_merge: PRMergeSignal | None = None,
 ) -> Rubric:
-    """Compose all four signals for a row that originated from a PR."""
+    """Compose all four signals for a row that originated from a PR.
+
+    Args:
+        pr_merge: Pre-fetched :class:`PRMergeSignal`. When supplied
+            (already resolved by the caller before the catch boundary),
+            ``pr_merge_signal`` is not called again. When ``None`` it is
+            fetched here as before.
+    """
     changed_files = _row_changed_files(row)
     signal_row = {**row, "changed_files": changed_files}
-    pr_merge = pr_merge_signal(signal_row, gh_api=gh_api)
+    if pr_merge is None:
+        pr_merge = pr_merge_signal(signal_row, gh_api=gh_api)
     comments = comment_resolution_signal(signal_row, gh_api=gh_api)
     fix = _safe_fix_applied(
         signal_row,
@@ -412,17 +439,33 @@ def _build_rubric_local(
     row: dict[str, Any],
     *,
     repo_clone: Path,
+    clone_resolved: bool = False,
 ) -> Rubric:
-    """Compose signals for a PR-less row (local-branch posterior)."""
-    try:
-        local = local_commit_applied_signal(
-            row,
-            repo_clone=repo_clone,
-            commits_since_fetcher=_commits_since,
-            file_at_fetcher=_file_at,
-        )
-    except (FileNotFoundError, OSError):
+    """Compose signals for a PR-less row (local-branch posterior).
+
+    When ``clone_resolved`` is ``False`` no real git working tree was
+    obtained for the row (the orchestrator passes the archive dir as a
+    placeholder), so the local-commit check cannot distinguish "no follow-up
+    commit applied the fix" from "we could not look". Forcing ``"unknown"``
+    avoids mislabeling such a row ``"rejected"``.
+    """
+    # Invariant: the local-commit posterior is valid ONLY for PR-less runs. A
+    # degraded PR row's merge evidence was merely unavailable, so emit "unknown"
+    # rather than risk a "rejected" false negative.
+    if _row_is_pr(row):
         local = LocalCommitAppliedSignal(verdict="unknown")
+    elif not clone_resolved:
+        local = LocalCommitAppliedSignal(verdict="unknown")
+    else:
+        try:
+            local = local_commit_applied_signal(
+                row,
+                repo_clone=repo_clone,
+                commits_since_fetcher=_commits_since,
+                file_at_fetcher=_file_at,
+            )
+        except (FileNotFoundError, OSError):
+            local = LocalCommitAppliedSignal(verdict="unknown")
     pr_merge = PRMergeSignal(merged=False, merged_at=None)
     comments = CommentResolutionSignal(total=0, replied=0, unresolved=0)
     return Rubric(
@@ -445,9 +488,7 @@ def _pr_state_for_rubric(rubric: Rubric) -> str | None:
     return "merged" if rubric.pr_merge.merged else "closed"
 
 
-# ---------------------------------------------------------------------------
 # Per-run annotation builder
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -495,6 +536,23 @@ class AnnotationPayload:
     has_posterior: bool
 
 
+def _degrade_to_local(
+    row: dict[str, Any],
+    *,
+    repo_clone: Path,
+    clone_resolved: bool,
+) -> tuple[Any, None, list[str], None, int]:
+    """Build a local-branch rubric and return the degraded posterior state.
+
+    Used when a PR-path fetch fails benignly (fork PR 404, unpushed-SHA 422)
+    or when the row has no PR at all.  Returns a 5-tuple
+    ``(rubric, valid_at, reviewer_logins, outcome_prior, prior_n)`` with the
+    non-PR defaults so callers can unpack uniformly.
+    """
+    rubric = _build_rubric_local(row, repo_clone=repo_clone, clone_resolved=clone_resolved)
+    return rubric, None, [], None, 0
+
+
 def build_annotation(
     row: dict[str, Any],
     *,
@@ -503,6 +561,7 @@ def build_annotation(
     gh_api: Any,
     repo_clone: Path,
     window_days: int,
+    clone_resolved: bool = True,
 ) -> AnnotationPayload:
     """Build one run's bitemporal annotation payload (pure of DB writes).
 
@@ -542,6 +601,10 @@ def build_annotation(
         repo_clone: Local clone root for the fix-applied / local-commit
             cascades.
         window_days: Lookback window for the fix-applied cascade.
+        clone_resolved: Whether a real git working tree was obtained for the
+            row. When ``False`` the local-branch posterior is forced to
+            ``"unknown"`` rather than risking a ``"rejected"`` mislabel from a
+            commit check that had no repository to inspect.
 
     Returns:
         A frozen :class:`AnnotationPayload`. ``valid_at`` is the PR merge
@@ -550,33 +613,69 @@ def build_annotation(
     Raises:
         AssertionError: When the scored breakdown does not carry the canonical
             ``REWARD_VERSION`` (a non-default-weights override leaked in).
-        Exception: Any reviewer-signal, prior-query, posterior-fetch
-            (``gh_api``), or git error propagates unchanged to the caller (the
-            orchestrator isolates per-row).
+        RateLimitError: Propagated unchanged so the orchestrator can abort the
+            sweep cleanly and preserve its resume marker.
+        Exception: A *benign* PR-merge-status fetch failure (fork PR 404,
+            unpushed-SHA 422) is caught and degrades the row to its local-branch
+            posterior rather than raising. Every other reviewer-signal,
+            prior-query, posterior-fetch (``gh_api``), or git error propagates
+            unchanged to the caller (the orchestrator isolates per-row). Once the
+            merge status is confirmed, a later ``comment_resolution_signal``
+            failure also propagates (the confirmed merge evidence is never
+            discarded).
     """
     if _row_is_pr(row):
-        rubric = _build_rubric_pr(
-            row,
-            gh_api=gh_api,
-            repo_clone=repo_clone,
-            window_days=window_days,
-        )
-        valid_at = rubric.pr_merge.merged_at
-        reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
-        pooled, prior_n = reviewer_set_penalty_prior(
-            archive_dir,
-            reviewer_logins,
-            before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            exclude_session=row["session_id"],
-            repo_slug=row.get("repo_slug"),
-        )
-        outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
+        try:
+            _pr_merge = pr_merge_signal(
+                {**row, "changed_files": _row_changed_files(row)},
+                gh_api=gh_api,
+            )
+        except RateLimitError:
+            raise
+        except GitError as exc:
+            # Narrow catch (only pr_merge_signal): a benign 404/422 degrades to
+            # local; a transient failure propagates so the run retries, not
+            # mislabels. A later comment-fetch GitError stays outside this block.
+            if not _is_benign_pr_absence(exc):
+                raise
+            rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
+                row, repo_clone=repo_clone, clone_resolved=clone_resolved
+            )
+        else:
+            # Merge confirmed, so the PR provably exists; a secondary comment-fetch
+            # GitError is transient and must propagate, not discard the confirmed
+            # PRMergeSignal by degrading to local.
+            rubric = _build_rubric_pr(
+                row,
+                gh_api=gh_api,
+                repo_clone=repo_clone,
+                window_days=window_days,
+                pr_merge=_pr_merge,
+            )
+            valid_at = rubric.pr_merge.merged_at
+            try:
+                reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
+            except RateLimitError:
+                raise
+            except GitError:
+                # Reviewer-set prior only refines the decided outcome; an
+                # auxiliary-lookup failure degrades to no prior, keeping the label.
+                reviewer_logins = []
+                outcome_prior = None
+                prior_n = 0
+            else:
+                pooled, prior_n = reviewer_set_penalty_prior(
+                    archive_dir,
+                    reviewer_logins,
+                    before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    exclude_session=row["session_id"],
+                    repo_slug=row.get("repo_slug"),
+                )
+                outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
     else:
-        rubric = _build_rubric_local(row, repo_clone=repo_clone)
-        valid_at = None
-        reviewer_logins = []
-        outcome_prior = None
-        prior_n = 0
+        rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
+            row, repo_clone=repo_clone, clone_resolved=clone_resolved
+        )
 
     outcome_label = derive_outcome_label(rubric)
     labels = [outcome_label] if outcome_label != "unknown" else []
@@ -609,9 +708,7 @@ def build_annotation(
     )
 
 
-# ---------------------------------------------------------------------------
 # Repo resolution — three-tier priority: source_path → clone cache → None
-# ---------------------------------------------------------------------------
 
 
 def _resolve_repo_for_row(
@@ -697,9 +794,7 @@ def _materialize_base_sha_if_missing(
         )
 
 
-# ---------------------------------------------------------------------------
 # Orchestrator — idempotent (evidence-hash dedup), re-runnable, per-row isolation
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -777,10 +872,8 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         msg = f"archive_dir does not exist: {config.archive_dir}"
         raise FileNotFoundError(msg)
 
-    # Build the queue: every indexed run, optionally prefix-filtered. We do not
-    # pre-drop annotated rows — the write layer makes re-harvest idempotent by
-    # deduping on unchanged ``(evidence_sha, reward_version)`` (a version bump
-    # still appends a new generation).
+    # Queue every indexed run (optionally prefix-filtered); the write layer makes
+    # re-harvest idempotent by deduping unchanged (evidence_sha, reward_version).
     if config.session_filter:
         queue = query_runs(
             config.archive_dir,
@@ -790,8 +883,8 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
     else:
         queue = query_runs(config.archive_dir)
 
-    # Cache + resume integration. The cache wraps the gh seam and tracks
-    # completed sessions so an interrupted run can resume without re-fetching.
+    # The cache wraps the gh seam and tracks completed sessions so an interrupted
+    # run resumes without re-fetching.
     cache: BackfillCache | None = None
     gh_api_callable: Any = _gh_api
     if config.cache_dir is not None:
@@ -821,13 +914,26 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                 row, clone_cache=clone_cache, fetched_repos=fetched_repos, console=console
             )
             _materialize_base_sha_if_missing(row, run_dir, repo_clone=row_repo_clone, console=console)
-            # Re-link orphan runs: the default deep loop archives before the PR
-            # exists, freezing ``pr_number=None``. Resolve the now-existing PR by
-            # ``head_sha`` so the run becomes labelable through the PR path. Stays
-            # inside the per-row ``try`` so a lookup error isolates to this row
-            # (and ``RateLimitError`` propagates to the abort handler unchanged).
+            # Re-link orphan runs (archived before the PR existed): resolve the
+            # now-existing PR by head_sha so the run becomes labelable. Inside the
+            # per-row try so a lookup error isolates (RateLimitError still aborts).
             if not _row_is_pr(row):
-                link = pr_link_signal(row, gh_api=gh_api_callable)
+                try:
+                    link = pr_link_signal(row, gh_api=gh_api_callable)
+                except RateLimitError:
+                    raise
+                except GitError as exc:
+                    # Benign 404/422 ⇒ PR unresolvable; degrade to local-branch
+                    # posterior (row stays pr_number=None). Transient failures
+                    # propagate so resume retries, not caches a degraded label.
+                    if not _is_benign_pr_absence(exc):
+                        raise
+                    print_warning(
+                        console,
+                        f"harvest: PR link lookup failed for session {row['session_id']}; "
+                        f"degrading to local-branch posterior: {type(exc).__name__}: {exc}",
+                    )
+                    link = None
                 if link is not None:
                     number, slug = link
                     row["pr_number"] = number
@@ -841,6 +947,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                 gh_api=gh_api_callable,
                 repo_clone=row_repo_clone or config.archive_dir,
                 window_days=config.fix_applied_window_days,
+                clone_resolved=row_repo_clone is not None,
             )
             if config.dry_run:
                 summary["would_annotate"] += 1
@@ -869,9 +976,8 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                 if cache is not None:
                     cache.mark_session_done(row["session_id"])
         except RateLimitError:
-            # Rate limit exhausted after bounded backoff: abort the whole sweep
-            # cleanly. The failed row is NOT marked done, so its resume marker is
-            # preserved and a later re-run picks up exactly where we stopped.
+            # Rate limit exhausted: abort cleanly. The failed row is NOT marked
+            # done, so its resume marker is preserved for a later re-run.
             summary["aborted"] = 1
             resume_marker = cache.progress_path if cache is not None else None
             abort_msg = (
@@ -892,6 +998,6 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
             continue
 
         if not config.dry_run:
-            await anyio.sleep(config.gh_request_spacing_sec)
+            await _row_spacing_sleep(config.gh_request_spacing_sec)
 
     return summary

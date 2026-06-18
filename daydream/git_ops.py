@@ -48,27 +48,19 @@ from typing import Any
 
 _logger = logging.getLogger(__name__)
 
-# Substrings (lowercased) that identify a GitHub API rate-limit response in
-# ``gh`` stderr output.  Kept as a module constant so the classifier and any
-# future callers share a single source of truth.
-#
-# NOTE: "429" is intentionally absent here; HTTP 429 is matched separately in
+# Lowercased substrings that identify a GitHub API rate-limit response in ``gh``
+# stderr. "429" is intentionally absent: HTTP 429 is matched separately in
 # ``_gh_error_for`` with a word-boundary regex to avoid false positives on
-# arbitrary digit sequences (e.g. URLs, SHAs, file sizes) that happen to
-# contain those three digits.
+# arbitrary digit sequences (URLs, SHAs, file sizes) containing those digits.
 _RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "rate limit",
     "secondary rate limit",
 )
 
-# Module-level singleton for the ``gh`` subprocess environment.
-# =============================================================
-# Set once at run entry from GitHub App credentials (mirroring the
-# ``AgentState`` singleton in ``daydream.agent``) and read internally by
-# ``_run_gh`` so every ``gh`` call authenticates under the minted installation
-# token. When ``None``, ``gh`` inherits the parent process environment (the
-# original, unchanged behaviour). Access only through the getter/setter/reset
-# functions below; reset between tests via the autouse conftest fixture.
+# Module-level singleton for the ``gh`` subprocess environment. Set once at run
+# entry from GitHub App credentials; read by ``_run_gh`` so every ``gh`` call
+# authenticates under the minted token. ``None`` means inherit the parent env.
+# Access only through the getter/setter/reset functions below.
 _gh_token_env: dict[str, str] | None = None
 
 
@@ -161,12 +153,9 @@ class WrongBranchError(GitError):
 # --- Internal subprocess helpers --------------------------------------------
 
 
-# A trivial git command exceeding its timeout means the host was momentarily
-# starved of CPU (heavy concurrent load), not that the command hung — so a
-# timeout is retried a bounded number of times before it surfaces as a
-# GitTimeoutError. This is what kept the deep-orchestrator full-suite tests
-# flaky: under load a 5s `git rev-parse`/`diff` would time out, collapse to a
-# generic GitError, and the run would exit 1 (see issue #120).
+# A trivial git command timing out means the host was CPU-starved, not that the
+# command hung — so retry a bounded number of times. Without this, under load a
+# 5s `git rev-parse`/`diff` would time out and exit the run 1 (see #120).
 _GIT_TIMEOUT_RETRIES = 2
 
 
@@ -388,7 +377,6 @@ def amend_trailers(repo: Path, trailers: dict[str, str], *, message: str | None 
     if not trailers:
         return
 
-    # Build the amended message via git interpret-trailers.
     trailer_args: list[str] = []
     for key, value in trailers.items():
         trailer_args += ["--trailer", f"{key}: {value}"]
@@ -401,8 +389,7 @@ def amend_trailers(repo: Path, trailers: dict[str, str], *, message: str | None 
     else:
         raw_message = message
 
-    # Pipe message through interpret-trailers (run directly, not via _run_git
-    # because we need stdin).
+    # Run directly, not via _run_git, because interpret-trailers needs stdin.
     try:
         interp = subprocess.run(  # noqa: S603 - arguments are not user-controlled
             ["git", "interpret-trailers", *trailer_args],  # noqa: S607 - git is a trusted command
@@ -1230,11 +1217,8 @@ def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
     add = _run_git(repo, ["add", "--", *(str(p) for p in paths)], timeout=30, retries=0)
     if add.returncode != 0:
         raise GitError(f"git add {paths} failed in {repo}: {add.stderr.strip()}")
-    # git commit fails with "Author identity unknown" when neither a local nor a
-    # global user.email / user.name is configured (common in fresh CI environments).
-    # Inject fallback values via -c only when the repo has no identity set; if the
-    # user already has an identity configured, git config will return it and we leave
-    # the commit command untouched.
+    # git commit fails "Author identity unknown" with no user.email/user.name
+    # (common in fresh CI). Inject fallback values via -c only when none is set.
     identity_ok = (
         _run_git(repo, ["config", "user.email"], timeout=5).returncode == 0
         and _run_git(repo, ["config", "user.name"], timeout=5).returncode == 0

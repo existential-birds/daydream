@@ -33,10 +33,6 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig
 from daydream.trajectory import TrajectoryRecorder
 
-# ---------------------------------------------------------------------------
-# Mock helpers
-# ---------------------------------------------------------------------------
-
 
 @dataclass
 class _MockRecorder:
@@ -76,11 +72,6 @@ class _MockConfig:
     file_config: DaydreamFileConfig | None = None
 
 
-# ---------------------------------------------------------------------------
-# git_context: _parse_repo_slug
-# ---------------------------------------------------------------------------
-
-
 def test_parse_repo_slug_ssh():
     assert _parse_repo_slug("git@github.com:org/repo.git") == "org/repo"
 
@@ -95,11 +86,6 @@ def test_parse_repo_slug_https_no_dot_git():
 
 def test_parse_repo_slug_invalid():
     assert _parse_repo_slug("not-a-url") is None
-
-
-# ---------------------------------------------------------------------------
-# git_context: capture_git_context
-# ---------------------------------------------------------------------------
 
 
 def test_capture_git_context_real_repo(tmp_path: Path):
@@ -162,11 +148,6 @@ def test_capture_git_context_populates_base_sha_and_changed_files(tmp_path: Path
     assert sorted(ctx.changed_files) == ["a.py", "b.py"]
 
 
-# ---------------------------------------------------------------------------
-# manifest: build_manifest
-# ---------------------------------------------------------------------------
-
-
 def test_build_manifest_basic(tmp_path: Path):
     recorder = _MockRecorder()
     config = _MockConfig()
@@ -189,8 +170,7 @@ def test_build_manifest_basic(tmp_path: Path):
     assert m.session_id == recorder.session_id
     assert m.run_flow == "normal"
     assert m.skill == "python"
-    # Manifest.model is no longer populated from config (per-phase models replaced
-    # the single config.model field); build_manifest stamps it as None.
+    # Per-phase models replaced config.model; build_manifest stamps model as None.
     assert m.model is None
     assert m.backend == "claude"
     assert m.total_cost_usd == 0.05
@@ -322,7 +302,6 @@ def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path):
         archive_path=tmp_path,
     )
 
-    # Populated from the recorder despite no evaluation; eval-only metrics stay None.
     assert m.wall_clock_seconds == 12.3
     assert m.total_findings is None
 
@@ -344,11 +323,6 @@ def test_build_manifest_eval_wall_clock_overrides_recorder(tmp_path: Path):
     )
 
     assert m.wall_clock_seconds == 42.5
-
-
-# ---------------------------------------------------------------------------
-# index: upsert_run / query_runs
-# ---------------------------------------------------------------------------
 
 
 def _make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
@@ -437,11 +411,6 @@ def test_query_runs_with_where(tmp_path: Path):
     assert ids == {"s1", "s3"}
 
 
-# ---------------------------------------------------------------------------
-# __init__: get_archive_dir
-# ---------------------------------------------------------------------------
-
-
 def test_get_archive_dir_creates_structure(monkeypatch, tmp_path: Path):
     target = tmp_path / "custom_archive"
     monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(target))
@@ -468,11 +437,6 @@ def test_archive_dir_fixture_isolates_env(archive_dir: Path, tmp_path: Path):
     assert archive_dir == tmp_path / "archive"
 
 
-# ---------------------------------------------------------------------------
-# __init__: _copy_bundle
-# ---------------------------------------------------------------------------
-
-
 def _make_recorder_mock(session_id: str, path: Path, *, explicit_path: bool = False) -> MagicMock:
     """Build a mock TrajectoryRecorder with session_id and path attributes."""
     recorder = MagicMock()
@@ -497,30 +461,26 @@ def _setup_bundle(
     live_run_dir = daydream / "runs" / session_id
     live_run_dir.mkdir(parents=True)
 
-    # Main trajectory under the run dir.
     traj = live_run_dir / "trajectory.json"
     traj.write_text('{"session_id": "test"}')
 
-    # Sub-trajectories live next to the parent.
+    # Sub-trajectories (fork output) live next to the parent.
     sub_dir = live_run_dir / "trajectories"
     sub_dir.mkdir()
     (sub_dir / "deep-python.json").write_text('{"fork": true}')
 
-    # Deep artifacts
     deep = daydream / "deep"
     deep.mkdir()
     (deep / "intent.md").write_text("intent")
 
-    # Diff patch
     (daydream / "diff.patch").write_text("diff content")
 
-    # Review output (lives in target root, not .daydream/)
+    # Review output lives in target root, not .daydream/.
     (target / ".review-output.md").write_text("review findings")
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    # Recorder.path points at the live trajectory inside the run dir.
     recorder = _make_recorder_mock(session_id, traj)
 
     return target, run_dir, recorder
@@ -539,7 +499,6 @@ def test_copy_bundle_partial_trajectory(tmp_path: Path):
     session_id = "abcd1234-0000-0000-0000-000000000000"
     target, run_dir, recorder = _setup_bundle(tmp_path, session_id)
 
-    # Drop a .partial sibling next to the live trajectory.json.
     partial = (
         target / ".daydream" / "runs" / session_id / "trajectory.json.partial"
     )
@@ -587,15 +546,14 @@ def test_copy_bundle_explicit_trajectory_path(tmp_path: Path):
     session_id = "abcd1234-0000-0000-0000-000000000000"
     target, run_dir, _ = _setup_bundle(tmp_path, session_id)
 
-    # Simulate --trajectory /tmp/custom.json: file lives outside .daydream/runs/
+    # Simulate --trajectory /tmp/custom.json: file lives outside .daydream/runs/.
     custom_traj = tmp_path / "custom-trajectory.json"
     custom_traj.write_text('{"custom": true}')
 
     recorder = _make_recorder_mock(session_id, custom_traj, explicit_path=True)
     _copy_bundle(target, run_dir, recorder)
 
-    # The copytree still copies the live run dir contents (the default trajectory).
-    # The custom path is copied on top as trajectory.json.
+    # The custom path is copied on top of the run dir as trajectory.json.
     archived = json.loads((run_dir / "trajectory.json").read_text())
     assert archived["custom"] is True
 
@@ -614,11 +572,6 @@ def test_copy_bundle_skips_missing(tmp_path: Path):
     assert not (run_dir / "review-output.md").exists()
     assert not (run_dir / "deep").exists()
     assert not (run_dir / "diff.patch").exists()
-
-
-# ---------------------------------------------------------------------------
-# __init__: archive_run full round-trip
-# ---------------------------------------------------------------------------
 
 
 def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path):
@@ -650,9 +603,7 @@ def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path):
     assert rows[0]["session_id"] == session_id
 
 
-# ---------------------------------------------------------------------------
 # index: label_observations (Task 12)
-# ---------------------------------------------------------------------------
 
 
 def _seed_one_run(archive_dir: Path, session_id: str) -> None:
@@ -724,13 +675,12 @@ def _seed_legacy_label_observation(archive_dir: Path, session_id: str) -> None:
 
 
 def test_label_observations_source_column_migrates(tmp_path: Path):
-    # Build the schema, then simulate a pre-source DB by replacing the table with
-    # the OLD DDL (no `source`) and seeding a legacy row.
+    # Build schema, then replace the table with the OLD DDL (no `source`) + a legacy row.
     upsert_run(tmp_path, _make_manifest(session_id="s-mig"))
     _seed_legacy_label_observation(tmp_path, "s-mig")
     assert "source" not in _label_obs_columns(tmp_path)  # precondition: legacy shape
 
-    # Open via the production connection path, which must ALTER-ADD `source`.
+    # The production connection path must ALTER-ADD `source`.
     upsert_run(tmp_path, _make_manifest(session_id="s-mig2"))
 
     cols = _label_obs_columns(tmp_path)
@@ -986,8 +936,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
 
     db_path = tmp_path / "index.db"
     conn = sqlite3.connect(str(db_path))
-    # Real pre-v4 runs schema (full DDL minus the new has_posterior column);
-    # label_observations bitemporal-but-no-posterior.
+    # Pre-v4 runs schema (DDL minus has_posterior); label_observations lacks posterior cols.
     pre_v4_runs_ddl = _CREATE_TABLE.replace(
         "    has_posterior INTEGER NOT NULL DEFAULT 0,\n", ""
     )
@@ -1008,9 +957,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     conn.commit()
     conn.close()
 
-    # First write through the real path triggers _migrate_schema + recreate.
-    # The stale label_observations table must emit the spec-sanctioned
-    # drop-and-recreate warning (existing label rows lost, repopulate via harvest).
+    # First real-path write triggers _migrate_schema + the drop-and-recreate warning.
     with pytest.warns(UserWarning, match="predates bitemporal/posterior columns"):
         append_label_observation(
             tmp_path,
@@ -1074,10 +1021,8 @@ def _seed_reviewed_outcomes(archive_dir: Path) -> None:
 
 
 def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp_path):
-    # Prior runs (one label_observation each): s_a(reviewers=[alice], rejected,1.0 @ t1),
-    #   s_b(reviewers=[bob], accepted,0.0 @ t2), s_c(reviewers=[alice,carol], contested,0.5 @ t3).
-    # Current row reviewers={alice}, valid_at == t3 -> pool = runs sharing alice, valid_at < t3, != current:
-    #   s_a only (s_c is @ t3, excluded by strict <). bob's run does not share a reviewer -> excluded.
+    # Current reviewers={alice}, valid_at==t3 -> pool = alice-sharing runs, valid_at < t3:
+    # only s_a (s_c @ t3 excluded by strict <; bob's run shares no reviewer).
     _seed_reviewed_outcomes(tmp_path)
     prior, n = reviewer_set_penalty_prior(tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur")
     assert prior == pytest.approx(1.0) and n == 1
@@ -1089,11 +1034,8 @@ def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp
 
 
 def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path):
-    # Seed the same three outcomes as _seed_reviewed_outcomes, but give s_a and
-    # s_b distinct repo_slugs so we can verify per-repo filtering.
-    #   s_a: repo=org/repo-A, reviewers=[alice], rejected (1.0) @ T1
-    #   s_b: repo=org/repo-B, reviewers=[alice], accepted (0.0) @ T2
-    #   cur: (no repo_slug, excluded by session_id)
+    # Two alice rows in distinct repos (s_a: repo-A rejected@T1; s_b: repo-B accepted@T2)
+    # verify per-repo filtering. cur has no repo_slug, excluded by session_id.
     for sid, slug in (("s_a", "org/repo-A"), ("s_b", "org/repo-B"), ("cur", None)):
         upsert_run(
             tmp_path,

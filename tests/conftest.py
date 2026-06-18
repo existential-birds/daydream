@@ -355,3 +355,24 @@ def archive_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
     path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(path))
     yield path
+
+
+@pytest.fixture(autouse=True)
+def _no_harvest_row_spacing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the harvest inter-row rate-limit delay so tests don't sleep for real.
+
+    ``run_harvest`` awaits ``_row_spacing_sleep(gh_request_spacing_sec)`` (default
+    0.8s) between every row to spread ``gh`` calls under GitHub's secondary rate
+    limits — real-time politeness with no bearing on test logic. Left unstubbed,
+    every ``run_harvest`` test paid 0.8s/row (the 10-row degrade test alone burned
+    8.17s of wall clock). Stub the module-level seam (mirroring how
+    ``_rate_limit_sleep`` is stubbed) so the delay is a no-op; no test asserts it
+    is honored. Lazy-imported so unrelated tests don't eagerly load the harvest
+    stack.
+    """
+    from daydream.training import harvest
+
+    async def _noop(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(harvest, "_row_spacing_sleep", _noop)
