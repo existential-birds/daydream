@@ -543,6 +543,39 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     assert commit_calls == []  # no commit on failure
 
 
+async def test_parallel_fix_commit_runs_once_after_all(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC#6: commit stays serial and runs exactly once, after every parallel fix lands.
+
+    Each fix writes its own ``.fixed-*`` sentinel; the spy commit records whether ALL
+    sentinels already exist at commit time. ``seen_at_commit == [True]`` proves a single
+    commit that observed every fix -- a regression moving commit inside the fan-out would
+    see a partial set (False) or commit more than once.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    files = ["f1.py", "f2.py", "f3.py"]
+    stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
+    seen_at_commit: list[bool] = []
+
+    async def _spy_commit(backend: Any, work: Any) -> None:
+        seen_at_commit.append(
+            all((multi_stack_target / f".fixed-{f.replace('.', '_')}").exists() for f in files)
+        )
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+    assert seen_at_commit == [True]  # exactly one commit, and every fix already landed
+
+
 async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-07: Stage order = TTT intent -> alternatives -> per-stack -> parse -> merge."""
     _silence(monkeypatch)
