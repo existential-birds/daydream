@@ -863,6 +863,24 @@ def severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda it: _SEVERITY_RANK.get(it.get("severity") or "", 1))
 
 
+def group_items_by_file(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Partition fix items into per-file groups, preserving input order.
+
+    Shared by the parallel fix loop: distinct files become distinct groups that
+    can run concurrently, while items targeting the same file stay together so
+    they run serially (no read-modify-write races). Group emission order is the
+    first-appearance order of each file; within-group order is input order, so a
+    ``severity_sorted`` input yields severity-ordered groups. Items with a
+    missing/None file bucket into a single ``"<no-file>"`` group (cannot prove
+    disjoint -> serialize for safety). Pure: no I/O, no mutation of inputs.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        key = item.get("file") or "<no-file>"
+        grouped.setdefault(key, []).append(item)
+    return list(grouped.items())
+
+
 RECOMMENDATION_VERDICTS_SCHEMA = {
     "type": "object",
     "properties": {

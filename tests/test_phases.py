@@ -2870,3 +2870,19 @@ async def test_verifier_excludes_structural_lens(tmp_path, monkeypatch, make_wor
     assert "bug" in backend.prompt
     # Verdicts file is written for downstream consumers.
     assert verdicts_path(dd).is_file()
+
+
+def test_group_items_by_file_preserves_order_within_and_across_groups():
+    from daydream.phases import group_items_by_file
+
+    items = [  # already severity_sorted by the caller
+        {"id": 1, "file": "a.py", "severity": "high"},
+        {"id": 2, "file": "b.py", "severity": "high"},
+        {"id": 3, "file": "a.py", "severity": "low"},
+        {"id": 4, "file": None, "severity": "low"},
+    ]
+    groups = group_items_by_file(items)
+    assert [k for k, _ in groups] == ["a.py", "b.py", "<no-file>"]
+    assert [i["id"] for i in dict(groups)["a.py"]] == [1, 3]  # input order kept
+    assert sum(len(v) for _, v in groups) == len(items)  # nothing dropped
+    assert group_items_by_file([]) == []
