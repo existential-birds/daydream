@@ -52,7 +52,7 @@ from daydream.phases import (
     phase_arbiter_review,
     phase_commit_push,
     phase_cross_stack_merge,
-    phase_fix,
+    phase_fix_parallel,
     phase_parse_feedback,
     phase_per_stack_reviews,
     phase_test_and_heal,
@@ -857,14 +857,16 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             summary += ")"
             print_info(console, summary)
 
-            for idx, item in enumerate(items, start=1):
-                await phase_fix(
-                    _resolve_backend(config, "fix", backend_cache),
-                    work,
-                    item,
-                    idx,
-                    len(items),
+            fix_failures = await phase_fix_parallel(
+                _resolve_backend(config, "fix", backend_cache), work, items
+            )
+            if fix_failures:
+                print_warning(
+                    console,
+                    f"{len(fix_failures)} fix group(s) failed: {sorted(fix_failures)}; "
+                    "other fixes applied but left uncommitted.",
                 )
+                return 1
 
             passed, _retries = await phase_test_and_heal(
                 _resolve_backend(config, "test", backend_cache), work, feedback_items=items
