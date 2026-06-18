@@ -501,6 +501,48 @@ async def test_parallel_fix_same_file_no_race(
     assert shared.read_text().split() == ["marker-1", "marker-2", "marker-3"]
 
 
+async def test_parallel_fix_failure_isolated_returns_nonzero(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC#5: a failed fix group is isolated, surfaced, and exits nonzero.
+
+    The bad.py group raises; its sentinel must be absent while the other groups
+    apply, a warning naming bad.py must surface (non-silent), commit must be
+    skipped, and the run must exit 1 (locked nonzero-on-failure decision).
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fix_fail_file = "bad.py"
+    stub.merge_items = [
+        _merge_item(1, "good1.py", "high"),
+        _merge_item(2, "bad.py", "high"),
+        _merge_item(3, "good2.py", "low"),
+    ]
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_warning",
+        lambda console, msg, *a, **k: warnings.append(msg),
+    )
+    commit_calls: list[int] = []
+
+    async def _spy_commit(backend: Any, work: Any) -> None:
+        commit_calls.append(1)
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 1  # decision: nonzero on failure
+    assert (multi_stack_target / ".fixed-good1_py").exists()  # other groups applied
+    assert (multi_stack_target / ".fixed-good2_py").exists()
+    assert not (multi_stack_target / ".fixed-bad_py").exists()  # failed group did not apply
+    assert any("bad.py" in m for m in warnings)  # non-silent
+    assert commit_calls == []  # no commit on failure
+
+
 async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-07: Stage order = TTT intent -> alternatives -> per-stack -> parse -> merge."""
     _silence(monkeypatch)
