@@ -466,6 +466,41 @@ async def test_parallel_fix_applies_all_disjoint_files(
         assert (multi_stack_target / f".fixed-{f.replace('.', '_')}").exists()
 
 
+async def test_parallel_fix_same_file_no_race(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3 items on ONE file (read-modify-write append) + 1 on another. Correct
+    per-file serialization keeps all markers in severity order; a per-ITEM
+    fan-out would lose/interleave appends (the anyio.sleep(0) makes that race
+    deterministic).
+
+    Discrimination validated: temporarily fanning out ``phase_fix_parallel``
+    per item (one task per item) makes this FAIL -- the racing read-modify-write
+    append + anyio.sleep(0) drops/reorders markers in shared.py; the correct
+    per-file-group serialization keeps them ordered. Reverting restores PASS.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    shared = multi_stack_target / "shared.py"
+    stub.fix_append_path = shared
+    stub.merge_items = [
+        _merge_item(1, "shared.py", "high", desc="marker-1"),
+        _merge_item(2, "shared.py", "medium", desc="marker-2"),
+        _merge_item(3, "shared.py", "low", desc="marker-3"),
+        _merge_item(4, "other.py", "high", desc="other"),
+    ]
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+    assert shared.read_text().split() == ["marker-1", "marker-2", "marker-3"]
+
+
 async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-07: Stage order = TTT intent -> alternatives -> per-stack -> parse -> merge."""
     _silence(monkeypatch)
