@@ -1924,7 +1924,7 @@ async def test_structural_finding_reaches_fix_loop(
         "structural finding never reached phase_fix -- it was dropped before the "
         f"fix loop; items fixed: {[(i.get('lens'), i.get('severity')) for i in fixed]!r}"
     )
-    sev = [i.get("severity") for i in fixed]
+    sev = [str(i["severity"]) for i in fixed]
     assert sorted(sev, key=lambda s: {"high": 0, "medium": 1, "low": 2}[s]) == ["high", "high", "low"]
     assert any(i.get("lens") == "structural" for i in fixed)
 
