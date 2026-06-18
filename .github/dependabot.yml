@@ -1,0 +1,24 @@
+# Keeps the SHA-pinned actions in .github/workflows/ current. Dependabot
+# bumps the pin and updates the trailing "# vX.Y.Z" comment in the same PR,
+# so we keep supply-chain pinning without manual SHA chasing.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # One PR per week for all action bumps instead of one PR per action.
+      github-actions:
+        patterns:
+          - "*"
+
+  # Python deps via uv (reads pyproject.toml + uv.lock at the repo root).
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns:
+          - "*"
