@@ -2886,3 +2886,33 @@ def test_group_items_by_file_preserves_order_within_and_across_groups():
     assert [i["id"] for i in dict(groups)["a.py"]] == [1, 3]  # input order kept
     assert sum(len(v) for _, v in groups) == len(items)  # nothing dropped
     assert group_items_by_file([]) == []
+
+
+async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(monkeypatch):
+    import anyio
+
+    from daydream import phases
+
+    active_files, order = set(), []
+
+    async def _fake_fix(backend, work, item, item_num, total):
+        f = item["file"]
+        if f == "boom.py":
+            raise RuntimeError("kaboom")
+        assert f not in active_files, "two concurrent fixes on the same file"
+        active_files.add(f)
+        order.append(item["id"])
+        await anyio.sleep(0)  # force interleave window
+        active_files.discard(f)
+
+    monkeypatch.setattr("daydream.phases.phase_fix", _fake_fix)
+    items = [
+        {"id": 1, "file": "a.py"},
+        {"id": 2, "file": "a.py"},
+        {"id": 3, "file": "b.py"},
+        {"id": 4, "file": "boom.py"},
+    ]
+    failures = await phases.phase_fix_parallel(object(), object(), items)
+    assert order.count(1) == 1 and order.count(2) == 1 and order.count(3) == 1  # 3 successful calls
+    assert order.index(1) < order.index(2)  # a.py items kept in input order
+    assert set(failures) == {"boom.py"} and "RuntimeError" in failures["boom.py"]

@@ -1687,6 +1687,74 @@ findings with extra skepticism here.
     print_fix_complete(console, item_num, total)
 
 
+async def phase_fix_parallel(
+    backend: Backend,
+    work: WorkContext,
+    items: list[dict[str, Any]],
+    *,
+    limiter_size: int = 4,
+) -> dict[str, str]:
+    """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
+
+    Items are grouped by ``file`` (preserving the caller's severity ordering).
+    Each file-group becomes one task that applies its items serially, while
+    distinct files run concurrently under an ``anyio.CapacityLimiter``. Same-file
+    serialization removes read-modify-write races; commit stays serial and after.
+
+    Args:
+        backend: The Backend to execute against (shared across tasks).
+        work: Workspace context for the fixes; ``work.repo`` is the agent cwd.
+        items: Feedback items, already severity-sorted by the caller.
+        limiter_size: Max number of file-groups to fix concurrently.
+
+    Returns:
+        ``failures``: file -> "<ExceptionType>: <message>" for file-groups whose
+        fix raised. Empty dict on full success. Callers MUST surface this to the
+        user so that uncommitted failures are visible instead of silently dropped.
+
+    """
+    groups = group_items_by_file(items)
+    item_numbers: dict[int, int] = {}
+    counter = 0
+    for _file_key, group_items in groups:
+        for item in group_items:
+            counter += 1
+            item_numbers[id(item)] = counter
+
+    recorder = get_current_recorder()
+    failures: dict[str, str] = {}
+    limiter = anyio.CapacityLimiter(limiter_size)
+    total = len(items)
+
+    async with anyio.create_task_group() as tg:
+        for file_key, group_items in groups:
+            # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
+            async def _task(
+                fkey: str = file_key,
+                grp: list[dict[str, Any]] = group_items,
+            ) -> None:
+                async with maybe_fork(recorder, f"fix-{fkey}"):
+                    try:
+                        async with limiter:
+                            for item in grp:
+                                await phase_fix(backend, work, item, item_numbers[id(item)], total)
+                    except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                        reason = f"{type(e).__name__}: {e}"
+                        failures[fkey] = reason
+                        print_warning(
+                            console,
+                            f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
+                            "but this file's changes are left uncommitted.",
+                        )
+
+            tg.start_soon(_task)
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+
+    return failures
+
+
 async def _emit_failure_handoff(
     backend: Backend,
     work: WorkContext,
