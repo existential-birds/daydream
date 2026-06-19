@@ -2680,15 +2680,17 @@ async def phase_per_stack_reviews(
                             await run_agent(backend, work.repo, task_prompt, phase=DaydreamPhase.DEEP)
                         results[stack_name] = task_output
                     except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                        reason = f"{type(e).__name__}: {e}"
-                        failures[stack_name] = reason
-                        print_warning(
-                            console,
-                            f"Per-stack review for '{stack_name}' failed ({reason}); "
-                            "merge report will note this stack as uncovered.",
-                        )
+                        failures[stack_name] = f"{type(e).__name__}: {e}"
 
             tg.start_soon(_task)
+
+    if failures:
+        lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))
+        print_warning(
+            console,
+            f"Per-stack reviews failed for {len(failures)} stack(s); "
+            "the merge report will note them as uncovered.\n" + lines,
+        )
 
     if recorder is not None:
         recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)

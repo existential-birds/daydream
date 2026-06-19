@@ -25,10 +25,12 @@ from typing import Any
 from rich.console import Console
 
 from daydream.backends import AgentEvent, ContinuationToken, ResultEvent
+from daydream.deep.detection import StackAssignment
 from daydream.phases import (
     phase_arbiter_review,
     phase_cross_stack_merge,
     phase_parse_feedback,
+    phase_per_stack_reviews,
 )
 from daydream.workspace import WorkContext
 
@@ -193,3 +195,79 @@ async def test_arbiter_prints_kept_dropped(monkeypatch, tmp_path):
     assert "kept" in out.lower()
     assert "2" in out
     assert "1" in out
+
+
+@dataclass
+class _PerStackBackend:
+    """Backend that raises for stacks whose name appears in ``fail_for``.
+
+    ``phase_per_stack_reviews`` passes each stack's output path (which embeds the
+    stack name, e.g. ``stack-stack-a-review.md``) into the per-stack prompt, so the
+    stub keys its raise/succeed decision off the prompt text. Mirrors the
+    three-method Backend protocol (test_agent_recorder_integration:61-96).
+    """
+
+    model = "mock-model"
+    fail_for: set[str]
+
+    def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        should_fail = any(f"stack-{name}-review.md" in prompt for name in self.fail_for)
+
+        async def _gen() -> AsyncIterator[AgentEvent]:
+            if should_fail:
+                raise RuntimeError("agent boom")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        return _gen()
+
+    async def cancel(self) -> None:
+        return None
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
+
+
+async def test_per_stack_failures_summarized_once(monkeypatch, tmp_path):
+    rec = _rec(monkeypatch)
+    work = _work(tmp_path)
+    (tmp_path / ".daydream" / "deep").mkdir(parents=True, exist_ok=True)
+    diff = tmp_path / ".daydream" / "deep" / "diff.patch"
+    diff.write_text("diff")
+    intent = tmp_path / ".daydream" / "deep" / "intent.md"
+    intent.write_text("intent")
+    alts = tmp_path / ".daydream" / "deep" / "alternatives.json"
+    alts.write_text("[]")
+
+    stacks = [
+        StackAssignment(stack_name="stack-a", skill_invocation=None, files=["a.py"]),
+        StackAssignment(stack_name="stack-b", skill_invocation=None, files=["b.py"]),
+        StackAssignment(stack_name="stack-c", skill_invocation=None, files=["c.py"]),
+    ]
+    backend = _PerStackBackend(fail_for={"stack-a", "stack-b"})
+
+    successes, failures = await phase_per_stack_reviews(
+        backend,
+        work,
+        stacks,
+        diff_path=diff,
+        intent_path=intent,
+        alternatives_path=alts,
+    )
+
+    out = rec.export_text()
+    assert set(failures) == {"stack-a", "stack-b"}
+    assert set(successes) == {"stack-c"}
+    # ONE consolidated end-of-phase summary names BOTH failed stacks -- not two
+    # scattered inline warnings. The summary header is emitted exactly once.
+    assert "stack-a" in out and "stack-b" in out
+    assert out.count("uncovered") >= 1
+    assert out.count("Per-stack reviews failed") == 1
