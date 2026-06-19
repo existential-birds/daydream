@@ -318,7 +318,11 @@ class ClaudeBackend:
                 self._active_clients.discard(client)
 
     async def cancel(self) -> None:
-        """Cancel all running agents."""
+        """Interrupt every active SDK client.
+
+        Sends an interrupt to each in-flight agent client in turn; an error
+        raised by any client's interrupt propagates to the caller.
+        """
         for client in list(self._active_clients):
             await client.interrupt()
 
