@@ -138,6 +138,7 @@ jobs:
   # An analyze failure routes here instead of silently skipping the post job.
   surface-analyze-failure:
     runs-on: ubuntu-latest
+    permissions: {}
     if: github.event.workflow_run.conclusion == 'failure'
     steps:
       - name: Mint posting token

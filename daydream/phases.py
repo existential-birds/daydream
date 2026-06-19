@@ -55,16 +55,23 @@ _logger = logging.getLogger(__name__)
 
 TEST_OUTPUT_TAIL_LINES = 100
 
+# Generous for a real fix yet bounds a flailing agent that's globbing $HOME after a missed Read.
+FIX_MAX_TURNS = 25
+
 
 def _build_fix_prompt(
     test_output: str,
     feedback_items: list[dict[str, Any]] | None = None,
+    *,
+    repo: Path | None = None,
 ) -> str:
     """Build an enriched prompt for the fix agent with test output and file context.
 
     Args:
         test_output: Raw test output text.
         feedback_items: Optional list of feedback items with 'file' keys.
+        repo: Optional repo root; listed files are mapped to absolute paths when
+            they exist under it, so the fix agent's first Read hits.
 
     Returns:
         Prompt string with truncated test output and file list.
@@ -81,6 +88,8 @@ def _build_fix_prompt(
 
     if feedback_items:
         files = sorted({item["file"] for item in feedback_items if "file" in item})
+        if repo is not None:
+            files = [str(repo / f) if (repo / f).is_file() else f for f in files]
         if files:
             file_list = "\n".join(f"- {f}" for f in files)
             parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
@@ -863,6 +872,34 @@ def severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda it: _SEVERITY_RANK.get(it.get("severity") or "", 1))
 
 
+def group_items_by_file(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Partition fix items into per-file groups, preserving input order.
+
+    Shared by the parallel fix loop: distinct files become distinct groups that
+    can run concurrently, while items targeting the same file stay together so
+    they run serially (no read-modify-write races). Group emission order is the
+    first-appearance order of each file; within-group order is input order, so a
+    ``severity_sorted`` input yields severity-ordered groups. Items with a
+    missing/None file bucket into a single ``"<no-file>"`` group (cannot prove
+    disjoint -> serialize for safety). Pure: no I/O, no mutation of inputs.
+
+    Args:
+        items: Canonical fix items (each a dict with at least an optional
+            ``"file"`` key).
+
+    Returns:
+        Ordered list of ``(file_key, items_for_file)`` tuples, where
+        *file_key* is the file path string or ``"<no-file>"`` for items
+        lacking a file, and *items_for_file* preserves the input order of
+        items assigned to that file.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        key = item.get("file") or "<no-file>"
+        grouped.setdefault(key, []).append(item)
+    return list(grouped.items())
+
+
 RECOMMENDATION_VERDICTS_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1596,7 +1633,13 @@ async def phase_verify_recommendations(
 
 
 async def phase_fix(
-    backend: Backend, work: WorkContext, item: dict[str, Any], item_num: int, total: int,
+    backend: Backend,
+    work: WorkContext,
+    item: dict[str, Any],
+    item_num: int,
+    total: int,
+    *,
+    console_lock: anyio.Lock | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -1606,6 +1649,9 @@ async def phase_fix(
         item: Feedback item containing description, file, and line
         item_num: Current item number (1-indexed)
         total: Total number of items
+        console_lock: Optional lock to serialize console writes across
+            concurrent callers.  Pass the same lock to every concurrent
+            ``phase_fix`` invocation; leave ``None`` for serial callers.
 
     Returns:
         None
@@ -1613,15 +1659,18 @@ async def phase_fix(
     """
     description = item.get("description", "No description")
     file_path = item.get("file", "Unknown file")
+    resolved = work.repo / file_path
+    file_ref = str(resolved) if resolved.is_file() else file_path
     line = item.get("line", "Unknown")
 
-    console.print()
-    print_fix_progress(console, item_num, total, description)
+    async with (console_lock if console_lock is not None else anyio.Lock()):
+        console.print()
+        print_fix_progress(console, item_num, total, description)
 
     prompt = f"""Fix this issue:
 {description}
 
-File: {file_path}
+File: {file_ref}
 Line: {line}
 
 Make the minimal change needed. Do NOT change error handling semantics
@@ -1665,8 +1714,106 @@ findings with extra skepticism here.
                 "commit message.\n"
             )
 
-    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
-    print_fix_complete(console, item_num, total)
+    if console_lock is not None:
+        # Concurrent path: suppress the Live/LiveToolPanelRegistry renderer in
+        # run_agent so multiple concurrent agents don't each start their own
+        # Rich Live context on the shared console (which garbles output).
+        # The callback serializes progress lines through the shared lock.
+        async def _cb(text: str) -> None:
+            async with console_lock:
+                console.print(text)
+
+        await run_agent(
+            backend, work.repo, prompt,
+            phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            progress_callback=_cb,
+        )
+    else:
+        await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS)
+    async with (console_lock if console_lock is not None else anyio.Lock()):
+        print_fix_complete(console, item_num, total)
+
+
+async def phase_fix_parallel(
+    backend: Backend,
+    work: WorkContext,
+    items: list[dict[str, Any]],
+    *,
+    limiter_size: int = 4,
+) -> dict[str, str]:
+    """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
+
+    Items are grouped by ``file`` (preserving the caller's severity ordering).
+    Each file-group becomes one task that applies its items serially, while
+    distinct files run concurrently under an ``anyio.CapacityLimiter``. Same-file
+    serialization prevents concurrent writes to the *same named file*; it does
+    not guarantee disjoint edits if an agent touches files other than the one
+    named in the item's ``file`` key. Commit stays serial and after.
+
+    Args:
+        backend: The Backend to execute against (shared across tasks).
+        work: Workspace context for the fixes; ``work.repo`` is the agent cwd.
+        items: Feedback items, already severity-sorted by the caller.
+        limiter_size: Max number of file-groups to fix concurrently.
+
+    Returns:
+        ``failures``: file -> "<ExceptionType>: <message>" for file-groups whose
+        fix raised. Empty dict on full success. Callers MUST surface this to the
+        user so that uncommitted failures are visible instead of silently dropped.
+
+    """
+    raw_groups = group_items_by_file(items)
+    # Assign stable 1-based counters by pairing each item with its number
+    # directly, avoiding fragile id()-keyed dicts whose keys are memory
+    # addresses and can collide if dicts are reallocated between loops.
+    counter = 0
+    groups_numbered: list[tuple[str, list[tuple[dict[str, Any], int]]]] = []
+    for file_key, group_items in raw_groups:
+        numbered: list[tuple[dict[str, Any], int]] = []
+        for item in group_items:
+            counter += 1
+            numbered.append((item, counter))
+        groups_numbered.append((file_key, numbered))
+
+    recorder = get_current_recorder()
+    failures: dict[str, str] = {}
+    _failures_lock = anyio.Lock()
+    limiter = anyio.CapacityLimiter(limiter_size)
+    _console_lock = anyio.Lock()
+    total = len(items)
+
+    async with anyio.create_task_group() as tg:
+        for file_key, numbered_items in groups_numbered:
+            # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
+            async def _task(
+                fkey: str = file_key,
+                grp: list[tuple[dict[str, Any], int]] = numbered_items,
+            ) -> None:
+                _fkey_slug = fkey.replace("/", "-").replace("\\", "-")
+                async with limiter:
+                    async with maybe_fork(recorder, f"fix-{_fkey_slug}"):
+                        try:
+                            for item, item_num in grp:
+                                await phase_fix(
+                                    backend, work, item, item_num, total,
+                                    console_lock=_console_lock,
+                                )
+                        except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                            reason = f"{type(e).__name__}: {e}"
+                            async with _failures_lock:
+                                failures[fkey] = reason
+                            print_warning(
+                                console,
+                                f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
+                                "but this file's changes are left uncommitted.",
+                            )
+
+            tg.start_soon(_task)
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+
+    return failures
 
 
 async def _emit_failure_handoff(
@@ -1821,8 +1968,10 @@ async def phase_test_and_heal(
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             console.print()
             print_info(console, "Launching agent to fix test failures (auto)...")
-            fix_prompt = _build_fix_prompt(output, feedback_items)
-            _, _ = await run_agent(backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX)
+            fix_prompt = _build_fix_prompt(output, feedback_items, repo=work.repo)
+            _, _ = await run_agent(
+                backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            )
             retries_used += 1
             continuation = None
             continue
@@ -1872,8 +2021,10 @@ async def phase_test_and_heal(
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            fix_prompt = _build_fix_prompt(output, feedback_items)
-            _, _ = await run_agent(backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX)
+            fix_prompt = _build_fix_prompt(output, feedback_items, repo=work.repo)
+            _, _ = await run_agent(
+                backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            )
             retries_used += 1
             continuation = None
             continue

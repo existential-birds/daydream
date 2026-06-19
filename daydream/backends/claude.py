@@ -156,7 +156,7 @@ class ClaudeBackend:
 
     def __init__(self, model: str):
         self.model = model
-        self._client: ClaudeSDKClient | None = None
+        self._active_clients: set[ClaudeSDKClient] = set()
 
     async def execute(
         self,
@@ -229,7 +229,7 @@ class ClaudeBackend:
         skipped_tool_ids: set[str] = set()
 
         async with ClaudeSDKClient(options=options) as client:
-            self._client = client
+            self._active_clients.add(client)
             try:
                 await client.query(prompt)
                 async for msg in client.receive_response():
@@ -315,12 +315,16 @@ class ClaudeBackend:
                     continuation=None,
                 )
             finally:
-                self._client = None
+                self._active_clients.discard(client)
 
     async def cancel(self) -> None:
-        """Cancel the running agent."""
-        if self._client is not None:
-            await self._client.interrupt()
+        """Interrupt every active SDK client.
+
+        Sends an interrupt to each in-flight agent client in turn; an error
+        raised by any client's interrupt propagates to the caller.
+        """
+        for client in list(self._active_clients):
+            await client.interrupt()
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
         """Format a skill invocation for Claude.

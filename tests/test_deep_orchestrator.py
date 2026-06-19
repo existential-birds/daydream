@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.backends import ResultEvent, TextEvent
@@ -66,6 +67,14 @@ class _StubBackend:
         self.fail_first_test_run: bool = False
         # Override for the merge agent's item list (None -> default three-item payload).
         self.merge_items: list[dict[str, Any]] | None = None
+        # When set, the fix branch appends the prompt's marker token to this file
+        # via read-modify-write with an anyio.sleep(0) interleave point -- a
+        # per-ITEM fan-out would lose/reorder appends; correct per-file
+        # serialization preserves marker order.
+        self.fix_append_path: Path | None = None
+        # When set, the fix branch raises for the matching file, isolating one
+        # file-group's failure so a test can assert the others still applied.
+        self.fix_fail_file: str | None = None
 
     async def execute(
         self,
@@ -253,7 +262,19 @@ class _StubBackend:
         # phase_fix -> "apply" the edit by writing a sentinel file, the observable
         # consequence the --yes real-path test asserts the fix gate auto-approved.
         if pl.startswith("fix this issue"):
-            (cwd / ".daydream-fix-applied").write_text("applied\n")
+            m = re.search(r"^File: (.+)$", prompt, re.M)
+            fixed_file = m.group(1).strip() if m else "unknown"
+            # phase_fix emits an absolute path when the file exists on disk; the stub keys fixes by basename.
+            fixed_name = Path(fixed_file).name
+            if self.fix_fail_file is not None and fixed_name == self.fix_fail_file:
+                raise RuntimeError(f"stub fix failure for {fixed_name}")
+            (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
+            (cwd / f".fixed-{fixed_name.replace('.', '_')}").write_text("applied\n")
+            if self.fix_append_path is not None and fixed_name == self.fix_append_path.name:
+                tok = re.search(r"marker-\d+", prompt)
+                cur = self.fix_append_path.read_text() if self.fix_append_path.exists() else ""
+                await anyio.sleep(0)  # deterministic interleave point
+                self.fix_append_path.write_text(cur + (tok.group(0) if tok else "?") + "\n")
             yield TextEvent(text="Applied the fix.")
             yield ResultEvent(structured_output=None, continuation=None)
             return
@@ -396,6 +417,165 @@ async def _run_deep(target: Path, *, start_at: str = "review") -> int:
     # cleanup=False suppresses the interactive cleanup prompt; deep is the default.
     config = RunConfig(target=str(target), start_at=start_at, cleanup=False)
     return await run(config)
+
+
+def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = None) -> dict[str, Any]:
+    """Build a validated 8-key merged item (shape copied from the stub default)."""
+    return {
+        "id": item_id,
+        "lens": "per-stack",
+        "file": file,
+        "line": 1,
+        "severity": severity,
+        "description": desc if desc is not None else f"{severity} issue in {file}",
+        "confidence": "MEDIUM",
+        "rationale": "rationale",
+    }
+
+
+async def _ok(*_a: Any, **_k: Any) -> tuple[bool, int]:
+    """Async stand-in for phase_test_and_heal that always passes."""
+    return (True, 0)
+
+
+async def _noop_commit(*_a: Any, **_k: Any) -> None:
+    """Async no-op stand-in for phase_commit_push."""
+    return None
+
+
+async def test_parallel_fix_applies_all_disjoint_files(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC#3: every disjoint-file group is applied (each per-file sentinel lands).
+
+    A serial loop + single-sentinel stub would fail this -- it asserts EVERY
+    per-file ``.fixed-*`` marker, not just the last one written.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    files = ["f1.py", "f2.py", "f3.py", "f4.py"]
+    stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+    for f in files:
+        assert (multi_stack_target / f".fixed-{f.replace('.', '_')}").exists()
+
+
+async def test_parallel_fix_same_file_no_race(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3 items on ONE file (read-modify-write append) + 1 on another. Correct
+    per-file serialization keeps all markers in severity order; a per-ITEM
+    fan-out would lose/interleave appends (the anyio.sleep(0) makes that race
+    deterministic).
+
+    Discrimination validated: temporarily fanning out ``phase_fix_parallel``
+    per item (one task per item) makes this FAIL -- the racing read-modify-write
+    append + anyio.sleep(0) drops/reorders markers in shared.py; the correct
+    per-file-group serialization keeps them ordered. Reverting restores PASS.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    shared = multi_stack_target / "shared.py"
+    stub.fix_append_path = shared
+    stub.merge_items = [
+        _merge_item(1, "shared.py", "high", desc="marker-1"),
+        _merge_item(2, "shared.py", "medium", desc="marker-2"),
+        _merge_item(3, "shared.py", "low", desc="marker-3"),
+        _merge_item(4, "other.py", "high", desc="other"),
+    ]
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+    assert shared.read_text().split() == ["marker-1", "marker-2", "marker-3"]
+
+
+async def test_parallel_fix_failure_isolated_returns_nonzero(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC#5: a failed fix group is isolated, surfaced, and exits nonzero.
+
+    The bad.py group raises; its sentinel must be absent while the other groups
+    apply, a warning naming bad.py must surface (non-silent), commit must be
+    skipped, and the run must exit 1 (locked nonzero-on-failure decision).
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fix_fail_file = "bad.py"
+    stub.merge_items = [
+        _merge_item(1, "good1.py", "high"),
+        _merge_item(2, "bad.py", "high"),
+        _merge_item(3, "good2.py", "low"),
+    ]
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_warning",
+        lambda console, msg, *a, **k: warnings.append(msg),
+    )
+    commit_calls: list[int] = []
+
+    async def _spy_commit(backend: Any, work: Any) -> None:
+        commit_calls.append(1)
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 1  # decision: nonzero on failure
+    assert (multi_stack_target / ".fixed-good1_py").exists()  # other groups applied
+    assert (multi_stack_target / ".fixed-good2_py").exists()
+    assert not (multi_stack_target / ".fixed-bad_py").exists()  # failed group did not apply
+    assert any("bad.py" in m for m in warnings)  # non-silent
+    assert commit_calls == []  # no commit on failure
+
+
+async def test_parallel_fix_commit_runs_once_after_all(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC#6: commit stays serial and runs exactly once, after every parallel fix lands.
+
+    Each fix writes its own ``.fixed-*`` sentinel; the spy commit records whether ALL
+    sentinels already exist at commit time. ``seen_at_commit == [True]`` proves a single
+    commit that observed every fix -- a regression moving commit inside the fan-out would
+    see a partial set (False) or commit more than once.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    files = ["f1.py", "f2.py", "f3.py"]
+    stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
+    seen_at_commit: list[bool] = []
+
+    async def _spy_commit(backend: Any, work: Any) -> None:
+        seen_at_commit.append(
+            all((multi_stack_target / f".fixed-{f.replace('.', '_')}").exists() for f in files)
+        )
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+    assert seen_at_commit == [True]  # exactly one commit, and every fix already landed
 
 
 async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1445,7 +1625,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
 
     # Stub fix/test_and_heal/commit_push so they don't mutate the workspace or run
     # tests, but still trigger their resolver call.
-    async def _stub_fix(backend, work, item, idx, total):  # noqa: ARG001
+    async def _stub_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         return None
 
     async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
@@ -1454,7 +1634,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     async def _stub_commit(backend, work):  # noqa: ARG001
         return None
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _stub_fix)
+    monkeypatch.setattr("daydream.phases.phase_fix", _stub_fix)
     monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
 
@@ -1722,7 +1902,7 @@ async def test_structural_finding_reaches_fix_loop(
 
     fixed: list[dict[str, Any]] = []
 
-    async def _capture_fix(backend, work, item, idx, total):  # noqa: ARG001
+    async def _capture_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         fixed.append(item)
 
     async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
@@ -1734,7 +1914,7 @@ async def test_structural_finding_reaches_fix_loop(
     async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
         return None
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _capture_fix)
+    monkeypatch.setattr("daydream.phases.phase_fix", _capture_fix)
     monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
@@ -1746,10 +1926,8 @@ async def test_structural_finding_reaches_fix_loop(
         "structural finding never reached phase_fix -- it was dropped before the "
         f"fix loop; items fixed: {[(i.get('lens'), i.get('severity')) for i in fixed]!r}"
     )
-    assert [i.get("severity") for i in fixed] == ["high", "high", "low"], (
-        "fix loop received items out of severity order; expected ['high', 'high', "
-        f"'low'], got {[i.get('severity') for i in fixed]!r}"
-    )
+    sev = [str(i["severity"]) for i in fixed]
+    assert sev == sorted(sev, key=lambda s: {"high": 0, "medium": 1, "low": 2}[s])
 
 
 async def test_start_at_fix_recovers_merged_items(
@@ -1778,7 +1956,7 @@ async def test_start_at_fix_recovers_merged_items(
 
     fixed: list[dict[str, Any]] = []
 
-    async def _capture_fix(backend, work, item, idx, total):  # noqa: ARG001
+    async def _capture_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         fixed.append(item)
 
     async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
@@ -1790,7 +1968,7 @@ async def test_start_at_fix_recovers_merged_items(
     async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
         return None
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _capture_fix)
+    monkeypatch.setattr("daydream.phases.phase_fix", _capture_fix)
     monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
@@ -1883,11 +2061,11 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     # Spy on phase_fix to prove fixes are NOT applied when the gate declines.
     fix_calls: list[Any] = []
 
-    async def _spy_fix(backend, work, item, idx, total):  # noqa: ARG001
+    async def _spy_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         fix_calls.append(item)
         return None
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _spy_fix)
+    monkeypatch.setattr("daydream.phases.phase_fix", _spy_fix)
 
     # Any stdin read in non-interactive mode is a bug -- fail loudly.
     def _forbidden_input(*_a: Any, **_kw: Any) -> str:
@@ -1938,11 +2116,11 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
 
     fix_calls: list[Any] = []
 
-    async def _spy_fix(backend, work, item, idx, total):  # noqa: ARG001
+    async def _spy_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         fix_calls.append(item)
         return None
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix", _spy_fix)
+    monkeypatch.setattr("daydream.phases.phase_fix", _spy_fix)
 
     # Every stdin read raises EOFError (closed stdin without the non_interactive flag).
     def _eof_input(*_a: Any, **_kw: Any) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from collections.abc import Callable
@@ -345,7 +346,7 @@ async def run_agent(
     *,
     phase: DaydreamPhase,
     output_schema: dict[str, Any] | None = None,
-    progress_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[str], Any] | None = None,
     continuation: ContinuationToken | None = None,
     agents: dict[str, AgentDefinition] | None = None,
     max_turns: int | None = None,
@@ -437,7 +438,9 @@ async def run_agent(
                     if use_callback and progress_callback is not None:
                         last_line = event.text.strip().split("\n")[-1]
                         if last_line:
-                            progress_callback(last_line)
+                            result = progress_callback(last_line)
+                            if inspect.isawaitable(result):
+                                await result
                     else:
                         agent_renderer.append(event.text)
 
@@ -459,7 +462,9 @@ async def run_agent(
                         # can later resolve a Task-family label for the progress line.
                         tool_registry.note_call(event.id, event.name, event.input)
                         label = tool_registry.resolve_call_label(event.name, event.input)
-                        progress_callback(format_callback_progress(event.name, event.input, label))
+                        result = progress_callback(format_callback_progress(event.name, event.input, label))
+                        if inspect.isawaitable(result):
+                            await result
                     else:
                         if agent_renderer.has_content:
                             agent_renderer.finish()
