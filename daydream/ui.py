@@ -2321,10 +2321,10 @@ def print_issues_table(console: Console, issues: list[dict]) -> None:
 
 def format_verdict_join(
     *,
-    matched: list,
-    unmatched: list,
-    structural: list,
-    other: list,
+    matched: list[int | None],
+    unmatched: list[int | None],
+    structural: list[int | None],
+    other: list[int | None],
     total: int,
 ) -> Table:
     """Build a table summarizing how merged items joined to verifier verdicts.
@@ -2356,15 +2356,22 @@ def format_verdict_join(
     table.add_column("Count", style=STYLE_FG)
     table.add_column("IDs", style=STYLE_DIM)
 
-    def _ids(values: list) -> str:
+    def _ids(values: list[int | None]) -> str:
         return ", ".join(str(v) for v in values)
 
-    table.add_row("Matched", str(len(matched)), _ids(matched))
-    table.add_row("Unmatched", str(len(unmatched)), _ids(unmatched))
-    table.add_row("Structural", str(len(structural)), _ids(structural))
+    n_matched = len(matched)
+    n_unmatched = len(unmatched)
+    n_structural = len(structural)
+    n_other = len(other)
+    computed_total = n_matched + n_unmatched + n_structural + n_other
+
+    table.add_row("Matched", str(n_matched), _ids(matched))
+    table.add_row("Unmatched", str(n_unmatched), _ids(unmatched))
+    table.add_row("Structural", str(n_structural), _ids(structural))
     if other:
-        table.add_row("Other", str(len(other)), _ids(other))
-    table.add_row("Total", str(total), "")
+        table.add_row("Other", str(n_other), _ids(other))
+    mismatch = f"  [expected {total}]" if computed_total != total else ""
+    table.add_row("Total", str(computed_total) + mismatch, "")
 
     return table
 
@@ -2374,21 +2381,23 @@ def format_verdict_join(
 _EXPLORATION_LIST_CAP = 8
 
 
-def render_exploration_summary(console: Console, ctx: "ExplorationContext") -> None:
-    """Render the pre-scan exploration context as a readable summary.
+def render_exploration_summary(ctx: "ExplorationContext") -> "Group | Text":
+    """Build a renderable summarising the pre-scan exploration context.
 
     Replaces the raw structured-output JSON dump with a counts header plus
     compact lists of conventions, dependencies, and affected files. Mirrors
     the field shapes and label wording of ExplorationContext.to_prompt_section.
 
     Args:
-        console: Rich Console instance for output.
         ctx: Aggregated exploration results (read-only).
+
+    Returns:
+        A rich renderable (Table wrapped in a Group, or a plain Text for the
+        empty case) ready to pass to console.print.
 
     """
     if not (ctx.affected_files or ctx.conventions or ctx.dependencies or ctx.guidelines):
-        print_dim(console, "Exploration: no codebase context gathered")
-        return
+        return Text("Exploration: no codebase context gathered", style=STYLE_DIM)
 
     def _count(n: int, singular: str, plural: str) -> str:
         return f"{n} {singular}" if n == 1 else f"{n} {plural}"
@@ -2446,8 +2455,7 @@ def render_exploration_summary(console: Console, ctx: "ExplorationContext") -> N
     if ctx.guidelines:
         _add_items("Project Guidelines", list(ctx.guidelines))
 
-    console.print()
-    console.print(table)
+    return Group(Text(""), table)
 
 
 # Menu Component

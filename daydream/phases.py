@@ -1519,7 +1519,8 @@ If there are no actionable issues, return: {{"issues": []}}
         raise ValueError(f"Expected dict with 'issues' key, got {type(result)}")
 
     feedback_items = result["issues"]
-    print_info(console, f"Found {len(feedback_items)} actionable issues")
+    issue_count = len(feedback_items)
+    print_info(console, f"Found {issue_count} actionable {'issue' if issue_count == 1 else 'issues'}")
     if feedback_items:
         print_feedback_table(console, feedback_items)
     return feedback_items
@@ -2689,7 +2690,7 @@ async def phase_per_stack_reviews(
         print_warning(
             console,
             f"Per-stack reviews failed for {len(failures)} stack(s); "
-            "the merge report will note them as uncovered.\n" + lines,
+            "failures will be passed to the merge step.\n" + lines,
         )
 
     if recorder is not None:

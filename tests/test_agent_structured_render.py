@@ -7,62 +7,24 @@ Verified terminal-render harness (from Task 0):
     rec.export_text()  # captures the rendered agent text
 
 run_agent requires the keyword-only `phase=` argument (DaydreamPhase),
-imported from daydream.trajectory. MockBackend mirrors the dataclass at
-tests/test_agent_recorder_integration.py:61-96.
+imported from daydream.trajectory. MockBackend is imported from
+tests.test_agent_recorder_integration (the single canonical definition).
 """
 
 from __future__ import annotations
-
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 
 from rich.console import Console
 
 from daydream.agent import run_agent
 from daydream.backends import (
-    AgentEvent,
-    ContinuationToken,
     ResultEvent,
     TextEvent,
 )
 from daydream.trajectory import DaydreamPhase
+from tests.test_agent_recorder_integration import MockBackend
 
 RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}'
 PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}
-
-
-@dataclass
-class MockBackend:
-    """Minimal Backend that replays a canned event list (mirrors the protocol)."""
-
-    model = "mock-model"
-    events: list[AgentEvent]
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
-        events = self.events
-
-        async def _gen() -> AsyncIterator[AgentEvent]:
-            for event in events:
-                yield event
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        return None
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
 
 
 async def test_structured_output_text_is_not_rendered(monkeypatch, tmp_path):

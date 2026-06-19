@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Console
+from test_agent_recorder_integration import MockBackend
 
 from daydream.backends import AgentEvent, ContinuationToken, ResultEvent
 from daydream.deep.detection import StackAssignment
@@ -32,39 +33,6 @@ from daydream.phases import (
     phase_parse_feedback,
     phase_per_stack_reviews,
 )
-from daydream.workspace import WorkContext
-
-
-@dataclass
-class MockBackend:
-    """Replays a canned event list (mirrors test_agent_recorder_integration:61-96)."""
-
-    model = "mock-model"
-    events: list[AgentEvent]
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
-        events = self.events
-
-        async def _gen() -> AsyncIterator[AgentEvent]:
-            for event in events:
-                yield event
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        return None
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
 
 
 def _rec(monkeypatch: Any) -> Console:
@@ -73,20 +41,7 @@ def _rec(monkeypatch: Any) -> Console:
     return rec
 
 
-def _work(tmp_path: Path) -> WorkContext:
-    return WorkContext(
-        repo=tmp_path,
-        source=tmp_path,
-        base_branch="main",
-        base_sha="DEADBEEF",
-        head_branch="feat/x",
-        head_sha="CAFEBABE",
-        is_ephemeral=False,
-        run_id="20260101000000-deadbeef",
-    )
-
-
-async def test_parse_feedback_renders_issue_table(monkeypatch, tmp_path):
+async def test_parse_feedback_renders_issue_table(monkeypatch, tmp_path, make_work):
     rec = _rec(monkeypatch)
     payload = {
         "issues": [
@@ -102,17 +57,17 @@ async def test_parse_feedback_renders_issue_table(monkeypatch, tmp_path):
     }
     backend = MockBackend([ResultEvent(structured_output=payload, continuation=None)])
 
-    items = await phase_parse_feedback(backend, _work(tmp_path))
+    items = await phase_parse_feedback(backend, make_work(tmp_path))
 
     out = rec.export_text()
     assert items == payload["issues"]
-    assert "Found 1 actionable issues" in out
+    assert "Found 1 actionable issue" in out
     assert "f.py" in out
     assert "Missing null check" in out
     assert "{" not in out
 
 
-async def test_merge_prints_item_count(monkeypatch, tmp_path):
+async def test_merge_prints_item_count(monkeypatch, tmp_path, make_work):
     rec = _rec(monkeypatch)
     items = [
         {
@@ -140,7 +95,7 @@ async def test_merge_prints_item_count(monkeypatch, tmp_path):
 
     await phase_cross_stack_merge(
         backend,
-        _work(tmp_path),
+        make_work(tmp_path),
         per_stack_records_paths=[],
         intent_path=intent,
         alternatives_path=alts,
@@ -148,11 +103,11 @@ async def test_merge_prints_item_count(monkeypatch, tmp_path):
     )
 
     out = rec.export_text()
-    assert "3" in out
+    assert "Merged into 3 items" in out
     assert "{" not in out
 
 
-async def test_arbiter_prints_kept_dropped(monkeypatch, tmp_path):
+async def test_arbiter_prints_kept_dropped(monkeypatch, tmp_path, make_work):
     rec = _rec(monkeypatch)
     selected = [
         {
@@ -183,7 +138,7 @@ async def test_arbiter_prints_kept_dropped(monkeypatch, tmp_path):
 
     verdicts = await phase_arbiter_review(
         backend,
-        _work(tmp_path),
+        make_work(tmp_path),
         selected_records=selected,
         diff_path=diff,
         intent_path=intent,
@@ -236,9 +191,9 @@ class _PerStackBackend:
         return f"/{skill_key}"
 
 
-async def test_per_stack_failures_summarized_once(monkeypatch, tmp_path):
+async def test_per_stack_failures_summarized_once(monkeypatch, tmp_path, make_work):
     rec = _rec(monkeypatch)
-    work = _work(tmp_path)
+    work = make_work(tmp_path)
     (tmp_path / ".daydream" / "deep").mkdir(parents=True, exist_ok=True)
     diff = tmp_path / ".daydream" / "deep" / "diff.patch"
     diff.write_text("diff")
@@ -269,5 +224,5 @@ async def test_per_stack_failures_summarized_once(monkeypatch, tmp_path):
     # ONE consolidated end-of-phase summary names BOTH failed stacks -- not two
     # scattered inline warnings. The summary header is emitted exactly once.
     assert "stack-a" in out and "stack-b" in out
-    assert out.count("uncovered") >= 1
+    assert out.count("failures will be passed to the merge step") >= 1
     assert out.count("Per-stack reviews failed") == 1

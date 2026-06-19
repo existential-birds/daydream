@@ -109,7 +109,7 @@ def test_render_exploration_summary_shows_content_not_json():
         dependencies=[Dependency(source="router.go", target="gen/server.go", relationship="imports")],
     )
     console = Console(record=True, force_terminal=True, width=100)
-    render_exploration_summary(console, ctx)
+    console.print(render_exploration_summary(ctx))
     out = console.export_text()
     assert "OpenAPI First" in out
     assert "1 convention" in out  # count line
@@ -123,7 +123,7 @@ def test_render_exploration_summary_empty_is_quiet():
     from daydream.ui import render_exploration_summary  # type: ignore[attr-defined]
 
     console = Console(record=True, force_terminal=True, width=100)
-    render_exploration_summary(console, ExplorationContext())
+    console.print(render_exploration_summary(ExplorationContext()))
     out = console.export_text()
     assert "{" not in out and "[" not in out  # never dumps a structure; one dim line at most
 
