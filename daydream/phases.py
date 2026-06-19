@@ -40,6 +40,7 @@ from daydream.ui import (
     phase_subtitle,
     print_dim,
     print_error,
+    print_feedback_table,
     print_fix_complete,
     print_fix_progress,
     print_info,
@@ -1519,6 +1520,8 @@ If there are no actionable issues, return: {{"issues": []}}
 
     feedback_items = result["issues"]
     print_info(console, f"Found {len(feedback_items)} actionable issues")
+    if feedback_items:
+        print_feedback_table(console, feedback_items)
     return feedback_items
 
 
@@ -2797,6 +2800,8 @@ async def phase_arbiter_review(
         arb_id = finding.get("arb_id")
         if isinstance(arb_id, int):
             verdicts[arb_id] = finding
+    kept = sum(1 for v in verdicts.values() if v.get("keep"))
+    print_info(console, f"Arbiter: kept {kept}, dropped {len(verdicts) - kept}")
     return verdicts
 
 
@@ -2917,6 +2922,7 @@ async def phase_cross_stack_merge(
 
     items = normalize_items(agent_items + structural_items)
     items_path.write_text(json.dumps({"items": items}, indent=2))
+    print_info(console, f"Merged into {len(items)} items")
 
     # Render the human report FROM the canonical items, then copy from the deep
     # artifact dir to the canonical location (the deep dir avoids sandbox write
