@@ -33,6 +33,20 @@ def test_plan_renderer_dims_ungrounded_steps():
     assert "(ungrounded)" in output
 
 
+def test_format_verdict_join_renders_table_counts():
+    from rich.console import Console
+
+    from daydream.ui import format_verdict_join  # type: ignore[attr-defined]
+
+    table = format_verdict_join(matched=[1, 2], unmatched=[3], structural=[4, 5], other=[], total=5)
+    console = Console(record=True, force_terminal=True, width=100)
+    console.print(table)
+    out = console.export_text()
+    assert "2" in out and "matched" in out.lower()
+    assert "structural" in out.lower()
+    assert "{" not in out
+
+
 def _run_renderer_and_count_panels(width: int, height: int, text_lines: list[str]) -> tuple[int, object]:
     from rich.console import Console
     from rich.panel import Panel

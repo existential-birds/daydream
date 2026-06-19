@@ -2316,6 +2316,59 @@ def print_issues_table(console: Console, issues: list[dict]) -> None:
             console.print(Text(f"  Files: {files_str}", style=STYLE_DIM))
 
 
+# Verdict-Join Summary Component
+
+
+def format_verdict_join(
+    *,
+    matched: list,
+    unmatched: list,
+    structural: list,
+    other: list,
+    total: int,
+) -> Table:
+    """Build a table summarizing how merged items joined to verifier verdicts.
+
+    One row per category (Matched / Unmatched / Structural / Other) showing the
+    count and, dimly, the ids; a final Total row. The Other row is omitted when
+    empty. Mirrors the print_summary table style.
+
+    Args:
+        matched: Ids of items that matched a verifier verdict.
+        unmatched: Ids of verdict-eligible items with no verifier verdict.
+        structural: Ids of structural (verdict-exempt) items.
+        other: Leftover ids that fit no other bucket.
+        total: Total number of items to fix (len(items)).
+
+    Returns:
+        A rich Table ready to pass to console.print.
+
+    """
+    table = Table(
+        title="Verdict Join",
+        title_style=STYLE_BOLD_GREEN,
+        box=box.ROUNDED,
+        border_style=STYLE_PURPLE,
+        show_header=False,
+        padding=(0, 1),
+    )
+    table.add_column("Category", style=STYLE_CYAN)
+    table.add_column("Count", style=STYLE_FG)
+    table.add_column("IDs", style=STYLE_DIM)
+
+    def _ids(values: list) -> str:
+        return ", ".join(str(v) for v in values)
+
+    table.add_row("Matched", str(len(matched)), _ids(matched))
+    table.add_row("Unmatched", str(len(unmatched)), _ids(unmatched))
+    table.add_row("Structural", str(len(structural)), _ids(structural))
+    if other:
+        table.add_row("Other", str(len(other)), _ids(other))
+    table.add_row("Total", str(total), "")
+
+    return table
+
+
 # Exploration Summary Component
 
 _EXPLORATION_LIST_CAP = 8
