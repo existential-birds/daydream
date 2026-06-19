@@ -11,7 +11,7 @@ on:
 
 jobs:
   check:
-    runs-on: blacksmith
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code

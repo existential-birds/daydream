@@ -1,6 +1,0 @@
-# Blacksmith provisions the runners behind the `blacksmith` label; actionlint
-# only knows GitHub-hosted labels, so declare it here or the CI actionlint
-# step (ci.yml) fails with "label \"blacksmith\" is unknown".
-self-hosted-runner:
-  labels:
-    - blacksmith

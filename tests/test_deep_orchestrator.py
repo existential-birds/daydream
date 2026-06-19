@@ -1625,7 +1625,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
 
     # Stub fix/test_and_heal/commit_push so they don't mutate the workspace or run
     # tests, but still trigger their resolver call.
-    async def _stub_fix(backend, work, item, idx, total):  # noqa: ARG001
+    async def _stub_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         return None
 
     async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
@@ -1902,7 +1902,7 @@ async def test_structural_finding_reaches_fix_loop(
 
     fixed: list[dict[str, Any]] = []
 
-    async def _capture_fix(backend, work, item, idx, total):  # noqa: ARG001
+    async def _capture_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         fixed.append(item)
 
     async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
@@ -1956,7 +1956,7 @@ async def test_start_at_fix_recovers_merged_items(
 
     fixed: list[dict[str, Any]] = []
 
-    async def _capture_fix(backend, work, item, idx, total):  # noqa: ARG001
+    async def _capture_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         fixed.append(item)
 
     async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
@@ -2061,7 +2061,7 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     # Spy on phase_fix to prove fixes are NOT applied when the gate declines.
     fix_calls: list[Any] = []
 
-    async def _spy_fix(backend, work, item, idx, total):  # noqa: ARG001
+    async def _spy_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         fix_calls.append(item)
         return None
 
@@ -2116,7 +2116,7 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
 
     fix_calls: list[Any] = []
 
-    async def _spy_fix(backend, work, item, idx, total):  # noqa: ARG001
+    async def _spy_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         fix_calls.append(item)
         return None
 

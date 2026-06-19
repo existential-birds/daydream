@@ -882,6 +882,16 @@ def group_items_by_file(items: list[dict[str, Any]]) -> list[tuple[str, list[dic
     ``severity_sorted`` input yields severity-ordered groups. Items with a
     missing/None file bucket into a single ``"<no-file>"`` group (cannot prove
     disjoint -> serialize for safety). Pure: no I/O, no mutation of inputs.
+
+    Args:
+        items: Canonical fix items (each a dict with at least an optional
+            ``"file"`` key).
+
+    Returns:
+        Ordered list of ``(file_key, items_for_file)`` tuples, where
+        *file_key* is the file path string or ``"<no-file>"`` for items
+        lacking a file, and *items_for_file* preserves the input order of
+        items assigned to that file.
     """
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in items:
@@ -1623,7 +1633,13 @@ async def phase_verify_recommendations(
 
 
 async def phase_fix(
-    backend: Backend, work: WorkContext, item: dict[str, Any], item_num: int, total: int,
+    backend: Backend,
+    work: WorkContext,
+    item: dict[str, Any],
+    item_num: int,
+    total: int,
+    *,
+    console_lock: anyio.Lock | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -1633,6 +1649,9 @@ async def phase_fix(
         item: Feedback item containing description, file, and line
         item_num: Current item number (1-indexed)
         total: Total number of items
+        console_lock: Optional lock to serialize console writes across
+            concurrent callers.  Pass the same lock to every concurrent
+            ``phase_fix`` invocation; leave ``None`` for serial callers.
 
     Returns:
         None
@@ -1644,8 +1663,9 @@ async def phase_fix(
     file_ref = str(resolved) if resolved.is_file() else file_path
     line = item.get("line", "Unknown")
 
-    console.print()
-    print_fix_progress(console, item_num, total, description)
+    async with (console_lock if console_lock is not None else anyio.Lock()):
+        console.print()
+        print_fix_progress(console, item_num, total, description)
 
     prompt = f"""Fix this issue:
 {description}
@@ -1694,8 +1714,24 @@ findings with extra skepticism here.
                 "commit message.\n"
             )
 
-    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS)
-    print_fix_complete(console, item_num, total)
+    if console_lock is not None:
+        # Concurrent path: suppress the Live/LiveToolPanelRegistry renderer in
+        # run_agent so multiple concurrent agents don't each start their own
+        # Rich Live context on the shared console (which garbles output).
+        # The callback serializes progress lines through the shared lock.
+        async def _cb(text: str) -> None:
+            async with console_lock:
+                console.print(text)
+
+        await run_agent(
+            backend, work.repo, prompt,
+            phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            progress_callback=_cb,
+        )
+    else:
+        await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS)
+    async with (console_lock if console_lock is not None else anyio.Lock()):
+        print_fix_complete(console, item_num, total)
 
 
 async def phase_fix_parallel(
@@ -1726,39 +1762,51 @@ async def phase_fix_parallel(
         user so that uncommitted failures are visible instead of silently dropped.
 
     """
-    groups = group_items_by_file(items)
-    item_numbers: dict[int, int] = {}
+    raw_groups = group_items_by_file(items)
+    # Assign stable 1-based counters by pairing each item with its number
+    # directly, avoiding fragile id()-keyed dicts whose keys are memory
+    # addresses and can collide if dicts are reallocated between loops.
     counter = 0
-    for _file_key, group_items in groups:
+    groups_numbered: list[tuple[str, list[tuple[dict[str, Any], int]]]] = []
+    for file_key, group_items in raw_groups:
+        numbered: list[tuple[dict[str, Any], int]] = []
         for item in group_items:
             counter += 1
-            item_numbers[id(item)] = counter
+            numbered.append((item, counter))
+        groups_numbered.append((file_key, numbered))
 
     recorder = get_current_recorder()
     failures: dict[str, str] = {}
+    _failures_lock = anyio.Lock()
     limiter = anyio.CapacityLimiter(limiter_size)
+    _console_lock = anyio.Lock()
     total = len(items)
 
     async with anyio.create_task_group() as tg:
-        for file_key, group_items in groups:
+        for file_key, numbered_items in groups_numbered:
             # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
             async def _task(
                 fkey: str = file_key,
-                grp: list[dict[str, Any]] = group_items,
+                grp: list[tuple[dict[str, Any], int]] = numbered_items,
             ) -> None:
-                async with maybe_fork(recorder, f"fix-{fkey}"):
-                    try:
-                        async with limiter:
-                            for item in grp:
-                                await phase_fix(backend, work, item, item_numbers[id(item)], total)
-                    except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                        reason = f"{type(e).__name__}: {e}"
-                        failures[fkey] = reason
-                        print_warning(
-                            console,
-                            f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
-                            "but this file's changes are left uncommitted.",
-                        )
+                _fkey_slug = fkey.replace("/", "-").replace("\\", "-")
+                async with limiter:
+                    async with maybe_fork(recorder, f"fix-{_fkey_slug}"):
+                        try:
+                            for item, item_num in grp:
+                                await phase_fix(
+                                    backend, work, item, item_num, total,
+                                    console_lock=_console_lock,
+                                )
+                        except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                            reason = f"{type(e).__name__}: {e}"
+                            async with _failures_lock:
+                                failures[fkey] = reason
+                            print_warning(
+                                console,
+                                f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
+                                "but this file's changes are left uncommitted.",
+                            )
 
             tg.start_soon(_task)
 

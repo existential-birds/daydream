@@ -3106,7 +3106,7 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
 
     active_files, order = set(), []
 
-    async def _fake_fix(backend, work, item, item_num, total):
+    async def _fake_fix(backend, work, item, item_num, total, **kwargs):
         f = item["file"]
         if f == "boom.py":
             raise RuntimeError("kaboom")

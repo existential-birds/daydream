@@ -33,7 +33,7 @@ permissions: {}
 
 jobs:
   dispatch:
-    runs-on: blacksmith
+    runs-on: ubuntu-latest
     if: >-
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
