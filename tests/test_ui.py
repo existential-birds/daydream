@@ -81,6 +81,39 @@ def test_agent_text_renderer_small_content_single_panel():
     assert renderer._buffer == []  # type: ignore[attr-defined]
 
 
+def test_render_exploration_summary_shows_content_not_json():
+    from rich.console import Console
+
+    from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
+    from daydream.ui import render_exploration_summary  # type: ignore[attr-defined]
+
+    ctx = ExplorationContext(
+        affected_files=[FileInfo(path="services/library/openapi.yaml", role="modified")],
+        conventions=[
+            Convention(name="OpenAPI First", description="openapi.yaml is the HTTP contract", source="CLAUDE.md")
+        ],
+        dependencies=[Dependency(source="router.go", target="gen/server.go", relationship="imports")],
+    )
+    console = Console(record=True, force_terminal=True, width=100)
+    render_exploration_summary(console, ctx)
+    out = console.export_text()
+    assert "OpenAPI First" in out
+    assert "1 convention" in out  # count line
+    assert "{" not in out  # no raw JSON
+
+
+def test_render_exploration_summary_empty_is_quiet():
+    from rich.console import Console
+
+    from daydream.exploration import ExplorationContext
+    from daydream.ui import render_exploration_summary  # type: ignore[attr-defined]
+
+    console = Console(record=True, force_terminal=True, width=100)
+    render_exploration_summary(console, ExplorationContext())
+    out = console.export_text()
+    assert "{" not in out and "[" not in out  # never dumps a structure; one dim line at most
+
+
 def test_prompt_user_returns_default_on_eof(monkeypatch):
     from unittest.mock import Mock
 

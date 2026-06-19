@@ -119,6 +119,39 @@ class _StubBackend:
             )
             return
 
+        # Exploration specialists. Each returns its envelope sub-dict as
+        # structured_output (keyed into results[name] by _run_specialist) plus a
+        # TextEvent of raw JSON the production gate must suppress from the terminal.
+        if "you are the **pattern-scanner** specialist" in pl:
+            payload = {
+                "conventions": [
+                    {
+                        "name": "OpenAPI First",
+                        "description": "openapi.yaml is the HTTP contract",
+                        "source": "CLAUDE.md",
+                    }
+                ],
+                "guidelines": [],
+            }
+            yield TextEvent(text=json.dumps({"conventions": payload["conventions"], "guidelines": []}))
+            yield ResultEvent(structured_output=payload, continuation=None)
+            return
+        if "you are the **dependency-tracer** specialist" in pl:
+            payload = {
+                "affected_files": [],
+                "dependencies": [
+                    {"source": "App.tsx", "target": "api.py", "relationship": "calls"}
+                ],
+            }
+            yield TextEvent(text=json.dumps(payload))
+            yield ResultEvent(structured_output=payload, continuation=None)
+            return
+        if "you are the **test-mapper** specialist" in pl:
+            payload = {"affected_files": []}
+            yield TextEvent(text=json.dumps(payload))
+            yield ResultEvent(structured_output=payload, continuation=None)
+            return
+
         # TTT intent phase -> plain text. Discriminator unique to build_intent_prompt.
         if "understand the intent of these changes" in pl:
             yield TextEvent(text="The PR updates greetings across stacks.")
@@ -352,6 +385,7 @@ def _install_stub_backend(
     *,
     is_codex: bool = False,
     pin_skill_availability: bool = True,
+    enable_exploration: bool = False,
 ) -> _StubBackend:
     """Patch create_backend to return a single stub backend instance.
 
@@ -363,6 +397,10 @@ def _install_stub_backend(
             plugin registry and prevents exploration from adding unexpected
             backend calls. Pass False when a test explicitly controls skill
             availability (e.g. via ``CLAUDE_CONFIG_DIR``).
+        enable_exploration: When True, leaves ``EXPLORATION_AVAILABLE`` True so
+            the real ``pre_scan`` branch runs and the stub answers the
+            specialist prompts. Default False preserves the existing behavior
+            (exploration disabled) that the rest of the suite relies on.
     """
     stub = _StubBackend(target, is_codex=is_codex)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: stub)
@@ -373,8 +411,9 @@ def _install_stub_backend(
     if pin_skill_availability:
         # None -> orchestrator falls back to set(SKILL_MAP.keys()).
         monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
-        # Disable exploration pre-scan so it doesn't add extra backend calls.
-        monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+        if not enable_exploration:
+            # Disable exploration pre-scan so it doesn't add extra backend calls.
+            monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     return stub
 
 
@@ -441,6 +480,44 @@ async def _ok(*_a: Any, **_k: Any) -> tuple[bool, int]:
 async def _noop_commit(*_a: Any, **_k: Any) -> None:
     """Async no-op stand-in for phase_commit_push."""
     return None
+
+
+async def test_run_deep_renders_prescan_summary_not_json(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real-path: the pre-scan summary renders as a readable panel, not raw JSON.
+
+    Drives ``run`` through ``run_deep`` with EXPLORATION_AVAILABLE left True so
+    the real ``pre_scan`` branch executes and the stub answers the specialist
+    prompts. Asserts the convention surfaces in the rendered summary and that
+    no raw structured-output JSON envelope leaks to the terminal.
+    """
+    from rich.console import Console
+
+    from daydream.runner import RunConfig, run
+
+    # Add a 4th changed file so select_tier() -> "parallel" (the pattern-scanner
+    # runs and its conventions reach the rendered summary).
+    (multi_stack_target / "extra.py").write_text("VALUE = 2\n")
+    subprocess.run(["git", "add", "."], cwd=multi_stack_target, capture_output=True, check=True)  # noqa: S603, S607
+    subprocess.run(  # noqa: S603, S607
+        ["git", "commit", "-m", "add extra"], cwd=multi_stack_target, capture_output=True, check=True
+    )
+
+    _silence(monkeypatch)
+    rec = Console(record=True, force_terminal=True, width=120)
+    monkeypatch.setattr("daydream.deep.orchestrator.console", rec)
+    _install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+    out = rec.export_text()
+    assert "OpenAPI First" in out  # convention surfaced by the summary
+    assert '{"conventions"' not in out and "pattern-scanner" not in out  # no raw JSON envelope
 
 
 async def test_parallel_fix_applies_all_disjoint_files(

@@ -69,6 +69,7 @@ from daydream.ui import (
     print_success,
     print_verification_summary,
     print_warning,
+    render_exploration_summary,
 )
 from daydream.workspace import WorkContext
 
@@ -537,6 +538,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     config.exploration_depth,
                     diff_ref=_compute_diff_ref(target_dir),
                 )
+                render_exploration_summary(console, config.exploration_context)
         if EXPLORATION_AVAILABLE and config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(
                 daydream_dir / "exploration"
