@@ -608,6 +608,48 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert first["parse"] < first["merge"]
 
 
+PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
+
+
+def _intent_prompt(stub: _StubBackend) -> str:
+    """Recover the intent-phase prompt by its stable instruction text."""
+    return next(c["prompt"] for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower())
+
+
+async def test_pr_body_reaches_intent_prompt(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PR description body is threaded into the initial intent prompt."""
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_pr_view",
+        lambda repo, pr=None: {"number": 7, "body": PR_SENTINEL},
+    )
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    rc = await run(RunConfig(target=str(multi_stack_target), pr_number=7, start_at="review", cleanup=False))
+    assert rc == 0
+    assert PR_SENTINEL in _intent_prompt(stub)
+
+
+async def test_no_pr_body_degrades_cleanly(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No PR body -> intent prompt is byte-for-byte today's behavior."""
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, pr=None: None)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    rc = await run(RunConfig(target=str(multi_stack_target), pr_number=7, start_at="review", cleanup=False))
+    assert rc == 0
+    assert PR_SENTINEL not in _intent_prompt(stub)
+    assert "pull request description" not in _intent_prompt(stub).lower()
+
+
 async def test_fresh_context_per_stage(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-08: Each stage = a distinct Backend.execute call (no continuation reuse)."""
     _silence(monkeypatch)

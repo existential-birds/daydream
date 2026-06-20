@@ -548,6 +548,11 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
 
             if config.start_at not in ("per-stack", "merge", "fix"):
                 print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
+                # Ground intent in the author's PR description when one exists.
+                # gh_pr_view soft-fails to None (never raises here); a missing
+                # dict or empty body all collapse to None -> today's behavior.
+                pr_view = git_ops.gh_pr_view(target_dir, config.pr_number)
+                pr_description = (pr_view or {}).get("body") or None
                 intent_summary = await phase_understand_intent(
                     _resolve_backend(config, "intent", backend_cache),
                     work,
@@ -555,6 +560,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     log,
                     branch,
                     exploration_dir=exploration_dir,
+                    pr_description=pr_description,
                 )
 
                 print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])

@@ -2314,6 +2314,7 @@ async def phase_understand_intent(
     branch: str,
     *,
     exploration_dir: Path | None = None,
+    pr_description: str | None = None,
 ) -> str:
     """Phase: Understand the intent of the PR through conversational confirmation.
 
@@ -2327,6 +2328,13 @@ async def phase_understand_intent(
         diff_path: Path to the diff file on disk.
         log: Git log output (main..HEAD --oneline).
         branch: Current branch name.
+        exploration_dir: Optional directory of pre-scan exploration context.
+        pr_description: Optional author-written PR description body. When
+            present, it is threaded into the INITIAL intent proposal as the
+            authoritative statement of intent. It is deliberately NOT
+            re-injected into the interactive correction-loop rebuild: once a
+            human supplies a correction, that correction is the higher
+            authority.
 
     Returns:
         The confirmed intent summary string.
@@ -2340,6 +2348,7 @@ async def phase_understand_intent(
         branch=branch,
         log=log,
         exploration_dir=exploration_dir,
+        pr_description=pr_description,
     )
 
     while True:
