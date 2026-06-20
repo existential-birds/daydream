@@ -182,7 +182,7 @@ async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
+    monkeypatch.setattr("daydream.ui.panels.time.sleep", lambda _: None)
 
     output = StringIO()
     test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
@@ -228,7 +228,7 @@ async def test_glob_tool_panel_singular_file_count(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
+    monkeypatch.setattr("daydream.ui.panels.time.sleep", lambda _: None)
 
     output = StringIO()
     test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
@@ -266,7 +266,7 @@ async def test_glob_tool_panel_truncates_long_results(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
+    monkeypatch.setattr("daydream.ui.panels.time.sleep", lambda _: None)
 
     output = StringIO()
     test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
@@ -299,7 +299,7 @@ async def test_quiet_mode_shows_header_only(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
+    monkeypatch.setattr("daydream.ui.panels.time.sleep", lambda _: None)
 
     output = StringIO()
     test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
@@ -339,7 +339,7 @@ async def test_quiet_mode_empty_result_shows_header_only(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
+    monkeypatch.setattr("daydream.ui.panels.time.sleep", lambda _: None)
 
     output = StringIO()
     test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
@@ -372,7 +372,7 @@ async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
+    monkeypatch.setattr("daydream.ui.panels.time.sleep", lambda _: None)
 
     output = StringIO()
     # Force truecolor for consistent RGB color codes across environments.
@@ -413,7 +413,7 @@ async def test_skill_tool_panel_collapses_output(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
+    monkeypatch.setattr("daydream.ui.panels.time.sleep", lambda _: None)
 
     output = StringIO()
     test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
@@ -459,7 +459,7 @@ async def test_concurrent_tool_panels_display_results(monkeypatch):
 
     backend = MockBackendWithEvents(events)
 
-    monkeypatch.setattr("daydream.ui.time.sleep", lambda _: None)
+    monkeypatch.setattr("daydream.ui.panels.time.sleep", lambda _: None)
 
     output = StringIO()
     test_console = Console(file=output, force_terminal=True, width=120, theme=NEON_THEME)
