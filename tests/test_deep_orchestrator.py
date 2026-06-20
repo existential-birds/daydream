@@ -421,7 +421,10 @@ def _install_stub_backend(
     if pin_skill_availability:
         # None -> orchestrator falls back to set(SKILL_MAP.keys()).
         monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
-        if not enable_exploration:
+        if enable_exploration:
+            # Pin True so the pre_scan branch runs regardless of ambient module state.
+            monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", True)
+        else:
             # Disable exploration pre-scan so it doesn't add extra backend calls.
             monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     return stub

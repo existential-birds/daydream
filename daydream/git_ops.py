@@ -102,6 +102,34 @@ def reset_gh_token_env() -> None:
     _gh_token_env = None
 
 
+# Header names whose values are secrets. ``gh api -H "Authorization: Bearer
+# <jwt>"`` carries a minted App/installation token as a plain argument, so any
+# log line or error message that joins raw args masks these values.
+_SENSITIVE_HEADER_PREFIXES = ("authorization:",)
+
+
+def _redact_args(args: list[str]) -> list[str]:
+    """Mask secret-bearing args (e.g. ``Authorization: Bearer <jwt>``).
+
+    The token is passed as a plain ``gh``/``git`` argument, so joining raw args
+    into a warning or :class:`GitError` message would leak it into logs. The
+    header name is kept for debuggability; only the value is replaced.
+
+    Args:
+        args: The argument list passed after ``gh``/``git``.
+
+    Returns:
+        A copy with sensitive header values replaced by ``***``.
+    """
+    redacted: list[str] = []
+    for arg in args:
+        if any(arg.lower().startswith(prefix) for prefix in _SENSITIVE_HEADER_PREFIXES):
+            redacted.append(f"{arg.split(':', 1)[0]}: ***")
+        else:
+            redacted.append(arg)
+    return redacted
+
+
 # --- Errors ------------------------------------------------------------------
 
 
@@ -309,16 +337,18 @@ def _run_gh(
             if attempt < retries:
                 _logger.warning(
                     "gh %s timed out after %ss (attempt %d/%d); retrying",
-                    " ".join(args),
+                    " ".join(_redact_args(args)),
                     timeout,
                     attempt + 1,
                     retries + 1,
                 )
         except (subprocess.SubprocessError, OSError) as exc:
-            raise GitError(f"gh {' '.join(args)} failed: {type(exc).__name__}: {exc}") from exc
+            raise GitError(f"gh {' '.join(_redact_args(args))} failed: {type(exc).__name__}: {exc}") from exc
 
     suffix = f" ({retries + 1} attempts)" if retries else ""
-    raise GitTimeoutError(f"gh {' '.join(args)} timed out after {timeout}s{suffix}") from last_timeout
+    raise GitTimeoutError(
+        f"gh {' '.join(_redact_args(args))} timed out after {timeout}s{suffix}"
+    ) from last_timeout
 
 
 # --- Pre-flight --------------------------------------------------------------

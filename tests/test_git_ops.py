@@ -1150,6 +1150,63 @@ def test_gh_api_headers_pass_dash_h_args(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert "--input" in captured[1]
 
 
+def test_gh_api_error_message_redacts_authorization_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subprocess failure must not leak the Bearer token into the GitError.
+
+    Real-path: ``gh_api`` builds ``-H "Authorization: Bearer <jwt>"`` and calls the
+    real ``_run_gh``; only ``subprocess.run`` is faked (the external boundary).
+    """
+    repo = _make_repo_with_main(tmp_path)
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise OSError("gh executable failed to spawn")
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    with pytest.raises(GitError) as excinfo:
+        git_ops.gh_api(repo, "/app/installations", headers={"Authorization": "Bearer jwt-super-secret-xyz"})
+
+    msg = str(excinfo.value)
+    assert "jwt-super-secret-xyz" not in msg
+    assert "Authorization: ***" in msg
+
+
+def test_gh_api_timeout_redacts_authorization_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Timeout must redact the Bearer token in both the retry warning and the error."""
+    import logging
+
+    repo = _make_repo_with_main(tmp_path)
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+    # Force one retry so the warning-log branch fires.
+    monkeypatch.setattr(git_ops, "_gh_retries", lambda: 1)
+
+    with caplog.at_level(logging.WARNING, logger="daydream.git_ops"):
+        with pytest.raises(git_ops.GitTimeoutError) as excinfo:
+            git_ops.gh_api(
+                repo,
+                "/app/installations",
+                headers={"Authorization": "Bearer jwt-super-secret-xyz"},
+                idempotent=True,
+            )
+
+    msg = str(excinfo.value)
+    assert "jwt-super-secret-xyz" not in msg
+    assert "Authorization: ***" in msg
+    # The retry warning fired and must also be redacted.
+    warnings = [r.getMessage() for r in caplog.records]
+    assert warnings, "expected a retry warning to be logged"
+    assert all("jwt-super-secret-xyz" not in w for w in warnings)
+    assert any("Authorization: ***" in w for w in warnings)
+
+
 def test_gh_api_jq_invalid_line_raises_git_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class _Proc:
         returncode = 0
