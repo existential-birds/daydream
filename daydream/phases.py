@@ -1807,11 +1807,12 @@ async def phase_fix_parallel(
                             reason = f"{type(e).__name__}: {e}"
                             async with _failures_lock:
                                 failures[fkey] = reason
-                            print_warning(
-                                console,
-                                f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
-                                "but this file's changes are left uncommitted.",
-                            )
+                            async with _console_lock:
+                                print_warning(
+                                    console,
+                                    f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
+                                    "but this file's changes are left uncommitted.",
+                                )
 
             tg.start_soon(_task)
 
