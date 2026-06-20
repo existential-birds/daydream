@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -372,7 +373,13 @@ def install_fake_gh(bin_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
     """Write the ``gh`` shim into ``bin_dir`` and prepend it to ``PATH``."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     shim = bin_dir / "gh"
-    shim.write_text(_SHIM_SOURCE, encoding="utf-8")
+    # Pin the shebang to the interpreter running the suite. A bare
+    # ``#!/usr/bin/env python3`` resolves ``python3`` off PATH to whatever shim
+    # comes first (e.g. a pyenv shim), whose cold-start can intermittently
+    # exceed git_ops's 60s ``gh`` timeout and flake every fake-gh test. The
+    # current interpreter is always present and starts immediately.
+    source = _SHIM_SOURCE.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1)
+    shim.write_text(source, encoding="utf-8")
     shim.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return FakeGh(bin_dir)
