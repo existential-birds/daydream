@@ -13,17 +13,24 @@ Resolve the archive root (this exact precedence; do NOT hardcode the home path):
 1. `$DAYDREAM_ARCHIVE_DIR` if set, else `~/.daydream/archive`.
 2. Runs live in `<root>/runs/<session-uuid>/`.
 
-Identify the current repo: `git -C <cwd> rev-parse --show-toplevel` (absolute path) and `git rev-parse HEAD`, `git rev-parse --abbrev-ref HEAD` (both are used in step 3 to detect stale findings via `git diff <run head_sha>..HEAD`).
+Identify the current repo: `git -C <cwd> rev-parse --show-toplevel` (absolute path) and `git rev-parse HEAD` (used in step 3 to detect stale findings via `git diff <run head_sha>..HEAD`), `git rev-parse --abbrev-ref HEAD` (branch name, for display and secondary matching).
 
 List runs newest-first and match. Each run's `manifest.json` records the target repo at `git.source_path` (absolute path) — that is the match field. Secondary signals in the same manifest: `git.repo_slug`, `git.branch`, `git.head_sha`.
 
 ```bash
 ROOT="${DAYDREAM_ARCHIVE_DIR:-$HOME/.daydream/archive}/runs"
 REPO="$(git rev-parse --show-toplevel)"
-for d in $(ls -dt "$ROOT"/*/); do
-  src=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]+'manifest.json'))['git']['source_path'])" "$d" 2>/dev/null)
+while IFS= read -r d; do
+  src=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]+'manifest.json'))['git']['source_path'])" "$d")
   [ "$src" = "$REPO" ] && echo "$d" && break
-done
+done < <(python3 -c "
+import os, sys
+root = sys.argv[1]
+dirs = [os.path.join(root, e) for e in os.listdir(root)
+        if os.path.isdir(os.path.join(root, e))]
+dirs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+print('\n'.join(dirs))
+" "$ROOT")
 ```
 
 Pick the newest match (prefer one whose `git.head_sha` equals the current HEAD; if the newest match is on a different branch/SHA, say so explicitly — its findings may be stale). If no run matches `source_path`, say "No archived daydream run found for this repo" and stop.
@@ -35,7 +42,7 @@ From the matched run dir read:
 - `deep/merged-items.json` — the findings: `items[]` each with `id`, `description`, `file`, `line`, `confidence` (HIGH/MEDIUM/LOW), `severity`, `lens`, `rationale`.
 - `deep/recommendation-verdicts.json` — the arbiter's `verdicts[]`: `issue_id`, `verdict` (`consistent` / `inconsistent`), `evidence`, `unverified_assumptions`. A finding with no verdict row was not arbitrated; a finding may appear under more than one `id`/lens (dedupe by file+line+description). **If this file is absent entirely** (the run stopped before the arbitration phase), treat every finding as unarbitrated — proceed to step 3 to cross-check against current code, and in step 5 apply the "unarbitrated but code check confirms the issue still exists" path for each finding.
 - `review-output.md` — human-readable finding list (cross-check ids).
-- `trajectories/fix-*.json` — one per finding the fix phase touched. The filename is `fix-<slug>.json` where `<slug>` is derived from the target file path by: replacing `/` and `\` with `-`, then lowercasing, replacing every character that is not `[a-z0-9-]` with `-`, collapsing consecutive `-` into one, and stripping leading/trailing `-`. Example: `src/daydream/phases.py` → `fix-src-daydream-phases-py.json`; `My_Module.py` → `fix-my-module-py.json`.
+- `trajectories/fix-*.json` — one per finding the fix phase touched. The filename is `fix-<slug>.json` where `<slug>` is derived from the target file path (`file_key`) by the pipeline `_safe_descriptor("fix-" + fkey.replace("/", "-").replace("\\", "-"))`, which: (1) prepends `fix-` and replaces `/` and `\` with `-`, (2) lowercases the whole string, (3) replaces every character that is not `[a-z0-9-]` with `-`, (4) collapses consecutive `-` into one, (5) strips leading/trailing `-`. Example: `src/daydream/phases.py` → `fix-src-daydream-phases-py.json`; `My_Module.py` → `fix-my-module-py.json`. **Collision caveat**: paths that differ only in separator-like characters collapse to the same slug — e.g. `src/my.module/file.py` and `src/my-module/file.py` both yield `fix-src-my-module-file-py.json`. When a slug matches multiple candidate paths from the finding list, cross-reference the `items[].file` field in `deep/merged-items.json` against each candidate path to identify which finding(s) the trajectory actually covers; do not assume a unique mapping.
 
 ### Tell whether a fix actually ran
 
@@ -44,7 +51,12 @@ One trajectory file covers **all findings for the same target file** (findings a
 Open each `trajectories/fix-*.json` and inspect `steps` / `final_metrics.total_steps`:
 - **Never attempted** — no `fix-*.json` file exists for that finding's file.
 - **Dispatched but not run** — the trajectory has only the single `source: "user"` prompt step (`total_steps == 1`, no `source: "assistant"` step, no tool calls). The fixer was given the prompt but produced no edits.
-- **Applied (candidate)** — multiple steps including `source: "assistant"` with tool calls (Edit/Write/Bash). Do NOT classify as `applied` yet; verify against real git state in step 3 first. An agent may have made edits that a later Bash call in the same trajectory reverted. For files with multiple findings, each finding must be independently confirmed — the trajectory being "applied" only means the agent ran, not that every finding in the batch was addressed.
+- **Ran (unconfirmed — NOT yet "applied")** — multiple steps including `source: "assistant"` with tool calls (Edit/Write/Bash). **Stop here; do NOT record this as `applied`.** The final classification for each finding MUST come from the git-state check in step 3. After that check, classify as:
+  - `applied` — tool calls ran AND `git diff` confirms the fix for this specific finding is present in current code.
+  - `not-applied (reverted)` — tool calls ran AND `git diff` shows no net change for this specific finding (edits were reverted within the same trajectory).
+  - `ran-not-addressed` — tool calls ran for this file's trajectory but the diff shows no edit was ever attempted for this specific finding (the agent skipped it within the batch). Use this instead of `not-applied (reverted)` when there is no evidence the finding was even touched.
+
+  For files with multiple findings, each finding must be classified independently — the trajectory having run only means the agent executed for that file, not that every finding in the batch was addressed.
 
 ## 3. Cross-check against current code
 
@@ -56,17 +68,17 @@ Output a tight status line: matched run id, `status`, flow, head_sha vs current 
 
 | id | file:line | sev/conf | verdict | fix state | current-code check | proposed action |
 
-`fix state` ∈ {applied, not-applied (reverted), dispatched-not-run, never-attempted}. `applied` requires git-state confirmation from step 3 (the trajectory had tool calls AND `git diff` shows the change is present in current code). If tool calls appeared in the trajectory but the diff shows no net change, use `not-applied (reverted)`. Keep it decisive, no hedging.
+`fix state` ∈ {applied, not-applied (reverted), ran-not-addressed, dispatched-not-run, never-attempted}. `applied` requires git-state confirmation from step 3 (the trajectory had tool calls AND `git diff` shows the change is present in current code for this specific finding). If tool calls appeared in the trajectory but the diff shows no net change for this finding and the agent did attempt it, use `not-applied (reverted)`. If the trajectory ran tool calls for the file but this specific finding was never touched (no diff evidence it was attempted), use `ran-not-addressed`. Keep it decisive, no hedging.
 
 ## 5. Propose dispositions, then confirm
 
 For each finding, recommend ONE action:
 
-**Apply the fix** when: verdict `consistent` (or unarbitrated but the code check confirms the issue still exists), finding still applies to current code, and fix state is `dispatched-not-run` or `never-attempted`.
+**Apply the fix** when: verdict `consistent` (or unarbitrated but the code check confirms the issue still exists), finding still applies to current code, and fix state is `dispatched-not-run`, `ran-not-addressed`, or `never-attempted`.
 
 **Dispose** (state the reason) when any of:
 - verdict `inconsistent` — the arbiter found the rationale doesn't hold.
-- `metrics.grounding_rate == 0.0` or `coverage_ratio == 0.0`, or a finding whose rationale cites only the diff — not grounded in the codebase.
+- a finding whose rationale cites only the diff and no codebase evidence — not grounded in the codebase. (Note: if the run's `metrics.grounding_rate == 0.0` or `coverage_ratio == 0.0`, flag this in the step 4 summary as a run-level signal, but evaluate each finding individually — a HIGH-confidence finding independently verified against current code in step 3 is not disposed solely because of a run-aggregate metric.)
 - the named file/line/symbol no longer exists or was already fixed since the run's head_sha — no longer applies.
 - the fix is too broken to recover (e.g. the finding misreads the contract; an in-code schema/type/comment documents the named behavior as intentional) — disposing is correct.
 

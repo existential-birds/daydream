@@ -57,6 +57,7 @@ TEST_OUTPUT_TAIL_LINES = 100
 
 # Generous for a real fix yet bounds a flailing agent that's globbing $HOME after a missed Read.
 FIX_MAX_TURNS = 25
+_PR_BODY_MAX_CHARS = 8000
 
 
 def _build_fix_prompt(
@@ -1186,7 +1187,6 @@ def build_intent_prompt(
     if pointer:
         parts.append(pointer)
     if pr_description and pr_description.strip():
-        _PR_BODY_MAX_CHARS = 8000
         body_text = pr_description.strip()
         if len(body_text) > _PR_BODY_MAX_CHARS:
             body_text = body_text[:_PR_BODY_MAX_CHARS] + "\n[PR description truncated]"
@@ -1201,7 +1201,7 @@ def build_intent_prompt(
             "'complete'.\n\n"
             "Pull request description:\n"
             "<pr_description>\n"
-            f"{body_text}\n"
+            f"{body_text.replace('</pr_description>', '<\\/pr_description>')}\n"
             "</pr_description>\n"
         )
     body = (
@@ -1726,8 +1726,7 @@ If this finding conflicts with an explicit in-code contract — a JSON schema, a
 type signature, or a comment documenting intent — the contract wins. Do not
 override documented intent to satisfy the finding; note the conflict in your
 commit message (or report inability to fix). Treat low/medium-confidence
-findings with extra skepticism here. If confirmed author intent is provided
-below, it takes precedence over both the contract and this finding.
+findings with extra skepticism here.
 """
 
     # Best-effort: inject the confirmed author intent so the fixer won't undo a

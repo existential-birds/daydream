@@ -126,11 +126,10 @@ class _StubBackend:
             # on-disk confirmed-intent file (intent_p) and downstream stages —
             # including the fix prompt — read it back.
             summary = "The PR updates greetings across stacks."
-            pr_match = re.search(
-                r"<pr_description>\n(.*?)\n</pr_description>", prompt, re.DOTALL
-            )
-            if pr_match is not None:
-                summary += f"\nConfirmed author intent: {pr_match.group(1).strip()}"
+            _tag = "<pr_description>\n"
+            if _tag in prompt:
+                pr_body = prompt.split(_tag, 1)[1]
+                summary += f"\nConfirmed author intent: {pr_body}"
             yield TextEvent(text=summary)
             yield ResultEvent(structured_output=None, continuation=None)
             return
@@ -744,6 +743,7 @@ async def test_non_interactive_intent_prompt_carries_pr_body(
     monkeypatch.setattr("builtins.input", _forbidden_input)
 
     reset_state()
+    rc = -1
     try:
         assert get_non_interactive() is False
         config = RunConfig(
@@ -760,6 +760,33 @@ async def test_non_interactive_intent_prompt_carries_pr_body(
 
     assert rc == 0
     assert PR_SENTINEL in _intent_prompt(stub)
+
+
+@pytest.mark.asyncio
+async def test_non_open_pr_state_suppresses_pr_body(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When gh_pr_view returns a non-OPEN state (CLOSED or MERGED), the
+    orchestrator must NOT thread the PR body into the intent prompt — trusting
+    a stale description would be wrong.  Asserts on the observable prompt
+    content, not on internal state."""
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    for state in ("CLOSED", "MERGED"):
+        monkeypatch.setattr(
+            "daydream.git_ops.gh_pr_view",
+            lambda repo, pr=None, _s=state: {"number": 7, "body": PR_SENTINEL, "state": _s},
+        )
+        stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+        rc = await run(RunConfig(target=str(multi_stack_target), pr_number=7, start_at="review", cleanup=False))
+        assert rc == 0
+        intent = _intent_prompt(stub)
+        assert PR_SENTINEL not in intent, f"PR body must be suppressed when state={state!r}"
+        assert "pull request description" not in intent.lower(), (
+            f"PR section header must be absent when state={state!r}"
+        )
 
 
 async def test_fresh_context_per_stage(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
