@@ -33,6 +33,20 @@ def test_plan_renderer_dims_ungrounded_steps():
     assert "(ungrounded)" in output
 
 
+def test_format_verdict_join_renders_table_counts():
+    from rich.console import Console
+
+    from daydream.ui import format_verdict_join  # type: ignore[attr-defined]
+
+    table = format_verdict_join(matched=[1, 2], unmatched=[3], structural=[4, 5], other=[], total=5)
+    console = Console(record=True, force_terminal=True, width=100)
+    console.print(table)
+    out = console.export_text()
+    assert "2" in out and "matched" in out.lower()
+    assert "structural" in out.lower()
+    assert "{" not in out
+
+
 def _run_renderer_and_count_panels(width: int, height: int, text_lines: list[str]) -> tuple[int, object]:
     from rich.console import Console
     from rich.panel import Panel
@@ -79,6 +93,39 @@ def test_agent_text_renderer_small_content_single_panel():
     assert panel_count == 0, f"finish() printed {panel_count} extra panel(s) via console.print"
     assert renderer._live is None  # type: ignore[attr-defined]
     assert renderer._buffer == []  # type: ignore[attr-defined]
+
+
+def test_render_exploration_summary_shows_content_not_json():
+    from rich.console import Console
+
+    from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
+    from daydream.ui import render_exploration_summary  # type: ignore[attr-defined]
+
+    ctx = ExplorationContext(
+        affected_files=[FileInfo(path="services/library/openapi.yaml", role="modified")],
+        conventions=[
+            Convention(name="OpenAPI First", description="openapi.yaml is the HTTP contract", source="CLAUDE.md")
+        ],
+        dependencies=[Dependency(source="router.go", target="gen/server.go", relationship="imports")],
+    )
+    console = Console(record=True, force_terminal=True, width=100)
+    console.print(render_exploration_summary(ctx))
+    out = console.export_text()
+    assert "OpenAPI First" in out
+    assert "1 convention" in out  # count line
+    assert "{" not in out  # no raw JSON
+
+
+def test_render_exploration_summary_empty_is_quiet():
+    from rich.console import Console
+
+    from daydream.exploration import ExplorationContext
+    from daydream.ui import render_exploration_summary  # type: ignore[attr-defined]
+
+    console = Console(record=True, force_terminal=True, width=100)
+    console.print(render_exploration_summary(ExplorationContext()))
+    out = console.export_text()
+    assert "{" not in out and "[" not in out  # never dumps a structure; one dim line at most
 
 
 def test_prompt_user_returns_default_on_eof(monkeypatch):

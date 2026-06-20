@@ -62,6 +62,7 @@ from daydream.phases import (
 )
 from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
 from daydream.ui import (
+    format_verdict_join,
     print_error,
     print_info,
     print_preflight_notice,
@@ -69,6 +70,7 @@ from daydream.ui import (
     print_success,
     print_verification_summary,
     print_warning,
+    render_exploration_summary,
 )
 from daydream.workspace import WorkContext
 
@@ -537,6 +539,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     config.exploration_depth,
                     diff_ref=_compute_diff_ref(target_dir),
                 )
+                console.print(render_exploration_summary(config.exploration_context))
         if EXPLORATION_AVAILABLE and config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(
                 daydream_dir / "exploration"
@@ -844,18 +847,15 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 and i.get("lens") != "structural"
                 and not isinstance(i.get("id"), int)
             ]
-            eligible = len(matched_ids) + len(unmatched_ids)
-            summary = (
-                f"Verdict join: {len(matched_ids)}/{eligible} verdict-eligible items "
-                f"matched a verifier verdict; {len(structural_ids)} structural "
-                f"verdict-exempt; {len(items)} total to fix "
-                f"(matched={matched_ids}, unmatched={unmatched_ids}, "
-                f"structural={structural_ids}"
+            console.print(
+                format_verdict_join(
+                    matched=matched_ids,
+                    unmatched=unmatched_ids,
+                    structural=structural_ids,
+                    other=other_ids,
+                    total=len(items),
+                )
             )
-            if other_ids:
-                summary += f", other={other_ids}"
-            summary += ")"
-            print_info(console, summary)
 
             fix_failures = await phase_fix_parallel(
                 _resolve_backend(config, "fix", backend_cache), work, items

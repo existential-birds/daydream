@@ -441,7 +441,9 @@ async def run_agent(
                             result = progress_callback(last_line)
                             if inspect.isawaitable(result):
                                 await result
-                    else:
+                    elif output_schema is None:
+                        # Structured-output text is the JSON payload, redundant with
+                        # the returned structured result — don't echo it to the terminal.
                         agent_renderer.append(event.text)
 
                     if inv is not None:
