@@ -478,12 +478,10 @@ async def run_agent(
                         inv.observe(event)
 
                 elif isinstance(event, ToolResultEvent):
-                    if use_callback:
-                        # Populate the task_id→label map in callback mode too, so a later
-                        # TaskOutput/TaskStop resolves its originating label.
-                        tool_registry.observe_result(event.id, event.output)
-                    else:
-                        tool_registry.observe_result(event.id, event.output)
+                    # Populate the task_id→label map in both modes, so a later
+                    # TaskOutput/TaskStop resolves its originating label.
+                    tool_registry.observe_result(event.id, event.output)
+                    if not use_callback:
                         panel = tool_registry.get(event.id)
                         if panel:
                             panel.set_result(event.output, event.is_error)
