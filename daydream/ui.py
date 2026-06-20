@@ -1875,10 +1875,6 @@ def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
 
 # Agent Text Helpers
 
-# Constants for agent text styling
-AGENT_TEXT_BG = "#051208"  # Very dark green background
-AGENT_TEXT_FG = NEON_COLORS["green"]  # Neon green text
-
 # Detect markdown headers anywhere in text, not just line-start, to catch inline
 # headers produced by streaming.
 _MARKDOWN_HEADER_PATTERN = re.compile(r"#{1,6}\s+\S")
