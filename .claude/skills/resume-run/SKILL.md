@@ -21,7 +21,7 @@ List runs newest-first and match. Each run's `manifest.json` records the target 
 ROOT="${DAYDREAM_ARCHIVE_DIR:-$HOME/.daydream/archive}/runs"
 REPO="$(git rev-parse --show-toplevel)"
 while IFS= read -r d; do
-  src=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]+'manifest.json'))['git']['source_path'])" "$d")
+  src=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]+'/manifest.json'))['git']['source_path'])" "$d")
   [ "$src" = "$REPO" ] && echo "$d" && break
 done < <(python3 -c "
 import os, sys

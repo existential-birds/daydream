@@ -128,7 +128,8 @@ class _StubBackend:
             summary = "The PR updates greetings across stacks."
             _tag = "<pr_description>\n"
             if _tag in prompt:
-                pr_body = prompt.split(_tag, 1)[1]
+                tail = prompt.split(_tag, 1)[1]
+                pr_body = tail.split("\n</pr_description>", 1)[0]
                 summary += f"\nConfirmed author intent: {pr_body}"
             yield TextEvent(text=summary)
             yield ResultEvent(structured_output=None, continuation=None)
