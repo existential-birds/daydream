@@ -22,7 +22,6 @@ import pytest
 from daydream import cli
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 from daydream.pr_review import parse_finding_markers
-from tests.harness.fake_gh import FakeGh, install_fake_gh
 
 
 def cli_main(argv: list[str]) -> int:
@@ -36,11 +35,6 @@ def cli_main(argv: list[str]) -> int:
     finally:
         sys.argv = saved
     raise AssertionError("cli.main() must exit via sys.exit")
-
-
-@pytest.fixture
-def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
-    return install_fake_gh(tmp_path / "fake-gh-bin", monkeypatch)
 
 
 def _post_argv(artifact: Path, *, pr: int = 7) -> list[str]:

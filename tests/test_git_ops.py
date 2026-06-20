@@ -666,7 +666,7 @@ def test_run_gh_read_wrapper_retries_then_succeeds_and_exhausts(
     so read-only wrappers retry. Two cases through the production path:
       * a timeout on the first attempt is retried and the later success returns;
       * timeouts that exhaust every attempt raise GitTimeoutError after exactly
-        ``_GH_TIMEOUT_RETRIES + 1`` tries.
+        ``_gh_retries() + 1`` tries.
     """
     repo = _make_repo_with_main(tmp_path)
     ok = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="octocat/hello\n", stderr="")
@@ -694,7 +694,7 @@ def test_run_gh_read_wrapper_retries_then_succeeds_and_exhausts(
     monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
     with pytest.raises(git_ops.GitTimeoutError):
         git_ops.gh_pr_diff(repo, 7)
-    assert calls["n"] == git_ops._GH_TIMEOUT_RETRIES + 1
+    assert calls["n"] == git_ops._gh_retries() + 1
 
 
 def test_run_gh_mutation_does_not_retry_on_timeout(
@@ -741,7 +741,7 @@ def test_gh_api_retries_only_when_idempotent(
     # Read: idempotent=True -> retried to exhaustion.
     with pytest.raises(git_ops.GitTimeoutError):
         git_ops.gh_api(repo, "/user", idempotent=True)
-    assert calls["n"] == git_ops._GH_TIMEOUT_RETRIES + 1
+    assert calls["n"] == git_ops._gh_retries() + 1
 
     # Mutation: a GraphQL-shaped POST with a body, default flag -> no retry.
     calls["n"] = 0
@@ -1163,13 +1163,7 @@ def test_gh_api_jq_invalid_line_raises_git_error(monkeypatch: pytest.MonkeyPatch
 
 # --- gh secret/variable/PR primitives (Task 2) ------------------------------
 
-from tests.harness.fake_gh import FakeGh, install_fake_gh  # noqa: E402
-
-
-@pytest.fixture
-def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
-    """Install the fake ``gh`` binary on PATH for real-path subprocess tests."""
-    return install_fake_gh(tmp_path / "fake-gh-bin", monkeypatch)
+from tests.harness.fake_gh import FakeGh  # noqa: E402
 
 
 def test_gh_secret_set_passes_value_on_stdin_never_argv(fake_gh: FakeGh, git_repo: Path) -> None:

@@ -14,6 +14,7 @@ from daydream.exploration import (
     FileInfo,
 )
 from daydream.workspace import WorkContext
+from tests.harness.fake_gh import FakeGh, install_fake_gh
 
 # Isolate the test process from any inherited git environment. When the suite
 # runs under a git command that exports them — most importantly a pre-push hook
@@ -376,3 +377,36 @@ def _no_harvest_row_spacing(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(harvest, "_row_spacing_sleep", _noop)
+
+
+@pytest.fixture
+def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
+    """Install the subprocess ``gh`` shim and shrink the ``gh`` timeout budget.
+
+    Every test using this fixture spawns a real ``gh`` subprocess (the fake
+    shim), so it is auto-marked ``integration`` by
+    :func:`pytest_collection_modifyitems` and excluded from the pre-push gate.
+
+    The shim replies in milliseconds, so the production 60s / 2-retry budget
+    only serves to turn a CPU-starved interpreter cold start into a 3 x 60s =
+    180s stall (the original fake-gh flake). Cap each attempt at 15s with a
+    single retry: the typical run stays sub-second, the worst case is 30s.
+    """
+    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_SECONDS", "15")
+    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_RETRIES", "1")
+    return install_fake_gh(tmp_path / "fake-gh-bin", monkeypatch)
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Auto-mark every test that drives the subprocess ``gh`` shim ``integration``.
+
+    These tests spawn a real ``gh`` subprocess and so carry process cold-start
+    cost that flakes under host CPU saturation. Marking them keeps the pre-push
+    gate (``-m "not integration"``) fast and deterministic; CI runs the full
+    suite, preserving their coverage.
+    """
+    for item in items:
+        if "fake_gh" in getattr(item, "fixturenames", ()):
+            item.add_marker("integration")

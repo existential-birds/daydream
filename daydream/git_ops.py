@@ -163,7 +163,25 @@ _GIT_TIMEOUT_RETRIES = 2
 # cannot tell an idempotent GraphQL *query* from a *mutation* by HTTP method
 # (both are POST), so retry is opt-in per caller — the default is 0 attempts,
 # keeping every existing mutating caller unretried unless it explicitly opts in.
-_GH_TIMEOUT_RETRIES = 2
+#
+# Both budgets are read from the environment at call time, not frozen at import,
+# so a test harness can shrink them: a fake `gh` shim must never be granted the
+# production network-sized 60s budget, which under host CPU starvation turns a
+# sub-second call into a 3 x 60s = 180s stall (the fake-gh pre-push flake).
+_GH_DEFAULT_TIMEOUT = 60
+_GH_DEFAULT_RETRIES = 2
+
+
+def _gh_timeout() -> int:
+    """Default ``gh`` subprocess timeout in seconds (env-overridable)."""
+    raw = os.environ.get("DAYDREAM_GH_TIMEOUT_SECONDS")
+    return int(raw) if raw else _GH_DEFAULT_TIMEOUT
+
+
+def _gh_retries() -> int:
+    """Read-only ``gh`` timeout-retry budget (env-overridable)."""
+    raw = os.environ.get("DAYDREAM_GH_TIMEOUT_RETRIES")
+    return int(raw) if raw else _GH_DEFAULT_RETRIES
 
 
 def _run_git(
@@ -232,7 +250,7 @@ def _run_gh(
     repo: Path,
     args: list[str],
     *,
-    timeout: int = 60,
+    timeout: int | None = None,
     input_text: str | None = None,
     retries: int = 0,
 ) -> subprocess.CompletedProcess[str]:
@@ -241,7 +259,8 @@ def _run_gh(
     Args:
         repo: Repository working directory.
         args: Arguments after ``gh``.
-        timeout: Subprocess timeout in seconds.
+        timeout: Subprocess timeout in seconds. ``None`` (the default) uses the
+            env-overridable :func:`_gh_timeout`.
         input_text: Optional text piped to the subprocess on **stdin** (used to
             pass secret values via ``gh secret set --body-file -`` so the value
             never appears in the process argument vector).
@@ -250,7 +269,7 @@ def _run_gh(
             Only timeouts are retried; other failures raise immediately. Defaults
             to ``0`` so a non-idempotent ``gh`` call (e.g. ``pr create``,
             ``secret set``, a GraphQL mutation) is never re-run after a timeout.
-            Read-only callers pass ``_GH_TIMEOUT_RETRIES`` to ride out host CPU
+            Read-only callers pass :func:`_gh_retries` to ride out host CPU
             starvation.
 
     The subprocess environment is sourced from the module ``_gh_token_env``
@@ -267,6 +286,8 @@ def _run_gh(
         GitError: If the subprocess machinery fails for any other reason
             (missing ``gh``, OS-level error).
     """
+    if timeout is None:
+        timeout = _gh_timeout()
     token_env = get_gh_token_env()
     env = {**os.environ, **token_env} if token_env is not None else None
     last_timeout: subprocess.TimeoutExpired | None = None
@@ -1311,7 +1332,7 @@ def gh_pr_view(repo: Path, pr: int | None = None) -> dict | None:
         ]
     )
     try:
-        proc = _run_gh(repo, args, timeout=60, retries=_GH_TIMEOUT_RETRIES)
+        proc = _run_gh(repo, args, retries=_gh_retries())
     except GitError as exc:
         _logger.warning("gh pr view failed (returning None): %s", exc)
         return None
@@ -1346,8 +1367,7 @@ def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict]:
             "--json",
             "number,headRefOid,baseRefOid,baseRefName,url,headRepository,headRepositoryOwner",
         ],
-        timeout=60,
-        retries=_GH_TIMEOUT_RETRIES,
+        retries=_gh_retries(),
     )
     if proc.returncode != 0:
         return []
@@ -1371,7 +1391,7 @@ def gh_pr_diff(repo: Path, pr: int) -> str:
     Raises:
         GitError: If ``gh pr diff`` fails.
     """
-    proc = _run_gh(repo, ["pr", "diff", str(pr)], timeout=60, retries=_GH_TIMEOUT_RETRIES)
+    proc = _run_gh(repo, ["pr", "diff", str(pr)], retries=_gh_retries())
     if proc.returncode != 0:
         raise GitError(f"gh pr diff {pr} failed: {proc.stderr.strip()}")
     return proc.stdout
@@ -1408,8 +1428,7 @@ def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     proc = _run_gh(
         repo,
         ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        timeout=60,
-        retries=_GH_TIMEOUT_RETRIES,
+        retries=_gh_retries(),
     )
     if proc.returncode != 0:
         return None
@@ -1498,7 +1517,7 @@ def gh_api(
         if jq is not None:
             args.extend(["--jq", jq])
         args.append(endpoint)
-        proc = _run_gh(repo, args, timeout=60, retries=_GH_TIMEOUT_RETRIES if idempotent else 0)
+        proc = _run_gh(repo, args, retries=_gh_retries() if idempotent else 0)
         if proc.returncode != 0:
             raise _gh_error_for(f"gh api {endpoint} failed: {proc.stderr.strip()}", proc.stderr)
         try:
@@ -1524,7 +1543,7 @@ def gh_api(
             args.append("--paginate")
         if jq is not None:
             args.extend(["--jq", jq])
-        proc = _run_gh(repo, args, timeout=60, retries=_GH_TIMEOUT_RETRIES if idempotent else 0)
+        proc = _run_gh(repo, args, retries=_gh_retries() if idempotent else 0)
         if proc.returncode != 0:
             raise _gh_error_for(
                 f"gh api {endpoint} failed: {proc.stderr.strip()} "
@@ -1586,7 +1605,7 @@ def gh_secret_set(
         GitError: If neither/both scopes are given, or the ``gh`` call fails.
     """
     args = ["secret", "set", name, "--body-file", "-", *_scope_args(org, repo_slug)]
-    proc = _run_gh(repo, args, timeout=60, input_text=value)
+    proc = _run_gh(repo, args, input_text=value)
     if proc.returncode != 0:
         raise _gh_error_for(f"gh secret set {name} failed: {proc.stderr.strip()}", proc.stderr)
 
@@ -1614,7 +1633,7 @@ def gh_variable_set(
         GitError: If neither/both scopes are given, or the ``gh`` call fails.
     """
     args = ["variable", "set", name, "--body", value, *_scope_args(org, repo_slug)]
-    proc = _run_gh(repo, args, timeout=60)
+    proc = _run_gh(repo, args)
     if proc.returncode != 0:
         raise _gh_error_for(f"gh variable set {name} failed: {proc.stderr.strip()}", proc.stderr)
 
@@ -1622,7 +1641,7 @@ def gh_variable_set(
 def _gh_name_list(repo: Path, kind: str, org: str | None, repo_slug: str | None) -> list[str]:
     """Run ``gh <kind> list --json name`` and return the names."""
     args = [kind, "list", "--json", "name", *_scope_args(org, repo_slug)]
-    proc = _run_gh(repo, args, timeout=60, retries=_GH_TIMEOUT_RETRIES)
+    proc = _run_gh(repo, args, retries=_gh_retries())
     if proc.returncode != 0:
         raise _gh_error_for(f"gh {kind} list failed: {proc.stderr.strip()}", proc.stderr)
     try:
@@ -1689,7 +1708,7 @@ def gh_pr_create(
     args = ["pr", "create", "--head", head, "--base", base, "--title", title, "--body", body]
     if repo_slug is not None:
         args += ["--repo", repo_slug]
-    proc = _run_gh(repo, args, timeout=60)
+    proc = _run_gh(repo, args)
     if proc.returncode != 0:
         raise _gh_error_for(f"gh pr create failed: {proc.stderr.strip()}", proc.stderr)
     return proc.stdout.strip()
