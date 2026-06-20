@@ -26,7 +26,6 @@ from daydream.ui.theme import (
     STYLE_YELLOW,
 )
 
-# Patterns for syntax highlighting in tool output
 _FILE_PATH_PATTERN = re.compile(r"(\.?/?(?:[\w.-]+/)*[\w.-]+\.\w+)")
 _LINE_NUMBER_PATTERN = re.compile(r"^(\s*)(\d+)([:\-\|])")
 _ERROR_KEYWORDS = re.compile(r"\b(error|Error|ERROR|failed|Failed|FAILED|exception|Exception|EXCEPTION|Traceback)\b")
@@ -37,7 +36,6 @@ _STRING_PATTERN = re.compile(r"(['\"])(.*?)\1")
 _ARROW_PATTERN = re.compile(r"(->|=>|-->|==>)")
 _BRACKET_PATTERN = re.compile(r"([\[\]{}()])")
 
-# Git-specific colorization patterns
 _GIT_ADDED_PATTERN = re.compile(r"^(\+(?!\+\+).*|A[ \t].*)$")
 _GIT_DELETED_PATTERN = re.compile(r"^(-(?!--).*|D[ \t].*)$")
 _GIT_MODIFIED_PATTERN = re.compile(r"^M[ \t].*$")
@@ -79,21 +77,17 @@ def _detect_shell_syntax(content: str) -> bool:
         True if the content appears to be shell script or output.
 
     """
-    # Check for shebang - strong indicator
     if _SHEBANG_PATTERN.search(content):
         return True
 
-    # Count shell prompt lines ($ or # at start)
     prompt_matches = len(_SHELL_DETECT_PROMPT_PATTERN.findall(content))
     if prompt_matches >= 2:
         return True
 
-    # Count shell command patterns
     command_matches = len(_SHELL_DETECT_COMMAND_PATTERN.findall(content))
     if command_matches >= 3:
         return True
 
-    # Check combination: at least 1 prompt + 1 command
     return bool(prompt_matches >= 1 and command_matches >= 1)
 
 
@@ -141,7 +135,6 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
         Rich Text with neon styling applied.
 
     """
-    # Check for git-specific patterns first
     git_result = _colorize_git_line(line)
     if git_result is not None:
         return git_result
@@ -149,8 +142,7 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
     result = Text()
 
     if is_error:
-        # Error output - still colorize but with red base
-        # Highlight file paths in orange for visibility
+        # Highlight file paths in orange so they stand out against the red base.
         pos = 0
         for match in _FILE_PATH_PATTERN.finditer(line):
             if match.start() > pos:
@@ -170,87 +162,71 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
         result.append(sep, style=STYLE_PURPLE)
         line = line[line_num_match.end():]
 
-    # Process the rest of the line for patterns
     segments: list[tuple[int, int, str, Style]] = []
 
-    # Find all file paths (highest priority - cyan)
     for match in _FILE_PATH_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
                         STYLE_CYAN))
 
-    # Find error keywords (red bold)
     for match in _ERROR_KEYWORDS.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
                         STYLE_BOLD_RED))
 
-    # Find success keywords (green bold)
     for match in _SUCCESS_KEYWORDS.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
                         STYLE_BOLD_GREEN))
 
-    # Find warning keywords (yellow bold)
     for match in _WARNING_KEYWORDS.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
                         STYLE_BOLD_YELLOW))
 
-    # Find strings (orange)
     for match in _STRING_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(0),
                         STYLE_ORANGE))
 
-    # Find arrows (pink)
     for match in _ARROW_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
                         STYLE_BOLD_PINK))
 
-    # Find brackets (purple)
     for match in _BRACKET_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
                         STYLE_PURPLE))
 
-    # Find shell variables $VAR and ${VAR} (yellow)
     for match in _SHELL_VAR_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
                         STYLE_YELLOW))
 
-    # Find shell prompts at line start (cyan)
     for match in _SHELL_PROMPT_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
                         STYLE_CYAN))
 
-    # Find pipe and redirect operators (pink)
     for match in _PIPE_REDIRECT_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
                         STYLE_PINK))
 
-    # Find common commands at line start (orange bold)
     for match in _COMMAND_PATTERN.finditer(line):
         segments.append((match.start(), match.end(), match.group(1),
                         Style(color=NEON_COLORS["orange"], bold=True)))
 
-    # Sort segments by start position, then by length (longer matches first)
+    # Sort by start, then longest-first, so wider matches win overlaps.
     segments.sort(key=lambda x: (x[0], -(x[1] - x[0])))
 
-    # Build the result, avoiding overlaps
     last_end = 0
     used_ranges: list[tuple[int, int]] = []
 
     for start, end, text, style in segments:
-        # Check if this segment overlaps with any used range
         overlaps = any(not (end <= used_start or start >= used_end)
                       for used_start, used_end in used_ranges)
         if overlaps:
             continue
 
         if start > last_end:
-            # Add default styled text before this segment
             result.append(line[last_end:start],
                          style=STYLE_FG)
         result.append(text, style=style)
         used_ranges.append((start, end))
         last_end = end
 
-    # Add remaining text
     if last_end < len(line):
         result.append(line[last_end:],
                      style=STYLE_FG)

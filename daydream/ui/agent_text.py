@@ -46,23 +46,20 @@ def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
 
     result = Text()
 
-    # Patterns for highlighting
     code_pattern = re.compile(r"`([^`]+)`")
     bold_pattern = re.compile(r"\*\*([^*]+)\*\*")
     italic_pattern = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)")
     url_pattern = re.compile(r"https?://[^\s\])<>]+")
     file_path_pattern = re.compile(r"(?:^|[\s(])([./]?(?:[\w.-]+/)+[\w.-]+\.\w+)")
 
-    # Process text character by character with pattern matching
     pos = 0
     segments: list[tuple[int, int, str, Style]] = []
 
-    # Find all patterns
     for match in code_pattern.finditer(text):
         segments.append((
             match.start(),
             match.end(),
-            match.group(1),  # Just the code, not backticks
+            match.group(1),
             Style(color=NEON_COLORS["orange"], bgcolor="#3a3a3a"),
         ))
 
@@ -98,10 +95,8 @@ def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
             STYLE_CYAN,
         ))
 
-    # Sort segments by position, prefer longer matches
     segments.sort(key=lambda x: (x[0], -(x[1] - x[0])))
 
-    # Build result avoiding overlaps
     pos = 0
     used_ranges: list[tuple[int, int]] = []
 
@@ -114,14 +109,12 @@ def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
             continue
 
         if start > pos:
-            # Add default styled text with base style
             result.append(text[pos:start], style=base_style)
 
         result.append(display_text, style=style)
         used_ranges.append((start, end))
         pos = end
 
-    # Add remaining text with base style
     if pos < len(text):
         result.append(text[pos:], style=base_style)
 
@@ -228,13 +221,10 @@ class AgentTextRenderer:
         full_text = "".join(self._buffer)
         lines = full_text.split("\n")
 
-        # Detect markdown - use gradient but no italic for markdown content
         use_italic = not _has_markdown_headers(full_text)
 
-        # Render with vertical gradient
         content = _render_agent_lines_with_gradient(lines, use_italic=use_italic)
 
-        # Append spinner at end (like a cursor) while streaming
         if show_spinner:
             content.append_text(self._spinner.render())
 
@@ -288,12 +278,10 @@ class AgentTextRenderer:
         if not text:
             return
 
-        # Auto-start if not already started
         if not self._started:
             self.start()
 
         self._buffer.append(text)
-        # Live will pick up buffer changes via __rich__() on next refresh
 
     def finish(self) -> None:
         """Stop the Live context and print the final Panel.
@@ -309,7 +297,6 @@ class AgentTextRenderer:
             self._live.stop()
             self._live = None
 
-        # Reset state
         self._buffer = []
         self._started = False
 

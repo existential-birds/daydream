@@ -58,7 +58,6 @@ def print_fix_progress(
     text.append("  ", style=Style())
     text.append(f"[{item_num}/{total}] ", style=STYLE_BOLD_CYAN)
     text.append("Fixing: ", style=STYLE_PINK)
-    # Truncate description
     desc = description[:60] + "..." if len(description) > 60 else description
     text.append(desc, style=STYLE_FG)
     console.print(text)
@@ -190,7 +189,6 @@ def print_issues_table(console: Console, issues: list[dict]) -> None:
     console.print()
     console.print(table)
 
-    # Print full details for each issue
     for issue in issues:
         console.print()
         issue_id = issue.get("id", "?")

@@ -12,8 +12,6 @@ from rich.style import Style
 from rich.text import Text
 from rich.theme import Theme
 
-# Color Theme (Dracula-based)
-
 NEON_COLORS = {
     "background": "#282A36",
     "foreground": "#F8F8F2",
@@ -36,7 +34,6 @@ NEON_THEME = Theme({
     "neon.pink": NEON_COLORS["pink"],
     "neon.cyan": NEON_COLORS["cyan"],
     "neon.orange": NEON_COLORS["orange"],
-    # Semantic styles
     "neon.error": f"bold {NEON_COLORS['red']}",
     "neon.success": f"bold {NEON_COLORS['green']}",
     "neon.warning": f"bold {NEON_COLORS['yellow']}",
@@ -48,10 +45,8 @@ NEON_THEME = Theme({
     "neon.string": NEON_COLORS["orange"],
 })
 
-# Reusable Style Constants
-# Pre-defined Style objects for use with Text.append() and other Rich components
-# that require Style objects rather than theme strings.
-
+# Pre-defined Style objects for Text.append() and other Rich components that
+# require Style objects rather than theme strings.
 STYLE_CYAN = Style(color=NEON_COLORS["cyan"])
 STYLE_PURPLE = Style(color=NEON_COLORS["purple"])
 STYLE_PINK = Style(color=NEON_COLORS["pink"])
@@ -61,7 +56,6 @@ STYLE_ORANGE = Style(color=NEON_COLORS["orange"])
 STYLE_RED = Style(color=NEON_COLORS["red"])
 STYLE_FG = Style(color=NEON_COLORS["foreground"])
 
-# Bold variants
 STYLE_BOLD_PINK = Style(color=NEON_COLORS["pink"], bold=True)
 STYLE_BOLD_CYAN = Style(color=NEON_COLORS["cyan"], bold=True)
 STYLE_BOLD_PURPLE = Style(color=NEON_COLORS["purple"], bold=True)
@@ -69,11 +63,9 @@ STYLE_BOLD_GREEN = Style(color=NEON_COLORS["green"], bold=True)
 STYLE_BOLD_YELLOW = Style(color=NEON_COLORS["yellow"], bold=True)
 STYLE_BOLD_RED = Style(color=NEON_COLORS["red"], bold=True)
 
-# Panel styles
 STYLE_PANEL_BG = Style(bgcolor="#1e1e2e")
 STYLE_AGENT_BG = Style(bgcolor="#051208")
 
-# Dim style
 STYLE_DIM = Style(dim=True)
 
 # Truncation limits shared across the tool renderers. Named so the scattered
@@ -96,7 +88,6 @@ _BACKGROUND_TASK_TOOLS = frozenset({"TaskOutput", "TaskStop"})
 # the todo's ``subject`` (in ``TaskCreate``'s input; later tools resolve by id).
 _TODO_TASK_TOOLS = frozenset({"TaskCreate", "TaskGet", "TaskUpdate", "TaskList"})
 
-# Mystical action terms for tool displays
 MYSTICAL_TERMS = {
     "Glob": ["scrying", "divining", "seeking", "wandering"],
     "Grep": ["channeling", "attuning", "resonating", "listening"],
@@ -106,7 +97,6 @@ MYSTICAL_TERMS = {
     "Skill": ["invoking", "channeling", "summoning", "awakening"],
 }
 
-# Dream Surgery symbols for Edit tool visualization
 SURGERY_CHAKRA_SYMBOLS = ["◉", "◎", "●", "○", "◐", "◑", "◒"]
 SURGERY_ENERGY_FLOW = ["~", "≈", "∿", "〜", "⌇", "⌁", "⚡"]
 SURGERY_PHASES = [
@@ -122,7 +112,6 @@ def mystical_term(tool: str) -> str:
     return random.choice(MYSTICAL_TERMS.get(tool, ["processing"]))
 
 
-# Dreamlike phase subtitles
 PHASE_SUBTITLES = {
     "DAYDREAM": [
         "the mind wanders, the code improves",
@@ -195,12 +184,11 @@ GRADIENT_COLORS = [
     "#663399",
 ]
 
-# Status configuration mapping
 STATUS_CONFIG = {
-    "pending": {"icon": "⏲", "color": NEON_COLORS["yellow"]},  # ⏲
-    "in_progress": {"icon": "⮕", "color": NEON_COLORS["cyan"]},  # ⮕
-    "completed": {"icon": "✔", "color": NEON_COLORS["green"]},  # ✔
-    "failed": {"icon": "✗", "color": NEON_COLORS["red"]},  # ✗
+    "pending": {"icon": "⏲", "color": NEON_COLORS["yellow"]},
+    "in_progress": {"icon": "⮕", "color": NEON_COLORS["cyan"]},
+    "completed": {"icon": "✔", "color": NEON_COLORS["green"]},
+    "failed": {"icon": "✗", "color": NEON_COLORS["red"]},
 }
 
 # Gradient colors for ASCII art header (cyan -> pink -> purple)
@@ -251,10 +239,7 @@ def pill(text: str, bg_color: str, fg_color: str) -> Text:
     """
     result = Text()
     bg_style = Style(color=bg_color)
-    # Left edge
     result.append("▌", style=bg_style)
-    # Center text with background
     result.append(text, style=Style(color=fg_color, bgcolor=bg_color, bold=True))
-    # Right edge
     result.append("▐", style=bg_style)
     return result

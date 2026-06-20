@@ -39,7 +39,7 @@ def print_feedback_table(console: Console, items: list[dict[str, object]]) -> No
 
     """
     table = Table(
-        title="📋 Issues to Fix",  # 📋
+        title="📋 Issues to Fix",
         title_style=STYLE_BOLD_CYAN,
         box=box.ROUNDED,
         border_style=STYLE_PURPLE,
@@ -88,7 +88,7 @@ def print_error(console: Console, title: str, message: str) -> None:
     """
     panel = Panel(
         Text(message, style=STYLE_RED),
-        title=f"⚠️  {title}",  # ⚠️
+        title=f"⚠️  {title}",
         title_align="left",
         box=box.DOUBLE_EDGE,
         border_style=STYLE_RED,
@@ -224,7 +224,7 @@ def prompt_user(console: Console, message: str, default: str = "") -> str:
         return default
 
     prompt_text = Text()
-    prompt_text.append("▶ ", style=STYLE_CYAN)  # ▶
+    prompt_text.append("▶ ", style=STYLE_CYAN)
     prompt_text.append(message, style=STYLE_CYAN)
     if default:
         prompt_text.append(f" [{default}]", style=Style(color=NEON_COLORS["foreground"], dim=True))

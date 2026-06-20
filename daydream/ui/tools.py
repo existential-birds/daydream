@@ -185,19 +185,14 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
         if i > 0:
             result.append(", ", style=STYLE_FG)
 
-        # Key in cyan
         result.append(str(key), style=STYLE_CYAN)
         result.append("=", style=STYLE_PURPLE)
 
-        # Value styling based on type
         if isinstance(value, bool):
-            # Boolean in purple
             result.append(str(value), style=STYLE_PURPLE)
         elif isinstance(value, (int, float)):
-            # Numeric value in yellow
             result.append(str(value), style=STYLE_YELLOW)
         elif isinstance(value, str):
-            # String value - check for file paths
             if "/" in value or value.endswith((".py", ".js", ".ts", ".md", ".json", ".yaml", ".yml")):
                 result.append(value, style=STYLE_CYAN)
             else:
@@ -205,7 +200,6 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
         elif value is None:
             result.append("None", style=STYLE_PURPLE)
         else:
-            # Other values (dicts, lists, etc.) in foreground
             result.append(str(value), style=STYLE_FG)
 
     return result
@@ -289,7 +283,7 @@ def _build_tool_header(
     # task_id to a dim suffix, and never surface block/timeout plumbing.
     if name in _BACKGROUND_TASK_TOOLS:
         header_line = Text()
-        header_line.append("🎠 ", style=STYLE_ORANGE)  # 🎠
+        header_line.append("🎠 ", style=STYLE_ORANGE)
         header_line.append(name, style=STYLE_BOLD_PINK)
         task_id = str(args.get(_task_id_key(name), ""))
         _append_label_and_id(header_line, label, task_id)
@@ -300,7 +294,7 @@ def _build_tool_header(
     # TaskUpdate appends its status change. Never surface plumbing.
     if name in _TODO_TASK_TOOLS:
         header_line = Text()
-        header_line.append("🎠 ", style=STYLE_ORANGE)  # 🎠
+        header_line.append("🎠 ", style=STYLE_ORANGE)
         header_line.append(name, style=STYLE_BOLD_PINK)
         if name == "TaskCreate":
             subject = str(args.get("subject", "")).strip()
@@ -318,23 +312,20 @@ def _build_tool_header(
         content.append_text(header_line)
         return content
 
-    # Special handling for Skill tool calls - Gradient Whisper style
     if name == "Skill":
         header_line = Text()
-        header_line.append("✨ ", style=STYLE_PURPLE)  # ✨
+        header_line.append("✨ ", style=STYLE_PURPLE)
         header_line.append(f"{mystical_term('Skill')} ", style=Style(color=NEON_COLORS["pink"], italic=True))
         header_line.append("Skill", style=STYLE_BOLD_CYAN)
         content.append_text(header_line)
         content.append("\n  ")
 
-        # Apply character-by-character gradient to skill name
         skill_name = str(args.get("skill", ""))
         for i, char in enumerate(skill_name):
             position = i / max(len(skill_name) - 1, 1)
             color = _get_gradient_color(position)
             content.append(char, style=Style(color=color, bold=True))
 
-        # Show args in non-quiet mode (if present)
         if not quiet_mode:
             skill_args = args.get("args")
             if skill_args:
@@ -344,14 +335,12 @@ def _build_tool_header(
 
         return content
 
-    # Special handling for TodoWrite tool calls
     if name == "TodoWrite":
         header_line = Text()
-        header_line.append("🔧 ", style=STYLE_ORANGE)  # 🔧
+        header_line.append("🔧 ", style=STYLE_ORANGE)
         header_line.append("TodoWrite", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
 
-        # Parse and display todos list
         todos = args.get("todos", [])
         if isinstance(todos, list):
             for todo in todos:
@@ -365,26 +354,22 @@ def _build_tool_header(
                     content.append(f"{config['icon']} ", style=Style(color=config["color"]))
                     content.append(todo_content, style=Style(color=config["color"]))
         else:
-            # Fallback for non-list todos
             content.append("\n")
             content.append_text(_colorize_tool_args(args))
 
         return content
 
-    # Special handling for Bash tool calls
     if name in ("Bash", "shell"):
         header_line = Text()
-        header_line.append("🔨 ", style=STYLE_ORANGE)  # 🔨
+        header_line.append("🔨 ", style=STYLE_ORANGE)
         header_line.append("Bash", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
 
-        # Add description if present
         description = str(args.get("description", ""))
         if description:
             content.append("\n")
             content.append(description, style=STYLE_CYAN)
 
-        # Add command if not in quiet mode
         if not quiet_mode:
             command = str(args.get("command", ""))
             if command:
@@ -394,12 +379,11 @@ def _build_tool_header(
 
         return content
 
-    # Special handling for Write tool (header only, content preview handled separately)
     if name == "Write":
         file_path = str(args.get("file_path", ""))
 
         header_line = Text()
-        header_line.append("⛏️ ", style=STYLE_ORANGE)  # ⛏️
+        header_line.append("⛏️ ", style=STYLE_ORANGE)
         header_line.append("Write", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
         content.append(f" {mystical_term('Write')}... ", style=f"{STYLE_PURPLE} italic")
@@ -407,19 +391,17 @@ def _build_tool_header(
 
         return content
 
-    # Special handling for Glob tool calls
     if name == "Glob":
         pattern = str(args.get("pattern", ""))
         search_path = str(args.get("path", ""))
 
         header_line = Text()
-        header_line.append("🔮 ", style=STYLE_PURPLE)  # 🔮 crystal ball
+        header_line.append("🔮 ", style=STYLE_PURPLE)
         header_line.append("Glob", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
         content.append(f" {mystical_term('Glob')}... ", style=f"{STYLE_PURPLE} italic")
         content.append(pattern, style=STYLE_ORANGE)
 
-        # Search path if provided
         if search_path:
             content.append("\n")
             content.append("path=", style=STYLE_PURPLE)
@@ -427,7 +409,6 @@ def _build_tool_header(
 
         return content
 
-    # Special handling for Grep tool calls
     if name == "Grep":
         pattern = str(args.get("pattern", ""))
         search_path = str(args.get("path", ""))
@@ -435,25 +416,22 @@ def _build_tool_header(
         file_type = str(args.get("type", ""))
 
         header_line = Text()
-        header_line.append("🧙 ", style=STYLE_PURPLE)  # 🧙 wizard
+        header_line.append("🧙 ", style=STYLE_PURPLE)
         header_line.append("Grep", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
         content.append(f" {mystical_term('Grep')}... ", style=f"{STYLE_PURPLE} italic")
         content.append(pattern, style=STYLE_ORANGE)
 
-        # Search path if provided
         if search_path:
             content.append("\n")
             content.append("path=", style=STYLE_PURPLE)
             content.append(search_path, style=STYLE_CYAN)
 
-        # Glob filter if provided
         if glob_filter:
             content.append("\n")
             content.append("glob=", style=STYLE_PURPLE)
             content.append(glob_filter, style=STYLE_YELLOW)
 
-        # File type if provided
         if file_type:
             content.append("\n")
             content.append("type=", style=STYLE_PURPLE)
@@ -461,20 +439,18 @@ def _build_tool_header(
 
         return content
 
-    # Special handling for Read tool calls
     if name == "Read":
         file_path = str(args.get("file_path", ""))
         offset = args.get("offset")
         limit = args.get("limit")
 
         header_line = Text()
-        header_line.append("📜 ", style=STYLE_ORANGE)  # 📜 scroll
+        header_line.append("📜 ", style=STYLE_ORANGE)
         header_line.append("Read", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
         content.append(f" {mystical_term('Read')}... ", style=f"{STYLE_PURPLE} italic")
         content.append(file_path, style=STYLE_CYAN)
 
-        # Line range if specified
         if offset is not None or limit is not None:
             content.append("\n")
             if offset is not None:
@@ -488,22 +464,19 @@ def _build_tool_header(
 
         return content
 
-    # Special handling for Edit tool calls - Dream Surgery visualization
     if name == "Edit":
         file_path = str(args.get("file_path", ""))
         old_string = str(args.get("old_string", ""))
         new_string = str(args.get("new_string", ""))
         replace_all = args.get("replace_all", False)
 
-        # Header with surgery/healing theme
         header_line = Text()
-        header_line.append("⚕ ", style=STYLE_CYAN)  # Medical symbol
+        header_line.append("⚕ ", style=STYLE_CYAN)
         header_line.append("Edit", style=STYLE_BOLD_PINK)
         content.append_text(header_line)
         content.append(f" {mystical_term('Edit')}... ", style=Style(color=NEON_COLORS["purple"], italic=True))
         content.append(file_path, style=STYLE_CYAN)
 
-        # Replace all flag if true
         if replace_all:
             content.append("\n")
             content.append("replace_all=", style=STYLE_PURPLE)
@@ -511,7 +484,6 @@ def _build_tool_header(
 
         content.append("\n")
 
-        # BLOCKED energy - old string with red→orange gradient
         content.append("\n")
         content.append("  ⊗ ", style=STYLE_RED)
         content.append("BLOCKED", style=Style(color=NEON_COLORS["red"], bold=True))
@@ -522,16 +494,14 @@ def _build_tool_header(
             if len(old_string.split("\n")) > _EDIT_PREVIEW_MAX_LINES:
                 preview += "\n..."
             preview_len = max(len(preview) - 1, 1)
-            # Show with gradient from red to orange
             for i, char in enumerate(preview):
                 if char == "\n":
-                    content.append("\n  ")  # Indent continuation lines
+                    content.append("\n  ")
                 else:
                     t = i / preview_len
                     color = _interpolate_color(NEON_COLORS["red"], NEON_COLORS["orange"], t)
                     content.append(char, style=Style(color=color))
 
-        # FLOWING energy - new string with cyan→green gradient
         content.append("\n\n")
         content.append("  ✓ ", style=STYLE_GREEN)
         content.append("FLOWING", style=Style(color=NEON_COLORS["green"], bold=True))
@@ -542,10 +512,9 @@ def _build_tool_header(
             if len(new_string.split("\n")) > _EDIT_PREVIEW_MAX_LINES:
                 preview += "\n..."
             preview_len = max(len(preview) - 1, 1)
-            # Show with gradient from cyan to green
             for i, char in enumerate(preview):
                 if char == "\n":
-                    content.append("\n  ")  # Indent continuation lines
+                    content.append("\n  ")
                 else:
                     t = i / preview_len
                     color = _interpolate_color(NEON_COLORS["cyan"], NEON_COLORS["green"], t)
@@ -553,11 +522,11 @@ def _build_tool_header(
 
         return content
 
-    # Special handling for Task tool calls — description/prompt rendered as markdown
-    # below the header (see _build_tool_body_extras).
+    # Task description/prompt render as markdown below the header (see
+    # _build_tool_body_extras).
     if name == "Task":
         header_line = Text()
-        header_line.append("🎠 ", style=STYLE_ORANGE)  # 🎠
+        header_line.append("🎠 ", style=STYLE_ORANGE)
         header_line.append("Task", style=STYLE_BOLD_PINK)
         subagent = str(args.get("subagent_type", ""))
         if subagent:
@@ -566,13 +535,11 @@ def _build_tool_header(
         content.append_text(header_line)
         return content
 
-    # Standard tool call display (other tools)
     header_line = Text()
-    header_line.append("🎠 ", style=STYLE_ORANGE)  # 🎠
+    header_line.append("🎠 ", style=STYLE_ORANGE)
     header_line.append(name, style=STYLE_BOLD_PINK)
     content.append_text(header_line)
 
-    # Add formatted key=value pairs
     if args:
         content.append("\n")
         args_text = _colorize_tool_args(args)
@@ -637,7 +604,6 @@ def _build_result_content(
         lines = lines[:max_lines]
         truncated = True
 
-    # For non-error shell content, use Rich Syntax highlighting
     if not is_error and _detect_shell_syntax(content):
         display_content = "\n".join(lines)
         syntax = Syntax(
@@ -657,14 +623,12 @@ def _build_result_content(
             return Group(syntax, truncation_text), truncated
         return syntax, truncated
 
-    # Build colorized text content using manual colorization
     result_text = Text()
     for i, line in enumerate(lines):
         result_text.append_text(_colorize_line(line, is_error))
         if i < len(lines) - 1:
             result_text.append("\n")
 
-    # Add truncation indicator if needed
     if truncated:
         result_text.append("\n")
         result_text.append(

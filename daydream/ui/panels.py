@@ -85,9 +85,8 @@ class LiveThinkingPanel:
             Rich Panel with animated spinners in title.
 
         """
-        # Build title with spinners
         title = Text()
-        title.append("💭 Thinking")  # 💭
+        title.append("💭 Thinking")
         title.append_text(self._spinner.render())
 
         return Panel(
@@ -110,11 +109,10 @@ class LiveThinkingPanel:
         self._console.print()
         with Live(self, console=self._console, refresh_per_second=10, transient=True):
             time.sleep(duration)
-        # Print final static panel
         self._console.print(
             Panel(
                 Markdown(self._content),
-                title="💭 Thinking",  # 💭
+                title="💭 Thinking",
                 title_align="left",
                 box=box.ROUNDED,
                 border_style=STYLE_PURPLE,
@@ -137,7 +135,7 @@ def print_thinking(console: Console, content: str, max_length: int = 300) -> Non
 
     """
     panel = LiveThinkingPanel(console, content, max_length)
-    panel.show(duration=0.5)  # Brief animation before settling
+    panel.show(duration=0.5)
 
 
 class CrazySpinner:
@@ -190,26 +188,22 @@ class CrazySpinner:
 
         """
         result = Text()
-        result.append(" ")  # Leading space
+        result.append(" ")
 
         num_colors = len(GRADIENT_COLORS)
 
         for i in range(self._num_spinners):
-            # Get this spinner's pattern
             pattern_idx = (self._spinner_indices[i] + self._frame // 8) % len(self.SPINNERS)
             pattern = self.SPINNERS[pattern_idx]
 
-            # Get current character from pattern
             char_idx = (self._frame + self._offsets[i]) % len(pattern)
             char = pattern[char_idx]
 
-            # Color cycles through gradient, offset per spinner
             color_idx = (self._frame + i * 3) % num_colors
             color = GRADIENT_COLORS[color_idx]
 
             result.append(char, style=Style(color=color, bold=True))
 
-        # Advance frame
         self._frame += 1
 
         return result
@@ -311,20 +305,17 @@ class LiveToolPanel:
         if not self._result.strip():
             return Text()
 
-        # Special handling for Glob results - show file count and formatted list
         if self._name == "Glob" and not self._is_error:
             return self._build_glob_result(max_lines)
 
-        # Special handling for Grep results - show match count
         if self._name == "Grep" and not self._is_error:
             return self._build_grep_result(max_lines)
 
-        # Special handling for Edit results - show harmony restored message
         if self._name == "Edit" and not self._is_error:
             return self._build_edit_result()
 
-        # Special handling for TaskOutput - surface the <output> snippet, stripping
-        # the XML-ish tag plumbing (retrieval_status, task_id, status, ...).
+        # Surface the <output> snippet, stripping the XML-ish tag plumbing
+        # (retrieval_status, task_id, status, ...).
         if self._name == "TaskOutput" and not self._is_error:
             match = re.search(r"<output>(.*?)</output>", self._result, re.DOTALL)
             snippet = match.group(1).strip() if match else self._result
@@ -350,30 +341,24 @@ class LiveToolPanel:
 
         result = Text()
 
-        # Show count with sparkles
-        result.append("✨ ", style=STYLE_YELLOW)  # ✨
+        result.append("✨ ", style=STYLE_YELLOW)
         result.append(f"Found {total_files} file{'s' if total_files != 1 else ''}", style=STYLE_BOLD_CYAN)
         result.append("\n")
 
-        # Show files (truncated if needed)
         display_lines = lines[:max_lines]
         for i, filepath in enumerate(display_lines):
-            # Extract just the filename for compact display
             filename = filepath.rsplit("/", 1)[-1] if "/" in filepath else filepath
-            # Get parent directory for context
             parent = filepath.rsplit("/", 1)[0] if "/" in filepath else ""
 
             result.append("  ")
             result.append(filename, style=STYLE_CYAN)
             if parent:
-                # Show truncated parent path
                 if len(parent) > 40:
                     parent = "..." + parent[-37:]
                 result.append(f"  {parent}", style=STYLE_DIM)
             if i < len(display_lines) - 1:
                 result.append("\n")
 
-        # Show truncation indicator
         if total_files > max_lines:
             result.append("\n")
             result.append(
@@ -399,12 +384,10 @@ class LiveToolPanel:
 
         result = Text()
 
-        # Show count with sparkles
-        result.append("✨ ", style=STYLE_YELLOW)  # ✨
+        result.append("✨ ", style=STYLE_YELLOW)
         result.append(f"Found {total_matches} match{'es' if total_matches != 1 else ''}", style=STYLE_BOLD_CYAN)
         result.append("\n")
 
-        # Use standard result formatting for the actual content
         content, _ = _build_result_content(self._result, self._is_error, max_lines)
 
         return Group(result, content)
@@ -418,16 +401,13 @@ class LiveToolPanel:
         """
         result = Text()
 
-        # Harmony restored header with energy symbols
         result.append("  ")
         result.append("✓ ", style=STYLE_BOLD_GREEN)
         result.append("HARMONY RESTORED", style=Style(color=NEON_COLORS["green"], bold=True))
         result.append("\n\n")
 
-        # Energy flow visualization
         flow_width = 30
         for i in range(flow_width):
-            # Gradient from cyan through green
             t = i / flow_width
             color = _interpolate_color(NEON_COLORS["cyan"], NEON_COLORS["green"], t)
             char = SURGERY_ENERGY_FLOW[i % len(SURGERY_ENERGY_FLOW)]
@@ -435,7 +415,6 @@ class LiveToolPanel:
 
         result.append("\n\n")
 
-        # Show the actual result if present
         if self._result and self._result.strip():
             result.append("  ", style=STYLE_DIM)
             result.append(self._result.strip(), style=STYLE_DIM)
@@ -449,23 +428,19 @@ class LiveToolPanel:
             Rich Text with animated energy flow and phase status.
 
         """
-        # Advance frame
         self._frame += 1
 
         result = Text()
 
-        # Determine current phase based on frame (cycles through phases)
-        # At 10fps refresh, 4 frames per phase = 0.4s per phase, full cycle in 1.6s
+        # At 10fps refresh, 4 frames per phase = 0.4s per phase, full cycle in 1.6s.
         phase_duration = 4
         phase_idx = (self._frame // phase_duration) % len(SURGERY_PHASES)
         phase_name, phase_color_key = SURGERY_PHASES[phase_idx]
         phase_color = NEON_COLORS[phase_color_key]
 
-        # Energy flow animation - cycles every frame
         energy_idx = self._frame % len(SURGERY_ENERGY_FLOW)
         energy_char = SURGERY_ENERGY_FLOW[energy_idx]
 
-        # Chakra symbol animation - cycles every 2 frames
         chakra_idx = (self._frame // 2) % len(SURGERY_CHAKRA_SYMBOLS)
         chakra_char = SURGERY_CHAKRA_SYMBOLS[chakra_idx]
 
@@ -489,28 +464,22 @@ class LiveToolPanel:
             Rich Panel containing the consolidated tool call display.
 
         """
-        # Build header
         header = self._build_tool_header_content()
 
-        # Determine border color based on tool type and error state
         if self._name == "Skill":
             border_color = NEON_COLORS["cyan"]
         elif self._is_error:
             border_color = NEON_COLORS["red"]
         elif self._name == "Edit" and self._result is None:
-            # Animated border color for Edit surgery - pulse between purple and cyan
-            # At 10fps, modulo 10 = 1 second full cycle
+            # At 10fps, modulo 10 = 1 second full pulse cycle.
             pulse = abs((self._frame % 10) - 5) / 5
             border_color = _interpolate_color(NEON_COLORS["purple"], NEON_COLORS["cyan"], pulse)
         else:
             border_color = NEON_COLORS["purple"]
 
-        # Markdown body extras (e.g. Task description/prompt)
         body_extras = _build_tool_body_extras(self._name, self._args)
 
-        # Build content: header + inline spinner (if waiting) or result
         if self._result is None:
-            # Special handling for Edit - show surgery phase animation
             if self._name == "Edit":
                 surgery_indicator = self._build_surgery_phase_indicator()
                 header_with_surgery = Text()
@@ -519,22 +488,18 @@ class LiveToolPanel:
                 header_with_surgery.append_text(self._spinner.render())
                 content = Group(header_with_surgery)
             else:
-                # Show spinner inline with header
                 header_with_spinner = Text()
                 header_with_spinner.append_text(header)
                 header_with_spinner.append_text(self._spinner.render())
                 content = Group(header_with_spinner, *body_extras)
         elif self._name == "Skill":
-            # Skip output section for Skill calls - the header already shows skill name
+            # Skill calls skip the output section; the header already shows the skill name.
             content = Group(header)
         elif self._quiet_mode:
-            # Quiet mode complete: header only
             content = Group(header, *body_extras)
         else:
-            # Normal mode: show result
             result_content = self._build_result_content_internal()
 
-            # Add title for result section
             if self._is_error:
                 result_title = Text()
                 result_title.append("❌ Error", style=STYLE_BOLD_RED)
@@ -543,7 +508,7 @@ class LiveToolPanel:
                 result_title.append("Output", style=STYLE_BOLD_CYAN)
 
             if isinstance(result_content, Text) and not result_content.plain.strip():
-                # Empty result - just show header (wrap in Group for type consistency)
+                # Wrap the lone header in Group for return-type consistency.
                 content = Group(header, *body_extras)
             else:
                 content = Group(
@@ -765,7 +730,6 @@ class LiveToolPanelRegistry:
             The created LiveToolPanel.
 
         """
-        # Finalize existing panel if duplicate tool_use_id
         if tool_use_id in self._panels:
             self._finalize_panel(tool_use_id)
 
@@ -797,7 +761,6 @@ class LiveToolPanelRegistry:
 
         self._active_order.append(tool_use_id)
 
-        # Print a blank line before the first panel group
         if self._live is None:
             self._console.print()
 
@@ -908,13 +871,12 @@ class LiveToolPanelRegistry:
         panel = self._panels.pop(tool_use_id, None)
         self._active_order.remove(tool_use_id)
 
-        # Stop Live so we can print the finalized panel statically
+        # Stop Live so the finalized panel can be printed statically.
         self._stop_live()
 
         if panel:
             self._console.print(panel._render_panel())
 
-        # Restart Live for remaining active panels
         self._ensure_live()
 
 
@@ -1000,7 +962,7 @@ class ShutdownPanel:
         """
         self._steps.append(ShutdownStep(message=initial_message, status="completed"))
 
-        self._console.print()  # Add spacing before panel
+        self._console.print()
         self._live = Live(
             self._render_panel(),
             console=self._console,

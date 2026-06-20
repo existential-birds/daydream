@@ -63,12 +63,10 @@ def _get_gradient_color(position: float) -> str:
     """
     position = max(0.0, min(1.0, position))
 
-    # Map position to gradient array index
     index = position * (len(ASCII_GRADIENT_COLORS) - 1)
     lower_idx = int(index)
     upper_idx = min(lower_idx + 1, len(ASCII_GRADIENT_COLORS) - 1)
 
-    # Interpolate between the two nearest colors
     t = index - lower_idx
     return _interpolate_color(
         ASCII_GRADIENT_COLORS[lower_idx],
@@ -98,29 +96,23 @@ def print_phase_hero(
     try:
         ascii_art = pyfiglet.figlet_format(title, font="ansi_shadow")
     except pyfiglet.FigletError:
-        # Fallback to standard font
         ascii_art = pyfiglet.figlet_format(title, font="standard")
 
     lines = ascii_art.rstrip("\n").split("\n")
 
-    # Find the maximum line width for gradient calculation
     max_width = max(len(line) for line in lines) if lines else 1
 
-    # Build the gradient text
     gradient_text = Text()
 
     for line_idx, line in enumerate(lines):
         if not line.strip():
-            # Empty or whitespace-only line
             gradient_text.append(line + "\n")
             continue
 
-        # Apply gradient character by character
         for char_idx, char in enumerate(line):
             if char == " ":
                 gradient_text.append(char)
             else:
-                # Calculate position in gradient based on character position
                 position = char_idx / max_width if max_width > 0 else 0
                 color = _get_gradient_color(position)
                 gradient_text.append(char, style=Style(color=color, bold=True))
@@ -128,19 +120,16 @@ def print_phase_hero(
         if line_idx < len(lines) - 1:
             gradient_text.append("\n")
 
-    # Create decorative subtitle
     tagline = Text()
     tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
     tagline.append(f" {description} ", style=Style(color=NEON_COLORS["pink"], dim=True, italic=True))
     tagline.append("~", style=Style(color=NEON_COLORS["purple"], dim=True))
 
-    # Combine ASCII art and tagline as separate centered elements
     full_content = Group(
         Align.center(gradient_text),
         Align.center(tagline),
     )
 
-    # Create panel with dim purple border for subtle framing
     panel = Panel(
         full_content,
         box=box.DOUBLE_EDGE,
@@ -148,5 +137,5 @@ def print_phase_hero(
         padding=(0, 2),
     )
 
-    console.print()  # Add spacing before
+    console.print()
     console.print(panel)
