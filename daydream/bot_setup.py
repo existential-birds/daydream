@@ -466,7 +466,7 @@ def _installed_owner_logins(repo_dir: Path, jwt_token: str) -> set[str | None]:
     """
     bearer = {"Authorization": f"Bearer {jwt_token}"}
     with _scoped_gh_token(jwt_token):
-        installations = git_ops.gh_api(repo_dir, "/app/installations", headers=bearer)
+        installations = git_ops.gh_api(repo_dir, "/app/installations", headers=bearer, idempotent=True)
     return {
         (inst.get("account") or {}).get("login")
         for inst in (installations if isinstance(installations, list) else [])

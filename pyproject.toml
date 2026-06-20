@@ -65,6 +65,9 @@ select = ["E", "F", "I", "W"]
 # Vendored from Harbor v0.5.0; see daydream/atif/NOTICE.
 # Mechanical-only edit policy (D-03): no reformatting allowed.
 "daydream/atif/**" = ["E", "F", "I", "W"]
+# Re-exporting package facade: every import re-exports a submodule symbol onto
+# the public `daydream.ui` surface (no `__all__`, per project convention).
+"daydream/ui/__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

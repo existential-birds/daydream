@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
+from rich.text import Text
 
 import daydream
 from daydream import git_ops
@@ -40,6 +41,7 @@ from daydream.ui import (
     phase_subtitle,
     print_dim,
     print_error,
+    print_feedback_table,
     print_fix_complete,
     print_fix_progress,
     print_info,
@@ -1548,7 +1550,10 @@ If there are no actionable issues, return: {{"issues": []}}
         raise ValueError(f"Expected dict with 'issues' key, got {type(result)}")
 
     feedback_items = result["issues"]
-    print_info(console, f"Found {len(feedback_items)} actionable issues")
+    issue_count = len(feedback_items)
+    print_info(console, f"Found {issue_count} actionable {'issue' if issue_count == 1 else 'issues'}")
+    if feedback_items:
+        print_feedback_table(console, feedback_items)
     return feedback_items
 
 
@@ -1777,7 +1782,7 @@ findings with extra skepticism here.
         # run_agent so multiple concurrent agents don't each start their own
         # Rich Live context on the shared console (which garbles output).
         # The callback serializes progress lines through the shared lock.
-        async def _cb(text: str) -> None:
+        async def _cb(text: Text) -> None:
             async with console_lock:
                 console.print(text)
 
@@ -1864,11 +1869,12 @@ async def phase_fix_parallel(
                             reason = f"{type(e).__name__}: {e}"
                             async with _failures_lock:
                                 failures[fkey] = reason
-                            print_warning(
-                                console,
-                                f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
-                                "but this file's changes are left uncommitted.",
-                            )
+                            async with _console_lock:
+                                print_warning(
+                                    console,
+                                    f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
+                                    "but this file's changes are left uncommitted.",
+                                )
 
             tg.start_soon(_task)
 
@@ -2748,15 +2754,17 @@ async def phase_per_stack_reviews(
                             await run_agent(backend, work.repo, task_prompt, phase=DaydreamPhase.DEEP)
                         results[stack_name] = task_output
                     except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                        reason = f"{type(e).__name__}: {e}"
-                        failures[stack_name] = reason
-                        print_warning(
-                            console,
-                            f"Per-stack review for '{stack_name}' failed ({reason}); "
-                            "merge report will note this stack as uncovered.",
-                        )
+                        failures[stack_name] = f"{type(e).__name__}: {e}"
 
             tg.start_soon(_task)
+
+    if failures:
+        lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))
+        print_warning(
+            console,
+            f"Per-stack reviews failed for {len(failures)} stack(s); "
+            "failures will be passed to the merge step.\n" + lines,
+        )
 
     if recorder is not None:
         recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
@@ -2868,6 +2876,8 @@ async def phase_arbiter_review(
         arb_id = finding.get("arb_id")
         if isinstance(arb_id, int):
             verdicts[arb_id] = finding
+    kept = sum(1 for v in verdicts.values() if v.get("keep"))
+    print_info(console, f"Arbiter: kept {kept}, dropped {len(verdicts) - kept}")
     return verdicts
 
 
@@ -2988,6 +2998,7 @@ async def phase_cross_stack_merge(
 
     items = normalize_items(agent_items + structural_items)
     items_path.write_text(json.dumps({"items": items}, indent=2))
+    print_info(console, f"Merged into {len(items)} items")
 
     # Render the human report FROM the canonical items, then copy from the deep
     # artifact dir to the canonical location (the deep dir avoids sandbox write

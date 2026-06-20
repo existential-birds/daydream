@@ -98,14 +98,23 @@ mutation($subjectId: ID!) {
 """
 
 
-def _graphql(repo: Path, query: str, variables: dict[str, Any]) -> dict[str, Any]:
-    """Run a GraphQL query via ``gh api graphql`` and return the response.
+def _graphql(repo: Path, query: str, variables: dict[str, Any], *, idempotent: bool = False) -> dict[str, Any]:
+    """Run a GraphQL operation via ``gh api graphql`` and return the response.
+
+    Args:
+        idempotent: Set True for read-only *queries* so the call is retried on
+            host-load timeouts; leave False for *mutations*, which must not be
+            re-run after a timeout.
 
     Raises:
         GitError: If the call fails or the response carries GraphQL errors.
     """
     response = git_ops.gh_api(
-        repo, "graphql", method="POST", input_data={"query": query, "variables": variables}
+        repo,
+        "graphql",
+        method="POST",
+        input_data={"query": query, "variables": variables},
+        idempotent=idempotent,
     )
     if not isinstance(response, dict) or response.get("errors"):
         raise GitError(f"GraphQL query failed: {response!r}")
@@ -144,7 +153,7 @@ def fetch_prior_findings(target_dir: Path, repo_slug: str, pr_number: int) -> di
     cursor: str | None = None
     while True:
         variables = {"owner": owner, "name": name, "number": pr_number, "cursor": cursor}
-        response = _graphql(target_dir, _REVIEW_THREADS_QUERY, variables)
+        response = _graphql(target_dir, _REVIEW_THREADS_QUERY, variables, idempotent=True)
         threads = response["data"]["repository"]["pullRequest"]["reviewThreads"]
         for thread in threads["nodes"]:
             for comment in thread["comments"]["nodes"]:
@@ -163,7 +172,7 @@ def fetch_prior_findings(target_dir: Path, repo_slug: str, pr_number: int) -> di
         cursor = page_info["endCursor"]
 
     reviews = git_ops.gh_api(
-        target_dir, f"repos/{owner}/{name}/pulls/{pr_number}/reviews", paginate=True
+        target_dir, f"repos/{owner}/{name}/pulls/{pr_number}/reviews", paginate=True, idempotent=True
     )
     for review in reviews:
         for fingerprint in parse_finding_markers(review.get("body") or ""):
