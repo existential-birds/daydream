@@ -74,7 +74,6 @@ _TASK_PROMPT_MAX_LINES = 10
 _RESULT_MAX_LINES = 20
 _EDIT_PREVIEW_MAX_LINES = 30
 _GLOB_MAX_LINES = 15
-_WRITE_PREVIEW_CHARS = 200
 
 # Mechanical/plumbing tool args dropped from the generic key=value fallback so the
 # line leads with meaningful keys instead of noise.
@@ -87,6 +86,10 @@ _BACKGROUND_TASK_TOOLS = frozenset({"TaskOutput", "TaskStop"})
 # Todo-list tools that reference a small-integer ``taskId``; the human label is
 # the todo's ``subject`` (in ``TaskCreate``'s input; later tools resolve by id).
 _TODO_TASK_TOOLS = frozenset({"TaskCreate", "TaskGet", "TaskUpdate", "TaskList"})
+
+# Launch tools whose background-task result strings carry the assigned task id
+# in the ``Command running in background with ID: <id>`` prose pattern.
+_LAUNCH_TASK_TOOLS = frozenset({"Bash", "Agent", "Task"})
 
 MYSTICAL_TERMS = {
     "Glob": ["scrying", "divining", "seeking", "wandering"],

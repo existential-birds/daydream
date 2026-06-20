@@ -22,6 +22,7 @@ from daydream.ui.console import _interpolate_color
 from daydream.ui.theme import (
     _BACKGROUND_TASK_TOOLS,
     _GLOB_MAX_LINES,
+    _LAUNCH_TASK_TOOLS,
     _RESULT_MAX_LINES,
     _TODO_TASK_TOOLS,
     GRADIENT_COLORS,
@@ -41,11 +42,11 @@ from daydream.ui.theme import (
     SURGERY_PHASES,
 )
 from daydream.ui.tools import (
-    _LAUNCH_TASK_TOOLS,
     _build_result_content,
     _build_tool_body_extras,
     _build_tool_header,
     _derive_task_label,
+    _label_source_name,
     _parse_assigned_task_id,
     _task_id_key,
     _task_label_ns_key,
@@ -703,10 +704,7 @@ class LiveToolPanelRegistry:
         """
         if name in _BACKGROUND_TASK_TOOLS or name in _TODO_TASK_TOOLS:
             task_id = str(args.get(_task_id_key(name), ""))
-            # Background tools look up ids stored by launch tools ("bg:" prefix);
-            # todo-list tools look up ids stored by TaskCreate ("tc:" prefix).
-            origin_name = "Bash" if name in _BACKGROUND_TASK_TOOLS else "TaskCreate"
-            return self.resolve_label(origin_name, task_id)
+            return self.resolve_label(_label_source_name(name), task_id)
         return None
 
     def create(

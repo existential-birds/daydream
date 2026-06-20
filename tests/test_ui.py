@@ -323,11 +323,12 @@ def test_task_prompt_truncation_uses_named_limit():
     from rich.console import Console
 
     from daydream.ui import LiveToolPanelRegistry
+    from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
 
     reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
     reg.create("c1", "Task", {"description": "d", "prompt": "\n".join(f"l{i}" for i in range(40))})
     out = _render_panel_text(reg, "c1")
-    assert "more lines)" in out
+    assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in out
     assert "l0" in out
     assert "l39" not in out
 

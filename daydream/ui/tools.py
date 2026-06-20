@@ -18,6 +18,7 @@ from daydream.ui.console import _get_gradient_color, _interpolate_color
 from daydream.ui.theme import (
     _BACKGROUND_TASK_TOOLS,
     _EDIT_PREVIEW_MAX_LINES,
+    _LAUNCH_TASK_TOOLS,
     _MECHANICAL_TOOL_ARGS,
     _RESULT_MAX_LINES,
     _TASK_PROMPT_MAX_LINES,
@@ -40,7 +41,6 @@ from daydream.ui.theme import (
 # Patterns for harvesting the assigned task id out of an originating tool's result string.
 _LAUNCH_TASK_ID_PATTERN = re.compile(r"\bCommand running in background with ID:\s*([A-Za-z0-9]+)\b")
 _TASKCREATE_ID_PATTERN = re.compile(r"Task #(\d+)")
-_LAUNCH_TASK_TOOLS = frozenset({"Bash", "Agent", "Task"})
 
 # Single-line icon + primary-arg spec for the callback/parallel render path,
 # which cannot open Rich panels (concurrent agents would each fight for the
@@ -101,8 +101,6 @@ def _primary_tool_value(name: str, args: dict[str, object]) -> tuple[str, str | 
             continue
         if isinstance(value, str) and value.strip():
             return value, key
-        if isinstance(value, (int, float)):
-            return str(value), key
     return "", None
 
 
@@ -198,6 +196,24 @@ def _task_id_key(name: str) -> str:
     ``_build_tool_header``.
     """
     return "task_id" if name in _BACKGROUND_TASK_TOOLS else "taskId"
+
+
+def _label_source_name(name: str) -> str:
+    """Return the originating-tool name used as the namespace key for label lookups.
+
+    Background-task tools (``TaskOutput``/``TaskStop``) look up labels stored
+    by launch tools (``"Bash"`` namespace, ``"bg:"`` prefix); todo-list tools
+    look up labels stored by ``"TaskCreate"`` (``"tc:"`` prefix).  Centralising
+    this mapping here means ``resolve_call_label`` does not have to re-derive it
+    with an inline ternary that runs parallel to ``_task_label_ns_key``.
+
+    Args:
+        name: A Task-family consumer tool name (e.g. ``"TaskOutput"``).
+
+    Returns:
+        The originating-tool name to pass to ``resolve_label`` / ``_task_label_ns_key``.
+    """
+    return "Bash" if name in _BACKGROUND_TASK_TOOLS else "TaskCreate"
 
 
 def format_callback_progress(
