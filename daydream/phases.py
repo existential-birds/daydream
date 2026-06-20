@@ -1663,6 +1663,7 @@ async def phase_fix(
     total: int,
     *,
     console_lock: anyio.Lock | None = None,
+    intent_path: Path | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -1675,6 +1676,11 @@ async def phase_fix(
         console_lock: Optional lock to serialize console writes across
             concurrent callers.  Pass the same lock to every concurrent
             ``phase_fix`` invocation; leave ``None`` for serial callers.
+        intent_path: Optional path to the confirmed author-intent file. When
+            present and readable, its text is injected as authoritative intent
+            with a rule forbidding fixes that undo a deliberate decision. The
+            read is best-effort enrichment: a missing or unreadable file is
+            skipped silently so an intent-read failure can never block the fix.
 
     Returns:
         None
@@ -1715,6 +1721,26 @@ override documented intent to satisfy the finding; note the conflict in your
 commit message (or report inability to fix). Treat low/medium-confidence
 findings with extra skepticism here.
 """
+
+    # Best-effort: inject the confirmed author intent so the fixer won't undo a
+    # deliberate decision. Guarded on .exists() and wrapped so an intent-read
+    # failure NEVER blocks or crashes a fix (deliberate deviation from strict
+    # propagation). A read failure skips the block; it is never coerced into a
+    # fake intent string.
+    if intent_path is not None and intent_path.exists():
+        try:
+            confirmed_intent = intent_path.read_text()
+        except OSError:
+            confirmed_intent = None
+        if confirmed_intent and confirmed_intent.strip():
+            prompt += (
+                "\nCONFIRMED AUTHOR INTENT for this change (authoritative):\n"
+                f"{confirmed_intent.strip()}\n\n"
+                "If applying this fix would undo, revert, or contradict a decision the "
+                "confirmed intent describes as deliberate, do NOT apply it. Report the "
+                "conflict in your commit message (or report inability to fix) instead of "
+                "overriding the author's deliberate choice.\n"
+            )
 
     verifier_verdict = item.get("verifier_verdict")
     if verifier_verdict:
@@ -1763,6 +1789,7 @@ async def phase_fix_parallel(
     items: list[dict[str, Any]],
     *,
     limiter_size: int = 4,
+    intent_path: Path | None = None,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
@@ -1778,6 +1805,8 @@ async def phase_fix_parallel(
         work: Workspace context for the fixes; ``work.repo`` is the agent cwd.
         items: Feedback items, already severity-sorted by the caller.
         limiter_size: Max number of file-groups to fix concurrently.
+        intent_path: Optional confirmed-intent file forwarded unchanged to each
+            ``phase_fix`` call so every fix carries the deliberate-intent guard.
 
     Returns:
         ``failures``: file -> "<ExceptionType>: <message>" for file-groups whose
@@ -1820,6 +1849,7 @@ async def phase_fix_parallel(
                                 await phase_fix(
                                     backend, work, item, item_num, total,
                                     console_lock=_console_lock,
+                                    intent_path=intent_path,
                                 )
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                             reason = f"{type(e).__name__}: {e}"

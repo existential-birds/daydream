@@ -864,7 +864,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             print_info(console, summary)
 
             fix_failures = await phase_fix_parallel(
-                _resolve_backend(config, "fix", backend_cache), work, items
+                _resolve_backend(config, "fix", backend_cache), work, items, intent_path=intent_p
             )
             if fix_failures:
                 print_warning(

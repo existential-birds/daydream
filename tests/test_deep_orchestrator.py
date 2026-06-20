@@ -121,7 +121,17 @@ class _StubBackend:
 
         # TTT intent phase -> plain text. Discriminator unique to build_intent_prompt.
         if "understand the intent of these changes" in pl:
-            yield TextEvent(text="The PR updates greetings across stacks.")
+            # Echo the author's PR description (when build_intent_prompt injected
+            # one) into the returned intent summary so it lands verbatim in the
+            # on-disk confirmed-intent file (intent_p) and downstream stages —
+            # including the fix prompt — read it back.
+            summary = "The PR updates greetings across stacks."
+            pr_match = re.search(
+                r"Pull request description:\n(.*?)\n", prompt, re.DOTALL
+            )
+            if pr_match is not None:
+                summary += f"\nConfirmed author intent: {pr_match.group(1).strip()}"
+            yield TextEvent(text=summary)
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
@@ -576,6 +586,56 @@ async def test_parallel_fix_commit_runs_once_after_all(
     )
     assert exit_code == 0
     assert seen_at_commit == [True]  # exactly one commit, and every fix already landed
+
+
+INTENT_SENTINEL = "SKIP_IF_NO_QUERY_IS_A_DELIBERATE_GUARD"
+
+
+def _fix_prompts(stub: _StubBackend) -> list[str]:
+    return [c["prompt"] for c in stub.calls if c["prompt"].startswith("Fix this issue")]
+
+
+async def test_confirmed_intent_reaches_fix_prompt(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The confirmed author intent reaches every deep fix prompt so a fixer
+    can't undo a deliberate decision.
+
+    Real-path through ``runner.run`` to the fix gate (``assume="yes"``). The PR
+    body carries ``INTENT_SENTINEL``; the stub's intent branch echoes it into
+    the confirmed-intent file (intent_p), and the fix phase must inline that
+    file's text plus the "don't undo deliberate intent" rule into each fix
+    prompt. Asserts on observable fix-prompt content, not that a call happened.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_pr_view",
+        lambda repo, pr=None: {"body": INTENT_SENTINEL},
+    )
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    rc = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            pr_number=7,
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
+    )
+    assert rc == 0
+    fix_prompts = _fix_prompts(stub)
+    assert fix_prompts, "expected at least one fix prompt"
+    joined = "\n".join(fix_prompts)
+    assert INTENT_SENTINEL in joined
+    low = joined.lower()
+    assert "deliberate" in low and ("do not" in low or "don't" in low)
 
 
 async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
