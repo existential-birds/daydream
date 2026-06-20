@@ -650,6 +650,58 @@ async def test_no_pr_body_degrades_cleanly(
     assert "pull request description" not in _intent_prompt(stub).lower()
 
 
+async def test_non_interactive_intent_prompt_carries_pr_body(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real-path: the unattended (non-interactive) deep run auto-accepts the
+    proposed intent with no human corrector -- and STILL threads the PR body
+    into the intent prompt.
+
+    This locks the path where the bug actually bit. The body must be wired at
+    prompt-build time in ``build_intent_prompt`` (before ``run_agent``),
+    independent of the confirm gate -- so it survives auto-accept. The real
+    ``prompt_user`` is left intact; ``builtins.input`` is a forbidden sentinel
+    proving stdin is never touched in non-interactive mode.
+    """
+    from daydream.agent import get_non_interactive, reset_state
+    from daydream.runner import RunConfig, run
+
+    _silence_gate_noise(monkeypatch)
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_pr_view",
+        lambda repo, pr=None: {"number": 7, "body": PR_SENTINEL},
+    )
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
+
+    monkeypatch.setattr("builtins.input", _forbidden_input)
+
+    reset_state()
+    try:
+        assert get_non_interactive() is False
+        config = RunConfig(
+            target=str(multi_stack_target),
+            pr_number=7,
+            start_at="review",
+            cleanup=False,
+            non_interactive=True,
+        )
+        rc = await run(config)
+        assert get_non_interactive() is True
+    finally:
+        reset_state()
+
+    assert rc == 0
+    assert PR_SENTINEL in _intent_prompt(stub)
+
+
 async def test_fresh_context_per_stage(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-08: Each stage = a distinct Backend.execute call (no continuation reuse)."""
     _silence(monkeypatch)
