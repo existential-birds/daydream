@@ -600,6 +600,29 @@ def test_git_diff_no_exclude_still_works(tmp_path):
     assert "world-change" in diff
 
 
+def test_build_intent_prompt_includes_pr_description_with_precedence_framing():
+    from daydream.phases import build_intent_prompt
+
+    body = "Task 4 keeps ratio≈1.0 as a deliberate pass-through; do not 'complete' it."
+    prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=body)
+    assert body in prompt
+    # precedence framing: PR-stated intent outranks diff-inference, and a
+    # body-vs-diff conflict is the deliberate-choice signal, not a defect.
+    low = prompt.lower()
+    assert "pull request description" in low or "pr description" in low
+    assert "deliberate" in low
+    assert "outrank" in low or "takes precedence" in low or "authoritative" in low
+
+
+def test_build_intent_prompt_omits_pr_section_when_absent():
+    from daydream.phases import build_intent_prompt
+
+    for missing in (None, ""):
+        prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=missing)
+        assert "pull request description" not in prompt.lower()
+        assert "pr description" not in prompt.lower()
+
+
 @pytest.mark.asyncio
 async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch, make_work):
     """User confirms the agent's understanding on the first attempt."""
