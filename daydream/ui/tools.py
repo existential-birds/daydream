@@ -42,6 +42,81 @@ _LAUNCH_TASK_ID_PATTERN = re.compile(r"\bCommand running in background with ID:\
 _TASKCREATE_ID_PATTERN = re.compile(r"Task #(\d+)")
 _LAUNCH_TASK_TOOLS = frozenset({"Bash", "Agent", "Task"})
 
+# Single-line icon + primary-arg spec for the callback/parallel render path,
+# which cannot open Rich panels (concurrent agents would each fight for the
+# shared console's Live context). These mirror the per-tool choices baked into
+# ``_build_tool_header`` so a parallel-fix line names the same icon and primary
+# argument the panel header would lead with.
+_CALLBACK_TOOL_ICONS = {
+    "Read": "📜",
+    "Write": "⛏️",
+    "Edit": "⚕",
+    "Glob": "🔮",
+    "Grep": "🧙",
+    "Bash": "🔨",
+    "shell": "🔨",
+    "Skill": "✨",
+    "TodoWrite": "🔧",
+    **{name: "🎠" for name in (*_BACKGROUND_TASK_TOOLS, *_TODO_TASK_TOOLS)},
+}
+_PRIMARY_TOOL_ARG = {
+    "Read": ("file_path",),
+    "Write": ("file_path",),
+    "Edit": ("file_path",),
+    "NotebookEdit": ("notebook_path", "file_path"),
+    "Glob": ("pattern",),
+    "Grep": ("pattern",),
+    "Bash": ("description", "command"),
+    "shell": ("description", "command"),
+    "Skill": ("skill",),
+}
+
+
+def _primary_tool_value(name: str, args: dict[str, object]) -> tuple[str, str | None]:
+    """Return the meaningful primary-argument value for a tool's progress line.
+
+    Mirrors the per-tool choice in ``_build_tool_header`` (Read/Edit/Write →
+    ``file_path``, Grep/Glob → ``pattern``, Bash → ``description``/``command``).
+    Falls back to the first non-mechanical, non-boolean value so an unknown tool
+    still shows something meaningful rather than a stray flag — the old blind
+    ``next(iter(args.values()))`` surfaced ``replace_all=False`` as ``"False"``.
+
+    Args:
+        name: The tool's name.
+        args: The tool's input args.
+
+    Returns:
+        ``(value, key)`` — the primary value as a string and the arg key it came
+        from (``None`` when no key matched). ``("", None)`` when nothing
+        meaningful exists. The key lets the caller color by argument *role*
+        (path vs pattern) the way the panel header does.
+
+    """
+    for key in _PRIMARY_TOOL_ARG.get(name, ()):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value, key
+    for key, value in args.items():
+        if key in _MECHANICAL_TOOL_ARGS or isinstance(value, bool):
+            continue
+        if isinstance(value, str) and value.strip():
+            return value, key
+        if isinstance(value, (int, float)):
+            return str(value), key
+    return "", None
+
+
+def _primary_value_style(key: str | None) -> Style:
+    """Color the primary arg by role, matching ``_build_tool_header``.
+
+    Path-bearing keys render cyan (Read/Edit/Write file_path); ``pattern`` and
+    everything else render orange (Grep/Glob), the same split the panel header
+    uses — so a glob pattern that happens to end in ``.py`` stays orange.
+    """
+    if key is not None and key.endswith("path"):
+        return STYLE_CYAN
+    return STYLE_ORANGE
+
 
 def _parse_assigned_task_id(name: str, output: str) -> str | None:
     """Extract the assigned task id from an originating tool's result string.
@@ -130,34 +205,69 @@ def format_callback_progress(
     args: dict[str, object],
     label: str | None,
     max_len: int = 80,
-) -> str:
-    """Build a one-line, plumbing-free progress string for the callback render path.
+) -> Text:
+    """Build a styled one-line progress entry for the callback render path.
 
     The callback (parallel-fix/quiet) render path streams a single status line
-    per tool call instead of a Rich panel. Task-family tools must never surface
-    the opaque ``name + task_id`` dump or mechanical ``block``/``timeout`` args
-    here; they lead with the resolved label (when known) and otherwise fall back
-    to a non-opaque derivation (``subject``/``description``/first command line),
-    demoting the bare id to a parenthesized suffix.
+    per tool call instead of a Rich panel — concurrent agents cannot each open
+    their own Rich ``Live`` on the shared console. The line still carries theme
+    styling (tool icon, pink tool name, cyan path / orange pattern) so it matches
+    the rest of the UI, and it names the same primary argument the panel header
+    would lead with rather than a blind first-value dump.
+
+    Task-family tools must never surface the opaque ``name + task_id`` dump or
+    mechanical ``block``/``timeout`` args here; they lead with the resolved label
+    (when known) and otherwise fall back to a non-opaque derivation
+    (``subject``/``description``/first command line), demoting the bare id to a
+    parenthesized suffix.
 
     Args:
         name: The tool's name.
         args: The tool's input args.
         label: The resolved label for the call's id, or None when unknown.
-        max_len: Maximum length of the returned string.
+        max_len: Maximum length of the primary-argument value.
 
     Returns:
-        A truncated progress line.
+        A styled, indented Rich Text line that nests under the fix-progress header.
 
     """
+    line = Text("    ")
+    icon = _CALLBACK_TOOL_ICONS.get(name)
+    if icon:
+        line.append(f"{icon} ", style=STYLE_ORANGE)
+    line.append(name, style=STYLE_BOLD_PINK)
+
     if name in _BACKGROUND_TASK_TOOLS or name in _TODO_TASK_TOOLS:
         task_id = str(args.get(_task_id_key(name), "")).strip()
         lead = label or _derive_task_label(args, task_id)
         suffix = _format_label_and_id_str(lead, task_id if task_id != lead else "")
-        return f"{name} {suffix}"[:max_len]
+        if suffix:
+            line.append(" ")
+            line.append(suffix, style=STYLE_CYAN)
+        return line
 
-    first_arg = next(iter(args.values()), "") if args else ""
-    return f"{name} {first_arg}"[:max_len]
+    value, key = _primary_tool_value(name, args)
+    if value:
+        line.append(" ")
+        line.append(value[:max_len], style=_primary_value_style(key))
+    return line
+
+
+def format_callback_text(text: str) -> Text:
+    """Style a line of agent narration for the callback/parallel render path.
+
+    Narration interleaves across concurrent fix agents, so it renders dim and
+    indented — secondary to the colored ``[N/total] Fixing:`` headers, but still
+    visible as a liveness signal during long parallel fixes.
+
+    Args:
+        text: A single line of agent narration.
+
+    Returns:
+        A dim, indented Rich Text line.
+
+    """
+    return Text(f"    {text}", style=STYLE_DIM)
 
 
 def _colorize_tool_args(args: dict[str, object]) -> Text:

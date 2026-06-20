@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
+    from rich.text import Text
 
 from daydream.backends import (
     Backend,
@@ -32,6 +33,7 @@ from daydream.ui import (
     LiveToolPanelRegistry,
     create_console,
     format_callback_progress,
+    format_callback_text,
     print_cost,
     print_error,
     print_thinking,
@@ -346,7 +348,7 @@ async def run_agent(
     *,
     phase: DaydreamPhase,
     output_schema: dict[str, Any] | None = None,
-    progress_callback: Callable[[str], Any] | None = None,
+    progress_callback: Callable[[Text], Any] | None = None,
     continuation: ContinuationToken | None = None,
     agents: dict[str, AgentDefinition] | None = None,
     max_turns: int | None = None,
@@ -438,7 +440,7 @@ async def run_agent(
                     if use_callback and progress_callback is not None:
                         last_line = event.text.strip().split("\n")[-1]
                         if last_line:
-                            result = progress_callback(last_line)
+                            result = progress_callback(format_callback_text(last_line))
                             if inspect.isawaitable(result):
                                 await result
                     elif output_schema is None:
