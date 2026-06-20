@@ -1,16 +1,14 @@
-"""Tool-call rendering helpers and the static ``print_tool_call`` component.
+"""Tool-call rendering helpers.
 
 Task-id harvesting/labeling, callback-progress formatting, tool-arg
-colorization, the shared header/body/result builders, and the static tool-call
-panel renderer.
+colorization, and the shared header/body/result builders consumed by the
+live tool-call panels.
 """
 
 import re
 
-from rich import box
-from rich.console import Console, Group
+from rich.console import Group
 from rich.markdown import Markdown
-from rich.panel import Panel
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
@@ -24,7 +22,6 @@ from daydream.ui.theme import (
     _RESULT_MAX_LINES,
     _TASK_PROMPT_MAX_LINES,
     _TODO_TASK_TOOLS,
-    _WRITE_PREVIEW_CHARS,
     NEON_COLORS,
     STATUS_CONFIG,
     STYLE_BOLD_CYAN,
@@ -34,7 +31,6 @@ from daydream.ui.theme import (
     STYLE_FG,
     STYLE_GREEN,
     STYLE_ORANGE,
-    STYLE_PANEL_BG,
     STYLE_PURPLE,
     STYLE_RED,
     STYLE_YELLOW,
@@ -273,7 +269,7 @@ def _build_tool_header(
 ) -> Text:
     """Build styled tool header content.
 
-    Shared by print_tool_call() and LiveToolPanel._build_tool_header().
+    Used by LiveToolPanel._build_tool_header().
 
     Args:
         name: Name of the tool being called.
@@ -623,7 +619,7 @@ def _build_result_content(
 ) -> tuple[Text | Syntax | Group, bool]:
     """Build styled result content with syntax highlighting.
 
-    Shared by print_tool_result() and LiveToolPanel._build_result_content().
+    Used by LiveToolPanel._build_result_content().
 
     Args:
         content: The result content to display.
@@ -677,71 +673,3 @@ def _build_result_content(
         )
 
     return result_text, truncated
-
-
-def print_tool_call(
-    console: Console,
-    name: str,
-    args: dict[str, object],
-    quiet_mode: bool = False,
-) -> None:
-    """Print a tool call with its arguments.
-
-    Displays the tool name with a wrench icon, followed by the arguments
-    in a styled panel. All tool calls are wrapped in a Panel with dark
-    background and purple border.
-
-    Special handling for Skill tool calls: uses ✨ icon and displays
-    the skill name as a pink pill badge.
-
-    Special handling for Bash tool calls: shows description and optionally
-    the command (hidden in quiet mode).
-
-    Args:
-        console: Rich Console instance for output.
-        name: Name of the tool being called.
-        args: Dictionary of arguments passed to the tool.
-        quiet_mode: If True, hide command details for Bash tools.
-
-    """
-    # Newline before tool call for separation
-    console.print()
-
-    # Build header using shared helper
-    content = _build_tool_header(name, args, quiet_mode)
-
-    # Handle Write tool content preview (unique to static display)
-    panel_content: Group | Text = content
-    if name == "Write" and not quiet_mode:
-        file_path = str(args.get("file_path", ""))
-        content_str = str(args.get("content", ""))
-
-        if file_path.endswith(".md") and content_str:
-            # Render markdown content
-            md_content = Markdown(content_str)
-            panel_content = Group(content, Text("\n"), md_content)
-        elif content_str:
-            # Show truncated content preview for non-markdown files
-            content.append("\n")
-            preview = (
-                content_str[:_WRITE_PREVIEW_CHARS] + "..."
-                if len(content_str) > _WRITE_PREVIEW_CHARS
-                else content_str
-            )
-            content.append(preview, style=Style(color=NEON_COLORS["foreground"], dim=True))
-    elif name == "Task":
-        extras = _build_tool_body_extras(name, args)
-        if extras:
-            panel_content = Group(content, *extras)
-
-    # Determine border style
-    border_style = STYLE_CYAN if name == "Skill" else STYLE_PURPLE
-
-    panel = Panel(
-        panel_content,
-        box=box.ROUNDED,
-        border_style=border_style,
-        style=STYLE_PANEL_BG,
-        padding=(0, 1),
-    )
-    console.print(panel)

@@ -1,19 +1,15 @@
 """Output colorization for tool results.
 
-File/git/shell regex patterns, shell-syntax detection, per-line neon
-colorization, and the static ``print_tool_result`` renderer.
+File/git/shell regex patterns, shell-syntax detection, and per-line neon
+colorization.
 """
 
 import re
 
-from rich import box
-from rich.console import Console
-from rich.panel import Panel
 from rich.style import Style
 from rich.text import Text
 
 from daydream.ui.theme import (
-    _RESULT_MAX_LINES,
     NEON_COLORS,
     STYLE_BOLD_CYAN,
     STYLE_BOLD_GREEN,
@@ -24,7 +20,6 @@ from daydream.ui.theme import (
     STYLE_FG,
     STYLE_GREEN,
     STYLE_ORANGE,
-    STYLE_PANEL_BG,
     STYLE_PINK,
     STYLE_PURPLE,
     STYLE_RED,
@@ -261,53 +256,3 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
                      style=STYLE_FG)
 
     return result
-
-
-def print_tool_result(
-    console: Console,
-    content: str,
-    is_error: bool = False,
-    max_lines: int = _RESULT_MAX_LINES,
-) -> None:
-    """Print a tool result with neon syntax highlighting.
-
-    Displays the result content with colorized file paths, line numbers,
-    and keyword highlighting. Uses red styling for errors. For shell scripts
-    and command output, uses Rich's Syntax class for proper highlighting.
-
-    Args:
-        console: Rich Console instance for output.
-        content: The result content to display.
-        is_error: Whether this is an error result.
-        max_lines: Maximum number of lines to display.
-
-    """
-    # Local import to keep the module DAG acyclic: tools.py imports colorize
-    # helpers, so colorize.py must not import tools at module load time.
-    from daydream.ui.tools import _build_result_content
-
-    if not content or not content.strip():
-        return
-
-    # Build result content using shared helper
-    result_content, _ = _build_result_content(content, is_error, max_lines)
-
-    # Determine border style and title
-    if is_error:
-        border_style = STYLE_RED
-        title = "[bold red]❌ Error[/bold red]"
-    else:
-        border_style = STYLE_PURPLE
-        title = f"[bold {NEON_COLORS['cyan']}]Output[/bold {NEON_COLORS['cyan']}]"
-
-    panel = Panel(
-        result_content,
-        box=box.ROUNDED,
-        border_style=border_style,
-        title=title,
-        title_align="left",
-        style=STYLE_PANEL_BG,
-        expand=False,
-        padding=(0, 1),
-    )
-    console.print(panel)

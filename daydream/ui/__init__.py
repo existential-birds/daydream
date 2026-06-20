@@ -10,17 +10,9 @@ a single ``ui.py`` module.
 
 from daydream.ui.agent_text import (
     AgentTextRenderer,
-    AgentTextState,
-    print_agent_text,
-    reset_agent_text_state,
-)
-from daydream.ui.colorize import (
-    print_tool_result,
 )
 from daydream.ui.console import (
     create_console,
-    print_header,
-    print_phase,
     print_phase_hero,
 )
 from daydream.ui.messages import (
@@ -40,7 +32,6 @@ from daydream.ui.panels import (
     LiveThinkingPanel,
     LiveToolPanel,
     LiveToolPanelRegistry,
-    NeonThrobber,
     ShutdownPanel,
     ShutdownStep,
     get_shutdown_panel,
@@ -89,12 +80,10 @@ from daydream.ui.theme import (
     SURGERY_CHAKRA_SYMBOLS,
     SURGERY_ENERGY_FLOW,
     SURGERY_PHASES,
-    get_status_style,
     mystical_term,
     phase_subtitle,
     pill,
 )
 from daydream.ui.tools import (
     format_callback_progress,
-    print_tool_call,
 )

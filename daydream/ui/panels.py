@@ -1,6 +1,6 @@
 """Live-updating animated panels.
 
-The thinking panel, the throbber/spinner animations, the consolidated tool-call
+The thinking panel, the spinner animation, the consolidated tool-call
 Live panel and its multi-panel registry, and the shutdown progress panel.
 """
 
@@ -140,56 +140,6 @@ def print_thinking(console: Console, content: str, max_length: int = 300) -> Non
     panel.show(duration=0.5)  # Brief animation before settling
 
 
-class NeonThrobber:
-    """Animated gradient bar for progress indication.
-
-    Creates a scrolling rainbow effect using horizontal line characters
-    and the gradient color palette.
-
-    Attributes:
-        _offset: Current animation offset for color cycling.
-        _char: Character used to render the throbber bar.
-
-    """
-
-    def __init__(self) -> None:
-        """Initialize the throbber with offset tracking."""
-        self._offset = 0
-        self._char = "━"  # ━
-
-    def render(self, width: int = 40) -> Text:
-        """Render the throbber bar with current animation frame.
-
-        Args:
-            width: Width of the throbber bar in characters.
-
-        Returns:
-            Rich Text object containing the styled throbber.
-
-        """
-        result = Text()
-        num_colors = len(GRADIENT_COLORS)
-
-        for i in range(width):
-            color_index = (i + self._offset) % num_colors
-            color = GRADIENT_COLORS[color_index]
-            result.append(self._char, style=Style(color=color))
-
-        # Advance offset for next frame
-        self._offset = (self._offset + 1) % num_colors
-
-        return result
-
-    def reset(self) -> None:
-        """Reset the animation offset to the beginning.
-
-        Returns:
-            None
-
-        """
-        self._offset = 0
-
-
 class CrazySpinner:
     """Wild multi-pattern spinner with gradient colors.
 
@@ -276,7 +226,7 @@ class LiveToolPanel:
     Shows an animated throbber while waiting for the result, then replaces it
     with the actual result content.
 
-    In quiet mode, delegates to print_tool_call and skips result display.
+    In quiet mode, renders the tool header only and skips result display.
 
     Args:
         console: Rich Console instance for output.

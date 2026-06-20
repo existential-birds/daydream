@@ -1,8 +1,7 @@
 """Streaming agent-text rendering.
 
-Per-response state, inline markdown/path/code highlighting, the vertical
-cyan-to-green gradient renderer, the buffering ``AgentTextRenderer`` Live panel,
-and the gutter-aware ``print_agent_text`` streamer.
+Inline markdown/path/code highlighting, the vertical cyan-to-green gradient
+renderer, and the buffering ``AgentTextRenderer`` Live panel.
 """
 
 import re
@@ -22,36 +21,6 @@ from daydream.ui.theme import (
     STYLE_CYAN,
     STYLE_GREEN,
 )
-
-
-class AgentTextState:
-    """State holder for agent text rendering.
-
-    Encapsulates mutable state used during streaming agent text output
-    to track gutter display and markdown detection.
-
-    This class provides thread-safe state management for concurrent
-    rendering contexts.
-
-    Attributes:
-        line_started: Whether a line has been started (gutter printed).
-        has_markdown: Whether markdown headers have been detected.
-
-    """
-
-    def __init__(self) -> None:
-        """Initialize agent text state."""
-        self.line_started: bool = False
-        self.has_markdown: bool = False
-
-    def reset(self) -> None:
-        """Reset state for a new agent response."""
-        self.line_started = False
-        self.has_markdown = False
-
-
-# Global instance for backward compatibility
-_agent_text_state = AgentTextState()
 
 
 def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
@@ -353,69 +322,3 @@ class AgentTextRenderer:
 
         """
         return bool(self._buffer)
-
-
-def print_agent_text(console: Console, text: str) -> None:
-    """Print agent text output with streaming-friendly left gutter.
-
-    Displays agent text with a neon-styled left border and
-    markdown-aware syntax highlighting. The gutter prefix is
-    shown on the first line, and the text flows with word wrapping.
-
-    Uses italic for regular narration, but not for markdown content.
-
-    Args:
-        console: Rich Console instance for output.
-        text: The agent text to display.
-
-    Returns:
-        None
-
-    """
-    if not text:
-        return
-
-    # Check for markdown headers in this chunk
-    if _has_markdown_headers(text):
-        _agent_text_state.has_markdown = True
-
-    # Split into lines to handle multiline text
-    lines = text.split("\n")
-
-    for i, line in enumerate(lines):
-        is_last = i == len(lines) - 1
-
-        if not _agent_text_state.line_started:
-            # Start of a new agent text block - add separation and gutter prefix
-            console.print()  # Newline for separation from tool calls
-            gutter = Text()
-            gutter.append("│ ", style=STYLE_GREEN)
-            console.print(gutter, end="")
-            _agent_text_state.line_started = True
-
-        # Highlight and print the line content with dark green background
-        # Use italic only for non-markdown content
-        if line:
-            use_italic = not _agent_text_state.has_markdown
-            base_style = Style(color=NEON_COLORS["green"], italic=use_italic)
-            highlighted = _highlight_agent_text(line, base_style=base_style)
-            highlighted.stylize(STYLE_AGENT_BG)
-            console.print(highlighted, end="")
-
-        # Handle newlines - reset gutter state for next line
-        if not is_last:
-            console.print()  # Complete the current line
-            _agent_text_state.line_started = False
-
-
-def reset_agent_text_state() -> None:
-    """Reset the agent text line state.
-
-    Call this at the end of an agent response to ensure
-    the next agent response starts with a fresh gutter.
-
-    Returns:
-        None
-
-    """
-    _agent_text_state.reset()

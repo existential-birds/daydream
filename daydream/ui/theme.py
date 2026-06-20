@@ -2,8 +2,8 @@
 
 Dracula-based color theme, reusable Style constants, size caps, tool-arg
 classification frozensets, mystical action terms, phase subtitles, gradient
-palettes, and the status configuration — plus the pure primitives (``pill``,
-``get_status_style``) shared across UI clusters.
+palettes, and the status configuration — plus the ``pill`` primitive shared
+across UI clusters.
 """
 
 import random
@@ -258,17 +258,3 @@ def pill(text: str, bg_color: str, fg_color: str) -> Text:
     # Right edge
     result.append("▐", style=bg_style)
     return result
-
-
-def get_status_style(status: str) -> Style:
-    """Get the Rich Style for a given status.
-
-    Args:
-        status: One of "pending", "in_progress", "completed", "failed".
-
-    Returns:
-        Rich Style object with appropriate color.
-
-    """
-    config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
-    return Style(color=config["color"])

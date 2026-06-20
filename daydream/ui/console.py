@@ -1,7 +1,7 @@
-"""Console construction and header/phase banner components.
+"""Console construction and phase-hero banner components.
 
-Themed ``Console`` factory, the neon header panel, the gradient interpolation
-helpers, the pyfiglet phase-hero banner, and the simple phase indicator.
+Themed ``Console`` factory, the gradient interpolation helpers, and the
+pyfiglet phase-hero banner.
 """
 
 import pyfiglet
@@ -16,10 +16,6 @@ from daydream.ui.theme import (
     ASCII_GRADIENT_COLORS,
     NEON_COLORS,
     NEON_THEME,
-    STATUS_CONFIG,
-    STYLE_BOLD_PURPLE,
-    STYLE_FG,
-    STYLE_PINK,
 )
 
 
@@ -31,26 +27,6 @@ def create_console() -> Console:
 
     """
     return Console(theme=NEON_THEME)
-
-
-def print_header(console: Console, text: str) -> None:
-    """Print a neon-bordered header panel.
-
-    Creates a prominent header with pink border and purple text,
-    using double-edge box styling for a retro terminal look.
-
-    Args:
-        console: Rich Console instance for output.
-        text: The header text to display.
-
-    """
-    header_panel = Panel(
-        Text(text, style=STYLE_BOLD_PURPLE),
-        box=box.DOUBLE_EDGE,
-        border_style=STYLE_PINK,
-        padding=(0, 2),
-    )
-    console.print(header_panel)
 
 
 def _interpolate_color(color1: str, color2: str, t: float) -> str:
@@ -173,40 +149,4 @@ def print_phase_hero(
     )
 
     console.print()  # Add spacing before
-    console.print(panel)
-
-
-def print_phase(
-    console: Console,
-    phase_num: int,
-    description: str,
-    status: str = "in_progress",
-) -> None:
-    """Print a phase indicator with status.
-
-    Displays a numbered phase with an appropriate status icon and
-    color-coded border based on the current status.
-
-    Args:
-        console: Rich Console instance for output.
-        phase_num: The phase number to display.
-        description: Description of the phase.
-        status: One of "pending", "in_progress", "completed", "failed".
-
-    """
-    config = STATUS_CONFIG.get(status, STATUS_CONFIG["pending"])
-    icon = config["icon"]
-    color = config["color"]
-
-    phase_text = Text()
-    phase_text.append(f"{icon} ", style=Style(color=color))
-    phase_text.append(f"Phase {phase_num}: ", style=Style(color=color, bold=True))
-    phase_text.append(description, style=STYLE_FG)
-
-    panel = Panel(
-        phase_text,
-        box=box.ROUNDED,
-        border_style=Style(color=color),
-        padding=(0, 1),
-    )
     console.print(panel)
