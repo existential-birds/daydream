@@ -499,8 +499,8 @@ async def test_run_deep_renders_prescan_summary_not_json(
     # Add a 4th changed file so select_tier() -> "parallel" (the pattern-scanner
     # runs and its conventions reach the rendered summary).
     (multi_stack_target / "extra.py").write_text("VALUE = 2\n")
-    subprocess.run(["git", "add", "."], cwd=multi_stack_target, capture_output=True, check=True)  # noqa: S603, S607
-    subprocess.run(  # noqa: S603, S607
+    subprocess.run(["git", "add", "."], cwd=multi_stack_target, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "commit", "-m", "add extra"], cwd=multi_stack_target, capture_output=True, check=True
     )
 
