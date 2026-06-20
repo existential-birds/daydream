@@ -158,6 +158,13 @@ class WrongBranchError(GitError):
 # 5s `git rev-parse`/`diff` would time out and exit the run 1 (see #120).
 _GIT_TIMEOUT_RETRIES = 2
 
+# `gh` calls time out under the same host CPU starvation as git (see #120), so
+# read-only `gh` invocations retry too. Mutations must NOT inherit this: `gh`
+# cannot tell an idempotent GraphQL *query* from a *mutation* by HTTP method
+# (both are POST), so retry is opt-in per caller — the default is 0 attempts,
+# keeping every existing mutating caller unretried unless it explicitly opts in.
+_GH_TIMEOUT_RETRIES = 2
+
 
 def _run_git(
     repo: Path,
@@ -227,6 +234,7 @@ def _run_gh(
     *,
     timeout: int = 60,
     input_text: str | None = None,
+    retries: int = 0,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``gh`` in *repo* with hardened defaults.
 
@@ -237,6 +245,13 @@ def _run_gh(
         input_text: Optional text piped to the subprocess on **stdin** (used to
             pass secret values via ``gh secret set --body-file -`` so the value
             never appears in the process argument vector).
+        retries: How many additional attempts to make after a
+            :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
+            Only timeouts are retried; other failures raise immediately. Defaults
+            to ``0`` so a non-idempotent ``gh`` call (e.g. ``pr create``,
+            ``secret set``, a GraphQL mutation) is never re-run after a timeout.
+            Read-only callers pass ``_GH_TIMEOUT_RETRIES`` to ride out host CPU
+            starvation.
 
     The subprocess environment is sourced from the module ``_gh_token_env``
     singleton when set (via :func:`set_gh_token_env`), so ``gh`` authenticates
@@ -247,27 +262,42 @@ def _run_gh(
         The completed process with text-decoded stdout/stderr.
 
     Raises:
-        GitTimeoutError: If the call times out. Subclass of :class:`GitError`.
+        GitTimeoutError: If every attempt times out. Subclass of
+            :class:`GitError`.
         GitError: If the subprocess machinery fails for any other reason
             (missing ``gh``, OS-level error).
     """
     token_env = get_gh_token_env()
-    try:
-        return subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["gh", *args],  # noqa: S607 - gh is a trusted command
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=False,
-            check=False,
-            input=input_text,
-            env={**os.environ, **token_env} if token_env is not None else None,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise GitTimeoutError(f"gh {' '.join(args)} timed out after {timeout}s") from exc
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise GitError(f"gh {' '.join(args)} failed: {type(exc).__name__}: {exc}") from exc
+    env = {**os.environ, **token_env} if token_env is not None else None
+    last_timeout: subprocess.TimeoutExpired | None = None
+    for attempt in range(retries + 1):
+        try:
+            return subprocess.run(  # noqa: S603 - arguments are not user-controlled
+                ["gh", *args],  # noqa: S607 - gh is a trusted command
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                shell=False,
+                check=False,
+                input=input_text,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_timeout = exc
+            if attempt < retries:
+                _logger.warning(
+                    "gh %s timed out after %ss (attempt %d/%d); retrying",
+                    " ".join(args),
+                    timeout,
+                    attempt + 1,
+                    retries + 1,
+                )
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise GitError(f"gh {' '.join(args)} failed: {type(exc).__name__}: {exc}") from exc
+
+    suffix = f" ({retries + 1} attempts)" if retries else ""
+    raise GitTimeoutError(f"gh {' '.join(args)} timed out after {timeout}s{suffix}") from last_timeout
 
 
 # --- Pre-flight --------------------------------------------------------------
@@ -1280,7 +1310,7 @@ def gh_pr_view(repo: Path, pr: int | None = None) -> dict | None:
             "number,title,body,state,headRefName,baseRefName,headRefOid,baseRefOid,url",
         ]
     )
-    proc = _run_gh(repo, args, timeout=60)
+    proc = _run_gh(repo, args, timeout=60, retries=_GH_TIMEOUT_RETRIES)
     if proc.returncode != 0:
         return None
     try:
@@ -1313,6 +1343,7 @@ def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict]:
             "number,headRefOid,baseRefOid,baseRefName,url,headRepository,headRepositoryOwner",
         ],
         timeout=60,
+        retries=_GH_TIMEOUT_RETRIES,
     )
     if proc.returncode != 0:
         return []
@@ -1336,7 +1367,7 @@ def gh_pr_diff(repo: Path, pr: int) -> str:
     Raises:
         GitError: If ``gh pr diff`` fails.
     """
-    proc = _run_gh(repo, ["pr", "diff", str(pr)], timeout=60)
+    proc = _run_gh(repo, ["pr", "diff", str(pr)], timeout=60, retries=_GH_TIMEOUT_RETRIES)
     if proc.returncode != 0:
         raise GitError(f"gh pr diff {pr} failed: {proc.stderr.strip()}")
     return proc.stdout
@@ -1374,6 +1405,7 @@ def gh_repo_view(repo: Path) -> tuple[str, str] | None:
         repo,
         ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
         timeout=60,
+        retries=_GH_TIMEOUT_RETRIES,
     )
     if proc.returncode != 0:
         return None
@@ -1414,6 +1446,7 @@ def gh_api(
     input_data: Any | None = None,
     jq: str | None = None,
     headers: dict[str, str] | None = None,
+    idempotent: bool = False,
 ) -> Any:
     """Call ``gh api <endpoint>`` and return parsed JSON.
 
@@ -1437,6 +1470,10 @@ def gh_api(
             explicit ``Authorization`` header takes precedence over the
             ``token``-scheme header gh derives from ``GH_TOKEN`` — required
             for App JWT calls, which GitHub only accepts as ``Bearer``.
+        idempotent: When True, the call is retried on timeout (host CPU
+            starvation). Set this only for reads — GET endpoints and GraphQL
+            *queries* — never for mutations, since ``method``/``input_data``
+            alone cannot distinguish a GraphQL query from a mutation (both POST).
 
     Returns:
         The parsed JSON value (object, list, or scalar); with *jq*, a list of
@@ -1457,7 +1494,7 @@ def gh_api(
         if jq is not None:
             args.extend(["--jq", jq])
         args.append(endpoint)
-        proc = _run_gh(repo, args, timeout=60)
+        proc = _run_gh(repo, args, timeout=60, retries=_GH_TIMEOUT_RETRIES if idempotent else 0)
         if proc.returncode != 0:
             raise _gh_error_for(f"gh api {endpoint} failed: {proc.stderr.strip()}", proc.stderr)
         try:
@@ -1483,7 +1520,7 @@ def gh_api(
             args.append("--paginate")
         if jq is not None:
             args.extend(["--jq", jq])
-        proc = _run_gh(repo, args, timeout=60)
+        proc = _run_gh(repo, args, timeout=60, retries=_GH_TIMEOUT_RETRIES if idempotent else 0)
         if proc.returncode != 0:
             raise _gh_error_for(
                 f"gh api {endpoint} failed: {proc.stderr.strip()} "
@@ -1581,7 +1618,7 @@ def gh_variable_set(
 def _gh_name_list(repo: Path, kind: str, org: str | None, repo_slug: str | None) -> list[str]:
     """Run ``gh <kind> list --json name`` and return the names."""
     args = [kind, "list", "--json", "name", *_scope_args(org, repo_slug)]
-    proc = _run_gh(repo, args, timeout=60)
+    proc = _run_gh(repo, args, timeout=60, retries=_GH_TIMEOUT_RETRIES)
     if proc.returncode != 0:
         raise _gh_error_for(f"gh {kind} list failed: {proc.stderr.strip()}", proc.stderr)
     try:
