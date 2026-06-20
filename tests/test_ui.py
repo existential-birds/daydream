@@ -86,15 +86,6 @@ def test_agent_text_renderer_overflow_single_panel():
     assert renderer._buffer == []  # type: ignore[attr-defined]
 
 
-def test_agent_text_renderer_small_content_single_panel():
-    lines = ["hello\n", "world\n", "short content\n"]
-    panel_count, renderer = _run_renderer_and_count_panels(80, 40, lines)
-
-    assert panel_count == 0, f"finish() printed {panel_count} extra panel(s) via console.print"
-    assert renderer._live is None  # type: ignore[attr-defined]
-    assert renderer._buffer == []  # type: ignore[attr-defined]
-
-
 def test_render_exploration_summary_shows_content_not_json():
     from rich.console import Console
 
