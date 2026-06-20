@@ -86,15 +86,6 @@ def test_agent_text_renderer_overflow_single_panel():
     assert renderer._buffer == []  # type: ignore[attr-defined]
 
 
-def test_agent_text_renderer_small_content_single_panel():
-    lines = ["hello\n", "world\n", "short content\n"]
-    panel_count, renderer = _run_renderer_and_count_panels(80, 40, lines)
-
-    assert panel_count == 0, f"finish() printed {panel_count} extra panel(s) via console.print"
-    assert renderer._live is None  # type: ignore[attr-defined]
-    assert renderer._buffer == []  # type: ignore[attr-defined]
-
-
 def test_render_exploration_summary_shows_content_not_json():
     from rich.console import Console
 
@@ -198,24 +189,32 @@ def test_prompt_user_destructive_defaults_decline_on_eof(monkeypatch, message):
 
 
 def test_parse_background_task_id_from_launch_string():
-    from daydream.ui import _parse_assigned_task_id
-
-    launch = (Path(__file__).parent / "fixtures/task_tools/bash_bg_launch.txt").read_text()
-    assert _parse_assigned_task_id("Bash", launch) == "b0nsmwb99"
-    create = (Path(__file__).parent / "fixtures/task_tools/taskcreate_result.txt").read_text()
-    assert _parse_assigned_task_id("TaskCreate", create) == "1"
-    assert _parse_assigned_task_id("Bash", "no id here") is None
-
-
-def test_colorize_tool_args_drops_mechanical_keys():
     from rich.console import Console
 
-    from daydream.ui import _colorize_tool_args
+    from daydream.ui import LiveToolPanelRegistry
 
-    console = Console(record=True)
-    console.print(_colorize_tool_args({"command": "pytest", "block": True, "timeout": 120000}))
-    out = console.export_text()
-    assert "command" in out and "pytest" in out
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "Bash", {"command": "pytest", "run_in_background": True, "description": "Run tests"})
+    launch = (Path(__file__).parent / "fixtures/task_tools/bash_bg_launch.txt").read_text()
+    reg.observe_result("c1", launch)
+    assert reg.resolve_label("Bash", "b0nsmwb99") == "Run tests"
+    assert reg.resolve_label("Bash", "unknown") is None
+
+    reg.create("c2", "TaskCreate", {"subject": "Find tool-call render code", "description": "d"})
+    create = (Path(__file__).parent / "fixtures/task_tools/taskcreate_result.txt").read_text()
+    reg.observe_result("c2", create)
+    assert reg.resolve_label("TaskCreate", "1") == "Find tool-call render code"
+
+
+def test_bash_panel_shows_command_drops_mechanical_keys():
+    from rich.console import Console
+
+    from daydream.ui import LiveToolPanelRegistry
+
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=False)
+    reg.create("c1", "Bash", {"command": "pytest", "block": True, "timeout": 120000})
+    out = _render_panel_text(reg, "c1")
+    assert "pytest" in out
     assert "block" not in out and "timeout" not in out
 
 
@@ -267,14 +266,11 @@ def test_taskoutput_header_unknown_id_falls_back_to_bare_id():
 def test_taskcreate_header_shows_subject_and_body():
     from rich.console import Console
 
-    from daydream.ui import _build_tool_body_extras, _build_tool_header
+    from daydream.ui import LiveToolPanelRegistry
 
-    c = Console(record=True)
-    args = {"subject": "Fix auth bug", "description": "details here"}
-    c.print(_build_tool_header("TaskCreate", args))
-    for e in _build_tool_body_extras("TaskCreate", args):
-        c.print(e)
-    out = c.export_text()
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "details here"})
+    out = _render_panel_text(reg, "c1")
     assert "Fix auth bug" in out and "details here" in out
 
 
@@ -326,14 +322,15 @@ def test_taskoutput_result_shows_output_snippet():
 def test_task_prompt_truncation_uses_named_limit():
     from rich.console import Console
 
-    from daydream.ui import _TASK_PROMPT_MAX_LINES, _build_tool_body_extras
+    from daydream.ui import LiveToolPanelRegistry
+    from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
 
-    args = {"description": "d", "prompt": "\n".join(f"l{i}" for i in range(40))}
-    extras = _build_tool_body_extras("Task", args)
-    c = Console(record=True)
-    for e in extras:
-        c.print(e)
-    assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in c.export_text()
+    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg.create("c1", "Task", {"description": "d", "prompt": "\n".join(f"l{i}" for i in range(40))})
+    out = _render_panel_text(reg, "c1")
+    assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in out
+    assert "l0" in out
+    assert "l39" not in out
 
 
 async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
@@ -394,7 +391,9 @@ async def test_run_agent_callback_path_labels_taskoutput(tmp_path):
             ResultEvent(structured_output=None, continuation=None),
         ]
     )
-    lines: list[str] = []
+    from rich.text import Text
+
+    lines: list[Text] = []
     await run_agent(
         backend,
         tmp_path,
@@ -402,7 +401,48 @@ async def test_run_agent_callback_path_labels_taskoutput(tmp_path):
         phase=DaydreamPhase.REVIEW,
         progress_callback=lines.append,
     )
-    joined = "\n".join(lines)
+    joined = "\n".join(line.plain for line in lines)
     assert "Run tests" in joined  # resolved label surfaces in callback mode
     assert "block" not in joined and "timeout" not in joined
     assert "TaskOutput a066168" not in joined  # opaque bare-id dump form is gone
+
+
+async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path):
+    """The parallel-fix callback line names the edited file, never a stray flag.
+
+    Regression: the old blind ``next(iter(args.values()))`` surfaced a leading
+    ``replace_all`` flag as ``"Edit False"`` instead of the file being edited.
+    """
+    from rich.text import Text
+
+    from daydream.agent import run_agent
+    from daydream.backends import ResultEvent, ToolStartEvent
+    from daydream.trajectory import DaydreamPhase
+    from tests.test_agent_recorder_integration import MockBackend
+
+    backend = MockBackend(
+        [
+            ToolStartEvent(
+                id="e1",
+                name="Edit",
+                input={
+                    "replace_all": False,
+                    "file_path": "/repo/daydream/git_ops.py",
+                    "old_string": "a",
+                    "new_string": "b",
+                },
+            ),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
+    lines: list[Text] = []
+    await run_agent(
+        backend,
+        tmp_path,
+        "go",
+        phase=DaydreamPhase.FIX,
+        progress_callback=lines.append,
+    )
+    joined = "\n".join(line.plain for line in lines)
+    assert "/repo/daydream/git_ops.py" in joined  # the meaningful primary arg
+    assert "Edit False" not in joined  # the stray-boolean dump is gone

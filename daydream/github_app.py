@@ -171,7 +171,9 @@ def mint_installation_token(repo_dir: Path, app_id: int, private_key: str, owner
 def _find_installation(repo_dir: Path, owner: str, repo: str, headers: dict[str, str]) -> tuple[int, str]:
     """List App installations and return ``(id, "{slug}[bot]")`` for *owner*."""
     try:
-        installations = git_ops.gh_api(repo_dir, "/app/installations", paginate=True, jq=".[]", headers=headers)
+        installations = git_ops.gh_api(
+            repo_dir, "/app/installations", paginate=True, jq=".[]", headers=headers, idempotent=True
+        )
     except git_ops.GitError as exc:
         raise ValueError(f"failed to list App installations: {exc}") from exc
 
@@ -273,7 +275,7 @@ def get_app_metadata(repo_dir: Path, app_id: int, private_key: str) -> dict:
     bearer = {"Authorization": f"Bearer {jwt_token}"}
     with _scoped_gh_token(jwt_token):
         try:
-            payload = git_ops.gh_api(repo_dir, "/app", headers=bearer)
+            payload = git_ops.gh_api(repo_dir, "/app", headers=bearer, idempotent=True)
         except git_ops.GitError as exc:
             raise GitHubAppError(f"failed to read App metadata: {exc}") from exc
 
@@ -294,7 +296,7 @@ def resolve_user_identity(repo_dir: Path) -> str:
         run, so this function never raises.
     """
     try:
-        login = git_ops.gh_api(repo_dir, "/user").get("login")
+        login = git_ops.gh_api(repo_dir, "/user", idempotent=True).get("login")
     except Exception:  # noqa: BLE001 - identity display is cosmetic; never abort a run
         return "unknown"
     if isinstance(login, str) and login:

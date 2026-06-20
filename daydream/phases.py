@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
+from rich.text import Text
 
 import daydream
 from daydream import git_ops
@@ -1723,7 +1724,7 @@ findings with extra skepticism here.
         # run_agent so multiple concurrent agents don't each start their own
         # Rich Live context on the shared console (which garbles output).
         # The callback serializes progress lines through the shared lock.
-        async def _cb(text: str) -> None:
+        async def _cb(text: Text) -> None:
             async with console_lock:
                 console.print(text)
 
@@ -1806,11 +1807,12 @@ async def phase_fix_parallel(
                             reason = f"{type(e).__name__}: {e}"
                             async with _failures_lock:
                                 failures[fkey] = reason
-                            print_warning(
-                                console,
-                                f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
-                                "but this file's changes are left uncommitted.",
-                            )
+                            async with _console_lock:
+                                print_warning(
+                                    console,
+                                    f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
+                                    "but this file's changes are left uncommitted.",
+                                )
 
             tg.start_soon(_task)
 
