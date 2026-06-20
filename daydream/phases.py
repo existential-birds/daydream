@@ -1186,6 +1186,10 @@ def build_intent_prompt(
     if pointer:
         parts.append(pointer)
     if pr_description and pr_description.strip():
+        _PR_BODY_MAX_CHARS = 8000
+        body_text = pr_description.strip()
+        if len(body_text) > _PR_BODY_MAX_CHARS:
+            body_text = body_text[:_PR_BODY_MAX_CHARS] + "\n[PR description truncated]"
         parts.append(
             "The author supplied the following pull-request description. Treat this "
             "author-stated intent as AUTHORITATIVE: where the description and the "
@@ -1195,7 +1199,10 @@ def build_intent_prompt(
             "guard that looks like a no-op, a pass-through that looks unfinished — that "
             "is a deliberate design decision to preserve, NOT a defect to surface or "
             "'complete'.\n\n"
-            f"Pull request description:\n{pr_description.strip()}\n"
+            "Pull request description:\n"
+            "<pr_description>\n"
+            f"{body_text}\n"
+            "</pr_description>\n"
         )
     body = (
         f"You have full access to explore the codebase. Read the diff file at {diff_path} "
@@ -1719,7 +1726,8 @@ If this finding conflicts with an explicit in-code contract — a JSON schema, a
 type signature, or a comment documenting intent — the contract wins. Do not
 override documented intent to satisfy the finding; note the conflict in your
 commit message (or report inability to fix). Treat low/medium-confidence
-findings with extra skepticism here.
+findings with extra skepticism here. If confirmed author intent is provided
+below, it takes precedence over both the contract and this finding.
 """
 
     # Best-effort: inject the confirmed author intent so the fixer won't undo a
@@ -1736,6 +1744,8 @@ findings with extra skepticism here.
             prompt += (
                 "\nCONFIRMED AUTHOR INTENT for this change (authoritative):\n"
                 f"{confirmed_intent.strip()}\n\n"
+                "This confirmed intent is the highest-priority authority: it outranks both "
+                "the in-code-contract rule above and the finding itself. "
                 "If applying this fix would undo, revert, or contradict a decision the "
                 "confirmed intent describes as deliberate, do NOT apply it. Report the "
                 "conflict in your commit message (or report inability to fix) instead of "

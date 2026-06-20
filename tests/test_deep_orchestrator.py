@@ -127,7 +127,7 @@ class _StubBackend:
             # including the fix prompt — read it back.
             summary = "The PR updates greetings across stacks."
             pr_match = re.search(
-                r"Pull request description:\n(.*?)\n", prompt, re.DOTALL
+                r"<pr_description>\n(.*?)\n</pr_description>", prompt, re.DOTALL
             )
             if pr_match is not None:
                 summary += f"\nConfirmed author intent: {pr_match.group(1).strip()}"

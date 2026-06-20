@@ -1280,7 +1280,10 @@ def gh_pr_view(repo: Path, pr: int | None = None) -> dict | None:
             "number,title,body,state,headRefName,baseRefName,headRefOid,baseRefOid,url",
         ]
     )
-    proc = _run_gh(repo, args, timeout=60)
+    try:
+        proc = _run_gh(repo, args, timeout=60)
+    except (GitTimeoutError, GitError):
+        return None
     if proc.returncode != 0:
         return None
     try:
