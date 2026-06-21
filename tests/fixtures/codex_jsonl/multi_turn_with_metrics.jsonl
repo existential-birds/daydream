@@ -1,0 +1,15 @@
+{"type":"thread.started","thread_id":"019eebb8-aaaa-aaaa-aaaa-000000000001"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"reasoning","text":"","aggregated_output":"","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Planning the review: inspect the diff, then run the tests."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'git diff main...HEAD'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'git diff main...HEAD'","aggregated_output":"diff --git a/app.py b/app.py\n+def foo(): pass","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Turn 1 complete: reviewed the diff and found one issue."}}
+{"type":"turn.completed","usage":{"input_tokens":34594,"cached_input_tokens":9984,"output_tokens":168,"reasoning_output_tokens":88}}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_3","type":"reasoning","text":"","aggregated_output":"","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"reasoning","text":"Re-evaluating after the fix; the test suite should pass now."}}
+{"type":"item.started","item":{"id":"item_4","type":"command_execution","command":"/bin/zsh -lc 'pytest -q'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":"/bin/zsh -lc 'pytest -q'","aggregated_output":"1 passed in 0.5s","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_5","type":"agent_message","text":"Turn 2 complete: tests pass, issue resolved."}}
+{"type":"turn.completed","usage":{"input_tokens":36000,"cached_input_tokens":12000,"output_tokens":200,"reasoning_output_tokens":100}}
