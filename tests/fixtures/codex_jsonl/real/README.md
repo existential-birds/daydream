@@ -36,7 +36,7 @@ file (mention the codex CLI version in the commit message).
 drives `CodexBackend.execute` through this golden and asserts **structural**
 coverage (not byte-exact text, so a model swap that rewords the agent message
 still passes): a text span, two paired tool calls with **zero orphans** (the
-#153 deterministic-correlation contract re-asserted on real data), a
+`#153` deterministic-correlation contract re-asserted on real data), a
 `MetricsEvent` with prompt/completion tokens and `cached_tokens` surfaced from
 `cached_input_tokens`, and a `ResultEvent`. If the parser or the CLI shape
 drifts, this test fails.
