@@ -9,7 +9,9 @@ payloads.
 
 import asyncio
 import json
+import os
 import shutil
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,10 +29,10 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.backends.pi import (
+    _PI_AGENT_DIR_ENV,
     _PI_STDOUT_LIMIT_BYTES,
     PiBackend,
     PiError,
-    _extract_json,
     _render_tool_result,
     _resolve_skill_dir,
     _schema_instruction,
@@ -191,8 +193,16 @@ async def test_continuation_token_uses_session_id_flag():
 
 
 @pytest.mark.asyncio
-async def test_fresh_run_uses_no_session():
-    """No continuation → --no-session (ephemeral); no --session-id flag."""
+async def test_fresh_run_uses_session_id_not_no_session():
+    """No continuation → --session-id <uuid> (persistent); never --no-session.
+
+    Fresh runs must not use --no-session: that flag is ephemeral (pi docs:
+    "Don't save session (ephemeral)"), so the session id harvested from the run
+    cannot be resumed later — resuming with --session-id <id> creates an empty
+    session. Generating a UUID up front and passing --session-id <uuid> makes
+    the returned continuation token genuinely resumable, which matters because
+    phase_test_and_heal feeds the token back into its retry loop.
+    """
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
@@ -201,8 +211,11 @@ async def test_fresh_run_uses_no_session():
             pass
 
         flat_args = list(mock_exec.call_args.args)
-        assert "--no-session" in flat_args
-        assert "--session-id" not in flat_args
+        assert "--no-session" not in flat_args
+        assert "--session-id" in flat_args
+        passed_id = flat_args[flat_args.index("--session-id") + 1]
+        # A genuine UUID: the token must name a resumable persistent session.
+        uuid.UUID(passed_id)
 
 
 @pytest.mark.asyncio
@@ -586,18 +599,46 @@ def test_create_backend_invalid_includes_pi_in_message():
         create_backend("invalid")
 
 
-# Opt-in live smoke test — only runs when the `pi` binary is on $PATH.
+# Truly opt-in live smoke test (plan §8). Gating on `shutil.which("pi")`
+# alone is NOT enough: with `pi` installed but z.ai unconfigured, `pi --mode
+# json` blocks waiting for /login, which would hang `make test` and the
+# pre-push hook for the 60s timeout below and then fail. So the test also
+# requires DAYDREAM_PI_LIVE=1 — it is skipped by default and only runs when a
+# human explicitly opts in (mirroring the benchmark e2e "spends money" gate).
 _PI_AVAILABLE = shutil.which("pi") is not None
+_PI_LIVE_OPT_IN = os.environ.get("DAYDREAM_PI_LIVE") == "1"
 
 
-@pytest.mark.skipif(not _PI_AVAILABLE, reason="pi binary not on $PATH")
+@pytest.mark.skipif(
+    not (_PI_AVAILABLE and _PI_LIVE_OPT_IN),
+    reason="live pi smoke test; set DAYDREAM_PI_LIVE=1 (and ensure `pi` is on $PATH and logged in) to run",
+)
 @pytest.mark.asyncio
 async def test_live_pi_smoke():
-    """Smoke test against a real `pi` binary (opt-in via $PATH)."""
+    """Smoke test against a real `pi` binary (opt-in via DAYDREAM_PI_LIVE=1).
+
+    Asserts an observable success signal (actual assistant text), not mere
+    event arrival: the backend's finalization path always emits CostEvent +
+    ResultEvent on EOF, so on an auth/model failure (empty stdout, error on
+    stderr) those two events still arrive — the text assertion is what
+    distinguishes a real reply from a bare EOF. The wait_for timeout converts
+    a hang (e.g. pi blocking on /login when z.ai creds are absent) into a
+    failure rather than an infinite stall.
+    """
     backend = PiBackend(model="glm-5.2")
     events = []
-    async for event in backend.execute(Path("/tmp"), "Reply with exactly: pong"):
-        events.append(event)
+
+    async def _collect() -> None:
+        async for event in backend.execute(Path("/tmp"), "Reply with exactly: pong"):
+            events.append(event)
+
+    await asyncio.wait_for(_collect(), timeout=60.0)
+
+    # Observable success: the agent must actually have replied. Asserting only
+    # ResultEvent/CostEvent is a false green — they are unconditionally emitted
+    # at EOF by the finalization path, so they survive an auth/model failure.
+    text = "".join(e.text for e in events if isinstance(e, TextEvent))
+    assert "pong" in text.lower(), f"no assistant text emitted (auth/model failure?): events={events!r}"
     # A real run must finalize with CostEvent + ResultEvent.
     assert any(isinstance(e, ResultEvent) for e in events)
     assert any(isinstance(e, CostEvent) for e in events)
@@ -650,51 +691,143 @@ async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# _extract_json — robust structured-output extraction for prose-wrapped JSON
-# (critical for GLM models that wrap JSON in reasoning text)
+# PI_BASE_URL → temporary models.json override (plan §6)
 # ---------------------------------------------------------------------------
 
-class TestExtractJson:
-    """Verify _extract_json handles clean JSON, fenced JSON, and prose-wrapped JSON."""
 
-    def test_clean_json_object(self):
-        assert _extract_json('{"findings": [], "ok": true}') == {"findings": [], "ok": True}
+@pytest.mark.asyncio
+async def test_pi_base_url_writes_temporary_models_override(monkeypatch, tmp_path):
+    """PI_BASE_URL writes a temp models.json and sets PI_CODING_AGENT_DIR (plan §6).
 
-    def test_clean_json_array(self):
-        assert _extract_json('[1, 2, 3]') == [1, 2, 3]
+    The user's persistent ``~/.pi/agent/models.json`` is never mutated: pi is
+    pointed at a throwaway agent dir via ``PI_CODING_AGENT_DIR`` (verified in
+    pi's ``src/config.ts``), and the dir is removed once the run finishes.
+    """
+    # Point HOME at an empty dir so the merge source is absent (deterministic).
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PI_BASE_URL", "https://custom.example.com/v4")
 
-    def test_markdown_fenced_json(self):
-        text = '```json\n{"findings": [{"arb_id": 1, "keep": true}]}\n```'
-        result = _extract_json(text)
-        assert result == {"findings": [{"arb_id": 1, "keep": True}]}
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    # The temp dir is removed in execute()'s finally, so the models.json must
+    # be snapshotted at spawn time (before execute returns).
+    snapshot: dict[str, object] = {}
 
-    def test_markdown_fenced_bare(self):
-        text = '```\n{"x": 1}\n```'
-        assert _extract_json(text) == {"x": 1}
+    def _spawn(*args: object, **kwargs: object) -> object:
+        env = kwargs.get("env")
+        if isinstance(env, dict) and _PI_AGENT_DIR_ENV in env:
+            override_dir = Path(str(env[_PI_AGENT_DIR_ENV]))
+            snapshot["dir"] = override_dir
+            snapshot["models"] = json.loads((override_dir / "models.json").read_text())
+        return mock_proc
 
-    def test_prose_wrapped_json(self):
-        text = (
-            "Based on my analysis of all findings, here are my verdicts:\n"
-            '{"findings": [{"arb_id": 1, "keep": false}]}'
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", side_effect=_spawn):
+        async for _ in backend.execute(Path("/tmp"), "p"):
+            pass
+
+    models = snapshot["models"]
+    # Default override provider is "zai" when PI_PROVIDER is unset.
+    assert models["providers"]["zai"]["baseUrl"] == "https://custom.example.com/v4"
+    # Temp dir is cleaned up once the run finishes (no leak).
+    assert not Path(snapshot["dir"]).exists()  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_pi_base_url_includes_api_key_and_provider(monkeypatch, tmp_path):
+    """PI_API_KEY / PI_PROVIDER flow into the override entry alongside baseUrl."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PI_BASE_URL", "https://custom.example.com/v4")
+    monkeypatch.setenv("PI_API_KEY", "secret-key")
+    monkeypatch.setenv("PI_PROVIDER", "my-proxy")
+
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    snapshot: dict[str, object] = {}
+
+    def _spawn(*args: object, **kwargs: object) -> object:
+        env = kwargs.get("env")
+        if isinstance(env, dict) and _PI_AGENT_DIR_ENV in env:
+            override_dir = Path(str(env[_PI_AGENT_DIR_ENV]))
+            snapshot["models"] = json.loads((override_dir / "models.json").read_text())
+        return mock_proc
+
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", side_effect=_spawn) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), "p"):
+            pass
+
+    entry = snapshot["models"]["providers"]["my-proxy"]  # type: ignore[index]
+    assert entry["baseUrl"] == "https://custom.example.com/v4"
+    assert entry["apiKey"] == "secret-key"
+    # And the provider flag is still forwarded to the CLI.
+    flat_args = list(mock_exec.call_args.args)
+    assert flat_args[flat_args.index("--provider") + 1] == "my-proxy"
+
+
+@pytest.mark.asyncio
+async def test_pi_base_url_merges_existing_models_json(monkeypatch, tmp_path):
+    """The override merges (not replaces) the user's existing models.json.
+
+    A pre-existing provider entry is preserved; only the override provider's
+    baseUrl (and apiKey when given) is set on top. This is the "no clobber"
+    half of best-effort (plan §6).
+    """
+    existing = tmp_path / ".pi" / "agent" / "models.json"
+    existing.parent.mkdir(parents=True)
+    existing.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "ollama": {
+                        "baseUrl": "http://localhost:11434/v1",
+                        "apiKey": "ollama",
+                    }
+                }
+            }
         )
-        result = _extract_json(text)
-        assert result == {"findings": [{"arb_id": 1, "keep": False}]}
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PI_BASE_URL", "https://custom.example.com/v4")
 
-    def test_prose_wrapped_array(self):
-        text = 'Here are the issues:\n[{"id": 1, "severity": "high"}]\nThat concludes the review.'
-        result = _extract_json(text)
-        assert result == [{"id": 1, "severity": "high"}]
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    snapshot: dict[str, object] = {}
 
-    def test_empty_string(self):
-        assert _extract_json("") is None
+    def _spawn(*args: object, **kwargs: object) -> object:
+        env = kwargs.get("env")
+        if isinstance(env, dict) and _PI_AGENT_DIR_ENV in env:
+            override_dir = Path(str(env[_PI_AGENT_DIR_ENV]))
+            snapshot["models"] = json.loads((override_dir / "models.json").read_text())
+        return mock_proc
 
-    def test_whitespace_only(self):
-        assert _extract_json("   \n  ") is None
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", side_effect=_spawn):
+        async for _ in backend.execute(Path("/tmp"), "p"):
+            pass
 
-    def test_no_json_at_all(self):
-        assert _extract_json("This is just prose with no JSON whatsoever.") is None
+    models = snapshot["models"]
+    # Existing provider preserved.
+    assert models["providers"]["ollama"]["baseUrl"] == "http://localhost:11434/v1"  # type: ignore[index]
+    # Override applied on top.
+    assert models["providers"]["zai"]["baseUrl"] == "https://custom.example.com/v4"  # type: ignore[index]
+    # The user's persistent file is untouched.
+    assert json.loads(existing.read_text())["providers"] == {
+        "ollama": {
+            "baseUrl": "http://localhost:11434/v1",
+            "apiKey": "ollama",
+        }
+    }
 
-    def test_json_with_nested_braces_in_strings(self):
-        text = '{"msg": "contains a } brace", "ok": true}'
-        result = _extract_json(text)
-        assert result == {"msg": "contains a } brace", "ok": True}
+
+@pytest.mark.asyncio
+async def test_no_pi_base_url_means_no_agent_dir_env(monkeypatch):
+    """Without PI_BASE_URL there is no override: env is None (inherit parent)."""
+    monkeypatch.delenv("PI_BASE_URL", raising=False)
+
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), "p"):
+            pass
+
+        # env=None → asyncio inherits the parent environment (no PI_CODING_AGENT_DIR).
+        assert mock_exec.call_args.kwargs.get("env") is None

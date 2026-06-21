@@ -22,7 +22,9 @@ def extract_json(text: str) -> Any:
     3. ``json.loads`` on the cleaned text (fast path for clean JSON).
     4. If that fails, scan for the first balanced ``{...}`` or ``[...]`` block
        (depth-counting, string-aware) and parse that substring. Whichever brace
-       type appears earliest in the text is tried first.
+       type appears earliest in the text is tried first; if a balanced span of
+       that type fails to parse, keep scanning forward for a later valid span of
+       the same type before falling back to the other brace type.
 
     Returns the parsed value (dict, list, str, int, …) or ``None`` if no valid
     JSON was found. Never raises.
@@ -60,32 +62,44 @@ def extract_json(text: str) -> Any:
         candidates.append((bracket_idx, "[", "]"))
     candidates.sort()  # by position in text
 
-    for start_idx, start_char, end_char in candidates:
-        depth = 0
-        in_string = False
-        escape = False
-        for i in range(start_idx, len(cleaned)):
-            ch = cleaned[i]
-            if escape:
-                escape = False
-                continue
-            if ch == "\\":
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if ch == start_char:
-                depth += 1
-            elif ch == end_char:
-                depth -= 1
-                if depth == 0:
-                    candidate = cleaned[start_idx : i + 1]
-                    try:
-                        return json.loads(candidate)
-                    except (json.JSONDecodeError, ValueError):
-                        break  # try the next candidate
+    for _, start_char, end_char in candidates:
+        scan_from = 0
+        while True:
+            start_idx = cleaned.find(start_char, scan_from)
+            if start_idx == -1:
+                break  # no more spans of this brace type; try the next candidate
+            depth = 0
+            in_string = False
+            escape = False
+            end_idx = -1
+            for i in range(start_idx, len(cleaned)):
+                ch = cleaned[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == start_char:
+                    depth += 1
+                elif ch == end_char:
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i
+                        break
+            if end_idx == -1:
+                break  # unbalanced; try the next brace-type candidate
+            candidate = cleaned[start_idx : end_idx + 1]
+            try:
+                return json.loads(candidate)
+            except (json.JSONDecodeError, ValueError):
+                # This balanced span is unparseable; scan forward for a later
+                # valid span of the same brace type before giving up on it.
+                scan_from = end_idx + 1
 
     return None

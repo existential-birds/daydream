@@ -11,11 +11,13 @@ pattern; it emits the same event vocabulary so the existing
 :class:`daydream.trajectory.TrajectoryRecorder` produces valid ATIF v1.6
 trajectories indistinguishable in shape from the other two backends.
 
-z.ai coding plan wiring (GLM models) is configured once in ``~/.pi/models.json``
-(see ``design.md`` §3); daydream never fabricates a base URL or cost table.
-Optional ``PI_PROVIDER`` / ``PI_API_KEY`` / ``PI_THINKING`` env overrides are
-forwarded as CLI flags. ``PI_BASE_URL`` has no matching CLI flag — set it in
-``~/.pi/models.json`` (documented in CLAUDE.md).
+z.ai coding plan wiring (GLM models) is configured once in
+``~/.pi/agent/models.json`` (see ``design.md`` §3); daydream never fabricates a
+base URL or cost table. Optional ``PI_PROVIDER`` / ``PI_API_KEY`` /
+``PI_THINKING`` env overrides are forwarded as CLI flags. ``PI_BASE_URL`` is not
+a CLI flag — when set, a throwaway models.json override is written and pi is
+pointed at it via ``PI_CODING_AGENT_DIR`` (plan §6), so the user's persistent
+``~/.pi/agent/models.json`` is never mutated.
 """
 
 from __future__ import annotations
@@ -23,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -40,6 +44,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.json_utils import extract_json
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
@@ -65,20 +70,22 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
 # Read-only tool subset (plan §3). Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
 
+# Pi reads its agent config (models.json, auth.json, settings.json) from its
+# agent dir, which is overridable via PI_CODING_AGENT_DIR (verified in pi's
+# src/config.ts: ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`,
+# getAgentDir() honors it, getModelsPath() = join(getAgentDir(), "models.json")).
+# Used to write a throwaway models.json for PI_BASE_URL (plan §6) without
+# touching the user's persistent ~/.pi/agent/models.json.
+_PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
+
+# Default provider key the PI_BASE_URL override targets when PI_PROVIDER is
+# unset. The z.ai coding plan (DEFAULT_PI_MODEL = "glm-5.2") uses "zai"
+# (plan §3; matches a configured ~/.pi/agent/models.json).
+_PI_DEFAULT_OVERRIDE_PROVIDER = "zai"
+
 
 class PiError(Exception):
     """Raised when a Pi turn fails (e.g. ``stopReason == "error"``)."""
-
-
-def _extract_json(text: str) -> Any:
-    """Extract a JSON object or array from possibly prose-wrapped model text.
-
-    Thin wrapper around the shared :func:`daydream.json_utils.extract_json`.
-    Kept as a module-private alias so existing call sites and tests are stable.
-    """
-    from daydream.json_utils import extract_json
-
-    return extract_json(text)
 
 
 def _render_tool_result(result: Any) -> str:
@@ -147,8 +154,13 @@ def _resolve_skill_dir(skill_key: str) -> Path | None:
     helper searches the standard plugin locations for a directory whose slug
     matches ``skill_key`` and contains a ``SKILL.md``. The full Beagle
     skill-path resolver is tracked separately (design doc Phase 2); this is the
-    sufficient-for-parity implementation. Returns ``None`` when unresolved — the
-    caller degrades gracefully and never raises.
+    sufficient-for-parity implementation. Note this is a parallel skill-location
+    mechanism: :func:`daydream.deep.orchestrator.get_installed_skills` answers
+    "are the Beagle skills installed?" by reading the Claude Code plugin
+    registry instead of walking the filesystem, so the two can disagree on
+    where the Beagle skills live — consolidate them when the full resolver
+    lands. Returns ``None`` when unresolved — the caller degrades gracefully
+    and never raises.
     """
     slug = skill_key.split(":")[-1]
     home = Path.home()
@@ -166,6 +178,73 @@ def _resolve_skill_dir(skill_key: str) -> Path | None:
         if (candidate / "SKILL.md").is_file():
             return candidate
     return None
+
+
+def _pi_agent_models_path() -> Path:
+    """Path to the user's persistent pi models.json (``~/.pi/agent/models.json``).
+
+    Computed at call time (not import) so ``HOME`` overrides in tests are
+    honored. Mirrors pi's own resolution: ``getModelsPath() ==
+    join(getAgentDir(), "models.json")`` with the default agent dir
+    ``~/.pi/agent`` (pi ``src/config.ts``).
+    """
+    return Path.home() / ".pi" / "agent" / "models.json"
+
+
+def _write_models_override(base_url: str, provider: str, api_key: str | None) -> Path:
+    """Write a throwaway models.json carrying a ``baseUrl`` override.
+
+    ``baseUrl`` is not a Pi CLI flag — it lives in pi's models.json (plan §6).
+    Pi locates models.json via its agent dir, which is overridable through the
+    ``PI_CODING_AGENT_DIR`` env var, so this builds a temporary agent dir
+    containing a models.json that *merges* the user's existing config with the
+    ``base_url`` override applied to ``provider`` (and ``api_key`` when given),
+    and returns the dir path for the caller to pass as that env var. The user's
+    persistent ``~/.pi/agent/models.json`` is never mutated.
+
+    Best-effort merge: an unreadable/absent/invalid existing models.json yields
+    a fresh config with just the override entry. Temp-dir/write failures raise
+    ``OSError`` so the caller can degrade to "no override" (plan §6:
+    best-effort).
+
+    Args:
+        base_url: The ``baseUrl`` to set on the provider entry (``PI_BASE_URL``).
+        provider: Provider key to override (``PI_PROVIDER`` or the z.ai default).
+        api_key: Optional ``apiKey`` to also set (``PI_API_KEY``).
+
+    Returns:
+        Path to the temporary agent dir containing the written ``models.json``.
+
+    """
+    temp_dir = Path(tempfile.mkdtemp(prefix="daydream-pi-models-"))
+    try:
+        config: dict[str, Any] = {"providers": {}}
+        existing = _pi_agent_models_path()
+        try:
+            if existing.is_file():
+                parsed = json.loads(existing.read_text(encoding="utf-8"))
+                if isinstance(parsed, dict):
+                    config = parsed
+        except (OSError, ValueError):
+            # Absent/unreadable/invalid existing config — start fresh.
+            config = {"providers": {}}
+        providers = config.get("providers")
+        if not isinstance(providers, dict):
+            providers = {}
+            config["providers"] = providers
+        entry = providers.get(provider)
+        if not isinstance(entry, dict):
+            entry = {}
+            providers[provider] = entry
+        entry["baseUrl"] = base_url
+        if api_key:
+            entry["apiKey"] = api_key
+        (temp_dir / "models.json").write_text(json.dumps(config), encoding="utf-8")
+    except OSError:
+        # Leave no half-written temp dir behind on failure.
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    return temp_dir
 
 
 class PiBackend:
@@ -200,7 +279,10 @@ class PiBackend:
                 the final assistant text is parsed as JSON at ``agent_end``.
             continuation: Optional token for session resumption. When present
                 and ``backend == "pi"``, ``--session-id <id>`` resumes that
-                session. Mutually exclusive with ``--no-session``.
+                session. Fresh runs generate a UUID and also pass
+                ``--session-id <uuid>`` so the returned token always points to
+                a saved (resumable) session — Pi's ``--no-session`` is
+                ephemeral and cannot be resumed.
             agents: Optional subagent mapping. Pi does not support non-empty
                 subagent maps and will raise if provided.
             max_turns: NOT enforced by Pi (no direct turn-count flag). Documented
@@ -235,6 +317,7 @@ class PiBackend:
         provider = os.environ.get("PI_PROVIDER")
         api_key = os.environ.get("PI_API_KEY")
         thinking = os.environ.get("PI_THINKING")
+        base_url = os.environ.get("PI_BASE_URL")
         if provider:
             args.extend(["--provider", provider])
         if api_key:
@@ -242,18 +325,45 @@ class PiBackend:
         if thinking:
             args.extend(["--thinking", thinking])
 
+        # PI_BASE_URL has no CLI flag — it lives in pi's models.json (plan §6).
+        # When set, write a throwaway models.json in a temp agent dir and point
+        # pi at it via PI_CODING_AGENT_DIR. The user's persistent config is
+        # never mutated; failures degrade to "no override" (best-effort).
+        models_override_dir: Path | None = None
+        sub_env: dict[str, str] | None = None
+        if base_url:
+            try:
+                models_override_dir = _write_models_override(
+                    base_url, provider or _PI_DEFAULT_OVERRIDE_PROVIDER, api_key
+                )
+                sub_env = {
+                    **os.environ,
+                    _PI_AGENT_DIR_ENV: str(models_override_dir),
+                }
+            except OSError:
+                from daydream.agent import console
+                from daydream.ui import print_warning
+
+                print_warning(
+                    console,
+                    "PI_BASE_URL is set but the temporary models.json override "
+                    "could not be written; set baseUrl in "
+                    "~/.pi/agent/models.json instead.",
+                )
+
         if read_only:
             args.extend(["--tools", _PI_READ_ONLY_TOOLS])
 
-        # --session-id and --no-session are mutually exclusive (plan §10).
-        # Resume takes precedence; fresh runs are ephemeral.
+        # Pi's --no-session is ephemeral (pi docs: "Don't save session
+        # (ephemeral)"); resuming it with --session-id <id> "creates it if
+        # missing" → an empty session that discards prior turns. So every run
+        # uses --session-id with a persistent id: the continuation's id when
+        # resuming, or a freshly generated UUID for a new session.
         resume_id: str | None = None
         if continuation and continuation.backend == "pi":
             resume_id = continuation.data.get("session_id")
-        if resume_id:
-            args.extend(["--session-id", resume_id])
-        else:
-            args.append("--no-session")
+        effective_session_id = resume_id or str(uuid.uuid4())
+        args.extend(["--session-id", effective_session_id])
 
         full_prompt = prompt
         if output_schema:
@@ -263,7 +373,6 @@ class PiBackend:
         session_id: str | None = None
         last_assistant_text: str | None = None
         structured_result: Any = None
-        finalized = False
 
         total_input = 0
         total_output = 0
@@ -278,7 +387,13 @@ class PiBackend:
                 cwd=str(cwd),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                # Merge stderr into stdout (matching CodexBackend). stderr=PIPE
+                # here would never be drained — a latent deadlock if pi writes
+                # more than the OS pipe buffer (~64KB) to stderr. The parse loop
+                # below already `continue`s past non-JSON lines, so stray stderr
+                # text mixed into stdout is harmlessly skipped.
+                stderr=asyncio.subprocess.STDOUT,
+                env=sub_env,
                 limit=_PI_STDOUT_LIMIT_BYTES,
             )
             self._processes.append(proc)
@@ -305,7 +420,7 @@ class PiBackend:
                     # Session header — capture the session id for the
                     # continuation token. Header field name is not stable across
                     # Pi builds, so probe the common keys.
-                    for key in ("sessionId", "session_id", "session", "id"):
+                    for key in ("id", "sessionId", "session_id", "session"):
                         val = event.get(key)
                         if isinstance(val, str) and val:
                             session_id = val
@@ -383,24 +498,10 @@ class PiBackend:
                     yield TurnEndEvent(message_id="")
 
                 elif event_type == "agent_end":
-                    if output_schema and last_assistant_text:
-                        structured_result = _extract_json(last_assistant_text)
-                    yield CostEvent(
-                        cost_usd=total_cost,
-                        input_tokens=total_input,
-                        output_tokens=total_output,
-                        cached_tokens=total_cache_read,
-                        model_name=self.model,
-                    )
-                    token_session = session_id or resume_id or str(uuid.uuid4())
-                    yield ResultEvent(
-                        structured_output=structured_result,
-                        continuation=ContinuationToken(
-                            backend="pi",
-                            data={"session_id": token_session},
-                        ),
-                    )
-                    finalized = True
+                    # No inline finalization — Cost/Result are emitted once from
+                    # the single post-loop path below (plan §10). The loop keeps
+                    # draining to EOF so the stdout pipe cannot fill mid-run.
+                    pass
 
                 # turn_start / message_start / message_update /
                 # tool_execution_update are streaming-only; the full content is
@@ -408,27 +509,28 @@ class PiBackend:
 
             await proc.wait()
 
-            # Guard (plan §10): if the stream ended without agent_end, still
-            # finalize exactly once so downstream consumers get Cost/Result.
-            if not finalized:
-                if output_schema and last_assistant_text:
-                    structured_result = _extract_json(last_assistant_text)
-                yield CostEvent(
-                    cost_usd=total_cost,
-                    input_tokens=total_input,
-                    output_tokens=total_output,
-                    cached_tokens=total_cache_read,
-                    model_name=self.model,
-                )
-                token_session = session_id or resume_id or str(uuid.uuid4())
-                yield ResultEvent(
-                    structured_output=structured_result,
-                    continuation=ContinuationToken(
-                        backend="pi",
-                        data={"session_id": token_session},
-                    ),
-                )
-                finalized = True
+            # Single finalization path (plan §10): runs exactly once whether
+            # the stream closed on agent_end or ended without it (truncated
+            # output). Cost/Result are derived from fully-accumulated totals.
+            if output_schema and last_assistant_text:
+                structured_result = extract_json(last_assistant_text)
+            yield CostEvent(
+                cost_usd=total_cost,
+                input_tokens=total_input,
+                output_tokens=total_output,
+                cached_tokens=total_cache_read,
+                model_name=self.model,
+            )
+            # Prefer the id pi reports in the session header (authoritative);
+            # fall back to the persistent id we passed via --session-id.
+            token_session = session_id or effective_session_id
+            yield ResultEvent(
+                structured_output=structured_result,
+                continuation=ContinuationToken(
+                    backend="pi",
+                    data={"session_id": token_session},
+                ),
+            )
 
         finally:
             if proc is not None and proc.returncode is None:
@@ -438,6 +540,8 @@ class PiBackend:
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
+            if models_override_dir is not None:
+                shutil.rmtree(models_override_dir, ignore_errors=True)
             self._processes = [active for active in self._processes if active is not proc]
             self._process = self._processes[-1] if self._processes else None
 

@@ -1504,8 +1504,10 @@ async def phase_parse_feedback(
     Returns:
         List of validated feedback items with id, description, file, line
 
-    Raises:
-        ValueError: If the agent output is not a valid list.
+    Note:
+        Unparseable agent output degrades gracefully: an empty response, prose
+        instead of JSON, or a dict missing the ``issues`` key returns ``[]``
+        and emits a warning rather than raising ``ValueError``.
 
     """
     print_phase_hero(console, "REFLECT", phase_subtitle("REFLECT"))

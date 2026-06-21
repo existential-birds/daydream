@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-21
 **Branch:** `feat/pi-backend` (worktree, branched from `origin/main`)
-**Status:** Ready for implementation
+**Status:** Implemented
 
 ## 1. Goal
 
@@ -60,8 +60,8 @@ Pi is invoked as (JSON event-stream mode):
 pi --mode json --model <MODEL> [--provider <PROVIDER>] [--api-key <KEY>] \
    [--system-prompt <PROMPT>] [--append-system-prompt <PROMPT>] \
    [--tools <COMMA_LIST>] [--exclude-tools <COMMA_LIST>] \
-   [--session-id <ID>] [--thinking <LEVEL>] \
-   --no-session  "<PROMPT>"
+   [--session-id <ID> | --no-session] [--thinking <LEVEL>] \
+   "<PROMPT>"
 ```
 
 - `--mode json` → emits **every** session event as one JSON object per line on stdout
@@ -91,7 +91,7 @@ z.ai models are configured once in `~/.pi/models.json` (Pi's model registry):
   "models": [
     {
       "id": "glm-5.2",
-      "name": "GLM-4.6 (z.ai coding plan)",
+      "name": "GLM-5.2 (z.ai coding plan)",
       "api": "openai-completions",
       "provider": "zai",
       "baseUrl": "https://api.z.ai/api/paas/v4",
@@ -301,7 +301,7 @@ In `daydream/cli.py`:
 - `tests/contract/test_backend_step_parity.py` — add a test asserting Pi produces the
   same Step shape as Claude/Codex against the canonical script. Parameterize or add
   `test_pi_produces_identical_steps` + `..._read_only`.
-- `daydream/CLAUDE.md` — document `PiBackend` in the backends section, the `pi` CLI
+- `CLAUDE.md` — document `PiBackend` in the backends section, the `pi` CLI
   prerequisite, and z.ai setup.
 
 ## 8. Test plan (mandatory — real-path per the Testing Standard)
@@ -323,8 +323,13 @@ In `daydream/cli.py`:
    model; unknown-backend error message includes `"pi"`.
 
 All tests must mock the subprocess (no real `pi` binary required). Add one
-**opt-in live smoke test** gated on `shutil.which("pi")` (skip if absent) — mirrors the
-established pattern.
+live smoke test that is **truly opt-in**: gate it on an env var
+(`DAYDREAM_PI_LIVE=1`), not merely `shutil.which("pi")`, and wrap the run in a
+timeout. Binary-on-`$PATH` is insufficient — with `pi` installed but z.ai
+unconfigured, `pi --mode json` blocks waiting for `/login`, which would hang
+`make test` and the pre-push hook. This is a new pattern, not an established one:
+the existing `shutil.which("gh")` skip-gates guard functional `gh`-dependent
+tests, not a live backend smoke test.
 
 ## 9. Verification (do this before declaring done)
 
@@ -333,7 +338,7 @@ make lint       # ruff — must be clean
 make typecheck  # mypy — must be clean
 make test       # full pytest suite — all green, including new pi tests
 ```
-`make check` runs all three. The full suite is ~343+ tests; collection is slow, allow
+`make check` runs all three. The full suite is 1627+ tests; collection is slow, allow
 time. **Do not bypass the pre-push hook or skip tests** (see CLAUDE.md
 Non-Negotiable rules). Commit with Conventional Commits (`feat(backends): add pi
 coding-agent backend with ATIF trajectory parity`).

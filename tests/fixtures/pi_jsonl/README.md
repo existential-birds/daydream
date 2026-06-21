@@ -7,7 +7,7 @@ stream (one JSON object per LF-delimited line) consumed by
 Event vocabulary mirrors `pi-mono` `AgentSessionEvent` (see
 `docs/plans/2026-06-21-pi-backend.md` §4):
 
-- Line 0 — session header (`{"type":"session","sessionId":"..."}`).
+- Line 0 — session header (`{"type":"session","id":"..."}`).
 - `agent_start` / `agent_end` — agent lifecycle.
 - `turn_start` / `turn_end` — turn lifecycle; `turn_end.message` carries the
   full `AssistantMessage` with `usage` (tokens + `cost.total` in USD) and

@@ -216,7 +216,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Claude backend reads API keys from `~/.claude/settings.json` via `setting_sources=["user"]` in `ClaudeAgentOptions` (`daydream/backends/claude.py`, line 78)
 - `CLAUDE_CONFIG_DIR` environment variable can override the default `~/.claude` directory (used in `daydream/deep/orchestrator.py`)
 - Codex backend requires `codex` CLI on `$PATH`; credentials managed by the Codex CLI itself
-- Pi backend (`--backend pi`) requires the `pi` CLI (`@earendil-works/pi-coding-agent`) on `$PATH`; z.ai coding plan (GLM models) is configured once in `~/.pi/models.json`. Optional `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` env overrides forward as `pi` CLI flags; `PI_BASE_URL` has no matching flag and must be set in `~/.pi/models.json`.
+- Pi backend (`--backend pi`) requires the `pi` CLI (`@earendil-works/pi-coding-agent`) on `$PATH`; z.ai coding plan (GLM models) is configured once in `~/.pi/models.json`. Optional `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` env overrides forward as `pi` CLI flags; `PI_BASE_URL` (no matching flag) writes a throwaway `models.json` override and is passed to pi via `PI_CODING_AGENT_DIR`.
 - `pyproject.toml` — Single source of truth: project metadata, dependencies, tool configuration
 - `[tool.mypy]` — `python_version = "3.12"`, `ignore_missing_imports = true`
 - `[tool.ruff]` — `line-length = 120`, `target-version = "py312"`, rules: `E`, `F`, `I`, `W`
@@ -310,7 +310,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Three required methods: `execute()`, `cancel()`, `format_skill_invocation()`
 - `execute()` is an `AsyncIterator[AgentEvent]` (not `async def`)
 - Implementations: `ClaudeBackend` (`daydream/backends/claude.py`), `CodexBackend` (`daydream/backends/codex.py`)
-- PiBackend: subprocess + JSONL (mirrors Codex) — `daydream/backends/pi.py`; `format_skill_invocation()` uses path-reference injection (Pi has no skill registry); `message_id=""` (no per-message id, like Codex); `--no-session` for fresh runs, `--session-id` for resume; `--tools read,find,ls,grep` for `read_only=True`
+- PiBackend: subprocess + JSONL (mirrors Codex) — `daydream/backends/pi.py`; `format_skill_invocation()` uses path-reference injection (Pi has no skill registry); `message_id=""` (no per-message id, like Codex); `--session-id <uuid>` (persistent) for fresh runs, `--session-id <id>` for resume (never `--no-session`, which is ephemeral and non-resumable); `--tools read,find,ls,grep` for `read_only=True`
 - Mock backends in tests implement the same three-method interface inline (no base class required)
 ## Async Patterns
 - `anyio.run(run, config)` is the top-level async entry point in `daydream/cli.py`
@@ -407,9 +407,9 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - `format_skill_invocation()` returns `/{key}` for Claude, `${name}` for Codex
 - Factory: `create_backend(name, model)` in `daydream/backends/__init__.py`
 - Implementations: `ClaudeBackend` (`daydream/backends/claude.py`), `CodexBackend` (`daydream/backends/codex.py`)
-- PiBackend: subprocess + JSONL (mirrors Codex) — `daydream/backends/pi.py`; `format_skill_invocation()` uses path-reference injection (Pi has no skill registry); `message_id=""` (no per-message id, like Codex); `--no-session` for fresh runs, `--session-id` for resume; `--tools read,find,ls,grep` for `read_only=True`, `PiBackend` (`daydream/backends/pi.py`)
+- PiBackend: subprocess + JSONL (mirrors Codex) — `daydream/backends/pi.py`; `format_skill_invocation()` uses path-reference injection (Pi has no skill registry); `message_id=""` (no per-message id, like Codex); `--session-id <uuid>` (persistent) for fresh runs, `--session-id <id>` for resume (never `--no-session`, which is ephemeral and non-resumable); `--tools read,find,ls,grep` for `read_only=True`
 - Purpose: Backend-agnostic event vocabulary consumed by `run_agent()`
-- Types: `TextEvent`, `ThinkingEvent`, `ToolStartEvent`, `ToolResultEvent`, `CostEvent`, `ResultEvent`
+- Types: `TextEvent`, `ThinkingEvent`, `ToolStartEvent`, `ToolResultEvent`, `CostEvent`, `MetricsEvent`, `TurnEndEvent`, `ResultEvent`
 - All are `@dataclass` instances; no base class, just a `TypeAlias` union defined in `daydream/backends/__init__.py`
 - Purpose: Single configuration object carrying all CLI settings into `run()`
 - Pattern: `@dataclass` with defaults; constructed entirely in `_parse_args()`
