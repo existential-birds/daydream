@@ -551,10 +551,6 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
 
             if config.start_at not in ("per-stack", "merge", "fix"):
                 print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
-                # Ground intent in the author's PR description when one exists.
-                # Only fetch when pr_number is explicit: passing None lets gh
-                # infer from the checked-out branch, which may be unrelated or
-                # stale and would then be trusted as authoritative intent.
                 pr_description: str | None = None
                 if config.pr_number is not None:
                     pr_view = git_ops.gh_pr_view(target_dir, config.pr_number)
