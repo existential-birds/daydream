@@ -37,7 +37,7 @@ from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
-from daydream.config import DEFAULT_TOOL_CALL_BUDGET, REVIEW_OUTPUT_FILE
+from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S, REVIEW_OUTPUT_FILE
 from daydream.ui import (
     phase_subtitle,
     print_dim,
@@ -1657,6 +1657,7 @@ async def phase_verify_recommendations(
         output_schema=RECOMMENDATION_VERDICTS_SCHEMA,
         max_turns=25,
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
         phase=DaydreamPhase.VERIFY,
     )
 
@@ -1797,6 +1798,7 @@ here.
             backend, work.repo, prompt,
             phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
             progress_callback=_cb,
         )
     else:
@@ -1804,6 +1806,7 @@ here.
             backend, work.repo, prompt,
             phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
         )
     async with (console_lock if console_lock is not None else anyio.Lock()):
         print_fix_complete(console, item_num, total)
@@ -2062,6 +2065,7 @@ async def phase_test_and_heal(
             _, _, _ = await run_agent(
                 backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
                 tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                wall_budget_s=DEFAULT_WALL_BUDGET_S,
             )
             retries_used += 1
             continuation = None
@@ -2116,6 +2120,7 @@ async def phase_test_and_heal(
             _, _, _ = await run_agent(
                 backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
                 tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                wall_budget_s=DEFAULT_WALL_BUDGET_S,
             )
             retries_used += 1
             continuation = None
@@ -2427,6 +2432,7 @@ async def phase_understand_intent(
         output, _, _ = await run_agent(
             backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
         )
         intent_text = output if isinstance(output, str) else str(output)
 

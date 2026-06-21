@@ -80,6 +80,10 @@ class _StubBackend:
         # in-loop tool-call budget in run_agent this stream never completes and
         # the run hangs; with it, the loop aborts after tool_call_budget calls.
         self.runaway_fix: bool = False
+        # Real per-event sleep for the runaway burst (default 0.0 == anyio.sleep(0),
+        # an interleave point with no wall time). A small positive value lets the
+        # wall-clock budget trip before the tool-call budget in the wall real-path test.
+        self.runaway_fix_sleep_s: float = 0.0
         # When True, the test-suite branch emits a Postgres-unreachable signature
         # (infra down, not a code bug) so phase_test_and_heal's
         # is_environmental_failure() short-circuit fires. The heal-fix branch then
@@ -322,7 +326,7 @@ class _StubBackend:
                 # tool-call budget exists to cut; the budget breaks the loop.
                 for n in range(500):
                     yield ToolStartEvent(id=f"tc-{n}", name="Bash", input={"command": "find /"})
-                    await anyio.sleep(0)
+                    await anyio.sleep(self.runaway_fix_sleep_s)
                 return
             m = re.search(r"^File: (.+)$", prompt, re.M)
             fixed_file = m.group(1).strip() if m else "unknown"
@@ -2714,6 +2718,28 @@ async def test_merge_resume_skips_arbiter_when_marker_present(
     assert arbiter_calls == [], "arbiter must not re-run when the completion marker is present"
 
 
+def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
+    """Collect ``step["extra"][key]`` across every trajectory JSON written for a run.
+
+    An aborted/forked turn writes sibling trajectory files under the per-run dir, so
+    scan all ``*.json`` beneath ``run_root`` plus the top-level ``traj`` path. Non-dict
+    or unparseable files are skipped. Returns only truthy values, in discovery order.
+    """
+    values: list[str] = []
+    for tf in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
+        try:
+            payload = json.loads(tf.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for step in payload.get("steps", []):
+            value = (step.get("extra") or {}).get(key)
+            if value:
+                values.append(value)
+    return values
+
+
 async def test_run_terminates_under_tool_call_budget(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2760,21 +2786,62 @@ async def test_run_terminates_under_tool_call_budget(
     # per-run dir, so scan every trajectory JSON written for this run for a step
     # whose extra carries a stop_reason -- the observable proof the turn aborted.
     run_root = multi_stack_target / ".daydream"
-    stop_reasons: list[str] = []
-    for tf in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
-        try:
-            payload = json.loads(tf.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        for step in payload.get("steps", []):
-            reason = (step.get("extra") or {}).get("stop_reason")
-            if reason:
-                stop_reasons.append(reason)
+    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
 
     assert stop_reasons, "no trajectory step recorded extra['stop_reason']; budget did not trip"
     assert "tool_call_budget_exceeded" in stop_reasons
+
+
+async def test_run_terminates_under_wall_budget(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#169 real-path: a runaway fix turn is capped by the wall-clock budget.
+
+    The stub's fix branch yields a slow, unbounded burst of ToolStartEvents (a real
+    per-event sleep, never a ResultEvent) -- the 1.5-5h time-tail #169 targets.
+    Driven through the real ``runner.run`` -> deep orchestrator -> ``phase_fix_parallel``
+    -> ``run_agent`` path with a tiny ``DEFAULT_WALL_BUDGET_S``, the wall scope must
+    cancel the turn, ``run`` must return an int exit code, and the aborted turn's ATIF
+    step must carry ``extra["stop_reason"] == "wall_budget_exceeded"``.
+
+    Discriminating: the wall budget only engages because ``phase_fix_parallel`` now
+    passes ``wall_budget_s=DEFAULT_WALL_BUDGET_S`` at the fix call site. Unwire that
+    (the pre-fix state, where the constant was defined but never passed) and the wall
+    scope is ``nullcontext()`` in production -- the tool-call budget trips instead, so
+    ``stop_reason`` is ``tool_call_budget_exceeded`` and this assertion fails.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    # Patch the binding read at the fix call site (phases imported the constant by
+    # name at import time, so patching daydream.config alone would not take effect).
+    # 0.3s wall trips after ~6 slow events, well before the 50-call tool-call budget.
+    monkeypatch.setattr("daydream.phases.DEFAULT_WALL_BUDGET_S", 0.3)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.runaway_fix = True
+    stub.runaway_fix_sleep_s = 0.05
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(
+            RunConfig(
+                target=str(multi_stack_target),
+                trajectory_path=traj,
+                assume="yes",
+                output_mode="loop",
+                cleanup=False,
+            )
+        )
+
+    assert isinstance(exit_code, int)
+
+    run_root = multi_stack_target / ".daydream"
+    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
+
+    assert stop_reasons, "no trajectory step recorded extra['stop_reason']; budget did not trip"
+    assert "wall_budget_exceeded" in stop_reasons
 
 
 async def test_environmental_failure_aborts_heal_loop(
@@ -2846,15 +2913,5 @@ async def test_environmental_failure_aborts_heal_loop(
     # invoked) and a TEST-phase trajectory step was recorded for this run.
     assert stub.test_suite_calls >= 1, "test suite never ran -- heal phase not reached"
     run_root = multi_stack_target / ".daydream"
-    saw_test_step = False
-    for tf in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
-        try:
-            payload = json.loads(tf.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        for step in payload.get("steps", []):
-            if (step.get("extra") or {}).get("daydream_phase") == "test":
-                saw_test_step = True
+    saw_test_step = "test" in _scan_trajectory_extra(run_root, traj, "daydream_phase")
     assert saw_test_step, "no TEST-phase trajectory step recorded -- heal phase not reached"

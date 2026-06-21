@@ -123,35 +123,12 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
 async def test_run_agent_cancel_error_swallowed(tmp_path: Path) -> None:
     """cancel() raising must not propagate — abort path must never raise into the CLI."""
 
-    @dataclass
-    class _RaisingCancelBackend:
-        """Backend whose cancel() raises; verifies the swallow contract in run_agent."""
-
-        model = "mock-model"
-        cancel_calls: int = 0
-
-        def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: dict[str, Any] | None = None,
-            continuation: ContinuationToken | None = None,
-            agents: dict[str, Any] | None = None,
-            max_turns: int | None = None,
-            read_only: bool = False,
-        ) -> Any:
-            async def _gen() -> AsyncIterator[AgentEvent]:
-                for i in range(200):
-                    yield ToolStartEvent(id=f"tool-{i}", name="Bash", input={"command": "ls"})
-
-            return _gen()
+    class _RaisingCancelBackend(_BurstBackend):
+        """_BurstBackend whose cancel() raises; verifies the swallow contract in run_agent."""
 
         async def cancel(self) -> None:
             self.cancel_calls += 1
             raise RuntimeError("cancel exploded")
-
-        def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-            return f"/{skill_key}"
 
     backend = _RaisingCancelBackend()
     recorder = _make_recorder(tmp_path)

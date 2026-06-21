@@ -608,7 +608,7 @@ async def run_agent(
             wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
             if budget_reason is None and wall_cancelled:
                 budget_reason = "wall_budget_exceeded"
-            aborted_reason = budget_reason  # propagate to function scope for caller visibility
+            aborted_reason = budget_reason
             if budget_reason is not None:
                 try:
                     await event_iter.aclose()
