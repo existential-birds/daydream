@@ -65,8 +65,11 @@ _READ_ONLY_HOOK_MATCHER = ".*"
 # plus an unrecoverable wipe. Matched on the raw command via regex.
 _DANGEROUS_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*find\s+/(\s|$)"),       # find / ...  (root-anchored scan)
-    re.compile(r"^\s*grep\b.*\s/(\s|$)"),    # grep ... /  (root-anchored recursive)
-    re.compile(r"^\s*rm\s+-rf?\s+/(\s|$)"),  # rm -rf /    (catastrophic wipe)
+    re.compile(r"^\s*grep\b.*\s/\s*$"),      # grep ... /  (root is the sole trailing path)
+    # rm wiping filesystem root or its glob, with a recursive flag in any order
+    # (-rf, -fr, -R, --recursive). A subpath like ``/home`` is left alone — this
+    # is a runaway/wipe backstop, not a security boundary (the read-only sandbox is).
+    re.compile(r"^\s*rm\s+(?:-\w*[rR]\w*|--recursive)\b.*?\s/\*?(?:\s|$)"),
 )
 
 # Tools unconditionally permitted under the read-only profile (Bash handled

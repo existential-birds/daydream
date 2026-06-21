@@ -28,7 +28,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.config import DEFAULT_WALL_BUDGET_S, UNKNOWN_SKILL_PATTERN
+from daydream.config import UNKNOWN_SKILL_PATTERN
 from daydream.trajectory import DaydreamPhase, get_current_recorder
 from daydream.ui import (
     AgentTextRenderer,
@@ -368,10 +368,8 @@ def is_environmental_failure(test_output: str) -> bool:
         "connection refused",
         "localhost:5432",
         ":6379",
-        "could not connect",
         "container is not running",
         "make db-up",
-        "is the server running",
         "econnrefused",
     ]
     return any(signature in output_lower for signature in infra_signatures)
@@ -389,9 +387,9 @@ async def run_agent(
     agents: dict[str, AgentDefinition] | None = None,
     max_turns: int | None = None,
     read_only: bool = False,
-    wall_budget_s: float | None = DEFAULT_WALL_BUDGET_S,
+    wall_budget_s: float | None = None,
     tool_call_budget: int | None = None,
-) -> tuple[str | Any, ContinuationToken | None]:
+) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
     Streams verbose output to stdout as it's received. When progress_callback
@@ -420,16 +418,20 @@ async def run_agent(
             at the tool layer (Claude PreToolUse guard hook; Codex
             ``--sandbox read-only``). Wired True only for the read-only
             failure-summarizer call; all other call sites keep the default.
-        wall_budget_s: Per-invocation wall-clock budget. When exceeded the loop
-            is cancelled, ``backend.cancel()`` is awaited, the ATIF turn is
-            marked aborted, and the partial output is returned — no exception
-            reaches the caller. ``None`` disables the wall budget.
+        wall_budget_s: Opt-in per-invocation wall-clock budget. When exceeded
+            the loop is cancelled, ``backend.cancel()`` is awaited, the ATIF
+            turn is marked aborted, and the partial output is returned — no
+            exception reaches the caller. ``None`` (the default) disables the
+            wall budget.
         tool_call_budget: Opt-in ceiling on ToolStartEvents in this turn. When
             exceeded the loop breaks with the same abort/partial-return path.
             ``None`` (the default) means no tool-call ceiling.
 
     Returns:
-        Tuple of (output, continuation_token). Output is text or structured data.
+        Tuple of (output, continuation_token, budget_reason). Output is text
+        or structured data. ``budget_reason`` is ``None`` on a normal
+        completion, or a string such as ``"wall_budget_exceeded"`` /
+        ``"tool_call_budget_exceeded"`` when the turn was cut short.
 
     Raises:
         MissingSkillError: If a required skill is not available.
@@ -440,6 +442,7 @@ async def run_agent(
     output_parts: list[str] = []
     structured_result: Any = None
     result_continuation: ContinuationToken | None = None
+    aborted_reason: str | None = None
     use_callback = progress_callback is not None
 
     _state.current_backends.append(backend)
@@ -605,6 +608,7 @@ async def run_agent(
             wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
             if budget_reason is None and wall_cancelled:
                 budget_reason = "wall_budget_exceeded"
+            aborted_reason = budget_reason  # propagate to function scope for caller visibility
             if budget_reason is not None:
                 try:
                     await event_iter.aclose()
@@ -635,14 +639,14 @@ async def run_agent(
         _state.current_backends.remove(backend)
 
     if output_schema is not None and structured_result is not None:
-        return structured_result, result_continuation
+        return structured_result, result_continuation, aborted_reason
     if output_schema is not None:
         raw = "".join(output_parts)
         # Fallback: JSON-parse the raw text when structured output failed.
         if raw.strip():
             try:
                 parsed = json.loads(raw)
-                return parsed, result_continuation
+                return parsed, result_continuation, aborted_reason
             except (json.JSONDecodeError, ValueError):
                 pass
-    return "".join(output_parts), result_continuation
+    return "".join(output_parts), result_continuation, aborted_reason

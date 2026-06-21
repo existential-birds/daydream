@@ -246,7 +246,7 @@ async def pre_scan(
     async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
         async with maybe_fork(recorder, f"explore-{name}"):
             try:
-                structured, _ = await run_agent(
+                structured, _, _ = await run_agent(
                     backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
                     phase=DaydreamPhase.EXPLORATION,
                 )

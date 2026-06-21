@@ -2377,6 +2377,7 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     monkeypatch.setattr("builtins.input", _forbidden_input)
 
     reset_state()
+    exit_code = -1
     try:
         assert get_non_interactive() is False
         config = RunConfig(target=str(multi_stack_target), cleanup=False, non_interactive=True)
@@ -2436,6 +2437,7 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     _force_interactive(monkeypatch)
 
     reset_state()
+    exit_code = -1
     try:
         assert get_non_interactive() is False
         config = RunConfig(target=str(multi_stack_target), cleanup=False, non_interactive=False)

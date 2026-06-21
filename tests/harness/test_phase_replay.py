@@ -58,7 +58,7 @@ async def test_side_effect_serves_per_phase(tmp_path, recorder):
             await run_agent(
                 CodexBackend("m"), tmp_path, "go", phase=DaydreamPhase.REVIEW
             )
-            par, _ = await run_agent(
+            par, _, _ = await run_agent(
                 CodexBackend("m"),
                 tmp_path,
                 "go",

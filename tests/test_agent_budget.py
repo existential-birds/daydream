@@ -104,7 +104,62 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
 
     with anyio.fail_after(5):
         async with recorder:
-            result, _ = await run_agent(
+            result, _, _ = await run_agent(
+                backend,
+                tmp_path,
+                "go",
+                phase=DaydreamPhase.FIX,
+                tool_call_budget=5,
+                wall_budget_s=None,
+            )
+
+    assert isinstance(result, str)
+    assert backend.cancel_calls == 1
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    step = _agent_step_with_stop_reason(traj)
+    assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
+
+
+async def test_run_agent_cancel_error_swallowed(tmp_path: Path) -> None:
+    """cancel() raising must not propagate — abort path must never raise into the CLI."""
+
+    @dataclass
+    class _RaisingCancelBackend:
+        """Backend whose cancel() raises; verifies the swallow contract in run_agent."""
+
+        model = "mock-model"
+        cancel_calls: int = 0
+
+        def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: dict[str, Any] | None = None,
+            continuation: ContinuationToken | None = None,
+            agents: dict[str, Any] | None = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+        ) -> Any:
+            async def _gen() -> AsyncIterator[AgentEvent]:
+                for i in range(200):
+                    yield ToolStartEvent(id=f"tool-{i}", name="Bash", input={"command": "ls"})
+
+            return _gen()
+
+        async def cancel(self) -> None:
+            self.cancel_calls += 1
+            raise RuntimeError("cancel exploded")
+
+        def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+            return f"/{skill_key}"
+
+    backend = _RaisingCancelBackend()
+    recorder = _make_recorder(tmp_path)
+
+    # Must complete without raising — error-swallow contract
+    with anyio.fail_after(5):
+        async with recorder:
+            result, _, _ = await run_agent(
                 backend,
                 tmp_path,
                 "go",
@@ -127,7 +182,7 @@ async def test_run_agent_wall_budget(tmp_path: Path) -> None:
 
     with anyio.fail_after(5):
         async with recorder:
-            result, _ = await run_agent(
+            result, _, _ = await run_agent(
                 backend,
                 tmp_path,
                 "go",

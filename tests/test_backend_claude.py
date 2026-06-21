@@ -310,6 +310,16 @@ def test_read_only_bash_guard_decision(cmd, allowed):
     ("find / -name y", True),
     ("grep -r pattern /", True),
     ("rm -rf /", True),
+    # F2: catastrophic wipe shapes the old `-rf?` literal missed.
+    ("rm -fr /", True),                       # reversed flags
+    ("rm -rf /*", True),                      # root glob
+    ("rm --recursive --force /", True),       # long-form flags
+    ("rm -Rf /", True),                       # capital-R recursive
+    ("rm -rf foo /", True),                   # trailing root arg
+    ("rm -rf /home/user/tmp", False),         # subpath under / is left alone
+    ("rm -rf build", False),                  # relative path
+    # F12: `/` as the grep pattern (not a root path) is no longer a false positive.
+    ("grep / file.txt", False),               # searching for a literal slash
     ("find core/osprey-tui -name agent.rs", False),
     ("ls", False),
     ("rg foo src/", False),

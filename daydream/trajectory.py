@@ -456,8 +456,13 @@ class Invocation:
         when the open step is finalized (mirrors the ``extra["partial_step"]``
         mechanism). ATIF's Step model has no dedicated status field, so the
         ``extra`` dict is the established extension point.
+
+        If the budget fires before any event is received, no step is open yet,
+        so we open one here to ensure ``_close_open_step`` (called from
+        ``finish()``) has a Step to stamp the reason onto.
         """
         self._stop_reason = reason
+        self._ensure_open_step()
 
     def observe(self, event: "AgentEvent") -> None:
         """Dispatch an AgentEvent into the active Step buffer.
