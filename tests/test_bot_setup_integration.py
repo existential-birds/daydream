@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import bot_setup, cli, config, git_ops
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV, AppCredentials, GitHubAppError
-from tests.harness.fake_gh import FakeGh, install_fake_gh
+from tests.harness.fake_gh import FakeGh
 
 
 def _real_pem() -> str:
@@ -28,12 +28,6 @@ def _real_pem() -> str:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ).decode()
-
-
-@pytest.fixture
-def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
-    """Install the fake ``gh`` binary on PATH for real-path subprocess tests."""
-    return install_fake_gh(tmp_path / "fake-gh-bin", monkeypatch)
 
 
 def test_callback_listener_captures_code_then_exchanges(monkeypatch):

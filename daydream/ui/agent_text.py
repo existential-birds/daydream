@@ -158,7 +158,6 @@ def _render_agent_lines_with_gradient(
 
     for i, line in enumerate(lines):
         if line:
-            # Calculate vertical gradient position (0.0 = top/cyan, 1.0 = bottom/green)
             t = i / max(num_lines - 1, 1)
             gradient_color = _interpolate_color(
                 NEON_COLORS["cyan"],
@@ -252,7 +251,6 @@ class AgentTextRenderer:
         if self._started:
             return
 
-        # Add newline for separation from previous output
         self._console.print()
 
         self._live = Live(

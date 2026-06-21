@@ -72,3 +72,7 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+addopts = "--strict-markers"
+markers = [
+    "integration: spawns a real `gh` subprocess (the fake shim); excluded from the pre-push gate, run in full CI. Applied automatically to any test using the `fake_gh` fixture.",
+]

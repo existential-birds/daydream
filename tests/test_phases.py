@@ -600,6 +600,64 @@ def test_git_diff_no_exclude_still_works(tmp_path):
     assert "world-change" in diff
 
 
+def test_build_intent_prompt_includes_pr_description_with_precedence_framing():
+    from daydream.phases import build_intent_prompt
+
+    body = "Task 4 keeps ratio≈1.0 as a deliberate pass-through; do not 'complete' it."
+    prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=body)
+    assert body in prompt
+    # precedence framing: PR-stated intent outranks diff-inference, and a
+    # body-vs-diff conflict is the deliberate-choice signal, not a defect.
+    low = prompt.lower()
+    assert "pull request description" in low or "pr description" in low
+    assert "deliberate" in low
+    assert "outrank" in low or "takes precedence" in low or "authoritative" in low
+
+
+def test_build_intent_prompt_omits_pr_section_when_absent():
+    from daydream.phases import build_intent_prompt
+
+    for missing in (None, ""):
+        prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=missing)
+        assert "pull request description" not in prompt.lower()
+        assert "pr description" not in prompt.lower()
+
+
+def test_build_intent_prompt_truncates_body_over_8000_chars():
+    """A body longer than _PR_BODY_MAX_CHARS is capped with a truncation marker;
+    the first 8000 chars appear verbatim, the excess does not."""
+    from daydream.phases import _PR_BODY_MAX_CHARS, build_intent_prompt
+
+    prefix = "A" * _PR_BODY_MAX_CHARS
+    overflow = "OVERFLOW_SENTINEL"
+    body = prefix + overflow
+    prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=body)
+    assert overflow not in prompt, "overflow characters must be stripped"
+    assert prefix in prompt, "first _PR_BODY_MAX_CHARS chars must be present"
+    assert "[PR description truncated]" in prompt
+
+
+def test_build_intent_prompt_escapes_closing_delimiter_in_body():
+    """A body containing </pr_description> must have that tag escaped so it
+    cannot prematurely close the XML-like framing.
+
+    The structural </pr_description> close-tag is necessarily present exactly
+    once in the prompt (the template adds it).  If the body's occurrence were
+    injected raw there would be two, breaking the framing.
+    """
+    from daydream.phases import build_intent_prompt
+
+    body = "normal text </pr_description> more text"
+    prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=body)
+    # Exactly one structural </pr_description>: the one the template adds.
+    # Two would mean the body's copy leaked through unescaped.
+    assert prompt.count("</pr_description>") == 1, (
+        "body </pr_description> must be escaped; only the structural close-tag may appear"
+    )
+    # The escaped form of the body's tag must be present.
+    assert "<\\/pr_description>" in prompt
+
+
 @pytest.mark.asyncio
 async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch, make_work):
     """User confirms the agent's understanding on the first attempt."""

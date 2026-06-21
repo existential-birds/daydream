@@ -551,6 +551,28 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
 
             if config.start_at not in ("per-stack", "merge", "fix"):
                 print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
+                pr_description: str | None = None
+                if config.pr_number is not None:
+                    pr_view = git_ops.gh_pr_view(target_dir, config.pr_number)
+                    if pr_view is not None:
+                        pr_state = pr_view.get("state", "")
+                        pr_head_oid = pr_view.get("headRefOid", "")
+                        local_head = work.head_sha
+                        if pr_state and pr_state.upper() != "OPEN":
+                            print_warning(
+                                console,
+                                f"PR #{config.pr_number} state is {pr_state!r} (not OPEN); "
+                                "skipping PR description to avoid trusting a stale body",
+                            )
+                        elif pr_head_oid and local_head and pr_head_oid != local_head:
+                            print_warning(
+                                console,
+                                f"PR #{config.pr_number} head SHA ({pr_head_oid[:12]}) "
+                                f"does not match local HEAD ({local_head[:12]}); "
+                                "skipping PR description to avoid trusting a mismatched body",
+                            )
+                        else:
+                            pr_description = pr_view.get("body") or None
                 intent_summary = await phase_understand_intent(
                     _resolve_backend(config, "intent", backend_cache),
                     work,
@@ -558,6 +580,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     log,
                     branch,
                     exploration_dir=exploration_dir,
+                    pr_description=pr_description,
                 )
 
                 print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
@@ -857,8 +880,17 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 )
             )
 
+            # Only forward confirmed intent when we ran the intent phase in
+            # this invocation.  When resuming via --start-at fix/merge/per-stack
+            # the intent phase was skipped, so intent_p may hold a stale
+            # artifact from a prior run; injecting it as authoritative would
+            # contradict the current diff's context.
+            intent_grounded_this_run = config.start_at not in ("per-stack", "merge", "fix")
             fix_failures = await phase_fix_parallel(
-                _resolve_backend(config, "fix", backend_cache), work, items
+                _resolve_backend(config, "fix", backend_cache),
+                work,
+                items,
+                intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
             )
             if fix_failures:
                 print_warning(

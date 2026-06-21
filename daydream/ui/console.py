@@ -92,7 +92,6 @@ def print_phase_hero(
         description: Subtitle text displayed below the ASCII art.
 
     """
-    # Generate ASCII art using pyfiglet with 'ansi_shadow' font for readability
     try:
         ascii_art = pyfiglet.figlet_format(title, font="ansi_shadow")
     except pyfiglet.FigletError:

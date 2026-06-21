@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 #
-# Pre-push hook that matches CI checks.
+# Pre-push hook: lint + typecheck + the fast test suite.
+#
+# Integration tests (those that spawn a real `gh` subprocess, auto-marked
+# `integration`) are excluded here so the gate stays fast and deterministic —
+# a fake `gh` shim under host CPU saturation could otherwise stall the push for
+# minutes. CI (`.github/workflows/ci.yml`) runs the FULL suite, integration
+# included, so their coverage is never skipped before merge.
+#
 # Install with: ln -sf ../../scripts/hooks/pre-push .git/hooks/pre-push
 #
 set -euo pipefail
@@ -13,7 +20,7 @@ uv run ruff check daydream tests
 echo "→ Type checking with mypy..."
 uv run mypy daydream tests
 
-echo "→ Running tests..."
-uv run pytest -n auto
+echo "→ Running tests (excluding integration; CI runs the full suite)..."
+uv run pytest -n auto -m "not integration"
 
 echo "✓ All checks passed"

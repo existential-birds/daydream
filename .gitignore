@@ -46,8 +46,11 @@ htmlcov/
 *.swo
 *~
 
-# Claude Code
-.claude/
+# Claude Code (ignore local settings/skills, but distribute the resume-run skill)
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/resume-run/
 
 # Logs
 logs/

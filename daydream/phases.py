@@ -59,6 +59,7 @@ TEST_OUTPUT_TAIL_LINES = 100
 
 # Generous for a real fix yet bounds a flailing agent that's globbing $HOME after a missed Read.
 FIX_MAX_TURNS = 25
+_PR_BODY_MAX_CHARS = 8000
 
 
 def _build_fix_prompt(
@@ -1165,8 +1166,19 @@ def build_intent_prompt(
     branch: str = "",
     log: str = "",
     exploration_dir: Path | None = None,
+    pr_description: str | None = None,
 ) -> str:
     """Assemble the prompt for `phase_understand_intent`.
+
+    Args:
+        diff_path: Path to the diff file the agent should read.
+        branch: Branch name under review.
+        log: Commit log for the branch.
+        exploration_dir: Optional pre-scan exploration directory pointer.
+        pr_description: Optional author-supplied pull-request description. When
+            present (non-empty after strip), an authoritative-intent section is
+            prepended ahead of the diff-reading instructions. When ``None`` or
+            empty, the prompt is byte-identical to the no-PR-body case.
 
     Returns:
         Fully assembled prompt string.
@@ -1176,6 +1188,24 @@ def build_intent_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
+    if pr_description and pr_description.strip():
+        body_text = pr_description.strip()
+        if len(body_text) > _PR_BODY_MAX_CHARS:
+            body_text = body_text[:_PR_BODY_MAX_CHARS] + "\n[PR description truncated]"
+        parts.append(
+            "The author supplied the following pull-request description. Treat this "
+            "author-stated intent as AUTHORITATIVE: where the description and the "
+            "intent you would infer from the diff conflict, the description outranks "
+            "the diff. Crucially, when the description says something is deliberate but "
+            "the diff appears to contradict it — a near-1.0 ratio that looks inert, a "
+            "guard that looks like a no-op, a pass-through that looks unfinished — that "
+            "is a deliberate design decision to preserve, NOT a defect to surface or "
+            "'complete'.\n\n"
+            "Pull request description:\n"
+            "<pr_description>\n"
+            f"{body_text.replace('</pr_description>', '<\\/pr_description>')}\n"
+            "</pr_description>\n"
+        )
     body = (
         f"You have full access to explore the codebase. Read the diff file at {diff_path} "
         f"and examine the codebase to understand the intent of these changes. "
@@ -1645,6 +1675,7 @@ async def phase_fix(
     total: int,
     *,
     console_lock: anyio.Lock | None = None,
+    intent_path: Path | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -1657,6 +1688,11 @@ async def phase_fix(
         console_lock: Optional lock to serialize console writes across
             concurrent callers.  Pass the same lock to every concurrent
             ``phase_fix`` invocation; leave ``None`` for serial callers.
+        intent_path: Optional path to the confirmed author-intent file. When
+            present and readable, its text is injected as authoritative intent
+            with a rule forbidding fixes that undo a deliberate decision. The
+            read is best-effort enrichment: a missing or unreadable file is
+            skipped silently so an intent-read failure can never block the fix.
 
     Returns:
         None
@@ -1697,6 +1733,28 @@ override documented intent to satisfy the finding; note the conflict in your
 commit message (or report inability to fix). Treat low/medium-confidence
 findings with extra skepticism here.
 """
+
+    # Best-effort: inject the confirmed author intent so the fixer won't undo a
+    # deliberate decision. Guarded on .exists() and wrapped so an intent-read
+    # failure NEVER blocks or crashes a fix (deliberate deviation from strict
+    # propagation). A read failure skips the block; it is never coerced into a
+    # fake intent string.
+    if intent_path is not None and intent_path.exists():
+        try:
+            confirmed_intent = intent_path.read_text()
+        except OSError:
+            confirmed_intent = None
+        if confirmed_intent and confirmed_intent.strip():
+            prompt += (
+                "\nCONFIRMED AUTHOR INTENT for this change (authoritative):\n"
+                f"{confirmed_intent.strip()}\n\n"
+                "This confirmed intent is the highest-priority authority: it outranks both "
+                "the in-code-contract rule above and the finding itself. "
+                "If applying this fix would undo, revert, or contradict a decision the "
+                "confirmed intent describes as deliberate, do NOT apply it. Report the "
+                "conflict in your commit message (or report inability to fix) instead of "
+                "overriding the author's deliberate choice.\n"
+            )
 
     verifier_verdict = item.get("verifier_verdict")
     if verifier_verdict:
@@ -1745,6 +1803,7 @@ async def phase_fix_parallel(
     items: list[dict[str, Any]],
     *,
     limiter_size: int = 4,
+    intent_path: Path | None = None,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
@@ -1760,6 +1819,8 @@ async def phase_fix_parallel(
         work: Workspace context for the fixes; ``work.repo`` is the agent cwd.
         items: Feedback items, already severity-sorted by the caller.
         limiter_size: Max number of file-groups to fix concurrently.
+        intent_path: Optional confirmed-intent file forwarded unchanged to each
+            ``phase_fix`` call so every fix carries the deliberate-intent guard.
 
     Returns:
         ``failures``: file -> "<ExceptionType>: <message>" for file-groups whose
@@ -1802,6 +1863,7 @@ async def phase_fix_parallel(
                                 await phase_fix(
                                     backend, work, item, item_num, total,
                                     console_lock=_console_lock,
+                                    intent_path=intent_path,
                                 )
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                             reason = f"{type(e).__name__}: {e}"
@@ -2297,6 +2359,7 @@ async def phase_understand_intent(
     branch: str,
     *,
     exploration_dir: Path | None = None,
+    pr_description: str | None = None,
 ) -> str:
     """Phase: Understand the intent of the PR through conversational confirmation.
 
@@ -2310,6 +2373,13 @@ async def phase_understand_intent(
         diff_path: Path to the diff file on disk.
         log: Git log output (main..HEAD --oneline).
         branch: Current branch name.
+        exploration_dir: Optional directory of pre-scan exploration context.
+        pr_description: Optional author-written PR description body. When
+            present, it is threaded into the INITIAL intent proposal as the
+            authoritative statement of intent. It is deliberately NOT
+            re-injected into the interactive correction-loop rebuild: once a
+            human supplies a correction, that correction is the higher
+            authority.
 
     Returns:
         The confirmed intent summary string.
@@ -2323,6 +2393,7 @@ async def phase_understand_intent(
         branch=branch,
         log=log,
         exploration_dir=exploration_dir,
+        pr_description=pr_description,
     )
 
     while True:

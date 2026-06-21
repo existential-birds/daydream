@@ -154,7 +154,17 @@ class _StubBackend:
 
         # TTT intent phase -> plain text. Discriminator unique to build_intent_prompt.
         if "understand the intent of these changes" in pl:
-            yield TextEvent(text="The PR updates greetings across stacks.")
+            # Echo the author's PR description (when build_intent_prompt injected
+            # one) into the returned intent summary so it lands verbatim in the
+            # on-disk confirmed-intent file (intent_p) and downstream stages —
+            # including the fix prompt — read it back.
+            summary = "The PR updates greetings across stacks."
+            _tag = "<pr_description>\n"
+            if _tag in prompt:
+                tail = prompt.split(_tag, 1)[1]
+                pr_body = tail.split("\n</pr_description>", 1)[0]
+                summary += f"\nConfirmed author intent: {pr_body}"
+            yield TextEvent(text=summary)
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
@@ -411,7 +421,10 @@ def _install_stub_backend(
     if pin_skill_availability:
         # None -> orchestrator falls back to set(SKILL_MAP.keys()).
         monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
-        if not enable_exploration:
+        if enable_exploration:
+            # Pin True so the pre_scan branch runs regardless of ambient module state.
+            monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", True)
+        else:
             # Disable exploration pre-scan so it doesn't add extra backend calls.
             monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     return stub
@@ -655,6 +668,56 @@ async def test_parallel_fix_commit_runs_once_after_all(
     assert seen_at_commit == [True]  # exactly one commit, and every fix already landed
 
 
+INTENT_SENTINEL = "SKIP_IF_NO_QUERY_IS_A_DELIBERATE_GUARD"
+
+
+def _fix_prompts(stub: _StubBackend) -> list[str]:
+    return [c["prompt"] for c in stub.calls if c["prompt"].startswith("Fix this issue")]
+
+
+async def test_confirmed_intent_reaches_fix_prompt(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The confirmed author intent reaches every deep fix prompt so a fixer
+    can't undo a deliberate decision.
+
+    Real-path through ``runner.run`` to the fix gate (``assume="yes"``). The PR
+    body carries ``INTENT_SENTINEL``; the stub's intent branch echoes it into
+    the confirmed-intent file (intent_p), and the fix phase must inline that
+    file's text plus the "don't undo deliberate intent" rule into each fix
+    prompt. Asserts on observable fix-prompt content, not that a call happened.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_pr_view",
+        lambda repo, pr=None: {"body": INTENT_SENTINEL},
+    )
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    rc = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            pr_number=7,
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
+    )
+    assert rc == 0
+    fix_prompts = _fix_prompts(stub)
+    assert fix_prompts, "expected at least one fix prompt"
+    joined = "\n".join(fix_prompts)
+    assert INTENT_SENTINEL in joined
+    low = joined.lower()
+    assert "deliberate" in low and ("do not" in low or "don't" in low)
+
+
 async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-07: Stage order = TTT intent -> alternatives -> per-stack -> parse -> merge."""
     _silence(monkeypatch)
@@ -683,6 +746,128 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert first["alternatives"] < first["per-stack"]
     assert first["per-stack"] < first["parse"]
     assert first["parse"] < first["merge"]
+
+
+PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
+
+
+def _intent_prompt(stub: _StubBackend) -> str:
+    """Recover the intent-phase prompt by its stable instruction text."""
+    return next(c["prompt"] for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower())
+
+
+async def test_pr_body_reaches_intent_prompt(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PR description body is threaded into the initial intent prompt."""
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_pr_view",
+        lambda repo, pr=None: {"number": 7, "body": PR_SENTINEL},
+    )
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    rc = await run(RunConfig(target=str(multi_stack_target), pr_number=7, start_at="review", cleanup=False))
+    assert rc == 0
+    assert PR_SENTINEL in _intent_prompt(stub)
+
+
+async def test_no_pr_body_degrades_cleanly(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No PR body -> intent prompt is byte-for-byte today's behavior."""
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, pr=None: None)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    rc = await run(RunConfig(target=str(multi_stack_target), pr_number=7, start_at="review", cleanup=False))
+    assert rc == 0
+    assert PR_SENTINEL not in _intent_prompt(stub)
+    assert "pull request description" not in _intent_prompt(stub).lower()
+
+
+async def test_non_interactive_intent_prompt_carries_pr_body(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real-path: the unattended (non-interactive) deep run auto-accepts the
+    proposed intent with no human corrector -- and STILL threads the PR body
+    into the intent prompt.
+
+    This locks the path where the bug actually bit. The body must be wired at
+    prompt-build time in ``build_intent_prompt`` (before ``run_agent``),
+    independent of the confirm gate -- so it survives auto-accept. The real
+    ``prompt_user`` is left intact; ``builtins.input`` is a forbidden sentinel
+    proving stdin is never touched in non-interactive mode.
+    """
+    from daydream.agent import get_non_interactive, reset_state
+    from daydream.runner import RunConfig, run
+
+    _silence_gate_noise(monkeypatch)
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_pr_view",
+        lambda repo, pr=None: {"number": 7, "body": PR_SENTINEL},
+    )
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
+
+    monkeypatch.setattr("builtins.input", _forbidden_input)
+
+    reset_state()
+    rc = -1
+    try:
+        assert get_non_interactive() is False
+        config = RunConfig(
+            target=str(multi_stack_target),
+            pr_number=7,
+            start_at="review",
+            cleanup=False,
+            non_interactive=True,
+        )
+        rc = await run(config)
+        assert get_non_interactive() is True
+    finally:
+        reset_state()
+
+    assert rc == 0
+    assert PR_SENTINEL in _intent_prompt(stub)
+
+
+@pytest.mark.asyncio
+async def test_non_open_pr_state_suppresses_pr_body(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When gh_pr_view returns a non-OPEN state (CLOSED or MERGED), the
+    orchestrator must NOT thread the PR body into the intent prompt — trusting
+    a stale description would be wrong.  Asserts on the observable prompt
+    content, not on internal state."""
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    for state in ("CLOSED", "MERGED"):
+        monkeypatch.setattr(
+            "daydream.git_ops.gh_pr_view",
+            lambda repo, pr=None, _s=state: {"number": 7, "body": PR_SENTINEL, "state": _s},
+        )
+        stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+        rc = await run(RunConfig(target=str(multi_stack_target), pr_number=7, start_at="review", cleanup=False))
+        assert rc == 0
+        intent = _intent_prompt(stub)
+        assert PR_SENTINEL not in intent, f"PR body must be suppressed when state={state!r}"
+        assert "pull request description" not in intent.lower(), (
+            f"PR section header must be absent when state={state!r}"
+        )
 
 
 async def test_fresh_context_per_stage(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
