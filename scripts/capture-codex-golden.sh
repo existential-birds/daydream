@@ -36,8 +36,10 @@ echo "→ golden output: $GOLDEN_OUT"
 echo "→ prompt: read README.md then hello.py, then describe both"
 
 # Read prompt from stdin, run read-only so nothing mutates the sample repo.
+# --cd pins the codex working directory to SAMPLE_REPO so the golden is always
+# captured against the in-repo sample repo, never the caller's cwd.
 echo "Read README.md, then read hello.py, then describe both files in one sentence each." \
-  | codex exec --experimental-json --sandbox read-only > "$GOLDEN_OUT"
+  | codex exec --experimental-json --sandbox read-only --cd "$SAMPLE_REPO" > "$GOLDEN_OUT"
 
 LINES=$(wc -l < "$GOLDEN_OUT" | tr -d ' ')
 echo "✓ captured $LINES JSONL lines"

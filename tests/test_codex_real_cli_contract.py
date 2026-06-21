@@ -134,6 +134,8 @@ async def test_codex_live_smoke() -> None:
         "--experimental-json",
         "--sandbox",
         "read-only",
+        "--cd",
+        str(sample_repo),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -156,7 +158,11 @@ async def test_codex_live_smoke() -> None:
         "item.completed",
         "error",
     }
+    # Failure event types that indicate a broken live run; their presence must
+    # fail the test rather than pass false-green on a non-empty-but-failed stream.
+    failure_types = {"turn.failed", "error"}
     lines: list[str] = []
+    failures: list[str] = []
     assert proc.stdout is not None
     while True:
         raw = await proc.stdout.readline()
@@ -173,10 +179,14 @@ async def test_codex_live_smoke() -> None:
         etype = evt.get("type", "")
         if etype not in known_types:
             _logger.warning("codex live smoke: unrecognized event type %r", etype)
+        if etype in failure_types:
+            failures.append(etype)
         lines.append(text)
-    await proc.wait()
+    rc = await proc.wait()
 
     assert lines, "codex live smoke produced no JSONL output"
+    assert rc == 0, f"codex live smoke exited non-zero: rc={rc}"
+    assert not failures, f"codex live smoke reported failure events: {failures}"
 
     # Feed the live lines through the parser and assert a non-empty stream.
     backend = CodexBackend(model="live-smoke-model")
