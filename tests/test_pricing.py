@@ -290,3 +290,30 @@ def test_compute_cost_uses_override_prices() -> None:
         output_tokens=0,
     )
     assert builtin == pytest.approx(5.0)
+
+
+def test_resolve_prices_adds_unknown_model_then_compute_cost_succeeds() -> None:
+    """Chaining resolve → compute for a genuinely-unknown model (#156 #1).
+
+    An override for a model NOT in MODEL_PRICES must land in the merged table
+    and make compute_cost return a non-None synthesized value. The individual
+    building blocks (load, resolve-per-model, compute-with-prices) are tested
+    above; this asserts the full chain that the Codex cost-synthesis renderer
+    relies on (resolve_prices(load_user_prices()) → compute_cost).
+    """
+    overrides = {"private-finetune": ModelPrice(input=3.0, cached_input=1.0, output=12.0)}
+    merged = resolve_prices(overrides)
+    # The unknown model is now present; built-ins are preserved unchanged.
+    assert "private-finetune" in merged
+    assert "gpt-5.5" in merged
+    assert merged["gpt-5.5"] == MODEL_PRICES["gpt-5.5"]
+    cost = compute_cost(
+        model="private-finetune",
+        input_tokens=500_000,
+        cached_input_tokens=100_000,
+        output_tokens=1_000,
+        prices=merged,
+    )
+    assert cost is not None
+    # 500K*3/1M + 100K*1/1M + 1K*12/1M = 1.5 + 0.1 + 0.012 = 1.612
+    assert cost == pytest.approx(1.612)
