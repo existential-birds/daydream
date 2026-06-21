@@ -43,7 +43,7 @@ def make_mock_process(lines: list[str]) -> MagicMock:
 
     process = MagicMock()
     process.stdout = _MockStdout()
-    process.stdin = MagicMock()
+    process.stdin = None  # PiBackend uses stdin=DEVNULL; None matches the real semantics
     process.wait = AsyncMock(return_value=0)
     process.returncode = 0
     process.terminate = MagicMock()

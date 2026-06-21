@@ -93,7 +93,7 @@ def extract_json(text: str) -> Any:
                         end_idx = i
                         break
             if end_idx == -1:
-                break  # unbalanced; try the next brace-type candidate
+                continue  # unbalanced; scan forward for a later span of this brace type
             candidate = cleaned[start_idx : end_idx + 1]
             try:
                 return json.loads(candidate)

@@ -505,6 +505,14 @@ class PiBackend:
 
             await proc.wait()
 
+            # Fail fast on non-zero exit: if pi crashed without emitting a
+            # turn_end error event, surface the failure instead of reporting
+            # a successful completion with empty/partial output.
+            if proc.returncode != 0:
+                raise PiError(
+                    f"Pi CLI exited with return code {proc.returncode}"
+                )
+
             # Single finalization path (plan §10): runs exactly once whether
             # the stream closed on agent_end or ended without it (truncated
             # output). Cost/Result are derived from fully-accumulated totals.
