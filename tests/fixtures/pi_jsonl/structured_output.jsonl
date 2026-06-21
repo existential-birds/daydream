@@ -1,0 +1,7 @@
+{"type":"session","sessionId":"pi_ses_struct"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"{\"issues\":[{\"id\":1,\"description\":\"Fix type hints\",\"file\":\"app.py\",\"line\":5}]}"}]}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"issues\":[{\"id\":1,\"description\":\"Fix type hints\",\"file\":\"app.py\",\"line\":5}]}"}]}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"issues\":[{\"id\":1,\"description\":\"Fix type hints\",\"file\":\"app.py\",\"line\":5}]}"}],"model":"glm-4.6","usage":{"input":150,"output":80,"cost":{"total":0.0002}},"stopReason":"stop"}}
+{"type":"agent_end","messages":[]}

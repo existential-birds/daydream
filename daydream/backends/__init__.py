@@ -273,7 +273,7 @@ def create_backend(name: str, model: str | None = None) -> Backend:
     """Create a backend by name.
 
     Args:
-        name: Backend name ("claude" or "codex").
+        name: Backend name ("claude", "codex", or "pi").
         model: Optional CLI override. When ``None``, the per-backend default
             from :mod:`daydream.config` is used. This is the *only* place
             those defaults are read; downstream layers take ``model: str``
@@ -286,7 +286,7 @@ def create_backend(name: str, model: str | None = None) -> Backend:
         ValueError: If the backend name is unknown.
 
     """
-    from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+    from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_PI_MODEL
 
     if name == "claude":
         from daydream.backends.claude import ClaudeBackend
@@ -294,10 +294,14 @@ def create_backend(name: str, model: str | None = None) -> Backend:
     if name == "codex":
         from daydream.backends.codex import CodexBackend
         return CodexBackend(model=model or DEFAULT_CODEX_MODEL)
-    raise ValueError(f"Unknown backend: {name!r}. Expected 'claude' or 'codex'.")
+    if name == "pi":
+        from daydream.backends.pi import PiBackend
+        return PiBackend(model=model or DEFAULT_PI_MODEL)
+    raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', or 'pi'.")
 
 
 from daydream.backends.claude import ClaudeBackend  # noqa: E402
+from daydream.backends.pi import PiBackend  # noqa: E402
 
 __all__ = [
     "AgentEvent",
@@ -306,6 +310,7 @@ __all__ = [
     "ContinuationToken",
     "CostEvent",
     "MetricsEvent",
+    "PiBackend",
     "ResultEvent",
     "TextEvent",
     "ThinkingEvent",

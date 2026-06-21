@@ -1,0 +1,9 @@
+{"type":"session","sessionId":"pi_ses_multi"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"First turn body"}]}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"First turn body"}],"model":"glm-4.6","usage":{"input":150,"output":75,"cost":{"total":0.0001}},"stopReason":"stop"}}
+{"type":"turn_start"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Second turn body"}]}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Second turn body"}],"model":"glm-4.6","usage":{"input":50,"output":25,"cost":{"total":0.00005}},"stopReason":"stop"}}
+{"type":"agent_end","messages":[]}

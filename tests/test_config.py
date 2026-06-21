@@ -4,6 +4,7 @@ from daydream.config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
     DEFAULT_EXPLORATION_MODEL,
+    DEFAULT_PI_MODEL,
     PHASE_DEFAULT_MODELS,
 )
 
@@ -13,12 +14,12 @@ PHASE_NAMES = {
 }
 
 
-def test_phase_default_models_covers_both_backends():
-    assert set(PHASE_DEFAULT_MODELS.keys()) == {"claude", "codex"}
+def test_phase_default_models_covers_all_backends():
+    assert set(PHASE_DEFAULT_MODELS.keys()) == {"claude", "codex", "pi"}
 
 
 def test_phase_default_models_covers_every_phase_for_each_backend():
-    for backend_name in ("claude", "codex"):
+    for backend_name in ("claude", "codex", "pi"):
         assert set(PHASE_DEFAULT_MODELS[backend_name].keys()) == PHASE_NAMES, (
             f"{backend_name} default table missing phase entries"
         )
@@ -52,6 +53,18 @@ def test_phase_default_models_codex_uses_gpt_5_5_for_every_phase():
         assert codex[phase] == "gpt-5.5", (
             f"codex phase {phase} should default to gpt-5.5 in v1"
         )
+
+
+def test_phase_default_models_pi_uses_glm_4_6_for_every_phase():
+    pi = PHASE_DEFAULT_MODELS["pi"]
+    for phase in PHASE_NAMES:
+        assert pi[phase] == "glm-4.6", (
+            f"pi phase {phase} should default to glm-4.6 (z.ai coding plan)"
+        )
+
+
+def test_default_pi_model_is_glm_4_6():
+    assert DEFAULT_PI_MODEL == "glm-4.6"
 
 
 def test_default_exploration_model_matches_claude_phase_default():

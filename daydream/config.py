@@ -11,11 +11,13 @@ Exports:
     UNKNOWN_SKILL_PATTERN: str - Regex pattern for detecting unknown skill errors.
     DEFAULT_CLAUDE_MODEL: str - Default Claude model id when no override is given.
     DEFAULT_CODEX_MODEL: str - Default Codex model id when no override is given.
+    DEFAULT_PI_MODEL: str - Default Pi model id when no override is given (z.ai
+        coding plan GLM default).
     DEFAULT_EXPLORATION_MODEL: str - Default model for the EXPLORE phase.
     PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] - Per-backend per-phase default
-        model mapping. Outer key is backend name ("claude" or "codex"), inner key is
-        the phase name (lowercase, e.g. "review", "parse", "fix"), value is the
-        concrete model id.
+        model mapping. Outer key is backend name ("claude", "codex", or "pi"),
+        inner key is the phase name (lowercase, e.g. "review", "parse", "fix"),
+        value is the concrete model id.
     STRUCTURE_SKILL: str - Beagle skill name for the structural-maintainability
         meta-stack reviewer. Invoked internally by deep mode; not user-selectable
         (intentionally absent from REVIEW_SKILLS, SKILL_MAP, and ReviewSkillChoice).
@@ -30,6 +32,7 @@ from enum import Enum
 # as required and does no fallback of its own.
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
+DEFAULT_PI_MODEL = "glm-4.6"
 DEFAULT_EXPLORATION_MODEL = "claude-sonnet-4-6"
 
 # Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).
@@ -58,6 +61,10 @@ DEFAULT_TOOL_CALL_BUDGET = 50
 # Codex side defaults to ``gpt-5.5`` across the board in v1; per-phase tiering
 # for codex is deferred until concrete model picks across the codex lineup are
 # settled.
+#
+# Pi side defaults to ``glm-4.6`` (z.ai coding plan) across the board; per-phase
+# tiering is deferred until the GLM lineup (glm-4.6 / glm-4.5-air / etc.) is
+# mapped to tiers.
 PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
     "claude": {
         "parse": "claude-haiku-4-5",
@@ -88,6 +95,21 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "merge": "gpt-5.5",
         "intent": "gpt-5.5",
         "pr_feedback": "gpt-5.5",
+    },
+    "pi": {
+        "parse": "glm-4.6",
+        "fix": "glm-4.6",
+        "test": "glm-4.6",
+        "verify": "glm-4.6",
+        "exploration": "glm-4.6",
+        "per_stack_review": "glm-4.6",
+        "review": "glm-4.6",
+        "arbiter": "glm-4.6",
+        "wonder": "glm-4.6",
+        "envision": "glm-4.6",
+        "merge": "glm-4.6",
+        "intent": "glm-4.6",
+        "pr_feedback": "glm-4.6",
     },
 }
 

@@ -82,3 +82,27 @@ async def test_claude_and_codex_produce_identical_steps_read_only(tmp_path: Path
         codex_loader, tmp_path / "codex", read_only=True
     )
     _compare_steps(claude_steps, codex_steps)
+
+
+@pytest.mark.asyncio
+async def test_pi_produces_identical_steps_to_claude(tmp_path: Path) -> None:
+    """Pi must produce the same Step shape as Claude against the canonical
+    script — the proof of ATIF trajectory parity (plan §8.2)."""
+    from tests.contract._loaders import claude_loader, pi_loader
+
+    claude_steps = await _run_backend_against_canonical(claude_loader, tmp_path / "claude")
+    pi_steps = await _run_backend_against_canonical(pi_loader, tmp_path / "pi")
+    _compare_steps(claude_steps, pi_steps)
+
+
+@pytest.mark.asyncio
+async def test_pi_produces_identical_steps_read_only(tmp_path: Path) -> None:
+    """Pi read_only=True must still match Claude's Step shape — the read_only
+    tool restriction changes the CLI args, not the AgentEvent stream."""
+    from tests.contract._loaders import claude_loader, pi_loader
+
+    claude_steps = await _run_backend_against_canonical(
+        claude_loader, tmp_path / "claude", read_only=True
+    )
+    pi_steps = await _run_backend_against_canonical(pi_loader, tmp_path / "pi", read_only=True)
+    _compare_steps(claude_steps, pi_steps)

@@ -216,6 +216,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Claude backend reads API keys from `~/.claude/settings.json` via `setting_sources=["user"]` in `ClaudeAgentOptions` (`daydream/backends/claude.py`, line 78)
 - `CLAUDE_CONFIG_DIR` environment variable can override the default `~/.claude` directory (used in `daydream/deep/orchestrator.py`)
 - Codex backend requires `codex` CLI on `$PATH`; credentials managed by the Codex CLI itself
+- Pi backend (`--backend pi`) requires the `pi` CLI (`@earendil-works/pi-coding-agent`) on `$PATH`; z.ai coding plan (GLM models) is configured once in `~/.pi/models.json`. Optional `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` env overrides forward as `pi` CLI flags; `PI_BASE_URL` has no matching flag and must be set in `~/.pi/models.json`.
 - `pyproject.toml` — Single source of truth: project metadata, dependencies, tool configuration
 - `[tool.mypy]` — `python_version = "3.12"`, `ignore_missing_imports = true`
 - `[tool.ruff]` — `line-length = 120`, `target-version = "py312"`, rules: `E`, `F`, `I`, `W`
@@ -226,6 +227,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - `gh` (GitHub CLI) on `$PATH` — required for PR feedback and PR posting features
 - `git` on `$PATH` — required for all diff and commit operations
 - `codex` CLI on `$PATH` — required only when using `--backend codex`
+- `pi` CLI (`@earendil-works/pi-coding-agent`) on `$PATH` — required only when using `--backend pi`
 - Pre-push hook at `scripts/hooks/pre-push` runs lint + typecheck + full test suite before every push
 - No server deployment; purely a CLI tool executed locally
 - Console script entrypoint: `daydream = "daydream.cli:main"` declared in `pyproject.toml`
@@ -245,7 +247,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - `snake_case` throughout
 - Boolean flags use descriptive names: `cleanup_enabled`, `shutdown_requested`, `force_worktree`, `shallow`
 - Type-annotated at declaration where possible
-- `PascalCase` for all classes: `RunConfig`, `AgentState`, `MockBackend`, `ClaudeBackend`, `CodexBackend`
+- `PascalCase` for all classes: `RunConfig`, `AgentState`, `MockBackend`, `ClaudeBackend`, `CodexBackend`, `PiBackend`
 - Event dataclasses use `<Name>Event` pattern: `TextEvent`, `ToolStartEvent`, `CostEvent`, `ResultEvent`, `ThinkingEvent`, `ToolResultEvent`
 - Enums use `PascalCase` class name, `UPPER_SNAKE` members: `ReviewSkillChoice.PYTHON`, `ReviewSkillChoice.RUST`
 - Exception classes use `Error` suffix: `MissingSkillError`, `CodexError`
@@ -308,6 +310,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Three required methods: `execute()`, `cancel()`, `format_skill_invocation()`
 - `execute()` is an `AsyncIterator[AgentEvent]` (not `async def`)
 - Implementations: `ClaudeBackend` (`daydream/backends/claude.py`), `CodexBackend` (`daydream/backends/codex.py`)
+- PiBackend: subprocess + JSONL (mirrors Codex) — `daydream/backends/pi.py`; `format_skill_invocation()` uses path-reference injection (Pi has no skill registry); `message_id=""` (no per-message id, like Codex); `--no-session` for fresh runs, `--session-id` for resume; `--tools read,find,ls,grep` for `read_only=True`
 - Mock backends in tests implement the same three-method interface inline (no base class required)
 ## Async Patterns
 - `anyio.run(run, config)` is the top-level async entry point in `daydream/cli.py`
@@ -330,6 +333,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 | Trajectory | ATIF v1.6 recorder, redaction, ContextVar propagation | `daydream/trajectory.py` |
 | ClaudeBackend | Translates claude-agent-sdk messages to AgentEvents | `daydream/backends/claude.py` |
 | CodexBackend | Translates codex CLI JSONL output to AgentEvents | `daydream/backends/codex.py` |
+| PiBackend | Translates pi CLI JSONL output to AgentEvents | `daydream/backends/pi.py` |
 | UI | All terminal output — Rich panels, tables, prompts | `daydream/ui.py` |
 | Config | Centralized constants, skill mappings | `daydream/config.py` |
 | Deep Orchestrator | deep-review pipeline wiring | `daydream/deep/orchestrator.py` |
@@ -365,8 +369,8 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Used by: `phases.py` (all agent invocations go through `run_agent()`)
 - Purpose: SDK/CLI adapters that translate external APIs into a unified `AgentEvent` stream
 - Location: `daydream/backends/`
-- Contains: `Backend` protocol, `ClaudeBackend`, `CodexBackend`, all `AgentEvent` dataclasses, `create_backend()` factory
-- Depends on: `claude-agent-sdk` (Claude), external `codex` CLI (Codex)
+- Contains: `Backend` protocol, `ClaudeBackend`, `CodexBackend`, `PiBackend`, all `AgentEvent` dataclasses, `create_backend()` factory
+- Depends on: `claude-agent-sdk` (Claude), external `codex` CLI (Codex), external `pi` CLI (Pi)
 - Used by: `agent.py` (consumes events), `runner.py` (instantiates via `create_backend`)
 - Purpose: All terminal rendering — panels, phase heroes, tables, prompts, cost display
 - Location: `daydream/ui.py` (3470 lines)
@@ -403,6 +407,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - `format_skill_invocation()` returns `/{key}` for Claude, `${name}` for Codex
 - Factory: `create_backend(name, model)` in `daydream/backends/__init__.py`
 - Implementations: `ClaudeBackend` (`daydream/backends/claude.py`), `CodexBackend` (`daydream/backends/codex.py`)
+- PiBackend: subprocess + JSONL (mirrors Codex) — `daydream/backends/pi.py`; `format_skill_invocation()` uses path-reference injection (Pi has no skill registry); `message_id=""` (no per-message id, like Codex); `--no-session` for fresh runs, `--session-id` for resume; `--tools read,find,ls,grep` for `read_only=True`, `PiBackend` (`daydream/backends/pi.py`)
 - Purpose: Backend-agnostic event vocabulary consumed by `run_agent()`
 - Types: `TextEvent`, `ThinkingEvent`, `ToolStartEvent`, `ToolResultEvent`, `CostEvent`, `ResultEvent`
 - All are `@dataclass` instances; no base class, just a `TypeAlias` union defined in `daydream/backends/__init__.py`

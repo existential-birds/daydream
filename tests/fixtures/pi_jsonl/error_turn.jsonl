@@ -1,0 +1,6 @@
+{"type":"session","sessionId":"pi_ses_err"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"partial"}]}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"partial"}],"stopReason":"error","errorMessage":"Model returned an error"}}
+{"type":"agent_end","messages":[]}
