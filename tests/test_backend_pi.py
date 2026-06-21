@@ -30,6 +30,7 @@ from daydream.backends.pi import (
     _PI_STDOUT_LIMIT_BYTES,
     PiBackend,
     PiError,
+    _extract_json,
     _render_tool_result,
     _resolve_skill_dir,
     _schema_instruction,
@@ -646,3 +647,54 @@ async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path):
     assert step.metrics.prompt_tokens == 200
     assert step.metrics.completion_tokens == 100
     assert step.metrics.cost_usd == 0.0005
+
+
+# ---------------------------------------------------------------------------
+# _extract_json — robust structured-output extraction for prose-wrapped JSON
+# (critical for GLM models that wrap JSON in reasoning text)
+# ---------------------------------------------------------------------------
+
+class TestExtractJson:
+    """Verify _extract_json handles clean JSON, fenced JSON, and prose-wrapped JSON."""
+
+    def test_clean_json_object(self):
+        assert _extract_json('{"findings": [], "ok": true}') == {"findings": [], "ok": True}
+
+    def test_clean_json_array(self):
+        assert _extract_json('[1, 2, 3]') == [1, 2, 3]
+
+    def test_markdown_fenced_json(self):
+        text = '```json\n{"findings": [{"arb_id": 1, "keep": true}]}\n```'
+        result = _extract_json(text)
+        assert result == {"findings": [{"arb_id": 1, "keep": True}]}
+
+    def test_markdown_fenced_bare(self):
+        text = '```\n{"x": 1}\n```'
+        assert _extract_json(text) == {"x": 1}
+
+    def test_prose_wrapped_json(self):
+        text = (
+            "Based on my analysis of all findings, here are my verdicts:\n"
+            '{"findings": [{"arb_id": 1, "keep": false}]}'
+        )
+        result = _extract_json(text)
+        assert result == {"findings": [{"arb_id": 1, "keep": False}]}
+
+    def test_prose_wrapped_array(self):
+        text = 'Here are the issues:\n[{"id": 1, "severity": "high"}]\nThat concludes the review.'
+        result = _extract_json(text)
+        assert result == [{"id": 1, "severity": "high"}]
+
+    def test_empty_string(self):
+        assert _extract_json("") is None
+
+    def test_whitespace_only(self):
+        assert _extract_json("   \n  ") is None
+
+    def test_no_json_at_all(self):
+        assert _extract_json("This is just prose with no JSON whatsoever.") is None
+
+    def test_json_with_nested_braces_in_strings(self):
+        text = '{"msg": "contains a } brace", "ok": true}'
+        result = _extract_json(text)
+        assert result == {"msg": "contains a } brace", "ok": True}

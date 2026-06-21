@@ -70,6 +70,90 @@ class PiError(Exception):
     """Raised when a Pi turn fails (e.g. ``stopReason == "error"``)."""
 
 
+def _extract_json(text: str) -> Any:
+    """Extract a JSON object or array from possibly prose-wrapped model text.
+
+    GLM and other OpenAI-compatible models frequently wrap structured output in
+    reasoning prose or markdown code fences. A naive ``json.loads(text)`` fails
+    on these patterns, causing every structured-output phase (parse, arbiter,
+    merge, alternatives) to return raw text instead of the expected dict —
+    which downstream phases reject as malformed.
+
+    This helper, in priority order:
+
+    1. Strips leading/trailing whitespace.
+    2. Strips markdown code fences (```` ```json ... ``` ```` or bare ```` ``` ````).
+    3. Tries ``json.loads`` on the cleaned text (fast path for clean JSON).
+    4. If that fails, scans for the first balanced ``{...}`` or ``[...]`` block
+       (depth-counting, string-aware) and parses that substring.
+
+    Returns the parsed value (dict, list, str, int, …) or ``None`` if no valid
+    JSON was found. Never raises.
+    """
+    if not text or not text.strip():
+        return None
+
+    cleaned = text.strip()
+
+    # Strip markdown code fences: ```json\n...\n``` or ```\n...\n```
+    if cleaned.startswith("```"):
+        lines = cleaned.split("\n")
+        # Drop the opening fence line (may include language tag like "json")
+        lines = lines[1:]
+        # Drop the closing fence line
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
+    # Fast path — the entire text is valid JSON.
+    try:
+        return json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Slow path — find the first balanced JSON object/array within the text.
+    # This handles "Here is my analysis:\n{...json...}" patterns.
+    # Try whichever brace type ({ or [) appears earliest in the text first.
+    candidates: list[tuple[int, str, str]] = []
+    brace_idx = cleaned.find("{")
+    bracket_idx = cleaned.find("[")
+    if brace_idx != -1:
+        candidates.append((brace_idx, "{", "}"))
+    if bracket_idx != -1:
+        candidates.append((bracket_idx, "[", "]"))
+    candidates.sort()  # by position in text
+
+    for start_idx, start_char, end_char in candidates:
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start_idx, len(cleaned)):
+            ch = cleaned[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == start_char:
+                depth += 1
+            elif ch == end_char:
+                depth -= 1
+                if depth == 0:
+                    candidate = cleaned[start_idx : i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except (json.JSONDecodeError, ValueError):
+                        break  # try the next candidate
+
+    return None
+
+
 def _render_tool_result(result: Any) -> str:
     """Render a Pi ``AgentToolResult`` into a flat string for ``ToolResultEvent``.
 
@@ -373,10 +457,7 @@ class PiBackend:
 
                 elif event_type == "agent_end":
                     if output_schema and last_assistant_text:
-                        try:
-                            structured_result = json.loads(last_assistant_text)
-                        except json.JSONDecodeError:
-                            pass
+                        structured_result = _extract_json(last_assistant_text)
                     yield CostEvent(
                         cost_usd=total_cost,
                         input_tokens=total_input,
@@ -404,10 +485,7 @@ class PiBackend:
             # finalize exactly once so downstream consumers get Cost/Result.
             if not finalized:
                 if output_schema and last_assistant_text:
-                    try:
-                        structured_result = json.loads(last_assistant_text)
-                    except json.JSONDecodeError:
-                        pass
+                    structured_result = _extract_json(last_assistant_text)
                 yield CostEvent(
                     cost_usd=total_cost,
                     input_tokens=total_input,
