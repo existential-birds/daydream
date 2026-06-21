@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import tempfile
 import uuid
@@ -32,6 +33,8 @@ from daydream.backends import (
 _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
 _CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
+
+_logger = logging.getLogger(__name__)
 
 
 def _unwrap_shell_command(command: str) -> str:
@@ -138,12 +141,45 @@ class CodexBackend:
         structured_result: Any = None
 
         # Event correlation state. Codex events arrive item.started → updated* →
-        # completed. (1) Some item.started lack an `id`, so we synthesize a UUID
-        # keyed by type+content and pop it on completion to pair start/result.
+        # completed. (1) Some item.started lack an `id`; we pair start/result via
+        # a deterministic FIFO per item_type (order-preserving, content-
+        # independent) with the legacy content-key as a secondary fallback. When
+        # both miss, the completion is an orphan — we emit an OBSERVABLE warning
+        # and assign a deterministic sequence id so the trajectory recorder can
+        # still bucket it via unmatched_tool_results without a silent drop.
         # (2) agent_message/reasoning text may stream as item.updated deltas with
         # an empty item.completed, so we accumulate deltas by id and join them.
-        pending_item_ids: dict[str, str] = {}  # "type:content" → generated UUID
+        pending_fifo: dict[str, list[str]] = {}  # item_type → [ids] in start order
+        pending_item_ids: dict[str, str] = {}  # "type:content" → generated id (legacy)
         updated_text: dict[str, list[str]] = {}  # item_id → [text deltas]
+        parse_warnings: list[str] = []  # observable parse-failure surface
+        unmatched_seq = 0  # monotonic source for orphaned tool-result ids
+
+        def _warn(msg: str, **detail: Any) -> None:
+            """Log a parser warning and record it for later trajectory surfacing."""
+            parse_warnings.append(msg)
+            _logger.warning("codex: %s %s", msg, detail)
+
+        def _claim_tool_id(item_type: str, content_key: str, content_value: Any) -> str:
+            """Pop the next correlated id for a no-id item.completed.
+
+            Prefers the FIFO (content-independent order correlation), falls back
+            to the legacy content-key, and finally — if both miss — emits an
+            OBSERVABLE warning and returns a deterministic orphan id. The orphan
+            still lands in ``trajectory.extra.unmatched_tool_results`` because
+            the validator hard-fails on a dangling ``source_call_id``; the
+            warning ensures the miss is no longer silent.
+            """
+            nonlocal unmatched_seq
+            fifo = pending_fifo.get(item_type, [])
+            item_id = fifo.pop(0) if fifo else None
+            if item_id is None:
+                item_id = pending_item_ids.pop(content_key, None)
+            if item_id is None:
+                _warn("unmatched tool result", item_type=item_type, key=content_key, value=content_value)
+                item_id = f"codex-unmatched-{unmatched_seq}"
+                unmatched_seq += 1
+            return item_id
 
         proc: asyncio.subprocess.Process | None = None
 
@@ -173,6 +209,9 @@ class CodexBackend:
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
+                    # Codex occasionally emits non-JSON status lines on stdout;
+                    # skip them but leave a debug breadcrumb for triage.
+                    _logger.debug("codex: non-JSON line skipped: %r", raw_line[:80])
                     continue
 
                 event_type = event.get("type", "")
@@ -188,6 +227,9 @@ class CodexBackend:
                         item_id = item.get("id")
                         if not item_id:
                             item_id = str(uuid.uuid4())
+                            # FIFO is the primary correlation path (order-
+                            # preserving); content-key stays as legacy fallback.
+                            pending_fifo.setdefault("command_execution", []).append(item_id)
                             pending_item_ids[f"command_execution:{item.get('command', '')}"] = item_id
                         raw_cmd = item.get("command", "")
                         yield ToolStartEvent(
@@ -199,6 +241,9 @@ class CodexBackend:
                         item_id = item.get("id")
                         if not item_id:
                             item_id = str(uuid.uuid4())
+                            # FIFO is the primary correlation path (order-
+                            # preserving); content-key stays as legacy fallback.
+                            pending_fifo.setdefault("mcp_tool_call", []).append(item_id)
                             pending_item_ids[f"mcp_tool_call:{item.get('tool', '')}"] = item_id
                         yield ToolStartEvent(
                             id=item_id,
@@ -247,10 +292,11 @@ class CodexBackend:
                     elif item_type == "command_execution":
                         item_id = item.get("id")
                         if not item_id:
-                            lookup_key = f"command_execution:{item.get('command', '')}"
-                            item_id = pending_item_ids.pop(lookup_key, None)
-                            if item_id is None:
-                                item_id = str(uuid.uuid4())
+                            item_id = _claim_tool_id(
+                                "command_execution",
+                                f"command_execution:{item.get('command', '')}",
+                                item.get("command", ""),
+                            )
                         exit_code = item.get("exit_code", -1)
                         output = item.get("aggregated_output", "")
                         status = item.get("status", "")
@@ -287,10 +333,11 @@ class CodexBackend:
                     elif item_type == "mcp_tool_call":
                         item_id = item.get("id")
                         if not item_id:
-                            lookup_key = f"mcp_tool_call:{item.get('tool', '')}"
-                            item_id = pending_item_ids.pop(lookup_key, None)
-                            if item_id is None:
-                                item_id = str(uuid.uuid4())
+                            item_id = _claim_tool_id(
+                                "mcp_tool_call",
+                                f"mcp_tool_call:{item.get('tool', '')}",
+                                item.get("tool", ""),
+                            )
                         result_content = ""
                         if "result" in item:
                             result_content = str(item["result"].get("content", ""))
@@ -330,7 +377,13 @@ class CodexBackend:
                         try:
                             structured_result = json.loads(last_agent_text)
                         except json.JSONDecodeError:
-                            pass
+                            # Observable failure path — surface the bad payload
+                            # instead of silently degrading to None.
+                            _warn(
+                                "structured output parse failed",
+                                source="agent_text",
+                                raw=last_agent_text[:200],
+                            )
 
                     # Fallback: result/output field directly on turn.completed.
                     if output_schema and structured_result is None:
@@ -343,7 +396,11 @@ class CodexBackend:
                                     try:
                                         structured_result = json.loads(raw)
                                     except json.JSONDecodeError:
-                                        pass
+                                        _warn(
+                                            "structured output parse failed",
+                                            source=f"turn.completed.{key}",
+                                            raw=raw[:200],
+                                        )
                                 if structured_result is not None:
                                     break
 

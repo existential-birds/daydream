@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"th_badjson"}
+{"type":"item.started","item":{"type":"agent_message","id":"msg_1","content":[]}}
+{"type":"item.completed","item":{"type":"agent_message","id":"msg_1","text":"this is not valid JSON"}}
+{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":3}}
