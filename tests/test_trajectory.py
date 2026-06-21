@@ -133,6 +133,25 @@ async def test_tool_call_and_result_land_on_same_step(tmp_path: Path) -> None:
     assert step["observation"]["results"][0]["source_call_id"] == "tool-1"
 
 
+# Behavior: mark_aborted stamps extra["stop_reason"] on the closing step
+# and the trajectory stays schema-valid (Task 2).
+
+
+async def test_mark_aborted_stamps_stop_reason_on_closing_step(tmp_path: Path) -> None:
+    """An aborted invocation closes cleanly with extra['stop_reason'] set."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.FIX) as inv:
+            inv.observe(ToolStartEvent(id="tool-1", name="Bash", input={"command": "ls"}))
+            inv.mark_aborted("budget_exceeded")
+
+    traj = _read_trajectory(recorder.path)
+    assert atif_validate(traj, validate_images=False) is True
+    agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 1
+    assert agent_steps[0]["extra"]["stop_reason"] == "budget_exceeded"
+
+
 # Behavior 4: User step has source="user" and NO agent-only fields
 # (Pitfall 4)
 

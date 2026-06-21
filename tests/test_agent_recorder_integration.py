@@ -119,7 +119,7 @@ async def _run_with_recorder(
     phase: DaydreamPhase = DaydreamPhase.REVIEW,
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
     prompt: str = "hello",
-) -> tuple[dict[str, Any] | None, tuple[Any, Any]]:
+) -> tuple[dict[str, Any] | None, tuple[Any, Any, Any]]:
     """Drive run_agent inside a TrajectoryRecorder. Return (trajectory_dict, return_value)."""
     recorder = _make_recorder(tmp_path, run_flow=run_flow)
     target_path = recorder.path
@@ -265,7 +265,7 @@ async def test_no_recorder_is_clean_no_op(tmp_path: Path) -> None:
         ResultEvent(structured_output=None, continuation=None),
     ])
     # NO TrajectoryRecorder context — recorder is None.
-    out, cont = await run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW)
+    out, cont, _ = await run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW)
     assert isinstance(out, str)
     assert "ok" in out
     assert cont is None

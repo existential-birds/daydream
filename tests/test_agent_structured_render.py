@@ -31,7 +31,7 @@ async def test_structured_output_text_is_not_rendered(monkeypatch, tmp_path):
     rec = Console(record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.agent.console", rec)
     backend = MockBackend([TextEvent(text=RAW), ResultEvent(structured_output=PAYLOAD, continuation=None)])
-    result, _ = await run_agent(
+    result, _, _ = await run_agent(
         backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"}
     )
     out = rec.export_text()
@@ -46,5 +46,5 @@ async def test_plain_text_still_renders(monkeypatch, tmp_path):
     backend = MockBackend(
         [TextEvent(text="narration here"), ResultEvent(structured_output=None, continuation=None)]
     )
-    result, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)  # no output_schema
+    result, _, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)  # no output_schema
     assert "narration here" in rec.export_text()

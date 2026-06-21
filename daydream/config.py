@@ -32,6 +32,10 @@ DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 DEFAULT_EXPLORATION_MODEL = "claude-sonnet-4-6"
 
+# Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).
+DEFAULT_WALL_BUDGET_S = 1800.0
+DEFAULT_TOOL_CALL_BUDGET = 50
+
 # Per-backend per-phase default model table. The phase resolver in
 # ``daydream.runner._resolve_backend`` looks up
 # ``PHASE_DEFAULT_MODELS[backend_name][phase_name]`` when no explicit per-phase

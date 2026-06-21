@@ -322,7 +322,7 @@ async def test_no_recorder_clean_no_op(tmp_path: Path) -> None:
         ]
     )
     # NO TrajectoryRecorder context — direct invocation.
-    out, cont = await run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW)
+    out, cont, _ = await run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW)
     assert isinstance(out, str)
     assert "ok" in out
     assert cont is None

@@ -18,6 +18,7 @@ from daydream.agent import (
     get_assume,
     get_non_interactive,
     get_quiet_mode,
+    is_environmental_failure,
     resolve_gate,
     resolve_or_prompt,
     run_agent,
@@ -36,7 +37,7 @@ from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
-from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S, REVIEW_OUTPUT_FILE
 from daydream.ui import (
     phase_subtitle,
     print_dim,
@@ -214,7 +215,7 @@ async def _run_setup_investigator(
 
     async def _invoke() -> dict[str, Any] | None:
         try:
-            result, _ = await run_agent(
+            result, _, _ = await run_agent(
                 backend,
                 work.repo,
                 prompt,
@@ -655,7 +656,7 @@ async def _run_failure_summarizer(
 
     async def _invoke() -> str | None:
         try:
-            result, _ = await run_agent(
+            result, _, _ = await run_agent(
                 backend,
                 work.repo,
                 prompt,
@@ -1192,6 +1193,10 @@ def build_intent_prompt(
         body_text = pr_description.strip()
         if len(body_text) > _PR_BODY_MAX_CHARS:
             body_text = body_text[:_PR_BODY_MAX_CHARS] + "\n[PR description truncated]"
+        # Neutralize the delimiter so a body containing it can't break containment.
+        safe_body = body_text.replace("<pr_description>", "&lt;pr_description>").replace(
+            "</pr_description>", "&lt;/pr_description>"
+        )
         parts.append(
             "The author supplied the following pull-request description. Treat this "
             "author-stated intent as AUTHORITATIVE: where the description and the "
@@ -1203,7 +1208,7 @@ def build_intent_prompt(
             "'complete'.\n\n"
             "Pull request description:\n"
             "<pr_description>\n"
-            f"{body_text.replace('</pr_description>', '<\\/pr_description>')}\n"
+            f"{safe_body}\n"
             "</pr_description>\n"
         )
     body = (
@@ -1539,7 +1544,7 @@ For each issue found, return a JSON object with this structure:
 If there are no actionable issues, return: {{"issues": []}}
 """
 
-    result, _ = await run_agent(backend, work.repo, prompt, output_schema=schema, phase=DaydreamPhase.PARSE)
+    result, _, _ = await run_agent(backend, work.repo, prompt, output_schema=schema, phase=DaydreamPhase.PARSE)
 
     if not isinstance(result, dict) or "issues" not in result:
         # When structured output and JSON fallback both fail (e.g. empty
@@ -1645,12 +1650,14 @@ async def phase_verify_recommendations(
         output_path=output_path,
     )
 
-    result, _ = await run_agent(
+    result, _, _ = await run_agent(
         backend,
         work.repo,
         prompt,
         output_schema=RECOMMENDATION_VERDICTS_SCHEMA,
         max_turns=25,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
         phase=DaydreamPhase.VERIFY,
     )
 
@@ -1728,10 +1735,11 @@ justify each out-of-scope edit in your commit message rather than expanding
 silently. If the change balloons far beyond the named site, stop and report.
 
 If this finding conflicts with an explicit in-code contract — a JSON schema, a
-type signature, or a comment documenting intent — the contract wins. Do not
-override documented intent to satisfy the finding; note the conflict in your
-commit message (or report inability to fix). Treat low/medium-confidence
-findings with extra skepticism here.
+type signature, or a comment documenting intent — the contract wins (unless
+confirmed author intent below overrides it). Do not override documented intent
+to satisfy the finding; note the conflict in your commit message (or report
+inability to fix). Treat low/medium-confidence findings with extra skepticism
+here.
 """
 
     # Best-effort: inject the confirmed author intent so the fixer won't undo a
@@ -1789,10 +1797,17 @@ findings with extra skepticism here.
         await run_agent(
             backend, work.repo, prompt,
             phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
             progress_callback=_cb,
         )
     else:
-        await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS)
+        await run_agent(
+            backend, work.repo, prompt,
+            phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        )
     async with (console_lock if console_lock is not None else anyio.Lock()):
         print_fix_complete(console, item_num, total)
 
@@ -2001,7 +2016,7 @@ async def phase_test_and_heal(
         # may re-assign test_command_override (choice "1" → setup investigator).
         test_command_override = None
 
-        output, continuation = await run_agent(
+        output, continuation, _ = await run_agent(
             backend, work.repo, prompt, continuation=continuation, phase=DaydreamPhase.TEST,
         )
 
@@ -2012,6 +2027,16 @@ async def phase_test_and_heal(
             return True, retries_used
 
         print_warning(console, "Tests may have failed or result is unclear.")
+
+        # An infrastructure failure (DB/cache unreachable) cannot be healed by an
+        # agent fix turn, so abort before the heal gate instead of burning a retry.
+        if is_environmental_failure(output):
+            print_warning(
+                console,
+                "Test failure looks environmental (infrastructure unavailable); "
+                "skipping heal loop.",
+            )
+            return False, retries_used
 
         # Test-heal retry gate across the two interaction axes. With no human at
         # the keyboard, the menu's default "2" (fix-and-retry) would launch an
@@ -2037,8 +2062,10 @@ async def phase_test_and_heal(
             console.print()
             print_info(console, "Launching agent to fix test failures (auto)...")
             fix_prompt = _build_fix_prompt(output, feedback_items, repo=work.repo)
-            _, _ = await run_agent(
+            _, _, _ = await run_agent(
                 backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                wall_budget_s=DEFAULT_WALL_BUDGET_S,
             )
             retries_used += 1
             continuation = None
@@ -2090,8 +2117,10 @@ async def phase_test_and_heal(
             console.print()
             print_info(console, "Launching agent to fix test failures...")
             fix_prompt = _build_fix_prompt(output, feedback_items, repo=work.repo)
-            _, _ = await run_agent(
+            _, _, _ = await run_agent(
                 backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                wall_budget_s=DEFAULT_WALL_BUDGET_S,
             )
             retries_used += 1
             continuation = None
@@ -2400,7 +2429,11 @@ async def phase_understand_intent(
         console.print()
         print_info(console, "Agent is analyzing the changes...")
 
-        output, _ = await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.INTENT)
+        output, _, _ = await run_agent(
+            backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        )
         intent_text = output if isinstance(output, str) else str(output)
 
         console.print()
@@ -2484,7 +2517,7 @@ async def phase_alternative_review(
     console.print()
     print_info(console, "Agent is evaluating the implementation...")
 
-    result, _ = await run_agent(
+    result, _, _ = await run_agent(
         backend, work.repo, prompt, output_schema=ALTERNATIVE_REVIEW_SCHEMA, phase=DaydreamPhase.ALTERNATIVES,
     )
 
@@ -2630,7 +2663,7 @@ async def phase_generate_plan(
     console.print()
     print_info(console, f"Generating plan for {len(selected_issues)} issue(s)...")
 
-    result, _ = await run_agent(backend, work.repo, prompt, output_schema=PLAN_SCHEMA, phase=DaydreamPhase.PLAN)
+    result, _, _ = await run_agent(backend, work.repo, prompt, output_schema=PLAN_SCHEMA, phase=DaydreamPhase.PLAN)
 
     if not isinstance(result, dict):
         if not get_quiet_mode():
@@ -2866,7 +2899,7 @@ async def phase_arbiter_review(
         alternatives_path=alternatives_path,
         exploration_dir=exploration_dir,
     )
-    result, _ = await run_agent(backend, work.repo, prompt, output_schema=ARBITER_SCHEMA, phase=DaydreamPhase.DEEP)
+    result, _, _ = await run_agent(backend, work.repo, prompt, output_schema=ARBITER_SCHEMA, phase=DaydreamPhase.DEEP)
 
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
         raise ValueError(f"Arbiter returned no findings list (got {type(result).__name__})")
@@ -2963,7 +2996,7 @@ async def phase_cross_stack_merge(
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     print_dim(console, f"Model: {backend.model}")
-    result, _ = await run_agent(
+    result, _, _ = await run_agent(
         backend, work.repo, prompt, output_schema=MERGED_ITEMS_SCHEMA, phase=DaydreamPhase.DEEP
     )
 

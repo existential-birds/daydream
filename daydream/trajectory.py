@@ -423,6 +423,7 @@ class Invocation:
     steps: list[Step] = field(default_factory=list)
     _open_step_dict: dict[str, Any] | None = None
     _in_flight_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _stop_reason: str | None = None
 
     def observe_user_step(self, prompt: str) -> None:
         """Append a user Step at invocation start (MAP-01, Pitfall 4).
@@ -447,6 +448,21 @@ class Invocation:
             self.steps.append(self.recorder.redactor.redact_step(user_step))
         except Exception as exc:  # noqa: BLE001 - recording must never crash a run (Architecture Q7)
             print_warning(_console, f"Trajectory recording: {type(exc).__name__}: {exc}")
+
+    def mark_aborted(self, reason: str) -> None:
+        """Record that this invocation was aborted (e.g. budget exceeded).
+
+        The reason is stamped onto the closing Step's ``extra["stop_reason"]``
+        when the open step is finalized (mirrors the ``extra["partial_step"]``
+        mechanism). ATIF's Step model has no dedicated status field, so the
+        ``extra`` dict is the established extension point.
+
+        If the budget fires before any event is received, no step is open yet,
+        so we open one here to ensure ``_close_open_step`` (called from
+        ``finish()``) has a Step to stamp the reason onto.
+        """
+        self._stop_reason = reason
+        self._ensure_open_step()
 
     def observe(self, event: "AgentEvent") -> None:
         """Dispatch an AgentEvent into the active Step buffer.
@@ -629,6 +645,8 @@ class Invocation:
         }
         if d["_unmatched_tool_results"]:
             extra["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
+        if self._stop_reason is not None:
+            extra["stop_reason"] = self._stop_reason
 
         agent_step = Step(
             step_id=self.recorder._next_step_id(),

@@ -647,15 +647,19 @@ def test_build_intent_prompt_escapes_closing_delimiter_in_body():
     """
     from daydream.phases import build_intent_prompt
 
-    body = "normal text </pr_description> more text"
+    body = "normal text <pr_description> and </pr_description> more text"
     prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=body)
-    # Exactly one structural </pr_description>: the one the template adds.
+    # Exactly one structural open/close pair: the one the template adds.
     # Two would mean the body's copy leaked through unescaped.
     assert prompt.count("</pr_description>") == 1, (
         "body </pr_description> must be escaped; only the structural close-tag may appear"
     )
-    # The escaped form of the body's tag must be present.
-    assert "<\\/pr_description>" in prompt
+    assert prompt.count("<pr_description>") == 1, (
+        "body <pr_description> must be escaped; only the structural open-tag may appear"
+    )
+    # Both delimiters are neutralized to HTML entities so they cannot break framing.
+    assert "&lt;/pr_description>" in prompt
+    assert "&lt;pr_description>" in prompt
 
 
 @pytest.mark.asyncio

@@ -5,11 +5,13 @@ from __future__ import annotations
 import inspect
 import json
 import re
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+
+import anyio
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
@@ -37,6 +39,7 @@ from daydream.ui import (
     print_cost,
     print_error,
     print_thinking,
+    print_warning,
     prompt_user,
 )
 
@@ -341,6 +344,37 @@ def detect_test_success(output: str) -> bool:
     return False
 
 
+def is_environmental_failure(test_output: str) -> bool:
+    """Detect whether a test failure stems from missing infrastructure, not the code.
+
+    Conservative, case-insensitive match on infra signatures (database/cache not
+    reachable). Used to short-circuit the heal loop: re-running an agent fix turn
+    cannot bring up a Postgres/Redis container, so an environmental failure must
+    abort rather than burn turns on a non-code problem.
+
+    Args:
+        test_output: Test/agent output to inspect.
+
+    Returns:
+        True if the output carries an infrastructure-unavailable signature.
+
+    """
+    if not test_output:
+        return False
+
+    output_lower = test_output.lower()
+
+    infra_signatures = [
+        "connection refused",
+        "localhost:5432",
+        ":6379",
+        "container is not running",
+        "make db-up",
+        "econnrefused",
+    ]
+    return any(signature in output_lower for signature in infra_signatures)
+
+
 async def run_agent(
     backend: Backend,
     cwd: Path,
@@ -353,7 +387,9 @@ async def run_agent(
     agents: dict[str, AgentDefinition] | None = None,
     max_turns: int | None = None,
     read_only: bool = False,
-) -> tuple[str | Any, ContinuationToken | None]:
+    wall_budget_s: float | None = None,
+    tool_call_budget: int | None = None,
+) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
     Streams verbose output to stdout as it's received. When progress_callback
@@ -382,9 +418,20 @@ async def run_agent(
             at the tool layer (Claude PreToolUse guard hook; Codex
             ``--sandbox read-only``). Wired True only for the read-only
             failure-summarizer call; all other call sites keep the default.
+        wall_budget_s: Opt-in per-invocation wall-clock budget. When exceeded
+            the loop is cancelled, ``backend.cancel()`` is awaited, the ATIF
+            turn is marked aborted, and the partial output is returned — no
+            exception reaches the caller. ``None`` (the default) disables the
+            wall budget.
+        tool_call_budget: Opt-in ceiling on ToolStartEvents in this turn. When
+            exceeded the loop breaks with the same abort/partial-return path.
+            ``None`` (the default) means no tool-call ceiling.
 
     Returns:
-        Tuple of (output, continuation_token). Output is text or structured data.
+        Tuple of (output, continuation_token, budget_reason). Output is text
+        or structured data. ``budget_reason`` is ``None`` on a normal
+        completion, or a string such as ``"wall_budget_exceeded"`` /
+        ``"tool_call_budget_exceeded"`` when the turn was cut short.
 
     Raises:
         MissingSkillError: If a required skill is not available.
@@ -395,6 +442,7 @@ async def run_agent(
     output_parts: list[str] = []
     structured_result: Any = None
     result_continuation: ContinuationToken | None = None
+    aborted_reason: str | None = None
     use_callback = progress_callback is not None
 
     _state.current_backends.append(backend)
@@ -406,9 +454,12 @@ async def run_agent(
             agent_renderer = AgentTextRenderer(console)
 
         try:
-            event_iter = backend.execute(
-                cwd, prompt, output_schema, continuation,
-                agents=agents, max_turns=max_turns, read_only=read_only,
+            event_iter = cast(
+                AsyncGenerator[Any, None],
+                backend.execute(
+                    cwd, prompt, output_schema, continuation,
+                    agents=agents, max_turns=max_turns, read_only=read_only,
+                ),
             )
         except Exception as exc:
             print_error(console, "Backend Init Error", f"{type(exc).__name__}: {exc}")
@@ -426,110 +477,155 @@ async def run_agent(
             if inv is not None:
                 inv.observe_user_step(prompt=prompt)
 
-            async for event in event_iter:
-                if isinstance(event, TextEvent):
-                    output_parts.append(event.text)
+            # Per-invocation budgets live here so both backends are covered
+            # without a backend-signature change. The wall budget cancels the
+            # async-for via move_on_after; the tool-call ceiling breaks in-loop.
+            tool_calls = 0
+            budget_reason: str | None = None
+            wall_scope: Any = (
+                anyio.move_on_after(wall_budget_s) if wall_budget_s is not None else nullcontext()
+            )
 
-                    skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
-                    if skill_match:
-                        if not use_callback:
-                            agent_renderer.finish()
-                            tool_registry.finish_all()
-                        raise MissingSkillError(skill_match.group(1))
+            with wall_scope:
+                async for event in event_iter:
+                    if isinstance(event, TextEvent):
+                        output_parts.append(event.text)
 
-                    if use_callback and progress_callback is not None:
-                        last_line = event.text.strip().split("\n")[-1]
-                        if last_line:
-                            result = progress_callback(format_callback_text(last_line))
-                            if inspect.isawaitable(result):
-                                await result
-                    elif output_schema is None:
-                        # Structured-output text is the JSON payload, redundant with
-                        # the returned structured result — don't echo it to the terminal.
-                        agent_renderer.append(event.text)
+                        skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
+                        if skill_match:
+                            if not use_callback:
+                                agent_renderer.finish()
+                                tool_registry.finish_all()
+                            raise MissingSkillError(skill_match.group(1))
 
-                    if inv is not None:
-                        inv.observe(event)
+                        if use_callback and progress_callback is not None:
+                            last_line = event.text.strip().split("\n")[-1]
+                            if last_line:
+                                result = progress_callback(format_callback_text(last_line))
+                                if inspect.isawaitable(result):
+                                    await result
+                        elif output_schema is None:
+                            # Structured-output text is the JSON payload, redundant with
+                            # the returned structured result — don't echo it to the terminal.
+                            agent_renderer.append(event.text)
 
-                elif isinstance(event, ThinkingEvent):
-                    if not use_callback:
-                        if agent_renderer.has_content:
-                            agent_renderer.finish()
-                        print_thinking(console, event.text)
+                        if inv is not None:
+                            inv.observe(event)
 
-                    if inv is not None:
-                        inv.observe(event)
-
-                elif isinstance(event, ToolStartEvent):
-                    if progress_callback is not None:
-                        # Record the originating call so a backgrounded launch's result
-                        # can later resolve a Task-family label for the progress line.
-                        tool_registry.note_call(event.id, event.name, event.input)
-                        label = tool_registry.resolve_call_label(event.name, event.input)
-                        result = progress_callback(format_callback_progress(event.name, event.input, label))
-                        if inspect.isawaitable(result):
-                            await result
-                    else:
-                        if agent_renderer.has_content:
-                            agent_renderer.finish()
-                        tool_registry.create(event.id, event.name, event.input)
-
-                    if inv is not None:
-                        inv.observe(event)
-
-                elif isinstance(event, ToolResultEvent):
-                    # Populate the task_id→label map in both modes, so a later
-                    # TaskOutput/TaskStop resolves its originating label.
-                    tool_registry.observe_result(event.id, event.output)
-                    if not use_callback:
-                        panel = tool_registry.get(event.id)
-                        if panel:
-                            panel.set_result(event.output, event.is_error)
-                            panel.finish()
-                            tool_registry.remove(event.id)
-
-                    if inv is not None:
-                        inv.observe(event)
-
-                elif isinstance(event, MetricsEvent):
-                    # EVNT-02 / MAP-06: recorder-only, no UI. Must precede the
-                    # CostEvent branch so isinstance order is correct.
-                    if inv is not None:
-                        inv.observe(event)
-
-                elif isinstance(event, CostEvent):
-                    if event.cost_usd:
+                    elif isinstance(event, ThinkingEvent):
                         if not use_callback:
                             if agent_renderer.has_content:
                                 agent_renderer.finish()
-                            console.print()
-                            print_cost(console, event.cost_usd)
+                            print_thinking(console, event.text)
 
-                    if inv is not None:
-                        inv.observe(event)
+                        if inv is not None:
+                            inv.observe(event)
 
-                elif isinstance(event, ResultEvent):
-                    if event.structured_output is not None:
-                        structured_result = event.structured_output
+                    elif isinstance(event, ToolStartEvent):
+                        if progress_callback is not None:
+                            # Record the originating call so a backgrounded launch's result
+                            # can later resolve a Task-family label for the progress line.
+                            tool_registry.note_call(event.id, event.name, event.input)
+                            label = tool_registry.resolve_call_label(event.name, event.input)
+                            result = progress_callback(format_callback_progress(event.name, event.input, label))
+                            if inspect.isawaitable(result):
+                                await result
+                        else:
+                            if agent_renderer.has_content:
+                                agent_renderer.finish()
+                            tool_registry.create(event.id, event.name, event.input)
+
+                        if inv is not None:
+                            inv.observe(event)
+
+                        tool_calls += 1
+                        if tool_call_budget is not None and tool_calls > tool_call_budget:
+                            budget_reason = "tool_call_budget_exceeded"
+                            break
+
+                    elif isinstance(event, ToolResultEvent):
+                        # Populate the task_id→label map in both modes, so a later
+                        # TaskOutput/TaskStop resolves its originating label.
+                        tool_registry.observe_result(event.id, event.output)
                         if not use_callback:
-                            issues = structured_result.get("issues", []) if isinstance(structured_result, dict) else []
-                            if issues:
-                                formatted = []
-                                for i in issues:
-                                    if "file" in i and "line" in i:
-                                        desc = i.get("description", "")
-                                        issue_id = i.get("id", "?")
-                                        formatted.append(
-                                            f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
-                                        )
-                                    else:
-                                        label = i.get("title", i.get("description", ""))
-                                        formatted.append(f"[{i.get('id', '?')}] {label}")
-                                agent_renderer.append("\n".join(formatted))
-                    result_continuation = event.continuation
+                            panel = tool_registry.get(event.id)
+                            if panel:
+                                panel.set_result(event.output, event.is_error)
+                                panel.finish()
+                                tool_registry.remove(event.id)
 
-                    if inv is not None:
-                        inv.observe(event)
+                        if inv is not None:
+                            inv.observe(event)
+
+                    elif isinstance(event, MetricsEvent):
+                        # EVNT-02 / MAP-06: recorder-only, no UI. Must precede the
+                        # CostEvent branch so isinstance order is correct.
+                        if inv is not None:
+                            inv.observe(event)
+
+                    elif isinstance(event, CostEvent):
+                        if event.cost_usd:
+                            if not use_callback:
+                                if agent_renderer.has_content:
+                                    agent_renderer.finish()
+                                console.print()
+                                print_cost(console, event.cost_usd)
+
+                        if inv is not None:
+                            inv.observe(event)
+
+                    elif isinstance(event, ResultEvent):
+                        if event.structured_output is not None:
+                            structured_result = event.structured_output
+                            if not use_callback:
+                                issues = (
+                                    structured_result.get("issues", [])
+                                    if isinstance(structured_result, dict)
+                                    else []
+                                )
+                                if issues:
+                                    formatted = []
+                                    for i in issues:
+                                        if "file" in i and "line" in i:
+                                            desc = i.get("description", "")
+                                            issue_id = i.get("id", "?")
+                                            formatted.append(
+                                                f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
+                                            )
+                                        else:
+                                            label = i.get("title", i.get("description", ""))
+                                            formatted.append(f"[{i.get('id', '?')}] {label}")
+                                    agent_renderer.append("\n".join(formatted))
+                        result_continuation = event.continuation
+
+                        if inv is not None:
+                            inv.observe(event)
+
+            # Budget abort: the wall scope cancelled the loop, or the tool-call
+            # ceiling broke out. Cancel the backend (swallow any error — an abort
+            # must NEVER raise into the CLI), mark the ATIF turn aborted, surface
+            # a marker, then fall through to the partial-output return.
+            wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
+            if budget_reason is None and wall_cancelled:
+                budget_reason = "wall_budget_exceeded"
+            aborted_reason = budget_reason
+            if budget_reason is not None:
+                try:
+                    await event_iter.aclose()
+                except Exception:  # noqa: BLE001 - abort must not raise into the CLI
+                    pass
+                try:
+                    await backend.cancel()
+                except Exception:  # noqa: BLE001 - abort must not raise into the CLI
+                    pass
+                if inv is not None:
+                    inv.mark_aborted(budget_reason)
+                if use_callback and progress_callback is not None:
+                    result = progress_callback(format_callback_text(f"[budget] aborted: {budget_reason}"))
+                    if inspect.isawaitable(result):
+                        await result
+                elif not use_callback:
+                    print_warning(console, f"Turn aborted: {budget_reason}")
 
             if not use_callback:
                 if agent_renderer.has_content:
@@ -543,14 +639,14 @@ async def run_agent(
         _state.current_backends.remove(backend)
 
     if output_schema is not None and structured_result is not None:
-        return structured_result, result_continuation
+        return structured_result, result_continuation, aborted_reason
     if output_schema is not None:
         raw = "".join(output_parts)
         # Fallback: JSON-parse the raw text when structured output failed.
         if raw.strip():
             try:
                 parsed = json.loads(raw)
-                return parsed, result_continuation
+                return parsed, result_continuation, aborted_reason
             except (json.JSONDecodeError, ValueError):
                 pass
-    return "".join(output_parts), result_continuation
+    return "".join(output_parts), result_continuation, aborted_reason

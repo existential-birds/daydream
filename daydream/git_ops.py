@@ -1364,7 +1364,7 @@ def gh_pr_view(repo: Path, pr: int | None = None) -> dict | None:
     try:
         proc = _run_gh(repo, args, retries=_gh_retries())
     except GitError as exc:
-        _logger.warning("gh pr view failed (returning None): %s", exc)
+        _logger.warning("gh pr view failed (%s, returning None): %s", type(exc).__name__, exc)
         return None
     if proc.returncode != 0:
         return None
