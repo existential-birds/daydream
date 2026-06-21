@@ -181,3 +181,30 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
             f"step {cs.step_id}: cached_tokens not positive "
             f"({metrics.cached_tokens})"
         )
+
+    # #192: reasoning_output_tokens surfaced via Metrics.extra (vendored
+    # Metrics has no dedicated field — D-03 — so the documented extension
+    # carrier ``extra`` is used). Fixture's two turns carry 88 and 100.
+    # Subset of completion_tokens, NOT additive.
+    reasoning_steps = [
+        s
+        for s in metric_steps
+        if s.metrics is not None
+        and s.metrics.extra is not None
+        and s.metrics.extra.get("reasoning_tokens") is not None
+    ]
+    assert reasoning_steps, "no step carries reasoning_tokens via Metrics.extra"
+    for rs in reasoning_steps:
+        metrics = rs.metrics
+        assert metrics is not None and metrics.extra is not None, (
+            f"step {rs.step_id}: metrics/extra missing"
+        )
+        rt = metrics.extra["reasoning_tokens"]
+        assert isinstance(rt, int) and rt > 0, (
+            f"step {rs.step_id}: reasoning_tokens not a positive int ({rt})"
+        )
+        # Subset invariant: reasoning is part of completion, never exceeds it.
+        assert metrics.completion_tokens is not None and rt <= metrics.completion_tokens, (
+            f"step {rs.step_id}: reasoning_tokens ({rt}) exceeds "
+            f"completion_tokens ({metrics.completion_tokens}) — subset invariant"
+        )
