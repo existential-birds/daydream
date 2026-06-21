@@ -75,4 +75,5 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "--strict-markers"
 markers = [
     "integration: spawns a real `gh` subprocess (the fake shim); excluded from the pre-push gate, run in full CI. Applied automatically to any test using the `fake_gh` fixture.",
+    "live_codex: requires the real `codex` CLI on $PATH with valid auth; skipped automatically when codex is absent. Used by the real-CLI live smoke test in tests/test_codex_real_cli_contract.py.",
 ]
