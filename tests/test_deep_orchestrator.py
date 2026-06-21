@@ -36,12 +36,10 @@ class _StubBackend:
         target: Path,
         *,
         model: str = "mock-model",
-        is_codex: bool = False,
         shared_calls: list[dict[str, Any]] | None = None,
     ) -> None:
         self.model = model
         self._target = target
-        self._is_codex = is_codex
         # When set, every execute() call is also appended (model-tagged) to this
         # shared list so a per-(name, model) factory can capture which model ran
         # each phase even though backends are cached by (name, model) (#168).
@@ -438,7 +436,6 @@ def _install_stub_backend(
     monkeypatch: pytest.MonkeyPatch,
     target: Path,
     *,
-    is_codex: bool = False,
     pin_skill_availability: bool = True,
     enable_exploration: bool = False,
 ) -> _StubBackend:
@@ -457,12 +454,8 @@ def _install_stub_backend(
             specialist prompts. Default False preserves the existing behavior
             (exploration disabled) that the rest of the suite relies on.
     """
-    stub = _StubBackend(target, is_codex=is_codex)
+    stub = _StubBackend(target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: stub)
-    # Patch CodexBackend to the stub's class so the orchestrator's isinstance check
-    # fires without a real Codex dependency.
-    if is_codex:
-        monkeypatch.setattr("daydream.deep.orchestrator.CodexBackend", _StubBackend, raising=False)
     if pin_skill_availability:
         # None -> orchestrator falls back to set(SKILL_MAP.keys()).
         monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
@@ -1155,13 +1148,12 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     """D-30: pre-flight notice lists stages, stacks, skill per stack, total agent count."""
     captured: list[dict[str, Any]] = []
 
-    def _capture(console, *, stages, stack_lines, agent_count, codex_in_use, exploration_available) -> None:
+    def _capture(console, *, stages, stack_lines, agent_count, exploration_available) -> None:
         captured.append(
             {
                 "stages": stages,
                 "stack_lines": stack_lines,
                 "agent_count": agent_count,
-                "codex_in_use": codex_in_use,
                 "exploration_available": exploration_available,
             }
         )
@@ -1181,26 +1173,6 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     # fixture yields N=4 (python + react + generic + structure), so 2 + 2*4 + 1 + 1 = 12.
     assert notice["agent_count"] == 12
     assert len(notice["stack_lines"]) >= 1
-    # No Codex caveat on Claude backend.
-    assert notice["codex_in_use"] is False
-
-
-async def test_codex_cost_caveat(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-31: Codex backend triggers the cost_usd=None caveat in the notice."""
-    captured: list[dict[str, Any]] = []
-
-    def _capture(console, *, stages, stack_lines, agent_count, codex_in_use, exploration_available) -> None:
-        captured.append({"codex_in_use": codex_in_use})
-
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", _capture)
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-    _install_stub_backend(monkeypatch, multi_stack_target, is_codex=True)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-    assert captured[0]["codex_in_use"] is True
 
 
 async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1948,7 +1920,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    expected_phases = {"intent", "wonder", "review", "parse", "merge", "fix", "test", "verify"}
+    expected_phases = {"intent", "wonder", "per_stack_review", "parse", "merge", "fix", "test", "verify"}
     captured = set(seen_phases)
     missing = expected_phases - captured
     assert not missing, (

@@ -52,9 +52,11 @@ CANONICAL_SCRIPT: dict[str, Any] = json.loads(
 # - Codex MetricsEvent.message_id == "": Codex has no per-message id; the
 #   backend emits MetricsEvent with message_id="" once per turn.completed
 #   (daydream/backends/codex.py:333).
-# - Codex CostEvent.cost_usd is None: Codex's turn.completed.usage carries no
-#   cost; the backend always yields CostEvent(cost_usd=None)
-#   (daydream/backends/codex.py:341).
+# - Codex CostEvent.cost_usd is None: the conformance loader drives a sentinel
+#   model (``codex-test-model``) that is absent from the price table, so #194's
+#   backend-layer synthesis yields None (#156). A production priced model
+#   (e.g. gpt-5.5) would synthesize a non-None cost; that path is covered by
+#   tests/test_backend_codex.py and tests/test_codex_real_cli_contract.py.
 KNOWN_DELTAS: dict[str, dict[str, Any]] = {
     "codex": {
         "metrics_message_id": "",
@@ -101,7 +103,8 @@ async def test_backend_conformance(loader: Loader) -> None:
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
     costs = [e for e in events if isinstance(e, CostEvent)]
     if driver == "codex":
-        # Codex carries no per-message id and no cost.
+        # Codex carries no per-message id; cost is None only because the
+        # conformance loader's sentinel model is unpriced (see KNOWN_DELTAS).
         assert all(m.message_id == deltas["metrics_message_id"] for m in metrics)
         assert all(c.cost_usd is deltas["cost_usd"] for c in costs)
     else:

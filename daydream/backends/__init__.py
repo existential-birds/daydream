@@ -100,8 +100,9 @@ class CostEvent:
     """Cost and usage information (end-of-call signal feeding FinalMetrics).
 
     Attributes:
-        cost_usd: Total cost in USD; None when unavailable (Codex always
-            None per D-16).
+        cost_usd: Total cost in USD; None when unavailable. Codex synthesizes
+            via the #61 price table (#194 reverses D-16); None only when the
+            model is unknown to the table.
         input_tokens: Prompt tokens (None when unavailable).
         output_tokens: Completion tokens (None when unavailable).
         cached_tokens: Cached portion of input_tokens (subset, NOT added
@@ -156,11 +157,11 @@ class MetricsEvent:
             (Claude ``usage["output_tokens"]``, Codex
             ``usage["output_tokens"]``) and rename at the boundary.
         cached_tokens: Subset of ``prompt_tokens`` served from cache
-            (None when unavailable; Codex always None per D-16). NOT
-            additive to ``prompt_tokens`` (D-15).
-        cost_usd: Per-turn cost in USD (None when unavailable; Codex
-            always None per D-16 — DO NOT synthesize from a token-price
-            table).
+            (None when unavailable). NOT additive to ``prompt_tokens``
+            (D-15).
+        cost_usd: Per-turn cost in USD (None when unavailable). Codex
+            synthesizes via the #61 price table (#194 reverses D-16); None
+            only when the model is unknown to the table.
         reasoning_tokens: Reasoning portion of ``completion_tokens``
             (subset, NOT additive — Codex's ``accounting.rs`` already
             counts these inside ``output_tokens``). Surfaces Codex's
