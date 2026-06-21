@@ -12,6 +12,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from daydream.pr_comment_renderer import _PHASE_LABELS, _format_duration, render_run_info_block
 from daydream.trajectory import DaydreamPhase
 
@@ -197,6 +199,55 @@ def test_m6_unknown_model_renders_dash_and_footnote(tmp_path: Path) -> None:
     assert "| —" in out
     assert "mystery-model" in out
     assert "not in the price table" in out
+
+
+# M6b — user price override synthesizes cost for an otherwise-unknown model (#156)
+def test_m6b_user_override_synthesizes_cost_for_unknown_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user-supplied price (via DAYDREAM_PRICES_FILE) for an unknown Codex
+    model produces a SYNTHESIZED cost — not a dash and not the unavailable
+    footnote.
+
+    Extends M6: without the override the model renders '—' (cost unavailable).
+    With the override the renderer's resolve_prices(load_user_prices()) merges
+    it in and compute_cost synthesizes a dollar figure. This is the #156/#61
+    acceptance criterion #1 (Codex cost synthesis reads the overridable table).
+    """
+    prices_file = tmp_path / "prices.toml"
+    prices_file.write_text(
+        '[prices."custom-codex-op"]\ninput = 2.0\ncached_input = 0.5\noutput = 8.0\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
+
+    p = _write_trajectory(
+        tmp_path,
+        model="custom-codex-op",
+        steps=[
+            {
+                "step_id": 1,
+                "timestamp": "2026-05-02T00:00:00.000000Z",
+                "source": "user",
+                "message": "go",
+                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
+            },
+            _agent_step(
+                step_id=2,
+                phase="review",
+                model="custom-codex-op",
+                prompt=1_000_000,
+                completion=0,
+                cached=0,
+                cost_usd=None,
+            ),
+        ],
+    )
+    out = render_run_info_block([p])
+    # 1M uncached input * $2.00/1M = $2.00 synthesized (no cost_usd from backend).
+    assert "- **Cost:** $2.00" in out
+    # The unavailable footnote must NOT appear — the model IS priced via override.
+    assert "not in the price table" not in out
 
 
 # M7 — mixed-model label
