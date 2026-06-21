@@ -39,7 +39,7 @@ from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fi
 
 @pytest.mark.asyncio
 async def test_simple_text_events():
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -67,7 +67,7 @@ async def test_simple_text_events():
     assert cost_events[0].input_tokens == 100
     assert cost_events[0].output_tokens == 50
     assert cost_events[0].cached_tokens == 10
-    assert cost_events[0].model_name == "glm-4.6"
+    assert cost_events[0].model_name == "glm-5.2"
 
     assert len(result_events) == 1
     assert result_events[0].continuation is not None
@@ -77,7 +77,7 @@ async def test_simple_text_events():
 
 @pytest.mark.asyncio
 async def test_thinking_and_tool_use_events():
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
 
     with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -109,7 +109,7 @@ async def test_thinking_and_tool_use_events():
 
 @pytest.mark.asyncio
 async def test_structured_output():
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
@@ -134,7 +134,7 @@ async def test_structured_output():
 
 @pytest.mark.asyncio
 async def test_multi_turn_emits_turn_end_per_turn_and_aggregates_cost():
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("multi_turn.jsonl")
 
     with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -163,7 +163,7 @@ async def test_multi_turn_emits_turn_end_per_turn_and_aggregates_cost():
 
 @pytest.mark.asyncio
 async def test_error_turn_raises_pi_error():
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("error_turn.jsonl")
 
     with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -175,7 +175,7 @@ async def test_error_turn_raises_pi_error():
 @pytest.mark.asyncio
 async def test_continuation_token_uses_session_id_flag():
     """A pi continuation token maps to --session-id <id> (not --no-session)."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="pi", data={"session_id": "pi_resume_me"})
 
@@ -192,7 +192,7 @@ async def test_continuation_token_uses_session_id_flag():
 @pytest.mark.asyncio
 async def test_fresh_run_uses_no_session():
     """No continuation → --no-session (ephemeral); no --session-id flag."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
@@ -207,7 +207,7 @@ async def test_fresh_run_uses_no_session():
 @pytest.mark.asyncio
 async def test_read_only_restricts_tools():
     """read_only=True adds --tools read,find,ls,grep (excludes mutating tools)."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
@@ -231,7 +231,7 @@ async def test_env_overrides_forwarded_as_flags(monkeypatch):
     monkeypatch.setenv("PI_API_KEY", "secret-key")
     monkeypatch.setenv("PI_THINKING", "medium")
 
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
@@ -247,7 +247,7 @@ async def test_env_overrides_forwarded_as_flags(monkeypatch):
 @pytest.mark.asyncio
 async def test_cwd_passed_to_subprocess():
     """The target dir is passed as the process cwd (Pi reads it natively)."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
@@ -261,7 +261,7 @@ async def test_cwd_passed_to_subprocess():
 @pytest.mark.asyncio
 async def test_execute_raises_on_agents():
     """PiBackend refuses agents= with NotImplementedError (plan §5)."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_agent = {"description": "test", "prompt": "test"}
 
     with pytest.raises(NotImplementedError, match="Pi backend does not support exploration"):
@@ -272,7 +272,7 @@ async def test_execute_raises_on_agents():
 @pytest.mark.asyncio
 async def test_agent_end_always_finalizes_when_stream_ends_without_it():
     """Guard (plan §10): stream ending mid-turn still emits Cost + Result."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     # Stream ends after a turn_end but with NO agent_end line.
     lines = [
         '{"type":"session","sessionId":"pi_ses_truncated"}',
@@ -300,7 +300,7 @@ async def test_agent_end_always_finalizes_when_stream_ends_without_it():
 @pytest.mark.asyncio
 async def test_cancel_terminates_then_kills():
     """cancel() sends SIGTERM to all tracked processes, SIGKILL on timeout."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
 
     proc = MagicMock()
     proc.returncode = None
@@ -317,7 +317,7 @@ async def test_cancel_terminates_then_kills():
 
 @pytest.mark.asyncio
 async def test_cancel_no_op_when_no_processes():
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     backend._processes = []
     await backend.cancel()  # Must not raise.
 
@@ -325,7 +325,7 @@ async def test_cancel_no_op_when_no_processes():
 @pytest.mark.asyncio
 async def test_stdout_limit_allows_large_jsonl_events():
     """Large message_end lines must not trip asyncio's chunk-length guard."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     large_text = "x" * (70 * 1024)
     large_line = (
         json.dumps(
@@ -388,7 +388,7 @@ async def test_stdout_limit_allows_large_jsonl_events():
 @pytest.mark.asyncio
 async def test_missing_usage_skips_metrics_but_keeps_turn_end():
     """A turn_end without usage emits no MetricsEvent but still closes the step."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     lines = [
         '{"type":"session","sessionId":"pi_ses_nousage"}',
         '{"type":"agent_start"}',
@@ -417,7 +417,7 @@ async def test_missing_usage_skips_metrics_but_keeps_turn_end():
 @pytest.mark.asyncio
 async def test_concurrent_execute_calls_do_not_share_stdout_reader():
     """Overlapping runs on one backend keep reading their own process."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
 
     class _ImmediateStdout:
         def __init__(self, lines: list[str]) -> None:
@@ -542,7 +542,7 @@ def test_resolve_skill_dir_finds_slug(tmp_path, monkeypatch):
 
 
 def test_format_skill_invocation_unresolved_returns_hint():
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     # Force unresolved path.
     with patch("daydream.backends.pi._resolve_skill_dir", return_value=None):
         result = backend.format_skill_invocation("beagle-python:review-python", "--pr 7")
@@ -551,7 +551,7 @@ def test_format_skill_invocation_unresolved_returns_hint():
 
 
 def test_format_skill_invocation_resolved_uses_path_ref(tmp_path):
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     skill_dir = tmp_path / "review-python"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("# x\n")
@@ -593,7 +593,7 @@ _PI_AVAILABLE = shutil.which("pi") is not None
 @pytest.mark.asyncio
 async def test_live_pi_smoke():
     """Smoke test against a real `pi` binary (opt-in via $PATH)."""
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     events = []
     async for event in backend.execute(Path("/tmp"), "Reply with exactly: pong"):
         events.append(event)
@@ -609,7 +609,7 @@ async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path):
     from daydream.atif import validate
     from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
-    backend = PiBackend(model="glm-4.6")
+    backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
     traj_path = tmp_path / "trajectory.json"
 
@@ -617,7 +617,7 @@ async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path):
         path=traj_path,
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=tmp_path,
-        agent_model_name="glm-4.6",
+        agent_model_name="glm-5.2",
         session_id="00000000-0000-0000-0000-0000000000aa",
     )
     async with recorder:

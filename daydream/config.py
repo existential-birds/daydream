@@ -32,7 +32,7 @@ from enum import Enum
 # as required and does no fallback of its own.
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
-DEFAULT_PI_MODEL = "glm-4.6"
+DEFAULT_PI_MODEL = "glm-5.2"
 DEFAULT_EXPLORATION_MODEL = "claude-sonnet-4-6"
 
 # Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).
@@ -62,8 +62,8 @@ DEFAULT_TOOL_CALL_BUDGET = 50
 # for codex is deferred until concrete model picks across the codex lineup are
 # settled.
 #
-# Pi side defaults to ``glm-4.6`` (z.ai coding plan) across the board; per-phase
-# tiering is deferred until the GLM lineup (glm-4.6 / glm-4.5-air / etc.) is
+# Pi side defaults to ``glm-5.2`` (z.ai coding plan) across the board; per-phase
+# tiering is deferred until the GLM lineup (glm-5.2 / glm-4.5-air / etc.) is
 # mapped to tiers.
 PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
     "claude": {
@@ -97,19 +97,19 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "pr_feedback": "gpt-5.5",
     },
     "pi": {
-        "parse": "glm-4.6",
-        "fix": "glm-4.6",
-        "test": "glm-4.6",
-        "verify": "glm-4.6",
-        "exploration": "glm-4.6",
-        "per_stack_review": "glm-4.6",
-        "review": "glm-4.6",
-        "arbiter": "glm-4.6",
-        "wonder": "glm-4.6",
-        "envision": "glm-4.6",
-        "merge": "glm-4.6",
-        "intent": "glm-4.6",
-        "pr_feedback": "glm-4.6",
+        "parse": "glm-5.2",
+        "fix": "glm-5.2",
+        "test": "glm-5.2",
+        "verify": "glm-5.2",
+        "exploration": "glm-5.2",
+        "per_stack_review": "glm-5.2",
+        "review": "glm-5.2",
+        "arbiter": "glm-5.2",
+        "wonder": "glm-5.2",
+        "envision": "glm-5.2",
+        "merge": "glm-5.2",
+        "intent": "glm-5.2",
+        "pr_feedback": "glm-5.2",
     },
 }
 

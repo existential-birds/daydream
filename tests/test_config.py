@@ -55,16 +55,16 @@ def test_phase_default_models_codex_uses_gpt_5_5_for_every_phase():
         )
 
 
-def test_phase_default_models_pi_uses_glm_4_6_for_every_phase():
+def test_phase_default_models_pi_uses_glm_5_2_for_every_phase():
     pi = PHASE_DEFAULT_MODELS["pi"]
     for phase in PHASE_NAMES:
-        assert pi[phase] == "glm-4.6", (
-            f"pi phase {phase} should default to glm-4.6 (z.ai coding plan)"
+        assert pi[phase] == "glm-5.2", (
+            f"pi phase {phase} should default to glm-5.2 (z.ai coding plan)"
         )
 
 
-def test_default_pi_model_is_glm_4_6():
-    assert DEFAULT_PI_MODEL == "glm-4.6"
+def test_default_pi_model_is_glm_5_2():
+    assert DEFAULT_PI_MODEL == "glm-5.2"
 
 
 def test_default_exploration_model_matches_claude_phase_default():

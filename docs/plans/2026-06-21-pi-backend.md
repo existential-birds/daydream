@@ -90,7 +90,7 @@ z.ai models are configured once in `~/.pi/models.json` (Pi's model registry):
 {
   "models": [
     {
-      "id": "glm-4.6",
+      "id": "glm-5.2",
       "name": "GLM-4.6 (z.ai coding plan)",
       "api": "openai-completions",
       "provider": "zai",
@@ -101,7 +101,7 @@ z.ai models are configured once in `~/.pi/models.json` (Pi's model registry):
 }
 ```
 
-Then `daydream --backend pi --model glm-4.6` works. The backend passes `--model` and
+Then `daydream --backend pi --model glm-5.2` works. The backend passes `--model` and
 optionally `--provider`/`--api-key` (from env, see §6); `baseUrl` resolution happens in
 Pi from its models registry. **Do not** fabricate a base URL or cost table in daydream.
 
@@ -135,7 +135,7 @@ members (all verified against `pi-mono/packages/agent/src/types.ts` and
 ```json
 { "role": "assistant",
   "content": [ {"type":"text","text":"..."} | {"type":"thinking","thinking":"..."} | {"type":"toolCall","id":"...","name":"...","arguments":{}} ],
-  "api": "openai-completions", "provider": "zai", "model": "glm-4.6",
+  "api": "openai-completions", "provider": "zai", "model": "glm-5.2",
   "usage": <Usage>, "stopReason": "stop|length|toolUse|error|aborted",
   "errorMessage": "...", "timestamp": 1719000000000 }
 ```
@@ -251,8 +251,8 @@ this is a best-effort implementation sufficient for parity.
 ## 6. Configuration & env
 
 In `daydream/config.py` add:
-- `DEFAULT_PI_MODEL = "glm-4.6"`  (z.ai coding plan default)
-- A `"pi"` tier in `PHASE_DEFAULT_MODELS` mirroring the codex tier (glm-4.6 across all
+- `DEFAULT_PI_MODEL = "glm-5.2"`  (z.ai coding plan default)
+- A `"pi"` tier in `PHASE_DEFAULT_MODELS` mirroring the codex tier (glm-5.2 across all
   phases) — with the same phase keys (`parse`, `fix`, `test`, `verify`, `exploration`,
   `per_stack_review`, `review`, `arbiter`, `wonder`, `envision`, `merge`, `intent`,
   `pr_feedback`).
