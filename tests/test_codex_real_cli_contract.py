@@ -107,6 +107,12 @@ async def test_real_golden_parses_to_expected_events() -> None:
     assert mev.cached_tokens is not None and mev.cached_tokens > 0, (
         f"real cached_input_tokens not surfaced: {mev.cached_tokens}"
     )
+    # #192: reasoning_output_tokens must surface (real golden carries 79 —
+    # 35% of output is reasoning, invisible before this change). Subset of
+    # completion_tokens, NOT additive.
+    assert mev.reasoning_tokens is not None and mev.reasoning_tokens > 0, (
+        f"real reasoning_output_tokens not surfaced: {mev.reasoning_tokens}"
+    )
 
     # Result event present (turn.completed → ResultEvent with continuation).
     result_events = [e for e in events if isinstance(e, ResultEvent)]
@@ -160,9 +166,13 @@ async def test_codex_live_smoke() -> None:
     }
     # Failure event types that indicate a broken live run; their presence must
     # fail the test rather than pass false-green on a non-empty-but-failed stream.
+    # Exception: quota/rate-limit failures are ENVIRONMENTAL, not code defects —
+    # the test skips on those so a rate-limited dev machine doesn't go red.
     failure_types = {"turn.failed", "error"}
+    quota_markers = ("usage limit", "rate limit", "quota", "credit", "upgrade to pro", "try again at")
     lines: list[str] = []
     failures: list[str] = []
+    failure_messages: list[str] = []
     assert proc.stdout is not None
     while True:
         raw = await proc.stdout.readline()
@@ -181,12 +191,27 @@ async def test_codex_live_smoke() -> None:
             _logger.warning("codex live smoke: unrecognized event type %r", etype)
         if etype in failure_types:
             failures.append(etype)
+            # Capture the human-readable message for skip-vs-fail discrimination.
+            msg = evt.get("message") or evt.get("error", {})
+            if isinstance(msg, dict):
+                msg = msg.get("message", "")
+            if isinstance(msg, str) and msg:
+                failure_messages.append(msg)
         lines.append(text)
     rc = await proc.wait()
 
     assert lines, "codex live smoke produced no JSONL output"
-    assert rc == 0, f"codex live smoke exited non-zero: rc={rc}"
-    assert not failures, f"codex live smoke reported failure events: {failures}"
+
+    # Environmental failures (quota / rate-limit / "try again at HH:MM") are
+    # skip conditions, not regressions — the live binary ran, the seam works,
+    # the account is just throttled. A genuine failure (parser drift, subprocess
+    # seam break) has no quota marker and correctly fails the test.
+    joined = " ".join(failure_messages).lower()
+    if rc != 0 or failures:
+        if any(marker in joined for marker in quota_markers):
+            pytest.skip(f"codex live smoke hit an environmental limit (rc={rc}): {failure_messages[:1]}")
+        assert rc == 0, f"codex live smoke exited non-zero: rc={rc}"
+        assert not failures, f"codex live smoke reported failure events: {failures}"
 
     # Feed the live lines through the parser and assert a non-empty stream.
     backend = CodexBackend(model="live-smoke-model")

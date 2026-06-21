@@ -557,11 +557,18 @@ class Invocation:
                 self._ensure_open_step()
                 target = self._open_step_dict
             assert target is not None
+            # #192: reasoning_tokens is a SUBSET of completion_tokens (not
+            # additive). Vendored Metrics has no dedicated field (D-03), so
+            # carry it via the documented extension carrier ``extra``.
+            metrics_extra: dict[str, Any] | None = None
+            if event.reasoning_tokens is not None:
+                metrics_extra = {"reasoning_tokens": event.reasoning_tokens}
             target["_metrics"] = Metrics(
                 prompt_tokens=event.prompt_tokens,
                 completion_tokens=event.completion_tokens,
                 cached_tokens=event.cached_tokens,
                 cost_usd=event.cost_usd,
+                extra=metrics_extra,
             )
             if event.model_name:
                 target["_model_name"] = event.model_name
@@ -582,20 +589,36 @@ class Invocation:
             target = self._open_step_dict
             existing = target["_metrics"]
             if existing is None:
+                # #192: reasoning_tokens (subset of completion_tokens) via
+                # Metrics.extra — vendored Metrics has no field (D-03).
+                cost_metrics_extra: dict[str, Any] | None = None
+                if event.reasoning_tokens is not None:
+                    cost_metrics_extra = {"reasoning_tokens": event.reasoning_tokens}
                 target["_metrics"] = Metrics(
                     prompt_tokens=event.input_tokens,
                     completion_tokens=event.output_tokens,
                     cached_tokens=event.cached_tokens,
                     cost_usd=event.cost_usd,
+                    extra=cost_metrics_extra,
                 )
             else:
                 # MetricsEvent already populated this step. Prefer the
                 # existing token counts but backfill cost_usd if it wasn't
                 # surfaced per-message.
+                updates: dict[str, Any] = {}
                 if existing.cost_usd is None and event.cost_usd is not None:
-                    target["_metrics"] = existing.model_copy(
-                        update={"cost_usd": event.cost_usd}
-                    )
+                    updates["cost_usd"] = event.cost_usd
+                # #192: backfill reasoning_tokens via Metrics.extra when the
+                # MetricsEvent path didn't carry it (mirrors cost_usd backfill).
+                if (
+                    event.reasoning_tokens is not None
+                    and (existing.extra is None or "reasoning_tokens" not in existing.extra)
+                ):
+                    merged_extra = dict(existing.extra or {})
+                    merged_extra["reasoning_tokens"] = event.reasoning_tokens
+                    updates["extra"] = merged_extra
+                if updates:
+                    target["_metrics"] = existing.model_copy(update=updates)
             if event.model_name:
                 target["_model_name"] = event.model_name
                 self.recorder._upgrade_model_name(event.model_name)

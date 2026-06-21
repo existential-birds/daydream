@@ -355,7 +355,15 @@ class CodexBackend:
                     # token-price table (D-16). cached_input_tokens IS surfaced (#65, K4).
                     # Rename input/output_tokens → prompt/completion; skip if either
                     # missing (EVNT-02 requires both). CostEvent below carries partials.
+                    #
+                    # #192: reasoning_output_tokens is the reasoning portion of
+                    # output_tokens — a SUBSET, NOT additive (codex's own
+                    # accounting.rs already counts these inside output_tokens, so
+                    # cost synthesis is unchanged). Surfaced for cost attribution
+                    # and perf observability (#171/#172/#186). OpenAI emits the
+                    # COUNT only — no reasoning content (openai/codex#26428).
                     cached_tokens = usage.get("cached_input_tokens")
+                    reasoning_tokens = usage.get("reasoning_output_tokens")
                     if usage.get("input_tokens") is not None and usage.get("output_tokens") is not None:
                         yield MetricsEvent(
                             message_id="",
@@ -363,6 +371,7 @@ class CodexBackend:
                             completion_tokens=usage["output_tokens"],
                             cached_tokens=cached_tokens,
                             cost_usd=None,
+                            reasoning_tokens=reasoning_tokens,
                             model_name=self.model,
                         )
                     yield CostEvent(
@@ -370,6 +379,7 @@ class CodexBackend:
                         input_tokens=usage.get("input_tokens"),
                         output_tokens=usage.get("output_tokens"),
                         cached_tokens=cached_tokens,
+                        reasoning_tokens=reasoning_tokens,
                         model_name=self.model,
                     )
 
