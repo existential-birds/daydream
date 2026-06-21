@@ -304,7 +304,6 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
     """
     result = Text()
 
-    # Drop mechanical/plumbing keys entirely so the line leads with meaningful args.
     items = [(key, value) for key, value in args.items() if key not in _MECHANICAL_TOOL_ARGS]
 
     for i, (key, value) in enumerate(items):

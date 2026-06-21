@@ -148,7 +148,6 @@ class CrazySpinner:
 
     """
 
-    # Multiple spinner pattern sets - each runs independently
     SPINNERS = [
         # Braille dots - vertical bounce
         ["⠁", "⠂", "⠄", "⡀", "⡀", "⠄", "⠂", "⠁"],
@@ -177,7 +176,6 @@ class CrazySpinner:
         """
         self._num_spinners = num_spinners
         self._frame = 0
-        # Each spinner gets a random-ish starting pattern and offset
         self._spinner_indices = [i % len(self.SPINNERS) for i in range(num_spinners)]
         self._offsets = [i * 2 for i in range(num_spinners)]
 
@@ -825,8 +823,6 @@ class LiveToolPanelRegistry:
         self._call_args.clear()
         self._task_labels.clear()
 
-    # Internal helpers
-
     def _ensure_live(self) -> None:
         """Start the shared ``Live`` if there are active panels."""
         if self._active_order:
@@ -1023,7 +1019,6 @@ class ShutdownPanel:
             self._live.stop()
             self._live = None
 
-        # Print the final panel (non-transient)
         if self._steps:
             self._console.print(self._render_panel())
 
