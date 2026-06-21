@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"th_noid"}
+{"type":"item.started","item":{"type":"command_execution","command":"echo one"}}
+{"type":"item.completed","item":{"type":"command_execution","command":"echo one","status":"completed","exit_code":0,"aggregated_output":"one"}}
+{"type":"item.started","item":{"type":"command_execution","command":"echo two"}}
+{"type":"item.completed","item":{"type":"command_execution","command":"echo two","status":"completed","exit_code":0,"aggregated_output":"two"}}
+{"type":"item.started","item":{"type":"mcp_tool_call","tool":"search","arguments":{"q":"foo"}}}
+{"type":"item.completed","item":{"type":"mcp_tool_call","tool":"search","arguments":{"q":"foo"},"result":{"content":"found"}}}
+{"type":"item.completed","item":{"type":"agent_message","text":"Done."}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}

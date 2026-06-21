@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -503,3 +504,153 @@ async def test_execute_raises_on_agents():
     with pytest.raises(NotImplementedError, match="Codex backend does not support exploration"):
         async for _ in backend.execute(Path("/tmp"), "Test", agents={"explorer": mock_agent}):
             pass
+
+
+# ---------------------------------------------------------------------------
+# Parser hardening (#153): deterministic tool-id correlation + observable
+# parse-failure paths. See .beagle/concepts/codex-parser-hardening/plan.md.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_well_formed_multi_tool_no_orphans(caplog: pytest.LogCaptureFixture) -> None:
+    """No-id item.started/completed pairs correlate via FIFO with zero orphans.
+
+    Drives ``item_started_no_id.jsonl``: two ``command_execution`` items and one
+    ``mcp_tool_call`` item, all lacking ``id`` and arriving in start order.
+    Every ToolResultEvent must pair with a ToolStartEvent (id-set equality) and
+    no parser warning may fire.
+    """
+    backend = CodexBackend(model="fixture-model")
+    mock_proc = make_mock_process_from_fixture("item_started_no_id.jsonl")
+
+    with (
+        patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc),
+        caplog.at_level(logging.WARNING, logger="daydream.backends.codex"),
+    ):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Run tools"):
+            events.append(event)
+
+    tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(tool_starts) == 3
+    assert len(tool_results) == 3
+    start_ids = {e.id for e in tool_starts}
+    result_ids = {e.id for e in tool_results}
+    assert start_ids == result_ids, (
+        f"every tool result must pair with a tool start; starts={start_ids} results={result_ids}"
+    )
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not warnings, [r.getMessage() for r in warnings]
+
+
+@pytest.mark.asyncio
+async def test_orphaned_tool_result_is_observable(caplog: pytest.LogCaptureFixture) -> None:
+    """Orphaned tool result (no matching item.started) emits an OBSERVABLE warning.
+
+    Drives ``orphaned_tool_result.jsonl``: a ``command_execution`` item.completed
+    with no preceding item.started. Pre-fix this silently bucketed the result
+    into ``unmatched_tool_results`` via a fresh random UUID. Post-fix the parser
+    must (a) log a WARNING identifiable from caplog and (b) emit the
+    ToolResultEvent with a deterministic ``codex-unmatched-<seq>`` id so the
+    trajectory recorder still buckets it without a silent drop.
+    """
+    backend = CodexBackend(model="fixture-model")
+    mock_proc = make_mock_process_from_fixture("orphaned_tool_result.jsonl")
+
+    with (
+        patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc),
+        caplog.at_level(logging.WARNING, logger="daydream.backends.codex"),
+    ):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Orphan"):
+            events.append(event)
+
+    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(tool_results) == 1
+    assert tool_results[0].id == "codex-unmatched-0", (
+        f"orphan should receive a deterministic sequence id; got {tool_results[0].id!r}"
+    )
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("unmatched tool result" in w for w in warnings), (
+        f"expected an 'unmatched tool result' WARNING; got {warnings}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_structured_output_warns(caplog: pytest.LogCaptureFixture) -> None:
+    """Malformed structured-output agent_text emits an OBSERVABLE warning.
+
+    Drives ``malformed_structured_output.jsonl``: agent_text is the literal
+    string "this is not valid JSON" while ``output_schema`` is set. Pre-fix the
+    ``except json.JSONDecodeError: pass`` swallowed this and silently degraded
+    to ``structured_result=None``. Post-fix the parser must log a WARNING
+    identifiable from caplog; the ResultEvent continues to carry
+    ``structured_output=None`` (the schema parse genuinely failed).
+    """
+    backend = CodexBackend(model="fixture-model")
+    mock_proc = make_mock_process_from_fixture("malformed_structured_output.jsonl")
+    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
+
+    with (
+        patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc),
+        caplog.at_level(logging.WARNING, logger="daydream.backends.codex"),
+    ):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
+            events.append(event)
+
+    result_events = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(result_events) == 1
+    assert result_events[0].structured_output is None
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("structured output parse failed" in w for w in warnings), (
+        f"expected a 'structured output parse failed' WARNING; got {warnings}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixture", "expected_substring"),
+    [
+        # Top-level ``text`` wins (real Codex CLI format).
+        ("toplevel_text.jsonl", "Missing yield"),
+        # ``content[].type == "text"`` block extraction.
+        ("simple_text.jsonl", "Hello from Codex"),
+        # ``content[].type == "output_text"`` block extraction.
+        ("output_text_blocks.jsonl", "Bad import"),
+    ],
+)
+def test_text_extraction_precedence(fixture: str, expected_substring: str) -> None:
+    """Per-shape text extraction across the three Codex item shapes.
+
+    Each fixture exercises exactly one shape; ``_extract_text`` must return the
+    expected substring. The dedicated ``test_text_extraction_top_level_wins``
+    below pins the precedence between top-level ``text`` and ``content[]`` blocks
+    when both are present.
+    """
+    fixture_path = FIXTURES_DIR / fixture
+    lines = fixture_path.read_text().strip().split("\n")
+    items = [json.loads(line) for line in lines if "item.completed" in line]
+    candidates = [i["item"] for i in items if i["item"].get("type") == "agent_message"]
+    assert candidates, f"no agent_message item.completed in {fixture}"
+    extracted = CodexBackend._extract_text(candidates[0])
+    assert expected_substring in extracted, (
+        f"fixture={fixture} extracted={extracted!r} expected substring={expected_substring!r}"
+    )
+
+
+def test_text_extraction_top_level_wins_over_content_blocks() -> None:
+    """When BOTH top-level text and content[] blocks are set, top-level wins.
+
+    Pinning the precedence: the per-shape fixtures above each carry only one
+    shape, so this test fixes the relative ordering between the two paths.
+    """
+    item = {
+        "text": "TOP-LEVEL",
+        "content": [{"type": "text", "text": "BLOCK"}, {"type": "output_text", "text": "OUTPUT"}],
+    }
+    assert CodexBackend._extract_text(item) == "TOP-LEVEL"
