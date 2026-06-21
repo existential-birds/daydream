@@ -5,11 +5,11 @@ from __future__ import annotations
 import inspect
 import json
 import re
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 
@@ -451,9 +451,12 @@ async def run_agent(
             agent_renderer = AgentTextRenderer(console)
 
         try:
-            event_iter = backend.execute(
-                cwd, prompt, output_schema, continuation,
-                agents=agents, max_turns=max_turns, read_only=read_only,
+            event_iter = cast(
+                AsyncGenerator[Any, None],
+                backend.execute(
+                    cwd, prompt, output_schema, continuation,
+                    agents=agents, max_turns=max_turns, read_only=read_only,
+                ),
             )
         except Exception as exc:
             print_error(console, "Backend Init Error", f"{type(exc).__name__}: {exc}")
@@ -603,6 +606,10 @@ async def run_agent(
             if budget_reason is None and wall_cancelled:
                 budget_reason = "wall_budget_exceeded"
             if budget_reason is not None:
+                try:
+                    await event_iter.aclose()
+                except Exception:  # noqa: BLE001 - abort must not raise into the CLI
+                    pass
                 try:
                     await backend.cancel()
                 except Exception:  # noqa: BLE001 - abort must not raise into the CLI
