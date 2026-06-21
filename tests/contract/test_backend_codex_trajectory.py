@@ -149,9 +149,13 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
         )
         call_ids = {tc.tool_call_id for tc in (act_step.tool_calls or [])}
         result_ids = {r.source_call_id for r in observation.results}
-        assert result_ids & call_ids, (
-            f"ACT span on step {act_step.step_id}: tool result id {result_ids} "
-            f"not paired with tool call id {call_ids}"
+        # issubset, not intersection: intersection (&) would only prove at
+        # least one match, letting a step with mixed matched/unmatched results
+        # pass false-green. Every result id must correspond to a call id.
+        assert result_ids.issubset(call_ids), (
+            f"ACT span on step {act_step.step_id}: unpaired tool result ids "
+            f"{sorted(str(r) for r in (result_ids - call_ids))} "
+            f"not present in tool call ids {sorted(str(c) for c in call_ids)}"
         )
 
     # Step.metrics present with prompt/completion tokens (turn-granular, D-04).
