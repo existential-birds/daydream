@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import re
 from collections.abc import AsyncGenerator, Callable
 from contextlib import nullcontext
@@ -29,6 +28,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.config import UNKNOWN_SKILL_PATTERN
+from daydream.json_utils import extract_json
 from daydream.trajectory import DaydreamPhase, get_current_recorder
 from daydream.ui import (
     AgentTextRenderer,
@@ -642,11 +642,11 @@ async def run_agent(
         return structured_result, result_continuation, aborted_reason
     if output_schema is not None:
         raw = "".join(output_parts)
-        # Fallback: JSON-parse the raw text when structured output failed.
+        # Fallback: extract JSON from the raw text when structured output
+        # failed. Uses robust extraction (handles prose-wrapped JSON and
+        # markdown code fences — common with GLM and other OpenAI-compat models).
         if raw.strip():
-            try:
-                parsed = json.loads(raw)
+            parsed = extract_json(raw)
+            if parsed is not None:
                 return parsed, result_continuation, aborted_reason
-            except (json.JSONDecodeError, ValueError):
-                pass
     return "".join(output_parts), result_continuation, aborted_reason

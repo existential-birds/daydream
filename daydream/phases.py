@@ -1548,11 +1548,15 @@ If there are no actionable issues, return: {{"issues": []}}
 
     if not isinstance(result, dict) or "issues" not in result:
         # When structured output and JSON fallback both fail (e.g. empty
-        # response), treat as "no issues" rather than crashing.
-        if isinstance(result, str) and not result.strip():
-            print_warning(console, "Agent returned empty response; treating as no actionable issues")
-            return []
-        raise ValueError(f"Expected dict with 'issues' key, got {type(result)}")
+        # response or model returns prose instead of JSON), treat as "no
+        # issues" rather than crashing the entire run.
+        preview = str(result)[:200] if result else "empty"
+        print_warning(
+            console,
+            f"Agent returned no parseable issues (got {type(result).__name__}); "
+            f"treating as no actionable issues. Preview: {preview}",
+        )
+        return []
 
     feedback_items = result["issues"]
     issue_count = len(feedback_items)
