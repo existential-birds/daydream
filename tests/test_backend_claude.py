@@ -316,6 +316,11 @@ def test_read_only_bash_guard_decision(cmd, allowed):
     ("rm --recursive --force /", True),       # long-form flags
     ("rm -Rf /", True),                       # capital-R recursive
     ("rm -rf foo /", True),                   # trailing root arg
+    # Recursive flag NOT first: a non-recursive option token preceding it must
+    # not let the wipe slip past the guard (CodeRabbit #185).
+    ("rm --force --recursive /", True),       # long-form, recursive second
+    ("rm -f -r /", True),                     # short-form, recursive second
+    ("rm -i -r /*", True),                    # recursive second, root glob
     ("rm -rf /home/user/tmp", False),         # subpath under / is left alone
     ("rm -rf build", False),                  # relative path
     # F12: `/` as the grep pattern (not a root path) is no longer a false positive.
