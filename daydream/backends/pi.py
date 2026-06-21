@@ -149,18 +149,16 @@ def _schema_instruction(schema: dict[str, Any]) -> str:
 def _resolve_skill_dir(skill_key: str) -> Path | None:
     """Best-effort resolution of a Beagle skill key to its on-disk directory.
 
-    Pi has no skill registry (Beagle skills are Claude Code plugins), so
-    :meth:`PiBackend.format_skill_invocation` injects a path reference. This
-    helper searches the standard plugin locations for a directory whose slug
-    matches ``skill_key`` and contains a ``SKILL.md``. The full Beagle
-    skill-path resolver is tracked separately (design doc Phase 2); this is the
-    sufficient-for-parity implementation. Note this is a parallel skill-location
-    mechanism: :func:`daydream.deep.orchestrator.get_installed_skills` answers
-    "are the Beagle skills installed?" by reading the Claude Code plugin
-    registry instead of walking the filesystem, so the two can disagree on
-    where the Beagle skills live — consolidate them when the full resolver
-    lands. Returns ``None`` when unresolved — the caller degrades gracefully
-    and never raises.
+    Searches the standard plugin locations for a directory whose slug
+    matches ``skill_key`` and contains a ``SKILL.md``. Returns ``None``
+    when unresolved; the caller degrades gracefully and this function
+    never raises.
+
+    Note: this is a parallel skill-location mechanism —
+    :func:`daydream.deep.orchestrator.get_installed_skills` answers the
+    same question by reading the Claude Code plugin registry. The two
+    can disagree on where the Beagle skills live; consolidate when the
+    full resolver lands.
     """
     slug = skill_key.split(":")[-1]
     home = Path.home()
@@ -287,10 +285,8 @@ class PiBackend:
                 subagent maps and will raise if provided.
             max_turns: NOT enforced by Pi (no direct turn-count flag). Documented
                 gap; the argument is accepted for protocol parity only.
-            read_only: When True, restrict Pi's tools to the read-only subset
+            read_only: When True, restricts Pi's tools to the read-only subset
                 (``read,find,ls,grep``) so the agent cannot write/edit/bash.
-                Cleaner than Codex's read-only sandbox — bash exclusion also
-                blocks ``git commit``.
 
         Yields:
             AgentEvent instances.
@@ -433,7 +429,7 @@ class PiBackend:
                 event_type = event.get("type", "")
 
                 if event_type == "agent_start":
-                    pass
+                    pass  # Lifecycle marker; nothing to emit.
 
                 elif event_type == "message_end":
                     msg = event.get("message") or {}

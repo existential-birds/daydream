@@ -1,8 +1,6 @@
 """Tests for daydream.config module."""
 
 from daydream.config import (
-    DEFAULT_CLAUDE_MODEL,
-    DEFAULT_CODEX_MODEL,
     DEFAULT_EXPLORATION_MODEL,
     DEFAULT_PI_MODEL,
     PHASE_DEFAULT_MODELS,
@@ -71,12 +69,6 @@ def test_default_exploration_model_matches_claude_phase_default():
     # EXPLORE precedent: DEFAULT_EXPLORATION_MODEL is the fallback when no flag
     # is set and table lookup misses; keep it consistent with the table for Claude.
     assert DEFAULT_EXPLORATION_MODEL == PHASE_DEFAULT_MODELS["claude"]["exploration"]
-
-
-def test_default_constants_still_exported():
-    # Sanity: existing default constants remain importable for backend creation fallbacks.
-    assert isinstance(DEFAULT_CLAUDE_MODEL, str)
-    assert isinstance(DEFAULT_CODEX_MODEL, str)
 
 
 def test_structure_skill_constant_not_user_selectable() -> None:

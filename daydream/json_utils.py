@@ -47,7 +47,7 @@ def extract_json(text: str) -> Any:
     # Fast path — the entire text is valid JSON.
     try:
         return json.loads(cleaned)
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         pass
 
     # Slow path — find the first balanced JSON object/array within the text.
@@ -60,7 +60,7 @@ def extract_json(text: str) -> Any:
         candidates.append((brace_idx, "{", "}"))
     if bracket_idx != -1:
         candidates.append((bracket_idx, "[", "]"))
-    candidates.sort()  # by position in text
+    candidates.sort()
 
     for _, start_char, end_char in candidates:
         scan_from = 0
@@ -97,7 +97,7 @@ def extract_json(text: str) -> Any:
             candidate = cleaned[start_idx : end_idx + 1]
             try:
                 return json.loads(candidate)
-            except (json.JSONDecodeError, ValueError):
+            except ValueError:
                 # This balanced span is unparseable; scan forward for a later
                 # valid span of the same brace type before giving up on it.
                 scan_from = end_idx + 1

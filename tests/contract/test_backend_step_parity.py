@@ -38,7 +38,7 @@ async def _run_backend_against_canonical(
 
 
 def _compare_steps(left: list[Step], right: list[Step]) -> None:
-    assert len(left) == len(right), f"step count: claude={len(left)} codex={len(right)}"
+    assert len(left) == len(right), f"step count: left={len(left)} right={len(right)}"
     for li, ri in zip(left, right, strict=True):
         assert li.message == ri.message
         assert li.reasoning_content == ri.reasoning_content
