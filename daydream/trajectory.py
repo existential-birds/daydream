@@ -539,6 +539,19 @@ class Invocation:
         elif isinstance(event, MetricsEvent):
             # EVNT-02 attribute names verbatim (D-15: cached_tokens is a
             # SUBSET of prompt_tokens, not added).
+            #
+            # D-04 correlation fallback (Codex): Codex emits no per-message
+            # id, so MetricsEvent.message_id is always '' on the Codex path.
+            # In the common Codex case a TurnEndEvent closes the content Step
+            # before turn.completed fires, so this MetricsEvent arrives with
+            # no open Step and the ``target is None`` branch below opens a
+            # fresh Step to hold the metrics. Correlation is therefore
+            # TURN-granular for Codex — one MetricsEvent per turn.completed →
+            # one metrics-bearing Step per turn — which is coarser than
+            # Claude's per-message correlation via message_id. This is the
+            # documented, tested fallback for the missing id surface (see
+            # tests/contract/test_backend_codex_trajectory.py); it is not a
+            # silent coarsening.
             target = self._open_step_dict
             if target is None:
                 self._ensure_open_step()
