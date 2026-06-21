@@ -18,7 +18,7 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import ResultEvent, TextEvent, ToolStartEvent
 
 
 class _StubBackend:
@@ -75,6 +75,17 @@ class _StubBackend:
         # When set, the fix branch raises for the matching file, isolating one
         # file-group's failure so a test can assert the others still applied.
         self.fix_fail_file: str | None = None
+        # When True, the fix branch yields a long burst of ToolStartEvents and
+        # NEVER emits a ResultEvent -- simulating a runaway turn. Without the
+        # in-loop tool-call budget in run_agent this stream never completes and
+        # the run hangs; with it, the loop aborts after tool_call_budget calls.
+        self.runaway_fix: bool = False
+        # When True, the test-suite branch emits a Postgres-unreachable signature
+        # (infra down, not a code bug) so phase_test_and_heal's
+        # is_environmental_failure() short-circuit fires. The heal-fix branch then
+        # writes ``.daydream-heal-fix-applied`` -- a sentinel that MUST be absent
+        # when the short-circuit aborts before re-entering a fix turn (AC#6b).
+        self.environmental_test_failure: bool = False
 
     async def execute(
         self,
@@ -305,6 +316,14 @@ class _StubBackend:
         # phase_fix -> "apply" the edit by writing a sentinel file, the observable
         # consequence the --yes real-path test asserts the fix gate auto-approved.
         if pl.startswith("fix this issue"):
+            if self.runaway_fix:
+                # Emit a long burst of tool calls and NEVER a ResultEvent. A
+                # generator that never returns models the 1.5-5h time-tail the
+                # tool-call budget exists to cut; the budget breaks the loop.
+                for n in range(500):
+                    yield ToolStartEvent(id=f"tc-{n}", name="Bash", input={"command": "find /"})
+                    await anyio.sleep(0)
+                return
             m = re.search(r"^File: (.+)$", prompt, re.M)
             fixed_file = m.group(1).strip() if m else "unknown"
             # phase_fix emits an absolute path when the file exists on disk; the stub keys fixes by basename.
@@ -343,12 +362,34 @@ class _StubBackend:
             )
             return
 
+        # Heal-loop fix turn (prompt starts with "The tests failed."). Writes a
+        # distinct sentinel so a test can assert the heal loop DID re-enter a fix
+        # turn -- and, by its ABSENCE, that the environmental short-circuit aborted
+        # before any fix turn ran (AC#6b).
+        if pl.startswith("the tests failed"):
+            (cwd / ".daydream-heal-fix-applied").write_text("healed\n")
+            yield TextEvent(text="Attempted to fix the test failures.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
         # Test-and-heal run. The prompt is constant, so a call counter drives the
         # result: with fail_first_test_run set, the FIRST run fails (heal loop
-        # reaches choice "2") and subsequent runs pass.
+        # reaches choice "2") and subsequent runs pass. With
+        # environmental_test_failure set, every run emits a Postgres-unreachable
+        # signature -- detect_test_success() is False AND is_environmental_failure()
+        # is True, so the heal loop must abort before a fix turn.
         if "run the project's test suite" in pl:
             self.test_suite_calls += 1
-            if self.fail_first_test_run and self.test_suite_calls == 1:
+            if self.environmental_test_failure:
+                yield TextEvent(
+                    text=(
+                        "could not connect to server: Connection refused\n"
+                        "\tIs the server running on host localhost (127.0.0.1) "
+                        "and accepting TCP/IP connections on port 5432?\n"
+                        "The dev Postgres container is not running."
+                    )
+                )
+            elif self.fail_first_test_run and self.test_suite_calls == 1:
                 yield TextEvent(text="1 failed, 0 passed")
             else:
                 yield TextEvent(text="2 passed, 0 failed")
@@ -2669,3 +2710,149 @@ async def test_merge_resume_skips_arbiter_when_marker_present(
 
     arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
     assert arbiter_calls == [], "arbiter must not re-run when the completion marker is present"
+
+
+async def test_run_terminates_under_tool_call_budget(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC#6a real-path: a runaway fix turn is capped by the tool-call budget.
+
+    The stub's fix branch yields an unbounded burst of ToolStartEvents and never
+    a ResultEvent (the 1.5-5h time-tail #169 targets). Driven through the real
+    ``runner.run`` -> deep orchestrator -> ``phase_fix_parallel`` -> ``run_agent``
+    path with a small ``tool_call_budget``, the loop must break, ``run`` must
+    return an int exit code (no hang/exception), and the aborted turn's ATIF step
+    must carry ``extra["stop_reason"]``.
+
+    Discriminating: without the in-loop tool-call budget in ``run_agent`` the
+    stub stream never completes, so ``run`` never returns -- the ``fail_after``
+    timeout turns that regression into a failure instead of an infinite hang.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    # Patch the binding actually read at the fix call site (Task 5 imported the
+    # constant INTO daydream.phases); patching only daydream.config would not take
+    # effect because phases already resolved the name at import time.
+    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.runaway_fix = True
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(
+            RunConfig(
+                target=str(multi_stack_target),
+                trajectory_path=traj,
+                assume="yes",
+                output_mode="loop",
+                cleanup=False,
+            )
+        )
+
+    assert isinstance(exit_code, int)
+
+    # The aborted fix turn runs inside a sibling (forked) trajectory under the
+    # per-run dir, so scan every trajectory JSON written for this run for a step
+    # whose extra carries a stop_reason -- the observable proof the turn aborted.
+    run_root = multi_stack_target / ".daydream"
+    stop_reasons: list[str] = []
+    for tf in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
+        try:
+            payload = json.loads(tf.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for step in payload.get("steps", []):
+            reason = (step.get("extra") or {}).get("stop_reason")
+            if reason:
+                stop_reasons.append(reason)
+
+    assert stop_reasons, "no trajectory step recorded extra['stop_reason']; budget did not trip"
+    assert "tool_call_budget_exceeded" in stop_reasons
+
+
+async def test_environmental_failure_aborts_heal_loop(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC#6b real-path: an environmental test failure aborts heal without a fix turn.
+
+    Drives the REAL ``phase_test_and_heal`` through ``runner.run`` -> deep
+    orchestrator. The stub's test-suite branch emits a Postgres-unreachable
+    signature, so ``detect_test_success`` is False AND ``is_environmental_failure``
+    is True. The orchestrator's short-circuit (Task 6) must return failure BEFORE
+    re-entering a fix turn -- so the heal-fix sentinel
+    ``.daydream-heal-fix-applied`` must NEVER be written.
+
+    ``assume="yes"`` opts into a SINGLE bounded auto fix-and-retry, so this test
+    is DISCRIMINATING without hanging: remove the environmental short-circuit and
+    the heal loop runs exactly one fix turn (then aborts), writing the sentinel.
+    With the short-circuit in place the sentinel is absent, the run returns an int
+    failure exit code, and a TEST-phase trajectory step is recorded with no fix.
+    """
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.environmental_test_failure = True  # every test run reports infra-down
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    async def _stub_commit(backend, work):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    # phase_test_and_heal stays REAL so the environmental short-circuit runs.
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+
+    from daydream.runner import RunConfig, run
+
+    traj = tmp_path / "trajectory.json"
+    config = RunConfig(
+        target=str(multi_stack_target),
+        trajectory_path=traj,
+        assume="yes",
+        output_mode="loop",
+        cleanup=False,
+    )
+    exit_code = await run(config)
+
+    # Environmental failure is not healable -> run reports failure, not success.
+    assert isinstance(exit_code, int)
+    assert exit_code != 0, "environmental failure must surface as a non-zero exit, not be healed"
+
+    # The observable proof: the heal loop NEVER re-entered a fix turn, so the
+    # heal-fix sentinel was never written. (Discriminating: without the
+    # short-circuit, choice "2" would write this file.)
+    heal_sentinel = multi_stack_target / ".daydream-heal-fix-applied"
+    assert not heal_sentinel.exists(), (
+        "heal-fix sentinel exists -- the environmental short-circuit did not "
+        "abort before re-entering a fix turn"
+    )
+    # And no heal-fix prompt was ever dispatched to the backend.
+    heal_prompts = [c for c in stub.calls if c["prompt"].lower().startswith("the tests failed")]
+    assert not heal_prompts, "a heal fix prompt was dispatched despite environmental abort"
+
+    # The environmental outcome is observable: the test phase ran (the suite was
+    # invoked) and a TEST-phase trajectory step was recorded for this run.
+    assert stub.test_suite_calls >= 1, "test suite never ran -- heal phase not reached"
+    run_root = multi_stack_target / ".daydream"
+    saw_test_step = False
+    for tf in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
+        try:
+            payload = json.loads(tf.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for step in payload.get("steps", []):
+            if (step.get("extra") or {}).get("daydream_phase") == "test":
+                saw_test_step = True
+    assert saw_test_step, "no TEST-phase trajectory step recorded -- heal phase not reached"

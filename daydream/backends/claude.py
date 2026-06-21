@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -12,6 +13,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookJSONOutput
 from claude_agent_sdk.types import (
     AgentDefinition,
     AssistantMessage,
+    HookCallback,
     ResultMessage,
     TextBlock,
     ThinkingBlock,
@@ -57,6 +59,15 @@ _DANGEROUS_TOKENS: frozenset[str] = frozenset({"|", ";", "&", "`", "$"})
 # ``.*`` fires the guard for EVERY tool call so it can fail-closed (allow only
 # the safe set); a deny-list of mutating tools was fail-open.
 _READ_ONLY_HOOK_MATCHER = ".*"
+
+# Catastrophic Bash commands denied in ALL phases (always-on guard, #177). These
+# are the runaway-turn pathologies: full-filesystem-root scans that take hours,
+# plus an unrecoverable wipe. Matched on the raw command via regex.
+_DANGEROUS_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*find\s+/(\s|$)"),       # find / ...  (root-anchored scan)
+    re.compile(r"^\s*grep\b.*\s/(\s|$)"),    # grep ... /  (root-anchored recursive)
+    re.compile(r"^\s*rm\s+-rf?\s+/(\s|$)"),  # rm -rf /    (catastrophic wipe)
+)
 
 # Tools unconditionally permitted under the read-only profile (Bash handled
 # separately via the command allowlist).
@@ -148,6 +159,36 @@ async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> H
     )
 
 
+def _is_dangerous_command(cmd: str) -> bool:
+    """Return True if *cmd* is a catastrophic Bash command (always-on deny-list).
+
+    Matches full-filesystem-root scans (``find /``, ``grep ... /``) and ``rm -rf /``
+    — the runaway-turn pathologies. Conservative: a scoped path (``find core/...``)
+    or a non-matching command (``ls``, ``rg foo src/``) returns False.
+    """
+    return any(pattern.search(cmd) for pattern in _DANGEROUS_COMMAND_PATTERNS)
+
+
+async def _dangerous_command_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
+    """PreToolUse hook denying catastrophic Bash commands in ALL phases (#177).
+
+    Registered unconditionally. Allows everything except a small deny-list of
+    root-anchored scans and wipes (see ``_is_dangerous_command``). Codex has no
+    equivalent PreToolUse seam (out of scope; its enforcement is ``--sandbox``).
+    """
+    tool_name = input_data.get("tool_name") if isinstance(input_data, dict) else None
+    if tool_name != "Bash":
+        return {}
+    tool_input = input_data.get("tool_input") if isinstance(input_data, dict) else None
+    command = ""
+    if isinstance(tool_input, dict):
+        raw = tool_input.get("command")
+        command = raw if isinstance(raw, str) else ""
+    if _is_dangerous_command(command):
+        return _read_only_deny(f"dangerous command blocked (always-on guard): {command!r}")
+    return {}
+
+
 class ClaudeBackend:
     """Backend that wraps the Claude Agent SDK.
 
@@ -198,8 +239,13 @@ class ClaudeBackend:
             else None
         )
 
-        # Read-only profile: the PreToolUse hook — NOT allowed_tools — is the
-        # enforcement, since bypassPermissions leaves the tool list unrestricted.
+        # PreToolUse hooks — NOT allowed_tools — are the enforcement, since
+        # bypassPermissions leaves the tool list unrestricted. The dangerous-command
+        # guard is always-on (all phases, #177); the read-only guard composes on top
+        # when read_only=True.
+        pre_tool_use_hooks: list[HookCallback] = [_dangerous_command_guard]
+        if read_only:
+            pre_tool_use_hooks.append(_read_only_guard)
         options = ClaudeAgentOptions(
             cwd=str(cwd),
             permission_mode="bypassPermissions",
@@ -209,11 +255,9 @@ class ClaudeBackend:
             output_format=output_format,
             max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
             max_turns=max_turns,
-            hooks=(
-                {"PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=[_read_only_guard])]}
-                if read_only
-                else None
-            ),
+            hooks={
+                "PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=pre_tool_use_hooks)]
+            },
         )
 
         if agents:

@@ -305,6 +305,22 @@ def test_read_only_bash_guard_decision(cmd, allowed):
     assert _is_read_only_command(cmd) is allowed
 
 
+@pytest.mark.parametrize("cmd, dangerous", [
+    ("find / -path '*x*'", True),
+    ("find / -name y", True),
+    ("grep -r pattern /", True),
+    ("rm -rf /", True),
+    ("find core/osprey-tui -name agent.rs", False),
+    ("ls", False),
+    ("rg foo src/", False),
+])
+def test_is_dangerous_command(cmd, dangerous):
+    """The always-on dangerous-command predicate flags root-scans and catastrophic deletes."""
+    from daydream.backends.claude import _is_dangerous_command
+
+    assert _is_dangerous_command(cmd) is dangerous
+
+
 @pytest.mark.asyncio
 async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
     """read_only=True wires a fail-closed PreToolUse guard onto the SDK options.
@@ -330,43 +346,77 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
     matchers = hooks["PreToolUse"]
     assert len(matchers) == 1
     matcher = matchers[0]
-    assert matcher.hooks  # at least one callback registered
-    guard = matcher.hooks[0]
+    assert matcher.hooks  # callbacks registered
 
-    deny_write = await guard(
-        {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {}
+    async def decide(payload):
+        # Mirror the SDK: run every registered hook; first deny wins.
+        for hook in matcher.hooks:
+            out = await hook(payload, None, {})
+            if out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
+                return out
+        return {}
+
+    deny_write = await decide(
+        {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}
     )
     assert deny_write["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    deny_bash = await guard(
-        {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}, None, {}
+    deny_bash = await decide(
+        {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}
     )
     assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    allow_bash = await guard(
-        {"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}, None, {}
+    allow_bash = await decide(
+        {"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}
     )
     assert "hookSpecificOutput" not in allow_bash
-    allow_read = await guard({"tool_name": "Read", "tool_input": {"file_path": "x"}}, None, {})
+    allow_read = await decide({"tool_name": "Read", "tool_input": {"file_path": "x"}})
     assert "hookSpecificOutput" not in allow_read
 
     # Fail-closed: a narrow deny-list matcher would never present an unknown tool to the guard.
-    deny_unknown = await guard({"tool_name": "FutureMutator", "tool_input": {}}, None, {})
+    deny_unknown = await decide({"tool_name": "FutureMutator", "tool_input": {}})
     assert deny_unknown["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # read_only=True also composes the always-on dangerous-command guard: a root scan denies.
+    deny_find_root = await decide(
+        {"tool_name": "Bash", "tool_input": {"command": "find / -name x"}}
+    )
+    assert deny_find_root["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 @pytest.mark.asyncio
-async def test_non_read_only_execute_registers_no_hook(patch_sdk):
-    """read_only=False (default) leaves the normal fix/test profile untouched — no hook."""
+async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk):
+    """read_only=False (default) still wires the always-on dangerous-command guard.
+
+    The guard is registered unconditionally (all phases). Drive the callback that
+    was actually built onto the production options: a ``find /`` root scan denies,
+    a scoped ``find core/...`` allows.
+    """
     patch_sdk(MockClaudeSDKClientCapture)
     backend = ClaudeBackend(model="opus")
 
-    async for _ in backend.execute(Path("/tmp"), "Go"):
+    async for _ in backend.execute(Path("/tmp"), "Go", read_only=False):
         pass
 
     opts = MockClaudeSDKClientCapture.captured_options
     assert opts is not None
-    assert getattr(opts, "hooks", None) is None
+    hooks = opts.hooks
+    assert hooks is not None and "PreToolUse" in hooks
+    matchers = hooks["PreToolUse"]
+    assert len(matchers) == 1
+    guard = matchers[0].hooks[0]
+
+    deny_find_root = await guard(
+        {"tool_name": "Bash", "tool_input": {"command": "find / -name x"}}, None, {}
+    )
+    assert deny_find_root["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    allow_find_scoped = await guard(
+        {"tool_name": "Bash", "tool_input": {"command": "find core/osprey-tui -name agent.rs"}},
+        None,
+        {},
+    )
+    assert "hookSpecificOutput" not in allow_find_scoped
 
 
 @pytest.mark.asyncio

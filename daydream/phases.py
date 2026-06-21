@@ -18,6 +18,7 @@ from daydream.agent import (
     get_assume,
     get_non_interactive,
     get_quiet_mode,
+    is_environmental_failure,
     resolve_gate,
     resolve_or_prompt,
     run_agent,
@@ -36,7 +37,7 @@ from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
-from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.config import DEFAULT_TOOL_CALL_BUDGET, REVIEW_OUTPUT_FILE
 from daydream.ui import (
     phase_subtitle,
     print_dim,
@@ -1651,6 +1652,7 @@ async def phase_verify_recommendations(
         prompt,
         output_schema=RECOMMENDATION_VERDICTS_SCHEMA,
         max_turns=25,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         phase=DaydreamPhase.VERIFY,
     )
 
@@ -1789,10 +1791,15 @@ findings with extra skepticism here.
         await run_agent(
             backend, work.repo, prompt,
             phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             progress_callback=_cb,
         )
     else:
-        await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS)
+        await run_agent(
+            backend, work.repo, prompt,
+            phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        )
     async with (console_lock if console_lock is not None else anyio.Lock()):
         print_fix_complete(console, item_num, total)
 
@@ -2013,6 +2020,16 @@ async def phase_test_and_heal(
 
         print_warning(console, "Tests may have failed or result is unclear.")
 
+        # An infrastructure failure (DB/cache unreachable) cannot be healed by an
+        # agent fix turn, so abort before the heal gate instead of burning a retry.
+        if is_environmental_failure(output):
+            print_warning(
+                console,
+                "Test failure looks environmental (infrastructure unavailable); "
+                "skipping heal loop.",
+            )
+            return False, retries_used
+
         # Test-heal retry gate across the two interaction axes. With no human at
         # the keyboard, the menu's default "2" (fix-and-retry) would launch an
         # unbounded, mutating fix loop with nothing to stop it -- so the
@@ -2039,6 +2056,7 @@ async def phase_test_and_heal(
             fix_prompt = _build_fix_prompt(output, feedback_items, repo=work.repo)
             _, _ = await run_agent(
                 backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             )
             retries_used += 1
             continuation = None
@@ -2092,6 +2110,7 @@ async def phase_test_and_heal(
             fix_prompt = _build_fix_prompt(output, feedback_items, repo=work.repo)
             _, _ = await run_agent(
                 backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             )
             retries_used += 1
             continuation = None
@@ -2400,7 +2419,10 @@ async def phase_understand_intent(
         console.print()
         print_info(console, "Agent is analyzing the changes...")
 
-        output, _ = await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.INTENT)
+        output, _ = await run_agent(
+            backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        )
         intent_text = output if isinstance(output, str) else str(output)
 
         console.print()
