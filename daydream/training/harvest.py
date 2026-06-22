@@ -28,8 +28,11 @@ Signal sources (all under the archived run directory):
 
 Failure-propagation rules:
 
-* Absent structured artifacts ⇒ ``verifier_verdicts=None`` (the shallow-run
-  path); ``format_valid`` stays ``True`` because nothing failed to parse.
+* Absent verdicts ⇒ ``verifier_verdicts=None`` with the format gate intact —
+  expected for two run shapes keyed off the manifest's ``deep`` flag
+  (``row["deep"]``), not file presence: a shallow run (``deep`` false) never
+  produces verdicts, and a declined deep run (``deep`` true) skips
+  recommendation verification at the apply-fixes gate.
 * A *present* verdicts/records file that is malformed JSON ⇒ caught as
   :class:`json.JSONDecodeError` and surfaced as ``format_valid=False``;
   assembly never crashes on bad data.
@@ -179,14 +182,20 @@ def assemble_scoring_inputs(run_dir: Path, row: dict[str, Any]) -> ScoringInputs
     Reads the structured bronze artifacts under ``run_dir/deep`` and the
     review-output length proxy, combining them with the indexed
     ``grounding_rate`` into the capture-time signals the reward reducer
-    consumes. Absent artifacts yield the shallow-run path
-    (``verifier_verdicts=None``); a present-but-malformed structured
-    artifact sets ``format_valid=False`` without raising.
+    consumes. Absent verdicts yield ``verifier_verdicts=None`` and leave the
+    format gate intact; this is expected for *two* run shapes, keyed off the
+    manifest's ``deep`` flag (``row["deep"]``, emitted by
+    ``archive/manifest.py``) rather than the verdicts file's presence: a
+    genuine shallow run (``deep`` false) and a declined deep run (``deep``
+    true) whose recommendation-verification was skipped at the apply-fixes
+    gate. A present-but-malformed structured artifact sets
+    ``format_valid=False`` without raising.
 
     Args:
         run_dir: The archived run directory (bronze bundle root).
         row: The indexed manifest row; ``row["grounding_rate"]`` supplies the
-            grounding axis (``None`` when unavailable).
+            grounding axis (``None`` when unavailable) and ``row["deep"]``
+            classifies the verdicts-absent case (shallow vs. declined deep).
 
     Returns:
         A :class:`ScoringInputs` with the verdicts list (or ``None``), the
@@ -205,7 +214,13 @@ def assemble_scoring_inputs(run_dir: Path, row: dict[str, Any]) -> ScoringInputs
         if isinstance(verdicts, list):
             verifier_verdicts = verdicts
     except FileNotFoundError:
-        # Shallow run — no structured verdicts; nothing failed to parse.
+        # No structured verdicts; nothing failed to parse. Expected for two run
+        # shapes, distinguished by the manifest's ``deep`` flag (row["deep"]) —
+        # not by this file's presence: a shallow run (deep false) never produces
+        # verdicts, and after the verify relocation a declined deep run (deep
+        # true) skips recommendation verification at the apply-fixes gate, so it
+        # writes the deep bundle without a verdicts file. Both yield
+        # ``verifier_verdicts=None`` with the format gate intact.
         pass
     except json.JSONDecodeError:
         # Present but malformed ⇒ format gate floors.

@@ -1966,6 +1966,42 @@ def test_intent_phase_resolves_to_sonnet_default(
     )
 
 
+async def test_intent_phase_runs_on_sonnet_through_runner_run(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#171 real-path: the intent phase Sonnet downgrade must be observable
+    through the runner.run production entrypoint, not only at the unit seam.
+
+    The unit-level assertion (test_intent_phase_resolves_to_sonnet_default) pins
+    ``_resolve_backend(RunConfig(), "intent", {})`` directly. This is its
+    real-path counterpart: it drives runner.run via _run_deep (which calls
+    ``await run(config)``), captures the model on the backend that actually
+    executes the intent prompt via _install_model_capturing_stubs, and asserts
+    it is claude-sonnet-4-6 (mid tier). Mirrors the exact pattern of
+    test_per_stack_sonnet_merge_opus_and_arbiter_on_high_severity. Regression: a
+    revert of the intent default to Opus fails this assertion.
+    """
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch, multi_stack_target, parse_severity="high", merge_echo_records=True
+    )
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    # "understand the intent of these changes" is unique to build_intent_prompt
+    # (phases.py) -- the established intent-phase prompt discriminator.
+    intent_models = [
+        c["model"]
+        for c in calls
+        if "understand the intent of these changes" in c["prompt"].lower()
+    ]
+    assert intent_models, "intent phase did not execute through runner.run"
+    assert set(intent_models) == {"claude-sonnet-4-6"}, (
+        f"intent phase should run on claude-sonnet-4-6 (mid tier), got {sorted(intent_models)!r}"
+    )
+
+
 async def test_verifier_runs_after_merge_before_fix(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
