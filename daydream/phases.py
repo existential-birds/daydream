@@ -2743,7 +2743,7 @@ async def phase_per_stack_reviews(
     from daydream.deep import prompts as _prompts
     from daydream.deep.artifacts import deep_dir as _deep_dir
     from daydream.deep.artifacts import per_stack_review_path
-    from daydream.deep.orchestrator import _diff_blocks_for_files
+    from daydream.deep.prompts import _diff_blocks_for_files
 
     deep_dir_path = _deep_dir(work.repo)
     recorder = get_current_recorder()
@@ -2942,6 +2942,147 @@ async def phase_arbiter_review(
     return verdicts
 
 
+def _append_structural_and_write_merged(
+    base_items: list[dict[str, Any]],
+    structural_records_path: Path | None,
+    items_path: Path,
+    report_path: Path,
+    canonical_path: Path,
+) -> None:
+    """Append structural records to ``base_items`` and write the merged artifacts.
+
+    Single source of truth for the structural-tagging + write epilogue shared
+    by ``phase_cross_stack_merge`` (multi-stack) and
+    ``_write_single_stack_merged_items`` (tiny-diff bypass, issue #172), so the
+    merge-write contract lives in exactly one place instead of being copied.
+
+    Performs the shared sequence:
+      - parse ``structural_records_path`` with graceful degradation to ``[]``
+        on malformed/missing output (a prior agent run may have emitted bad
+        JSON -- degrade rather than crash);
+      - append structural findings tagged ``lens="structural"`` with HIGH/high
+        confidence/severity defaults -- the structural lens is high-conviction
+        by construction and must not be demoted at sort time;
+      - normalize the combined list (fresh unique ids) and write the canonical
+        ``merged-items.json``;
+      - render ``review-output.md`` from the canonical items and copy it to
+        ``canonical_path`` (the deep artifact dir avoids sandbox write
+        restrictions on repo-root dotfiles).
+
+    Callers own the clear-stale step: each clears ``items_path`` /
+    ``report_path`` / ``canonical_path`` at a point appropriate to its own
+    failure semantics (``phase_cross_stack_merge`` clears *before* the merge
+    agent runs so a crash leaves no stale output; the single-stack bypass has
+    no agent, so it clears immediately before this call). Keeping clear-stale
+    out of this helper preserves both error-handling contracts.
+
+    Args:
+        base_items: Non-structural records (merge-agent items or per-stack
+            records already tagged ``lens="per-stack"``).
+        structural_records_path: Optional path to the parsed structural
+            meta-stack records JSON. ``None`` when no structural review ran.
+        items_path: Canonical ``merged-items.json`` path.
+        report_path: Rendered report path inside the deep artifact dir.
+        canonical_path: Repo-root canonical report (``REVIEW_OUTPUT_FILE``).
+
+    """
+    from daydream.deep.render import render_report
+
+    # Append structural findings in Python, tagged lens="structural". They are
+    # parsed FEEDBACK_SCHEMA records ({id, description, file, line}) and carry no
+    # confidence/severity, so default both to HIGH/high -- the structural lens is
+    # high-conviction by construction and must not be demoted at sort time.
+    structural_items: list[dict[str, Any]] = []
+    if structural_records_path is not None and structural_records_path.is_file():
+        try:
+            structural_records = json.loads(structural_records_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            # Structural records come from a prior agent run that may have emitted
+            # malformed output; degrade to none rather than crash the merge.
+            print_warning(console, f"Skipping malformed structural records: {type(exc).__name__}: {exc}")
+            structural_records = []
+        for rec in structural_records:
+            structural_items.append(
+                {
+                    **rec,
+                    "lens": "structural",
+                    "confidence": rec.get("confidence", "HIGH"),
+                    "severity": rec.get("severity", "high"),
+                }
+            )
+
+    items = normalize_items(base_items + structural_items)
+    items_path.write_text(json.dumps({"items": items}, indent=2))
+    print_info(console, f"Merged into {len(items)} items")
+
+    # Render the human report FROM the canonical items, then copy from the deep
+    # artifact dir to the canonical location (the deep dir avoids sandbox write
+    # restrictions on repo-root dotfiles).
+    report_path.write_text(render_report(items))
+    canonical_path.write_text(report_path.read_text())
+
+
+def _write_single_stack_merged_items(
+    repo: Path,
+    deep_dir_path: Path,
+    all_records: list[dict[str, Any]],
+    structural_records_path: Path | None,
+) -> None:
+    """Write the canonical ``merged-items.json`` for a tiny-diff run (issue #172).
+
+    Replaces ``phase_cross_stack_merge`` for single-stack-mode runs: there is
+    nothing to cross-stack-merge and nothing contested to arbitrate, so the
+    host writes the canonical item list directly. The structural-tagging +
+    write epilogue is shared with ``phase_cross_stack_merge`` via
+    ``_append_structural_and_write_merged`` so downstream consumers (fix gate,
+    verifier, PR posting) consume items unchanged (AC6).
+
+    Owns only the single-stack-specific steps ``phase_cross_stack_merge``
+    delegates to its merge agent:
+      - clears stale ``merged-items.json`` / ``review-output.md`` /
+        canonical ``REVIEW_OUTPUT_FILE`` so a failed prior run can't leave
+        behind outdated content;
+      - tags per-stack records with ``lens="per-stack"`` (the merge agent
+        normally does this; in single-stack mode the host does it);
+      - delegates the structural append + normalize + render + copy to
+        ``_append_structural_and_write_merged``.
+
+    Args:
+        repo: Repository root (``work.repo``); the canonical report is written
+            alongside the deep artifact directory.
+        deep_dir_path: Deep artifact directory (``target / .daydream / deep``).
+        all_records: Non-structural parsed per-stack records (already
+            partitioned by the caller). Carries ``severity`` / ``confidence``
+            / ``rationale`` from ``PER_STACK_RECORD_SCHEMA`` but no ``lens``.
+        structural_records_path: Optional path to the parsed structural
+            meta-stack records JSON. ``None`` when no structural review ran.
+
+    """
+    from daydream.deep.artifacts import merged_items_path, merged_report_path
+
+    canonical_path = repo / REVIEW_OUTPUT_FILE
+    report_path = merged_report_path(deep_dir_path)
+    items_path = merged_items_path(deep_dir_path)
+
+    # Clear stale outputs (mirrors phase_cross_stack_merge).
+    canonical_path.unlink(missing_ok=True)
+    report_path.unlink(missing_ok=True)
+    items_path.unlink(missing_ok=True)
+
+    # Tag per-stack records (the merge agent normally sets lens; here the host
+    # does it). ``severity`` is already present from PER_STACK_RECORD_SCHEMA.
+    per_stack_items: list[dict[str, Any]] = [
+        {**rec, "lens": "per-stack"} for rec in all_records
+    ]
+
+    # Structural append + normalize + render + copy is shared with
+    # phase_cross_stack_merge (via _append_structural_and_write_merged) so the
+    # lens taxonomy and downstream verifier accounting stay identical (AC6).
+    _append_structural_and_write_merged(
+        per_stack_items, structural_records_path, items_path, report_path, canonical_path
+    )
+
+
 async def phase_cross_stack_merge(
     backend: Backend,
     work: WorkContext,
@@ -2999,7 +3140,6 @@ async def phase_cross_stack_merge(
     """
     from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path
     from daydream.deep.prompts import build_merge_prompt
-    from daydream.deep.render import render_report
 
     dd = deep_dir(work.repo)
     canonical_path = work.repo / REVIEW_OUTPUT_FILE
@@ -3034,36 +3174,12 @@ async def phase_cross_stack_merge(
         raise ValueError(f"Cross-stack merge returned no item list (got {type(result).__name__})")
     agent_items: list[dict[str, Any]] = result["items"]
 
-    # Append structural findings in Python, tagged lens="structural". They are
-    # parsed FEEDBACK_SCHEMA records ({id, description, file, line}) and carry no
-    # confidence/severity, so default both to HIGH/high -- the structural lens is
-    # high-conviction by construction and must not be demoted at sort time.
-    structural_items: list[dict[str, Any]] = []
-    if structural_records_path is not None and structural_records_path.is_file():
-        try:
-            structural_records = json.loads(structural_records_path.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
-            # Structural records come from a prior agent run that may have emitted
-            # malformed output; degrade to none rather than crash the merge.
-            print_warning(console, f"Skipping malformed structural records: {type(exc).__name__}: {exc}")
-            structural_records = []
-        for rec in structural_records:
-            structural_items.append(
-                {
-                    **rec,
-                    "lens": "structural",
-                    "confidence": rec.get("confidence", "HIGH"),
-                    "severity": rec.get("severity", "high"),
-                }
-            )
-
-    items = normalize_items(agent_items + structural_items)
-    items_path.write_text(json.dumps({"items": items}, indent=2))
-    print_info(console, f"Merged into {len(items)} items")
-
-    # Render the human report FROM the canonical items, then copy from the deep
-    # artifact dir to the canonical location (the deep dir avoids sandbox write
-    # restrictions on repo-root dotfiles).
-    report_path.write_text(render_report(items))
-    canonical_path.write_text(report_path.read_text())
+    # Structural append + normalize + render + copy is shared with
+    # _write_single_stack_merged_items via _append_structural_and_write_merged
+    # so the lens taxonomy and downstream verifier accounting stay identical
+    # (AC6). The structural-tagging + graceful-malformed-degradation rationale
+    # is documented there.
+    _append_structural_and_write_merged(
+        agent_items, structural_records_path, items_path, report_path, canonical_path
+    )
     return canonical_path

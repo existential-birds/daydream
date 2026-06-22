@@ -268,7 +268,13 @@ class _FakeSDKClient:
         # The structural parse (FEEDBACK_SCHEMA, no ``severity`` in the prompt)
         # returns empty — the per-stack record drives the assertion below.
         if "extract only actionable issues" in pl or "read the review output file" in pl:
-            if "severity" in pl:  # PER_STACK_RECORD_SCHEMA (per-stack parse)
+            # phase_parse_feedback injects the ``severity`` hint/field into the
+            # prompt ONLY when PER_STACK_RECORD_SCHEMA is passed (per-stack parse);
+            # the structural parse uses FEEDBACK_SCHEMA, whose prompt omits
+            # ``severity`` entirely. So the word ``severity`` in the prompt text
+            # is the fingerprint that distinguishes the two schemas.
+            is_per_stack_parse = "severity" in pl
+            if is_per_stack_parse:  # PER_STACK_RECORD_SCHEMA (per-stack parse)
                 issues = [
                     {
                         "id": 1,

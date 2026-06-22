@@ -398,7 +398,7 @@ def test_diff_blocks_for_files_selects_relevant_hunks() -> None:
     """AC4 helper: ``_diff_blocks_for_files`` returns only the blocks for the
     requested files (post-state path match), concatenated as-is.
     """
-    from daydream.deep.orchestrator import _diff_blocks_for_files
+    from daydream.deep.prompts import _diff_blocks_for_files
 
     out = _diff_blocks_for_files(_DIFF_TWO_FILES, ["api.py"])
     assert out is not None
@@ -418,7 +418,7 @@ def test_diff_blocks_for_files_returns_none_above_byte_budget() -> None:
     ``INLINE_DIFF_BUDGET_BYTES``, the helper returns ``None`` so the caller
     keeps the path pointer (the agent is told to Read diff.patch directly).
     """
-    from daydream.deep.orchestrator import INLINE_DIFF_BUDGET_BYTES, _diff_blocks_for_files
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES, _diff_blocks_for_files
 
     # Synthesize a diff whose single matching block exceeds the budget.
     huge_line = "x" * (INLINE_DIFF_BUDGET_BYTES + 64)
@@ -434,7 +434,7 @@ def test_diff_blocks_for_files_returns_none_above_byte_budget() -> None:
 
 def test_diff_blocks_for_files_returns_none_when_no_blocks_match() -> None:
     """AC4 no-match fallback: files not in the diff → None (caller keeps pointer)."""
-    from daydream.deep.orchestrator import _diff_blocks_for_files
+    from daydream.deep.prompts import _diff_blocks_for_files
 
     out = _diff_blocks_for_files(_DIFF_TWO_FILES, ["nonexistent.py"])
     assert out is None
@@ -444,7 +444,7 @@ def test_per_stack_prompt_inlines_hunks_and_drops_read_instruction(tmp_path: Pat
     """AC4 (unit): per-stack prompt with ``inline_diff`` supplied contains the
     inlined hunks, NOT the ``Read it directly`` instruction or diff_path.
     """
-    from daydream.deep.orchestrator import _diff_blocks_for_files
+    from daydream.deep.prompts import _diff_blocks_for_files
 
     p = _paths(tmp_path)
     inline = _diff_blocks_for_files(_DIFF_TWO_FILES, ["api.py"])
@@ -467,7 +467,7 @@ def test_generic_fallback_prompt_inlines_hunks_and_drops_read_instruction(
     """AC4 (unit): generic-fallback prompt with ``inline_diff`` supplied contains
     the inlined hunks, NOT the ``Read it directly`` instruction or diff_path.
     """
-    from daydream.deep.orchestrator import _diff_blocks_for_files
+    from daydream.deep.prompts import _diff_blocks_for_files
 
     p = _paths(tmp_path)
     inline = _diff_blocks_for_files(_DIFF_TWO_FILES, ["App.tsx"])

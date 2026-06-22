@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import uuid
 from dataclasses import asdict, is_dataclass
@@ -44,11 +43,11 @@ from daydream.deep.artifacts import (
     intent_path as _intent_path,
 )
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
-from daydream.deep.detection import StackAssignment, detect_stacks
+from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.phases import (
     FEEDBACK_SCHEMA,
     PER_STACK_RECORD_SCHEMA,
-    normalize_items,
+    _write_single_stack_merged_items,
     phase_alternative_review,
     phase_arbiter_review,
     phase_commit_push,
@@ -88,21 +87,14 @@ try:
 except ImportError:  # pragma: no cover -- only hit when Phases 1-4 absent
     EXPLORATION_AVAILABLE = False
 
-# Per-file block splitter (splits the unified diff at each `diff --git` header).
-_DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
-# `+++ ` and `--- ` file headers inside a single block.
-_DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (\S+)", re.MULTILINE)
-_DIFF_MINUS_HEADER = re.compile(r"^--- (\S+)", re.MULTILINE)
-# Fallback header for binary / mode-only diffs that lack `--- / +++`.
-_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)")
-
-
-# Issue #172 — Read-once diff hunks (Fix B). Upper byte bound for the inlined
-# diff section in per-stack / generic prompts. Above this bound the helper
-# returns ``None`` and the prompt falls back to the diff_path pointer so the
-# prompt size stays bounded. ~12 KiB comfortably fits a few hundred lines of
-# unified diff without bloating the per-stack review prompts.
-INLINE_DIFF_BUDGET_BYTES = 12_288
+# Per-file diff block splitter + the shared per-block path resolver live in
+# ``daydream.deep.prompts`` (canonical home of the diff-text -> prompt
+# primitives). Imported here because ``_diff_changed_files`` shares them with
+# ``prompts._diff_blocks_for_files`` (issue #172 Fix B).
+from daydream.deep.prompts import (
+    _DIFF_BLOCK_SPLIT,
+    _diff_block_path,
+)
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
 _PIPELINE_STAGE_NAMES: list[str] = [
@@ -137,9 +129,10 @@ def total_agent_count(stack_count: int) -> int:
 # Issue #172 — tiny-diff short-circuit. A diff with at most this many changed
 # files collapses the per-language fan-out to a single combined assignment and
 # skips the merge agent + arbiter (a tiny diff has nothing to cross-stack-merge
-# and nothing contested to arbitrate). Both levers are required for AC1 because
-# a 1-file single-language diff is already only 2 stacks (lang + structure);
-# the count reduction for that case comes entirely from skipping merge+arbiter.
+# and nothing contested to arbitrate). A 1-file single-language diff is already
+# only 2 stacks (lang + structure), so the collapse is a no-op there and the
+# count reduction for that case comes entirely from skipping merge+arbiter
+# (lever 2); see ``_single_stack_agent_count``.
 DEFAULT_SHALLOW_FANOUT_THRESHOLD = 2
 
 
@@ -196,10 +189,12 @@ def _collapse_stacks_for_tiny_diff(
 
     When ``0 < len(changed_files) <= threshold``:
 
-      - If ≥2 distinct *non-structural* stacks exist, merge them into a single
-        combined ``generic`` assignment (a single agent cannot invoke two
-        per-language Beagle skills, so the combined review uses the generic
-        fallback skill).
+      - If ≥2 distinct *non-structural* stacks exist, merge them into one
+        combined assignment. A code+docs/config diff (exactly one *real*
+        language stack plus the ``generic`` bucket) absorbs the generic files
+        into the language stack so its per-language Beagle skill survives; only
+        ≥2 *real* language stacks fall back to ``generic`` (a single agent
+        cannot invoke two per-language Beagle skills).
       - The ``STRUCTURE_STACK_NAME`` meta-stack stays as its own assignment so
         structural findings remain correctly tagged ``lens="structural"``
         downstream (AC6).
@@ -226,16 +221,38 @@ def _collapse_stacks_for_tiny_diff(
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
 
     # When ≥2 distinct non-structural stacks exist, merge them into one combined
-    # generic-fallback assignment (preserve the per-language skill for the
-    # common 1-language tiny-diff case).
+    # assignment. The combined skill depends on how many *real* language stacks
+    # are present:
+    #   - exactly one real language stack + the generic bucket (a code+docs/config
+    #     tiny diff, e.g. api.py + README.md): absorb the generic files into the
+    #     language stack so its per-language Beagle skill survives (the
+    #     skill-preservation goal stated in this docstring).
+    #   - ≥2 real language stacks (e.g. python + react): a single agent cannot
+    #     invoke two per-language Beagle skills, so fall back to generic.
     if len(non_structural) >= 2:
         combined_files = sorted({f for s in non_structural for f in s.files})
-        # A combined review cannot invoke two per-language Beagle skills, so the
-        # combined assignment uses the generic-fallback skill (skill_invocation=None).
-        # is_docs_only is False by construction: ≥2 non-structural stacks means at
-        # least one is a real language stack (docs-only diff → single generic stack).
+        real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
+        if len(real_language) == 1:
+            lang = real_language[0]
+            return (
+                [
+                    *structural,
+                    StackAssignment(
+                        stack_name=lang.stack_name,
+                        skill_invocation=lang.skill_invocation,
+                        files=combined_files,
+                        is_docs_only=False,
+                    ),
+                ],
+                True,
+            )
+        # ≥2 real-language stacks: one agent cannot invoke two per-language
+        # Beagle skills, so the combined assignment uses the generic-fallback
+        # skill (skill_invocation=None). is_docs_only is False by construction:
+        # ≥2 non-structural stacks means at least one is a real language stack
+        # (docs-only diff → single generic stack).
         combined = StackAssignment(
-            stack_name="generic",
+            stack_name=GENERIC_STACK,
             skill_invocation=None,
             files=combined_files,
             is_docs_only=False,
@@ -245,93 +262,6 @@ def _collapse_stacks_for_tiny_diff(
     # 0 or 1 non-structural stacks: nothing to collapse (lever 1 is a no-op), but
     # the gate is still active so the caller applies lever 2 (skip merge+arbiter).
     return stacks, True
-
-
-def _write_single_stack_merged_items(
-    repo: Path,
-    deep_dir_path: Path,
-    all_records: list[dict[str, Any]],
-    structural_records_path: Path | None,
-) -> None:
-    """Write the canonical ``merged-items.json`` for a tiny-diff run (issue #172).
-
-    Replaces ``phase_cross_stack_merge`` for single-stack-mode runs: there is
-    nothing to cross-stack-merge and nothing contested to arbitrate, so the
-    host writes the canonical item list directly. Reuses ``normalize_items``
-    and the **exact** structural-tagging logic from
-    ``phase_cross_stack_merge`` so downstream consumers (fix gate, verifier,
-    PR posting) consume items unchanged (AC6).
-
-    Mirrors ``phase_cross_stack_merge``'s write contract:
-      - clears stale ``merged-items.json`` / ``review-output.md`` /
-        canonical ``REVIEW_OUTPUT_FILE`` so a failed prior run can't leave
-        behind outdated content;
-      - tags per-stack records with ``lens="per-stack"`` (the merge agent
-        normally does this; in single-stack mode the host does it);
-      - appends structural records tagged ``lens="structural"`` with the same
-        HIGH/high confidence/severity defaults;
-      - renders ``review-output.md`` from the canonical items and copies it
-        to ``repo / REVIEW_OUTPUT_FILE``.
-
-    Args:
-        repo: Repository root (``work.repo``); the canonical report is written
-            alongside the deep artifact directory.
-        deep_dir_path: Deep artifact directory (``target / .daydream / deep``).
-        all_records: Non-structural parsed per-stack records (already
-            partitioned by the caller). Carries ``severity`` / ``confidence``
-            / ``rationale`` from ``PER_STACK_RECORD_SCHEMA`` but no ``lens``.
-        structural_records_path: Optional path to the parsed structural
-            meta-stack records JSON. ``None`` when no structural review ran.
-
-    """
-    from daydream.deep.artifacts import merged_items_path, merged_report_path
-    from daydream.deep.render import render_report
-
-    canonical_path = repo / REVIEW_OUTPUT_FILE
-    report_path = merged_report_path(deep_dir_path)
-    items_path = merged_items_path(deep_dir_path)
-
-    # Clear stale outputs (mirrors phase_cross_stack_merge).
-    canonical_path.unlink(missing_ok=True)
-    report_path.unlink(missing_ok=True)
-    items_path.unlink(missing_ok=True)
-
-    # Tag per-stack records (the merge agent normally sets lens; here the host
-    # does it). ``severity`` is already present from PER_STACK_RECORD_SCHEMA.
-    per_stack_items: list[dict[str, Any]] = [
-        {**rec, "lens": "per-stack"} for rec in all_records
-    ]
-
-    # Append structural findings in Python, tagged lens="structural". Copy
-    # verbatim from phase_cross_stack_merge:3019-3036 so the lens taxonomy and
-    # downstream verifier accounting (orchestrator.py:849/854) stay identical.
-    structural_items: list[dict[str, Any]] = []
-    if structural_records_path is not None and structural_records_path.is_file():
-        try:
-            structural_records = json.loads(structural_records_path.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
-            print_warning(
-                console, f"Skipping malformed structural records: {type(exc).__name__}: {exc}"
-            )
-            structural_records = []
-        for rec in structural_records:
-            structural_items.append(
-                {
-                    **rec,
-                    "lens": "structural",
-                    "confidence": rec.get("confidence", "HIGH"),
-                    "severity": rec.get("severity", "high"),
-                }
-            )
-
-    items = normalize_items(per_stack_items + structural_items)
-    items_path.write_text(json.dumps({"items": items}, indent=2))
-    print_info(console, f"Merged into {len(items)} items")
-
-    # Render + copy (mirrors phase_cross_stack_merge:3045-3046) so the canonical
-    # ``REVIEW_OUTPUT_FILE`` exists for the exit message and resume recovery.
-    report_path.write_text(render_report(items))
-    canonical_path.write_text(report_path.read_text())
 
 
 def get_installed_skills() -> set[str] | None:
@@ -384,6 +314,10 @@ def _diff_changed_files(diff: str) -> list[str]:
     deletions (``+++ /dev/null``) and to the ``diff --git`` header for
     binary / mode-only diffs that lack ``---``/``+++`` lines.
 
+    The per-block path resolution is delegated to ``_diff_block_path`` so the
+    unified-diff parsing contract is shared with ``_diff_blocks_for_files``
+    rather than duplicated here.
+
     Args:
         diff: Unified diff text.
 
@@ -391,85 +325,12 @@ def _diff_changed_files(diff: str) -> list[str]:
         Unique, insertion-ordered list of changed file paths (excluding
         ``/dev/null`` sentinels).
     """
-
-    def _strip_prefix(path: str, prefix: str) -> str:
-        return path[len(prefix) :] if path.startswith(prefix) else path
-
     files: list[str] = []
     for block in _DIFF_BLOCK_SPLIT.split(diff):
-        if not block.startswith("diff --git "):
-            continue
-        path: str | None = None
-        plus = _DIFF_PLUS_HEADER.search(block)
-        if plus and plus.group(1) != "/dev/null":
-            path = _strip_prefix(plus.group(1), "b/")
-        if path is None:
-            minus = _DIFF_MINUS_HEADER.search(block)
-            if minus and minus.group(1) != "/dev/null":
-                path = _strip_prefix(minus.group(1), "a/")
-        if path is None:
-            git = _DIFF_GIT_HEADER.match(block)
-            if git:
-                path = git.group(2)
+        path = _diff_block_path(block)
         if path and path not in files:
             files.append(path)
     return files
-
-
-def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
-    """Return the concatenated diff blocks for ``files`` (issue #172, Fix B).
-
-    Reuses the existing per-file block splitter (``_DIFF_BLOCK_SPLIT`` regex at
-    :91) plus the post-state header regexes (``_DIFF_PLUS_HEADER`` /
-    ``_DIFF_MINUS_HEADER`` / ``_DIFF_GIT_HEADER``) to select the ``diff --git``
-    blocks whose post-state path matches a file in ``files``. The blocks are
-    concatenated as-is (unified-diff text, including headers / hunks).
-
-    Byte-bounded: when the concatenated result would exceed
-    ``INLINE_DIFF_BUDGET_BYTES`` the helper returns ``None`` so the caller
-    falls back to the diff_path pointer (keeps prompt size bounded). Also
-    returns ``None`` when no blocks match (e.g. files absent from the diff).
-
-    Args:
-        diff: Full unified diff text.
-        files: Repo-relative paths to select blocks for.
-
-    Returns:
-        The concatenated diff blocks (with a trailing newline), or ``None``
-        when the result would exceed the byte budget or no blocks match.
-    """
-    wanted = set(files)
-    if not wanted:
-        return None
-
-    def _strip_prefix(path: str, prefix: str) -> str:
-        return path[len(prefix) :] if path.startswith(prefix) else path
-
-    selected: list[str] = []
-    for block in _DIFF_BLOCK_SPLIT.split(diff):
-        if not block.startswith("diff --git "):
-            continue
-        path: str | None = None
-        plus = _DIFF_PLUS_HEADER.search(block)
-        if plus and plus.group(1) != "/dev/null":
-            path = _strip_prefix(plus.group(1), "b/")
-        if path is None:
-            minus = _DIFF_MINUS_HEADER.search(block)
-            if minus and minus.group(1) != "/dev/null":
-                path = _strip_prefix(minus.group(1), "a/")
-        if path is None:
-            git = _DIFF_GIT_HEADER.match(block)
-            if git:
-                path = git.group(2)
-        if path in wanted:
-            selected.append(block if block.endswith("\n") else block + "\n")
-
-    if not selected:
-        return None
-    result = "".join(selected)
-    if len(result.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES:
-        return None
-    return result
 
 
 def _stack_preflight_line(stack: StackAssignment) -> str:

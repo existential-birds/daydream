@@ -3233,6 +3233,43 @@ def test_collapse_stacks_for_tiny_diff_two_languages() -> None:
     assert _single_stack_agent_count(len(collapsed)) < baseline_count
 
 
+def test_collapse_stacks_for_tiny_diff_code_plus_docs_preserves_language_skill() -> None:
+    """Skill-preservation (unit): code+docs tiny diff keeps the per-language skill.
+
+    A code+docs/config tiny diff routes via ``detect_stacks`` to exactly one real
+    language stack plus the ``generic`` bucket (e.g. ``api.py`` + ``README.md`` →
+    ``python`` + ``generic``). That is a single-language diff, so the collapse
+    must absorb the generic files into the language stack and keep its
+    per-language Beagle skill -- NOT downgrade it to the generic fallback
+    (the skill-preservation goal stated in ``_collapse_stacks_for_tiny_diff``'s
+    docstring). Only ≥2 *real* language stacks fall back to generic.
+    """
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import (
+        _collapse_stacks_for_tiny_diff,
+        _single_stack_agent_count,
+        total_agent_count,
+    )
+
+    files = ["api.py", "README.md"]
+    stacks = detect_stacks(files)
+    # Baseline sanity: python (real language) + generic + structure.
+    assert [s.stack_name for s in stacks] == ["python", "generic", "structure"]
+    baseline_count = total_agent_count(len(stacks))  # 12
+
+    collapsed, single_stack_mode = _collapse_stacks_for_tiny_diff(stacks, files, threshold=2)
+    assert single_stack_mode is True
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    # The real-language skill survives (NOT downgraded to generic fallback).
+    assert combined.stack_name == "python"
+    assert combined.skill_invocation == "beagle-python:review-python"
+    # The docs file is absorbed into the language stack.
+    assert set(combined.files) == {"api.py", "README.md"}
+    assert _single_stack_agent_count(len(collapsed)) < baseline_count
+
+
 def test_collapse_stacks_for_tiny_diff_disabled_at_threshold_zero() -> None:
     """AC7 edge: threshold=0 disables the short-circuit (no collapse happens)."""
     from daydream.deep.detection import detect_stacks
@@ -3499,3 +3536,87 @@ async def test_ac_fix_resume_on_tiny_diff(
     assert rc == 0
     fix_prompts = [c for c in stub.calls if c["prompt"].startswith("Fix this issue")]
     assert fix_prompts, "fix loop did not run on --start-at fix resume"
+
+
+async def test_ac_merge_resume_on_tiny_diff(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #172: ``--start-at merge`` resume on a tiny diff routes to the
+    single-stack merge writer, not the multi-stack merge agent.
+
+    Every other ``start_at="merge"`` test drives ``multi_stack_target``. This
+    one drives the tiny-diff resume path the finding flagged as untested:
+    ``single_stack_mode`` is recomputed True for the 2-file diff at the top of
+    ``run_deep``, so the ``config.start_at == "merge"`` branch (which reloads
+    the collapsed-stack records from disk and re-partitions the structural
+    meta-stack) must route to ``_write_single_stack_merged_items`` rather than
+    ``phase_cross_stack_merge``.
+
+    ``phase_cross_stack_merge`` is patched to raise so a regression that fails
+    to recompute ``single_stack_mode`` on resume surfaces as a hard failure
+    instead of silently routing through the multi-stack merge agent.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tiny_diff_target)
+    # Regression guard: the multi-stack merge agent must NOT run in
+    # single_stack_mode. If the merge-resume branch misroutes here, raise.
+    async def _fail_merge(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("phase_cross_stack_merge must not run in single_stack_mode")
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_cross_stack_merge", _fail_merge)
+    # Stub the post-merge side effects so the run terminates cleanly.
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    # Prime the deep artifacts the merge-resume branch reads from disk. The
+    # tiny-diff collapse yields a ``generic`` (collapsed language) stack plus
+    # the ``structure`` meta-stack, so records files must match both.
+    deep = tiny_diff_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    (deep / "stack-generic-records.json").write_text(
+        json.dumps(
+            [{"id": "gen-1", "description": "generic per-stack issue", "file": "api.py", "line": 1}]
+        )
+    )
+    (deep / "stack-structure-records.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "structure-1",
+                    "description": "file-size budget violated",
+                    "file": "api.py",
+                    "line": 1,
+                }
+            ]
+        )
+    )
+
+    rc = await run(
+        RunConfig(target=str(tiny_diff_target), start_at="merge", cleanup=False)
+    )
+    assert rc == 0
+
+    items_file = tiny_diff_target / ".daydream" / "deep" / "merged-items.json"
+    assert items_file.is_file(), "single-stack merge resume did not write merged-items.json"
+    items = json.loads(items_file.read_text())["items"]
+    # ``normalize_items`` reassigns ``id`` to a contiguous sequence, so assert on
+    # the preserved ``description`` + ``lens`` instead. The generic record is
+    # tagged per-stack and the structural record keeps its structural lens (AC6
+    # — lens taxonomy survives the host-written merge).
+    assert any(
+        i.get("description") == "generic per-stack issue" and i.get("lens") == "per-stack"
+        for i in items
+    ), f"generic per-stack item missing or mislabeled: {items}"
+    assert any(
+        i.get("description") == "file-size budget violated" and i.get("lens") == "structural"
+        for i in items
+    ), f"structural item missing or mislabeled: {items}"
