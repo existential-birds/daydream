@@ -927,7 +927,8 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     # merge agent. Downstream consumers (fix gate, verifier, PR
                     # posting) read the canonical JSON unchanged (AC6).
                     _write_single_stack_merged_items(
-                        work.repo, dd, all_records, structural_records_path
+                        work.repo, dd, all_records, structural_records_path,
+                        failed_stacks=failed_stacks or None,
                     )
 
             print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])

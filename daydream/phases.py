@@ -3001,7 +3001,12 @@ def _append_structural_and_write_merged(
             # malformed output; degrade to none rather than crash the merge.
             print_warning(console, f"Skipping malformed structural records: {type(exc).__name__}: {exc}")
             structural_records = []
+        if not isinstance(structural_records, list):
+            print_warning(console, "Skipping non-list structural records; expected a list")
+            structural_records = []
         for rec in structural_records:
+            if not isinstance(rec, dict):
+                continue
             structural_items.append(
                 {
                     **rec,
@@ -3027,6 +3032,8 @@ def _write_single_stack_merged_items(
     deep_dir_path: Path,
     all_records: list[dict[str, Any]],
     structural_records_path: Path | None,
+    *,
+    failed_stacks: dict[str, str] | None = None,
 ) -> None:
     """Write the canonical ``merged-items.json`` for a tiny-diff run (issue #172).
 
@@ -3063,6 +3070,16 @@ def _write_single_stack_merged_items(
     canonical_path = repo / REVIEW_OUTPUT_FILE
     report_path = merged_report_path(deep_dir_path)
     items_path = merged_items_path(deep_dir_path)
+
+    # Surface failed stacks (CodeRabbit: single-stack bypass must not silently
+    # succeed when a reviewer crashed). The full merge path passes these into
+    # the merge prompt; here we warn so the failure is visible in the report.
+    if failed_stacks:
+        print_warning(
+            console,
+            f"Single-stack run completed with {len(failed_stacks)} failed stack(s): "
+            + ", ".join(sorted(failed_stacks)),
+        )
 
     # Clear stale outputs (mirrors phase_cross_stack_merge).
     canonical_path.unlink(missing_ok=True)

@@ -71,8 +71,8 @@ INLINE_DIFF_BUDGET_BYTES = 12_288
 # Per-file block splitter (splits the unified diff at each `diff --git` header).
 _DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
 # `+++ ` and `--- ` file headers inside a single block.
-_DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (\S+)", re.MULTILINE)
-_DIFF_MINUS_HEADER = re.compile(r"^--- (\S+)", re.MULTILINE)
+_DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (.+)$", re.MULTILINE)
+_DIFF_MINUS_HEADER = re.compile(r"^--- (.+)$", re.MULTILINE)
 # Fallback header for binary / mode-only diffs that lack `--- / +++`.
 _DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)")
 
