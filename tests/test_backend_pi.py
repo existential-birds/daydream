@@ -29,7 +29,6 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.backends.pi import (
-    _PI_AGENT_DIR_ENV,
     _PI_STDOUT_LIMIT_BYTES,
     PiBackend,
     PiError,
@@ -729,136 +728,19 @@ async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# PI_BASE_URL → temporary models.json override (plan §6)
+# Default --provider is zai; PI_PROVIDER overrides (extension-based provider)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_pi_base_url_writes_temporary_models_override(monkeypatch, tmp_path):
-    """PI_BASE_URL writes a temp models.json and sets PI_CODING_AGENT_DIR (plan §6).
+async def test_default_provider_is_zai(monkeypatch):
+    """Without PI_PROVIDER, --provider defaults to ``zai`` (matches DEFAULT_PI_MODEL).
 
-    The user's persistent ``~/.pi/agent/models.json`` is never mutated: pi is
-    pointed at a throwaway agent dir via ``PI_CODING_AGENT_DIR`` (verified in
-    pi's ``src/config.ts``), and the dir is removed once the run finishes.
+    The z.ai provider is registered by the ``~/.pi/extensions/zai-provider``
+    pi extension; daydream must always point pi at it so the default GLM model
+    resolves without relying on a user-configured models.json entry.
     """
-    # Point HOME at an empty dir so the merge source is absent (deterministic).
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PI_BASE_URL", "https://custom.example.com/v4")
-
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    # The temp dir is removed in execute()'s finally, so the models.json must
-    # be snapshotted at spawn time (before execute returns).
-    snapshot: dict[str, object] = {}
-
-    def _spawn(*args: object, **kwargs: object) -> object:
-        env = kwargs.get("env")
-        if isinstance(env, dict) and _PI_AGENT_DIR_ENV in env:
-            override_dir = Path(str(env[_PI_AGENT_DIR_ENV]))
-            snapshot["dir"] = override_dir
-            snapshot["models"] = json.loads((override_dir / "models.json").read_text())
-        return mock_proc
-
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", side_effect=_spawn):
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-
-    models = snapshot["models"]
-    # Default override provider is "zai" when PI_PROVIDER is unset.
-    assert models["providers"]["zai"]["baseUrl"] == "https://custom.example.com/v4"
-    # Temp dir is cleaned up once the run finishes (no leak).
-    assert not Path(snapshot["dir"]).exists()  # type: ignore[arg-type]
-
-
-@pytest.mark.asyncio
-async def test_pi_base_url_includes_api_key_and_provider(monkeypatch, tmp_path):
-    """PI_API_KEY / PI_PROVIDER flow into the override entry alongside baseUrl."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PI_BASE_URL", "https://custom.example.com/v4")
-    monkeypatch.setenv("PI_API_KEY", "secret-key")
-    monkeypatch.setenv("PI_PROVIDER", "my-proxy")
-
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    snapshot: dict[str, object] = {}
-
-    def _spawn(*args: object, **kwargs: object) -> object:
-        env = kwargs.get("env")
-        if isinstance(env, dict) and _PI_AGENT_DIR_ENV in env:
-            override_dir = Path(str(env[_PI_AGENT_DIR_ENV]))
-            snapshot["models"] = json.loads((override_dir / "models.json").read_text())
-        return mock_proc
-
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", side_effect=_spawn) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-
-    entry = snapshot["models"]["providers"]["my-proxy"]  # type: ignore[index]
-    assert entry["baseUrl"] == "https://custom.example.com/v4"
-    assert entry["apiKey"] == "secret-key"
-    # And the provider flag is still forwarded to the CLI.
-    flat_args = list(mock_exec.call_args.args)
-    assert flat_args[flat_args.index("--provider") + 1] == "my-proxy"
-
-
-@pytest.mark.asyncio
-async def test_pi_base_url_merges_existing_models_json(monkeypatch, tmp_path):
-    """The override merges (not replaces) the user's existing models.json.
-
-    A pre-existing provider entry is preserved; only the override provider's
-    baseUrl (and apiKey when given) is set on top. This is the "no clobber"
-    half of best-effort (plan §6).
-    """
-    existing = tmp_path / ".pi" / "agent" / "models.json"
-    existing.parent.mkdir(parents=True)
-    existing.write_text(
-        json.dumps(
-            {
-                "providers": {
-                    "ollama": {
-                        "baseUrl": "http://localhost:11434/v1",
-                        "apiKey": "ollama",
-                    }
-                }
-            }
-        )
-    )
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PI_BASE_URL", "https://custom.example.com/v4")
-
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    snapshot: dict[str, object] = {}
-
-    def _spawn(*args: object, **kwargs: object) -> object:
-        env = kwargs.get("env")
-        if isinstance(env, dict) and _PI_AGENT_DIR_ENV in env:
-            override_dir = Path(str(env[_PI_AGENT_DIR_ENV]))
-            snapshot["models"] = json.loads((override_dir / "models.json").read_text())
-        return mock_proc
-
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", side_effect=_spawn):
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-
-    models = snapshot["models"]
-    # Existing provider preserved.
-    assert models["providers"]["ollama"]["baseUrl"] == "http://localhost:11434/v1"  # type: ignore[index]
-    # Override applied on top.
-    assert models["providers"]["zai"]["baseUrl"] == "https://custom.example.com/v4"  # type: ignore[index]
-    # The user's persistent file is untouched.
-    assert json.loads(existing.read_text())["providers"] == {
-        "ollama": {
-            "baseUrl": "http://localhost:11434/v1",
-            "apiKey": "ollama",
-        }
-    }
-
-
-@pytest.mark.asyncio
-async def test_no_pi_base_url_means_no_agent_dir_env(monkeypatch):
-    """Without PI_BASE_URL there is no override: env is None (inherit parent)."""
-    monkeypatch.delenv("PI_BASE_URL", raising=False)
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
 
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
@@ -867,5 +749,21 @@ async def test_no_pi_base_url_means_no_agent_dir_env(monkeypatch):
         async for _ in backend.execute(Path("/tmp"), "p"):
             pass
 
-        # env=None → asyncio inherits the parent environment (no PI_CODING_AGENT_DIR).
-        assert mock_exec.call_args.kwargs.get("env") is None
+        flat_args = list(mock_exec.call_args.args)
+        assert flat_args[flat_args.index("--provider") + 1] == "zai"
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_override(monkeypatch):
+    """PI_PROVIDER overrides the z.ai default."""
+    monkeypatch.setenv("PI_PROVIDER", "my-proxy")
+
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), "p"):
+            pass
+
+        flat_args = list(mock_exec.call_args.args)
+        assert flat_args[flat_args.index("--provider") + 1] == "my-proxy"

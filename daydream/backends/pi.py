@@ -11,13 +11,15 @@ pattern; it emits the same event vocabulary so the existing
 :class:`daydream.trajectory.TrajectoryRecorder` produces valid ATIF v1.6
 trajectories indistinguishable in shape from the other two backends.
 
-z.ai coding plan wiring (GLM models) is configured once in
-``~/.pi/agent/models.json`` (see ``design.md`` §3); daydream never fabricates a
-base URL or cost table. Optional ``PI_PROVIDER`` / ``PI_API_KEY`` /
-``PI_THINKING`` env overrides are forwarded as CLI flags. ``PI_BASE_URL`` is not
-a CLI flag — when set, a throwaway models.json override is written and pi is
-pointed at it via ``PI_CODING_AGENT_DIR`` (plan §6), so the user's persistent
-``~/.pi/agent/models.json`` is never mutated.
+z.ai coding plan wiring (GLM models) is registered via a pi extension at
+``~/.pi/extensions/zai-provider/`` that calls ``pi.registerProvider()`` with
+``baseUrl``, ``apiKey``, ``api: "openai-completions"``, and the six GLM
+models (see https://pi.dev/docs/latest/custom-provider). daydream defaults
+``--provider`` to ``zai`` (matching ``DEFAULT_PI_MODEL = "glm-5.2"``) and
+forwards optional ``PI_PROVIDER`` / ``PI_API_KEY`` / ``PI_THINKING`` env
+overrides as CLI flags. The provider extension is installed once via
+``pi install ~/.pi/extensions/zai-provider``; daydream never fabricates a
+base URL or writes a models.json override.
 """
 
 from __future__ import annotations
@@ -25,8 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
-import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -69,19 +69,6 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
 
 # Read-only tool subset (plan §3). Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
-
-# Pi reads its agent config (models.json, auth.json, settings.json) from its
-# agent dir, which is overridable via PI_CODING_AGENT_DIR (verified in pi's
-# src/config.ts: ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`,
-# getAgentDir() honors it, getModelsPath() = join(getAgentDir(), "models.json")).
-# Used to write a throwaway models.json for PI_BASE_URL (plan §6) without
-# touching the user's persistent ~/.pi/agent/models.json.
-_PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
-
-# Default provider key the PI_BASE_URL override targets when PI_PROVIDER is
-# unset. The z.ai coding plan (DEFAULT_PI_MODEL = "glm-5.2") uses "zai"
-# (plan §3; matches a configured ~/.pi/agent/models.json).
-_PI_DEFAULT_OVERRIDE_PROVIDER = "zai"
 
 
 class PiError(Exception):
@@ -178,73 +165,6 @@ def _resolve_skill_dir(skill_key: str) -> Path | None:
     return None
 
 
-def _pi_agent_models_path() -> Path:
-    """Path to the user's persistent pi models.json (``~/.pi/agent/models.json``).
-
-    Computed at call time (not import) so ``HOME`` overrides in tests are
-    honored. Mirrors pi's own resolution: ``getModelsPath() ==
-    join(getAgentDir(), "models.json")`` with the default agent dir
-    ``~/.pi/agent`` (pi ``src/config.ts``).
-    """
-    return Path.home() / ".pi" / "agent" / "models.json"
-
-
-def _write_models_override(base_url: str, provider: str, api_key: str | None) -> Path:
-    """Write a throwaway models.json carrying a ``baseUrl`` override.
-
-    ``baseUrl`` is not a Pi CLI flag — it lives in pi's models.json (plan §6).
-    Pi locates models.json via its agent dir, which is overridable through the
-    ``PI_CODING_AGENT_DIR`` env var, so this builds a temporary agent dir
-    containing a models.json that *merges* the user's existing config with the
-    ``base_url`` override applied to ``provider`` (and ``api_key`` when given),
-    and returns the dir path for the caller to pass as that env var. The user's
-    persistent ``~/.pi/agent/models.json`` is never mutated.
-
-    Best-effort merge: an unreadable/absent/invalid existing models.json yields
-    a fresh config with just the override entry. Temp-dir/write failures raise
-    ``OSError`` so the caller can degrade to "no override" (plan §6:
-    best-effort).
-
-    Args:
-        base_url: The ``baseUrl`` to set on the provider entry (``PI_BASE_URL``).
-        provider: Provider key to override (``PI_PROVIDER`` or the z.ai default).
-        api_key: Optional ``apiKey`` to also set (``PI_API_KEY``).
-
-    Returns:
-        Path to the temporary agent dir containing the written ``models.json``.
-
-    """
-    temp_dir = Path(tempfile.mkdtemp(prefix="daydream-pi-models-"))
-    try:
-        config: dict[str, Any] = {"providers": {}}
-        existing = _pi_agent_models_path()
-        try:
-            if existing.is_file():
-                parsed = json.loads(existing.read_text(encoding="utf-8"))
-                if isinstance(parsed, dict):
-                    config = parsed
-        except (OSError, ValueError):
-            # Absent/unreadable/invalid existing config — start fresh.
-            config = {"providers": {}}
-        providers = config.get("providers")
-        if not isinstance(providers, dict):
-            providers = {}
-            config["providers"] = providers
-        entry = providers.get(provider)
-        if not isinstance(entry, dict):
-            entry = {}
-            providers[provider] = entry
-        entry["baseUrl"] = base_url
-        if api_key:
-            entry["apiKey"] = api_key
-        (temp_dir / "models.json").write_text(json.dumps(config), encoding="utf-8")
-    except OSError:
-        # Leave no half-written temp dir behind on failure.
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-    return temp_dir
-
-
 class PiBackend:
     """Backend that wraps the Pi CLI subprocess.
 
@@ -310,42 +230,14 @@ class PiBackend:
             self.model,
         ]
 
-        provider = os.environ.get("PI_PROVIDER")
+        provider = os.environ.get("PI_PROVIDER", "zai")
         api_key = os.environ.get("PI_API_KEY")
         thinking = os.environ.get("PI_THINKING")
-        base_url = os.environ.get("PI_BASE_URL")
-        if provider:
-            args.extend(["--provider", provider])
+        args.extend(["--provider", provider])
         if api_key:
             args.extend(["--api-key", api_key])
         if thinking:
             args.extend(["--thinking", thinking])
-
-        # PI_BASE_URL has no CLI flag — it lives in pi's models.json (plan §6).
-        # When set, write a throwaway models.json in a temp agent dir and point
-        # pi at it via PI_CODING_AGENT_DIR. The user's persistent config is
-        # never mutated; failures degrade to "no override" (best-effort).
-        models_override_dir: Path | None = None
-        sub_env: dict[str, str] | None = None
-        if base_url:
-            try:
-                models_override_dir = _write_models_override(
-                    base_url, provider or _PI_DEFAULT_OVERRIDE_PROVIDER, api_key
-                )
-                sub_env = {
-                    **os.environ,
-                    _PI_AGENT_DIR_ENV: str(models_override_dir),
-                }
-            except OSError:
-                from daydream.agent import console
-                from daydream.ui import print_warning
-
-                print_warning(
-                    console,
-                    "PI_BASE_URL is set but the temporary models.json override "
-                    "could not be written; set baseUrl in "
-                    "~/.pi/agent/models.json instead.",
-                )
 
         if read_only:
             args.extend(["--tools", _PI_READ_ONLY_TOOLS])
@@ -392,7 +284,6 @@ class PiBackend:
                 # below already `continue`s past non-JSON lines, so stray stderr
                 # text mixed into stdout is harmlessly skipped.
                 stderr=asyncio.subprocess.STDOUT,
-                env=sub_env,
                 limit=_PI_STDOUT_LIMIT_BYTES,
             )
             self._processes.append(proc)
@@ -564,8 +455,6 @@ class PiBackend:
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
-            if models_override_dir is not None:
-                shutil.rmtree(models_override_dir, ignore_errors=True)
             self._processes = [active for active in self._processes if active is not proc]
             self._process = self._processes[-1] if self._processes else None
 

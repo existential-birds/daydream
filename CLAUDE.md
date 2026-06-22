@@ -216,7 +216,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Claude backend reads API keys from `~/.claude/settings.json` via `setting_sources=["user"]` in `ClaudeAgentOptions` (`daydream/backends/claude.py`, line 78)
 - `CLAUDE_CONFIG_DIR` environment variable can override the default `~/.claude` directory (used in `daydream/deep/orchestrator.py`)
 - Codex backend requires `codex` CLI on `$PATH`; credentials managed by the Codex CLI itself
-- Pi backend (`--backend pi`) requires the `pi` CLI (`@earendil-works/pi-coding-agent`) on `$PATH`; z.ai coding plan (GLM models) is configured once in `~/.pi/models.json`. Optional `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` env overrides forward as `pi` CLI flags; `PI_BASE_URL` (no matching flag) writes a throwaway `models.json` override and is passed to pi via `PI_CODING_AGENT_DIR`.
+- Pi backend (`--backend pi`) requires the `pi` CLI (`@earendil-works/pi-coding-agent`) on `$PATH`; z.ai coding plan (GLM models) is registered via a pi extension at `~/.pi/extensions/zai-provider/` (installed once via `pi install`). `--provider` defaults to `zai` (matching `DEFAULT_PI_MODEL = "glm-5.2"`); optional `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` env overrides forward as `pi` CLI flags.
 - `pyproject.toml` — Single source of truth: project metadata, dependencies, tool configuration
 - `[tool.mypy]` — `python_version = "3.12"`, `ignore_missing_imports = true`
 - `[tool.ruff]` — `line-length = 120`, `target-version = "py312"`, rules: `E`, `F`, `I`, `W`
