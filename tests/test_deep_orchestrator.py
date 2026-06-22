@@ -3035,6 +3035,42 @@ def _git_single_file_target(tmp_path: Path) -> Path:
     return target
 
 
+def _install_accept_gate_pipeline(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> _StubBackend:
+    """Patch the deep pipeline for a fix-gate-ACCEPT run.
+
+    Bundles the per-test setup the two alternatives diff-tier tests share:
+    pin the interactive stdin/CI axis so a forced accept is honoured, silence
+    the deep UI noise (including the recommendation verification summary),
+    force every ``prompt_user`` seam to ``"y"`` (belt-and-suspenders alongside
+    ``assume="yes"``, which short-circuits the gate before any prompt runs),
+    and stub the non-idempotent PR-post / test / commit steps. Returns the
+    stub backend.
+    """
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:  # noqa: ARG001
+        return None
+
+    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
+        return (True, 0)
+
+    async def _stub_commit(backend, work):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+
+    return _install_stub_backend(monkeypatch, target)
+
+
 async def test_alternatives_skipped_for_trivial_diff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3050,29 +3086,10 @@ async def test_alternatives_skipped_for_trivial_diff(
 
     target = _git_single_file_target(tmp_path)
 
-    # Accept the fix gate so the full pipeline runs; pin interactivity so the
-    # "y" stub is honoured.
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-
-    stub = _install_stub_backend(monkeypatch, target)
-
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:  # noqa: ARG001
-        return None
-
-    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
-        return (True, 0)
-
-    async def _stub_commit(backend, work):  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+    # Accept the fix gate so the full pipeline runs; the shared helper pins
+    # interactivity, silences deep UI noise, and stubs the non-idempotent
+    # PR-post / test / commit steps.
+    stub = _install_accept_gate_pipeline(monkeypatch, target)
 
     traj = tmp_path / "trajectory.json"
     exit_code = await run(
@@ -3118,28 +3135,9 @@ async def test_alternatives_runs_for_multi_file_diff(
     """
     from daydream.runner import RunConfig, run
 
-    # Accept the fix gate; pin interactivity so the "y" stub is honoured.
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:  # noqa: ARG001
-        return None
-
-    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
-        return (True, 0)
-
-    async def _stub_commit(backend, work):  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+    # Accept the fix gate; the shared helper pins interactivity, silences deep
+    # UI noise, and stubs the non-idempotent PR-post / test / commit steps.
+    stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target)
 
     traj = tmp_path / "trajectory.json"
     exit_code = await run(
