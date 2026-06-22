@@ -70,6 +70,41 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
 # Read-only tool subset (plan §3). Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
 
+# Pi CLI ships only a minimal built-in system prompt. Claude Code and Codex
+# inject rich guidance (tool efficiency, exploration strategy, conciseness) at
+# the CLI layer; Pi does not, so the GLM model burns its tool-call budget on
+# exploratory reads during LISTEN. This preamble is appended (via
+# ``--append-system-prompt``) to Pi's built-in coding-assistant prompt to
+# mirror that guidance. Keep it concise — the model re-reads it every turn.
+_PI_SYSTEM_PREAMBLE = """\
+You are an efficient coding agent operating under a strict tool-call budget.
+You have a LIMITED number of tool calls per turn (typically 50). Every call is
+precious — make each one count.
+
+WORK STRATEGY:
+- Search before you read. Use grep/find/ls to map relevant locations before
+  opening any file. Prefer one targeted grep over three sequential reads.
+- Batch related reads. Don't read files one at a time in a loop when a single
+  grep would surface every relevant location.
+- Read the diff first. If a diff file or git output is in your context, start
+  there; only explore files referenced by the diff or their direct imports.
+- Don't re-read what you've already read. If a file's content is already in
+  your context (prior tool result, the diff, the prompt), reuse it.
+- Answer directly when you can. If the existing context (commit log, diff,
+  prior tool results) already answers the question, respond without additional
+  tool calls.
+- Stop exploring once you know enough. The goal is understanding and reporting,
+  not exhaustive codebase enumeration. When you have enough, produce your
+  answer immediately.
+
+GIT CONTEXT:
+You are operating in a git repository. Use `git diff`, `git log`, and
+`git show` to understand changes efficiently — they are usually cheaper than
+reading whole files.
+
+Be concise in your responses. Do not narrate exploration step by step; report
+findings and conclusions."""
+
 
 class PiError(Exception):
     """Raised when a Pi turn fails (e.g. ``stopReason == "error"``)."""
@@ -238,6 +273,11 @@ class PiBackend:
             args.extend(["--api-key", api_key])
         if thinking:
             args.extend(["--thinking", thinking])
+
+        # Pi's built-in system prompt is minimal; append the daydream preamble
+        # so the GLM model gets the same tool-efficiency / budget-awareness
+        # guidance that Claude Code and Codex inject natively via their CLIs.
+        args.extend(["--append-system-prompt", _PI_SYSTEM_PREAMBLE])
 
         if read_only:
             args.extend(["--tools", _PI_READ_ONLY_TOOLS])

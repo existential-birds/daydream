@@ -767,3 +767,37 @@ async def test_pi_provider_override(monkeypatch):
 
         flat_args = list(mock_exec.call_args.args)
         assert flat_args[flat_args.index("--provider") + 1] == "my-proxy"
+
+
+# ---------------------------------------------------------------------------
+# System prompt preamble (--append-system-prompt)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_append_system_prompt_preamble_in_args():
+    """The tool-efficiency preamble is passed via --append-system-prompt.
+
+    Pi's built-in system prompt is minimal compared to Claude Code / Codex; the
+    GLM model needs the budget-awareness guidance appended or it exhausts its
+    tool-call budget during exploration. The flag must appear in every run,
+    not gated on env vars or read_only.
+    """
+    from daydream.backends.pi import _PI_SYSTEM_PREAMBLE
+
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), "p"):
+            pass
+
+        flat_args = list(mock_exec.call_args.args)
+        assert "--append-system-prompt" in flat_args
+        preamble = flat_args[flat_args.index("--append-system-prompt") + 1]
+        assert preamble == _PI_SYSTEM_PREAMBLE
+        # Preamble must actually carry the budget-awareness guidance, not be
+        # an empty stub a future refactor could silently collapse to.
+        assert "tool-call budget" in preamble
+        assert "grep" in preamble.lower()
+
