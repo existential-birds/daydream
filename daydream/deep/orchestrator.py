@@ -455,6 +455,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     daydream_dir.mkdir(exist_ok=True)
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
+    # Diff is immutable from here on; compute the tiering verdict once and reuse
+    # it at both the exploration gate and the alternatives gate below.
+    tier = select_tier(count_changed_files(diff))
     dd = deep_dir(target_dir)
 
     session_id = str(uuid.uuid4())
@@ -514,7 +517,6 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 "without pre-scan grounding",
             )
         elif config.exploration_context is None:
-            tier = select_tier(count_changed_files(diff))
             if tier == "skip":
                 print_dim(console, "Skipping exploration -- trivial diff")
                 config.exploration_context = ExplorationContext()
@@ -575,13 +577,17 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 )
 
                 print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
-                alt_issues = await phase_alternative_review(
-                    _resolve_backend(config, "wonder", backend_cache),
-                    work,
-                    diff_path,
-                    intent_summary,
-                    exploration_dir=exploration_dir,
-                )
+                if tier == "skip":
+                    alt_issues: list[dict[str, Any]] = []
+                    print_dim(console, "Skipping alternatives -- trivial diff")
+                else:
+                    alt_issues = await phase_alternative_review(
+                        _resolve_backend(config, "wonder", backend_cache),
+                        work,
+                        diff_path,
+                        intent_summary,
+                        exploration_dir=exploration_dir,
+                    )
 
                 intent_p, alts_p = _write_ttt_artifacts(
                     dd, intent_summary=intent_summary, alt_issues=alt_issues
@@ -789,17 +795,6 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 if deep_copy.exists():
                     merged_report.write_text(deep_copy.read_text())
 
-            # Recommendation verification (issue #83). Runs unconditionally so a
-            # --start-at fix resume still produces verdicts; read-only and idempotent.
-            # Must precede both PR posting and the y/N gate regardless of resume entry.
-            verdicts_file, verdicts_payload = await phase_verify_recommendations(
-                _resolve_backend(config, "verify", backend_cache),
-                work,
-                merged_items_path=merged_items_path(dd),
-                deep_dir=dd,
-            )
-            print_verification_summary(console, verdicts_file)
-
             # Offer to post findings as inline PR review comments.
             # `post_review_to_pr_from_report` is a non-idempotent GitHub write, so
             # `--start-at fix` (resume after the merged report) must skip it to
@@ -837,8 +832,20 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # tier so equal-severity items keep their canonical merge order.
             items = severity_sorted(items)
 
+            # Recommendation verification (#83). Runs ONLY after the apply-fixes
+            # gate accepts, so a declined run (non-interactive / EOF / explicit "N")
+            # skips both the verify pass and the recommendation-verdicts.json
+            # artifact. A --start-at fix resume still produces verdicts whenever
+            # fixes are applied (the gate still runs on resume; accept => verify runs).
+            verdicts_file, verdicts_payload = await phase_verify_recommendations(
+                _resolve_backend(config, "verify", backend_cache),
+                work,
+                merged_items_path=merged_items_path(dd),
+                deep_dir=dd,
+            )
+            print_verification_summary(console, verdicts_file)
+
             # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
-            verdicts_payload = verdicts_payload if isinstance(verdicts_payload, dict) else {"verdicts": []}
             items = _attach_verdicts(items, verdicts_payload)
             matched_ids = [i["id"] for i in items if i.get("verifier_verdict") is not None]
             unmatched_ids = [

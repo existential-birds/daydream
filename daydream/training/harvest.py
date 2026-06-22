@@ -28,8 +28,9 @@ Signal sources (all under the archived run directory):
 
 Failure-propagation rules:
 
-* Absent structured artifacts ⇒ ``verifier_verdicts=None`` (the shallow-run
-  path); ``format_valid`` stays ``True`` because nothing failed to parse.
+* Absent verdicts ⇒ ``verifier_verdicts=None`` with the format gate intact.
+  Expected for a shallow run and, after the verify relocation, a declined
+  deep run that skipped recommendation verification at the apply-fixes gate.
 * A *present* verdicts/records file that is malformed JSON ⇒ caught as
   :class:`json.JSONDecodeError` and surfaced as ``format_valid=False``;
   assembly never crashes on bad data.
@@ -179,8 +180,10 @@ def assemble_scoring_inputs(run_dir: Path, row: dict[str, Any]) -> ScoringInputs
     Reads the structured bronze artifacts under ``run_dir/deep`` and the
     review-output length proxy, combining them with the indexed
     ``grounding_rate`` into the capture-time signals the reward reducer
-    consumes. Absent artifacts yield the shallow-run path
-    (``verifier_verdicts=None``); a present-but-malformed structured
+    consumes. Absent verdicts yield ``verifier_verdicts=None`` and leave the
+    format gate intact — expected for a shallow run and, after the verify
+    relocation, a declined deep run whose recommendation verification was
+    skipped at the apply-fixes gate. A present-but-malformed structured
     artifact sets ``format_valid=False`` without raising.
 
     Args:
@@ -205,7 +208,9 @@ def assemble_scoring_inputs(run_dir: Path, row: dict[str, Any]) -> ScoringInputs
         if isinstance(verdicts, list):
             verifier_verdicts = verdicts
     except FileNotFoundError:
-        # Shallow run — no structured verdicts; nothing failed to parse.
+        # No structured verdicts; nothing failed to parse. Expected for a
+        # shallow run and, after the verify relocation, a declined deep run
+        # that skipped recommendation verification at the apply-fixes gate.
         pass
     except json.JSONDecodeError:
         # Present but malformed ⇒ format gate floors.

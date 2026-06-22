@@ -397,6 +397,23 @@ def test_assemble_shallow_run_has_null_verdicts(tmp_path: Path):
     assert inputs.verifier_verdicts is None
 
 
+def test_assemble_declined_deep_run_null_verdicts_keeps_format_valid(tmp_path: Path):
+    # Verify relocation: a declined deep run writes the deep bundle (records,
+    # merged report) but skips recommendation verification, so no
+    # recommendation-verdicts.json exists. Harvest must treat the absent
+    # verdicts as expected (verifier_verdicts=None, format gate intact), not
+    # floor format_valid.
+    run_dir = tmp_path / "run"
+    (run_dir / "deep").mkdir(parents=True)
+    # stack records are present and valid (as on a real declined deep run)
+    (run_dir / "deep" / "stack-python-records.json").write_text(
+        json.dumps({"records": [{"id": "i1"}]})
+    )
+    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 0.5})
+    assert inputs.verifier_verdicts is None          # declined ⇒ no verdicts
+    assert inputs.format_valid is True                # absence is expected, not malformed
+
+
 def test_assemble_malformed_verdicts_flags_format_invalid(tmp_path: Path):
     run_dir = tmp_path / "run"
     (run_dir / "deep").mkdir(parents=True)

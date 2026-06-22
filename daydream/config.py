@@ -49,8 +49,8 @@ DEFAULT_TOOL_CALL_BUDGET = 50
 #
 # Claude tiering:
 #   - cheap (haiku):   PARSE
-#   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW
-#   - heavy (opus):    REVIEW, WONDER, ENVISION, MERGE, INTENT, PR_FEEDBACK, ARBITER
+#   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT
+#   - heavy (opus):    REVIEW, WONDER, ENVISION, MERGE, PR_FEEDBACK, ARBITER
 #
 # ``per_stack_review`` and ``arbiter`` split the deep per-stack fan-out off the
 # heavy ``review`` tier (issue #168): the N per-stack reviewers run on Sonnet
@@ -78,7 +78,7 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "wonder": "claude-opus-4-8",
         "envision": "claude-opus-4-8",
         "merge": "claude-opus-4-8",
-        "intent": "claude-opus-4-8",
+        "intent": "claude-sonnet-4-6",
         "pr_feedback": "claude-opus-4-8",
     },
     "codex": {
