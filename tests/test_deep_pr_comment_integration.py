@@ -259,16 +259,36 @@ class _FakeSDKClient:
                 ),
             ]
 
-        # phase_parse_feedback (FEEDBACK_SCHEMA): ResultMessage must carry
-        # structured_output of the right shape.
+        # phase_parse_feedback (FEEDBACK_SCHEMA / PER_STACK_RECORD_SCHEMA):
+        # ResultMessage must carry structured_output of the right shape.
+        # Issue #172: the tiny-diff short-circuit writes ``merged-items.json``
+        # directly from these parsed records (no merge agent) for ≤2-file
+        # diffs, so the per-stack parse MUST yield a non-empty issue for the
+        # PR-comment pipeline to have content on the single-file fixture.
+        # The structural parse (FEEDBACK_SCHEMA, no ``severity`` in the prompt)
+        # returns empty — the per-stack record drives the assertion below.
         if "extract only actionable issues" in pl or "read the review output file" in pl:
+            if "severity" in pl:  # PER_STACK_RECORD_SCHEMA (per-stack parse)
+                issues = [
+                    {
+                        "id": 1,
+                        "description": "Use a more descriptive function name",
+                        "file": "foo.py",
+                        "line": 1,
+                        "severity": "medium",
+                        "confidence": "MEDIUM",
+                        "rationale": "The current name is ambiguous.",
+                    }
+                ]
+            else:  # FEEDBACK_SCHEMA (structural parse)
+                issues = []
             return [
                 FakeAssistantMessage(
                     content=[FakeTextBlock(text="parsing")],
                     model=FIXTURE_MODEL_ID,
                 ),
                 FakeResultMessage(
-                    structured_output={"issues": []},
+                    structured_output={"issues": issues},
                     total_cost_usd=0.05,
                     usage={
                         "input_tokens": 1500,

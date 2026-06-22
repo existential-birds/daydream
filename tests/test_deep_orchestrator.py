@@ -3124,3 +3124,378 @@ async def test_alternatives_runs_for_multi_file_diff(
         or "evaluate the implementation" in c["prompt"].lower()
     ]
     assert alt_calls, "alternatives wonder prompt was not dispatched for a 3-file diff"
+
+# =============================================================================
+# Issue #172 — Perf: tiny-diff short-circuit + read-once diff hunks
+# =============================================================================
+
+
+def test_shallow_fanout_threshold_precedence() -> None:
+    """AC7: SHALLOW_FANOUT_THRESHOLD honors CLI (RunConfig) > config file > default.
+
+    Mirrors the `_resolve_backend` precedence pattern; uses `is not None` so a
+    config value of ``0`` (disable the short-circuit entirely) is honored
+    rather than treated as falsy.
+    """
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.deep.orchestrator import (
+        DEFAULT_SHALLOW_FANOUT_THRESHOLD,
+        _shallow_fanout_threshold,
+    )
+    from daydream.runner import RunConfig
+
+    # Default: no CLI field, no file_config.
+    assert _shallow_fanout_threshold(RunConfig()) == DEFAULT_SHALLOW_FANOUT_THRESHOLD
+    # Explicit 0 on RunConfig disables the short-circuit (must NOT be ignored as falsy).
+    assert _shallow_fanout_threshold(RunConfig(shallow_fanout_threshold=0)) == 0
+    # CLI value wins.
+    assert _shallow_fanout_threshold(RunConfig(shallow_fanout_threshold=5)) == 5
+    # File-config value beats default.
+    fc = DaydreamFileConfig(shallow_fanout_threshold=3)
+    assert _shallow_fanout_threshold(RunConfig(file_config=fc)) == 3
+    # File-config value of 0 (disable) is honored, not treated as falsy.
+    fc_zero = DaydreamFileConfig(shallow_fanout_threshold=0)
+    assert _shallow_fanout_threshold(RunConfig(file_config=fc_zero)) == 0
+    # CLI > file.
+    assert (
+        _shallow_fanout_threshold(
+            RunConfig(file_config=fc, shallow_fanout_threshold=5)
+        )
+        == 5
+    )
+
+
+def test_collapse_stacks_for_tiny_diff_single_language() -> None:
+    """AC1 (unit): 1-file single-language diff collapses to a strictly smaller agent count.
+
+    Today `detect_stacks(["api.py"])` yields 2 stacks (python + structure) →
+    `total_agent_count(2) == 8`. After collapse:
+      - lever 1 (collapse language fan-out) is a no-op (only one language stack)
+      - lever 2 (skip merge+arbiter) drops the count to ``_single_stack_agent_count``
+        which must be strictly less than 8.
+    """
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import (
+        _collapse_stacks_for_tiny_diff,
+        _single_stack_agent_count,
+        total_agent_count,
+    )
+
+    stacks = detect_stacks(["api.py"])
+    assert len(stacks) == 2  # python + structure (baseline sanity check)
+    baseline_count = total_agent_count(len(stacks))  # 8
+
+    collapsed, single_stack_mode = _collapse_stacks_for_tiny_diff(
+        stacks, ["api.py"], threshold=2
+    )
+    assert single_stack_mode is True
+    # Structure stack stays as its own assignment (AC6 lens taxonomy preserved).
+    stack_names = [s.stack_name for s in collapsed]
+    assert "structure" in stack_names
+    # The collapsed run uses the single-stack agent count, which MUST be strictly
+    # less than the baseline 8 (lever 2: skip merge+arbiter).
+    assert _single_stack_agent_count(len(collapsed)) < baseline_count
+
+
+def test_collapse_stacks_for_tiny_diff_two_languages() -> None:
+    """AC1 (unit): 2-file two-language diff collapses the language fan-out.
+
+    Today `detect_stacks(["api.py", "App.tsx"])` yields 3 stacks (python + react
+    + structure) → ``total_agent_count(3) == 12``. After collapse the two
+    language stacks merge into one combined (generic-fallback) stack, so the
+    surviving stack list is `[combined, structure]` (≤2). The single-stack agent
+    count for ≤2 stacks is strictly less than 12.
+    """
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import (
+        _collapse_stacks_for_tiny_diff,
+        _single_stack_agent_count,
+        total_agent_count,
+    )
+
+    stacks = detect_stacks(["api.py", "App.tsx"])
+    assert len(stacks) == 3  # python + react + structure (baseline)
+    baseline_count = total_agent_count(len(stacks))  # 12
+
+    collapsed, single_stack_mode = _collapse_stacks_for_tiny_diff(
+        stacks, ["api.py", "App.tsx"], threshold=2
+    )
+    assert single_stack_mode is True
+    # Collapse merged the two language stacks into one combined assignment.
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    # Combined assignment carries both files and uses the generic-fallback skill
+    # (a single agent cannot invoke two per-language Beagle skills).
+    assert set(combined.files) == {"api.py", "App.tsx"}
+    assert combined.skill_invocation is None
+    # Single-stack agent count is strictly less than 12.
+    assert _single_stack_agent_count(len(collapsed)) < baseline_count
+
+
+def test_collapse_stacks_for_tiny_diff_disabled_at_threshold_zero() -> None:
+    """AC7 edge: threshold=0 disables the short-circuit (no collapse happens)."""
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import _collapse_stacks_for_tiny_diff
+
+    stacks = detect_stacks(["api.py", "App.tsx"])
+    collapsed, single_stack_mode = _collapse_stacks_for_tiny_diff(
+        stacks, ["api.py", "App.tsx"], threshold=0
+    )
+    assert single_stack_mode is False
+    assert collapsed == stacks  # unchanged
+
+
+def _count_review_prompts(calls: list[dict[str, Any]]) -> int:
+    """Count per-stack + structural review prompts in a captured call list.
+
+    Discriminators mirror the production prompt builders:
+      - per-stack / generic-fallback: ``"you are reviewing the <X> stack"``
+      - structural: ``"you are the structural reviewer"``
+    """
+    n = 0
+    for c in calls:
+        pl = c["prompt"].lower()
+        if "you are reviewing the" in pl and "stack" in pl:
+            n += 1
+        elif "you are the structural reviewer" in pl:
+            n += 1
+    return n
+
+
+def _count_merge_prompts(calls: list[dict[str, Any]]) -> int:
+    """Count cross-stack merge-agent prompts (discriminator: 'cross-stack merge agent')."""
+    return sum(1 for c in calls if "cross-stack merge agent" in c["prompt"].lower())
+
+
+async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge(
+    tiny_diff_target: Path, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2 (real-path): a ≤2-file two-language diff collapses the fan-out.
+
+    Drives ``runner.run`` through the full deep pipeline on a 2-file repo
+    (``api.py`` + ``App.tsx``). The tiny-diff short-circuit MUST:
+      - collapse the two language stacks (python + react) into one combined
+        generic-fallback review (≤2 review agents total, vs 4 for multi_stack);
+      - skip the merge agent + arbiter;
+      - still write the canonical ``merged-items.json`` (AC6 unchanged schema).
+
+    The proof is directional: the same harness run against ``multi_stack_target``
+    yields strictly more review prompts and a recorded merge-agent prompt, while
+    the tiny-diff run yields strictly fewer and no merge prompt.
+    """
+    from daydream.runner import RunConfig, run
+
+    # Run BOTH repos through the identical harness so the count comparison is a
+    # paired observation, not an absolute threshold.
+    async def _drive(target: Path) -> list[dict[str, Any]]:
+        # Fresh shared-call list per run (the factory binds it via closure).
+        _silence(monkeypatch)
+        shared_calls = _install_model_capturing_stubs(monkeypatch, target)
+        # Stub the post-merge side effects so the run terminates cleanly.
+        monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+        monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+        async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+            return None
+        monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+        rc = await run(RunConfig(target=str(target), start_at="review", cleanup=False))
+        assert rc == 0, f"deep run on {target.name} exited {rc}"
+        return list(shared_calls)
+
+    tiny_calls = await _drive(tiny_diff_target)
+    multi_calls = await _drive(multi_stack_target)
+
+    # (b) Canonical merged-items.json written for the tiny diff.
+    items_file = tiny_diff_target / ".daydream" / "deep" / "merged-items.json"
+    assert items_file.is_file(), f"merged-items.json missing at {items_file}"
+    items_payload = json.loads(items_file.read_text())
+    assert isinstance(items_payload.get("items"), list)
+
+    # (c) Review-prompt count for tiny diff is STRICTLY LESS than multi_stack.
+    tiny_reviews = _count_review_prompts(tiny_calls)
+    multi_reviews = _count_review_prompts(multi_calls)
+    assert tiny_reviews < multi_reviews, (
+        f"tiny-diff review fan-out did not collapse: tiny={tiny_reviews}, multi={multi_reviews}"
+    )
+    # Tiny diff: 2 review agents (combined lang + structure). Multi: 4.
+    assert tiny_reviews == 2, f"expected 2 review agents for tiny diff, got {tiny_reviews}"
+    assert multi_reviews == 4, f"expected 4 review agents for multi_stack, got {multi_reviews}"
+
+    # The merge agent MUST be skipped on the tiny diff (lever 2).
+    assert _count_merge_prompts(tiny_calls) == 0, "merge agent ran on tiny diff"
+    # And the multi_stack run still invokes it (regression-guard for AC3).
+    assert _count_merge_prompts(multi_calls) == 1, "merge agent missing on multi_stack"
+
+
+async def test_ac3_multi_stack_fanout_unchanged_by_short_circuit(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC3 (regression guard): the ≥3-file fan-out is byte-for-byte unchanged.
+
+    The tiny-diff short-circuit is scoped to ≤threshold files. The 3-file
+    ``multi_stack_target`` (python + react + generic + structure = 4 stacks)
+    MUST still perform the full fan-out AND invoke the merge agent. This test
+    pairs with AC2 to prove the gate is scoped correctly.
+
+    This also documents that ``test_preflight_notice`` (which asserts
+    ``agent_count == 12`` for this fixture) stays green: 4 stacks → 12 agents,
+    unchanged because no collapse fires above the threshold.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    shared_calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    rc = await run(RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False))
+    assert rc == 0
+
+    # 4 stacks → 4 review prompts (python + react + generic + structure).
+    assert _count_review_prompts(shared_calls) == 4
+    # Merge agent still runs (NOT collapsed).
+    assert _count_merge_prompts(shared_calls) == 1
+
+
+async def test_ac5_per_stack_prompt_inlines_diff_hunks(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC5 (real-path): per-stack review prompts contain inlined diff hunks and
+    NO ``Read it directly`` / diff_path instruction.
+
+    Drives ``runner.run`` through the deep pipeline on a 2-file fixture and
+    inspects the recorded prompts on the stub's shared call list. The per-stack
+    review prompt MUST inline the relevant hunks and MUST NOT instruct the agent
+    to ``Read it directly`` — proving ``diff.patch`` is read 0 times
+    (transitively: no Read instruction + hunks present inline).
+
+    Grounding note: ``_StubBackend`` does not model tool-call execution (its
+    review branch writes the review file directly without emitting Read events),
+    so "diff.patch is Read 0 times" is proven by the absence of the Read
+    instruction in the recorded prompt, not by counting Read events.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    shared_calls = _install_model_capturing_stubs(monkeypatch, tiny_diff_target)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    rc = await run(RunConfig(target=str(tiny_diff_target), start_at="review", cleanup=False))
+    assert rc == 0
+
+    # The per-stack review prompt is the one carrying the scope discriminator.
+    # (The structural prompt is intentionally NOT inlined — Fix B excludes it.)
+    per_stack_review_prompts = [
+        c["prompt"]
+        for c in shared_calls
+        if "you are reviewing the" in c["prompt"].lower() and "stack" in c["prompt"].lower()
+    ]
+    assert per_stack_review_prompts, "expected at least one per-stack review prompt"
+    prompt = per_stack_review_prompts[0]
+
+    # Hunks are inlined: the actual changed content reaches the prompt.
+    assert "return 'universe'" in prompt, "expected inlined hunk content in per-stack prompt"
+    # The Read instruction is absent (the agent is never told to Read diff.patch).
+    assert "Read it directly" not in prompt
+    # And diff_path is not embedded as an instruction (it remains a required
+    # param of the builder but is not surfaced when hunks are inlined).
+    diff_path_str = str(tiny_diff_target / ".daydream" / "diff.patch")
+    assert diff_path_str not in prompt
+
+    # Discriminating check: the STRUCTURAL prompt still carries the pointer
+    # (Fix B does NOT inline the structural / arbiter prompts).
+    structural_prompts = [
+        c["prompt"] for c in shared_calls if "you are the structural reviewer" in c["prompt"].lower()
+    ]
+    assert structural_prompts, "expected a structural review prompt"
+    assert "Read it directly" in structural_prompts[0]
+    assert diff_path_str in structural_prompts[0]
+
+
+async def test_ac6_single_stack_merged_items_carry_structural_lens(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC6: tiny-diff single-stack writer tags structural items ``lens="structural"``.
+
+    The single-stack host writer (``_write_single_stack_merged_items``) must
+    replicate ``phase_cross_stack_merge``'s structural tagging exactly so the
+    verifier's matched/unmatched accounting (orchestrator.py:968/973) does not
+    drift. Real-path: drive the tiny-diff flow, parse merged-items.json, and
+    assert at least one item carries ``lens="structural"``.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _install_model_capturing_stubs(monkeypatch, tiny_diff_target)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    rc = await run(RunConfig(target=str(tiny_diff_target), start_at="review", cleanup=False))
+    assert rc == 0
+
+    items_file = tiny_diff_target / ".daydream" / "deep" / "merged-items.json"
+    assert items_file.is_file()
+    items = json.loads(items_file.read_text())["items"]
+    lenses = {i.get("lens") for i in items}
+    # Structural findings reach the canonical item list tagged correctly.
+    assert "structural" in lenses, f"no structural-lens items in {lenses}"
+    # And every item carries a fresh contiguous integer id (normalize_items).
+    assert all(isinstance(i.get("id"), int) for i in items), "non-integer id in merged items"
+    assert [i["id"] for i in items] == list(range(1, len(items) + 1)), "ids not contiguous"
+
+
+async def test_ac_fix_resume_on_tiny_diff(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #172 risk: ``--start-at fix`` resume on a tiny diff works.
+
+    ``single_stack_mode`` is recomputed at the top of ``run_deep`` from
+    ``changed_files``, so a resume re-enters the same bypass branch. The merge
+    block is skipped (``config.start_at == "fix"``), and the fix gate reads the
+    surviving ``merged-items.json`` produced by the single-stack writer. This
+    test primes the tiny-diff artifacts with a first run, then resumes with
+    ``--start-at fix`` and asserts the fix loop reads the JSON and applies.
+    """
+    from daydream.runner import RunConfig, run
+
+    # Phase 1: produce merged-items.json via a full tiny-diff run.
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    rc = await run(RunConfig(target=str(tiny_diff_target), assume="no", cleanup=False))
+    assert rc == 0
+    items_file = tiny_diff_target / ".daydream" / "deep" / "merged-items.json"
+    assert items_file.is_file(), "priming run did not produce merged-items.json"
+
+    # Phase 2: resume with --start-at fix and accept the gate; the fix loop
+    # must read the canonical JSON and dispatch at least one fix prompt.
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+
+    rc = await run(
+        RunConfig(target=str(tiny_diff_target), start_at="fix", assume="yes", cleanup=False)
+    )
+    assert rc == 0
+    fix_prompts = [c for c in stub.calls if c["prompt"].startswith("Fix this issue")]
+    assert fix_prompts, "fix loop did not run on --start-at fix resume"

@@ -2706,6 +2706,7 @@ async def phase_per_stack_reviews(
     intent_path: Path,
     alternatives_path: Path,
     exploration_dir: Path | None = None,
+    diff_text: str | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run one review agent per detected stack concurrently (D-17).
 
@@ -2721,6 +2722,12 @@ async def phase_per_stack_reviews(
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
         exploration_dir: Optional pre-scan exploration directory.
+        diff_text: Issue #172 Fix B. The raw unified diff text. When supplied,
+            the per-stack / generic-fallback prompts inline the relevant hunks
+            for each stack (via ``_diff_blocks_for_files``) and drop the
+            ``Read it directly`` instruction. ``None`` falls back to the
+            diff_path pointer. The structural prompt is never inlined
+            (it roams repo-wide by design).
 
     Returns:
         Tuple of ``(successes, failures)``:
@@ -2736,6 +2743,7 @@ async def phase_per_stack_reviews(
     from daydream.deep import prompts as _prompts
     from daydream.deep.artifacts import deep_dir as _deep_dir
     from daydream.deep.artifacts import per_stack_review_path
+    from daydream.deep.orchestrator import _diff_blocks_for_files
 
     deep_dir_path = _deep_dir(work.repo)
     recorder = get_current_recorder()
@@ -2748,6 +2756,9 @@ async def phase_per_stack_reviews(
         for stack in stacks:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
             if stack.stack_name == STRUCTURE_STACK_NAME:
+                # Structural prompt is NOT inlined — its lens legitimately roams
+                # beyond the diff, so it keeps its diff_path pointer and its
+                # repo-wide Read/Grep/Bash freedom.
                 prompt = _prompts.build_structural_prompt(
                     files=stack.files,
                     diff_path=diff_path,
@@ -2757,29 +2768,40 @@ async def phase_per_stack_reviews(
                     exploration_dir=exploration_dir,
                     prior_commits=prior_commits,
                 )
-            elif stack.skill_invocation is None:
-                prompt = _prompts.build_generic_fallback_prompt(
-                    files=stack.files,
-                    diff_path=diff_path,
-                    intent_path=intent_path,
-                    alternatives_path=alternatives_path,
-                    output_path=output_path,
-                    exploration_dir=exploration_dir,
-                    is_docs_only=stack.is_docs_only,
-                    prior_commits=prior_commits,
-                )
             else:
-                prompt = _prompts.build_per_stack_prompt(
-                    skill_invocation=stack.skill_invocation,
-                    stack_name=stack.stack_name,
-                    files=stack.files,
-                    diff_path=diff_path,
-                    intent_path=intent_path,
-                    alternatives_path=alternatives_path,
-                    output_path=output_path,
-                    exploration_dir=exploration_dir,
-                    prior_commits=prior_commits,
+                # Issue #172 Fix B: inline the relevant diff hunks for this
+                # stack when diff_text is supplied AND the blocks fit the byte
+                # budget. ``None`` falls back to the diff_path pointer.
+                inline_diff = (
+                    _diff_blocks_for_files(diff_text, stack.files)
+                    if diff_text is not None
+                    else None
                 )
+                if stack.skill_invocation is None:
+                    prompt = _prompts.build_generic_fallback_prompt(
+                        files=stack.files,
+                        diff_path=diff_path,
+                        intent_path=intent_path,
+                        alternatives_path=alternatives_path,
+                        output_path=output_path,
+                        exploration_dir=exploration_dir,
+                        is_docs_only=stack.is_docs_only,
+                        prior_commits=prior_commits,
+                        inline_diff=inline_diff,
+                    )
+                else:
+                    prompt = _prompts.build_per_stack_prompt(
+                        skill_invocation=stack.skill_invocation,
+                        stack_name=stack.stack_name,
+                        files=stack.files,
+                        diff_path=diff_path,
+                        intent_path=intent_path,
+                        alternatives_path=alternatives_path,
+                        output_path=output_path,
+                        exploration_dir=exploration_dir,
+                        prior_commits=prior_commits,
+                        inline_diff=inline_diff,
+                    )
 
             # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
             async def _task(

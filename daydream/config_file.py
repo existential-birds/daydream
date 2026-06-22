@@ -34,11 +34,16 @@ class DaydreamFileConfig:
         backend: Global default backend name, or None if unset.
         phases: Per-phase sub-tables mapping phase name to a dict of keys
             (e.g. ``{"fix": {"backend": "codex", "model": "..."}}``).
+        shallow_fanout_threshold: Max changed-file count that triggers the
+            tiny-diff short-circuit in deep mode (issue #172). ``None`` falls
+            through to the RunConfig field / orchestrator default. ``0``
+            explicitly disables the short-circuit.
     """
 
     model: str | None = None
     backend: str | None = None
     phases: dict[str, dict[str, str]] = field(default_factory=dict)
+    shallow_fanout_threshold: int | None = None
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase.
@@ -182,8 +187,21 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
 
     model = merged.get("model")
     backend = merged.get("backend")
+    # shallow_fanout_threshold: tolerate non-int (stray string, list, etc.) by
+    # degrading to None rather than crashing the loader. ``0`` is a meaningful
+    # value (disable the short-circuit) so it must round-trip unchanged.
+    raw_threshold = merged.get("shallow_fanout_threshold")
+    threshold: int | None
+    if isinstance(raw_threshold, bool):
+        # bool is a subclass of int but never a meaningful threshold value.
+        threshold = None
+    elif isinstance(raw_threshold, int):
+        threshold = raw_threshold
+    else:
+        threshold = None
     return DaydreamFileConfig(
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,
         phases=_coerce_phases(merged.get("phases")),
+        shallow_fanout_threshold=threshold,
     )

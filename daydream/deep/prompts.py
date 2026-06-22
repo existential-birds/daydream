@@ -60,7 +60,41 @@ def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
     )
 
 
-def _diff_instruction(diff_path: Path, files: list[str]) -> str:
+def _diff_instruction(
+    diff_path: Path,
+    files: list[str],
+    *,
+    inline_diff: str | None = None,
+) -> str:
+    """Diff context for a per-stack / generic-fallback reviewer.
+
+    Issue #172 Fix B (read-once):
+      - When ``inline_diff`` is supplied (the relevant hunks already extracted
+        by ``_diff_blocks_for_files`` and under the byte bound), the hunks are
+        inlined and the ``Read it directly`` instruction is DROPPED. The agent
+        has what it needs without a tool-call round-trip for the static
+        ``diff.patch`` file.
+      - When ``inline_diff`` is ``None`` (byte budget exceeded / no matching
+        blocks / caller had no diff text), today's path-pointer text is used
+        unchanged so the agent can still locate the full diff for whole-file
+        context. ``diff_path`` stays a required param either way.
+
+    Args:
+        diff_path: Path to the full diff on disk.
+        files: Files this stack owns (used in the fallback path-pointer text).
+        inline_diff: Pre-extracted hunks to inline, or ``None`` for the fallback.
+
+    Returns:
+        The diff-context section for the prompt.
+    """
+    if inline_diff:
+        return (
+            "Relevant diff hunks for your stack (inlined; do NOT re-Read "
+            "diff.patch for these — the hunks are already here):\n\n"
+            f"{inline_diff.rstrip()}\n\n"
+            "Focus on hunks that touch your stack's files. For whole-file "
+            "context beyond these hunks you MAY Read the source files directly."
+        )
     joined = ", ".join(files)
     # Point agents at diff_path directly. A bare `git diff -- <files>` command
     # only surfaces uncommitted workspace changes; on a clean PR branch it
@@ -85,6 +119,7 @@ def build_per_stack_prompt(
     output_path: Path,
     exploration_dir: Path | None = None,
     prior_commits: str | None = None,
+    inline_diff: str | None = None,
 ) -> str:
     """Assemble the per-stack review prompt.
 
@@ -98,6 +133,9 @@ def build_per_stack_prompt(
         output_path: Where the agent must write its review.
         exploration_dir: Pre-scan exploration directory (if available).
         prior_commits: Oneline log of prior daydream commits on this branch.
+        inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
+            to inline (skips the ``Read it directly`` instruction). ``None``
+            falls back to the diff_path pointer.
 
     Returns:
         Assembled prompt string.
@@ -113,7 +151,7 @@ def build_per_stack_prompt(
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(_stack_scope_instruction(stack_name, files))
-    parts.append(_diff_instruction(diff_path, files))
+    parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
     parts.append(skill_invocation)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
@@ -468,6 +506,7 @@ def build_generic_fallback_prompt(
     exploration_dir: Path | None = None,
     is_docs_only: bool = False,
     prior_commits: str | None = None,
+    inline_diff: str | None = None,
 ) -> str:
     """Assemble the generic-fallback review prompt (no skill invocation).
 
@@ -482,6 +521,9 @@ def build_generic_fallback_prompt(
         exploration_dir: Pre-scan exploration directory (if available).
         is_docs_only: Whether the whole diff is docs-only (D-20).
         prior_commits: Oneline log of prior daydream commits on this branch.
+        inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
+            to inline (skips the ``Read it directly`` instruction). ``None``
+            falls back to the diff_path pointer.
 
     Returns:
         Assembled prompt string.
@@ -499,7 +541,7 @@ def build_generic_fallback_prompt(
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(_stack_scope_instruction("generic-fallback", files))
-    parts.append(_diff_instruction(diff_path, files))
+    parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
     parts.append(
         "Review these files for correctness, clarity, and consistency with the "
         "author's intent. Apply language-agnostic review practices."
