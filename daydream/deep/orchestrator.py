@@ -455,6 +455,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     daydream_dir.mkdir(exist_ok=True)
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
+    # Diff is immutable from here on; compute the tiering verdict once and reuse
+    # it at both the exploration gate and the alternatives gate below.
+    tier = select_tier(count_changed_files(diff))
     dd = deep_dir(target_dir)
 
     session_id = str(uuid.uuid4())
@@ -514,7 +517,6 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 "without pre-scan grounding",
             )
         elif config.exploration_context is None:
-            tier = select_tier(count_changed_files(diff))
             if tier == "skip":
                 print_dim(console, "Skipping exploration -- trivial diff")
                 config.exploration_context = ExplorationContext()
@@ -575,7 +577,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 )
 
                 print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
-                if select_tier(count_changed_files(diff)) == "skip":
+                if tier == "skip":
                     alt_issues: list[dict[str, Any]] = []
                     print_dim(console, "Skipping alternatives -- trivial diff")
                 else:
