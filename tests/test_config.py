@@ -1,9 +1,8 @@
 """Tests for daydream.config module."""
 
 from daydream.config import (
-    DEFAULT_CLAUDE_MODEL,
-    DEFAULT_CODEX_MODEL,
     DEFAULT_EXPLORATION_MODEL,
+    DEFAULT_PI_MODEL,
     PHASE_DEFAULT_MODELS,
 )
 
@@ -13,12 +12,12 @@ PHASE_NAMES = {
 }
 
 
-def test_phase_default_models_covers_both_backends():
-    assert set(PHASE_DEFAULT_MODELS.keys()) == {"claude", "codex"}
+def test_phase_default_models_covers_all_backends():
+    assert set(PHASE_DEFAULT_MODELS.keys()) == {"claude", "codex", "pi"}
 
 
 def test_phase_default_models_covers_every_phase_for_each_backend():
-    for backend_name in ("claude", "codex"):
+    for backend_name in ("claude", "codex", "pi"):
         assert set(PHASE_DEFAULT_MODELS[backend_name].keys()) == PHASE_NAMES, (
             f"{backend_name} default table missing phase entries"
         )
@@ -54,16 +53,22 @@ def test_phase_default_models_codex_uses_gpt_5_5_for_every_phase():
         )
 
 
+def test_phase_default_models_pi_uses_glm_5_2_for_every_phase():
+    pi = PHASE_DEFAULT_MODELS["pi"]
+    for phase in PHASE_NAMES:
+        assert pi[phase] == "glm-5.2", (
+            f"pi phase {phase} should default to glm-5.2 (z.ai coding plan)"
+        )
+
+
+def test_default_pi_model_is_glm_5_2():
+    assert DEFAULT_PI_MODEL == "glm-5.2"
+
+
 def test_default_exploration_model_matches_claude_phase_default():
     # EXPLORE precedent: DEFAULT_EXPLORATION_MODEL is the fallback when no flag
     # is set and table lookup misses; keep it consistent with the table for Claude.
     assert DEFAULT_EXPLORATION_MODEL == PHASE_DEFAULT_MODELS["claude"]["exploration"]
-
-
-def test_default_constants_still_exported():
-    # Sanity: existing default constants remain importable for backend creation fallbacks.
-    assert isinstance(DEFAULT_CLAUDE_MODEL, str)
-    assert isinstance(DEFAULT_CODEX_MODEL, str)
 
 
 def test_structure_skill_constant_not_user_selectable() -> None:

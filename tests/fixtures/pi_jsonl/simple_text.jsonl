@@ -1,0 +1,7 @@
+{"type":"session","sessionId":"pi_ses_simple"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"Hello from Pi"}],"model":"glm-4.6"}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Hello from Pi"}],"model":"glm-4.6"}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Hello from Pi"}],"model":"glm-4.6","usage":{"input":100,"output":50,"cacheRead":10,"cost":{"input":0.0001,"output":0.0002,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0003}},"stopReason":"stop"}}
+{"type":"agent_end","messages":[]}

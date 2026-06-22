@@ -12,9 +12,10 @@ Two layers, per issue #154:
    CLI shape has changed. Structural assertions are version-robust (not
    byte-exact) so a model/CLI swap that rewords the agent text still passes.
 
-2. ``test_codex_live_smoke`` (Layer 2, skip-gated): marked ``live_codex`` and
-   skipped cleanly when the ``codex`` binary is not on ``$PATH`` (no red CI
-   for contributors without the binary). When codex IS present it runs a
+2. ``test_codex_live_smoke`` (Layer 2, opt-in): marked ``live_codex`` and
+   skipped by default. Set ``DAYDREAM_CODEX_LIVE=1`` to opt in (mirrors the
+   pi smoke test's ``DAYDREAM_PI_LIVE=1`` gate — binary presence alone is
+   not sufficient because an unauthenticated codex exits non-zero). When
    trivial review against the in-repo sample repo and asserts a non-empty
    ``AgentEvent`` stream + clean trajectory, logging any unrecognized JSONL
    event types.
@@ -29,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,14 @@ from tests.harness.codex_replay import FIXTURES_DIR, make_mock_process_from_fixt
 REAL_GOLDEN = "real/golden.jsonl"
 
 _logger = logging.getLogger(__name__)
+
+# Opt-in gate for the live codex smoke test. Mirrors the pi smoke test's
+# DAYDREAM_PI_LIVE=1 pattern: codex being on $PATH is NOT sufficient —
+# with the binary installed but not authenticated, `codex exec` exits
+# non-zero, producing a false red. Require explicit opt-in so the test
+# is skipped by default and only runs when a human explicitly enables it.
+_CODEX_LIVE_OPT_IN = os.environ.get("DAYDREAM_CODEX_LIVE") == "1"
+_CODEX_AVAILABLE = shutil.which("codex") is not None
 
 
 @pytest.mark.asyncio
@@ -127,16 +137,19 @@ async def test_real_golden_parses_to_expected_events() -> None:
 
 @pytest.mark.live_codex
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not (_CODEX_AVAILABLE and _CODEX_LIVE_OPT_IN),
+    reason="live codex smoke test; set DAYDREAM_CODEX_LIVE=1 (and ensure `codex` is on $PATH and logged in) to run",
+)
 async def test_codex_live_smoke() -> None:
-    """Live smoke against the real codex binary — skipped when codex is absent.
+    """Live smoke against the real codex binary — opt-in via DAYDREAM_CODEX_LIVE=1.
 
     Proves the subprocess seam, arg construction, and parser still agree with
-    the live CLI. Skipped cleanly (no red CI) when ``codex`` is not on PATH.
+    the live CLI. Skipped by default; set ``DAYDREAM_CODEX_LIVE=1`` to opt in
+    (mirrors the pi smoke test's ``DAYDREAM_PI_LIVE=1`` gate — binary presence
+    alone is not sufficient because an unauthenticated codex exits non-zero).
     Any unrecognized JSONL event type is logged at WARNING for triage.
     """
-    if shutil.which("codex") is None:
-        pytest.skip("codex CLI not available on PATH")
-
     sample_repo = Path(__file__).parent / "fixtures" / "real_cli_sample_repo"
     prompt = "Read README.md and summarize it in one sentence."
 
