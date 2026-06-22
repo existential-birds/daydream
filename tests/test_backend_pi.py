@@ -429,6 +429,44 @@ async def test_missing_usage_skips_metrics_but_keeps_turn_end():
 
 
 @pytest.mark.asyncio
+async def test_nonzero_exit_raises_with_captured_output():
+    """Non-zero exit surfaces pi's diagnostic output in the PiError message."""
+    backend = PiBackend(model="glm-5.2")
+    lines = [
+        "Error: authentication required. Run `pi login` to authenticate.",
+        "fatal: could not connect to API endpoint",
+    ]
+    mock_proc = make_mock_process(lines)
+    mock_proc.returncode = 1
+
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(PiError, match="return code 1") as exc_info:
+            async for _ in backend.execute(Path("/tmp"), "p"):
+                pass
+
+    # The error must include the captured diagnostic lines, not just the
+    # return code — otherwise debugging a crashed pi is impossible.
+    msg = str(exc_info.value)
+    assert "authentication required" in msg
+    assert "could not connect" in msg
+
+
+@pytest.mark.asyncio
+async def test_nonzero_exit_with_no_output_still_informative():
+    """If pi crashes with zero output, the error says so explicitly."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process([])
+    mock_proc.returncode = 1
+
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(PiError, match="return code 1") as exc_info:
+            async for _ in backend.execute(Path("/tmp"), "p"):
+                pass
+
+    assert "no non-JSON output captured" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_concurrent_execute_calls_do_not_share_stdout_reader():
     """Overlapping runs on one backend keep reading their own process."""
     backend = PiBackend(model="glm-5.2")

@@ -369,6 +369,9 @@ class PiBackend:
         session_id: str | None = None
         last_assistant_text: str | None = None
         structured_result: Any = None
+        # Non-JSON lines (stderr merged into stdout, pi diagnostic output, etc.)
+        # captured for error reporting when the process exits non-zero.
+        stderr_lines: list[str] = []
 
         total_input = 0
         total_output = 0
@@ -409,6 +412,11 @@ class PiBackend:
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
+                    # Capture non-JSON lines — these are stderr merged into
+                    # stdout (pi diagnostics, login prompts, errors). Kept for
+                    # error reporting when the process exits non-zero.
+                    if len(stderr_lines) < 20:
+                        stderr_lines.append(raw_line)
                     continue
 
                 if is_first_line:
@@ -506,11 +514,23 @@ class PiBackend:
             await proc.wait()
 
             # Fail fast on non-zero exit: if pi crashed without emitting a
-            # turn_end error event, surface the failure instead of reporting
-            # a successful completion with empty/partial output.
+            # turn_end error event, surface the failure with diagnostic output
+            # instead of reporting a successful completion with empty/partial
+            # output.
             if proc.returncode != 0:
+                stderr_tail = "\n".join(stderr_lines[-10:])
+                if stderr_lines:
+                    detail = (
+                        f"\nPi CLI output (last {len(stderr_lines)} "
+                        f"non-JSON lines):\n{stderr_tail}"
+                    )
+                else:
+                    detail = (
+                        "\n(no non-JSON output captured — pi may have "
+                        "crashed before writing to stdout)"
+                    )
                 raise PiError(
-                    f"Pi CLI exited with return code {proc.returncode}"
+                    f"Pi CLI exited with return code {proc.returncode}.{detail}"
                 )
 
             # Single finalization path (plan §10): runs exactly once whether
