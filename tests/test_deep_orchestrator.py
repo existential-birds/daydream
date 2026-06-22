@@ -2997,44 +2997,6 @@ async def test_environmental_failure_aborts_heal_loop(
     assert saw_test_step, "no TEST-phase trajectory step recorded -- heal phase not reached"
 
 
-def _git_single_file_target(tmp_path: Path) -> Path:
-    """Build a 1-changed-file feature-branch repo for AC4's trivial-diff case.
-
-    Mirrors the ``multi_stack_target`` fixture shape (init on ``main``, change on
-    ``feature``) but with a single file (``api.py``) so
-    ``select_tier(count_changed_files(diff)) == "skip"``.
-    """
-    target = tmp_path / "single_file"
-    target.mkdir()
-    (target / "api.py").write_text("def hello():\n    return 'world'\n")
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "init", "-b", "main"], cwd=target, capture_output=True, check=True
-    )
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "config", "user.email", "test@test.com"], cwd=target, capture_output=True, check=True
-    )
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "config", "user.name", "Test"], cwd=target, capture_output=True, check=True
-    )
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "add", "."], cwd=target, capture_output=True, check=True
-    )
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "commit", "-m", "init"], cwd=target, capture_output=True, check=True
-    )
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "checkout", "-b", "feature"], cwd=target, capture_output=True, check=True
-    )
-    (target / "api.py").write_text("def hello():\n    return 'universe'\n")
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "add", "."], cwd=target, capture_output=True, check=True
-    )
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "commit", "-m", "change"], cwd=target, capture_output=True, check=True
-    )
-    return target
-
-
 def _install_accept_gate_pipeline(
     monkeypatch: pytest.MonkeyPatch, target: Path
 ) -> _StubBackend:
@@ -3072,7 +3034,7 @@ def _install_accept_gate_pipeline(
 
 
 async def test_alternatives_skipped_for_trivial_diff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC4 real-path (negative): a 1-file diff skips the alternatives (wonder) phase.
 
@@ -3084,7 +3046,7 @@ async def test_alternatives_skipped_for_trivial_diff(
     """
     from daydream.runner import RunConfig, run
 
-    target = _git_single_file_target(tmp_path)
+    target = feature_branch_repo
 
     # Accept the fix gate so the full pipeline runs; the shared helper pins
     # interactivity, silences deep UI noise, and stubs the non-idempotent

@@ -409,7 +409,7 @@ def test_assemble_declined_deep_run_null_verdicts_keeps_format_valid(tmp_path: P
     (run_dir / "deep" / "stack-python-records.json").write_text(
         json.dumps({"records": [{"id": "i1"}]})
     )
-    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 0.5, "deep": 1})
+    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 0.5})
     assert inputs.verifier_verdicts is None          # declined ⇒ no verdicts
     assert inputs.format_valid is True                # absence is expected, not malformed
 
