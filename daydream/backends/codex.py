@@ -29,6 +29,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.pricing import compute_cost, load_user_prices, resolve_prices
 
 _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
 _CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
@@ -351,10 +352,13 @@ class CodexBackend:
                 elif event_type == "turn.completed":
                     usage = event.get("usage", {})
                     # EVNT-07: MetricsEvent per turn (empty message_id — Codex has no
-                    # per-message id). cost_usd stays None — DO NOT synthesize from a
-                    # token-price table (D-16). cached_input_tokens IS surfaced (#65, K4).
-                    # Rename input/output_tokens → prompt/completion; skip if either
-                    # missing (EVNT-02 requires both). CostEvent below carries partials.
+                    # per-message id). #194 reverses D-16: the CLI emits no cost field,
+                    # so we now synthesize from tokens via the #61 user-overridable price
+                    # table (Claude/Pi parity). None when the model is unknown to the
+                    # table (preserves the #156 observable-marker). cached_input_tokens
+                    # IS surfaced (#65, K4). Rename input/output_tokens → prompt/completion;
+                    # skip if either missing (EVNT-02 requires both). CostEvent below
+                    # carries partials.
                     #
                     # #192: reasoning_output_tokens is the reasoning portion of
                     # output_tokens — a SUBSET, NOT additive (codex's own
@@ -364,20 +368,34 @@ class CodexBackend:
                     # COUNT only — no reasoning content (openai/codex#26428).
                     cached_tokens = usage.get("cached_input_tokens")
                     reasoning_tokens = usage.get("reasoning_output_tokens")
-                    if usage.get("input_tokens") is not None and usage.get("output_tokens") is not None:
+                    in_tok = usage.get("input_tokens")
+                    out_tok = usage.get("output_tokens")
+                    # cached_input_tokens is a SUBSET of input_tokens (D-15);
+                    # compute_cost expects uncached input. Clamp at 0 (mirror
+                    # pr_comment_renderer:346).
+                    cached = cached_tokens or 0
+                    uncached_input = max((in_tok or 0) - cached, 0)
+                    synth_cost = compute_cost(
+                        model=self.model,
+                        input_tokens=uncached_input,
+                        cached_input_tokens=cached,
+                        output_tokens=out_tok or 0,
+                        prices=resolve_prices(load_user_prices()),
+                    )
+                    if in_tok is not None and out_tok is not None:
                         yield MetricsEvent(
                             message_id="",
-                            prompt_tokens=usage["input_tokens"],
-                            completion_tokens=usage["output_tokens"],
+                            prompt_tokens=in_tok,
+                            completion_tokens=out_tok,
                             cached_tokens=cached_tokens,
-                            cost_usd=None,
+                            cost_usd=synth_cost,
                             reasoning_tokens=reasoning_tokens,
                             model_name=self.model,
                         )
                     yield CostEvent(
-                        cost_usd=None,
-                        input_tokens=usage.get("input_tokens"),
-                        output_tokens=usage.get("output_tokens"),
+                        cost_usd=synth_cost,
+                        input_tokens=in_tok,
+                        output_tokens=out_tok,
                         cached_tokens=cached_tokens,
                         reasoning_tokens=reasoning_tokens,
                         model_name=self.model,

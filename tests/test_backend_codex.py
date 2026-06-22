@@ -25,7 +25,8 @@ from daydream.backends.codex import (
     CodexError,
     _unwrap_shell_command,
 )
-from tests.harness.codex_replay import make_mock_process_from_fixture
+from daydream.pricing import compute_cost, load_user_prices, resolve_prices
+from tests.harness.codex_replay import make_mock_process, make_mock_process_from_fixture
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
@@ -47,7 +48,17 @@ async def test_simple_text_events():
     assert len(text_events) == 1
     assert text_events[0].text == "Hello from Codex"
     assert len(cost_events) == 1
-    assert cost_events[0].cost_usd is None
+    # #194: gpt-5.3-codex is in MODEL_PRICES → cost is now synthesized at the
+    # backend layer (D-16 reversed), matching compute_cost for these tokens.
+    expected_cost = compute_cost(
+        model="gpt-5.3-codex",
+        input_tokens=100,
+        cached_input_tokens=0,
+        output_tokens=50,
+        prices=resolve_prices(load_user_prices()),
+    )
+    assert cost_events[0].cost_usd is not None
+    assert cost_events[0].cost_usd == pytest.approx(expected_cost)
     assert cost_events[0].input_tokens == 100
     assert cost_events[0].output_tokens == 50
     assert len(result_events) == 1
@@ -327,12 +338,96 @@ async def test_turn_completed_cached_input_tokens():
     assert metrics_events[0].prompt_tokens == 300
     assert metrics_events[0].completion_tokens == 150
     assert metrics_events[0].cached_tokens == 200
+    # fixture-model is unknown to the price table → cost_usd stays None (#156
+    # observable-marker preserved after #194 reversed D-16).
     assert metrics_events[0].cost_usd is None
 
     assert len(cost_events) == 1
     assert cost_events[0].input_tokens == 300
     assert cost_events[0].output_tokens == 150
     assert cost_events[0].cached_tokens == 200
+
+
+@pytest.mark.asyncio
+async def test_codex_synthesizes_cost_for_known_model() -> None:
+    """#194: a known-priced model synthesizes cost at the backend layer.
+
+    Drives a turn.completed with gpt-5.5 (in MODEL_PRICES) and known token
+    counts. Both MetricsEvent and CostEvent must carry a non-None cost_usd
+    matching compute_cost for the uncached-input/cached/output split. Mirrors
+    how Claude (SDK total_cost_usd) and Pi (usage.cost.total) populate cost
+    at the event layer. Reverses D-16.
+    """
+    backend = CodexBackend(model="gpt-5.5")
+    # input_tokens is the TOTAL (cached is a subset per D-15); 15000 total
+    # with 5000 cached → 10000 uncached. output 2000.
+    lines = [
+        '{"type":"thread.started","thread_id":"th_synth"}',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}',
+        '{"type":"turn.completed","usage":{"input_tokens":15000,'
+        '"cached_input_tokens":5000,"output_tokens":2000}}',
+    ]
+
+    mock_proc = make_mock_process(lines)
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Synth"):
+            events.append(event)
+
+    expected = compute_cost(
+        model="gpt-5.5",
+        input_tokens=10_000,  # uncached = 15000 - 5000
+        cached_input_tokens=5_000,
+        output_tokens=2_000,
+        prices=resolve_prices(load_user_prices()),
+    )
+    assert expected is not None
+
+    metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
+    cost_events = [e for e in events if isinstance(e, CostEvent)]
+    assert len(metrics_events) == 1
+    assert len(cost_events) == 1
+    mev = metrics_events[0]
+    cev = cost_events[0]
+    assert mev.cost_usd is not None and mev.cost_usd > 0
+    assert cev.cost_usd is not None and cev.cost_usd > 0
+    assert mev.cost_usd == pytest.approx(expected)
+    assert cev.cost_usd == pytest.approx(expected)
+    # Token wiring unchanged: cached surfaced, input/output renamed.
+    assert mev.prompt_tokens == 15_000
+    assert mev.completion_tokens == 2_000
+    assert mev.cached_tokens == 5_000
+
+
+@pytest.mark.asyncio
+async def test_codex_cost_none_for_unknown_model() -> None:
+    """#156 preserved after #194: a model unknown to the price table yields cost_usd=None.
+
+    Drives a turn.completed with ``definitely-not-a-real-model`` (absent from
+    MODEL_PRICES and any user override). compute_cost returns None, so both
+    MetricsEvent and CostEvent keep cost_usd=None — the observable marker that
+    downstream renderers use to show "cost unavailable".
+    """
+    backend = CodexBackend(model="definitely-not-a-real-model")
+    lines = [
+        '{"type":"thread.started","thread_id":"th_unknown"}',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}',
+        '{"type":"turn.completed","usage":{"input_tokens":1000,'
+        '"cached_input_tokens":200,"output_tokens":50}}',
+    ]
+
+    mock_proc = make_mock_process(lines)
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "Unknown"):
+            events.append(event)
+
+    metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
+    cost_events = [e for e in events if isinstance(e, CostEvent)]
+    assert len(metrics_events) == 1
+    assert len(cost_events) == 1
+    assert metrics_events[0].cost_usd is None
+    assert cost_events[0].cost_usd is None
 
 
 @pytest.mark.asyncio

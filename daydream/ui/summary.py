@@ -431,21 +431,21 @@ def print_preflight_notice(
     stages: list[str],
     stack_lines: list[str],
     agent_count: int,
-    codex_in_use: bool,
     exploration_available: bool,
 ) -> None:
-    """Print the deep-mode pre-flight notice (D-30, D-31).
+    """Print the deep-mode pre-flight notice (D-30).
 
     Lists the stages, detected stacks, skill per stack, and total agent
-    count. Surfaces the ``cost_usd=None`` caveat when the Codex backend
-    is in use, because the Codex CLI does not report per-stage cost.
+    count. The D-31 ``cost_usd=None`` caveat was removed when #194 reversed
+    D-16 (Codex now synthesizes cost at the backend layer); per-model
+    unpriceable cases surface via the renderer's "cost unavailable" marker
+    (#156) at render time instead.
 
     Args:
         console: Rich Console instance for output.
         stages: Ordered list of stage display names.
         stack_lines: Per-stack human-readable summary lines.
         agent_count: Total agent invocation count (D-30 formula).
-        codex_in_use: True when any active backend is Codex (D-31).
         exploration_available: True when the exploration infrastructure
             (Phases 1-4) is installed and the pre-scan is wired in.
     """
@@ -464,8 +464,3 @@ def print_preflight_notice(
     for line in stack_lines:
         console.print(f"    - {line}")
     console.print(f"[neon.fg]  Total agents: {agent_count}[/]")
-    if codex_in_use:
-        console.print(
-            "[neon.yellow]  ⚠ Codex backend: per-stage cost_usd=None "
-            "(cost not reported by codex CLI)[/]"
-        )

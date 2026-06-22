@@ -67,7 +67,7 @@ async def test_real_golden_parses_to_expected_events() -> None:
         f"real golden missing at {FIXTURES_DIR / REAL_GOLDEN}"
     )
 
-    backend = CodexBackend(model="real-golden-model")
+    backend = CodexBackend(model="gpt-5.5")
     mock_proc = make_mock_process_from_fixture(REAL_GOLDEN)
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -112,6 +112,12 @@ async def test_real_golden_parses_to_expected_events() -> None:
     # completion_tokens, NOT additive.
     assert mev.reasoning_tokens is not None and mev.reasoning_tokens > 0, (
         f"real reasoning_output_tokens not surfaced: {mev.reasoning_tokens}"
+    )
+    # #194: gpt-5.5 is in MODEL_PRICES → cost is synthesized at the backend
+    # layer (D-16 reversed). The golden's tokens are non-trivial, so the
+    # synthesized cost must be non-None and strictly positive.
+    assert mev.cost_usd is not None and mev.cost_usd > 0, (
+        f"real golden cost not synthesized for gpt-5.5: {mev.cost_usd}"
     )
 
     # Result event present (turn.completed → ResultEvent with continuation).

@@ -87,10 +87,6 @@ try:
 except ImportError:  # pragma: no cover -- only hit when Phases 1-4 absent
     EXPLORATION_AVAILABLE = False
 
-# Codex backend class used for isinstance() in the pre-flight notice
-# (D-31 cost_usd=None caveat). Imported here so tests can monkeypatch it.
-from daydream.backends.codex import CodexBackend  # noqa: E402
-
 # Per-file block splitter (splits the unified diff at each `diff --git` header).
 _DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
 # `+++ ` and `--- ` file headers inside a single block.
@@ -499,18 +495,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         skill_availability = installed if installed is not None else set(SKILL_MAP.keys())
         stacks = detect_stacks(changed_files, skill_availability=skill_availability)
 
-        # Pre-flight notice (D-30, D-31).
+        # Pre-flight notice (D-30).
         stack_lines = [_stack_preflight_line(s) for s in stacks]
-        # Review-centric preflight: the cost_usd=None caveat fires when the
-        # review-phase backend is Codex. Other per-phase backends may differ
-        # but the notice is anchored on the review stage.
-        review_backend_for_preflight = _resolve_backend(config, "review", backend_cache)
         print_preflight_notice(
             console,
             stages=_PIPELINE_STAGE_NAMES,
             stack_lines=stack_lines,
             agent_count=total_agent_count(len(stacks)),
-            codex_in_use=isinstance(review_backend_for_preflight, CodexBackend),
             exploration_available=EXPLORATION_AVAILABLE,
         )
 
