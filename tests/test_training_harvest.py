@@ -401,9 +401,8 @@ def test_assemble_declined_deep_run_null_verdicts_keeps_format_valid(tmp_path: P
     # Verify relocation: a declined deep run writes the deep bundle (records,
     # merged report) but skips recommendation verification, so no
     # recommendation-verdicts.json exists. Harvest must treat the absent
-    # verdicts as expected (verifier_verdicts=None, format gate intact) — NOT
-    # floor format_valid — and the run is distinguished from a shallow run by
-    # the manifest's deep flag (row["deep"]), not by file presence.
+    # verdicts as expected (verifier_verdicts=None, format gate intact), not
+    # floor format_valid.
     run_dir = tmp_path / "run"
     (run_dir / "deep").mkdir(parents=True)
     # stack records are present and valid (as on a real declined deep run)
