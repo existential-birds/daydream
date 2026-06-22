@@ -1929,6 +1929,43 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     )
 
 
+def test_intent_phase_resolves_to_sonnet_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC3: the ``intent`` phase resolves to ``claude-sonnet-4-6`` by default.
+
+    Intent summarization is a single mid-complexity turn that does not need Opus;
+    Sonnet matches the FIX/TEST/EXPLORATION/PER_STACK_REVIEW tier. Captures the
+    ``model=`` passed to ``create_backend`` and asserts the default, then that an
+    explicit ``RunConfig(model=...)`` override still wins.
+    """
+    from daydream.runner import RunConfig, _resolve_backend
+
+    captured: dict[str, Any] = {}
+
+    class _B:
+        def __init__(self, model: str | None) -> None:
+            self.model = model
+
+    def fake_create(name: str, model: str | None = None) -> _B:  # noqa: ARG001
+        captured["model"] = model
+        return _B(model)
+
+    monkeypatch.setattr("daydream.runner.create_backend", fake_create)
+
+    # Default: intent lands on Sonnet (mid tier), not Opus.
+    backend = _resolve_backend(RunConfig(), "intent", {})
+    assert backend.model == "claude-sonnet-4-6", (
+        f"intent phase default should be claude-sonnet-4-6, got {backend.model!r}"
+    )
+
+    # An explicit global model override still wins over the phase default.
+    backend_override = _resolve_backend(RunConfig(model="claude-opus-4-8"), "intent", {})
+    assert backend_override.model == "claude-opus-4-8", (
+        f"RunConfig(model=...) override should win for intent, got {backend_override.model!r}"
+    )
+
+
 async def test_verifier_runs_after_merge_before_fix(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2065,6 +2102,11 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
     ), (
         "unverified_assumptions did not propagate into the fix prompt; "
         f"fix prompts seen: {fix_prompts!r}"
+    )
+    # AC2 regression guard: when the gate accepts, verify runs and the verdicts
+    # artifact lands on disk (same path asserted by the ordering test).
+    assert (multi_stack_target / ".daydream" / "deep" / "recommendation-verdicts.json").is_file(), (
+        "verdicts file missing -- verify did not run when the gate accepted"
     )
 
 
@@ -2290,6 +2332,12 @@ async def test_start_at_fix_recovers_merged_items(
         "phase_fix received an item that did not originate from the deep-dir "
         f"merged-items.json; got {fixed!r}"
     )
+    # AC5 regression guard: a --start-at fix resume that applies fixes (gate
+    # accepted) still produces verdicts -- verify runs post-gate-accept on resume.
+    assert (multi_stack_target / ".daydream" / "deep" / "recommendation-verdicts.json").is_file(), (
+        "verdicts file missing on --start-at fix resume -- verify must run when "
+        "the gate accepts and fixes are applied"
+    )
 
 
 # Real-path integration: non-interactive / EOF-safe apply-fixes gate.
@@ -2313,7 +2361,7 @@ def _silence_gate_noise(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_apply_fixes_gate_non_interactive_takes_safe_default(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Real-path: non-interactive deep run declines fixes and exits 0 without
     reading stdin.
@@ -2323,6 +2371,11 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     ``config.non_interactive=True`` propagated by ``run``, the gate must
     short-circuit to its "n" default -- never touching stdin -- so the run
     declines fixes and returns 0.
+
+    AC1: because the gate declines, the recommendation verifier must NOT run --
+    no ``verify`` value among the run's trajectory ``daydream_phase`` steps and
+    no ``recommendation-verdicts.json`` on disk. Verify lives inside the
+    fix-accept branch; a declined run skips it (and its cost).
     """
     from daydream.agent import get_non_interactive, reset_state
     from daydream.config import REVIEW_OUTPUT_FILE
@@ -2352,11 +2405,17 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
 
     monkeypatch.setattr("builtins.input", _forbidden_input)
 
+    traj = tmp_path / "trajectory.json"
     reset_state()
     exit_code = -1
     try:
         assert get_non_interactive() is False
-        config = RunConfig(target=str(multi_stack_target), cleanup=False, non_interactive=True)
+        config = RunConfig(
+            target=str(multi_stack_target),
+            cleanup=False,
+            non_interactive=True,
+            trajectory_path=traj,
+        )
         exit_code = await run(config)
         assert get_non_interactive() is True
     finally:
@@ -2367,6 +2426,19 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     # The gate's "report written ... exiting" path ran (report on disk before return 0).
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).is_file(), (
         "merged report missing -- the apply-fixes gate's success/exit path did not run"
+    )
+
+    # AC1: the verifier never ran because the gate declined. No verify phase in
+    # the trajectory, and no recommendation-verdicts.json artifact on disk.
+    run_root = multi_stack_target / ".daydream"
+    phases = _scan_trajectory_extra(run_root, traj, "daydream_phase")
+    assert "verify" not in phases, (
+        f"verify phase ran despite the gate declining; phases: {phases!r}"
+    )
+    verdicts_file = multi_stack_target / ".daydream" / "deep" / "recommendation-verdicts.json"
+    assert not verdicts_file.exists(), (
+        f"recommendation-verdicts.json exists despite declined gate -- verify must "
+        f"not run when fixes are not applied; found {verdicts_file}"
     )
 
 
@@ -2887,3 +2959,172 @@ async def test_environmental_failure_aborts_heal_loop(
     run_root = multi_stack_target / ".daydream"
     saw_test_step = "test" in _scan_trajectory_extra(run_root, traj, "daydream_phase")
     assert saw_test_step, "no TEST-phase trajectory step recorded -- heal phase not reached"
+
+
+def _git_single_file_target(tmp_path: Path) -> Path:
+    """Build a 1-changed-file feature-branch repo for AC4's trivial-diff case.
+
+    Mirrors the ``multi_stack_target`` fixture shape (init on ``main``, change on
+    ``feature``) but with a single file (``api.py``) so
+    ``select_tier(count_changed_files(diff)) == "skip"``.
+    """
+    target = tmp_path / "single_file"
+    target.mkdir()
+    (target / "api.py").write_text("def hello():\n    return 'world'\n")
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "init", "-b", "main"], cwd=target, capture_output=True, check=True
+    )
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "config", "user.email", "test@test.com"], cwd=target, capture_output=True, check=True
+    )
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "config", "user.name", "Test"], cwd=target, capture_output=True, check=True
+    )
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "add", "."], cwd=target, capture_output=True, check=True
+    )
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "commit", "-m", "init"], cwd=target, capture_output=True, check=True
+    )
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "checkout", "-b", "feature"], cwd=target, capture_output=True, check=True
+    )
+    (target / "api.py").write_text("def hello():\n    return 'universe'\n")
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "add", "."], cwd=target, capture_output=True, check=True
+    )
+    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
+        ["git", "commit", "-m", "change"], cwd=target, capture_output=True, check=True
+    )
+    return target
+
+
+async def test_alternatives_skipped_for_trivial_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC4 real-path (negative): a 1-file diff skips the alternatives (wonder) phase.
+
+    ``select_tier(count_changed_files(diff)) == "skip"`` for <=1 changed file, so
+    the alternatives phase must NOT run: no ``alternatives`` value among the run's
+    trajectory ``daydream_phase`` steps, no ``wonder`` prompt dispatched through
+    the stub, and ``alternatives.json`` written as ``[]`` (downstream per-stack
+    and merge consumers still find the file). Intent still runs unconditionally.
+    """
+    from daydream.runner import RunConfig, run
+
+    target = _git_single_file_target(tmp_path)
+
+    # Accept the fix gate so the full pipeline runs; pin interactivity so the
+    # "y" stub is honoured.
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    stub = _install_stub_backend(monkeypatch, target)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:  # noqa: ARG001
+        return None
+
+    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
+        return (True, 0)
+
+    async def _stub_commit(backend, work):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+
+    traj = tmp_path / "trajectory.json"
+    exit_code = await run(
+        RunConfig(target=str(target), trajectory_path=traj, assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+
+    run_root = target / ".daydream"
+    phases = _scan_trajectory_extra(run_root, traj, "daydream_phase")
+
+    # alternatives phase never ran.
+    assert "alternatives" not in phases, (
+        f"alternatives phase ran for a trivial (1-file) diff; phases: {phases!r}"
+    )
+    # No wonder/alternatives prompt was dispatched (discriminator per _StubBackend.execute).
+    alt_calls = [
+        c
+        for c in stub.calls
+        if "would you have done this differently" in c["prompt"].lower()
+        or "evaluate the implementation" in c["prompt"].lower()
+    ]
+    assert not alt_calls, (
+        f"alternatives wonder prompt dispatched for a trivial diff: {len(alt_calls)} call(s)"
+    )
+    # alternatives.json still written as [] so downstream consumers find the file.
+    alts_json = json.loads((target / ".daydream" / "deep" / "alternatives.json").read_text())
+    assert alts_json == [], f"expected empty alternatives.json on skip, got {alts_json!r}"
+    # intent still ran -- it is never gated by tier.
+    assert "intent" in phases, (
+        f"intent phase did not run; it must not be gated by diff tier; phases: {phases!r}"
+    )
+
+
+async def test_alternatives_runs_for_multi_file_diff(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC4 real-path (positive): a >=2-file diff runs the alternatives phase.
+
+    ``multi_stack_target`` carries a 3-file diff (api.py, App.tsx, README.md),
+    so ``select_tier(count_changed_files(diff)) == "single"`` (not ``"skip"``).
+    The alternatives phase MUST run: an ``alternatives`` value among the run's
+    trajectory ``daydream_phase`` steps and a ``wonder`` prompt dispatched.
+    """
+    from daydream.runner import RunConfig, run
+
+    # Accept the fix gate; pin interactivity so the "y" stub is honoured.
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:  # noqa: ARG001
+        return None
+
+    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
+        return (True, 0)
+
+    async def _stub_commit(backend, work):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+
+    traj = tmp_path / "trajectory.json"
+    exit_code = await run(
+        RunConfig(
+            target=str(multi_stack_target), trajectory_path=traj, assume="yes", output_mode="loop", cleanup=False
+        )
+    )
+    assert exit_code == 0
+
+    run_root = multi_stack_target / ".daydream"
+    phases = _scan_trajectory_extra(run_root, traj, "daydream_phase")
+
+    # alternatives phase ran.
+    assert "alternatives" in phases, (
+        f"alternatives phase did not run for a 3-file diff; phases: {phases!r}"
+    )
+    # A wonder/alternatives prompt was dispatched.
+    alt_calls = [
+        c
+        for c in stub.calls
+        if "would you have done this differently" in c["prompt"].lower()
+        or "evaluate the implementation" in c["prompt"].lower()
+    ]
+    assert alt_calls, "alternatives wonder prompt was not dispatched for a 3-file diff"
