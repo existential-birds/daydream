@@ -133,3 +133,34 @@ Traceback (most recent call last):
     foo()
 """
     assert detect_test_success(output) is False
+
+
+def test_pytest_deselected_passed() -> None:
+    """pytest summary with deselected tests must be a pass (issue #198)."""
+    assert detect_test_success("2528 passed, 391 deselected, 1 warning in 30.30s") is True
+
+
+def test_pytest_bare_passed_no_failed() -> None:
+    """Bare 'N passed' with no failure mention must be a pass."""
+    assert detect_test_success("100 passed in 5.2s") is True
+
+
+def test_pytest_skipped_passed() -> None:
+    """pytest summary with skipped tests must be a pass."""
+    assert detect_test_success("50 passed, 3 skipped in 2.1s") is True
+
+
+def test_pytest_xfailed_passed() -> None:
+    """pytest summary with xfailed tests must be a pass."""
+    assert detect_test_success("10 passed, 2 xfailed") is True
+
+
+def test_explicit_zero_failed_with_tests_passed() -> None:
+    """'N tests passed, 0 failed' must be a pass (regression: not failed_counts
+    broke this because failed_counts is [0], a truthy list)."""
+    assert detect_test_success("100 tests passed, 0 failed") is True
+
+
+def test_pytest_errors_are_not_pass() -> None:
+    """pytest 'errors' (collection errors) are genuine non-passes."""
+    assert detect_test_success("1 passed, 2 errors in 1.0s") is False
