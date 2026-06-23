@@ -288,6 +288,19 @@ async def test_compute_phase_timings_orphaned_end_skipped(tmp_path: Path) -> Non
     assert "fix" not in timings
 
 
+async def test_compute_phase_timings_orphaned_start_pruned(tmp_path: Path) -> None:
+    """A start with no matching end is pruned — no zero-occurrence bucket (symmetric to orphaned ends)."""
+    rec = _make_recorder(tmp_path)
+    rec.emit_phase_start(DaydreamPhase.FIX)  # orphaned — no end
+    rec.emit_phase_start(DaydreamPhase.REVIEW)
+    rec.emit_phase_end(DaydreamPhase.REVIEW)
+    timings = rec.compute_phase_timings()
+    assert timings is not None
+    assert "review" in timings
+    # FIX had a start but no end → pruned as a zero-occurrence bucket.
+    assert "fix" not in timings
+
+
 # --- Real-path: deep run via runner.run ------------------------------------
 
 

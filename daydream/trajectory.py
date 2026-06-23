@@ -1084,8 +1084,10 @@ class TrajectoryRecorder:
             key = ev.phase.value
             if ev.event == "phase_start":
                 pending_starts.setdefault(key, []).append(ev.timestamp)
-                # Create the bucket lazily on the first start so orphaned ends
-                # don't produce zero-occurrence buckets.
+                # Ensure the bucket exists so the matching phase_end can update it.
+                # Orphaned ends (no start) are skipped by the guard below; orphaned
+                # starts (no end) leave a zero-occurrence bucket that is pruned in
+                # the return comprehension, so neither produces a spurious bucket.
                 by_phase.setdefault(key, {"wall_clock_seconds": 0.0, "occurrences": 0})
             elif ev.event == "phase_end":
                 starts = pending_starts.get(key)
@@ -1107,6 +1109,7 @@ class TrajectoryRecorder:
                 "occurrences": val["occurrences"],
             }
             for key, val in by_phase.items()
+            if val["occurrences"] > 0  # drop orphaned starts (start with no matching end)
         }
 
     def _sibling_path_for(self, descriptor: str) -> Path:
