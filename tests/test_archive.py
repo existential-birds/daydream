@@ -56,6 +56,9 @@ class _MockRecorder:
     def compute_wall_clock_seconds(self) -> float | None:
         return self._wall_clock_seconds
 
+    def compute_phase_timings(self) -> dict[str, Any] | None:
+        return None
+
 
 @dataclass
 class _MockConfig:

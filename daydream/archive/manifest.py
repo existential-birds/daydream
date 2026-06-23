@@ -65,6 +65,10 @@ class Manifest:
         total_cached_tokens: Cached tokens.
         wall_clock_seconds: Wall-clock duration derived from step timestamps
             on every run; refined by eval's fork-inclusive value when available.
+        phase_timings: Per-phase wall-clock breakdown derived from explicit
+            ``phase_start``/``phase_end`` events (issue #203). ``None`` when no
+            phase events were emitted (pre-#203 runs or runs that skip phase
+            wrapping). Each entry: ``{"wall_clock_seconds": float, "occurrences": int}``.
         total_findings: Number of findings (from eval, if available).
         grounding_rate: Grounding rate (from eval, if available).
         coverage_ratio: File coverage ratio (from eval, if available).
@@ -117,6 +121,7 @@ class Manifest:
     # wall_clock_seconds is derived from step timestamps on every run; the
     # remaining metrics below are populated only with --eval.
     wall_clock_seconds: float | None = None
+    phase_timings: dict[str, Any] | None = None
     total_findings: int | None = None
     grounding_rate: float | None = None
     coverage_ratio: float | None = None
@@ -174,6 +179,7 @@ class Manifest:
                 "total_completion_tokens": self.total_completion_tokens,
                 "total_cached_tokens": self.total_cached_tokens,
                 "wall_clock_seconds": self.wall_clock_seconds,
+                "phase_timings": self.phase_timings,
                 "total_findings": self.total_findings,
                 "grounding_rate": self.grounding_rate,
                 "coverage_ratio": self.coverage_ratio,
@@ -256,6 +262,8 @@ def build_manifest(
     # Derivable from step timestamps, so populated for every run; the --eval
     # fork-inclusive value (eval.analyzer.analyze_timing) takes precedence below.
     m.wall_clock_seconds = recorder.compute_wall_clock_seconds()
+    # Per-phase breakdown from explicit phase_start/phase_end events (#203).
+    m.phase_timings = recorder.compute_phase_timings()
 
     if evaluation:
         timing = evaluation.get("timing", {})

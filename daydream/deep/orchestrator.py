@@ -60,7 +60,13 @@ from daydream.phases import (
     phase_verify_recommendations,
     severity_sorted,
 )
-from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
+from daydream.trajectory import (
+    DaydreamPhase,
+    DaydreamRunFlow,
+    TrajectoryRecorder,
+    default_trajectory_path,
+    phase_scope,
+)
 from daydream.ui import (
     format_verdict_join,
     print_error,
@@ -671,14 +677,15 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
                 explore_backend = _resolve_backend(config, "exploration", backend_cache)
                 print_dim(console, f"Exploration model: {explore_backend.model}")
-                config.exploration_context = await safe_explore(
-                    pre_scan,
-                    explore_backend,
-                    target_dir,
-                    diff,
-                    config.exploration_depth,
-                    diff_ref=_compute_diff_ref(target_dir),
-                )
+                async with phase_scope(DaydreamPhase.EXPLORATION):
+                    config.exploration_context = await safe_explore(
+                        pre_scan,
+                        explore_backend,
+                        target_dir,
+                        diff,
+                        config.exploration_depth,
+                        diff_ref=_compute_diff_ref(target_dir),
+                    )
                 console.print(render_exploration_summary(config.exploration_context))
         if EXPLORATION_AVAILABLE and config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(
@@ -743,16 +750,17 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             failed_stacks: dict[str, str] = {}
             if config.start_at not in ("merge", "fix"):
                 print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
-                per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
-                    _resolve_backend(config, "per_stack_review", backend_cache),
-                    work,
-                    stacks,
-                    diff_path=diff_path,
-                    intent_path=intent_p,
-                    alternatives_path=alts_p,
-                    exploration_dir=exploration_dir,
-                    diff_text=diff,
-                )
+                async with phase_scope(DaydreamPhase.DEEP, stage="review"):
+                    per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
+                        _resolve_backend(config, "per_stack_review", backend_cache),
+                        work,
+                        stacks,
+                        diff_path=diff_path,
+                        intent_path=intent_p,
+                        alternatives_path=alts_p,
+                        exploration_dir=exploration_dir,
+                        diff_text=diff,
+                    )
                 # Persist so a later `--start-at merge` resume can still surface
                 # uncovered stacks (the in-memory failure map otherwise dies here).
                 failures_p = per_stack_failures_path(dd)
@@ -872,15 +880,16 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     if config.start_at != "merge" or not arbiter_marker.is_file():
                         arbiter_targets = select_arbiter_targets(all_records, record_sources)
                         if arbiter_targets:
-                            verdicts = await phase_arbiter_review(
-                                _resolve_backend(config, "arbiter", backend_cache),
-                                work,
-                                selected_records=[all_records[i] for i in arbiter_targets],
-                                diff_path=diff_path,
-                                intent_path=intent_p,
-                                alternatives_path=alts_p,
-                                exploration_dir=exploration_dir,
-                            )
+                            async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
+                                verdicts = await phase_arbiter_review(
+                                    _resolve_backend(config, "arbiter", backend_cache),
+                                    work,
+                                    selected_records=[all_records[i] for i in arbiter_targets],
+                                    diff_path=diff_path,
+                                    intent_path=intent_p,
+                                    alternatives_path=alts_p,
+                                    exploration_dir=exploration_dir,
+                                )
                             all_records, record_sources = _apply_arbiter_verdicts(
                                 all_records, record_sources, arbiter_targets, verdicts
                             )
