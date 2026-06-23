@@ -106,7 +106,15 @@ def test_generic_fallback_no_docs_notice_by_default(tmp_path: Path) -> None:
 
 
 def test_prompts_embed_no_full_file_contents(tmp_path: Path) -> None:
-    """D-09: prompts reference paths, never embed diffs or file bodies."""
+    """D-09: prompts reference paths, never embed diffs or file bodies.
+
+    Note (issue #172, Fix B): when ``inline_diff`` is supplied the per-stack
+    prompt DOES embed the relevant diff hunks — that is the read-once
+    optimization, not a D-09 violation. This heuristic guards the default
+    (``inline_diff=None``) path only: no line longer than 400 chars there.
+    The inlined path is bounded by ``INLINE_DIFF_BUDGET_BYTES`` separately
+    (see ``test_inline_diff_byte_budget``).
+    """
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
         skill_invocation="/beagle-python:review-python",
@@ -119,15 +127,34 @@ def test_prompts_embed_no_full_file_contents(tmp_path: Path) -> None:
 
 
 def test_per_stack_prompt_points_at_diff_path(tmp_path: Path) -> None:
-    """Prompt references diff_path for agents to read directly."""
+    """Fallback (``inline_diff=None``): prompt references diff_path for agents
+    to read directly.
+
+    Issue #172 Fix B: with ``inline_diff`` supplied, the path pointer is
+    DROPPED (the hunks are inlined instead). The fallback contract — when the
+    byte budget is exceeded or the caller has no diff text — keeps the pointer
+    so the agent can still locate the full diff for whole-file context.
+    """
     p = _paths(tmp_path)
-    out = build_per_stack_prompt(
+    # Default (inline_diff=None) → pointer present (fallback contract).
+    out_fallback = build_per_stack_prompt(
         skill_invocation="/beagle-python:review-python",
         stack_name="python",
         files=["api.py"],
         **p,
     )
-    assert str(p["diff_path"]) in out
+    assert str(p["diff_path"]) in out_fallback
+    # inline_diff supplied → pointer absent (hunks inlined instead).
+    out_inline = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        inline_diff="diff --git a/api.py b/api.py\n+++ b/api.py\n@@ -1 +1 @@\n-x\n+y\n",
+        **p,
+    )
+    assert str(p["diff_path"]) not in out_inline
+    assert "Read it directly" not in out_inline
+    assert "-x" in out_inline and "+y" in out_inline  # hunks inlined
 
 
 def test_per_stack_prompt_omits_bare_git_diff_command(tmp_path: Path) -> None:
@@ -148,13 +175,26 @@ def test_per_stack_prompt_omits_bare_git_diff_command(tmp_path: Path) -> None:
 
 
 def test_generic_fallback_prompt_omits_bare_git_diff_command(tmp_path: Path) -> None:
-    """Generic fallback must not embed the broken git-diff command either."""
+    """Generic fallback must not embed the broken git-diff command either.
+
+    Issue #172 Fix B: with ``inline_diff`` supplied, the diff_path pointer is
+    DROPPED. The fallback (``inline_diff=None``) path still references
+    diff_path so the agent can locate the full diff.
+    """
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(files=["config.yaml"], **p)
-    assert "git diff --no-color -- config.yaml" not in out
-    assert "git diff -- config.yaml" not in out
-    # diff_path must still be referenced.
-    assert str(p["diff_path"]) in out
+    # Default (inline_diff=None) → pointer present (fallback contract).
+    out_fallback = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    assert "git diff --no-color -- config.yaml" not in out_fallback
+    assert "git diff -- config.yaml" not in out_fallback
+    assert str(p["diff_path"]) in out_fallback
+    # inline_diff supplied → pointer absent (hunks inlined instead).
+    out_inline = build_generic_fallback_prompt(
+        files=["config.yaml"],
+        inline_diff="diff --git a/config.yaml b/config.yaml\n+++ b/config.yaml\n@@ -1 +1 @@\n-x\n+y\n",
+        **p,
+    )
+    assert str(p["diff_path"]) not in out_inline
+    assert "Read it directly" not in out_inline
 
 
 def _merge_paths(tmp_path: Path) -> dict[str, Path | list[Path] | None]:
@@ -333,3 +373,127 @@ def test_merge_prompt_omits_structural_section_when_path_is_none(tmp_path: Path)
     assert "## Structural Review" not in prompt
     assert "Structural-stack parsed records:" not in prompt
     assert "Structural-stack handling:" not in prompt
+
+
+# =============================================================================
+# Issue #172 — Fix B: read-once inline diff hunks in per-stack / generic prompts
+# =============================================================================
+
+
+_DIFF_TWO_FILES = (
+    "diff --git a/api.py b/api.py\n"
+    "+++ b/api.py\n"
+    "@@ -1 +1 @@\n"
+    "-def hello(): return 'world'\n"
+    "+def hello(): return 'universe'\n"
+    "diff --git a/App.tsx b/App.tsx\n"
+    "+++ b/App.tsx\n"
+    "@@ -1 +1 @@\n"
+    "-export const App = () => <div>hello</div>;\n"
+    "+export const App = () => <div>universe</div>;\n"
+)
+
+
+def test_diff_blocks_for_files_selects_relevant_hunks() -> None:
+    """AC4 helper: ``_diff_blocks_for_files`` returns only the blocks for the
+    requested files (post-state path match), concatenated as-is.
+    """
+    from daydream.deep.prompts import _diff_blocks_for_files
+
+    out = _diff_blocks_for_files(_DIFF_TWO_FILES, ["api.py"])
+    assert out is not None
+    assert "diff --git a/api.py b/api.py" in out
+    assert "def hello(): return 'universe'" in out
+    # App.tsx block is NOT in the filtered output.
+    assert "App.tsx" not in out
+    # Two files requested → both blocks present.
+    both = _diff_blocks_for_files(_DIFF_TWO_FILES, ["api.py", "App.tsx"])
+    assert both is not None
+    assert "def hello(): return 'universe'" in both
+    assert "<div>universe</div>" in both
+
+
+def test_diff_blocks_for_files_returns_none_above_byte_budget() -> None:
+    """AC4 byte-bound fallback: when the relevant blocks exceed
+    ``INLINE_DIFF_BUDGET_BYTES``, the helper returns ``None`` so the caller
+    keeps the path pointer (the agent is told to Read diff.patch directly).
+    """
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES, _diff_blocks_for_files
+
+    # Synthesize a diff whose single matching block exceeds the budget.
+    huge_line = "x" * (INLINE_DIFF_BUDGET_BYTES + 64)
+    huge_diff = (
+        "diff --git a/api.py b/api.py\n"
+        "+++ b/api.py\n"
+        "@@ -1 +1 @@\n"
+        f"-{huge_line}\n"
+        f"+{huge_line}\n"
+    )
+    assert _diff_blocks_for_files(huge_diff, ["api.py"]) is None
+
+
+def test_diff_blocks_for_files_returns_none_when_no_blocks_match() -> None:
+    """AC4 no-match fallback: files not in the diff → None (caller keeps pointer)."""
+    from daydream.deep.prompts import _diff_blocks_for_files
+
+    out = _diff_blocks_for_files(_DIFF_TWO_FILES, ["nonexistent.py"])
+    assert out is None
+
+
+def test_per_stack_prompt_inlines_hunks_and_drops_read_instruction(tmp_path: Path) -> None:
+    """AC4 (unit): per-stack prompt with ``inline_diff`` supplied contains the
+    inlined hunks, NOT the ``Read it directly`` instruction or diff_path.
+    """
+    from daydream.deep.prompts import _diff_blocks_for_files
+
+    p = _paths(tmp_path)
+    inline = _diff_blocks_for_files(_DIFF_TWO_FILES, ["api.py"])
+    assert inline is not None  # sanity: the helper found a block
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        inline_diff=inline,
+        **p,
+    )
+    assert "def hello(): return 'universe'" in out  # hunk inlined
+    assert "Read it directly" not in out
+    assert str(p["diff_path"]) not in out
+
+
+def test_generic_fallback_prompt_inlines_hunks_and_drops_read_instruction(
+    tmp_path: Path,
+) -> None:
+    """AC4 (unit): generic-fallback prompt with ``inline_diff`` supplied contains
+    the inlined hunks, NOT the ``Read it directly`` instruction or diff_path.
+    """
+    from daydream.deep.prompts import _diff_blocks_for_files
+
+    p = _paths(tmp_path)
+    inline = _diff_blocks_for_files(_DIFF_TWO_FILES, ["App.tsx"])
+    assert inline is not None
+    out = build_generic_fallback_prompt(
+        files=["App.tsx"],
+        inline_diff=inline,
+        **p,
+    )
+    assert "<div>universe</div>" in out
+    assert "Read it directly" not in out
+    assert str(p["diff_path"]) not in out
+
+
+def test_structural_prompt_keeps_diff_pointer_and_read_freedom(tmp_path: Path) -> None:
+    """AC4: structural prompt is NOT inlined — it keeps its diff pointer AND
+    its repo-wide Read/Grep/Bash freedom (the structural lens roams beyond
+    the diff by design). Fix B does not touch the structural / arbiter prompts.
+    """
+    from daydream.deep.prompts import build_structural_prompt
+
+    p = _paths(tmp_path)
+    out = build_structural_prompt(
+        files=["api.py"],
+        **p,
+    )
+    assert "read any file in the codebase" in out
+    assert str(p["diff_path"]) in out  # keeps its pointer
+    assert "Read it directly" in out   # structural prompt unchanged

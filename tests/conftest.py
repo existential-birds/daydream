@@ -246,6 +246,72 @@ def multi_stack_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def tiny_diff_target(tmp_path: Path) -> Path:
+    """Git repo with a 2-file two-language diff on a feature branch (issue #172).
+
+    Mirrors ``multi_stack_target`` but with only two changed files (``api.py`` +
+    ``App.tsx``) so the deep pipeline's tiny-diff short-circuit fires: the two
+    language stacks collapse into one combined generic-fallback assignment and
+    the merge agent + arbiter are skipped. Used by AC2 / AC5 real-path tests.
+    """
+    project = tmp_path / "tiny_diff"
+    project.mkdir()
+    (project / "api.py").write_text("def hello():\n    return 'world'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
+    subprocess.run(  # noqa: S603
+        ["git", "init", "-b", "main"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "config", "user.email", "test@test.com"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "config", "user.name", "Test"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "add", "."],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "commit", "-m", "init"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "checkout", "-b", "feature"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
+    subprocess.run(  # noqa: S603
+        ["git", "add", "."],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "commit", "-m", "change"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=True,
+    )
+    return project
+
+
+@pytest.fixture
 def make_work() -> Callable[..., WorkContext]:
     """Builder for synthetic ``WorkContext`` instances.
 

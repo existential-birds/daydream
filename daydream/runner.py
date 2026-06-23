@@ -187,6 +187,11 @@ class RunConfig:
         assume: Forced yes/no answer for interactive gates — ``"yes"`` (``--yes``),
             ``"no"``, or ``None``. Orthogonal to ``non_interactive``: it supplies a
             pre-decided answer rather than controlling stdin access.
+        shallow_fanout_threshold: Max changed-file count that triggers the
+            tiny-diff short-circuit in deep mode (issue #172). ``None`` falls
+            through to ``file_config.shallow_fanout_threshold`` then
+            ``DEFAULT_SHALLOW_FANOUT_THRESHOLD`` (precedence CLI > file > default,
+            mirroring ``_resolve_backend``). ``0`` disables the short-circuit.
 
     """
 
@@ -229,6 +234,10 @@ class RunConfig:
     non_interactive: bool = False
     assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
     identity: str = "unknown"  # resolved GitHub identity; set once by run()
+    # Issue #172: tiny-diff short-circuit gate (max changed files). CLI-tier
+    # override; falls through to file-config scalar then the orchestrator
+    # default (DEFAULT_SHALLOW_FANOUT_THRESHOLD). ``0`` disables the gate.
+    shallow_fanout_threshold: int | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:

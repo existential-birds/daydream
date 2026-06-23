@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import uuid
 from dataclasses import asdict, is_dataclass
@@ -44,10 +43,11 @@ from daydream.deep.artifacts import (
     intent_path as _intent_path,
 )
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
-from daydream.deep.detection import StackAssignment, detect_stacks
+from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.phases import (
     FEEDBACK_SCHEMA,
     PER_STACK_RECORD_SCHEMA,
+    _write_single_stack_merged_items,
     phase_alternative_review,
     phase_arbiter_review,
     phase_commit_push,
@@ -87,13 +87,14 @@ try:
 except ImportError:  # pragma: no cover -- only hit when Phases 1-4 absent
     EXPLORATION_AVAILABLE = False
 
-# Per-file block splitter (splits the unified diff at each `diff --git` header).
-_DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
-# `+++ ` and `--- ` file headers inside a single block.
-_DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (\S+)", re.MULTILINE)
-_DIFF_MINUS_HEADER = re.compile(r"^--- (\S+)", re.MULTILINE)
-# Fallback header for binary / mode-only diffs that lack `--- / +++`.
-_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)")
+# Per-file diff block splitter + the shared per-block path resolver live in
+# ``daydream.deep.prompts`` (canonical home of the diff-text -> prompt
+# primitives). Imported here because ``_diff_changed_files`` shares them with
+# ``prompts._diff_blocks_for_files`` (issue #172 Fix B).
+from daydream.deep.prompts import (
+    _DIFF_BLOCK_SPLIT,
+    _diff_block_path,
+)
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
 _PIPELINE_STAGE_NAMES: list[str] = [
@@ -123,6 +124,144 @@ def total_agent_count(stack_count: int) -> int:
         Total agent invocation count surfaced in the pre-flight notice.
     """
     return 2 + stack_count + stack_count + 1 + 1
+
+
+# Issue #172 — tiny-diff short-circuit. A diff with at most this many changed
+# files collapses the per-language fan-out to a single combined assignment and
+# skips the merge agent + arbiter (a tiny diff has nothing to cross-stack-merge
+# and nothing contested to arbitrate). A 1-file single-language diff is already
+# only 2 stacks (lang + structure), so the collapse is a no-op there and the
+# count reduction for that case comes entirely from skipping merge+arbiter
+# (lever 2); see ``_single_stack_agent_count``.
+DEFAULT_SHALLOW_FANOUT_THRESHOLD = 2
+
+
+def _single_stack_agent_count(stack_count: int) -> int:
+    """Return the agent count for a tiny-diff single-stack run (issue #172).
+
+    Single-stack mode runs 2 TTT + N per-stack reviews + N parse passes but
+    skips the merge agent and the arbiter (lever 2). The surviving stack list
+    after collapse is at most ``[combined-or-single, structure]`` (≤2).
+
+    Args:
+        stack_count: Number of stack assignments AFTER the tiny-diff collapse.
+
+    Returns:
+        Total agent invocation count for the single-stack-mode run.
+    """
+    return 2 + stack_count + stack_count
+
+
+def _shallow_fanout_threshold(config: RunConfig) -> int:
+    """Resolve the tiny-diff short-circuit threshold (issue #172, AC7).
+
+    Precedence (highest first), mirroring ``_resolve_backend`` /
+    ``_resolved_model`` at ``runner.py:295-326``:
+
+      1. ``RunConfig.shallow_fanout_threshold`` (CLI tier).
+      2. ``DaydreamFileConfig.shallow_fanout_threshold`` (file-config scalar).
+      3. ``DEFAULT_SHALLOW_FANOUT_THRESHOLD`` (built-in default).
+
+    Uses ``is not None`` checks rather than truthiness so a configured value
+    of ``0`` (explicitly disable the short-circuit) is honored.
+
+    Args:
+        config: Run configuration carrying the CLI/file-config sources.
+
+    Returns:
+        The resolved integer threshold. ``0`` disables the short-circuit.
+    """
+    if config.shallow_fanout_threshold is not None:
+        return config.shallow_fanout_threshold
+    file_config = config.file_config
+    if file_config is not None and file_config.shallow_fanout_threshold is not None:
+        return file_config.shallow_fanout_threshold
+    return DEFAULT_SHALLOW_FANOUT_THRESHOLD
+
+
+def _collapse_stacks_for_tiny_diff(
+    stacks: list[StackAssignment],
+    changed_files: list[str],
+    *,
+    threshold: int,
+) -> tuple[list[StackAssignment], bool]:
+    """Collapse the per-language fan-out for a tiny diff (issue #172, Fix A lever 1).
+
+    When ``0 < len(changed_files) <= threshold``:
+
+      - If ≥2 distinct *non-structural* stacks exist, merge them into one
+        combined assignment. A code+docs/config diff (exactly one *real*
+        language stack plus the ``generic`` bucket) absorbs the generic files
+        into the language stack so its per-language Beagle skill survives; only
+        ≥2 *real* language stacks fall back to ``generic`` (a single agent
+        cannot invoke two per-language Beagle skills).
+      - The ``STRUCTURE_STACK_NAME`` meta-stack stays as its own assignment so
+        structural findings remain correctly tagged ``lens="structural"``
+        downstream (AC6).
+      - If only one non-structural stack exists (the common 1-file case), it is
+        preserved unchanged — the per-language skill survives.
+
+    Returns ``(stacks, single_stack_mode)`` where ``single_stack_mode`` reports
+    whether the tiny-diff gate is active (caller uses it to skip merge+arbiter).
+    When the gate is inactive, ``stacks`` is returned unchanged.
+
+    Args:
+        stacks: Stack assignments returned by ``detect_stacks``.
+        changed_files: Changed file list used to compute the gate.
+        threshold: Resolved threshold from ``_shallow_fanout_threshold``. ``0``
+            disables the short-circuit (returns inputs unchanged).
+
+    Returns:
+        Tuple of ``(possibly_collapsed_stacks, single_stack_mode)``.
+    """
+    if threshold <= 0 or not (0 < len(changed_files) <= threshold):
+        return stacks, False
+
+    non_structural = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
+    structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
+
+    # When ≥2 distinct non-structural stacks exist, merge them into one combined
+    # assignment. The combined skill depends on how many *real* language stacks
+    # are present:
+    #   - exactly one real language stack + the generic bucket (a code+docs/config
+    #     tiny diff, e.g. api.py + README.md): absorb the generic files into the
+    #     language stack so its per-language Beagle skill survives (the
+    #     skill-preservation goal stated in this docstring).
+    #   - ≥2 real language stacks (e.g. python + react): a single agent cannot
+    #     invoke two per-language Beagle skills, so fall back to generic.
+    if len(non_structural) >= 2:
+        combined_files = sorted({f for s in non_structural for f in s.files})
+        real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
+        if len(real_language) == 1:
+            lang = real_language[0]
+            return (
+                [
+                    *structural,
+                    StackAssignment(
+                        stack_name=lang.stack_name,
+                        skill_invocation=lang.skill_invocation,
+                        files=combined_files,
+                        is_docs_only=False,
+                    ),
+                ],
+                True,
+            )
+        # ≥2 real-language stacks: one agent cannot invoke two per-language
+        # Beagle skills, so the combined assignment uses the generic-fallback
+        # skill (skill_invocation=None). is_docs_only is False by construction:
+        # ≥2 non-structural stacks means at least one is a real language stack
+        # (docs-only diff → single generic stack).
+        combined = StackAssignment(
+            stack_name=GENERIC_STACK,
+            skill_invocation=None,
+            files=combined_files,
+            is_docs_only=False,
+        )
+        return [*structural, combined], True
+
+    # 0 or 1 non-structural stacks: nothing to collapse (lever 1 is a no-op), but
+    # the gate is still active so the caller applies lever 2 (skip merge+arbiter).
+    return stacks, True
 
 
 def get_installed_skills() -> set[str] | None:
@@ -175,6 +314,10 @@ def _diff_changed_files(diff: str) -> list[str]:
     deletions (``+++ /dev/null``) and to the ``diff --git`` header for
     binary / mode-only diffs that lack ``---``/``+++`` lines.
 
+    The per-block path resolution is delegated to ``_diff_block_path`` so the
+    unified-diff parsing contract is shared with ``_diff_blocks_for_files``
+    rather than duplicated here.
+
     Args:
         diff: Unified diff text.
 
@@ -182,26 +325,9 @@ def _diff_changed_files(diff: str) -> list[str]:
         Unique, insertion-ordered list of changed file paths (excluding
         ``/dev/null`` sentinels).
     """
-
-    def _strip_prefix(path: str, prefix: str) -> str:
-        return path[len(prefix) :] if path.startswith(prefix) else path
-
     files: list[str] = []
     for block in _DIFF_BLOCK_SPLIT.split(diff):
-        if not block.startswith("diff --git "):
-            continue
-        path: str | None = None
-        plus = _DIFF_PLUS_HEADER.search(block)
-        if plus and plus.group(1) != "/dev/null":
-            path = _strip_prefix(plus.group(1), "b/")
-        if path is None:
-            minus = _DIFF_MINUS_HEADER.search(block)
-            if minus and minus.group(1) != "/dev/null":
-                path = _strip_prefix(minus.group(1), "a/")
-        if path is None:
-            git = _DIFF_GIT_HEADER.match(block)
-            if git:
-                path = git.group(2)
+        path = _diff_block_path(block)
         if path and path not in files:
             files.append(path)
     return files
@@ -497,14 +623,35 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         # pre-D-16 behavior is safer than routing everything to generic.
         skill_availability = installed if installed is not None else set(SKILL_MAP.keys())
         stacks = detect_stacks(changed_files, skill_availability=skill_availability)
+        # Issue #172 — tiny-diff short-circuit. When the diff is small enough
+        # (≤ SHALLOW_FANOUT_THRESHOLD files), collapse the per-language fan-out
+        # to a single combined assignment and skip merge+arbiter downstream.
+        # ``single_stack_mode`` is recomputed here (top of run_deep) so a
+        # ``--start-at merge``/``--start-at fix`` resume on a tiny diff re-enters
+        # the same bypass branch rather than routing to the absent merge agent.
+        threshold = _shallow_fanout_threshold(config)
+        if threshold > 0 and 0 < len(changed_files) <= threshold:
+            stacks, _ = _collapse_stacks_for_tiny_diff(
+                stacks, changed_files, threshold=threshold
+            )
+            single_stack_mode = True
+        else:
+            single_stack_mode = False
 
-        # Pre-flight notice (D-30).
+        # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
+        # when single_stack_mode is active (issue #172): merge+arbiter are
+        # skipped, so the estimate uses ``_single_stack_agent_count``.
         stack_lines = [_stack_preflight_line(s) for s in stacks]
+        notice_agent_count = (
+            _single_stack_agent_count(len(stacks))
+            if single_stack_mode
+            else total_agent_count(len(stacks))
+        )
         print_preflight_notice(
             console,
             stages=_PIPELINE_STAGE_NAMES,
             stack_lines=stack_lines,
-            agent_count=total_agent_count(len(stacks)),
+            agent_count=notice_agent_count,
             exploration_available=EXPLORATION_AVAILABLE,
         )
 
@@ -604,6 +751,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     intent_path=intent_p,
                     alternatives_path=alts_p,
                     exploration_dir=exploration_dir,
+                    diff_text=diff,
                 )
                 # Persist so a later `--start-at merge` resume can still surface
                 # uncovered stacks (the in-memory failure map otherwise dies here).
@@ -711,64 +859,77 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 else:
                     structural_records_path = None
 
-                # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
-                # a single heavyweight arbiter now re-reviews ONLY the
-                # high-severity / contested findings and writes its verdicts back
-                # into the per-stack records before merge. A `--start-at merge`
-                # resume re-runs arbitration from the on-disk records UNLESS the
-                # completion marker proves a prior run already finalised them
-                # (#175): a crash between the parse write and the rewrite would
-                # otherwise let unarbitrated high-severity findings reach merge.
-                arbiter_marker = arbiter_complete_path(dd)
-                if config.start_at != "merge" or not arbiter_marker.is_file():
-                    arbiter_targets = select_arbiter_targets(all_records, record_sources)
-                    if arbiter_targets:
-                        verdicts = await phase_arbiter_review(
-                            _resolve_backend(config, "arbiter", backend_cache),
-                            work,
-                            selected_records=[all_records[i] for i in arbiter_targets],
-                            diff_path=diff_path,
-                            intent_path=intent_p,
-                            alternatives_path=alts_p,
-                            exploration_dir=exploration_dir,
-                        )
-                        all_records, record_sources = _apply_arbiter_verdicts(
-                            all_records, record_sources, arbiter_targets, verdicts
-                        )
-                        _rewrite_stack_records(
-                            dd, per_stack_records_paths, all_records, record_sources
-                        )
-                    arbiter_marker.write_text("")
+                if not single_stack_mode:
+                    # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
+                    # a single heavyweight arbiter now re-reviews ONLY the
+                    # high-severity / contested findings and writes its verdicts back
+                    # into the per-stack records before merge. A `--start-at merge`
+                    # resume re-runs arbitration from the on-disk records UNLESS the
+                    # completion marker proves a prior run already finalised them
+                    # (#175): a crash between the parse write and the rewrite would
+                    # otherwise let unarbitrated high-severity findings reach merge.
+                    arbiter_marker = arbiter_complete_path(dd)
+                    if config.start_at != "merge" or not arbiter_marker.is_file():
+                        arbiter_targets = select_arbiter_targets(all_records, record_sources)
+                        if arbiter_targets:
+                            verdicts = await phase_arbiter_review(
+                                _resolve_backend(config, "arbiter", backend_cache),
+                                work,
+                                selected_records=[all_records[i] for i in arbiter_targets],
+                                diff_path=diff_path,
+                                intent_path=intent_p,
+                                alternatives_path=alts_p,
+                                exploration_dir=exploration_dir,
+                            )
+                            all_records, record_sources = _apply_arbiter_verdicts(
+                                all_records, record_sources, arbiter_targets, verdicts
+                            )
+                            _rewrite_stack_records(
+                                dd, per_stack_records_paths, all_records, record_sources
+                            )
+                        arbiter_marker.write_text("")
 
-                # Dedup pre-filter (D-27).
-                alt_issues_for_dedup: list[dict[str, Any]] = (
-                    json.loads(alts_p.read_text()) if alts_p.exists() else []
-                )
-                pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
-                record_pairs = build_record_dedup_candidates(all_records, sources=record_sources)
-                dedup_p = dedup_candidates_path(dd)
-                dedup_p.write_text(
-                    json.dumps(
-                        {
-                            "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
-                            "record_duplicate_pairs": [_candidate_pair_to_json(p) for p in record_pairs],
-                        },
-                        indent=2,
+                    # Dedup pre-filter (D-27).
+                    alt_issues_for_dedup: list[dict[str, Any]] = (
+                        json.loads(alts_p.read_text()) if alts_p.exists() else []
                     )
-                )
+                    pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
+                    record_pairs = build_record_dedup_candidates(all_records, sources=record_sources)
+                    dedup_p = dedup_candidates_path(dd)
+                    dedup_p.write_text(
+                        json.dumps(
+                            {
+                                "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
+                                "record_duplicate_pairs": [_candidate_pair_to_json(p) for p in record_pairs],
+                            },
+                            indent=2,
+                        )
+                    )
 
-                # Cross-stack merge (D-23..D-26).
-                await phase_cross_stack_merge(
-                    _resolve_backend(config, "merge", backend_cache),
-                    work,
-                    per_stack_records_paths=per_stack_records_paths,
-                    intent_path=intent_p,
-                    alternatives_path=alts_p,
-                    dedup_candidates_path=dedup_p,
-                    exploration_dir=exploration_dir,
-                    failed_stacks=failed_stacks or None,
-                    structural_records_path=structural_records_path,
-                )
+                    # Cross-stack merge (D-23..D-26).
+                    await phase_cross_stack_merge(
+                        _resolve_backend(config, "merge", backend_cache),
+                        work,
+                        per_stack_records_paths=per_stack_records_paths,
+                        intent_path=intent_p,
+                        alternatives_path=alts_p,
+                        dedup_candidates_path=dedup_p,
+                        exploration_dir=exploration_dir,
+                        failed_stacks=failed_stacks or None,
+                        structural_records_path=structural_records_path,
+                    )
+                else:
+                    # Issue #172 — tiny-diff single-stack bypass. A ≤2-file diff
+                    # has nothing to cross-stack-merge and nothing contested to
+                    # arbitrate, so the host writes ``merged-items.json`` directly
+                    # via ``normalize_items`` + the exact structural-tagging logic
+                    # from ``phase_cross_stack_merge``. No arbiter, no dedup, no
+                    # merge agent. Downstream consumers (fix gate, verifier, PR
+                    # posting) read the canonical JSON unchanged (AC6).
+                    _write_single_stack_merged_items(
+                        work.repo, dd, all_records, structural_records_path,
+                        failed_stacks=failed_stacks or None,
+                    )
 
             print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
             merged_report = target_dir / REVIEW_OUTPUT_FILE

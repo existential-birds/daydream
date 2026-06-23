@@ -16,6 +16,7 @@ Public builders:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,130 @@ def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
     )
 
 
-def _diff_instruction(diff_path: Path, files: list[str]) -> str:
+# Issue #172 — Read-once diff hunks (Fix B). Upper byte bound for the inlined
+# diff section in per-stack / generic prompts. Above this bound the helper
+# returns ``None`` and the prompt falls back to the diff_path pointer so the
+# prompt size stays bounded. ~12 KiB comfortably fits a few hundred lines of
+# unified diff without bloating the per-stack review prompts.
+INLINE_DIFF_BUDGET_BYTES = 12_288
+
+# Per-file block splitter (splits the unified diff at each `diff --git` header).
+_DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
+# `+++ ` and `--- ` file headers inside a single block.
+_DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (.+)$", re.MULTILINE)
+_DIFF_MINUS_HEADER = re.compile(r"^--- (.+)$", re.MULTILINE)
+# Fallback header for binary / mode-only diffs that lack `--- / +++`.
+_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)")
+
+
+def _diff_block_path(block: str) -> str | None:
+    """Resolve the single changed path for one ``diff --git`` block.
+
+    Shared unified-diff block-parsing contract used by both
+    ``_diff_blocks_for_files`` (here) and ``orchestrator._diff_changed_files``
+    so the post-state / pre-state / header fallback order and ``/dev/null``
+    handling live in exactly one place.
+
+    Prefers the post-state path (``+++ b/<path>``) so renames produce only the
+    destination. Falls back to the pre-state path for deletions
+    (``+++ /dev/null``) and to the ``diff --git`` header for binary / mode-only
+    diffs that lack ``---``/``+++`` lines. ``/dev/null`` sentinels are skipped
+    at every layer. Returns ``None`` for blocks that are not ``diff --git``
+    headers or where no path can be resolved.
+    """
+
+    def _strip_prefix(path: str, prefix: str) -> str:
+        return path[len(prefix) :] if path.startswith(prefix) else path
+
+    if not block.startswith("diff --git "):
+        return None
+    plus = _DIFF_PLUS_HEADER.search(block)
+    if plus and plus.group(1) != "/dev/null":
+        return _strip_prefix(plus.group(1), "b/")
+    minus = _DIFF_MINUS_HEADER.search(block)
+    if minus and minus.group(1) != "/dev/null":
+        return _strip_prefix(minus.group(1), "a/")
+    git = _DIFF_GIT_HEADER.match(block)
+    if git:
+        return git.group(2)
+    return None
+
+
+def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
+    """Return the concatenated diff blocks for ``files`` (issue #172, Fix B).
+
+    Reuses the existing per-file block splitter (``_DIFF_BLOCK_SPLIT`` regex)
+    plus ``_diff_block_path`` (which applies the post-state header regexes
+    ``_DIFF_PLUS_HEADER`` / ``_DIFF_MINUS_HEADER`` / ``_DIFF_GIT_HEADER``) to
+    select the ``diff --git`` blocks whose post-state path matches a file in
+    ``files``. The blocks are concatenated as-is (unified-diff text, including
+    headers / hunks).
+
+    Byte-bounded: when the concatenated result would exceed
+    ``INLINE_DIFF_BUDGET_BYTES`` the helper returns ``None`` so the caller
+    falls back to the diff_path pointer (keeps prompt size bounded). Also
+    returns ``None`` when no blocks match (e.g. files absent from the diff).
+
+    Args:
+        diff: Full unified diff text.
+        files: Repo-relative paths to select blocks for.
+
+    Returns:
+        The concatenated diff blocks (with a trailing newline), or ``None``
+        when the result would exceed the byte budget or no blocks match.
+    """
+    wanted = set(files)
+    if not wanted:
+        return None
+
+    selected: list[str] = []
+    for block in _DIFF_BLOCK_SPLIT.split(diff):
+        if _diff_block_path(block) in wanted:
+            selected.append(block if block.endswith("\n") else block + "\n")
+
+    if not selected:
+        return None
+    result = "".join(selected)
+    if len(result.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES:
+        return None
+    return result
+
+
+def _diff_instruction(
+    diff_path: Path,
+    files: list[str],
+    *,
+    inline_diff: str | None = None,
+) -> str:
+    """Diff context for a per-stack / generic-fallback reviewer.
+
+    Issue #172 Fix B (read-once):
+      - When ``inline_diff`` is supplied (the relevant hunks already extracted
+        by ``_diff_blocks_for_files`` and under the byte bound), the hunks are
+        inlined and the ``Read it directly`` instruction is DROPPED. The agent
+        has what it needs without a tool-call round-trip for the static
+        ``diff.patch`` file.
+      - When ``inline_diff`` is ``None`` (byte budget exceeded / no matching
+        blocks / caller had no diff text), today's path-pointer text is used
+        unchanged so the agent can still locate the full diff for whole-file
+        context. ``diff_path`` stays a required param either way.
+
+    Args:
+        diff_path: Path to the full diff on disk.
+        files: Files this stack owns (used in the fallback path-pointer text).
+        inline_diff: Pre-extracted hunks to inline, or ``None`` for the fallback.
+
+    Returns:
+        The diff-context section for the prompt.
+    """
+    if inline_diff:
+        return (
+            "Relevant diff hunks for your stack (inlined; do NOT re-Read "
+            "diff.patch for these — the hunks are already here):\n\n"
+            f"{inline_diff.rstrip()}\n\n"
+            "Focus on hunks that touch your stack's files. For whole-file "
+            "context beyond these hunks you MAY Read the source files directly."
+        )
     joined = ", ".join(files)
     # Point agents at diff_path directly. A bare `git diff -- <files>` command
     # only surfaces uncommitted workspace changes; on a clean PR branch it
@@ -85,6 +209,7 @@ def build_per_stack_prompt(
     output_path: Path,
     exploration_dir: Path | None = None,
     prior_commits: str | None = None,
+    inline_diff: str | None = None,
 ) -> str:
     """Assemble the per-stack review prompt.
 
@@ -98,6 +223,9 @@ def build_per_stack_prompt(
         output_path: Where the agent must write its review.
         exploration_dir: Pre-scan exploration directory (if available).
         prior_commits: Oneline log of prior daydream commits on this branch.
+        inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
+            to inline (skips the ``Read it directly`` instruction). ``None``
+            falls back to the diff_path pointer.
 
     Returns:
         Assembled prompt string.
@@ -113,7 +241,7 @@ def build_per_stack_prompt(
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(_stack_scope_instruction(stack_name, files))
-    parts.append(_diff_instruction(diff_path, files))
+    parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
     parts.append(skill_invocation)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
@@ -468,6 +596,7 @@ def build_generic_fallback_prompt(
     exploration_dir: Path | None = None,
     is_docs_only: bool = False,
     prior_commits: str | None = None,
+    inline_diff: str | None = None,
 ) -> str:
     """Assemble the generic-fallback review prompt (no skill invocation).
 
@@ -482,6 +611,9 @@ def build_generic_fallback_prompt(
         exploration_dir: Pre-scan exploration directory (if available).
         is_docs_only: Whether the whole diff is docs-only (D-20).
         prior_commits: Oneline log of prior daydream commits on this branch.
+        inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
+            to inline (skips the ``Read it directly`` instruction). ``None``
+            falls back to the diff_path pointer.
 
     Returns:
         Assembled prompt string.
@@ -499,7 +631,7 @@ def build_generic_fallback_prompt(
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(_stack_scope_instruction("generic-fallback", files))
-    parts.append(_diff_instruction(diff_path, files))
+    parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
     parts.append(
         "Review these files for correctness, clarity, and consistency with the "
         "author's intent. Apply language-agnostic review practices."
