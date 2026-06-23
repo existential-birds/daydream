@@ -295,9 +295,11 @@ def detect_test_success(output: str) -> bool:
     output_lower = output.lower()
 
     # finditer so a later non-zero count isn't hidden by an earlier "0 failed".
+    # pytest "errors" (collection errors) are genuine non-passes — counted
+    # alongside failures here.
     failed_counts = [
         int(match.group(1).replace(",", ""))
-        for match in re.finditer(r"(\d[\d,]*)\s+(?:tests?\s+)?fail(?:ed|ures?)\b", output_lower)
+        for match in re.finditer(r"(\d[\d,]*)\s+(?:tests?\s+)?(?:fail(?:ed|ures?)|errors?)\b", output_lower)
     ]
     passed_counts = [
         int(match.group(1).replace(",", ""))
@@ -329,15 +331,19 @@ def detect_test_success(output: str) -> bool:
         r"all tests pass",
         r"no (?:test )?failures?",
         r"\b0\s+failures?\b",
+        r"\d+\s+passed(?:,\s*\d+\s+(?:deselected|skipped|xfailed))*(?:,\s*\d+\s+warnings?)?",
     ]
     for pattern in success_sentinels:
         if re.search(pattern, output_lower):
             return True
 
-    # Structured: saw a passed count and an explicit 0-failure count.
-    has_explicit_zero_failed = any(count == 0 for count in failed_counts)
+    # Structured: positive passed count and no failures at all.
+    # pytest omits "0 failed" entirely when there are zero failures — an empty
+    # failed_counts means "no failures mentioned". When "0 failed" IS present,
+    # failed_counts is [0] (non-empty). Both cases are passes.
     max_passed = max(passed_counts) if passed_counts else None
-    if max_passed is not None and max_passed > 0 and has_explicit_zero_failed:
+    no_failures = not failed_counts or all(c == 0 for c in failed_counts)
+    if max_passed is not None and max_passed > 0 and no_failures:
         return True
 
     # Conservative fallback: bare "passed" with no count is not enough.
