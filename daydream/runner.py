@@ -875,29 +875,32 @@ async def _run_review_or_comment(
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
                 explore_backend = _resolve_backend(config, "exploration", backend_cache)
                 print_dim(console, f"Exploration model: {explore_backend.model}")
-                config.exploration_context = await safe_explore(
-                    pre_scan,
-                    explore_backend,
-                    target_dir,
-                    diff,
-                    config.exploration_depth,
-                    diff_ref=_compute_diff_ref(target_dir),
-                )
+                async with phase_scope(DaydreamPhase.EXPLORATION):
+                    config.exploration_context = await safe_explore(
+                        pre_scan,
+                        explore_backend,
+                        target_dir,
+                        diff,
+                        config.exploration_depth,
+                        diff_ref=_compute_diff_ref(target_dir),
+                    )
 
         # Materialise exploration to disk so phase prompts can reference files.
         exploration_dir: Path | None = None
         if config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
 
-        intent_summary = await phase_understand_intent(
-            backend, work, diff_path, log, branch,
-            exploration_dir=exploration_dir,
-        )
+        async with phase_scope(DaydreamPhase.INTENT):
+            intent_summary = await phase_understand_intent(
+                backend, work, diff_path, log, branch,
+                exploration_dir=exploration_dir,
+            )
 
-        issues = await phase_alternative_review(
-            backend, work, diff_path, intent_summary,
-            exploration_dir=exploration_dir,
-        )
+        async with phase_scope(DaydreamPhase.ALTERNATIVES):
+            issues = await phase_alternative_review(
+                backend, work, diff_path, intent_summary,
+                exploration_dir=exploration_dir,
+            )
 
         # Phase A artifact emission (--findings-out, review only); before the
         # zero-issues early return.
@@ -916,11 +919,12 @@ async def _run_review_or_comment(
         skip_plan = post_to_pr and not config.plan
         try:
             if not skip_plan:
-                _, plan_data = await phase_generate_plan(
-                    backend, work, diff_path, intent_summary, issues,
-                    exploration_dir=exploration_dir,
-                    auto_select_all=post_to_pr,
-                )
+                async with phase_scope(DaydreamPhase.PLAN):
+                    _, plan_data = await phase_generate_plan(
+                        backend, work, diff_path, intent_summary, issues,
+                        exploration_dir=exploration_dir,
+                        auto_select_all=post_to_pr,
+                    )
         finally:
             exploration_cleanup = target_dir / ".daydream" / "exploration"
             if exploration_cleanup.is_dir():

@@ -27,6 +27,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
     PhaseEvent,
+    Step,
     TrajectoryRecorder,
     get_current_recorder,
     phase_scope,
@@ -193,25 +194,16 @@ async def test_invocation_records_started_at_ended_at(tmp_path: Path) -> None:
     assert subs[0]["step_ids"] == [1]
 
 
-async def test_no_steps_omits_subtrajectories_key(tmp_path: Path) -> None:
-    """When no invocations ran, extra has no subtrajectories key."""
+async def test_no_invocations_omits_subtrajectories_key(tmp_path: Path) -> None:
+    """Zero invocations → extra has no subtrajectories key, even with steps present."""
     rec = _make_recorder(tmp_path)
     async with rec:
-        rec.emit_phase_start(DaydreamPhase.REVIEW)
-        rec.emit_phase_end(DaydreamPhase.REVIEW)
-        # Manually add a step so _write doesn't skip.
-        async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="x"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
-    # But now there IS a subtrajectory. Test the truly-empty case:
-    rec2 = _make_recorder(tmp_path.parent / "second")
-    rec2.path = tmp_path / "t2.json"
-    async with rec2:
-        # Emit phase events but no invocation — however _write skips empty steps.
-        rec2.emit_phase_start(DaydreamPhase.REVIEW)
-        rec2.emit_phase_end(DaydreamPhase.REVIEW)
-    # No file written (steps empty → _write returns early).
-    assert not rec2.path.exists()
+        # Seed a step so _write does not take its empty-steps early return,
+        # but open NO invocation — so _register_subtrajectory never fires.
+        rec._extend_steps([Step(step_id=1, source="user", message="seed")])
+    assert rec.path.exists()
+    data = _read_trajectory(rec.path)
+    assert "subtrajectories" not in data["extra"]
 
 
 async def test_subtrajectory_step_ids_track_multiple_invocations(tmp_path: Path) -> None:
@@ -490,3 +482,175 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     assert "deep" in phase_timings, (
         f"deep missing from manifest phase_timings: {phase_timings!r}"
     )
+    # The gate is declined, so fix/test/verify never run; but the deep phases
+    # reached before the gate (intent/alternatives/parse) MUST be timed. This
+    # guards the issue #203 wraps against silent regression -- a reverted wrap
+    # drops the phase from phase_timings and fails here.
+    for phase in ("intent", "alternatives", "parse"):
+        assert phase in phase_timings, (
+            f"{phase} missing from deep phase_timings: {phase_timings!r}"
+        )
+
+
+async def test_deep_run_accept_gate_wraps_fix_test_verify(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real-path (issue #203): accepting the deep fix gate wraps FIX/TEST/VERIFY.
+
+    The declined-path test above returns at the apply-fixes gate, so it can never
+    reach fix/test/verify -- the longest deep phases. This test drives ``run``
+    with ``assume=\"yes\"`` through the full deep pipeline to commit and asserts
+    the longest wrapped phases (fix/test/verify) plus intent/alternatives/parse
+    all carry phase_events -> phase_timings. ``phase_test_and_heal`` and
+    ``phase_commit_push`` are stubbed (the established pattern) to keep the run
+    deterministic; ``phase_scope`` still brackets the call sites, so the timing
+    events fire regardless.
+    """
+    from tests.test_deep_orchestrator import (
+        _install_stub_backend,
+        _noop_commit,
+        _ok,
+        _silence,
+    )
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    # Stub the real test/commit primitives so the run completes without real
+    # test execution or git commits; phase_scope still wraps these call sites.
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    from daydream.runner import RunConfig, run
+
+    traj = tmp_path / "trajectory.json"
+    config = RunConfig(
+        target=str(multi_stack_target),
+        assume="yes",  # accept the apply-fixes gate -> verify/fix/test run
+        trajectory_path=traj,
+        cleanup=False,
+    )
+    exit_code = await run(config)
+    assert exit_code == 0
+
+    assert traj.exists(), "deep run must write the trajectory to disk"
+    data = json.loads(traj.read_text(encoding="utf-8"))
+    assert atif_validate(data, validate_images=False) is True
+
+    # The longest phases -- fix/test/verify -- only run past an accepted gate.
+    events = data["extra"].get("phase_events", [])
+    event_phases = {e["phase"] for e in events}
+    for phase in ("verify", "fix", "test"):
+        assert phase in event_phases, (
+            f"{phase} phase_events missing; got phases: {sorted(event_phases)!r}"
+        )
+
+    # Manifest: phase_timings must carry every wrapped deep phase.
+    manifest_files = list((tmp_path / "archive").rglob("manifest.json"))
+    assert manifest_files, "manifest.json not written"
+    manifest = json.loads(manifest_files[0].read_text())
+    phase_timings = manifest["metrics"]["phase_timings"]
+    assert phase_timings is not None
+    for phase in ("intent", "alternatives", "parse", "verify", "fix", "test", "deep"):
+        assert phase in phase_timings, (
+            f"{phase} missing from deep phase_timings: {phase_timings!r}"
+        )
+
+
+async def test_review_flow_emits_phase_events_and_manifest_timings(
+    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real-path (issue #203): ``--review`` flow wraps INTENT/ALTERNATIVES/PLAN.
+
+    Before the fix, ``_run_review_or_comment`` ran its phases with no
+    ``phase_scope`` wrapping, so its manifest emitted ``phase_timings: null``.
+    Drives ``runner.run`` with ``output_mode="review"`` (the production
+    review-only flow) through a real temp git repo with a scripted backend
+    injected via the ``create_backend`` seam; only the backend and the GitHub
+    lookups are mocked. The single-file diff selects the ``skip`` exploration
+    tier, so EXPLORATION does not run -- but INTENT/ALTERNATIVES/PLAN always
+    run in review mode (``post_to_pr=False`` => ``skip_plan=False``) and must
+    be timed. Asserts the on-disk trajectory ``phase_events`` plus the manifest
+    ``phase_timings`` (non-null) carry those phases.
+    """
+    import subprocess
+    from unittest.mock import patch
+
+    from daydream import git_ops
+    from daydream.backends import ResultEvent, TextEvent
+    from daydream.pr_review import PRInfo
+    from daydream.runner import RunConfig, run
+    from tests.harness.phase_backend import PhaseDispatchBackend
+
+    issue = {
+        "id": 1,
+        "title": "Greeting changed without tests",
+        "description": "`hello` now returns a different greeting with no test coverage",
+        "recommendation": "Add a regression test for the new greeting",
+        "severity": "medium",
+        "confidence": "HIGH",
+        "files": ["main.py"],
+        "rationale": "",
+    }
+    # Same scripted stream replays for every phase: alternatives consume the
+    # issues; intent stringifies them; plan renders an empty change list.
+    backend = PhaseDispatchBackend(events=[
+        TextEvent(text="Review complete."),
+        ResultEvent(structured_output={"issues": [issue]}, continuation=None),
+    ])
+    head = git_ops.head_sha(feature_branch_repo)
+    base = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", "rev-parse", "main"],  # noqa: S607 - git is a trusted command
+        cwd=feature_branch_repo, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main",
+                owner="o", repo="r", url="https://example.invalid/pr/7")
+
+    findings_out = tmp_path / "findings.json"
+    traj = tmp_path / "trajectory.json"
+    config = RunConfig(
+        target=str(feature_branch_repo),
+        output_mode="review",
+        pr_number=7,
+        findings_out=str(findings_out),
+        trajectory_path=traj,
+        non_interactive=True,
+    )
+
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    with patch("daydream.runner.create_backend", return_value=backend), \
+         patch("daydream.github_app.resolve_user_identity", return_value="tester"), \
+         patch("daydream.pr_review.find_pr_by_number", return_value=pr):
+        exit_code = await run(config)
+    assert exit_code == 0
+
+    assert traj.exists(), "review run must write the trajectory to disk"
+    data = json.loads(traj.read_text(encoding="utf-8"))
+    assert atif_validate(data, validate_images=False) is True
+
+    # The review-only flow wraps INTENT/ALTERNATIVES/PLAN (issue #203). A
+    # reverted wrap drops the phase from phase_events and fails here -- this is
+    # the regression guard for the named finding.
+    events = data["extra"].get("phase_events", [])
+    event_phases = {e["phase"] for e in events}
+    for phase in ("intent", "alternatives", "plan"):
+        assert phase in event_phases, (
+            f"{phase} phase_events missing; got phases: {sorted(event_phases)!r}"
+        )
+
+    # Manifest: phase_timings must be non-null (was null before the fix) and
+    # carry the wrapped review phases.
+    manifest_files = list((tmp_path / "archive").rglob("manifest.json"))
+    assert manifest_files, "manifest.json not written"
+    manifest = json.loads(manifest_files[0].read_text())
+    phase_timings = manifest["metrics"]["phase_timings"]
+    assert phase_timings is not None, "review flow phase_timings must not be null"
+    for phase in ("intent", "alternatives", "plan"):
+        assert phase in phase_timings, (
+            f"{phase} missing from review phase_timings: {phase_timings!r}"
+        )

@@ -720,28 +720,30 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                             )
                         else:
                             pr_description = pr_view.get("body") or None
-                intent_summary = await phase_understand_intent(
-                    _resolve_backend(config, "intent", backend_cache),
-                    work,
-                    diff_path,
-                    log,
-                    branch,
-                    exploration_dir=exploration_dir,
-                    pr_description=pr_description,
-                )
+                async with phase_scope(DaydreamPhase.INTENT):
+                    intent_summary = await phase_understand_intent(
+                        _resolve_backend(config, "intent", backend_cache),
+                        work,
+                        diff_path,
+                        log,
+                        branch,
+                        exploration_dir=exploration_dir,
+                        pr_description=pr_description,
+                    )
 
                 print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
                 if tier == "skip":
                     alt_issues: list[dict[str, Any]] = []
                     print_dim(console, "Skipping alternatives -- trivial diff")
                 else:
-                    alt_issues = await phase_alternative_review(
-                        _resolve_backend(config, "wonder", backend_cache),
-                        work,
-                        diff_path,
-                        intent_summary,
-                        exploration_dir=exploration_dir,
-                    )
+                    async with phase_scope(DaydreamPhase.ALTERNATIVES):
+                        alt_issues = await phase_alternative_review(
+                            _resolve_backend(config, "wonder", backend_cache),
+                            work,
+                            diff_path,
+                            intent_summary,
+                            exploration_dir=exploration_dir,
+                        )
 
                 intent_p, alts_p = _write_ttt_artifacts(
                     dd, intent_summary=intent_summary, alt_issues=alt_issues
@@ -833,12 +835,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                         record_schema = (
                             FEEDBACK_SCHEMA if stack_name == STRUCTURE_STACK_NAME else PER_STACK_RECORD_SCHEMA
                         )
-                        records = await phase_parse_feedback(
-                            _resolve_backend(config, "parse", backend_cache),
-                            work,
-                            input_path=output_path,
-                            output_schema=record_schema,
-                        )
+                        async with phase_scope(DaydreamPhase.PARSE):
+                            records = await phase_parse_feedback(
+                                _resolve_backend(config, "parse", backend_cache),
+                                work,
+                                input_path=output_path,
+                                output_schema=record_schema,
+                            )
                         records_path = per_stack_records_path(dd, stack_name)
                         records_path.write_text(json.dumps(records, indent=2))
                         per_stack_records_paths.append(records_path)
@@ -1007,12 +1010,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # skips both the verify pass and the recommendation-verdicts.json
             # artifact. A --start-at fix resume still produces verdicts whenever
             # fixes are applied (the gate still runs on resume; accept => verify runs).
-            verdicts_file, verdicts_payload = await phase_verify_recommendations(
-                _resolve_backend(config, "verify", backend_cache),
-                work,
-                merged_items_path=merged_items_path(dd),
-                deep_dir=dd,
-            )
+            async with phase_scope(DaydreamPhase.VERIFY):
+                verdicts_file, verdicts_payload = await phase_verify_recommendations(
+                    _resolve_backend(config, "verify", backend_cache),
+                    work,
+                    merged_items_path=merged_items_path(dd),
+                    deep_dir=dd,
+                )
             print_verification_summary(console, verdicts_file)
 
             # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
@@ -1054,12 +1058,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # artifact from a prior run; injecting it as authoritative would
             # contradict the current diff's context.
             intent_grounded_this_run = config.start_at not in ("per-stack", "merge", "fix")
-            fix_failures = await phase_fix_parallel(
-                _resolve_backend(config, "fix", backend_cache),
-                work,
-                items,
-                intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
-            )
+            async with phase_scope(DaydreamPhase.FIX):
+                fix_failures = await phase_fix_parallel(
+                    _resolve_backend(config, "fix", backend_cache),
+                    work,
+                    items,
+                    intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
+                )
             if fix_failures:
                 print_warning(
                     console,
@@ -1068,9 +1073,10 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 )
                 return 1
 
-            passed, _retries = await phase_test_and_heal(
-                _resolve_backend(config, "test", backend_cache), work, feedback_items=items
-            )
+            async with phase_scope(DaydreamPhase.TEST):
+                passed, _retries = await phase_test_and_heal(
+                    _resolve_backend(config, "test", backend_cache), work, feedback_items=items
+                )
             if not passed:
                 print_warning(console, "Tests failed after fix attempt.")
                 return 1
