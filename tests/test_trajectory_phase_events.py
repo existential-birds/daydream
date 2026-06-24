@@ -1,16 +1,8 @@
-"""Tests for issue #203 — phase timing events in ATIF trajectories.
-
-Unit tests for the PhaseEvent model, ``emit_phase_start``/``emit_phase_end``,
-per-Invocation subtrajectory timestamps, ``compute_phase_timings``, and the
-``phase_scope`` context manager; plus real-path integration tests that drive
-``runner.run`` (the production entrypoint) with a mocked backend and assert
-the on-disk trajectory + manifest carry the new timing data.
-"""
+"""Tests for trajectory phase timing events."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +10,6 @@ import pytest
 
 from daydream.atif import validate as atif_validate
 from daydream.backends import (
-    AgentEvent,
-    ContinuationToken,
     ResultEvent,
     TextEvent,
 )
@@ -32,6 +22,7 @@ from daydream.trajectory import (
     get_current_recorder,
     phase_scope,
 )
+from tests.harness.phase_backend import PhaseDispatchBackend
 
 # --- Helpers ---------------------------------------------------------------
 
@@ -296,47 +287,10 @@ async def test_compute_phase_timings_orphaned_start_pruned(tmp_path: Path) -> No
 # --- Real-path: deep run via runner.run ------------------------------------
 
 
-class _ShallowMockBackend:
-    """Minimal Backend that yields canned events for shallow phase tests.
-
-    Every execute() returns a TextEvent + ResultEvent with empty issues, so
-    the parse phase returns no feedback items and the fix phase is skipped.
-    """
-
-    model = "mock-model"
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
-        yield TextEvent(text="ok")
-        yield ResultEvent(structured_output={"issues": []}, continuation=None)
-
-    async def cancel(self) -> None:
-        return None
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}" + (f" {args}" if args else "")
-
-
 async def test_shallow_run_emits_phase_events_and_subtrajectories(
     feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Real-path: shallow single-pass run writes trajectory with phase_events + subtrajectories.
-
-    Drives ``runner.run`` → ``_run_loop_shallow`` (the production shallow path)
-    with a mock backend. The run starts at ``fix`` (skipping the skill-bound
-    review phase) with a pre-created ``.review-output.md`` so the parse phase
-    can proceed. Asserts the OBSERVABLE on-disk trajectory JSON carries
-    explicit phase_events (parse + test), subtrajectories with timestamps, and
-    that the manifest's metrics block carries phase_timings.
-    """
+    """Shallow single-pass run writes trajectory and manifest timing data."""
     from daydream.config import REVIEW_OUTPUT_FILE
     from daydream.runner import RunConfig, run
 
@@ -345,7 +299,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
 
     monkeypatch.setattr(
         "daydream.runner.create_backend",
-        lambda name, model=None: _ShallowMockBackend(),
+        lambda name, model=None: PhaseDispatchBackend(),
     )
 
     # Patch phase_test_and_heal to avoid running a real test suite.
@@ -482,10 +436,7 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     assert "deep" in phase_timings, (
         f"deep missing from manifest phase_timings: {phase_timings!r}"
     )
-    # The gate is declined, so fix/test/verify never run; but the deep phases
-    # reached before the gate (intent/alternatives/parse) MUST be timed. This
-    # guards the issue #203 wraps against silent regression -- a reverted wrap
-    # drops the phase from phase_timings and fails here.
+    # Declined gate still records the phases reached before fix/test/verify.
     for phase in ("intent", "alternatives", "parse"):
         assert phase in phase_timings, (
             f"{phase} missing from deep phase_timings: {phase_timings!r}"
@@ -495,17 +446,7 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
 async def test_deep_run_accept_gate_wraps_fix_test_verify(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Real-path (issue #203): accepting the deep fix gate wraps FIX/TEST/VERIFY.
-
-    The declined-path test above returns at the apply-fixes gate, so it can never
-    reach fix/test/verify -- the longest deep phases. This test drives ``run``
-    with ``assume=\"yes\"`` through the full deep pipeline to commit and asserts
-    the longest wrapped phases (fix/test/verify) plus intent/alternatives/parse
-    all carry phase_events -> phase_timings. ``phase_test_and_heal`` and
-    ``phase_commit_push`` are stubbed (the established pattern) to keep the run
-    deterministic; ``phase_scope`` still brackets the call sites, so the timing
-    events fire regardless.
-    """
+    """Accepted deep fix gate records fix/test/verify timing events."""
     from tests.test_deep_orchestrator import (
         _install_stub_backend,
         _noop_commit,
@@ -520,8 +461,7 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
         return None
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-    # Stub the real test/commit primitives so the run completes without real
-    # test execution or git commits; phase_scope still wraps these call sites.
+    # Avoid real test execution or git commits while exercising the runner path.
     monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
 
@@ -564,19 +504,7 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
 async def test_review_flow_emits_phase_events_and_manifest_timings(
     feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Real-path (issue #203): ``--review`` flow wraps INTENT/ALTERNATIVES/PLAN.
-
-    Before the fix, ``_run_review_or_comment`` ran its phases with no
-    ``phase_scope`` wrapping, so its manifest emitted ``phase_timings: null``.
-    Drives ``runner.run`` with ``output_mode="review"`` (the production
-    review-only flow) through a real temp git repo with a scripted backend
-    injected via the ``create_backend`` seam; only the backend and the GitHub
-    lookups are mocked. The single-file diff selects the ``skip`` exploration
-    tier, so EXPLORATION does not run -- but INTENT/ALTERNATIVES/PLAN always
-    run in review mode (``post_to_pr=False`` => ``skip_plan=False``) and must
-    be timed. Asserts the on-disk trajectory ``phase_events`` plus the manifest
-    ``phase_timings`` (non-null) carry those phases.
-    """
+    """Review-only flow records intent, alternatives, and plan timings."""
     import subprocess
     from unittest.mock import patch
 
@@ -584,7 +512,6 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     from daydream.backends import ResultEvent, TextEvent
     from daydream.pr_review import PRInfo
     from daydream.runner import RunConfig, run
-    from tests.harness.phase_backend import PhaseDispatchBackend
 
     issue = {
         "id": 1,
@@ -596,8 +523,7 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
         "files": ["main.py"],
         "rationale": "",
     }
-    # Same scripted stream replays for every phase: alternatives consume the
-    # issues; intent stringifies them; plan renders an empty change list.
+    # Same scripted stream replays for every phase in this review-only path.
     backend = PhaseDispatchBackend(events=[
         TextEvent(text="Review complete."),
         ResultEvent(structured_output={"issues": [issue]}, continuation=None),
@@ -633,9 +559,7 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     data = json.loads(traj.read_text(encoding="utf-8"))
     assert atif_validate(data, validate_images=False) is True
 
-    # The review-only flow wraps INTENT/ALTERNATIVES/PLAN (issue #203). A
-    # reverted wrap drops the phase from phase_events and fails here -- this is
-    # the regression guard for the named finding.
+    # Review-only flow records intent, alternatives, and plan phases.
     events = data["extra"].get("phase_events", [])
     event_phases = {e["phase"] for e in events}
     for phase in ("intent", "alternatives", "plan"):

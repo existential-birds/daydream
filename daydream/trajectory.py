@@ -1084,10 +1084,6 @@ class TrajectoryRecorder:
             key = ev.phase.value
             if ev.event == "phase_start":
                 pending_starts.setdefault(key, []).append(ev.timestamp)
-                # Ensure the bucket exists so the matching phase_end can update it.
-                # Orphaned ends (no start) are skipped by the guard below; orphaned
-                # starts (no end) leave a zero-occurrence bucket that is pruned in
-                # the return comprehension, so neither produces a spurious bucket.
                 by_phase.setdefault(key, {"wall_clock_seconds": 0.0, "occurrences": 0})
             elif ev.event == "phase_end":
                 starts = pending_starts.get(key)
