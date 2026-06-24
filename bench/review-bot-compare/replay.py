@@ -81,6 +81,50 @@ def _is_transient(stdout: str) -> bool:
     return False
 
 
+def _findings_complete(findings_path: Path, traj_path: Path) -> bool:
+    """True when a prior attempt already produced a *complete* review on disk.
+
+    daydream writes the findings artifact and the trajectory's `final_metrics`
+    only at the very end of the review pipeline. A z.ai/GLM stream-drop at the
+    closing stream (`PiError: terminated`) exits the subprocess non-zero but
+    leaves both files fully written — the review is done, only the socket died.
+    Re-running it wastes ~9 min and risks dropping again, so we treat this as a
+    success and never retry it.
+    """
+    try:
+        art = read_json(findings_path)
+        if not isinstance(art.get("findings"), list):
+            return False
+        traj = read_json(traj_path)
+    except (ValueError, OSError):
+        return False
+    return bool(traj.get("final_metrics"))
+
+
+def _collect(findings_path: Path, traj_path: Path) -> dict:
+    """Read finding count + cost/token metrics off the on-disk artifacts."""
+    out: dict = {}
+    if findings_path.exists():
+        try:
+            art = read_json(findings_path)
+            out["n_findings"] = len(art.get("findings", []))
+            out["findings_path"] = str(findings_path)
+        except (ValueError, OSError):
+            out["n_findings"] = None
+    else:
+        out["n_findings"] = 0
+    if traj_path.exists():
+        try:
+            fm = read_json(traj_path).get("final_metrics") or {}
+            out["cost_usd"] = fm.get("total_cost_usd")
+            out["prompt_tokens"] = fm.get("total_prompt_tokens")
+            out["completion_tokens"] = fm.get("total_completion_tokens")
+            out["cached_tokens"] = fm.get("total_cached_tokens")
+        except (ValueError, OSError):
+            pass
+    return out
+
+
 def git(source: Path, args: list[str], *, check: bool = True, timeout: int | None = None):
     return run(["git", "-C", str(source), *args], check=check, timeout=timeout)
 
@@ -136,6 +180,16 @@ def replay_one(
     for p in (findings_path, traj_path, log_path):
         p.parent.mkdir(parents=True, exist_ok=True)
 
+    # Resume: a prior attempt already produced a complete review (a tail-end
+    # stream-drop leaves findings + trajectory fully written). Never re-run it.
+    if _findings_complete(findings_path, traj_path):
+        result.update(_collect(findings_path, traj_path))
+        result["attempts"] = 0
+        result["wall_seconds"] = 0.0
+        result["reused_existing"] = True
+        result["status"] = "ok"
+        return result
+
     # Fresh worktree at the bot's snapshot.
     git(source, ["worktree", "remove", "--force", str(wt)], check=False)
     git(source, ["worktree", "add", "--detach", str(wt), head], timeout=300)
@@ -162,6 +216,10 @@ def replay_one(
         proc = run(cmd, cwd=wt, check=False, timeout=timeout, env=_local_identity_env())
         if proc.returncode == 0 or attempts > retries or not _is_transient(proc.stdout):
             break
+        # The review may have completed and only the closing stream dropped —
+        # findings + trajectory are on disk. That's a success; don't re-run it.
+        if _findings_complete(findings_path, traj_path):
+            break
         wait = backoff * (2 ** (attempts - 1))
         print(f"  transient backend error (attempt {attempts}/{retries+1}); "
               f"retrying in {wait}s", file=sys.stderr)
@@ -177,31 +235,18 @@ def replay_one(
     if proc.returncode != 0 and _is_transient(proc.stdout):
         result["transient_error"] = True
 
-    # Collect findings.
-    if findings_path.exists():
-        try:
-            art = read_json(findings_path)
-            result["n_findings"] = len(art.get("findings", []))
-            result["findings_path"] = str(findings_path)
-        except (ValueError, OSError):
-            result["n_findings"] = None
-    else:
-        result["n_findings"] = 0
-
-    # Collect cost/tokens from the trajectory's final_metrics.
-    if traj_path.exists():
-        try:
-            traj = read_json(traj_path)
-            fm = traj.get("final_metrics") or {}
-            result["cost_usd"] = fm.get("total_cost_usd")
-            result["prompt_tokens"] = fm.get("total_prompt_tokens")
-            result["completion_tokens"] = fm.get("total_completion_tokens")
-            result["cached_tokens"] = fm.get("total_cached_tokens")
-        except (ValueError, OSError):
-            pass
+    result.update(_collect(findings_path, traj_path))
 
     git(source, ["worktree", "remove", "--force", str(wt)], check=False)
-    result["status"] = "ok" if proc.returncode == 0 else f"daydream-exit-{proc.returncode}"
+    # A non-zero exit whose review nonetheless completed (stream dropped at the
+    # tail) is a success: findings + metrics are intact on disk.
+    if proc.returncode == 0:
+        result["status"] = "ok"
+    elif _findings_complete(findings_path, traj_path):
+        result["status"] = "ok"
+        result["stream_dropped_at_tail"] = True
+    else:
+        result["status"] = f"daydream-exit-{proc.returncode}"
     return result
 
 
