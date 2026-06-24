@@ -50,10 +50,35 @@ _TRANSIENT_SIGNATURES = (
     "try again later",
 )
 
+# Provider/network stream-drop signatures: the z.ai/GLM provider closes the
+# streaming HTTP connection mid-generation, which undici surfaces as a literal
+# "terminated" error and pi propagates as `PiError: terminated`. These are
+# completed-but-lost reviews worth a retry. Matched case-insensitively, but ONLY
+# inside a backend/fatal error context so an ordinary review finding that merely
+# mentions one of these words in prose is not mistaken for a retryable failure.
+_STREAM_DROP_SIGNATURES = (
+    "terminated",
+    "econnreset",
+    "connection reset",
+    "socket hang up",
+    "premature close",
+    "epipe",
+)
+_ERROR_CONTEXT_MARKERS = (
+    "pierror",
+    "backend execution error",
+    "fatal error",
+)
+
 
 def _is_transient(stdout: str) -> bool:
     low = (stdout or "").lower()
-    return any(sig in low for sig in _TRANSIENT_SIGNATURES)
+    if any(sig in low for sig in _TRANSIENT_SIGNATURES):
+        return True
+    # Stream-drop signatures only count when daydream actually errored out.
+    if any(marker in low for marker in _ERROR_CONTEXT_MARKERS):
+        return any(sig in low for sig in _STREAM_DROP_SIGNATURES)
+    return False
 
 
 def git(source: Path, args: list[str], *, check: bool = True, timeout: int | None = None):
