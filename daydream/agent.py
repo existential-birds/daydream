@@ -452,6 +452,7 @@ async def run_agent(
     use_callback = progress_callback is not None
 
     _state.current_backends.append(backend)
+    event_iter: AsyncGenerator[Any, None] | None = None
     try:
         # Created unconditionally for task_id→label correlation; in callback mode
         # only its label methods run — no panels or Live display.
@@ -643,6 +644,16 @@ async def run_agent(
         raise
     finally:
         _state.current_backends.remove(backend)
+        # Always close the async generator explicitly so the SDK's internal
+        # TaskGroup / cancel scope exits in the same task that entered it.
+        # Without this, the async-gen finalizer can fire during GC in a
+        # different task, causing "Attempted to exit a cancel scope in a
+        # different task" RuntimeError from anyio (D-20).
+        if event_iter is not None:
+            try:
+                await event_iter.aclose()
+            except Exception:  # noqa: BLE001 — cleanup must not raise
+                pass
 
     if output_schema is not None and structured_result is not None:
         return structured_result, result_continuation, aborted_reason
