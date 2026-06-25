@@ -185,6 +185,26 @@ async def test_invocation_records_started_at_ended_at(tmp_path: Path) -> None:
     assert subs[0]["step_ids"] == [1]
 
 
+async def test_invocation_ended_at_not_before_final_step(tmp_path: Path) -> None:
+    """ended_at is stamped after finish() flushes the still-open final step.
+
+    A lone TextEvent leaves the step open, so finish() materializes it during
+    __aexit__ with a fresh timestamp. ended_at must be stamped after that flush,
+    otherwise it predates its own last step and underreports timing (#203).
+    """
+    rec = _make_recorder(tmp_path)
+    async with rec:
+        async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="open step, never closed before exit"))
+    traj = _read_trajectory(rec.path)
+    sub = traj["extra"]["subtrajectories"][0]
+    step_ts = [s["timestamp"] for s in traj["steps"] if s["step_id"] in sub["step_ids"]]
+    assert step_ts, "expected the open step to be flushed by finish()"
+    assert sub["ended_at"] >= max(step_ts), (
+        f"ended_at {sub['ended_at']!r} predates final step {max(step_ts)!r}"
+    )
+
+
 async def test_no_invocations_omits_subtrajectories_key(tmp_path: Path) -> None:
     """Zero invocations → extra has no subtrajectories key, even with steps present."""
     rec = _make_recorder(tmp_path)

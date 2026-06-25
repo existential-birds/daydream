@@ -1361,8 +1361,8 @@ class _InvocationCM:
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self._invocation is not None:
             try:
-                self._invocation.ended_at = now_iso()
                 self._invocation.finish()
+                self._invocation.ended_at = now_iso()
                 self._recorder._register_subtrajectory(self._invocation)
             finally:
                 with suppress(ValueError):

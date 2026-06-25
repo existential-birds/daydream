@@ -118,8 +118,8 @@ class Manifest:
     total_completion_tokens: int | None = None
     total_cached_tokens: int | None = None
 
-    # wall_clock_seconds is derived from step timestamps on every run; the
-    # remaining metrics below are populated only with --eval.
+    # wall_clock_seconds and phase_timings are derived from step/phase events
+    # on every run; the remaining metrics below are populated only with --eval.
     wall_clock_seconds: float | None = None
     phase_timings: dict[str, Any] | None = None
     total_findings: int | None = None
