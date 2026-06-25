@@ -6,7 +6,7 @@ bot reviewed.
 
 Three stages, each a standalone script (stdlib + `gh`/`git` CLIs only):
 
-```
+```text
 harvest.py   bot's historic reviews  → out/<owner__repo>/pr-<N>.json + index.json
 replay.py    daydream @ same snapshot → out/<owner__repo>/findings|traj|replay/
 judge.py     LLM semantic matching    → out/<owner__repo>/judge/pr-<N>.json   (optional)

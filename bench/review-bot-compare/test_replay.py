@@ -8,6 +8,7 @@ pytest suite. Run directly:  python3 test_replay.py
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import types
 import unittest
@@ -188,6 +189,30 @@ class ReplayRetryTest(unittest.TestCase):
         self.assertEqual(res["attempts"], 0)
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["n_findings"], 2)
+
+    def test_worktree_removed_when_run_raises(self) -> None:
+        # run(..., timeout=) raises TimeoutExpired straight through replay_one.
+        # The detached worktree must still be reclaimed in the finally block,
+        # or leaked worktrees accumulate across a long batch.
+        removes = []
+
+        def tracking_git(source, args, *, check=True, timeout=None):
+            if args[:2] == ["worktree", "remove"]:
+                removes.append(args)
+            return types.SimpleNamespace(returncode=0, stdout="deadbeef\n", stderr="")
+
+        def boom_run(cmd, *, cwd=None, check=False, timeout=None, env=None):
+            raise subprocess.TimeoutExpired(cmd, 10)
+
+        replay.git = tracking_git
+        replay.run = boom_run
+        with self.assertRaises(subprocess.TimeoutExpired):
+            replay_one(self.record, self.source, self.out, "pi", False, 10,
+                       retries=0, backoff=0)
+
+        # Two removes: the pre-add cleanup AND the post-failure finally cleanup.
+        # Pre-fix there was only the pre-add remove (1) on the exception path.
+        self.assertEqual(len(removes), 2, "worktree must be removed in finally")
 
     def test_transient_drop_without_findings_does_retry(self) -> None:
         # No findings ever written -> the loop must exhaust its retries.

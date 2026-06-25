@@ -194,59 +194,64 @@ def replay_one(
     git(source, ["worktree", "remove", "--force", str(wt)], check=False)
     git(source, ["worktree", "add", "--detach", str(wt), head], timeout=300)
 
-    cmd = [
-        "daydream", "--review", "--non-interactive",
-        "--backend", backend,
-        "--pr-number", str(n),
-        "--base", base,
-        "--findings-out", str(findings_path),
-        "--trajectory", str(traj_path),
-    ]
-    if shallow:
-        cmd.append("--shallow")
-    cmd.append(str(wt))
+    try:
+        cmd = [
+            "daydream", "--review", "--non-interactive",
+            "--backend", backend,
+            "--pr-number", str(n),
+            "--base", base,
+            "--findings-out", str(findings_path),
+            "--trajectory", str(traj_path),
+        ]
+        if shallow:
+            cmd.append("--shallow")
+        cmd.append(str(wt))
 
-    # Retry transient backend overload/rate-limit (e.g. z.ai GLM "429 service
-    # temporarily overloaded") with exponential backoff. A fresh worktree is
-    # already in place; daydream re-runs cleanly over it.
-    start = time.monotonic()
-    attempts = 0
-    while True:
-        attempts += 1
-        proc = run(cmd, cwd=wt, check=False, timeout=timeout, env=_local_identity_env())
-        if proc.returncode == 0 or attempts > retries or not _is_transient(proc.stdout):
-            break
-        # The review may have completed and only the closing stream dropped —
-        # findings + trajectory are on disk. That's a success; don't re-run it.
-        if _findings_complete(findings_path, traj_path):
-            break
-        wait = backoff * (2 ** (attempts - 1))
-        print(f"  transient backend error (attempt {attempts}/{retries+1}); "
-              f"retrying in {wait}s", file=sys.stderr)
-        time.sleep(wait)
-    elapsed = time.monotonic() - start
-    log_path.write_text(
-        f"$ {' '.join(cmd)}\n\n=== STDOUT ===\n{proc.stdout}\n\n=== STDERR ===\n{proc.stderr}"
-    )
+        # Retry transient backend overload/rate-limit (e.g. z.ai GLM "429 service
+        # temporarily overloaded") with exponential backoff. A fresh worktree is
+        # already in place; daydream re-runs cleanly over it.
+        start = time.monotonic()
+        attempts = 0
+        while True:
+            attempts += 1
+            proc = run(cmd, cwd=wt, check=False, timeout=timeout, env=_local_identity_env())
+            if proc.returncode == 0 or attempts > retries or not _is_transient(proc.stdout):
+                break
+            # The review may have completed and only the closing stream dropped —
+            # findings + trajectory are on disk. That's a success; don't re-run it.
+            if _findings_complete(findings_path, traj_path):
+                break
+            wait = backoff * (2 ** (attempts - 1))
+            print(f"  transient backend error (attempt {attempts}/{retries+1}); "
+                  f"retrying in {wait}s", file=sys.stderr)
+            time.sleep(wait)
+        elapsed = time.monotonic() - start
+        log_path.write_text(
+            f"$ {' '.join(cmd)}\n\n=== STDOUT ===\n{proc.stdout}\n\n=== STDERR ===\n{proc.stderr}"
+        )
 
-    result["exit_code"] = proc.returncode
-    result["attempts"] = attempts
-    result["wall_seconds"] = round(elapsed, 1)
-    if proc.returncode != 0 and _is_transient(proc.stdout):
-        result["transient_error"] = True
+        result["exit_code"] = proc.returncode
+        result["attempts"] = attempts
+        result["wall_seconds"] = round(elapsed, 1)
+        if proc.returncode != 0 and _is_transient(proc.stdout):
+            result["transient_error"] = True
 
-    result.update(_collect(findings_path, traj_path))
+        result.update(_collect(findings_path, traj_path))
 
-    git(source, ["worktree", "remove", "--force", str(wt)], check=False)
-    # A non-zero exit whose review nonetheless completed (stream dropped at the
-    # tail) is a success: findings + metrics are intact on disk.
-    if proc.returncode == 0:
-        result["status"] = "ok"
-    elif _findings_complete(findings_path, traj_path):
-        result["status"] = "ok"
-        result["stream_dropped_at_tail"] = True
-    else:
-        result["status"] = f"daydream-exit-{proc.returncode}"
+        # A non-zero exit whose review nonetheless completed (stream dropped at the
+        # tail) is a success: findings + metrics are intact on disk.
+        if proc.returncode == 0:
+            result["status"] = "ok"
+        elif _findings_complete(findings_path, traj_path):
+            result["status"] = "ok"
+            result["stream_dropped_at_tail"] = True
+        else:
+            result["status"] = f"daydream-exit-{proc.returncode}"
+    finally:
+        # Always reclaim the detached worktree, even if daydream timed out or
+        # raised — run(..., timeout=) raises TimeoutExpired through here, and
+        # leaked worktrees would otherwise accumulate across a long batch.
+        git(source, ["worktree", "remove", "--force", str(wt)], check=False)
     return result
 
 

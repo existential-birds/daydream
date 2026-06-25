@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -41,7 +42,15 @@ def harvest_pr(repo: str, owner: str, name: str, pr: dict, bot: str) -> dict | N
     bot_reviews = [r for r in reviews if bot_login_matches((r.get("user") or {}).get("login"), bot)]
 
     comments = gh_paginate(f"repos/{repo}/pulls/{n}/comments")
-    bot_comments = [c for c in comments if bot_login_matches((c.get("user") or {}).get("login"), bot)]
+    # Drop thread replies (in_reply_to_id set): they're not standalone findings,
+    # and counting them inflates n_inline_comments / can taint review_commit_id.
+    # compare.py applies the same filter, so harvest and compare stay aligned.
+    bot_comments = [
+        c
+        for c in comments
+        if not c.get("in_reply_to_id")
+        and bot_login_matches((c.get("user") or {}).get("login"), bot)
+    ]
 
     # Keep reviews carrying a body or any inline comment; skip pure approvals.
     bot_reviews = [r for r in bot_reviews if (r.get("body") or "").strip()]
@@ -59,7 +68,7 @@ def harvest_pr(repo: str, owner: str, name: str, pr: dict, bot: str) -> dict | N
         latest_c = max(bot_comments, key=lambda c: c.get("created_at") or "")
         review_commit_id = latest_c.get("commit_id") or latest_c.get("original_commit_id")
 
-    threads = graphql_review_threads(owner, name, n)
+    threads, threads_complete = graphql_review_threads(owner, name, n)
     bot_threads = [t for t in threads if bot_login_matches(t.get("author"), bot)]
 
     return {
@@ -102,6 +111,7 @@ def harvest_pr(repo: str, owner: str, name: str, pr: dict, bot: str) -> dict | N
             for c in bot_comments
         ],
         "threads": bot_threads,
+        "threads_complete": threads_complete,
     }
 
 
@@ -133,7 +143,7 @@ def main() -> int:
         n = pr["number"]
         try:
             record = harvest_pr(args.repo, owner, name, pr, args.bot)
-        except RuntimeError as e:
+        except (RuntimeError, json.JSONDecodeError) as e:
             print(f"  PR #{n}: error ({e}); skipping", file=sys.stderr)
             continue
         if record is None:
@@ -149,6 +159,7 @@ def main() -> int:
             "n_inline_comments": record["n_inline_comments"],
             "n_review_summaries": record["n_review_summaries"],
             "n_resolved_threads": resolved,
+            "threads_complete": record["threads_complete"],
         })
         print(
             f"  PR #{n}: {record['n_inline_comments']} inline, "

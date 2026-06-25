@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 from common import read_json, repo_slug, run, write_json
-from compare import bot_findings, dd_findings
+from compare import bot_findings, dd_findings, findings_digest
 
 MAX_TEXT = 600  # per-finding char cap to bound prompt size
 
@@ -109,9 +109,16 @@ def judge_pr(record: dict, art: dict, backend: str, provider: str, model: str,
     a = bot_findings(record)
     b = dd_findings(art)
     n = record["pr_number"]
+    # Bind this judgement to the exact findings it scored + the snapshot it ran
+    # against, so compare.py can reject it if replay is later rerun with different
+    # findings (a stale judge artifact would otherwise silently skew overlap).
+    provenance = {
+        "review_commit_id": record.get("review_commit_id"),
+        "findings_digest": findings_digest(a, b),
+    }
     if not a or not b:
         return {"pr_number": n, "a_count": len(a), "b_count": len(b), "matches": [],
-                "note": "one side empty"}
+                "note": "one side empty", **provenance}
 
     prompt = (
         f"{PROMPT_HEADER}\n\n=== Tool A findings ({len(a)}) ===\n{_fmt(a, 'A')}\n\n"
@@ -121,11 +128,19 @@ def judge_pr(record: dict, art: dict, backend: str, provider: str, model: str,
     parsed = _extract_json(raw)
     if not parsed or "matches" not in parsed:
         return {"pr_number": n, "a_count": len(a), "b_count": len(b), "matches": [],
-                "error": "unparseable judge output", "raw": raw[:500]}
+                "error": "unparseable judge output", "raw": raw[:500], **provenance}
 
-    # Validate indices and dedupe so each side is used at most once.
+    def _confidence(match: dict) -> float:
+        try:
+            return float(match.get("confidence", 1.0))
+        except (TypeError, ValueError, AttributeError):
+            return -1.0
+
+    # Validate indices and dedupe so each side is used at most once. Process by
+    # descending confidence so a conflicting index keeps the stronger pair rather
+    # than whichever the model happened to emit first.
     seen_a, seen_b, clean = set(), set(), []
-    for m in parsed["matches"]:
+    for m in sorted(parsed["matches"], key=_confidence, reverse=True):
         try:
             ai, bi = int(m["a"]), int(m["b"])
         except (KeyError, TypeError, ValueError):
@@ -145,7 +160,7 @@ def judge_pr(record: dict, art: dict, backend: str, provider: str, model: str,
             "b_path": b[bi].get("path"),
         })
     return {"pr_number": n, "backend": backend, "model": model,
-            "a_count": len(a), "b_count": len(b), "matches": clean}
+            "a_count": len(a), "b_count": len(b), "matches": clean, **provenance}
 
 
 def main() -> int:

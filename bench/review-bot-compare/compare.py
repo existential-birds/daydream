@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -116,6 +118,24 @@ def dd_findings(art: dict) -> list[dict]:
     return out
 
 
+def findings_digest(bot: list[dict], dd: list[dict]) -> str:
+    """Stable hash of the exact (path, line, text) inputs a judge run scored.
+
+    judge.py records this; compare.py recomputes it from the current findings and
+    rejects a judge artifact whose digest no longer matches (e.g. replay was rerun
+    with a different backend), so stale semantic matches can't skew the report.
+    """
+    payload = json.dumps(
+        {
+            "bot": [[f["path"], f["line"], f["text"]] for f in bot],
+            "dd": [[f["path"], f["line"], f["text"]] for f in dd],
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def match(bot: list[dict], dd: list[dict]) -> list[tuple[int, int, float]]:
     """Greedy one-to-one matches: list of (bot_idx, dd_idx, score)."""
     cands = []
@@ -161,10 +181,13 @@ def main() -> int:
     rows = []
     measured_cost = False  # any PR where the backend itself reported a real $
     synth_cost_used = False  # any PR where we synthesized $ from tokens
+    incomplete_threads = []  # PRs whose GraphQL thread fetch was truncated
 
     for res in replay:
         n = res["pr_number"]
         record = read_json(base / f"pr-{n}.json")
+        if record.get("threads_complete") is False:
+            incomplete_threads.append(n)
         bf = bot_findings(record)
         ok = res.get("status") == "ok"
         # A run is USABLE for comparison if it produced a valid findings
@@ -182,12 +205,16 @@ def main() -> int:
         bot_resolved = sum(1 for b in bf if b["resolved"])
         overlap_resolved = sum(1 for i, _, _ in pairs if bf[i]["resolved"])
 
-        # Prefer the LLM judge's semantic matches when a judge artifact exists.
+        # Prefer the LLM judge's semantic matches when a judge artifact exists —
+        # but only if it was scored against THESE findings. A digest mismatch
+        # means replay was rerun since the judge ran, so the matches are stale;
+        # reject them and fall back to the deterministic lower bound.
         overlap_source = "deterministic"
         jp = base / "judge" / f"pr-{n}.json"
         if usable and jp.exists():
             jrec = read_json(jp)
-            if not jrec.get("error"):
+            fresh = jrec.get("findings_digest") == findings_digest(bf, df)
+            if not jrec.get("error") and fresh:
                 jm = [m for m in jrec.get("matches", [])
                       if float(m.get("confidence", 0)) >= args.min_conf]
                 overlap = len(jm)
@@ -313,6 +340,11 @@ def main() -> int:
         md.append(f"**Partial runs ({n_partial}):** findings were emitted before a "
                   f"late error (e.g. usage limit); included in counts, but their "
                   f"cost/tokens may be missing and the review may be pre-merge.\n")
+    if incomplete_threads:
+        md.append(f"**Unreliable resolved-thread counts ({len(incomplete_threads)}):** "
+                  + ", ".join(f"#{n}" for n in incomplete_threads)
+                  + " — the GraphQL thread fetch was truncated at harvest, so the "
+                  "acted-upon proxy understates these PRs. Re-harvest to refresh.\n")
 
     md.append(f"\n## Totals (over {nd} usable daydream runs: "
               f"{n_complete} complete + {n_partial} partial)\n")

@@ -60,12 +60,15 @@ def gh_paginate(endpoint: str, *, jq: str | None = None) -> list[Any]:
     return flat
 
 
-def graphql_review_threads(owner: str, repo: str, number: int) -> list[dict[str, Any]]:
+def graphql_review_threads(owner: str, repo: str, number: int) -> tuple[list[dict[str, Any]], bool]:
     """Fetch PR review threads (resolution + first comment author) via GraphQL.
 
-    Returns one dict per thread: {is_resolved, is_outdated, path, line, author}.
-    Used to derive the "acted upon" ground-truth signal. Best-effort: returns
-    [] on any failure so harvest never dies on a GraphQL hiccup.
+    Returns ``(threads, ok)``, one dict per thread:
+    {is_resolved, is_outdated, path, line, author}. Used to derive the "acted
+    upon" ground-truth signal. ``ok`` is ``False`` when a transport/shape error
+    truncated the set, so the caller can mark that PR's resolved-thread count as
+    unreliable rather than reading a partial fetch as a real value. Best-effort:
+    never raises on a GraphQL hiccup.
     """
     query = """
     query($owner:String!,$repo:String!,$num:Int!,$cursor:String){
@@ -114,17 +117,17 @@ def graphql_review_threads(owner: str, repo: str, number: int) -> list[dict[str,
                 break
             cursor = page["endCursor"]
     except (RuntimeError, KeyError, TypeError, json.JSONDecodeError):
-        return threads
-    return threads
+        return threads, False
+    return threads, True
 
 
 def write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2, ensure_ascii=False))
+    path.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def repo_slug(repo: str) -> str:
