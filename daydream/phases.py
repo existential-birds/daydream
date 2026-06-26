@@ -1682,6 +1682,103 @@ async def phase_verify_recommendations(
     return output_path, payload
 
 
+# Shared scope/precedence/contract guardrails appended to every fix prompt
+# (single-finding ``phase_fix`` and batched ``phase_fix_batched``). Kept in one
+# place so the two prompt paths can never drift.
+_FIX_GUARDRAILS = """Do NOT change error handling semantics
+(e.g., converting warn-and-continue to error propagation, or vice versa)
+unless the issue description specifically explains why the current error
+handling strategy is wrong for that code path.
+
+Anchor the change to what this finding names — the file/symbol/line above. Do
+NOT make gratuitous edits to adjacent fields, keys, or functions the fix does
+not require; naming one issue is not license to "tidy" its neighbours. If a
+correct fix genuinely requires an edit the finding didn't name — a caller that
+must change in step, or a file the review step missed — make it, but name and
+justify each out-of-scope edit in your commit message rather than expanding
+silently. If the change balloons far beyond the named site, stop and report.
+
+If this finding conflicts with an explicit in-code contract — a JSON schema, a
+type signature, or a comment documenting intent — the contract wins (unless
+confirmed author intent below overrides it). Do not override documented intent
+to satisfy the finding; note the conflict in your commit message (or report
+inability to fix). Treat low/medium-confidence findings with extra skepticism
+here.
+"""
+
+
+def _build_intent_suffix(intent_path: Path | None) -> str:
+    """Build the confirmed-author-intent block for a fix prompt.
+
+    Best-effort enrichment: a missing or unreadable intent file yields an empty
+    string so an intent-read failure can never block a fix. A read failure is
+    never coerced into a fake intent string.
+
+    Args:
+        intent_path: Optional path to the confirmed author-intent file.
+
+    Returns:
+        The intent block (with leading newline) when present and readable;
+        otherwise an empty string.
+    """
+    if intent_path is None or not intent_path.exists():
+        return ""
+    try:
+        confirmed_intent = intent_path.read_text()
+    except OSError:
+        return ""
+    if not (confirmed_intent and confirmed_intent.strip()):
+        return ""
+    return (
+        "\nCONFIRMED AUTHOR INTENT for this change (authoritative):\n"
+        f"{confirmed_intent.strip()}\n\n"
+        "This confirmed intent is the highest-priority authority: it outranks both "
+        "the in-code-contract rule above and the finding itself. "
+        "If applying this fix would undo, revert, or contradict a decision the "
+        "confirmed intent describes as deliberate, do NOT apply it. Report the "
+        "conflict in your commit message (or report inability to fix) instead of "
+        "overriding the author's deliberate choice.\n"
+    )
+
+
+def _build_verifier_suffix(item: dict[str, Any]) -> str:
+    """Build the recommendation-verifier block for one finding.
+
+    Mirrors the single-finding verdict/evidence/assumptions text so batched and
+    single-finding prompts carry identical per-finding verifier guidance.
+
+    Args:
+        item: Feedback item, optionally carrying ``verifier_verdict``,
+            ``evidence``, and ``unverified_assumptions``.
+
+    Returns:
+        The verifier block (with leading newline) when a verdict is present;
+        otherwise an empty string.
+    """
+    verifier_verdict = item.get("verifier_verdict")
+    if not verifier_verdict:
+        return ""
+    evidence = item.get("evidence", "")
+    out = f"\nVerifier verdict: {verifier_verdict}. Evidence: {evidence}.\n"
+    assumptions = item.get("unverified_assumptions") or []
+    if isinstance(assumptions, list) and assumptions:
+        joined = "; ".join(str(a) for a in assumptions)
+        out += f"Unverified assumptions: {joined}.\n"
+    if verifier_verdict == "contradicts":
+        out += (
+            "\nDo NOT apply the recommendation literally if it contradicts the cited spec.\n"
+            "Explain the conflict in your commit message and choose a fix that preserves\n"
+            "the spec, or stop and report inability to fix.\n"
+        )
+    elif verifier_verdict == "uncertain":
+        out += (
+            "\nThe verifier could not confirm whether this recommendation is correct.\n"
+            "Proceed cautiously: apply the minimal fix and note the uncertainty in your\n"
+            "commit message.\n"
+        )
+    return out
+
+
 async def phase_fix(
     backend: Backend,
     work: WorkContext,
@@ -1729,69 +1826,13 @@ async def phase_fix(
 File: {file_ref}
 Line: {line}
 
-Make the minimal change needed. Do NOT change error handling semantics
-(e.g., converting warn-and-continue to error propagation, or vice versa)
-unless the issue description specifically explains why the current error
-handling strategy is wrong for that code path.
-
-Anchor the change to what this finding names — the file/symbol/line above. Do
-NOT make gratuitous edits to adjacent fields, keys, or functions the fix does
-not require; naming one issue is not license to "tidy" its neighbours. If a
-correct fix genuinely requires an edit the finding didn't name — a caller that
-must change in step, or a file the review step missed — make it, but name and
-justify each out-of-scope edit in your commit message rather than expanding
-silently. If the change balloons far beyond the named site, stop and report.
-
-If this finding conflicts with an explicit in-code contract — a JSON schema, a
-type signature, or a comment documenting intent — the contract wins (unless
-confirmed author intent below overrides it). Do not override documented intent
-to satisfy the finding; note the conflict in your commit message (or report
-inability to fix). Treat low/medium-confidence findings with extra skepticism
-here.
-"""
+Make the minimal change needed. {_FIX_GUARDRAILS}"""
 
     # Best-effort: inject the confirmed author intent so the fixer won't undo a
-    # deliberate decision. Guarded on .exists() and wrapped so an intent-read
-    # failure NEVER blocks or crashes a fix (deliberate deviation from strict
-    # propagation). A read failure skips the block; it is never coerced into a
-    # fake intent string.
-    if intent_path is not None and intent_path.exists():
-        try:
-            confirmed_intent = intent_path.read_text()
-        except OSError:
-            confirmed_intent = None
-        if confirmed_intent and confirmed_intent.strip():
-            prompt += (
-                "\nCONFIRMED AUTHOR INTENT for this change (authoritative):\n"
-                f"{confirmed_intent.strip()}\n\n"
-                "This confirmed intent is the highest-priority authority: it outranks both "
-                "the in-code-contract rule above and the finding itself. "
-                "If applying this fix would undo, revert, or contradict a decision the "
-                "confirmed intent describes as deliberate, do NOT apply it. Report the "
-                "conflict in your commit message (or report inability to fix) instead of "
-                "overriding the author's deliberate choice.\n"
-            )
-
-    verifier_verdict = item.get("verifier_verdict")
-    if verifier_verdict:
-        evidence = item.get("evidence", "")
-        prompt += f"\nVerifier verdict: {verifier_verdict}. Evidence: {evidence}.\n"
-        assumptions = item.get("unverified_assumptions") or []
-        if isinstance(assumptions, list) and assumptions:
-            joined = "; ".join(str(a) for a in assumptions)
-            prompt += f"Unverified assumptions: {joined}.\n"
-        if verifier_verdict == "contradicts":
-            prompt += (
-                "\nDo NOT apply the recommendation literally if it contradicts the cited spec.\n"
-                "Explain the conflict in your commit message and choose a fix that preserves\n"
-                "the spec, or stop and report inability to fix.\n"
-            )
-        elif verifier_verdict == "uncertain":
-            prompt += (
-                "\nThe verifier could not confirm whether this recommendation is correct.\n"
-                "Proceed cautiously: apply the minimal fix and note the uncertainty in your\n"
-                "commit message.\n"
-            )
+    # deliberate decision. A read failure skips the block; it is never coerced
+    # into a fake intent string (see _build_intent_suffix).
+    prompt += _build_intent_suffix(intent_path)
+    prompt += _build_verifier_suffix(item)
 
     if console_lock is not None:
         # Concurrent path: suppress the Live/LiveToolPanelRegistry renderer in
@@ -1820,6 +1861,93 @@ here.
         print_fix_complete(console, item_num, total)
 
 
+async def phase_fix_batched(
+    backend: Backend,
+    work: WorkContext,
+    items: list[dict[str, Any]],
+    item_nums: list[int],
+    total: int,
+    *,
+    console_lock: anyio.Lock | None = None,
+    intent_path: Path | None = None,
+) -> None:
+    """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
+
+    All ``items`` must target the same file; the caller (``phase_fix_parallel``)
+    groups them with ``group_items_by_file``. Batching collapses N per-finding
+    ``run_agent`` calls into one so the agent reads the file's context once and
+    produces a single coherent patch. A single-item group delegates straight to
+    ``phase_fix`` — there is no batched prompt to build.
+
+    Args:
+        backend: The Backend to execute against.
+        work: Workspace context for the fix; ``work.repo`` is the agent cwd.
+        items: Feedback items, all targeting the same file.
+        item_nums: 1-based progress counters aligned with ``items``.
+        total: Total number of items across the whole fix run.
+        console_lock: Optional lock to serialize console writes across concurrent
+            callers. Pass the same lock to every concurrent invocation; leave
+            ``None`` for serial callers.
+        intent_path: Optional path to the confirmed author-intent file, injected
+            verbatim (same best-effort handling as ``phase_fix``).
+
+    Returns:
+        None
+    """
+    if len(items) == 1:
+        await phase_fix(
+            backend, work, items[0], item_nums[0], total,
+            console_lock=console_lock, intent_path=intent_path,
+        )
+        return
+
+    count = len(items)
+    file_path = items[0].get("file", "Unknown file")
+    resolved = work.repo / file_path
+    file_ref = str(resolved) if resolved.is_file() else file_path
+
+    async with (console_lock if console_lock is not None else anyio.Lock()):
+        console.print()
+        print_fix_progress(console, item_nums[0], total, f"{count} findings in {file_path}")
+
+    findings_block = ""
+    for idx, item in enumerate(items, start=1):
+        desc = item.get("description", "No description")
+        line = item.get("line", "Unknown")
+        findings_block += f"\n{idx}. {desc}\n   File: {file_ref}\n   Line: {line}\n"
+        findings_block += _build_verifier_suffix(item)
+
+    prompt = f"""Fix these {count} issues in {file_ref}:
+{findings_block}
+Make the minimal changes needed to address ALL of the above findings in one coherent patch. {_FIX_GUARDRAILS}"""
+
+    prompt += _build_intent_suffix(intent_path)
+
+    if console_lock is not None:
+        # Concurrent path: suppress the Live renderer in run_agent and serialize
+        # progress lines through the shared lock (see phase_fix).
+        async def _cb(text: Text) -> None:
+            async with console_lock:
+                console.print(text)
+
+        await run_agent(
+            backend, work.repo, prompt,
+            phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            progress_callback=_cb,
+        )
+    else:
+        await run_agent(
+            backend, work.repo, prompt,
+            phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        )
+    async with (console_lock if console_lock is not None else anyio.Lock()):
+        print_fix_complete(console, item_nums[-1], total)
+
+
 async def phase_fix_parallel(
     backend: Backend,
     work: WorkContext,
@@ -1831,11 +1959,13 @@ async def phase_fix_parallel(
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
     Items are grouped by ``file`` (preserving the caller's severity ordering).
-    Each file-group becomes one task that applies its items serially, while
-    distinct files run concurrently under an ``anyio.CapacityLimiter``. Same-file
-    serialization prevents concurrent writes to the *same named file*; it does
-    not guarantee disjoint edits if an agent touches files other than the one
-    named in the item's ``file`` key. Commit stays serial and after.
+    Each file-group becomes one task whose findings are fixed together in a
+    single ``phase_fix_batched`` call (one ``run_agent`` turn per file), while
+    distinct files run concurrently under an ``anyio.CapacityLimiter``. If the
+    batched turn raises, the group falls back to per-finding ``phase_fix`` calls.
+    Same-file serialization prevents concurrent writes to the *same named file*;
+    it does not guarantee disjoint edits if an agent touches files other than the
+    one named in the item's ``file`` key. Commit stays serial and after.
 
     Args:
         backend: The Backend to execute against (shared across tasks).
@@ -1843,7 +1973,7 @@ async def phase_fix_parallel(
         items: Feedback items, already severity-sorted by the caller.
         limiter_size: Max number of file-groups to fix concurrently.
         intent_path: Optional confirmed-intent file forwarded unchanged to each
-            ``phase_fix`` call so every fix carries the deliberate-intent guard.
+            fix call so every fix carries the deliberate-intent guard.
 
     Returns:
         ``failures``: file -> "<ExceptionType>: <message>" for file-groups whose
@@ -1882,12 +2012,21 @@ async def phase_fix_parallel(
                 async with limiter:
                     async with maybe_fork(recorder, f"fix-{_fkey_slug}"):
                         try:
-                            for item, item_num in grp:
-                                await phase_fix(
-                                    backend, work, item, item_num, total,
+                            grp_items = [item for item, _ in grp]
+                            grp_nums = [num for _, num in grp]
+                            try:
+                                await phase_fix_batched(
+                                    backend, work, grp_items, grp_nums, total,
                                     console_lock=_console_lock,
                                     intent_path=intent_path,
                                 )
+                            except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
+                                for item, item_num in grp:
+                                    await phase_fix(
+                                        backend, work, item, item_num, total,
+                                        console_lock=_console_lock,
+                                        intent_path=intent_path,
+                                    )
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                             reason = f"{type(e).__name__}: {e}"
                             async with _failures_lock:
