@@ -613,6 +613,43 @@ def test_format_skill_invocation_bare_slug_unchanged():
 
 
 @pytest.mark.asyncio
+async def test_format_skill_invocation_token_is_consumed_by_execute(tmp_path, monkeypatch):
+    # Pairing guard: the token emitted by ``format_skill_invocation`` (producer)
+    # must be recognized by ``execute``'s ``_SKILL_TOKEN_RE`` scanner (consumer)
+    # so it is registered as a ``--skill`` flag. The producer and consumer are
+    # otherwise coupled only by the literal ``"/skill:"`` prefix; without this
+    # test a one-sided edit to either side would silently drop the ``--skill``
+    # flag while every isolated unit test stayed green. The prompt is built FROM
+    # the producer (not a hardcoded literal) so this asserts the contract, not a
+    # specific string.
+    skills_root = tmp_path / "skills"
+    py_dir = skills_root / "review-python"
+    py_dir.mkdir(parents=True)
+    (py_dir / "SKILL.md").write_text("# review-python\n")
+    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
+    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(skills_root))
+    monkeypatch.chdir(tmp_path)
+
+    backend = PiBackend(model="glm-5.2")
+    prompt = f"Review this.\n\n{backend.format_skill_invocation('beagle-python:review-python')}"
+
+    mock_proc = make_mock_process(['{"id": "s1"}'])
+    with patch(
+        "daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc
+    ) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), prompt):
+            pass
+
+    flat_args = list(mock_exec.call_args.args)
+    skill_indices = [i for i, a in enumerate(flat_args) if a == "--skill"]
+    assert len(skill_indices) == 1, (
+        f"producer/consumer pairing broken: token from format_skill_invocation "
+        f"was not scanned by execute; args: {flat_args}"
+    )
+    assert flat_args[skill_indices[0] + 1] == str(py_dir)
+
+
+@pytest.mark.asyncio
 async def test_execute_registers_resolved_skills_with_skill_flag(tmp_path, monkeypatch):
     # Issue #207: /skill:<slug> tokens in the prompt are registered with the
     # subprocess via repeatable --skill <dir> flags (de-duplicated, best-effort).
