@@ -204,8 +204,6 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     assert len(structural_calls) == 1
     assert len(per_stack_calls) == 1
     assert structural_calls[0]["files"] == ["a.py"]
-    # Issue #207: the structural skill key is routed through the backend
-    # formatter, so the structural prompt now carries a formatted invocation.
     assert structural_calls[0]["skill_invocation"] == f"/{STRUCTURE_SKILL}"
     assert "stack_name" not in structural_calls[0]
     assert per_stack_calls[0]["stack_name"] == "python"
@@ -253,13 +251,7 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work) ->
 
 
 class _PiShapeBackend(_RecordingBackend):
-    """Mock backend that delegates skill formatting to the real PiBackend.
-
-    Proves Issue #207 end-to-end through the production ``phase_per_stack_reviews``
-    path: the per-stack / structural prompt builders receive whatever the real
-    ``PiBackend.format_skill_invocation`` returns (``/skill:<slug>``), not a raw
-    Beagle key. Only ``execute`` is mocked (no subprocess); the formatter is real.
-    """
+    """Mock backend that uses PiBackend's real skill formatter."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -274,14 +266,7 @@ class _PiShapeBackend(_RecordingBackend):
 async def test_per_stack_prompts_use_pi_native_skill_command(
     tmp_path: Path, make_work
 ) -> None:
-    """Issue #207: every stack with a skill emits Pi's native /skill:<slug>.
-
-    Drives the production fan-out phase with raw Beagle keys (as detect_stacks
-    produces them) and a backend whose formatter is the real PiBackend. Asserts
-    the dispatched prompts carry /skill:<slug> for python, frontend, go, rust,
-    elixir, and structure -- and never the raw beagle-*: keys -- while the
-    generic fallback stack injects no skill token.
-    """
+    """Every stack with a skill emits Pi's native /skill:<slug>."""
     from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
 
     backend = _PiShapeBackend()

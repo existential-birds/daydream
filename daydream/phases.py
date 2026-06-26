@@ -2760,9 +2760,9 @@ async def phase_per_stack_reviews(
             if stack.stack_name == STRUCTURE_STACK_NAME:
                 # Structural prompt is NOT inlined — its lens legitimately roams
                 # beyond the diff, so it keeps its diff_path pointer and its
-                # repo-wide Read/Grep/Bash freedom. The structural skill key is
-                # routed through the backend formatter (Issue #207) so Pi emits
-                # its native /skill:<slug> command instead of a raw Beagle key.
+                # repo-wide Read/Grep/Bash freedom. The skill key is routed
+                # through the backend formatter so each backend emits its own
+                # invocation syntax.
                 structural_invocation = backend.format_skill_invocation(
                     stack.skill_invocation or STRUCTURE_SKILL
                 )
@@ -2799,9 +2799,7 @@ async def phase_per_stack_reviews(
                     )
                 else:
                     # Route the raw Beagle stack key through the backend
-                    # formatter (Issue #207) so each backend emits its own
-                    # invocation syntax (Pi: /skill:<slug>) instead of the raw
-                    # key leaking into the prompt.
+                    # formatter so each backend emits its own invocation syntax.
                     prompt = _prompts.build_per_stack_prompt(
                         skill_invocation=backend.format_skill_invocation(stack.skill_invocation),
                         stack_name=stack.stack_name,

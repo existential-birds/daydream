@@ -594,8 +594,6 @@ def test_resolve_skill_dir_finds_slug(tmp_path, monkeypatch):
 
 
 def test_format_skill_invocation_emits_native_command():
-    # Issue #207: Pi formats a Beagle key as its native /skill:<slug> command,
-    # stripping the plugin prefix. The raw key never appears.
     backend = PiBackend(model="glm-5.2")
     result = backend.format_skill_invocation("beagle-python:review-python")
     assert result == "/skill:review-python"
@@ -614,13 +612,7 @@ def test_format_skill_invocation_bare_slug_unchanged():
 
 
 def test_skill_token_re_grammar_matches_pi_name_rules():
-    # Pi's documented skill-name grammar (pi docs/skills.md "Name Rules") is
-    # lowercase a-z, 0-9, hyphens only. Every real slug (review-python,
-    # review-frontend, review-go, review-rust, review-elixir, review-ios,
-    # review-structure) matches; uppercase/underscore must NOT match because no
-    # valid Pi slug uses them (e.g. "PDF-Processing" is explicitly invalid).
-    # Without this guard a regression to the wider w class would silently
-    # admit tokens that can never resolve to a real skill.
+    # Pi skill names are lowercase letters, digits, and hyphens.
     admitted = ["review-python", "review-frontend", "review-go", "2-thing", "a"]
     rejected = ["Review_Python", "PDF-Processing", "foo_bar", "CamelCase"]
     for slug in admitted:
@@ -633,14 +625,7 @@ def test_skill_token_re_grammar_matches_pi_name_rules():
 
 @pytest.mark.asyncio
 async def test_format_skill_invocation_token_is_consumed_by_execute(tmp_path, monkeypatch):
-    # Pairing guard: the token emitted by ``format_skill_invocation`` (producer)
-    # must be recognized by ``execute``'s ``_SKILL_TOKEN_RE`` scanner (consumer)
-    # so it is registered as a ``--skill`` flag. The producer and consumer are
-    # otherwise coupled only by the literal ``"/skill:"`` prefix; without this
-    # test a one-sided edit to either side would silently drop the ``--skill``
-    # flag while every isolated unit test stayed green. The prompt is built FROM
-    # the producer (not a hardcoded literal) so this asserts the contract, not a
-    # specific string.
+    # The formatted token must be recognized by execute's scanner and registered.
     skills_root = tmp_path / "skills"
     py_dir = skills_root / "review-python"
     py_dir.mkdir(parents=True)
@@ -670,8 +655,6 @@ async def test_format_skill_invocation_token_is_consumed_by_execute(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_execute_registers_resolved_skills_with_skill_flag(tmp_path, monkeypatch):
-    # Issue #207: /skill:<slug> tokens in the prompt are registered with the
-    # subprocess via repeatable --skill <dir> flags (de-duplicated, best-effort).
     skills_root = tmp_path / "skills"
     py_dir = skills_root / "review-python"
     py_dir.mkdir(parents=True)
@@ -682,8 +665,7 @@ async def test_execute_registers_resolved_skills_with_skill_flag(tmp_path, monke
 
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process(['{"id": "s1"}'])
-    # Two references to the same resolvable skill + one unresolvable -> exactly
-    # one --skill entry, pointing at the resolved dir.
+    # Duplicate references are de-duplicated; unresolved skills are skipped.
     prompt = "Review this.\n\n/skill:review-python\n/skill:review-python\n/skill:review-go"
 
     with patch(
@@ -702,8 +684,7 @@ async def test_execute_registers_resolved_skills_with_skill_flag(tmp_path, monke
 
 @pytest.mark.asyncio
 async def test_execute_no_skill_flag_when_unresolvable(tmp_path, monkeypatch):
-    # Best-effort: an unresolvable /skill:<slug> never adds a --skill flag and
-    # never crashes the run (pi may still auto-discover it).
+    # Unresolvable skills do not add flags or fail the run.
     monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
     monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(tmp_path / "nope"))
     monkeypatch.chdir(tmp_path)
