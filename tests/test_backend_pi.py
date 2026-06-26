@@ -592,24 +592,76 @@ def test_resolve_skill_dir_finds_slug(tmp_path, monkeypatch):
     assert resolved == skill_dir
 
 
-def test_format_skill_invocation_unresolved_returns_hint():
+def test_format_skill_invocation_emits_native_command():
+    # Issue #207: Pi formats a Beagle key as its native /skill:<slug> command,
+    # stripping the plugin prefix. The raw key never appears.
     backend = PiBackend(model="glm-5.2")
-    # Force unresolved path.
-    with patch("daydream.backends.pi._resolve_skill_dir", return_value=None):
-        result = backend.format_skill_invocation("beagle-python:review-python", "--pr 7")
-    assert "beagle-python:review-python" in result
-    assert "--pr 7" in result
+    result = backend.format_skill_invocation("beagle-python:review-python")
+    assert result == "/skill:review-python"
+    assert "beagle-python" not in result
 
 
-def test_format_skill_invocation_resolved_uses_path_ref(tmp_path):
+def test_format_skill_invocation_preserves_args():
     backend = PiBackend(model="glm-5.2")
-    skill_dir = tmp_path / "review-python"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("# x\n")
-    with patch("daydream.backends.pi._resolve_skill_dir", return_value=skill_dir):
-        result = backend.format_skill_invocation("beagle-python:review-python")
-    assert f"{skill_dir}/SKILL.md`" in result
-    assert "methodology" in result
+    result = backend.format_skill_invocation("beagle-core:review-structure", "--pr 7")
+    assert result == "/skill:review-structure --pr 7"
+
+
+def test_format_skill_invocation_bare_slug_unchanged():
+    backend = PiBackend(model="glm-5.2")
+    assert backend.format_skill_invocation("review-go") == "/skill:review-go"
+
+
+@pytest.mark.asyncio
+async def test_execute_registers_resolved_skills_with_skill_flag(tmp_path, monkeypatch):
+    # Issue #207: /skill:<slug> tokens in the prompt are registered with the
+    # subprocess via repeatable --skill <dir> flags (de-duplicated, best-effort).
+    skills_root = tmp_path / "skills"
+    py_dir = skills_root / "review-python"
+    py_dir.mkdir(parents=True)
+    (py_dir / "SKILL.md").write_text("# review-python\n")
+    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
+    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(skills_root))
+    monkeypatch.chdir(tmp_path)
+
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process(['{"id": "s1"}'])
+    # Two references to the same resolvable skill + one unresolvable -> exactly
+    # one --skill entry, pointing at the resolved dir.
+    prompt = "Review this.\n\n/skill:review-python\n/skill:review-python\n/skill:review-go"
+
+    with patch(
+        "daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc
+    ) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), prompt):
+            pass
+
+    flat_args = list(mock_exec.call_args.args)
+    skill_indices = [i for i, a in enumerate(flat_args) if a == "--skill"]
+    assert len(skill_indices) == 1, f"expected one --skill flag, got args: {flat_args}"
+    assert flat_args[skill_indices[0] + 1] == str(py_dir)
+    # The --skill flag precedes the positional prompt (last arg).
+    assert skill_indices[0] < len(flat_args) - 1
+
+
+@pytest.mark.asyncio
+async def test_execute_no_skill_flag_when_unresolvable(tmp_path, monkeypatch):
+    # Best-effort: an unresolvable /skill:<slug> never adds a --skill flag and
+    # never crashes the run (pi may still auto-discover it).
+    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
+    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(tmp_path / "nope"))
+    monkeypatch.chdir(tmp_path)
+
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process(['{"id": "s1"}'])
+
+    with patch(
+        "daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc
+    ) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), "Review.\n\n/skill:review-rust"):
+            pass
+
+    assert "--skill" not in list(mock_exec.call_args.args)
 
 
 def test_create_backend_pi_returns_pi_backend_with_default_model():

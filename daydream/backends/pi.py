@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -69,6 +70,11 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
 
 # Read-only tool subset (plan §3). Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
+
+# Matches Pi's native ``/skill:<slug>`` command embedded in a prompt (emitted by
+# ``format_skill_invocation``). Used in ``execute`` to register the referenced
+# skill directories with the subprocess via ``--skill`` flags.
+_SKILL_TOKEN_RE = re.compile(r"/skill:([\w-]+)")
 
 # Pi CLI ships only a minimal built-in system prompt. Claude Code and Codex
 # inject rich guidance (tool efficiency, exploration strategy, conciseness) at
@@ -168,6 +174,17 @@ def _schema_instruction(schema: dict[str, Any]) -> str:
     )
 
 
+def _skill_slug(skill_key: str) -> str:
+    """Strip a Beagle plugin prefix from a skill key, leaving the bare slug.
+
+    ``beagle-python:review-python`` -> ``review-python``; a key that already
+    has no prefix (``review-python``) is returned unchanged. Pi has no plugin
+    namespace, so its native ``/skill:<slug>`` command and on-disk skill
+    directories are keyed by the bare slug.
+    """
+    return skill_key.split(":")[-1]
+
+
 def _resolve_skill_dir(skill_key: str) -> Path | None:
     """Best-effort resolution of a Beagle skill key to its on-disk directory.
 
@@ -182,7 +199,7 @@ def _resolve_skill_dir(skill_key: str) -> Path | None:
     can disagree on where the Beagle skills live; consolidate when the
     full resolver lands.
     """
-    slug = skill_key.split(":")[-1]
+    slug = _skill_slug(skill_key)
     home = Path.home()
     search_roots: list[Path] = [
         home / ".claude" / "skills",
@@ -296,6 +313,23 @@ class PiBackend:
         full_prompt = prompt
         if output_schema:
             full_prompt = prompt + _schema_instruction(output_schema)
+
+        # Register any /skill:<slug> commands referenced in the prompt with the
+        # subprocess via repeatable --skill <dir> flags so availability does not
+        # depend solely on ambient ~/.agents/skills mirrors. Best-effort and
+        # de-duplicated: slugs that don't resolve to an on-disk skill dir are
+        # skipped (pi may still auto-discover them) and never crash the run.
+        registered_dirs: set[str] = set()
+        for slug in _SKILL_TOKEN_RE.findall(full_prompt):
+            skill_dir = _resolve_skill_dir(slug)
+            if skill_dir is None:
+                continue
+            resolved = str(skill_dir)
+            if resolved in registered_dirs:
+                continue
+            registered_dirs.add(resolved)
+            args.extend(["--skill", resolved])
+
         args.append(full_prompt)
 
         session_id: str | None = None
@@ -515,30 +549,25 @@ class PiBackend:
                 await process.wait()
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        """Format a skill invocation for Pi via path-reference injection.
+        """Format a skill invocation as Pi's native ``/skill:<slug>`` command.
 
-        Pi has no skill registry (Beagle skills are Claude Code plugins), so we
-        resolve the skill directory on disk and instruct the agent to read its
-        ``SKILL.md``. When the directory cannot be resolved, the raw skill key
-        is kept as a hint — the review proceeds; this method never raises
-        (design doc §5 degradation path).
+        Pi exposes installed skills through a built-in slash command keyed by
+        the bare slug (it has no plugin namespace), so a Beagle key like
+        ``beagle-python:review-python`` becomes ``/skill:review-python``. The
+        plugin prefix is stripped via :func:`_skill_slug`; the matching skill
+        directory is registered with the subprocess in :meth:`execute` via a
+        ``--skill`` flag so the command resolves even without an ambient
+        mirror. This method never raises.
 
         Args:
             skill_key: Full skill key (e.g. "beagle-python:review-python").
             args: Optional arguments string.
 
         Returns:
-            Formatted skill invocation string.
+            Formatted skill invocation string (``/skill:<slug>`` plus args).
 
         """
-        skill_dir = _resolve_skill_dir(skill_key)
-        if skill_dir is not None:
-            base = (
-                f"Read `{skill_dir}/SKILL.md` and follow it as your review "
-                f"methodology. Read its companion files as it directs."
-            )
-        else:
-            base = f"Follow the `{skill_key}` skill methodology."
+        base = f"/skill:{_skill_slug(skill_key)}"
         if args:
             base = f"{base} {args}"
         return base

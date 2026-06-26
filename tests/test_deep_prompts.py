@@ -311,6 +311,7 @@ def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) 
     from daydream.deep.prompts import build_structural_prompt
 
     prompt = build_structural_prompt(
+        skill_invocation=f"/{STRUCTURE_SKILL}",
         files=["api/main.py", "ui/App.tsx"],
         diff_path=tmp_path / "diff.patch",
         intent_path=tmp_path / "intent.md",
@@ -328,6 +329,7 @@ def test_build_structural_prompt_omits_exploration_pointer(tmp_path: Path) -> No
     from daydream.deep.prompts import build_structural_prompt
 
     prompt = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
         files=["main.py"],
         diff_path=tmp_path / "diff.patch",
         intent_path=tmp_path / "intent.md",
@@ -491,6 +493,7 @@ def test_structural_prompt_keeps_diff_pointer_and_read_freedom(tmp_path: Path) -
 
     p = _paths(tmp_path)
     out = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
         files=["api.py"],
         **p,
     )
