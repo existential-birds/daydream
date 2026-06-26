@@ -76,3 +76,6 @@ Thumbs.db
 
 # Beagle local artifacts
 .beagle/
+
+# Local git worktrees
+.worktrees/
