@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import uuid
@@ -158,7 +159,13 @@ def _pi_retry_base_delay() -> float:
                 _PI_DEFAULT_RETRY_BASE_DELAY,
             )
         else:
-            if value < 0:
+            if not math.isfinite(value):
+                logger.warning(
+                    "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is not finite; using default %g",
+                    raw,
+                    _PI_DEFAULT_RETRY_BASE_DELAY,
+                )
+            elif value < 0:
                 logger.warning(
                     "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is negative; using default %g",
                     raw,
@@ -174,17 +181,20 @@ def _is_retryable_error_message(message: str) -> bool:
 
     High-precision literals (429, rate limit/rate_limit, too many requests) are
     matched as plain substrings — they are extremely unlikely to appear in a
-    non-transient context.  Ambiguous stems (overload, capacity, throttl) require
-    a left word boundary so that phrases like "not overloaded", "capacity
-    planning", or "preloaded" do not produce false positives.
+    non-transient context. Ambiguous terms require positive overload/capacity
+    wording and explicitly reject negated or planning contexts.
     """
     lower = message.lower()
     # Unambiguous literals — plain substring is safe.
     if any(token in lower for token in ("429", "rate limit", "rate_limit", "too many requests")):
         return True
-    # Ambiguous stems — require a word boundary on the left to avoid false
-    # positives (e.g. "not overloaded", "preloaded", "capacity planning").
-    return bool(re.search(r"\b(?:overload|capacity|throttl)", lower))
+    if re.search(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b", lower):
+        return False
+    return bool(
+        re.search(r"\boverloaded?\b|\boverload(?:ed|ing)?\b", lower)
+        or re.search(r"\bcapacity\s+(?:unavailable|exceeded|limit|limited|full|reached)\b", lower)
+        or re.search(r"\bthrottl(?:e|ed|ing)\b", lower)
+    )
 
 
 def _is_retryable_exit_code(code: int) -> bool:

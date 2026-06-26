@@ -257,8 +257,6 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work) ->
 class _PiShapeBackend(_RecordingBackend):
     """Mock backend that uses PiBackend's real skill formatter."""
 
-    fanout_concurrency = 4
-
     def __init__(self) -> None:
         super().__init__()
         from daydream.backends.pi import PiBackend

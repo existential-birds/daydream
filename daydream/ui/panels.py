@@ -823,6 +823,14 @@ class LiveToolPanelRegistry:
         self._call_args.clear()
         self._task_labels.clear()
 
+    def discard_all(self) -> None:
+        """Stop rendering and clear tracked panels without printing them."""
+        self._stop_live()
+        self._active_order.clear()
+        self._panels.clear()
+        self._call_args.clear()
+        self._task_labels.clear()
+
     def _ensure_live(self) -> None:
         """Start the shared ``Live`` if there are active panels."""
         if self._active_order:

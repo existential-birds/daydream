@@ -992,6 +992,14 @@ def test_is_retryable_error_message_non_retryable():
     assert _is_retryable_error_message("auth failed") is False
 
 
+def test_is_retryable_error_message_not_overloaded_is_non_retryable():
+    assert _is_retryable_error_message("service is not overloaded") is False
+
+
+def test_is_retryable_error_message_capacity_planning_is_non_retryable():
+    assert _is_retryable_error_message("capacity planning required") is False
+
+
 def test_is_retryable_error_message_empty():
     assert _is_retryable_error_message("") is False
 
@@ -1123,6 +1131,16 @@ def test_pi_retry_base_delay_default():
 def test_pi_retry_base_delay_env_override(monkeypatch):
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.5")
     assert _pi_retry_base_delay() == pytest.approx(0.5)
+
+
+def test_pi_retry_base_delay_nan_falls_back(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "nan")
+    assert _pi_retry_base_delay() == _PI_DEFAULT_RETRY_BASE_DELAY
+
+
+def test_pi_retry_base_delay_inf_falls_back(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "inf")
+    assert _pi_retry_base_delay() == _PI_DEFAULT_RETRY_BASE_DELAY
 
 
 # ---------------------------------------------------------------------------

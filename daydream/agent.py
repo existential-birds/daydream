@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import os
 import random
 import re
@@ -456,12 +457,6 @@ async def run_agent(
     _state.current_backends.append(backend)
     event_iter: AsyncGenerator[Any, None] | None = None
     try:
-        # Created unconditionally for task_id→label correlation; in callback mode
-        # only its label methods run — no panels or Live display.
-        tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
-        if not use_callback:
-            agent_renderer = AgentTextRenderer(console)
-
         # Open Invocation scope when a recorder is active; nullcontext keeps the
         # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
         # here — only inv.observe()/inv.observe_user_step() against the recorder.
@@ -470,6 +465,12 @@ async def run_agent(
         _default_delay = float(os.environ.get("DAYDREAM_PI_RETRY_BASE_DELAY_S", "2.0"))
         max_attempts = getattr(backend, "retry_attempts", _default_attempts)
         base_delay = getattr(backend, "retry_base_delay_s", _default_delay)
+        if max_attempts < 0:
+            raise ValueError("retry attempts must be >= 0")
+        if not math.isfinite(base_delay):
+            raise ValueError("retry base delay must be finite")
+        if base_delay < 0:
+            raise ValueError("retry base delay must be >= 0")
 
         for attempt in range(max_attempts + 1):
             # Reset accumulated state so a failed attempt's partial output
@@ -479,6 +480,10 @@ async def run_agent(
             result_continuation = None
             tool_calls = 0
             budget_reason: str | None = None
+            # Created per attempt so a failed retry's UI panels and task-label
+            # mappings cannot be flushed or reused by a later successful attempt.
+            tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
+            agent_renderer = AgentTextRenderer(console)
 
             try:
                 event_iter = cast(
@@ -677,6 +682,7 @@ async def run_agent(
                     # Calling cancel() would terminate all processes on the shared
                     # backend instance, killing sibling concurrent tasks under
                     # fan-out (phases.py phase_per_stack_reviews).
+                    tool_registry.discard_all()
                     await anyio.sleep(delay)
                     continue
                 raise
