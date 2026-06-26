@@ -125,21 +125,17 @@ The package follows a phased execution model:
 
 ```
 cli.py → runner.py → phases.py → agent.py
-                  ↘ ui.py (terminal output)
+                  ↘ ui/ (terminal output)
 ```
 
 ### Module Responsibilities
 
 - **cli.py**: Entry point, argument parsing, signal handlers (SIGINT/SIGTERM)
 - **runner.py**: Main orchestration via `run()` async function, `RunConfig` dataclass
-- **phases.py**: Four workflow phases:
-  1. `phase_review()` - Invoke Beagle review skill, write to `.review-output.md`
-  2. `phase_parse_feedback()` - Extract actionable issues as JSON
-  3. `phase_fix()` - Apply fixes one-by-one
-  4. `phase_test_and_heal()` - Run tests, interactive retry/fix loop
-- **agent.py**: Claude SDK client wrapper, `run_agent()` streams responses, `AgentState` dataclass for consolidated state, `MissingSkillError` exception
+- **phases.py**: Stateless `phase_*()` workflow steps. Shallow loop: `phase_review` → `phase_parse_feedback` → `phase_fix` → `phase_test_and_heal`. Deep pipeline: `phase_understand_intent`, `phase_alternative_review`, `phase_per_stack_reviews`, `phase_arbiter_review`, `phase_cross_stack_merge`. PR feedback: `phase_fetch_pr_feedback`, `phase_respond_pr_feedback`
+- **agent.py**: Backend wrapper, `run_agent()` streams responses, `AgentState` dataclass for consolidated state, `MissingSkillError` exception
 - **trajectory.py**: ATIF v1.6 trajectory recorder, `TrajectoryRecorder` with `ContextVar` propagation, `Invocation` per-`run_agent` scope, `Redactor` for secret scrubbing, `DaydreamPhase`/`DaydreamRunFlow` enums
-- **ui.py**: Rich-based terminal UI with Dracula theme, live-updating panels
+- **ui/**: Rich-based terminal UI package (Dracula theme, live-updating panels); split into `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize`
 - **config.py**: Skill mappings, constants
 
 ### Key Patterns
@@ -167,18 +163,16 @@ Requires the Beagle plugin for Claude Code to be installed. The review skills (`
 
 Daydream is a Python CLI that automates code review and fix loops using the Claude Agent SDK. It launches review agents equipped with Beagle skills to review code, parse actionable feedback, apply fixes automatically, and validate by running tests. The default flow is a deep multi-stack pipeline; `--shallow` opts into a single-skill loop; `--comment` and `--review` turn the run into a review-only flow that posts to a PR or writes a report. The `daydream feedback <pr#>` subcommand ingests bot review comments. Each run is recorded as an **Agent Trajectory Interchange Format (ATIF v1.6)** trajectory, interoperable with the Harbor ecosystem.
 
-**Core Value:** Reviews and recommendations must be grounded in actual codebase understanding — not guesses based on the diff alone. (Unchanged.) For this milestone specifically: **every daydream run produces a valid, replayable ATIF v1.6 trajectory that captures the full agent interaction history, tool I/O, and token/cost metrics.**
+**Core Value:** Reviews and recommendations must be grounded in actual codebase understanding — not guesses based on the diff alone. Every daydream run produces a valid, replayable ATIF v1.6 trajectory capturing the full agent interaction history, tool I/O, and token/cost metrics.
 
 ### Constraints
 
-- **SDK**: Must continue using `claude-agent-sdk` for agent capabilities — no custom orchestration framework. ATIF is layered on top of the existing `Backend` / `AgentEvent` abstraction.
-- **Backends**: Both Claude and Codex backends must produce ATIF trajectories. Codex parity is partial by design (no `cost_usd`, no `cached_tokens` from `turn.completed.usage`) — ATIF Metrics fields are all optional, so this is acceptable.
-- **Existing tests**: All 343 tests must pass post-migration. New tests added for trajectory recording, redaction, and Harbor-golden round-trip validation.
-- **CLI**: `--debug` is removed; `--trajectory <path>` is added. All output modes (`--comment`, `--review`, default loop) and the `daydream feedback` subcommand produce trajectories.
-- **Dependencies**: No `harbor` runtime dep. Vendored ATIF code under `daydream/atif/` (Apache-2.0). `pydantic>=2.11.7` promoted to explicit dep (already transitive via `claude-agent-sdk`).
+- **SDK**: Agent capabilities go through `claude-agent-sdk` (Claude backend); ATIF is layered on top of the `Backend` / `AgentEvent` abstraction, which keeps backends pluggable (Claude / Codex / Pi).
+- **Backends**: All backends produce ATIF trajectories. Codex/Pi parity is partial by design (e.g. no `cost_usd`, no `cached_tokens` from usage) — ATIF Metrics fields are all optional, so this is acceptable.
+- **Dependencies**: No `harbor` runtime dep. Vendored ATIF code under `daydream/atif/` (Apache-2.0, from Harbor v0.5.0). `pydantic>=2.11.7` is an explicit dep.
 - **Schema version**: Pinned to ATIF-v1.6 (emission). No multi-version emission support.
-- **Recorder placement**: `TrajectoryRecorder` lives in new `daydream/trajectory.py` module, propagated via `ContextVar` (not `AgentState`). Test isolation via autouse `_reset_trajectory_recorder` fixture in `conftest.py` mirroring the existing `reset_state()` pattern.
-- **Module-bloat ban**: No `Step()`, `ToolCall()`, or `Trajectory()` construction inside `phases.py` or `ui.py` — all ATIF model construction stays in `daydream/trajectory.py`.
+- **Recorder placement**: `TrajectoryRecorder` lives in `daydream/trajectory.py`, propagated via `ContextVar` (not `AgentState`). Test isolation via autouse `_reset_trajectory_recorder` fixture in `conftest.py`, mirroring the `reset_state()` pattern.
+- **Module-bloat ban**: No ATIF model construction (`Step`, `ToolCall`, `Trajectory`) inside `phases.py` or `ui/` — all ATIF model construction stays in `daydream/trajectory.py`.
 
 ## Technology Stack
 
@@ -192,8 +186,8 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Lockfile: `uv.lock` present and committed (revision 3)
 ## Frameworks
 - anyio 4.12.1 — `anyio.run()` is the process entry point in `daydream/cli.py`; `anyio.create_task_group()` and `anyio.CapacityLimiter` used for parallel fix invocations in `daydream/phases.py`
-- rich 14.3.1 — All terminal output; `Live` panels, themed `Console`, progress indicators, Dracula-inspired theme configured in `daydream/ui.py`
-- pyfiglet 1.0.4 — Phase name banners rendered via `daydream/ui.py`
+- rich 14.3.1 — All terminal output; `Live` panels, themed `Console`, progress indicators, Dracula-inspired theme configured in `daydream/ui/`
+- pyfiglet 1.0.4 — Phase name banners rendered via `daydream/ui/`
 - tree-sitter 0.25.2 — Core parsing engine used in `daydream/tree_sitter_index.py` for import resolution
 - tree-sitter-python 0.25.0 — Python language grammar
 - tree-sitter-typescript 0.23.2 — TypeScript and TSX grammars
@@ -206,7 +200,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - `claude-agent-sdk` 0.1.52 — Core Claude integration; `ClaudeSDKClient`, `ClaudeAgentOptions`, and all message types imported in `daydream/backends/claude.py`. Pinned to exact version in `pyproject.toml` (`==0.1.52`).
 - `mcp` 1.26.0 — Pulled in transitively by `claude-agent-sdk`; MCP tool call events handled in `daydream/backends/codex.py`
 - `anyio` 4.12.1 — Required for all async execution; entry point and task orchestration
-- `rich` 14.3.1 — All user-facing terminal output; 3295-line `daydream/ui.py` depends entirely on it
+- `rich` 14.3.1 — All user-facing terminal output; the `daydream/ui/` package depends entirely on it
 - `httpx` 0.28.1 — HTTP client pulled in transitively by `claude-agent-sdk`/`mcp`
 - `pydantic` — Pulled in transitively; used internally by `claude-agent-sdk` and `mcp`
 - `python-dotenv` — Transitively included; not explicitly used in daydream source code
@@ -318,11 +312,8 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - `asyncio_mode = "auto"` in pytest means `async def test_*` functions run automatically without explicit `@pytest.mark.asyncio` in most files (though explicit marks are also used)
 - Async generators used for backend `execute()` — callers use `async for event in backend.execute(...)`
 
-## Architecture
+## Architecture Reference
 
-## System Overview
-```text
-```
 ## Component Responsibilities
 | Component | Responsibility | File |
 |-----------|----------------|------|
@@ -334,7 +325,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 | ClaudeBackend | Translates claude-agent-sdk messages to AgentEvents | `daydream/backends/claude.py` |
 | CodexBackend | Translates codex CLI JSONL output to AgentEvents | `daydream/backends/codex.py` |
 | PiBackend | Translates pi CLI JSONL output to AgentEvents | `daydream/backends/pi.py` |
-| UI | All terminal output — Rich panels, tables, prompts | `daydream/ui.py` |
+| UI | All terminal output — Rich panels, tables, prompts | `daydream/ui/` |
 | Config | Centralized constants, skill mappings | `daydream/config.py` |
 | Deep Orchestrator | deep-review pipeline wiring | `daydream/deep/orchestrator.py` |
 | Exploration | Pre-scan context types and subagent coordination | `daydream/exploration.py`, `daydream/exploration_runner.py` |
@@ -350,22 +341,22 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Purpose: Entry point, argument parsing, signal handling
 - Location: `daydream/cli.py`
 - Contains: `main()`, `_parse_args()`, `_signal_handler()`, `_auto_detect_pr_number()`
-- Depends on: `runner.py`, `agent.py`, `ui.py`
+- Depends on: `runner.py`, `agent.py`, `ui/`
 - Used by: Console entry point (`pyproject.toml`), `daydream/__main__.py`
 - Purpose: Flow selection, backend instantiation, phase sequencing, loop control
 - Location: `daydream/runner.py`
 - Contains: `RunConfig` dataclass, `run()`, `run_feedback()`, `_dispatch()`, `_resolve_backend()`
-- Depends on: `phases.py`, `backends/`, `agent.py`, `ui.py`, `config.py`, `exploration.py`
+- Depends on: `phases.py`, `backends/`, `agent.py`, `ui/`, `config.py`, `exploration.py`
 - Used by: `cli.py` via `anyio.run(run, config)`
 - Purpose: Stateless async functions implementing each discrete workflow step
 - Location: `daydream/phases.py`
 - Contains: All `phase_*()` functions and prompt builders (`build_review_prompt()`, `build_intent_prompt()`, etc.)
-- Depends on: `agent.run_agent()`, `backends.Backend`, `ui.py`, `config.py`
+- Depends on: `agent.run_agent()`, `backends.Backend`, `ui/`, `config.py`
 - Used by: `runner.py` exclusively
 - Purpose: Backend execution wrapper; drives Rich UI from event stream; owns global state
 - Location: `daydream/agent.py`
 - Contains: `run_agent()`, `AgentState`, state getters/setters, `detect_test_success()`, `MissingSkillError`
-- Depends on: `backends/`, `ui.py`
+- Depends on: `backends/`, `ui/`
 - Used by: `phases.py` (all agent invocations go through `run_agent()`)
 - Purpose: SDK/CLI adapters that translate external APIs into a unified `AgentEvent` stream
 - Location: `daydream/backends/`
@@ -373,7 +364,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Depends on: `claude-agent-sdk` (Claude), external `codex` CLI (Codex), external `pi` CLI (Pi)
 - Used by: `agent.py` (consumes events), `runner.py` (instantiates via `create_backend`)
 - Purpose: All terminal rendering — panels, phase heroes, tables, prompts, cost display
-- Location: `daydream/ui.py` (3470 lines)
+- Location: `daydream/ui/` package (`console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize`)
 - Contains: `LiveToolPanelRegistry`, `ParallelFixPanel`, `ShutdownPanel`, `SummaryData`, `AgentTextRenderer`, print helpers
 - Depends on: `rich` only
 - Used by: `cli.py`, `runner.py`, `phases.py`, `agent.py`
@@ -390,7 +381,7 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Purpose: Multi-stack review pipeline orchestration (TTT + per-stack + cross-stack merge)
 - Location: `daydream/deep/`
 - Contains: `run_deep()` orchestrator, `detect_stacks()` file router, artifact path helpers, dedup pre-filter, per-stack/merge prompt builders
-- Depends on: `phases.py`, `runner.py`, `backends/`, `ui.py`, `config.py`, `exploration.py`
+- Depends on: `phases.py`, `runner.py`, `backends/`, `ui/`, `config.py`, `exploration.py`
 - Used by: `runner.py` (`run()` delegates to `run_deep()` by default; `--shallow` opts out)
 ## Data Flow
 ### Shallow Loop (`--shallow`): review → parse → fix → test
@@ -448,11 +439,11 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - **No circular imports:** `daydream/deep/orchestrator.py` uses late imports (`from daydream.phases import ...` inside `run_deep()`) to avoid circular dependency with `runner.py`
 - **Backend is first param:** All phase functions take `backend: Backend` as their first parameter
 - **Single SDK mode:** `ClaudeAgentOptions.permission_mode="bypassPermissions"` and `setting_sources=["user"]` — reads `~/.claude/settings.json` for API keys
-- **No direct print():** All user output goes through `daydream/ui.py` functions (`print_info`, `print_error`, etc.) using the Rich `Console` singleton
+- **No direct print():** All user output goes through `daydream/ui/` functions (`print_info`, `print_error`, etc.) using the Rich `Console` singleton
 ## Anti-Patterns
-### Calling the SDK directly from phases
-### Accessing `_state` directly
-### Adding phase logic to `runner.py`
+- Calling the SDK directly from phases — always go through `run_agent()`
+- Accessing `_state` directly — use the getters/setters
+- Adding phase logic to `runner.py` — phases live in `phases.py`
 ## Error Handling
 - `MissingSkillError` raised in `run_agent()` when `UNKNOWN_SKILL_PATTERN` matches text; caught in `runner.py` to print install instructions
 - `ValueError` raised in `phase_parse_feedback()` on bad structured output; caught in `runner.py`, prints "Parse Failed"
@@ -461,8 +452,3 @@ Daydream is a Python CLI that automates code review and fix loops using the Clau
 - Subprocess errors caught by type: `except (subprocess.SubprocessError, OSError):`
 - JSON/external errors caught narrowly: `except (json.JSONDecodeError, FileNotFoundError):`
 - All unhandled exceptions caught in `cli.main()` → `sys.exit(1)`
-## Cross-Cutting Concerns
-
-## Project Skills
-
-No project skills found. Add skills to any of: `.claude/skills/`, `.agents/skills/`, `.cursor/skills/`, `.github/skills/`, or `.codex/skills/` with a `SKILL.md` index file.
