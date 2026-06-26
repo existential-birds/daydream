@@ -3111,7 +3111,7 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
         RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
     )
 
-    assert isinstance(exit_code, int)
+    assert exit_code == 0
 
     fix_prompts = [
         c["prompt"]

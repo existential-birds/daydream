@@ -1934,8 +1934,10 @@ async def phase_fix_batched(
 Make the minimal changes needed to address ALL of the above findings in one coherent patch. {_FIX_GUARDRAILS}"""
 
     prompt += _build_intent_suffix(intent_path)
-    for item in items:
-        prompt += _build_verifier_suffix(item)
+    for idx, item in enumerate(items, start=1):
+        verifier_suffix = _build_verifier_suffix(item)
+        if verifier_suffix:
+            prompt += f"\nVerifier guidance for finding {idx}:{verifier_suffix}"
 
     # Scale budgets linearly with the number of findings so a batched group of N
     # findings gets the same per-finding headroom as a single-finding turn.
@@ -2041,17 +2043,28 @@ async def phase_fix_parallel(
                         try:
                             grp_items = [item for item, _ in grp]
                             grp_nums = [num for _, num in grp]
-                            try:
-                                await phase_fix_batched(
-                                    backend, work, grp_items, grp_nums, total,
-                                    console_lock=_console_lock,
-                                    intent_path=intent_path,
-                                )
-                            except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
-                                # Restore the file to HEAD before falling back so
-                                # per-finding fixes don't re-apply partial edits
-                                # that the batched turn may have already written.
-                                if fkey and fkey != "<no-file>":
+                            is_real_batch = len(grp_items) > 1 and fkey != "<no-file>"
+                            if not is_real_batch:
+                                # Single-item or <no-file> groups: go straight to
+                                # per-finding phase_fix (no batched prompt to build,
+                                # no fallback retry on failure).
+                                for item, item_num in grp:
+                                    await phase_fix(
+                                        backend, work, item, item_num, total,
+                                        console_lock=_console_lock,
+                                        intent_path=intent_path,
+                                    )
+                            else:
+                                try:
+                                    await phase_fix_batched(
+                                        backend, work, grp_items, grp_nums, total,
+                                        console_lock=_console_lock,
+                                        intent_path=intent_path,
+                                    )
+                                except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
+                                    # Restore the file to HEAD before falling back so
+                                    # per-finding fixes don't re-apply partial edits
+                                    # that the batched turn may have already written.
                                     try:
                                         git_ops.checkout_paths(work.repo, [Path(fkey)])
                                     except Exception as _restore_err:  # noqa: BLE001 -- restore is best-effort; don't block fallback
@@ -2060,12 +2073,12 @@ async def phase_fix_parallel(
                                                 console,
                                                 f"Could not restore {fkey} before fallback: {_restore_err}",
                                             )
-                                for item, item_num in grp:
-                                    await phase_fix(
-                                        backend, work, item, item_num, total,
-                                        console_lock=_console_lock,
-                                        intent_path=intent_path,
-                                    )
+                                    for item, item_num in grp:
+                                        await phase_fix(
+                                            backend, work, item, item_num, total,
+                                            console_lock=_console_lock,
+                                            intent_path=intent_path,
+                                        )
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                             reason = f"{type(e).__name__}: {e}"
                             async with _failures_lock:

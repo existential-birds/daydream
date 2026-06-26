@@ -3363,24 +3363,28 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
 
     from daydream import phases
 
-    active_files, order = set(), []
+    active_files, batched_calls, fix_calls = set(), [], []
 
     async def _fake_batched(backend, work, items, item_nums, total, **kwargs):
         f = items[0]["file"]
-        if f == "boom.py":
-            raise RuntimeError("kaboom")
+        batched_calls.append(f)
         assert f not in active_files, "two concurrent fixes on the same file"
         active_files.add(f)
-        order.append(f)  # one batched call per file-group
         await anyio.sleep(0)  # force interleave window
         active_files.discard(f)
 
-    async def _fail_fix(backend, work, item, item_num, total, **kwargs):
-        # Fallback for the failing batched group: also raise so the failure surfaces.
-        raise RuntimeError("kaboom")
+    async def _fake_fix(backend, work, item, item_num, total, **kwargs):
+        f = item["file"]
+        if f == "boom.py":
+            raise RuntimeError("kaboom")
+        fix_calls.append(f)
+        assert f not in active_files, "two concurrent fixes on the same file"
+        active_files.add(f)
+        await anyio.sleep(0)  # force interleave window
+        active_files.discard(f)
 
     monkeypatch.setattr("daydream.phases.phase_fix_batched", _fake_batched)
-    monkeypatch.setattr("daydream.phases.phase_fix", _fail_fix)
+    monkeypatch.setattr("daydream.phases.phase_fix", _fake_fix)
     items = [
         {"id": 1, "file": "a.py"},
         {"id": 2, "file": "a.py"},
@@ -3388,6 +3392,8 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
         {"id": 4, "file": "boom.py"},
     ]
     failures = await phases.phase_fix_parallel(object(), object(), items)
-    # One batched call per file-group (a.py's two findings are NOT two calls).
-    assert order.count("a.py") == 1 and order.count("b.py") == 1
+    # a.py has 2 findings -> one batched call. b.py and boom.py have 1 finding
+    # each -> direct phase_fix (no batched prompt, no fallback retry).
+    assert batched_calls == ["a.py"]
+    assert sorted(fix_calls) == ["b.py"]
     assert set(failures) == {"boom.py"} and "RuntimeError" in failures["boom.py"]
