@@ -1901,27 +1901,47 @@ async def phase_fix_batched(
         )
         return
 
+    # Items with no file cannot be meaningfully batched under a shared file
+    # header — "<no-file>" is not a real path.  Delegate each one individually
+    # to phase_fix (which already handles the unknown-file case correctly).
+    if not items[0].get("file"):
+        for item, item_num in zip(items, item_nums):
+            await phase_fix(
+                backend, work, item, item_num, total,
+                console_lock=console_lock, intent_path=intent_path,
+            )
+        return
+
     count = len(items)
-    file_path = items[0].get("file", "Unknown file")
-    resolved = work.repo / file_path
-    file_ref = str(resolved) if resolved.is_file() else file_path
+    file_path = items[0].get("file") or "Unknown file"
+    resolved = work.repo / file_path if file_path != "Unknown file" else None
+    file_ref = str(resolved) if resolved is not None and resolved.is_file() else file_path
 
     async with (console_lock if console_lock is not None else anyio.Lock()):
         console.print()
-        print_fix_progress(console, item_nums[0], total, f"{count} findings in {file_path}")
+        for item_num, item in zip(item_nums, items):
+            desc = item.get("description", "No description")
+            print_fix_progress(console, item_num, total, desc)
 
     findings_block = ""
     for idx, item in enumerate(items, start=1):
         desc = item.get("description", "No description")
         line = item.get("line", "Unknown")
         findings_block += f"\n{idx}. {desc}\n   File: {file_ref}\n   Line: {line}\n"
-        findings_block += _build_verifier_suffix(item)
 
     prompt = f"""Fix these {count} issues in {file_ref}:
 {findings_block}
 Make the minimal changes needed to address ALL of the above findings in one coherent patch. {_FIX_GUARDRAILS}"""
 
     prompt += _build_intent_suffix(intent_path)
+    for item in items:
+        prompt += _build_verifier_suffix(item)
+
+    # Scale budgets linearly with the number of findings so a batched group of N
+    # findings gets the same per-finding headroom as a single-finding turn.
+    scaled_max_turns = FIX_MAX_TURNS * count
+    scaled_tool_budget = DEFAULT_TOOL_CALL_BUDGET * count
+    scaled_wall_budget = DEFAULT_WALL_BUDGET_S * count
 
     if console_lock is not None:
         # Concurrent path: suppress the Live renderer in run_agent and serialize
@@ -1930,22 +1950,29 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
             async with console_lock:
                 console.print(text)
 
-        await run_agent(
+        _, _, budget_reason = await run_agent(
             backend, work.repo, prompt,
-            phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
-            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            phase=DaydreamPhase.FIX, max_turns=scaled_max_turns,
+            tool_call_budget=scaled_tool_budget,
+            wall_budget_s=scaled_wall_budget,
             progress_callback=_cb,
         )
     else:
-        await run_agent(
+        _, _, budget_reason = await run_agent(
             backend, work.repo, prompt,
-            phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
-            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            phase=DaydreamPhase.FIX, max_turns=scaled_max_turns,
+            tool_call_budget=scaled_tool_budget,
+            wall_budget_s=scaled_wall_budget,
+        )
+
+    if budget_reason is not None:
+        raise RuntimeError(
+            f"Batched fix turn budget exhausted ({budget_reason}); "
+            f"falling back to per-finding fixes for {file_ref}"
         )
     async with (console_lock if console_lock is not None else anyio.Lock()):
-        print_fix_complete(console, item_nums[-1], total)
+        for item_num in item_nums:
+            print_fix_complete(console, item_num, total)
 
 
 async def phase_fix_parallel(
@@ -2021,6 +2048,18 @@ async def phase_fix_parallel(
                                     intent_path=intent_path,
                                 )
                             except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
+                                # Restore the file to HEAD before falling back so
+                                # per-finding fixes don't re-apply partial edits
+                                # that the batched turn may have already written.
+                                if fkey and fkey != "<no-file>":
+                                    try:
+                                        git_ops.checkout_paths(work.repo, [Path(fkey)])
+                                    except Exception as _restore_err:  # noqa: BLE001 -- restore is best-effort; don't block fallback
+                                        if not get_quiet_mode():
+                                            print_warning(
+                                                console,
+                                                f"Could not restore {fkey} before fallback: {_restore_err}",
+                                            )
                                 for item, item_num in grp:
                                     await phase_fix(
                                         backend, work, item, item_num, total,

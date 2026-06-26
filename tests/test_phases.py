@@ -3,11 +3,14 @@
 
 import json
 import subprocess
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream.backends import (
+    AgentEvent,
     ContinuationToken,
     ResultEvent,
     TextEvent,
@@ -386,9 +389,15 @@ class _CapturingBatchBackend:
         self.prompts: list[str] = []
 
     async def execute(
-        self, cwd, prompt, output_schema=None, continuation=None, agents=None,
-        max_turns=None, read_only=False,
-    ):
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
         self.prompts.append(prompt)
         yield ResultEvent(structured_output=None, continuation=None)
 
