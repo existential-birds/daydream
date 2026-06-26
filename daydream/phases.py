@@ -2741,7 +2741,7 @@ async def phase_per_stack_reviews(
             dropped.
 
     """
-    from daydream.config import STRUCTURE_STACK_NAME
+    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
     from daydream.deep import prompts as _prompts
     from daydream.deep.artifacts import deep_dir as _deep_dir
     from daydream.deep.artifacts import per_stack_review_path
@@ -2760,8 +2760,14 @@ async def phase_per_stack_reviews(
             if stack.stack_name == STRUCTURE_STACK_NAME:
                 # Structural prompt is NOT inlined — its lens legitimately roams
                 # beyond the diff, so it keeps its diff_path pointer and its
-                # repo-wide Read/Grep/Bash freedom.
+                # repo-wide Read/Grep/Bash freedom. The skill key is routed
+                # through the backend formatter so each backend emits its own
+                # invocation syntax.
+                structural_invocation = backend.format_skill_invocation(
+                    stack.skill_invocation or STRUCTURE_SKILL
+                )
                 prompt = _prompts.build_structural_prompt(
+                    skill_invocation=structural_invocation,
                     files=stack.files,
                     diff_path=diff_path,
                     intent_path=intent_path,
@@ -2792,8 +2798,10 @@ async def phase_per_stack_reviews(
                         inline_diff=inline_diff,
                     )
                 else:
+                    # Route the raw Beagle stack key through the backend
+                    # formatter so each backend emits its own invocation syntax.
                     prompt = _prompts.build_per_stack_prompt(
-                        skill_invocation=stack.skill_invocation,
+                        skill_invocation=backend.format_skill_invocation(stack.skill_invocation),
                         stack_name=stack.stack_name,
                         files=stack.files,
                         diff_path=diff_path,

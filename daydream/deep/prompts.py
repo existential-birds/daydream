@@ -20,7 +20,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from daydream.config import STRUCTURE_SKILL
 from daydream.phases import (
     RECOMMENDATION_VERDICTS_SCHEMA,
     _confidence_and_convention_instructions,
@@ -249,6 +248,7 @@ def build_per_stack_prompt(
 
 def build_structural_prompt(
     *,
+    skill_invocation: str,
     files: list[str],
     diff_path: Path,
     intent_path: Path,
@@ -266,6 +266,7 @@ def build_structural_prompt(
     instead of being scoped to a stack subset.
 
     Args:
+        skill_invocation: Backend-formatted invocation for the structural skill.
         files: Full union of changed files across every stack. Used to anchor
             the scope statement; the reviewer is still free to read beyond.
         diff_path: Path to the full diff on disk.
@@ -300,7 +301,7 @@ def build_structural_prompt(
         f"do NOT run `git diff` without a base ref -- on a clean branch that "
         f"returns empty and hides committed changes."
     )
-    parts.append(f"/{STRUCTURE_SKILL}")
+    parts.append(skill_invocation)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
 

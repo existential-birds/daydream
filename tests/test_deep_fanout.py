@@ -45,13 +45,13 @@ def _mk_stacks() -> list[StackAssignment]:
     return [
         StackAssignment(
             stack_name="python",
-            skill_invocation="/beagle-python:review-python",
+            skill_invocation="beagle-python:review-python",
             files=["api.py"],
             is_docs_only=False,
         ),
         StackAssignment(
             stack_name="react",
-            skill_invocation="/beagle-react:review-frontend",
+            skill_invocation="beagle-react:review-frontend",
             files=["App.tsx"],
             is_docs_only=False,
         ),
@@ -180,7 +180,7 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     stacks = [
         StackAssignment(
             stack_name="python",
-            skill_invocation="/beagle-python:review-python",
+            skill_invocation="beagle-python:review-python",
             files=["a.py"],
             is_docs_only=False,
         ),
@@ -204,7 +204,7 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     assert len(structural_calls) == 1
     assert len(per_stack_calls) == 1
     assert structural_calls[0]["files"] == ["a.py"]
-    assert "skill_invocation" not in structural_calls[0]
+    assert structural_calls[0]["skill_invocation"] == f"/{STRUCTURE_SKILL}"
     assert "stack_name" not in structural_calls[0]
     assert per_stack_calls[0]["stack_name"] == "python"
 
@@ -248,3 +248,109 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work) ->
     # Failure surfaces in the returned failures dict with the exception reason.
     assert "react" in failures
     assert "simulated react failure" in failures["react"]
+
+
+class _PiShapeBackend(_RecordingBackend):
+    """Mock backend that uses PiBackend's real skill formatter."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        from daydream.backends.pi import PiBackend
+
+        self._pi = PiBackend(model="glm-5.2")
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return self._pi.format_skill_invocation(skill_key, args)
+
+
+async def test_per_stack_prompts_use_pi_native_skill_command(
+    tmp_path: Path, make_work
+) -> None:
+    """Every stack with a skill emits Pi's native /skill:<slug>."""
+    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
+
+    backend = _PiShapeBackend()
+    diff, intent, alts = _mk_context_files(tmp_path)
+
+    stacks = [
+        StackAssignment(
+            stack_name="python",
+            skill_invocation="beagle-python:review-python",
+            files=["api.py"],
+            is_docs_only=False,
+        ),
+        StackAssignment(
+            stack_name="react",
+            skill_invocation="beagle-react:review-frontend",
+            files=["App.tsx"],
+            is_docs_only=False,
+        ),
+        StackAssignment(
+            stack_name="go",
+            skill_invocation="beagle-go:review-go",
+            files=["main.go"],
+            is_docs_only=False,
+        ),
+        StackAssignment(
+            stack_name="rust",
+            skill_invocation="beagle-rust:review-rust",
+            files=["lib.rs"],
+            is_docs_only=False,
+        ),
+        StackAssignment(
+            stack_name="elixir",
+            skill_invocation="beagle-elixir:review-elixir",
+            files=["app.ex"],
+            is_docs_only=False,
+        ),
+        StackAssignment(
+            stack_name="generic",
+            skill_invocation=None,
+            files=["notes.txt"],
+            is_docs_only=False,
+        ),
+        StackAssignment(
+            stack_name=STRUCTURE_STACK_NAME,
+            skill_invocation=STRUCTURE_SKILL,
+            files=["api.py", "App.tsx"],
+            is_docs_only=False,
+        ),
+    ]
+
+    results, failures = await phase_per_stack_reviews(
+        backend,
+        make_work(tmp_path),
+        stacks,
+        diff_path=diff,
+        intent_path=intent,
+        alternatives_path=alts,
+    )
+
+    assert failures == {}
+    assert len(backend.prompts) == 7
+    joined = "\n\n".join(backend.prompts)
+
+    for token in (
+        "/skill:review-python",
+        "/skill:review-frontend",
+        "/skill:review-go",
+        "/skill:review-rust",
+        "/skill:review-elixir",
+        "/skill:review-structure",
+    ):
+        assert token in joined, f"missing {token} in dispatched prompts"
+
+    # No raw Beagle key may leak into any prompt.
+    for raw in (
+        "beagle-python:review-python",
+        "beagle-react:review-frontend",
+        "beagle-go:review-go",
+        "beagle-rust:review-rust",
+        "beagle-elixir:review-elixir",
+        "beagle-core:review-structure",
+    ):
+        assert raw not in joined, f"raw key {raw} leaked into a prompt"
+
+    # Generic fallback stack injects no skill command at all.
+    generic_prompt = next(p for p in backend.prompts if "generic-fallback" in p)
+    assert "/skill:" not in generic_prompt
