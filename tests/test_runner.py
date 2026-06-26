@@ -268,6 +268,8 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
     work = _fake_work(tmp_path)
 
     class _StubBackend:
+        fanout_concurrency = 4
+
         def __init__(self, model: str):
             self.model = model
 
@@ -378,6 +380,8 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
     # Stub backends to carry distinct phase-specific models so the dim line's
     # source is unambiguous.
     class _StubBackend:
+        fanout_concurrency = 4
+
         def __init__(self, model: str):
             self.model = model
 
@@ -474,6 +478,8 @@ async def test_shallow_items_canonicalized_and_severity_ordered(monkeypatch, tmp
     work = _fake_work(tmp_path)
 
     class _StubBackend:
+        fanout_concurrency = 4
+
         def __init__(self, model: str):
             self.model = model
 
@@ -597,6 +603,7 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch,
 
     class _StubBackend:
         model = "stub-model"
+        fanout_concurrency = 4
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
@@ -694,6 +701,7 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkey
 
     class _StubBackend:
         model = "stub-model"
+        fanout_concurrency = 4
 
     def _resolve(_config, phase, _cache=None):
         return test_backend if phase == "test" else _StubBackend()
@@ -811,6 +819,7 @@ async def test_yes_shallow_failing_tests_bounded_fix_and_abort(monkeypatch, tmp_
 
     class _StubBackend:
         model = "stub-model"
+        fanout_concurrency = 4
 
     def _resolve(_config, phase, _cache=None):
         return test_backend if phase == "test" else _StubBackend()

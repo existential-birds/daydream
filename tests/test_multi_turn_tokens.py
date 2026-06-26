@@ -56,6 +56,7 @@ class MockBackend:
     """Minimal Backend replaying a canned event list."""
 
     model = "mock-model"
+    fanout_concurrency = 4
     events: list[AgentEvent]
 
     def execute(

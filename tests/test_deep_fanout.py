@@ -82,7 +82,7 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work) -> None:
     diff, intent, alts = _mk_context_files(tmp_path)
 
     results, failures = await phase_per_stack_reviews(
-        backend,
+        backend,  # type: ignore[arg-type]
         make_work(tmp_path),
         _mk_stacks(),
         diff_path=diff,
@@ -101,7 +101,7 @@ async def test_fan_out_never_passes_agents_kwarg(tmp_path: Path, make_work) -> N
     diff, intent, alts = _mk_context_files(tmp_path)
 
     await phase_per_stack_reviews(
-        backend,
+        backend,  # type: ignore[arg-type]
         make_work(tmp_path),
         _mk_stacks(),
         diff_path=diff,
@@ -118,7 +118,7 @@ async def test_fan_out_unique_output_paths(tmp_path: Path, make_work) -> None:
     diff, intent, alts = _mk_context_files(tmp_path)
 
     results, _ = await phase_per_stack_reviews(
-        backend,
+        backend,  # type: ignore[arg-type]
         make_work(tmp_path),
         _mk_stacks(),
         diff_path=diff,
@@ -138,7 +138,7 @@ async def test_fan_out_closure_capture(tmp_path: Path, make_work) -> None:
     diff, intent, alts = _mk_context_files(tmp_path)
 
     await phase_per_stack_reviews(
-        backend,
+        backend,  # type: ignore[arg-type]
         make_work(tmp_path),
         _mk_stacks(),
         diff_path=diff,
@@ -195,7 +195,7 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     ]
 
     await _phase(
-        backend,
+        backend,  # type: ignore[arg-type]
         make_work(tmp_path),
         stacks,
         diff_path=diff,
@@ -215,6 +215,8 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work) ->
     """A single stack failure does not abort the whole fan-out, and is reported."""
 
     class _FlakyBackend(_RecordingBackend):
+        fanout_concurrency = 4
+
         async def execute(
             self,
             cwd: Path,
@@ -375,7 +377,7 @@ async def test_fanout_default_concurrency(tmp_path: Path, make_work, monkeypatch
     diff, intent, alts = _mk_context_files(tmp_path)
 
     await phase_per_stack_reviews(
-        backend,
+        backend,  # type: ignore[arg-type]
         make_work(tmp_path),
         _mk_stacks(),
         diff_path=diff,

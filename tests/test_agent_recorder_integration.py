@@ -70,6 +70,7 @@ class MockBackend:
     """
 
     model = "mock-model"
+    fanout_concurrency = 4
     events: list[AgentEvent]
 
     def execute(
@@ -377,6 +378,7 @@ class MaxTurnsBackend:
     """
 
     model = "mock-model"
+    fanout_concurrency = 4
     pre_events: list[AgentEvent]
 
     def execute(
