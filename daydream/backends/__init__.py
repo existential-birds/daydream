@@ -319,7 +319,7 @@ def create_backend(name: str, model: str | None = None) -> Backend:
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', or 'pi'.")
 
 
-from daydream.backends.claude import ClaudeBackend  # noqa: E402
+from daydream.backends.claude import ClaudeBackend, MaxTurnsError  # noqa: E402
 from daydream.backends.pi import PiBackend  # noqa: E402
 
 __all__ = [
@@ -328,6 +328,7 @@ __all__ = [
     "ClaudeBackend",
     "ContinuationToken",
     "CostEvent",
+    "MaxTurnsError",
     "MetricsEvent",
     "PiBackend",
     "ResultEvent",

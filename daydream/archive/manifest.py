@@ -69,6 +69,16 @@ class Manifest:
             ``phase_start``/``phase_end`` events (issue #203). ``None`` when no
             phase events were emitted (pre-#203 runs or runs that skip phase
             wrapping). Each entry: ``{"wall_clock_seconds": float, "occurrences": int}``.
+        fix_failures: Map of file-group -> failure reason for fix groups that
+            were dropped (``phase_fix_parallel`` raised). ``None`` when every
+            fix applied. When populated, ``status`` is forced to ``partial``
+            because the working tree holds reverted/unapplied edits and must not
+            be presented as a clean ``complete`` run.
+        fix_leftover_untracked: Sorted list of untracked paths that appeared
+            during a failed fix pass and survived tree-protection. Because
+            parallel groups share one working tree these cannot be attributed to
+            a specific group, so they are recorded (never deleted) to make the
+            partial run fully auditable. ``None`` when none were left behind.
         total_findings: Number of findings (from eval, if available).
         grounding_rate: Grounding rate (from eval, if available).
         coverage_ratio: File coverage ratio (from eval, if available).
@@ -97,6 +107,8 @@ class Manifest:
     review_only: bool = False
     deep: bool = False
     loop: bool = False
+    fix_failures: dict[str, str] | None = None
+    fix_leftover_untracked: list[str] | None = None
 
     # Git context
     source_path: str | None = None
@@ -154,6 +166,8 @@ class Manifest:
                 "deep": self.deep,
                 "loop": self.loop,
             },
+            "fix_failures": self.fix_failures,
+            "fix_leftover_untracked": self.fix_leftover_untracked,
             "git": {
                 "source_path": self.source_path,
                 "remote_url": self.remote_url,
@@ -203,6 +217,8 @@ def build_manifest(
     archive_path: Path,
     evaluation: dict[str, Any] | None = None,
     source_path: str | None = None,
+    fix_failures: dict[str, str] | None = None,
+    fix_leftover_untracked: list[str] | None = None,
 ) -> Manifest:
     """Construct a Manifest from run context.
 
@@ -214,6 +230,10 @@ def build_manifest(
         archive_path: Absolute path to the archive directory for this run.
         evaluation: Optional ``analyze_session()`` result dict.
         source_path: Absolute path to the source repository at archive time.
+        fix_failures: Map of dropped fix file-group -> reason, or ``None`` when
+            every fix applied. Recorded verbatim on the manifest.
+        fix_leftover_untracked: Sorted list of untracked paths left behind by a
+            failed fix pass, or ``None``. Recorded verbatim on the manifest.
 
     Returns:
         A fully populated Manifest.
@@ -242,6 +262,8 @@ def build_manifest(
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         loop=config.loop,
+        fix_failures=fix_failures or None,
+        fix_leftover_untracked=fix_leftover_untracked or None,
         source_path=source_path,
         remote_url=git_ctx.remote_url,
         repo_slug=git_ctx.repo_slug,

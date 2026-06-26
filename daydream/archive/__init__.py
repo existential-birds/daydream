@@ -136,6 +136,15 @@ def _archive_run_inner(
     if run_eval:
         evaluation = _run_eval(target_dir, recorder.session_id, run_dir)
 
+    # 3b. Surface dropped fix groups. A deep fix run that hit per-group failures
+    #     left partial/reverted edits in the tree; the run is NOT "complete".
+    #     Read from the source deep dir (written by the orchestrator before it
+    #     returned, so it is reliably present here), force status to "partial".
+    fix_failures = _read_fix_failures(target_dir)
+    fix_leftover_untracked = _read_fix_leftover_untracked(target_dir)
+    if fix_failures:
+        status = "partial"
+
     # 4. Build and write manifest
     source_path = str(work.source) if work is not None else str(target_dir)
     manifest = build_manifest(
@@ -146,12 +155,59 @@ def _archive_run_inner(
         archive_path=run_dir,
         evaluation=evaluation,
         source_path=source_path,
+        fix_failures=fix_failures,
+        fix_leftover_untracked=fix_leftover_untracked,
     )
     manifest_path = run_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
 
     # 5. Index in SQLite
     upsert_run(archive_dir, manifest)
+
+
+def _read_fix_failures(target_dir: Path) -> dict[str, str] | None:
+    """Read ``deep/fix-failures.json`` from the source tree, if present.
+
+    Written by the deep orchestrator when ``phase_fix_parallel`` dropped one or
+    more file-groups. Returns the parsed ``{file_group: reason}`` map, or
+    ``None`` when the file is absent, empty, or malformed — any of which means
+    "no recorded fix failures" and leaves the run status untouched.
+    """
+    # Imported here (not at module level) to avoid pulling the deep package into
+    # the archive import graph for non-deep runs.
+    from daydream.deep.artifacts import fix_failures_path
+
+    path = fix_failures_path(target_dir / ".daydream" / "deep")
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict) or not data:
+        return None
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
+    """Read ``deep/fix-leftover-untracked.json`` from the source tree, if present.
+
+    Written by the deep orchestrator alongside ``fix-failures.json`` when a
+    failed fix pass left untracked files behind. Returns the parsed sorted list
+    of paths, or ``None`` when the file is absent, empty, or malformed.
+    """
+    from daydream.deep.artifacts import fix_leftover_untracked_path
+
+    path = fix_leftover_untracked_path(target_dir / ".daydream" / "deep")
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, list) or not data:
+        return None
+    return [str(p) for p in data]
 
 
 def _copy_bundle(target_dir: Path, run_dir: Path, recorder: TrajectoryRecorder) -> None:

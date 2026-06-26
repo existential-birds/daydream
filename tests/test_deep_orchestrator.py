@@ -18,7 +18,12 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream.backends import ResultEvent, TextEvent, ToolStartEvent
+from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
+
+# Broken partial-fix content the stub writes before raising MaxTurnsError, so a
+# test can prove the orchestrator both captured it (recovery patch) and reverted
+# the working file to its pre-fix state.
+_PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
 
 class _StubBackend:
@@ -73,6 +78,15 @@ class _StubBackend:
         # When set, the fix branch raises for the matching file, isolating one
         # file-group's failure so a test can assert the others still applied.
         self.fix_fail_file: str | None = None
+        # When set, the fix branch WRITES a broken partial edit to the matching
+        # file and THEN raises MaxTurnsError -- simulating an agent that mutated
+        # the tree before exhausting its turn budget, so a test can assert the
+        # orchestrator reverts that partial edit and saves a recovery patch.
+        self.fix_partial_then_maxturns: str | None = None
+        # Repo-relative path of a stray untracked file the failing group creates
+        # before raising (e.g. "store/uuid.go") -- NOT the group's key file, so
+        # it survives tree-protection and must surface in fix_leftover_untracked.
+        self.fix_orphan_file: str | None = None
         # When True, the fix branch yields a long burst of ToolStartEvents and
         # NEVER emits a ResultEvent -- simulating a runaway turn. Without the
         # in-loop tool-call budget in run_agent this stream never completes and
@@ -330,6 +344,14 @@ class _StubBackend:
             fixed_file = m.group(1).strip() if m else "unknown"
             # phase_fix emits an absolute path when the file exists on disk; the stub keys fixes by basename.
             fixed_name = Path(fixed_file).name
+            if self.fix_partial_then_maxturns is not None and fixed_name == self.fix_partial_then_maxturns:
+                edit_target = Path(fixed_file) if Path(fixed_file).is_absolute() else (cwd / fixed_file)
+                edit_target.write_text(_PARTIAL_FIX_MARKER)
+                if self.fix_orphan_file is not None:
+                    orphan = cwd / self.fix_orphan_file
+                    orphan.parent.mkdir(parents=True, exist_ok=True)
+                    orphan.write_text("// stray file from a dead fix agent\n")
+                raise MaxTurnsError(f"stub: max turns exhausted mid-fix for {fixed_name}")
             if self.fix_fail_file is not None and fixed_name == self.fix_fail_file:
                 raise RuntimeError(f"stub fix failure for {fixed_name}")
             (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
@@ -671,6 +693,121 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     assert not (multi_stack_target / ".fixed-bad_py").exists()  # failed group did not apply
     assert any("bad.py" in m for m in warnings)  # non-silent
     assert commit_calls == []  # no commit on failure
+
+
+async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+) -> None:
+    """Real-path: a fix group that raises MaxTurnsError mid-edit is rolled back,
+    its partial content saved, and the archived run is marked ``partial``.
+
+    Two fix groups with mixed outcomes (the structural shape that hides bugs):
+    ``api.py`` succeeds (its sentinel lands) while ``App.tsx`` writes a broken
+    partial edit and then raises ``MaxTurnsError``. Drives ``runner.run`` through
+    the deep fix path with a real temp git worktree + real archive dir, mocking
+    only the backend. Asserts observable outcomes:
+
+      (a) the archived ``manifest.json`` has ``status == "partial"`` and
+          ``fix_failures`` names the failed group;
+      (b) the SUCCESSFUL group's edit (its sentinel) survives in the tree;
+      (c) the FAILED group's file is reverted to its pre-fix content AND a
+          recovery patch was written under ``.daydream/partial-fixes/``.
+
+    Fails if the persistence/revert is removed: without (a) the manifest stays
+    ``complete``; without (c) ``App.tsx`` keeps the broken partial edit.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fix_partial_then_maxturns = "App.tsx"
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high"),
+        _merge_item(2, "App.tsx", "high"),
+    ]
+    pre_fix_apptsx = (multi_stack_target / "App.tsx").read_text()
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 1  # dropped fix group => nonzero
+
+    # (b) successful group applied and survives.
+    assert (multi_stack_target / ".fixed-api_py").exists()
+
+    # (c) failed group reverted to pre-fix content; broken edit gone.
+    apptsx_after = (multi_stack_target / "App.tsx").read_text()
+    assert apptsx_after == pre_fix_apptsx
+    assert _PARTIAL_FIX_MARKER not in apptsx_after
+    patches = list((multi_stack_target / ".daydream" / "partial-fixes").glob("*.patch"))
+    assert patches, "expected a recovery patch for the reverted partial fix"
+    assert any("App.tsx" in p.read_text() for p in patches), "patch must capture the partial edit"
+
+    # (a) manifest records the failure and is no longer "complete".
+    run_dirs = list((archive_dir / "runs").iterdir())
+    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
+    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "partial"
+    assert manifest["fix_failures"], "manifest must record the dropped fix group"
+    assert any("App.tsx" in key for key in manifest["fix_failures"])
+
+
+async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+) -> None:
+    """Real-path: a stray untracked file a failed group creates -- one that is
+    NOT the group's key file -- is enumerated in the manifest and never deleted.
+
+    The failing ``App.tsx`` group writes a stray ``store/uuid.go`` before raising
+    ``MaxTurnsError``. Because parallel groups share one tree, that orphan can't
+    be attributed to a group, so the orchestrator records it (never deletes it):
+
+      (a) ``manifest.json`` lists ``store/uuid.go`` in ``fix_leftover_untracked``;
+      (b) the orphan still EXISTS in the tree (no risk of deleting good work);
+      (c) the run is still ``status == "partial"``.
+
+    Fails if the enumeration is removed: without (a) the orphan is invisible in
+    the archive -- the exact "half-broken tree presented as clean" gap.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fix_partial_then_maxturns = "App.tsx"
+    stub.fix_orphan_file = "store/uuid.go"
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high"),
+        _merge_item(2, "App.tsx", "high"),
+    ]
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 1
+
+    # (b) the unattributable orphan is preserved, never deleted.
+    assert (multi_stack_target / "store" / "uuid.go").exists()
+
+    run_dirs = list((archive_dir / "runs").iterdir())
+    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
+    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    # (c) partial, and (a) the orphan is enumerated for audit.
+    assert manifest["status"] == "partial"
+    leftover = manifest["fix_leftover_untracked"]
+    assert leftover, "manifest must enumerate untracked files left by the failed fix pass"
+    assert "store/uuid.go" in leftover
 
 
 async def test_parallel_fix_commit_runs_once_after_all(

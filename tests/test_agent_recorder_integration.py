@@ -31,6 +31,7 @@ from daydream.backends import (
     Backend,
     ContinuationToken,
     CostEvent,
+    MaxTurnsError,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -362,6 +363,88 @@ async def test_thinking_event_routes_to_agent_step(tmp_path: Path) -> None:
     assert len(agent_steps) == 1
     assert agent_steps[0]["reasoning_content"] == "let me think..."
     assert agent_steps[0]["message"] == "answer"
+
+
+@dataclass
+class MaxTurnsBackend:
+    """Backend whose event stream raises MaxTurnsError mid-turn.
+
+    Replays ``pre_events`` (an in-flight assistant turn), then raises
+    ``MaxTurnsError(subtype="error_max_turns")`` — mirroring a Claude
+    ``ResultMessage(is_error=True, subtype="error_max_turns")`` after the
+    agent has already produced output. Exercises the realistic shape: the
+    failure lands on a Step that already carries content, not an empty one.
+    """
+
+    model = "mock-model"
+    pre_events: list[AgentEvent]
+
+    def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        pre_events = self.pre_events
+
+        async def _gen() -> AsyncIterator[AgentEvent]:
+            for event in pre_events:
+                yield event
+            raise MaxTurnsError(
+                "Claude agent run failed: error_max_turns", subtype="error_max_turns"
+            )
+
+        return _gen()
+
+    async def cancel(self) -> None:
+        return None
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
+
+
+async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None:
+    """Regression: a max-turns failure must NOT be invisible in the archive.
+
+    Drives run_agent (the single-agent production entrypoint) with a backend
+    that raises MaxTurnsError mid-stream. Asserts BOTH:
+      (a) the typed MaxTurnsError propagates out of run_agent, and
+      (b) the trajectory WRITTEN to disk carries an error marker + the
+          ``error_max_turns`` subtype.
+    Removing the __aexit__ recording step makes (b) fail.
+    """
+    recorder = _make_recorder(tmp_path)
+    target_path = recorder.path
+    backend = MaxTurnsBackend(
+        pre_events=[
+            TextEvent(text="applying fix"),
+            ToolStartEvent(id="t1", name="Edit", input={"path": "a.py"}),
+            ToolResultEvent(id="t1", output="ok", is_error=False),
+        ]
+    )
+
+    # (a) typed exception propagates through the production entrypoint.
+    with pytest.raises(MaxTurnsError) as excinfo:
+        async with recorder:
+            await run_agent(backend, tmp_path, "fix this", phase=DaydreamPhase.FIX)
+    assert excinfo.value.subtype == "error_max_turns"
+
+    # (b) the emitted trajectory carries the error marker + subtype.
+    assert target_path.exists()
+    traj = json.loads(target_path.read_text())
+    assert atif_validate(traj) is True
+    errored = [s for s in traj["steps"] if s.get("extra", {}).get("error_subtype")]
+    assert len(errored) == 1
+    assert errored[0]["extra"]["error"] is True
+    assert errored[0]["extra"]["error_subtype"] == "error_max_turns"
+    # The marker lands on the in-flight Step that already held the turn's
+    # output — not a synthetic empty step.
+    assert errored[0]["message"] == "applying fix"
+    assert errored[0]["tool_calls"][0]["tool_call_id"] == "t1"
 
 
 async def test_cost_event_does_not_break_recording(tmp_path: Path) -> None:

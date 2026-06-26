@@ -374,7 +374,7 @@ async def test_phase_fix_passes_turn_budget(tmp_path, monkeypatch, make_work):
     await phase_fix(CapturingBackend(), make_work(tmp_path), item, 1, 1)
 
     assert captured_max_turns == [FIX_MAX_TURNS]
-    assert FIX_MAX_TURNS == 25
+    assert FIX_MAX_TURNS == 40
 
 
 class TestBuildFixPrompt:

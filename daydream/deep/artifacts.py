@@ -125,6 +125,29 @@ def per_stack_failures_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "per-stack-failures.json"
 
 
+def fix_failures_path(deep_dir_path: Path) -> Path:
+    """Fix-phase agent failure summary ({file_group: reason} JSON).
+
+    Persisted whenever ``phase_fix_parallel`` drops one or more file-groups so a
+    user inspecting the run -- or the archive manifest builder -- can see that
+    fixes were left unapplied. Mirrors :func:`per_stack_failures_path`; the
+    archive reads this file to mark the run ``partial`` instead of ``complete``.
+    """
+    return deep_dir_path / "fix-failures.json"
+
+
+def fix_leftover_untracked_path(deep_dir_path: Path) -> Path:
+    """Untracked paths that newly appeared during a failed fix pass (JSON list).
+
+    Parallel fix groups share one working tree, so an untracked file left behind
+    cannot be attributed to a specific group. Rather than risk deleting a
+    successful group's legitimate new file, the orchestrator records every path
+    that appeared during the fix pass and survived tree-protection here, so the
+    partial run is fully auditable. Written only alongside ``fix-failures.json``.
+    """
+    return deep_dir_path / "fix-leftover-untracked.json"
+
+
 def verdicts_path(deep_dir_path: Path) -> Path:
     """Path to the recommendation-verifier verdicts artifact."""
     return deep_dir_path / "recommendation-verdicts.json"

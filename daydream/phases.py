@@ -59,7 +59,9 @@ _logger = logging.getLogger(__name__)
 TEST_OUTPUT_TAIL_LINES = 100
 
 # Generous for a real fix yet bounds a flailing agent that's globbing $HOME after a missed Read.
-FIX_MAX_TURNS = 25
+FIX_MAX_TURNS = 40
+# Verify re-reads the fixed files and runs checks; same generous bound as fix.
+VERIFY_MAX_TURNS = 40
 _PR_BODY_MAX_CHARS = 8000
 
 
@@ -1661,7 +1663,7 @@ async def phase_verify_recommendations(
         work.repo,
         prompt,
         output_schema=RECOMMENDATION_VERDICTS_SCHEMA,
-        max_turns=25,
+        max_turns=VERIFY_MAX_TURNS,
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         phase=DaydreamPhase.VERIFY,

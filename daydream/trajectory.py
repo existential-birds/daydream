@@ -428,6 +428,7 @@ class Invocation:
     _open_step_dict: dict[str, Any] | None = None
     _in_flight_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     _stop_reason: str | None = None
+    _error_subtype: str | None = None
 
     def observe_user_step(self, prompt: str) -> None:
         """Append a user Step at invocation start (MAP-01, Pitfall 4).
@@ -466,6 +467,25 @@ class Invocation:
         ``finish()``) has a Step to stamp the reason onto.
         """
         self._stop_reason = reason
+        self._ensure_open_step()
+
+    def mark_errored(self, subtype: str) -> None:
+        """Record that this invocation ended in a fatal error.
+
+        Mirrors :meth:`mark_aborted`: the ``subtype`` (e.g.
+        ``"error_max_turns"``) is stamped onto the closing Step's
+        ``extra["error"]`` / ``extra["error_subtype"]`` when the open step is
+        finalized. ATIF's Step model has no dedicated status field, so the
+        ``extra`` dict is the established extension point (D-19). Without this,
+        a fatal failure (a backend raising mid-stream) is invisible in the
+        archived trajectory.
+
+        If the error fires before any event is received, no step is open yet,
+        so we open one here to ensure ``_close_open_step`` (called from
+        ``finish()`` on context-manager exit) has a Step to stamp the marker
+        onto.
+        """
+        self._error_subtype = subtype
         self._ensure_open_step()
 
     def observe(self, event: "AgentEvent") -> None:
@@ -687,6 +707,9 @@ class Invocation:
             extra["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
         if self._stop_reason is not None:
             extra["stop_reason"] = self._stop_reason
+        if self._error_subtype is not None:
+            extra["error"] = True
+            extra["error_subtype"] = self._error_subtype
 
         agent_step = Step(
             step_id=self.recorder._next_step_id(),
@@ -1360,6 +1383,17 @@ class _InvocationCM:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self._invocation is not None:
+            # A fatal error propagating out of run_agent's event loop (e.g. a
+            # backend raising MaxTurnsError on error_max_turns) would otherwise
+            # vanish from the archive. Stamp it onto the closing Step BEFORE
+            # finish() flushes — never swallow the exception, and never let a
+            # recording failure mask it.
+            if isinstance(exc_val, Exception):
+                try:
+                    subtype = getattr(exc_val, "subtype", None) or type(exc_val).__name__
+                    self._invocation.mark_errored(str(subtype))
+                except Exception:  # noqa: BLE001 - recording must never crash a run
+                    pass
             try:
                 self._invocation.finish()
                 self._invocation.ended_at = now_iso()
