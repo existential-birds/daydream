@@ -249,6 +249,11 @@ class Backend(Protocol):
     """Protocol for agent backends.
 
     Each backend yields a stream of AgentEvent instances from execute().
+
+    Optional extension: backends may expose ``fanout_concurrency: int`` to
+    advertise how many parallel execute() calls phase_per_stack_reviews should
+    run concurrently. When absent, the caller falls back to 4 via
+    ``getattr(backend, "fanout_concurrency", 4)``.
     """
 
     model: str

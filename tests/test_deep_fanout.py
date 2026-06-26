@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from daydream.backends import ResultEvent, TextEvent
 from daydream.deep.detection import StackAssignment
 from daydream.phases import phase_per_stack_reviews
@@ -354,3 +356,60 @@ async def test_per_stack_prompts_use_pi_native_skill_command(
     # Generic fallback stack injects no skill command at all.
     generic_prompt = next(p for p in backend.prompts if "generic-fallback" in p)
     assert "/skill:" not in generic_prompt
+
+
+async def test_fanout_default_concurrency(tmp_path: Path, make_work, monkeypatch) -> None:
+    """Backend without fanout_concurrency attribute → limiter defaults to 4."""
+    captured: list[int] = []
+    real_limiter = anyio.CapacityLimiter
+
+    def patched_limiter(n: int) -> anyio.CapacityLimiter:
+        captured.append(n)
+        return real_limiter(n)
+
+    monkeypatch.setattr(anyio, "CapacityLimiter", patched_limiter)
+
+    # _RecordingBackend has no fanout_concurrency attr → getattr(..., 4) returns 4.
+    backend = _RecordingBackend()
+    assert not hasattr(backend, "fanout_concurrency")
+    diff, intent, alts = _mk_context_files(tmp_path)
+
+    await phase_per_stack_reviews(
+        backend,
+        make_work(tmp_path),
+        _mk_stacks(),
+        diff_path=diff,
+        intent_path=intent,
+        alternatives_path=alts,
+    )
+
+    assert 4 in captured
+
+
+async def test_fanout_low_concurrency(tmp_path: Path, make_work, monkeypatch) -> None:
+    """Backend with fanout_concurrency=2 → limiter uses 2."""
+    captured: list[int] = []
+    real_limiter = anyio.CapacityLimiter
+
+    def patched_limiter(n: int) -> anyio.CapacityLimiter:
+        captured.append(n)
+        return real_limiter(n)
+
+    monkeypatch.setattr(anyio, "CapacityLimiter", patched_limiter)
+
+    class _LowConcurrencyBackend(_RecordingBackend):
+        fanout_concurrency = 2
+
+    backend = _LowConcurrencyBackend()
+    diff, intent, alts = _mk_context_files(tmp_path)
+
+    await phase_per_stack_reviews(
+        backend,
+        make_work(tmp_path),
+        _mk_stacks(),
+        diff_path=diff,
+        intent_path=intent,
+        alternatives_path=alts,
+    )
+
+    assert captured == [2]

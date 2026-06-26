@@ -116,8 +116,40 @@ Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
 
 
+_PI_DEFAULT_RETRY_ATTEMPTS = 3
+_PI_DEFAULT_RETRY_BASE_DELAY = 2.0
+
+
+def _pi_retry_attempts() -> int:
+    raw = os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS")
+    return int(raw) if raw else _PI_DEFAULT_RETRY_ATTEMPTS
+
+
+def _pi_retry_base_delay() -> float:
+    raw = os.environ.get("DAYDREAM_PI_RETRY_BASE_DELAY_S")
+    return float(raw) if raw else _PI_DEFAULT_RETRY_BASE_DELAY
+
+
+def _is_retryable_error_message(message: str) -> bool:
+    """Return True if the error message signals a transient overload or rate-limit."""
+    lower = message.lower()
+    return any(
+        token in lower
+        for token in ("429", "overload", "rate limit", "rate_limit", "capacity", "too many requests", "throttl")
+    )
+
+
+def _is_retryable_exit_code(code: int) -> bool:
+    """Return True for exit codes that indicate OOM/SIGKILL rather than a logic error."""
+    return code in (-9, 137)
+
+
 class PiError(Exception):
     """Raised when a Pi turn fails (e.g. ``stopReason == "error"``)."""
+
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def _render_tool_result(result: Any) -> str:
@@ -240,6 +272,7 @@ class PiBackend:
 
     def __init__(self, model: str):
         self.model = model
+        self.fanout_concurrency = 2
         self._process: asyncio.subprocess.Process | None = None
         self._processes: list[asyncio.subprocess.Process] = []
 
@@ -456,7 +489,8 @@ class PiBackend:
                     msg = event.get("message") or {}
                     stop_reason = msg.get("stopReason")
                     if stop_reason == "error":
-                        raise PiError(msg.get("errorMessage") or "Unknown Pi error")
+                        error_msg = msg.get("errorMessage") or "Unknown Pi error"
+                        raise PiError(error_msg, retryable=_is_retryable_error_message(error_msg))
                     usage = _extract_usage(msg)
                     inp = usage["input"]
                     outp = usage["output"]
@@ -496,7 +530,8 @@ class PiBackend:
             # turn_end error event, surface the failure with diagnostic output
             # instead of reporting a successful completion with empty/partial
             # output.
-            if proc.returncode != 0:
+            returncode = proc.returncode
+            if returncode is not None and returncode != 0:
                 stderr_tail = "\n".join(stderr_lines[-10:])
                 if stderr_lines:
                     detail = (
@@ -509,7 +544,8 @@ class PiBackend:
                         "crashed before writing to stdout)"
                     )
                 raise PiError(
-                    f"Pi CLI exited with return code {proc.returncode}.{detail}"
+                    f"Pi CLI exited with return code {returncode}.{detail}",
+                    retryable=_is_retryable_exit_code(returncode),
                 )
 
             # Single finalization path (plan §10): runs exactly once whether

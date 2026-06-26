@@ -218,6 +218,7 @@ class ClaudeBackend:
 
     def __init__(self, model: str):
         self.model = model
+        self.fanout_concurrency = 4
         self._active_clients: set[ClaudeSDKClient] = set()
 
     async def execute(
