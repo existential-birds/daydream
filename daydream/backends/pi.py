@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import uuid
@@ -119,24 +120,71 @@ findings and conclusions."""
 _PI_DEFAULT_RETRY_ATTEMPTS = 3
 _PI_DEFAULT_RETRY_BASE_DELAY = 2.0
 
+logger = logging.getLogger(__name__)
+
 
 def _pi_retry_attempts() -> int:
     raw = os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS")
-    return int(raw) if raw else _PI_DEFAULT_RETRY_ATTEMPTS
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                "DAYDREAM_PI_RETRY_ATTEMPTS=%r is not a valid integer; using default %d",
+                raw,
+                _PI_DEFAULT_RETRY_ATTEMPTS,
+            )
+        else:
+            if value < 0:
+                logger.warning(
+                    "DAYDREAM_PI_RETRY_ATTEMPTS=%r is negative; using default %d",
+                    raw,
+                    _PI_DEFAULT_RETRY_ATTEMPTS,
+                )
+            else:
+                return value
+    return _PI_DEFAULT_RETRY_ATTEMPTS
 
 
 def _pi_retry_base_delay() -> float:
     raw = os.environ.get("DAYDREAM_PI_RETRY_BASE_DELAY_S")
-    return float(raw) if raw else _PI_DEFAULT_RETRY_BASE_DELAY
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning(
+                "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is not a valid float; using default %g",
+                raw,
+                _PI_DEFAULT_RETRY_BASE_DELAY,
+            )
+        else:
+            if value < 0:
+                logger.warning(
+                    "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is negative; using default %g",
+                    raw,
+                    _PI_DEFAULT_RETRY_BASE_DELAY,
+                )
+            else:
+                return value
+    return _PI_DEFAULT_RETRY_BASE_DELAY
 
 
 def _is_retryable_error_message(message: str) -> bool:
-    """Return True if the error message signals a transient overload or rate-limit."""
+    """Return True if the error message signals a transient overload or rate-limit.
+
+    High-precision literals (429, rate limit/rate_limit, too many requests) are
+    matched as plain substrings — they are extremely unlikely to appear in a
+    non-transient context.  Ambiguous stems (overload, capacity, throttl) require
+    a left word boundary so that phrases like "not overloaded", "capacity
+    planning", or "preloaded" do not produce false positives.
+    """
     lower = message.lower()
-    return any(
-        token in lower
-        for token in ("429", "overload", "rate limit", "rate_limit", "capacity", "too many requests", "throttl")
-    )
+    # Unambiguous literals — plain substring is safe.
+    if any(token in lower for token in ("429", "rate limit", "rate_limit", "too many requests")):
+        return True
+    # Ambiguous stems — require a word boundary on the left to avoid false
+    # positives (e.g. "not overloaded", "preloaded", "capacity planning").
+    return bool(re.search(r"\b(?:overload|capacity|throttl)", lower))
 
 
 def _is_retryable_exit_code(code: int) -> bool:
@@ -273,6 +321,8 @@ class PiBackend:
     def __init__(self, model: str):
         self.model = model
         self.fanout_concurrency = 2
+        self.retry_attempts = _pi_retry_attempts()
+        self.retry_base_delay_s = _pi_retry_base_delay()
         self._process: asyncio.subprocess.Process | None = None
         self._processes: list[asyncio.subprocess.Process] = []
 

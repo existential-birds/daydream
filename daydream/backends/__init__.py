@@ -257,6 +257,7 @@ class Backend(Protocol):
     """
 
     model: str
+    fanout_concurrency: int
 
     def execute(
         self,

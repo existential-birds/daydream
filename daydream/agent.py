@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import random
 import re
 from collections.abc import AsyncGenerator, Callable
@@ -28,7 +29,6 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.backends.pi import _pi_retry_attempts, _pi_retry_base_delay
 from daydream.config import UNKNOWN_SKILL_PATTERN
 from daydream.json_utils import extract_json
 from daydream.trajectory import DaydreamPhase, get_current_recorder
@@ -466,8 +466,10 @@ async def run_agent(
         # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
         # here — only inv.observe()/inv.observe_user_step() against the recorder.
         recorder = get_current_recorder()
-        max_attempts = _pi_retry_attempts()
-        base_delay = _pi_retry_base_delay()
+        _default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "3"))
+        _default_delay = float(os.environ.get("DAYDREAM_PI_RETRY_BASE_DELAY_S", "2.0"))
+        max_attempts = getattr(backend, "retry_attempts", _default_attempts)
+        base_delay = getattr(backend, "retry_base_delay_s", _default_delay)
 
         for attempt in range(max_attempts + 1):
             # Reset accumulated state so a failed attempt's partial output
@@ -653,20 +655,28 @@ async def run_agent(
             except Exception as exc:
                 if attempt < max_attempts and getattr(exc, "retryable", False):
                     delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                    print_warning(
-                        console,
+                    retry_msg = (
                         f"Backend error ({type(exc).__name__}), retrying "
-                        f"attempt {attempt + 2}/{max_attempts + 1} after {delay:.1f}s...",
+                        f"attempt {attempt + 2}/{max_attempts + 1} after {delay:.1f}s..."
                     )
+                    if use_callback and progress_callback is not None:
+                        result = progress_callback(format_callback_text(f"[retry] {retry_msg}"))
+                        if inspect.isawaitable(result):
+                            await result
+                    elif not use_callback:
+                        print_warning(console, retry_msg)
                     if event_iter is not None:
                         try:
                             await event_iter.aclose()
                         except Exception:  # noqa: BLE001
                             pass
-                    try:
-                        await backend.cancel()
-                    except Exception:  # noqa: BLE001
-                        pass
+                        event_iter = None
+                    # Do NOT call backend.cancel() here: the execute() generator's
+                    # finally block already terminates and removes the failed
+                    # invocation's process when event_iter.aclose() is called above.
+                    # Calling cancel() would terminate all processes on the shared
+                    # backend instance, killing sibling concurrent tasks under
+                    # fan-out (phases.py phase_per_stack_reviews).
                     await anyio.sleep(delay)
                     continue
                 raise
