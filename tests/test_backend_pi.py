@@ -593,6 +593,36 @@ def test_resolve_skill_dir_finds_slug(tmp_path, monkeypatch):
     assert resolved == skill_dir
 
 
+def _install_skill(root: Path, slug: str) -> Path:
+    skill_dir = root / slug
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(f"# {slug}\n")
+    return skill_dir
+
+
+def test_resolve_skill_dir_prefers_agents_over_claude(tmp_path, monkeypatch):
+    # When the same slug exists in both ~/.agents/skills and ~/.claude/skills,
+    # the ~/.agents copy wins -- it is the primary default location.
+    agents_dir = _install_skill(tmp_path / ".agents" / "skills", "review-python")
+    _install_skill(tmp_path / ".claude" / "skills", "review-python")
+    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
+    monkeypatch.delenv("DAYDREAM_SKILLS_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert _resolve_skill_dir("beagle-python:review-python") == agents_dir
+
+
+def test_resolve_skill_dir_env_override_wins(tmp_path, monkeypatch):
+    # DAYDREAM_SKILLS_DIR is searched first: the override outranks the same
+    # slug installed in a standard location.
+    _install_skill(tmp_path / ".agents" / "skills", "review-python")
+    override_root = tmp_path / "custom"
+    override_dir = _install_skill(override_root, "review-python")
+    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
+    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(override_root))
+    monkeypatch.chdir(tmp_path)
+    assert _resolve_skill_dir("beagle-python:review-python") == override_dir
+
+
 def test_format_skill_invocation_emits_native_command():
     backend = PiBackend(model="glm-5.2")
     result = backend.format_skill_invocation("beagle-python:review-python")

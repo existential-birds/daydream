@@ -192,10 +192,17 @@ def _skill_slug(skill_key: str) -> str:
 def _resolve_skill_dir(skill_key: str) -> Path | None:
     """Best-effort resolution of a Beagle skill key to its on-disk directory.
 
-    Searches the standard plugin locations for a directory whose slug
-    matches ``skill_key`` and contains a ``SKILL.md``. Returns ``None``
-    when unresolved; the caller degrades gracefully and this function
-    never raises.
+    Searches, in priority order, for a directory whose slug matches
+    ``skill_key`` and contains a ``SKILL.md``:
+
+    1. ``$DAYDREAM_SKILLS_DIR`` — the configurable override; when set it is
+       searched first so it wins over the built-in locations.
+    2. ``~/.agents/skills`` — the primary default location.
+    3. ``~/.claude/skills`` — the legacy Claude Code plugin mirror.
+    4. the project-local ``.agents/skills`` then ``.claude/skills`` mirrors.
+
+    Returns ``None`` when unresolved; the caller degrades gracefully and this
+    function never raises.
 
     Note: this is a parallel skill-location mechanism —
     :func:`daydream.deep.orchestrator.get_installed_skills` answers the
@@ -205,15 +212,18 @@ def _resolve_skill_dir(skill_key: str) -> Path | None:
     """
     slug = _skill_slug(skill_key)
     home = Path.home()
-    search_roots: list[Path] = [
-        home / ".claude" / "skills",
-        home / ".agents" / "skills",
-        Path.cwd() / ".claude" / "skills",
-        Path.cwd() / ".agents" / "skills",
-    ]
+    search_roots: list[Path] = []
     extra = os.environ.get("DAYDREAM_SKILLS_DIR")
     if extra:
         search_roots.append(Path(extra))
+    search_roots.extend(
+        [
+            home / ".agents" / "skills",
+            home / ".claude" / "skills",
+            Path.cwd() / ".agents" / "skills",
+            Path.cwd() / ".claude" / "skills",
+        ]
+    )
     for root in search_roots:
         candidate = root / slug
         if (candidate / "SKILL.md").is_file():
