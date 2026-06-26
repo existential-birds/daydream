@@ -73,8 +73,12 @@ _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
 
 # Matches Pi's native ``/skill:<slug>`` command embedded in a prompt (emitted by
 # ``format_skill_invocation``). Used in ``execute`` to register the referenced
-# skill directories with the subprocess via ``--skill`` flags.
-_SKILL_TOKEN_RE = re.compile(r"/skill:([\w-]+)")
+# skill directories with the subprocess via ``--skill`` flags. The character
+# class mirrors Pi's documented skill-name grammar (lowercase a-z, 0-9, hyphens
+# only; see pi docs/skills.md "Name Rules"): uppercase and underscore are
+# excluded because no valid Pi slug uses them, so the wider ``\w`` class would
+# otherwise admit tokens that can never resolve to a real skill.
+_SKILL_TOKEN_RE = re.compile(r"/skill:([a-z0-9-]+)")
 
 # Pi CLI ships only a minimal built-in system prompt. Claude Code and Codex
 # inject rich guidance (tool efficiency, exploration strategy, conciseness) at

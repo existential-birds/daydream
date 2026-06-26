@@ -30,6 +30,7 @@ from daydream.backends import (
 )
 from daydream.backends.pi import (
     _PI_STDOUT_LIMIT_BYTES,
+    _SKILL_TOKEN_RE,
     PiBackend,
     PiError,
     _render_tool_result,
@@ -610,6 +611,24 @@ def test_format_skill_invocation_preserves_args():
 def test_format_skill_invocation_bare_slug_unchanged():
     backend = PiBackend(model="glm-5.2")
     assert backend.format_skill_invocation("review-go") == "/skill:review-go"
+
+
+def test_skill_token_re_grammar_matches_pi_name_rules():
+    # Pi's documented skill-name grammar (pi docs/skills.md "Name Rules") is
+    # lowercase a-z, 0-9, hyphens only. Every real slug (review-python,
+    # review-frontend, review-go, review-rust, review-elixir, review-ios,
+    # review-structure) matches; uppercase/underscore must NOT match because no
+    # valid Pi slug uses them (e.g. "PDF-Processing" is explicitly invalid).
+    # Without this guard a regression to the wider w class would silently
+    # admit tokens that can never resolve to a real skill.
+    admitted = ["review-python", "review-frontend", "review-go", "2-thing", "a"]
+    rejected = ["Review_Python", "PDF-Processing", "foo_bar", "CamelCase"]
+    for slug in admitted:
+        assert _SKILL_TOKEN_RE.findall(f"/skill:{slug}") == [slug], slug
+    for slug in rejected:
+        # No token (or a truncated one ending before the disallowed char) is
+        # captured as a *complete* match of the invalid slug.
+        assert slug not in _SKILL_TOKEN_RE.findall(f"/skill:{slug}"), slug
 
 
 @pytest.mark.asyncio
