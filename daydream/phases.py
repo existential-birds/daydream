@@ -2751,7 +2751,7 @@ async def phase_per_stack_reviews(
     recorder = get_current_recorder()
     results: dict[str, Path] = {}
     failures: dict[str, str] = {}
-    limiter = anyio.CapacityLimiter(4)
+    limiter = anyio.CapacityLimiter(getattr(backend, "fanout_concurrency", 4))
     prior_commits = _prior_daydream_commits(work)
 
     async with anyio.create_task_group() as tg:

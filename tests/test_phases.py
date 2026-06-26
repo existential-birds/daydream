@@ -35,6 +35,7 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
 
     class FreshContextBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -113,6 +114,7 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_turn_budget(
 
     class RecordingBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -175,6 +177,7 @@ async def test_phase_parse_feedback_empty_response_returns_empty_list(tmp_path, 
         """Simulates a schema miss: no structured output, no text."""
 
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -208,6 +211,7 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch, make_wo
         """Simulates a schema miss where the model outputs JSON as plain text."""
 
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -240,6 +244,7 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(tmp_pa
 
     class CapturingBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -283,6 +288,7 @@ async def test_phase_fix_resolves_existing_file_to_absolute_path(tmp_path, monke
 
     class CapturingBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -320,6 +326,7 @@ async def test_phase_fix_falls_back_to_relative_path_when_missing(tmp_path, monk
 
     class CapturingBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -355,6 +362,7 @@ async def test_phase_fix_passes_turn_budget(tmp_path, monkeypatch, make_work):
 
     class CapturingBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -673,6 +681,7 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
 
     class IntentBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -715,6 +724,7 @@ async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeyp
 
     class IntentBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -776,6 +786,7 @@ async def test_phase_understand_intent_forced_no_interactive_falls_through(tmp_p
 
         class IntentBackend:
             model = "test-model"
+            fanout_concurrency = 4
 
             async def execute(
                 self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -888,6 +899,7 @@ async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch, ma
 
     class ReviewBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -928,6 +940,7 @@ async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch, make_wo
 
     class NoIssuesBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -981,6 +994,7 @@ async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch, make_w
 
     class PlanBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -1036,6 +1050,7 @@ async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch, make_work
 
     class NeverCalledBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -1284,6 +1299,7 @@ class _ScriptedBackend:
     # their heros (Task 6). Tests don't assert this value — they just need the
     # attribute to exist on the duck-typed Backend.
     model = "test-model"
+    fanout_concurrency = 4
 
     def __init__(self, script: list) -> None:
         self.script = list(script)
@@ -2295,6 +2311,7 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
 
         class _BoundedLoopBackend:
             model = "test-model"
+            fanout_concurrency = 4
             read_only_calls: list[bool] = []
 
             async def execute(
@@ -2622,6 +2639,7 @@ async def test_phase_review_prints_model_line_after_hero(
 
     class _Backend:
         model = "claude-opus-4-6"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -2656,6 +2674,7 @@ async def test_phase_parse_feedback_prints_model_line_after_hero(
 
     class _Backend:
         model = "claude-haiku-4-5"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -2691,6 +2710,7 @@ async def test_phase_test_and_heal_prints_model_line_after_hero(
 
     class _Backend:
         model = "claude-sonnet-4-6"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -2725,6 +2745,7 @@ async def test_phase_fetch_pr_feedback_prints_model_line_after_hero(
 
     class _Backend:
         model = "claude-opus-4-6"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -2756,6 +2777,7 @@ async def test_phase_understand_intent_prints_model_line_after_hero(
 
     class _Backend:
         model = "claude-opus-4-6"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -2799,6 +2821,7 @@ async def test_phase_alternative_review_prints_model_line_after_hero(
 
     class _Backend:
         model = "claude-opus-4-6"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -2853,6 +2876,7 @@ async def test_phase_generate_plan_prints_model_line_after_hero(
 
     class _Backend:
         model = "claude-opus-4-6"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -2899,6 +2923,7 @@ async def test_phase_cross_stack_merge_prints_model_line_after_hero(
 
     class _Backend:
         model = "claude-opus-4-6"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -2976,6 +3001,7 @@ async def test_merge_writes_canonical_json_and_renders_markdown(tmp_path, monkey
 
     class MergeBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -3025,6 +3051,7 @@ async def test_merge_raises_on_empty_agent_output(tmp_path, monkeypatch, make_wo
 
     class EmptyBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
@@ -3112,6 +3139,7 @@ async def test_verifier_excludes_structural_lens(tmp_path, monkeypatch, make_wor
 
     class VerifyBackend:
         model = "test-model"
+        fanout_concurrency = 4
 
         async def execute(
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,

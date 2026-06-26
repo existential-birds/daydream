@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import math
+import os
+import random
 import re
 from collections.abc import AsyncGenerator, Callable
 from contextlib import nullcontext
@@ -454,191 +457,236 @@ async def run_agent(
     _state.current_backends.append(backend)
     event_iter: AsyncGenerator[Any, None] | None = None
     try:
-        # Created unconditionally for task_id→label correlation; in callback mode
-        # only its label methods run — no panels or Live display.
-        tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
-        if not use_callback:
-            agent_renderer = AgentTextRenderer(console)
-
-        try:
-            event_iter = cast(
-                AsyncGenerator[Any, None],
-                backend.execute(
-                    cwd, prompt, output_schema, continuation,
-                    agents=agents, max_turns=max_turns, read_only=read_only,
-                ),
-            )
-        except Exception as exc:
-            print_error(console, "Backend Init Error", f"{type(exc).__name__}: {exc}")
-            raise
-
         # Open Invocation scope when a recorder is active; nullcontext keeps the
         # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
         # here — only inv.observe()/inv.observe_user_step() against the recorder.
         recorder = get_current_recorder()
-        invocation_cm: Any = (
-            recorder.invocation(phase=phase) if recorder is not None else nullcontext(None)
-        )
+        _default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "3"))
+        _default_delay = float(os.environ.get("DAYDREAM_PI_RETRY_BASE_DELAY_S", "2.0"))
+        max_attempts = getattr(backend, "retry_attempts", _default_attempts)
+        base_delay = getattr(backend, "retry_base_delay_s", _default_delay)
+        if max_attempts < 0:
+            raise ValueError("retry attempts must be >= 0")
+        if not math.isfinite(base_delay):
+            raise ValueError("retry base delay must be finite")
+        if base_delay < 0:
+            raise ValueError("retry base delay must be >= 0")
 
-        async with invocation_cm as inv:
-            if inv is not None:
-                inv.observe_user_step(prompt=prompt)
-
-            # Per-invocation budgets live here so both backends are covered
-            # without a backend-signature change. The wall budget cancels the
-            # async-for via move_on_after; the tool-call ceiling breaks in-loop.
+        for attempt in range(max_attempts + 1):
+            # Reset accumulated state so a failed attempt's partial output
+            # does not leak into the next attempt's return value.
+            output_parts = []
+            structured_result = None
+            result_continuation = None
             tool_calls = 0
             budget_reason: str | None = None
-            wall_scope: Any = (
-                anyio.move_on_after(wall_budget_s) if wall_budget_s is not None else nullcontext()
-            )
+            # Created per attempt so a failed retry's UI panels and task-label
+            # mappings cannot be flushed or reused by a later successful attempt.
+            tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
+            agent_renderer = AgentTextRenderer(console)
 
-            with wall_scope:
-                async for event in event_iter:
-                    if isinstance(event, TextEvent):
-                        output_parts.append(event.text)
+            try:
+                event_iter = cast(
+                    AsyncGenerator[Any, None],
+                    backend.execute(
+                        cwd, prompt, output_schema, continuation,
+                        agents=agents, max_turns=max_turns, read_only=read_only,
+                    ),
+                )
+                invocation_cm: Any = (
+                    recorder.invocation(phase=phase) if recorder is not None else nullcontext(None)
+                )
 
-                        skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
-                        if skill_match:
-                            if not use_callback:
-                                agent_renderer.finish()
-                                tool_registry.finish_all()
-                            raise MissingSkillError(skill_match.group(1))
+                async with invocation_cm as inv:
+                    if inv is not None:
+                        inv.observe_user_step(prompt=prompt)
 
+                    # Per-invocation budgets live here so both backends are covered
+                    # without a backend-signature change. The wall budget cancels the
+                    # async-for via move_on_after; the tool-call ceiling breaks in-loop.
+                    wall_scope: Any = (
+                        anyio.move_on_after(wall_budget_s) if wall_budget_s is not None else nullcontext()
+                    )
+
+                    with wall_scope:
+                        async for event in event_iter:
+                            if isinstance(event, TextEvent):
+                                output_parts.append(event.text)
+
+                                skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
+                                if skill_match:
+                                    if not use_callback:
+                                        agent_renderer.finish()
+                                        tool_registry.finish_all()
+                                    raise MissingSkillError(skill_match.group(1))
+
+                                if use_callback and progress_callback is not None:
+                                    last_line = event.text.strip().split("\n")[-1]
+                                    if last_line:
+                                        result = progress_callback(format_callback_text(last_line))
+                                        if inspect.isawaitable(result):
+                                            await result
+                                elif output_schema is None:
+                                    # Structured-output text is the JSON payload, redundant with
+                                    # the returned structured result — don't echo it to the terminal.
+                                    agent_renderer.append(event.text)
+
+                                if inv is not None:
+                                    inv.observe(event)
+
+                            elif isinstance(event, ThinkingEvent):
+                                if not use_callback:
+                                    if agent_renderer.has_content:
+                                        agent_renderer.finish()
+                                    print_thinking(console, event.text)
+
+                                if inv is not None:
+                                    inv.observe(event)
+
+                            elif isinstance(event, ToolStartEvent):
+                                if progress_callback is not None:
+                                    # Record the originating call so a backgrounded launch's result
+                                    # can later resolve a Task-family label for the progress line.
+                                    tool_registry.note_call(event.id, event.name, event.input)
+                                    label = tool_registry.resolve_call_label(event.name, event.input)
+                                    result = progress_callback(format_callback_progress(event.name, event.input, label))
+                                    if inspect.isawaitable(result):
+                                        await result
+                                else:
+                                    if agent_renderer.has_content:
+                                        agent_renderer.finish()
+                                    tool_registry.create(event.id, event.name, event.input)
+
+                                if inv is not None:
+                                    inv.observe(event)
+
+                                tool_calls += 1
+                                if tool_call_budget is not None and tool_calls > tool_call_budget:
+                                    budget_reason = "tool_call_budget_exceeded"
+                                    break
+
+                            elif isinstance(event, ToolResultEvent):
+                                # Populate the task_id→label map in both modes, so a later
+                                # TaskOutput/TaskStop resolves its originating label.
+                                tool_registry.observe_result(event.id, event.output)
+                                if not use_callback:
+                                    panel = tool_registry.get(event.id)
+                                    if panel:
+                                        panel.set_result(event.output, event.is_error)
+                                        panel.finish()
+                                        tool_registry.remove(event.id)
+
+                                if inv is not None:
+                                    inv.observe(event)
+
+                            elif isinstance(event, MetricsEvent):
+                                # EVNT-02 / MAP-06: recorder-only, no UI. Must precede the
+                                # CostEvent branch so isinstance order is correct.
+                                if inv is not None:
+                                    inv.observe(event)
+
+                            elif isinstance(event, CostEvent):
+                                if event.cost_usd:
+                                    if not use_callback:
+                                        if agent_renderer.has_content:
+                                            agent_renderer.finish()
+                                        console.print()
+                                        print_cost(console, event.cost_usd)
+
+                                if inv is not None:
+                                    inv.observe(event)
+
+                            elif isinstance(event, ResultEvent):
+                                if event.structured_output is not None:
+                                    structured_result = event.structured_output
+                                    if not use_callback:
+                                        issues = (
+                                            structured_result.get("issues", [])
+                                            if isinstance(structured_result, dict)
+                                            else []
+                                        )
+                                        if issues:
+                                            formatted = []
+                                            for i in issues:
+                                                if "file" in i and "line" in i:
+                                                    desc = i.get("description", "")
+                                                    issue_id = i.get("id", "?")
+                                                    formatted.append(
+                                                        f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
+                                                    )
+                                                else:
+                                                    label = i.get("title", i.get("description", ""))
+                                                    formatted.append(f"[{i.get('id', '?')}] {label}")
+                                            agent_renderer.append("\n".join(formatted))
+                                result_continuation = event.continuation
+
+                                if inv is not None:
+                                    inv.observe(event)
+
+                    # Budget abort: the wall scope cancelled the loop, or the tool-call
+                    # ceiling broke out. Cancel the backend (swallow any error — an abort
+                    # must NEVER raise into the CLI), mark the ATIF turn aborted, surface
+                    # a marker, then fall through to the partial-output return.
+                    wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
+                    if budget_reason is None and wall_cancelled:
+                        budget_reason = "wall_budget_exceeded"
+                    aborted_reason = budget_reason
+                    if budget_reason is not None:
+                        try:
+                            await event_iter.aclose()
+                        except Exception:  # noqa: BLE001 - abort must not raise into the CLI
+                            pass
+                        try:
+                            await backend.cancel()
+                        except Exception:  # noqa: BLE001 - abort must not raise into the CLI
+                            pass
+                        if inv is not None:
+                            inv.mark_aborted(budget_reason)
                         if use_callback and progress_callback is not None:
-                            last_line = event.text.strip().split("\n")[-1]
-                            if last_line:
-                                result = progress_callback(format_callback_text(last_line))
-                                if inspect.isawaitable(result):
-                                    await result
-                        elif output_schema is None:
-                            # Structured-output text is the JSON payload, redundant with
-                            # the returned structured result — don't echo it to the terminal.
-                            agent_renderer.append(event.text)
-
-                        if inv is not None:
-                            inv.observe(event)
-
-                    elif isinstance(event, ThinkingEvent):
-                        if not use_callback:
-                            if agent_renderer.has_content:
-                                agent_renderer.finish()
-                            print_thinking(console, event.text)
-
-                        if inv is not None:
-                            inv.observe(event)
-
-                    elif isinstance(event, ToolStartEvent):
-                        if progress_callback is not None:
-                            # Record the originating call so a backgrounded launch's result
-                            # can later resolve a Task-family label for the progress line.
-                            tool_registry.note_call(event.id, event.name, event.input)
-                            label = tool_registry.resolve_call_label(event.name, event.input)
-                            result = progress_callback(format_callback_progress(event.name, event.input, label))
+                            result = progress_callback(format_callback_text(f"[budget] aborted: {budget_reason}"))
                             if inspect.isawaitable(result):
                                 await result
-                        else:
-                            if agent_renderer.has_content:
-                                agent_renderer.finish()
-                            tool_registry.create(event.id, event.name, event.input)
+                        elif not use_callback:
+                            print_warning(console, f"Turn aborted: {budget_reason}")
 
-                        if inv is not None:
-                            inv.observe(event)
+                    if not use_callback:
+                        if agent_renderer.has_content:
+                            agent_renderer.finish()
+                        tool_registry.finish_all()
+                        console.print()
 
-                        tool_calls += 1
-                        if tool_call_budget is not None and tool_calls > tool_call_budget:
-                            budget_reason = "tool_call_budget_exceeded"
-                            break
+                break  # success — exit the retry loop
 
-                    elif isinstance(event, ToolResultEvent):
-                        # Populate the task_id→label map in both modes, so a later
-                        # TaskOutput/TaskStop resolves its originating label.
-                        tool_registry.observe_result(event.id, event.output)
-                        if not use_callback:
-                            panel = tool_registry.get(event.id)
-                            if panel:
-                                panel.set_result(event.output, event.is_error)
-                                panel.finish()
-                                tool_registry.remove(event.id)
+            except Exception as exc:
+                if attempt < max_attempts and getattr(exc, "retryable", False):
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    retry_msg = (
+                        f"Backend error ({type(exc).__name__}), retrying "
+                        f"attempt {attempt + 2}/{max_attempts + 1} after {delay:.1f}s..."
+                    )
+                    if use_callback and progress_callback is not None:
+                        result = progress_callback(format_callback_text(f"[retry] {retry_msg}"))
+                        if inspect.isawaitable(result):
+                            await result
+                    elif not use_callback:
+                        print_warning(console, retry_msg)
+                    if event_iter is not None:
+                        try:
+                            await event_iter.aclose()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        event_iter = None
+                    # Do NOT call backend.cancel() here: the execute() generator's
+                    # finally block already terminates and removes the failed
+                    # invocation's process when event_iter.aclose() is called above.
+                    # Calling cancel() would terminate all processes on the shared
+                    # backend instance, killing sibling concurrent tasks under
+                    # fan-out (phases.py phase_per_stack_reviews).
+                    tool_registry.discard_all()
+                    await anyio.sleep(delay)
+                    continue
+                raise
 
-                        if inv is not None:
-                            inv.observe(event)
-
-                    elif isinstance(event, MetricsEvent):
-                        # EVNT-02 / MAP-06: recorder-only, no UI. Must precede the
-                        # CostEvent branch so isinstance order is correct.
-                        if inv is not None:
-                            inv.observe(event)
-
-                    elif isinstance(event, CostEvent):
-                        if event.cost_usd:
-                            if not use_callback:
-                                if agent_renderer.has_content:
-                                    agent_renderer.finish()
-                                console.print()
-                                print_cost(console, event.cost_usd)
-
-                        if inv is not None:
-                            inv.observe(event)
-
-                    elif isinstance(event, ResultEvent):
-                        if event.structured_output is not None:
-                            structured_result = event.structured_output
-                            if not use_callback:
-                                issues = (
-                                    structured_result.get("issues", [])
-                                    if isinstance(structured_result, dict)
-                                    else []
-                                )
-                                if issues:
-                                    formatted = []
-                                    for i in issues:
-                                        if "file" in i and "line" in i:
-                                            desc = i.get("description", "")
-                                            issue_id = i.get("id", "?")
-                                            formatted.append(
-                                                f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
-                                            )
-                                        else:
-                                            label = i.get("title", i.get("description", ""))
-                                            formatted.append(f"[{i.get('id', '?')}] {label}")
-                                    agent_renderer.append("\n".join(formatted))
-                        result_continuation = event.continuation
-
-                        if inv is not None:
-                            inv.observe(event)
-
-            # Budget abort: the wall scope cancelled the loop, or the tool-call
-            # ceiling broke out. Cancel the backend (swallow any error — an abort
-            # must NEVER raise into the CLI), mark the ATIF turn aborted, surface
-            # a marker, then fall through to the partial-output return.
-            wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
-            if budget_reason is None and wall_cancelled:
-                budget_reason = "wall_budget_exceeded"
-            aborted_reason = budget_reason
-            if budget_reason is not None:
-                try:
-                    await event_iter.aclose()
-                except Exception:  # noqa: BLE001 - abort must not raise into the CLI
-                    pass
-                try:
-                    await backend.cancel()
-                except Exception:  # noqa: BLE001 - abort must not raise into the CLI
-                    pass
-                if inv is not None:
-                    inv.mark_aborted(budget_reason)
-                if use_callback and progress_callback is not None:
-                    result = progress_callback(format_callback_text(f"[budget] aborted: {budget_reason}"))
-                    if inspect.isawaitable(result):
-                        await result
-                elif not use_callback:
-                    print_warning(console, f"Turn aborted: {budget_reason}")
-
-            if not use_callback:
-                if agent_renderer.has_content:
-                    agent_renderer.finish()
-                tool_registry.finish_all()
-                console.print()
     except Exception as exc:
         print_error(console, "Backend Execution Error", f"{type(exc).__name__}: {exc}")
         raise

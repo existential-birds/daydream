@@ -11,6 +11,7 @@ from daydream.phases import phase_parse_feedback
 
 class _SpyBackend:
     model = "test-model"
+    fanout_concurrency = 4
 
     def __init__(self) -> None:
         self.last_prompt: str = ""

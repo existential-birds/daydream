@@ -81,6 +81,7 @@ class _RecordingBackend:
     """Records every execute call; verifies no `agents` kwarg was passed."""
 
     model = "test-model"
+    fanout_concurrency = 4
 
     def __init__(self) -> None:
         self.agents_seen: list[Any] = []

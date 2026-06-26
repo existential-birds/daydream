@@ -71,6 +71,7 @@ class CodexBackend:
 
     def __init__(self, model: str):
         self.model = model
+        self.fanout_concurrency = 4
         self._process: asyncio.subprocess.Process | None = None
         self._processes: list[asyncio.subprocess.Process] = []
 

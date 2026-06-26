@@ -29,10 +29,16 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.backends.pi import (
+    _PI_DEFAULT_RETRY_ATTEMPTS,
+    _PI_DEFAULT_RETRY_BASE_DELAY,
     _PI_STDOUT_LIMIT_BYTES,
     _SKILL_TOKEN_RE,
     PiBackend,
     PiError,
+    _is_retryable_error_message,
+    _is_retryable_exit_code,
+    _pi_retry_attempts,
+    _pi_retry_base_delay,
     _render_tool_result,
     _resolve_skill_dir,
     _schema_instruction,
@@ -919,4 +925,230 @@ async def test_append_system_prompt_preamble_in_args():
         # an empty stub a future refactor could silently collapse to.
         assert "tool-call budget" in preamble
         assert "grep" in preamble.lower()
+
+
+# ---------------------------------------------------------------------------
+# PiError.retryable attribute
+# ---------------------------------------------------------------------------
+
+
+def test_pierror_retryable_default():
+    err = PiError("something went wrong")
+    assert err.retryable is False
+
+
+def test_pierror_retryable_kwarg():
+    err = PiError("429 rate limit", retryable=True)
+    assert err.retryable is True
+
+
+def test_pierror_message_preserved():
+    err = PiError("auth failed", retryable=False)
+    assert str(err) == "auth failed"
+
+
+# ---------------------------------------------------------------------------
+# _is_retryable_error_message
+# ---------------------------------------------------------------------------
+
+
+def test_is_retryable_error_message_429():
+    assert _is_retryable_error_message("429 Too Many Requests") is True
+
+
+def test_is_retryable_error_message_overload():
+    assert _is_retryable_error_message("Service is currently overloaded") is True
+
+
+def test_is_retryable_error_message_rate_limit_space():
+    assert _is_retryable_error_message("rate limit exceeded") is True
+
+
+def test_is_retryable_error_message_rate_limit_underscore():
+    assert _is_retryable_error_message("rate_limit hit") is True
+
+
+def test_is_retryable_error_message_capacity():
+    assert _is_retryable_error_message("Capacity unavailable") is True
+
+
+def test_is_retryable_error_message_too_many_requests():
+    assert _is_retryable_error_message("too many requests from this IP") is True
+
+
+def test_is_retryable_error_message_throttle():
+    assert _is_retryable_error_message("Request throttled") is True
+
+
+def test_is_retryable_error_message_throttling():
+    assert _is_retryable_error_message("throttling in effect") is True
+
+
+def test_is_retryable_error_message_case_insensitive():
+    assert _is_retryable_error_message("OVERLOAD detected") is True
+
+
+def test_is_retryable_error_message_non_retryable():
+    assert _is_retryable_error_message("auth failed") is False
+
+
+def test_is_retryable_error_message_not_overloaded_is_non_retryable():
+    assert _is_retryable_error_message("service is not overloaded") is False
+
+
+def test_is_retryable_error_message_capacity_planning_is_non_retryable():
+    assert _is_retryable_error_message("capacity planning required") is False
+
+
+def test_is_retryable_error_message_empty():
+    assert _is_retryable_error_message("") is False
+
+
+def test_is_retryable_error_message_unknown_pi_error():
+    assert _is_retryable_error_message("Unknown Pi error") is False
+
+
+# ---------------------------------------------------------------------------
+# _is_retryable_exit_code
+# ---------------------------------------------------------------------------
+
+
+def test_is_retryable_exit_code_sigkill():
+    assert _is_retryable_exit_code(-9) is True
+
+
+def test_is_retryable_exit_code_oom_137():
+    assert _is_retryable_exit_code(137) is True
+
+
+def test_is_retryable_exit_code_normal_exit_1():
+    assert _is_retryable_exit_code(1) is False
+
+
+def test_is_retryable_exit_code_normal_exit_2():
+    assert _is_retryable_exit_code(2) is False
+
+
+def test_is_retryable_exit_code_zero():
+    assert _is_retryable_exit_code(0) is False
+
+
+# ---------------------------------------------------------------------------
+# Error turn uses retryable classifier
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_error_turn_sets_retryable_on_429():
+    """A 429 errorMessage in turn_end sets retryable=True on PiError."""
+    backend = PiBackend(model="glm-5.2")
+    lines = [
+        '{"type":"session","sessionId":"pi_ses_429"}',
+        '{"type":"agent_start"}',
+        '{"type":"turn_start"}',
+        '{"type":"turn_end","message":{"role":"assistant","content":[],'
+        '"stopReason":"error","errorMessage":"429 Too Many Requests - rate limit exceeded"}}',
+    ]
+    mock_proc = make_mock_process(lines)
+
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(PiError) as exc_info:
+            async for _ in backend.execute(Path("/tmp"), "p"):
+                pass
+
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_error_turn_non_retryable_for_auth_failure():
+    """A non-transient errorMessage in turn_end sets retryable=False."""
+    backend = PiBackend(model="glm-5.2")
+    lines = [
+        '{"type":"session","sessionId":"pi_ses_auth"}',
+        '{"type":"agent_start"}',
+        '{"type":"turn_start"}',
+        '{"type":"turn_end","message":{"role":"assistant","content":[],'
+        '"stopReason":"error","errorMessage":"authentication required"}}',
+    ]
+    mock_proc = make_mock_process(lines)
+
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(PiError) as exc_info:
+            async for _ in backend.execute(Path("/tmp"), "p"):
+                pass
+
+    assert exc_info.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_oom_exit_sets_retryable():
+    """Exit code -9 (SIGKILL/OOM) sets retryable=True on the PiError."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process([])
+    mock_proc.returncode = -9
+
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(PiError) as exc_info:
+            async for _ in backend.execute(Path("/tmp"), "p"):
+                pass
+
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_normal_exit_1_not_retryable():
+    """Exit code 1 (auth error, config error) is NOT retryable."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process(["Error: not authenticated"])
+    mock_proc.returncode = 1
+
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(PiError) as exc_info:
+            async for _ in backend.execute(Path("/tmp"), "p"):
+                pass
+
+    assert exc_info.value.retryable is False
+
+
+# ---------------------------------------------------------------------------
+# Retry env knobs
+# ---------------------------------------------------------------------------
+
+
+def test_pi_retry_attempts_default():
+    assert _pi_retry_attempts() == _PI_DEFAULT_RETRY_ATTEMPTS
+
+
+def test_pi_retry_attempts_env_override(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "5")
+    assert _pi_retry_attempts() == 5
+
+
+def test_pi_retry_base_delay_default():
+    assert _pi_retry_base_delay() == _PI_DEFAULT_RETRY_BASE_DELAY
+
+
+def test_pi_retry_base_delay_env_override(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.5")
+    assert _pi_retry_base_delay() == pytest.approx(0.5)
+
+
+def test_pi_retry_base_delay_nan_falls_back(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "nan")
+    assert _pi_retry_base_delay() == _PI_DEFAULT_RETRY_BASE_DELAY
+
+
+def test_pi_retry_base_delay_inf_falls_back(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "inf")
+    assert _pi_retry_base_delay() == _PI_DEFAULT_RETRY_BASE_DELAY
+
+
+# ---------------------------------------------------------------------------
+# fanout_concurrency
+# ---------------------------------------------------------------------------
+
+
+def test_pi_backend_fanout_concurrency():
+    backend = PiBackend(model="glm-5.2")
+    assert backend.fanout_concurrency == 2
 
