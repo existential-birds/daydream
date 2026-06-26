@@ -928,7 +928,7 @@ async def test_append_system_prompt_preamble_in_args():
 
 
 # ---------------------------------------------------------------------------
-# Task 1: PiError.retryable attribute
+# PiError.retryable attribute
 # ---------------------------------------------------------------------------
 
 
@@ -948,7 +948,7 @@ def test_pierror_message_preserved():
 
 
 # ---------------------------------------------------------------------------
-# Task 1: _is_retryable_error_message
+# _is_retryable_error_message
 # ---------------------------------------------------------------------------
 
 
@@ -1001,7 +1001,7 @@ def test_is_retryable_error_message_unknown_pi_error():
 
 
 # ---------------------------------------------------------------------------
-# Task 1: _is_retryable_exit_code
+# _is_retryable_exit_code
 # ---------------------------------------------------------------------------
 
 
@@ -1026,7 +1026,7 @@ def test_is_retryable_exit_code_zero():
 
 
 # ---------------------------------------------------------------------------
-# Task 1: error turn uses retryable classifier
+# Error turn uses retryable classifier
 # ---------------------------------------------------------------------------
 
 
@@ -1103,7 +1103,7 @@ async def test_normal_exit_1_not_retryable():
 
 
 # ---------------------------------------------------------------------------
-# Task 2: Retry env knobs
+# Retry env knobs
 # ---------------------------------------------------------------------------
 
 
@@ -1126,7 +1126,7 @@ def test_pi_retry_base_delay_env_override(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 4: fanout_concurrency
+# fanout_concurrency
 # ---------------------------------------------------------------------------
 
 
