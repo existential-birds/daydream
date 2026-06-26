@@ -47,6 +47,7 @@ class _BurstBackend:
     """
 
     model = "mock-model"
+    fanout_concurrency: int = 4
     count: int = 200
     sleep_s: float = 0.0
     cancel_calls: int = 0
