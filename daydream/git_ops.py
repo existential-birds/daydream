@@ -811,6 +811,35 @@ def diff_paths(
     return proc.stdout
 
 
+def diff_worktree_against(repo: Path, ref: str, paths: list[str]) -> str:
+    """Return ``git diff <ref> -- <paths>`` (working tree vs *ref* for *paths*).
+
+    Unlike :func:`diff`/:func:`diff_paths` (which compare two refs), this diffs
+    the *current working tree* against *ref*, restricted to *paths*. Used to
+    snapshot a path's uncommitted partial-edit content before it is reverted, so
+    the patch is recoverable even after the working file is restored.
+
+    Args:
+        repo: Repository working directory.
+        ref: Ref to diff against (e.g. ``"HEAD"`` or a ``git stash create`` SHA).
+        paths: Repo-relative pathspec list.
+
+    Returns:
+        The diff text. Empty string when *paths* match *ref* exactly (or when a
+        path is untracked at *ref*, which ``git diff <ref> --`` does not show).
+
+    Raises:
+        GitError: If ``git diff`` fails.
+    """
+    if not paths:
+        return ""
+    args = ["diff", ref, "--", *paths]
+    proc = _run_git(repo, args, timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git diff {ref} -- {paths} failed in {repo}: {proc.stderr.strip()}")
+    return proc.stdout
+
+
 def log(repo: Path, base: str, head: str = "HEAD") -> str:
     """Return the one-line commit log for ``base..head``.
 
@@ -1017,6 +1046,55 @@ def changed_files(repo: Path) -> list[str]:
     return names
 
 
+def list_untracked(repo: Path) -> list[str]:
+    """Return repo-relative paths of untracked, non-ignored files.
+
+    Soft-failure semantics mirror :func:`changed_files`: returns ``[]`` on any
+    git error or non-zero exit. Used to snapshot the untracked set before a fix
+    pass so newly-orphaned files created by a failed group can be detected.
+
+    Args:
+        repo: Repository working directory.
+
+    Returns:
+        Untracked file paths (``git ls-files --others --exclude-standard``).
+    """
+    try:
+        proc = _run_git(repo, ["ls-files", "--others", "--exclude-standard"], timeout=10)
+    except GitError:
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def stash_create(repo: Path) -> str | None:
+    """Capture tracked working-tree + index changes as a dangling commit.
+
+    Runs ``git stash create``, which builds a stash commit object WITHOUT
+    touching the working tree or the stash ref list. The returned SHA names a
+    snapshot of the current tracked state; pass it to :func:`diff_worktree_against`
+    or :func:`restore_paths_from_ref` to capture or restore a single path's
+    pre-mutation content. Untracked files are NOT included (``git stash create``
+    ignores them), so callers track those separately via :func:`list_untracked`.
+
+    Args:
+        repo: Repository working directory.
+
+    Returns:
+        The 40-character snapshot SHA, or ``None`` when the tree has no tracked
+        changes (``git stash create`` prints nothing). A ``None`` result means
+        the pre-mutation tracked state equals ``HEAD``.
+
+    Raises:
+        GitError: If ``git stash create`` fails.
+    """
+    proc = _run_git(repo, ["stash", "create"], timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git stash create failed in {repo}: {proc.stderr.strip()}")
+    return proc.stdout.strip() or None
+
+
 def upstream_ahead_count(repo: Path, branch: str) -> int:
     """Return the number of commits ``<branch>@{upstream}`` is ahead of *branch*.
 
@@ -1180,6 +1258,32 @@ def checkout_paths(repo: Path, paths: list[Path]) -> None:
     proc = _run_git(repo, args, timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git checkout -- {paths} failed in {repo}: {proc.stderr.strip()}")
+
+
+def restore_paths_from_ref(repo: Path, ref: str, paths: list[str]) -> None:
+    """Restore *paths* to their content at *ref* (``git checkout <ref> -- <paths>``).
+
+    Discards working-tree edits for exactly *paths*, replacing them with the
+    *ref* version (and staging that version). Distinct from :func:`checkout_paths`,
+    which restores from the index (``git checkout -- <paths>``) rather than a ref.
+    Used to roll a single path back to its pre-fix content after a fix group
+    failed mid-edit, leaving the rest of the tree untouched.
+
+    Args:
+        repo: Repository working directory.
+        ref: Ref to restore from (e.g. ``"HEAD"`` or a ``git stash create`` SHA).
+        paths: Repo-relative paths to restore. No-op when empty.
+
+    Raises:
+        GitError: If the checkout fails (e.g. a path absent at *ref*, which is
+            the signal that the path was newly created and untracked).
+    """
+    if not paths:
+        return
+    args = ["checkout", ref, "--", *(str(p) for p in paths)]
+    proc = _run_git(repo, args, timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git checkout {ref} -- {paths} failed in {repo}: {proc.stderr.strip()}")
 
 
 def clean_untracked(repo: Path) -> None:

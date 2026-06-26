@@ -35,6 +35,8 @@ from daydream.deep.artifacts import (
     check_deep_artifacts,
     dedup_candidates_path,
     deep_dir,
+    fix_failures_path,
+    fix_leftover_untracked_path,
     merged_items_path,
     per_stack_failures_path,
     per_stack_records_path,
@@ -60,7 +62,13 @@ from daydream.phases import (
     phase_verify_recommendations,
     severity_sorted,
 )
-from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
+from daydream.trajectory import (
+    DaydreamPhase,
+    DaydreamRunFlow,
+    TrajectoryRecorder,
+    default_trajectory_path,
+    phase_scope,
+)
 from daydream.ui import (
     format_verdict_join,
     print_error,
@@ -519,6 +527,75 @@ def _rewrite_stack_records(
         dest_path.write_text(json.dumps(stack_records, indent=2))
 
 
+def _protect_tree_after_fix_failures(
+    work: WorkContext,
+    target_dir: Path,
+    fix_failures: dict[str, str],
+    *,
+    snapshot: str | None,
+    pre_untracked: set[str],
+) -> None:
+    """Roll each failed fix group's file back to its pre-fix content.
+
+    For every dropped file-group (keyed by repo-relative path), the partial-fix
+    content is FIRST saved to ``.daydream/partial-fixes/<slug>.patch`` (a
+    ``git diff`` against the pre-fix snapshot) so no agent work is destroyed,
+    THEN the path is restored to exactly its pre-fix state. Only the failed
+    paths are touched -- successful groups and unrelated paths are never
+    reverted. A failed group's newly-created untracked file (absent from
+    *pre_untracked*) has its raw content preserved and is then removed; untracked
+    files we cannot attribute to the failed group are left in place.
+
+    Args:
+        work: The run's workspace (``work.repo`` is the git working dir).
+        target_dir: Resolved target dir (``== work.repo``); root for the
+            ``.daydream/partial-fixes`` recovery directory.
+        fix_failures: ``{file_group: reason}`` for groups that failed.
+        snapshot: ``git stash create`` SHA captured before fixes, or ``None``
+            when the pre-fix tracked tree equalled ``HEAD``.
+        pre_untracked: Untracked paths present before the fix pass.
+    """
+    from daydream import git_ops
+    from daydream.git_ops import GitError
+
+    repo = work.repo
+    ref = snapshot or "HEAD"
+    recovery_dir = target_dir / ".daydream" / "partial-fixes"
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+
+    for fkey in sorted(fix_failures):
+        slug = fkey.replace("/", "-").replace("\\", "-")
+        file_path = repo / fkey
+        # 1. Save the partial-fix content first -- non-negotiable, before revert.
+        try:
+            patch = git_ops.diff_worktree_against(repo, ref, [fkey])
+        except GitError as exc:
+            patch = ""
+            print_warning(console, f"Could not diff partial fix for '{fkey}': {exc}")
+        if patch:
+            (recovery_dir / f"{slug}.patch").write_text(patch, encoding="utf-8")
+        elif file_path.is_file() and fkey not in pre_untracked:
+            # Newly-created untracked file (no diff vs ref): preserve raw content.
+            try:
+                (recovery_dir / f"{slug}.orphan").write_text(
+                    file_path.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+        # 2. Restore the path to its pre-fix content.
+        try:
+            git_ops.restore_paths_from_ref(repo, ref, [fkey])
+        except GitError:
+            # Path absent at ref => the failed group newly created it. Remove the
+            # orphan only when it was not already present pre-fix (attributable).
+            if file_path.is_file() and fkey not in pre_untracked:
+                try:
+                    file_path.unlink()
+                except OSError:
+                    pass
+
+
 async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """Execute the deep-review pipeline (D-07).
 
@@ -671,14 +748,15 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
                 explore_backend = _resolve_backend(config, "exploration", backend_cache)
                 print_dim(console, f"Exploration model: {explore_backend.model}")
-                config.exploration_context = await safe_explore(
-                    pre_scan,
-                    explore_backend,
-                    target_dir,
-                    diff,
-                    config.exploration_depth,
-                    diff_ref=_compute_diff_ref(target_dir),
-                )
+                async with phase_scope(DaydreamPhase.EXPLORATION):
+                    config.exploration_context = await safe_explore(
+                        pre_scan,
+                        explore_backend,
+                        target_dir,
+                        diff,
+                        config.exploration_depth,
+                        diff_ref=_compute_diff_ref(target_dir),
+                    )
                 console.print(render_exploration_summary(config.exploration_context))
         if EXPLORATION_AVAILABLE and config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(
@@ -713,28 +791,30 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                             )
                         else:
                             pr_description = pr_view.get("body") or None
-                intent_summary = await phase_understand_intent(
-                    _resolve_backend(config, "intent", backend_cache),
-                    work,
-                    diff_path,
-                    log,
-                    branch,
-                    exploration_dir=exploration_dir,
-                    pr_description=pr_description,
-                )
+                async with phase_scope(DaydreamPhase.INTENT):
+                    intent_summary = await phase_understand_intent(
+                        _resolve_backend(config, "intent", backend_cache),
+                        work,
+                        diff_path,
+                        log,
+                        branch,
+                        exploration_dir=exploration_dir,
+                        pr_description=pr_description,
+                    )
 
                 print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
                 if tier == "skip":
                     alt_issues: list[dict[str, Any]] = []
                     print_dim(console, "Skipping alternatives -- trivial diff")
                 else:
-                    alt_issues = await phase_alternative_review(
-                        _resolve_backend(config, "wonder", backend_cache),
-                        work,
-                        diff_path,
-                        intent_summary,
-                        exploration_dir=exploration_dir,
-                    )
+                    async with phase_scope(DaydreamPhase.ALTERNATIVES):
+                        alt_issues = await phase_alternative_review(
+                            _resolve_backend(config, "wonder", backend_cache),
+                            work,
+                            diff_path,
+                            intent_summary,
+                            exploration_dir=exploration_dir,
+                        )
 
                 intent_p, alts_p = _write_ttt_artifacts(
                     dd, intent_summary=intent_summary, alt_issues=alt_issues
@@ -743,16 +823,17 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             failed_stacks: dict[str, str] = {}
             if config.start_at not in ("merge", "fix"):
                 print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
-                per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
-                    _resolve_backend(config, "per_stack_review", backend_cache),
-                    work,
-                    stacks,
-                    diff_path=diff_path,
-                    intent_path=intent_p,
-                    alternatives_path=alts_p,
-                    exploration_dir=exploration_dir,
-                    diff_text=diff,
-                )
+                async with phase_scope(DaydreamPhase.DEEP, stage="review"):
+                    per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
+                        _resolve_backend(config, "per_stack_review", backend_cache),
+                        work,
+                        stacks,
+                        diff_path=diff_path,
+                        intent_path=intent_p,
+                        alternatives_path=alts_p,
+                        exploration_dir=exploration_dir,
+                        diff_text=diff,
+                    )
                 # Persist so a later `--start-at merge` resume can still surface
                 # uncovered stacks (the in-memory failure map otherwise dies here).
                 failures_p = per_stack_failures_path(dd)
@@ -825,12 +906,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                         record_schema = (
                             FEEDBACK_SCHEMA if stack_name == STRUCTURE_STACK_NAME else PER_STACK_RECORD_SCHEMA
                         )
-                        records = await phase_parse_feedback(
-                            _resolve_backend(config, "parse", backend_cache),
-                            work,
-                            input_path=output_path,
-                            output_schema=record_schema,
-                        )
+                        async with phase_scope(DaydreamPhase.PARSE):
+                            records = await phase_parse_feedback(
+                                _resolve_backend(config, "parse", backend_cache),
+                                work,
+                                input_path=output_path,
+                                output_schema=record_schema,
+                            )
                         records_path = per_stack_records_path(dd, stack_name)
                         records_path.write_text(json.dumps(records, indent=2))
                         per_stack_records_paths.append(records_path)
@@ -872,15 +954,16 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     if config.start_at != "merge" or not arbiter_marker.is_file():
                         arbiter_targets = select_arbiter_targets(all_records, record_sources)
                         if arbiter_targets:
-                            verdicts = await phase_arbiter_review(
-                                _resolve_backend(config, "arbiter", backend_cache),
-                                work,
-                                selected_records=[all_records[i] for i in arbiter_targets],
-                                diff_path=diff_path,
-                                intent_path=intent_p,
-                                alternatives_path=alts_p,
-                                exploration_dir=exploration_dir,
-                            )
+                            async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
+                                verdicts = await phase_arbiter_review(
+                                    _resolve_backend(config, "arbiter", backend_cache),
+                                    work,
+                                    selected_records=[all_records[i] for i in arbiter_targets],
+                                    diff_path=diff_path,
+                                    intent_path=intent_p,
+                                    alternatives_path=alts_p,
+                                    exploration_dir=exploration_dir,
+                                )
                             all_records, record_sources = _apply_arbiter_verdicts(
                                 all_records, record_sources, arbiter_targets, verdicts
                             )
@@ -998,12 +1081,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # skips both the verify pass and the recommendation-verdicts.json
             # artifact. A --start-at fix resume still produces verdicts whenever
             # fixes are applied (the gate still runs on resume; accept => verify runs).
-            verdicts_file, verdicts_payload = await phase_verify_recommendations(
-                _resolve_backend(config, "verify", backend_cache),
-                work,
-                merged_items_path=merged_items_path(dd),
-                deep_dir=dd,
-            )
+            async with phase_scope(DaydreamPhase.VERIFY):
+                verdicts_file, verdicts_payload = await phase_verify_recommendations(
+                    _resolve_backend(config, "verify", backend_cache),
+                    work,
+                    merged_items_path=merged_items_path(dd),
+                    deep_dir=dd,
+                )
             print_verification_summary(console, verdicts_file)
 
             # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
@@ -1045,23 +1129,66 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # artifact from a prior run; injecting it as authoritative would
             # contradict the current diff's context.
             intent_grounded_this_run = config.start_at not in ("per-stack", "merge", "fix")
-            fix_failures = await phase_fix_parallel(
-                _resolve_backend(config, "fix", backend_cache),
-                work,
-                items,
-                intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
-            )
+            # Snapshot the tracked tree + untracked set BEFORE fixes so a failed
+            # group's partial, possibly non-compiling edits can be captured and
+            # rolled back to exactly their pre-fix content (#203 follow-up).
+            try:
+                pre_fix_snapshot = git_ops.stash_create(work.repo)
+                pre_fix_untracked = set(git_ops.list_untracked(work.repo))
+            except git_ops.GitError as exc:
+                print_warning(console, f"Could not snapshot tree before fixes: {exc}")
+                pre_fix_snapshot = None
+                pre_fix_untracked = set()
+            async with phase_scope(DaydreamPhase.FIX):
+                fix_failures = await phase_fix_parallel(
+                    _resolve_backend(config, "fix", backend_cache),
+                    work,
+                    items,
+                    intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
+                )
+            fix_failures_p = fix_failures_path(dd)
             if fix_failures:
+                # Persist so the archive marks the run "partial" instead of
+                # "complete" -- the tree is no longer a clean success.
+                fix_failures_p.write_text(json.dumps(fix_failures, indent=2, sort_keys=True))
+                _protect_tree_after_fix_failures(
+                    work,
+                    target_dir,
+                    fix_failures,
+                    snapshot=pre_fix_snapshot,
+                    pre_untracked=pre_fix_untracked,
+                )
+                # Enumerate every untracked path that appeared during the fix
+                # pass and survived protection. Attribution to a specific group
+                # is impossible (shared tree, parallel groups), so we never
+                # delete these -- we record them so the partial state is fully
+                # auditable instead of silently leaving stray files unaccounted.
+                try:
+                    leftover = sorted(set(git_ops.list_untracked(work.repo)) - pre_fix_untracked)
+                except git_ops.GitError:
+                    leftover = []
+                leftover_p = fix_leftover_untracked_path(dd)
+                if leftover:
+                    leftover_p.write_text(json.dumps(leftover, indent=2))
+                elif leftover_p.exists():
+                    leftover_p.unlink()
                 print_warning(
                     console,
                     f"{len(fix_failures)} fix group(s) failed: {sorted(fix_failures)}; "
-                    "other fixes applied but left uncommitted.",
+                    "partial edits reverted (patches saved under .daydream/partial-fixes/).",
                 )
                 return 1
+            # Fresh successful fix supersedes any stale failures record.
+            if fix_failures_p.exists():
+                fix_failures_p.unlink()
+            stale_leftover_p = fix_leftover_untracked_path(dd)
+            if stale_leftover_p.exists():
+                stale_leftover_p.unlink()
 
-            passed, _retries = await phase_test_and_heal(
-                _resolve_backend(config, "test", backend_cache), work, feedback_items=items
-            )
+            async with phase_scope(DaydreamPhase.TEST):
+                passed, _retries = await phase_test_and_heal(
+                    _resolve_backend(config, "test", backend_cache), work, feedback_items=items
+                )
             if not passed:
                 print_warning(console, "Tests failed after fix attempt.")
                 return 1

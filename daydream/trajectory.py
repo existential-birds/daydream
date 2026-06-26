@@ -23,7 +23,7 @@ import json
 import os
 import re
 import tempfile
-from contextlib import nullcontext, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -421,9 +421,14 @@ class Invocation:
     recorder: "TrajectoryRecorder"
     phase: DaydreamPhase
     steps: list[Step] = field(default_factory=list)
+    # Per-invocation timing boundaries (issue #203). Set in _InvocationCM;
+    # surfaced via Trajectory.extra["subtrajectories"].
+    started_at: str = ""
+    ended_at: str = ""
     _open_step_dict: dict[str, Any] | None = None
     _in_flight_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     _stop_reason: str | None = None
+    _error_subtype: str | None = None
 
     def observe_user_step(self, prompt: str) -> None:
         """Append a user Step at invocation start (MAP-01, Pitfall 4).
@@ -462,6 +467,25 @@ class Invocation:
         ``finish()``) has a Step to stamp the reason onto.
         """
         self._stop_reason = reason
+        self._ensure_open_step()
+
+    def mark_errored(self, subtype: str) -> None:
+        """Record that this invocation ended in a fatal error.
+
+        Mirrors :meth:`mark_aborted`: the ``subtype`` (e.g.
+        ``"error_max_turns"``) is stamped onto the closing Step's
+        ``extra["error"]`` / ``extra["error_subtype"]`` when the open step is
+        finalized. ATIF's Step model has no dedicated status field, so the
+        ``extra`` dict is the established extension point (D-19). Without this,
+        a fatal failure (a backend raising mid-stream) is invisible in the
+        archived trajectory.
+
+        If the error fires before any event is received, no step is open yet,
+        so we open one here to ensure ``_close_open_step`` (called from
+        ``finish()`` on context-manager exit) has a Step to stamp the marker
+        onto.
+        """
+        self._error_subtype = subtype
         self._ensure_open_step()
 
     def observe(self, event: "AgentEvent") -> None:
@@ -683,6 +707,9 @@ class Invocation:
             extra["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
         if self._stop_reason is not None:
             extra["stop_reason"] = self._stop_reason
+        if self._error_subtype is not None:
+            extra["error"] = True
+            extra["error_subtype"] = self._error_subtype
 
         agent_step = Step(
             step_id=self.recorder._next_step_id(),
@@ -771,6 +798,60 @@ class Invocation:
 
 
 @dataclass
+class PhaseEvent:
+    """Explicit phase-boundary event (``phase_start`` / ``phase_end``).
+
+    Emitted by :meth:`TrajectoryRecorder.emit_phase_start` /
+    :meth:`TrajectoryRecorder.emit_phase_end` and serialized into
+    ``Trajectory.extra["phase_events"]`` so a per-phase wall-clock breakdown can
+    be reconstructed without inferring invocation→phase membership from step
+    timestamps (issue #203).
+
+    Attributes:
+        phase: The :class:`DaydreamPhase` this event brackets.
+        event: ``"phase_start"`` or ``"phase_end"``.
+        timestamp: ISO 8601 UTC timestamp (via :func:`now_iso`).
+        metadata: Optional structured metadata (e.g. ``{"stage": "review"}``
+            for the deep orchestrator's sub-stages).
+    """
+
+    phase: DaydreamPhase
+    event: str
+    timestamp: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON-serializable representation."""
+        d: dict[str, Any] = {
+            "phase": self.phase.value,
+            "event": self.event,
+            "timestamp": self.timestamp,
+        }
+        if self.metadata:
+            d["metadata"] = dict(self.metadata)
+        return d
+
+
+@asynccontextmanager
+async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> Any:
+    """Async context manager that emits ``phase_start``/``phase_end`` events.
+
+    Reads the active recorder via :func:`get_current_recorder`; a no-op when no
+    recorder is active (e.g. direct phase invocation outside a run). Used by
+    ``runner.py`` and ``deep/orchestrator.py`` to bracket phase boundaries so
+    the trajectory JSON carries explicit timing events (issue #203).
+    """
+    recorder = get_current_recorder()
+    if recorder is not None:
+        recorder.emit_phase_start(phase, **metadata)
+    try:
+        yield
+    finally:
+        if recorder is not None:
+            recorder.emit_phase_end(phase, **metadata)
+
+
+@dataclass
 class TrajectoryRecorder:
     """Owns the per-run ATIF Trajectory and writes it to disk on clean exit.
 
@@ -815,6 +896,13 @@ class TrajectoryRecorder:
     # write_partial reads this so SIGINT mid-run_agent() captures partial
     # work rather than dropping it.
     _active_invocations: list[Invocation] = field(default_factory=list)
+    # Explicit phase-boundary events (phase_start/phase_end) emitted by
+    # emit_phase_start/emit_phase_end via phase_scope. Serialized into
+    # Trajectory.extra["phase_events"] when non-empty (issue #203).
+    _phase_events: list[PhaseEvent] = field(default_factory=list)
+    # Per-Invocation timing summaries registered at _InvocationCM.__aexit__.
+    # Serialized into Trajectory.extra["subtrajectories"] when non-empty.
+    _subtrajectories: list[dict[str, Any]] = field(default_factory=list)
     on_write: Callable[[TrajectoryRecorder, str], None] | None = None
 
     async def __aenter__(self) -> "TrajectoryRecorder":
@@ -874,6 +962,55 @@ class TrajectoryRecorder:
             mirroring :func:`get_current_recorder`.
         """
         return self._active_invocations[-1].phase if self._active_invocations else None
+
+    def emit_phase_start(self, phase: DaydreamPhase, **metadata: Any) -> None:
+        """Record a ``phase_start`` boundary event (issue #203).
+
+        Args:
+            phase: The phase entering execution.
+            **metadata: Optional structured metadata (e.g. ``stage="review"``
+                for the deep orchestrator's DEEP sub-stages).
+        """
+        self._phase_events.append(
+            PhaseEvent(
+                phase=phase,
+                event="phase_start",
+                timestamp=now_iso(),
+                metadata=dict(metadata),
+            )
+        )
+
+    def emit_phase_end(self, phase: DaydreamPhase, **metadata: Any) -> None:
+        """Record a ``phase_end`` boundary event (issue #203).
+
+        Args:
+            phase: The phase leaving execution.
+            **metadata: Optional structured metadata (mirrors emit_phase_start.
+        """
+        self._phase_events.append(
+            PhaseEvent(
+                phase=phase,
+                event="phase_end",
+                timestamp=now_iso(),
+                metadata=dict(metadata),
+            )
+        )
+
+    def _register_subtrajectory(self, inv: Invocation) -> None:
+        """Register a per-Invocation timing summary (issue #203).
+
+        Called from ``_InvocationCM.__aexit__`` after ``finish()`` so the
+        Invocation's steps are finalized. The summary is surfaced via
+        ``Trajectory.extra["subtrajectories"]`` when non-empty.
+        """
+        self._subtrajectories.append(
+            {
+                "phase": inv.phase.value,
+                "started_at": inv.started_at,
+                "ended_at": inv.ended_at,
+                "step_ids": [s.step_id for s in inv.steps],
+            }
+        )
 
     def _next_step_id(self) -> int:
         self._step_id_counter += 1
@@ -943,6 +1080,56 @@ class TrajectoryRecorder:
         if len(timestamps) < 2:
             return None
         return round((max(timestamps) - min(timestamps)).total_seconds(), 1)
+
+    def compute_phase_timings(self) -> dict[str, Any] | None:
+        """Per-phase wall-clock breakdown derived from ``phase_start``/``phase_end`` events.
+
+        Pairs each ``phase_start`` with its matching ``phase_end`` (LIFO within a
+        phase value) and sums the durations. Returns ``None`` when no phase
+        events exist (backward compat for runs that predate issue #203).
+
+        Each phase entry: ``{"wall_clock_seconds": float, "occurrences": int}``.
+        Phases with the same :class:`DaydreamPhase` value (e.g. the deep
+        orchestrator's ``review`` and ``arbiter`` stages both emit
+        ``DaydreamPhase.DEEP``) fold into one bucket; the per-event ``metadata``
+        in ``extra["phase_events"]`` carries the stage breakdown for finer
+        analysis.
+
+        Returns:
+            Mapping of phase value → timing summary, or ``None`` when there are
+            no phase events.
+        """
+        if not self._phase_events:
+            return None
+        by_phase: dict[str, dict[str, Any]] = {}
+        pending_starts: dict[str, list[str]] = {}
+        for ev in self._phase_events:
+            key = ev.phase.value
+            if ev.event == "phase_start":
+                pending_starts.setdefault(key, []).append(ev.timestamp)
+                by_phase.setdefault(key, {"wall_clock_seconds": 0.0, "occurrences": 0})
+            elif ev.event == "phase_end":
+                starts = pending_starts.get(key)
+                if not starts:
+                    continue  # orphaned end with no matching start
+                bucket = by_phase[key]
+                start_ts = starts.pop()
+                try:
+                    start = parse_iso_timestamp(start_ts)
+                    end = parse_iso_timestamp(ev.timestamp)
+                except ValueError:
+                    continue  # unparseable timestamp; skip this pair
+                duration = (end - start).total_seconds()
+                bucket["wall_clock_seconds"] += max(0.0, duration)
+                bucket["occurrences"] += 1
+        return {
+            key: {
+                "wall_clock_seconds": round(val["wall_clock_seconds"], 3),
+                "occurrences": val["occurrences"],
+            }
+            for key, val in by_phase.items()
+            if val["occurrences"] > 0  # drop orphaned starts (start with no matching end)
+        }
 
     def _sibling_path_for(self, descriptor: str) -> Path:
         """Return the sibling trajectory file path for *descriptor*.
@@ -1033,6 +1220,10 @@ class TrajectoryRecorder:
             extra["pr_number"] = self.pr_number
         if self.pr_repo is not None:
             extra["pr_repo"] = self.pr_repo
+        if self._phase_events:
+            extra["phase_events"] = [e.to_dict() for e in self._phase_events]
+        if self._subtrajectories:
+            extra["subtrajectories"] = [dict(s) for s in self._subtrajectories]
         return Trajectory(
             schema_version="ATIF-v1.6",
             session_id=self.session_id,
@@ -1184,6 +1375,7 @@ class _InvocationCM:
 
     async def __aenter__(self) -> Invocation:
         self._invocation = Invocation(recorder=self._recorder, phase=self._phase)
+        self._invocation.started_at = now_iso()
         # Register with recorder so write_partial can capture in-flight steps
         # if SIGINT fires mid-invocation.
         self._recorder._active_invocations.append(self._invocation)
@@ -1191,8 +1383,21 @@ class _InvocationCM:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self._invocation is not None:
+            # A fatal error propagating out of run_agent's event loop (e.g. a
+            # backend raising MaxTurnsError on error_max_turns) would otherwise
+            # vanish from the archive. Stamp it onto the closing Step BEFORE
+            # finish() flushes — never swallow the exception, and never let a
+            # recording failure mask it.
+            if isinstance(exc_val, Exception):
+                try:
+                    subtype = getattr(exc_val, "subtype", None) or type(exc_val).__name__
+                    self._invocation.mark_errored(str(subtype))
+                except Exception:  # noqa: BLE001 - recording must never crash a run
+                    pass
             try:
                 self._invocation.finish()
+                self._invocation.ended_at = now_iso()
+                self._recorder._register_subtrajectory(self._invocation)
             finally:
                 with suppress(ValueError):
                     self._recorder._active_invocations.remove(self._invocation)

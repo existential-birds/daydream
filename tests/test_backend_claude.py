@@ -266,6 +266,56 @@ async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk):
     assert not [e for e in events if isinstance(e, ResultEvent)]
 
 
+class MockClaudeSDKClientMaxTurns:
+    """Mock client whose run ends by hitting the turn cap.
+
+    Mirrors the real SDK shape for the turn-cap case: a ResultMessage with
+    ``is_error=True`` and ``subtype="error_max_turns"`` (``result`` is None,
+    so the detail falls back to the subtype).
+    """
+
+    def __init__(self, options: Any = None):
+        self.options = options
+        self._prompt: str = ""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def query(self, prompt: str):
+        self._prompt = prompt
+
+    async def receive_response(self):
+        yield MockAssistantMessage(content=[MockTextBlock(text="working on it")])
+        yield MockResultMessage(
+            total_cost_usd=None,
+            is_error=True,
+            result=None,
+            subtype="error_max_turns",
+        )
+
+
+@pytest.mark.asyncio
+async def test_max_turns_result_raises_typed_error(patch_sdk):
+    """error_max_turns must raise the typed MaxTurnsError carrying the subtype.
+
+    A generic ClaudeAgentError left callers (and the trajectory) unable to
+    distinguish a turn-cap failure from a real backend error.
+    """
+    from daydream.backends.claude import MaxTurnsError
+
+    patch_sdk(MockClaudeSDKClientMaxTurns)
+    backend = ClaudeBackend(model="opus")
+    with pytest.raises(MaxTurnsError) as excinfo:
+        async for _ in backend.execute(Path("/tmp"), "Review this"):
+            pass
+    # Subtype is carried for trajectory recording; still a ClaudeAgentError.
+    assert excinfo.value.subtype == "error_max_turns"
+    assert isinstance(excinfo.value, ClaudeAgentError)
+
+
 def test_format_skill_invocation_full_key():
     backend = ClaudeBackend(model="fixture-model")
     result = backend.format_skill_invocation("beagle-python:review-python")

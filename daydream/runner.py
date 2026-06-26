@@ -74,7 +74,13 @@ from daydream.phases import (
     revert_uncommitted_changes,
     severity_sorted,
 )
-from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
+from daydream.trajectory import (
+    DaydreamPhase,
+    DaydreamRunFlow,
+    TrajectoryRecorder,
+    default_trajectory_path,
+    phase_scope,
+)
 from daydream.ui import (
     SummaryData,
     phase_subtitle,
@@ -657,7 +663,8 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         await phase_fetch_pr_feedback(review_backend, work, pr_number, bot)
 
         try:
-            feedback_items = await phase_parse_feedback(parse_backend, work)
+            async with phase_scope(DaydreamPhase.PARSE):
+                feedback_items = await phase_parse_feedback(parse_backend, work)
         except ValueError:
             print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
             return 1
@@ -669,12 +676,13 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         # Fix sequentially to avoid concurrent access to one mutable backend.
         results: list[FixResult] = []
         total_items = len(feedback_items)
-        for idx, item in enumerate(feedback_items, start=1):
-            try:
-                await phase_fix(fix_backend, work, item, idx, total_items)
-                results.append((item, True, None))
-            except Exception as e:
-                results.append((item, False, f"{type(e).__name__}: {e}"))
+        async with phase_scope(DaydreamPhase.FIX):
+            for idx, item in enumerate(feedback_items, start=1):
+                try:
+                    await phase_fix(fix_backend, work, item, idx, total_items)
+                    results.append((item, True, None))
+                except Exception as e:
+                    results.append((item, False, f"{type(e).__name__}: {e}"))
 
         successful = [r for r in results if r[1]]
         failed = [r for r in results if not r[1]]
@@ -867,29 +875,32 @@ async def _run_review_or_comment(
                 print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
                 explore_backend = _resolve_backend(config, "exploration", backend_cache)
                 print_dim(console, f"Exploration model: {explore_backend.model}")
-                config.exploration_context = await safe_explore(
-                    pre_scan,
-                    explore_backend,
-                    target_dir,
-                    diff,
-                    config.exploration_depth,
-                    diff_ref=_compute_diff_ref(target_dir),
-                )
+                async with phase_scope(DaydreamPhase.EXPLORATION):
+                    config.exploration_context = await safe_explore(
+                        pre_scan,
+                        explore_backend,
+                        target_dir,
+                        diff,
+                        config.exploration_depth,
+                        diff_ref=_compute_diff_ref(target_dir),
+                    )
 
         # Materialise exploration to disk so phase prompts can reference files.
         exploration_dir: Path | None = None
         if config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
 
-        intent_summary = await phase_understand_intent(
-            backend, work, diff_path, log, branch,
-            exploration_dir=exploration_dir,
-        )
+        async with phase_scope(DaydreamPhase.INTENT):
+            intent_summary = await phase_understand_intent(
+                backend, work, diff_path, log, branch,
+                exploration_dir=exploration_dir,
+            )
 
-        issues = await phase_alternative_review(
-            backend, work, diff_path, intent_summary,
-            exploration_dir=exploration_dir,
-        )
+        async with phase_scope(DaydreamPhase.ALTERNATIVES):
+            issues = await phase_alternative_review(
+                backend, work, diff_path, intent_summary,
+                exploration_dir=exploration_dir,
+            )
 
         # Phase A artifact emission (--findings-out, review only); before the
         # zero-issues early return.
@@ -908,11 +919,12 @@ async def _run_review_or_comment(
         skip_plan = post_to_pr and not config.plan
         try:
             if not skip_plan:
-                _, plan_data = await phase_generate_plan(
-                    backend, work, diff_path, intent_summary, issues,
-                    exploration_dir=exploration_dir,
-                    auto_select_all=post_to_pr,
-                )
+                async with phase_scope(DaydreamPhase.PLAN):
+                    _, plan_data = await phase_generate_plan(
+                        backend, work, diff_path, intent_summary, issues,
+                        exploration_dir=exploration_dir,
+                        auto_select_all=post_to_pr,
+                    )
         finally:
             exploration_cleanup = target_dir / ".daydream" / "exploration"
             if exploration_cleanup.is_dir():
@@ -1076,13 +1088,15 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 print_iteration_divider(console, iteration, config.max_iterations)
 
             assert skill is not None, "skill must be set when starting at review phase"
-            await phase_review(
-                review_backend, work, skill, diff_base=diff_base,
-                exploration_dir=exploration_dir,
-                exclude=config.ignore_paths,
-            )
+            async with phase_scope(DaydreamPhase.REVIEW):
+                await phase_review(
+                    review_backend, work, skill, diff_base=diff_base,
+                    exploration_dir=exploration_dir,
+                    exclude=config.ignore_paths,
+                )
 
-            items = await phase_parse_feedback(parse_backend, work)
+            async with phase_scope(DaydreamPhase.PARSE):
+                items = await phase_parse_feedback(parse_backend, work)
 
             if not items:
                 print_info(console, f"Clean review on iteration {iteration}")
@@ -1094,11 +1108,13 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
             print_dim(console, f"Model: {fix_backend.model}")
             fixes_count = 0
-            for i, item in enumerate(items, 1):
-                await phase_fix(fix_backend, work, item, i, len(items))
-                fixes_count += 1
+            async with phase_scope(DaydreamPhase.FIX):
+                for i, item in enumerate(items, 1):
+                    await phase_fix(fix_backend, work, item, i, len(items))
+                    fixes_count += 1
 
-            passed, retries = await phase_test_and_heal(test_backend, work, feedback_items=items)
+            async with phase_scope(DaydreamPhase.TEST):
+                passed, retries = await phase_test_and_heal(test_backend, work, feedback_items=items)
 
             if not passed:
                 print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
@@ -1186,18 +1202,20 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             if config.start_at == "review":
                 assert skill is not None, "skill must be set when starting at review phase"
                 try:
-                    await phase_review(
-                        review_backend, work, skill,
-                        exploration_dir=exploration_dir,
-                        exclude=config.ignore_paths,
-                    )
+                    async with phase_scope(DaydreamPhase.REVIEW):
+                        await phase_review(
+                            review_backend, work, skill,
+                            exploration_dir=exploration_dir,
+                            exclude=config.ignore_paths,
+                        )
                 except MissingSkillError as e:
                     _print_missing_skill_error(e.skill_name)
                     return 1
 
             if config.start_at in ("review", "parse", "fix"):
                 try:
-                    feedback_items = await phase_parse_feedback(parse_backend, work)
+                    async with phase_scope(DaydreamPhase.PARSE):
+                        feedback_items = await phase_parse_feedback(parse_backend, work)
                 except ValueError as exc:
                     print_error(console, "Phase 2 Error", str(exc))
                     print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
@@ -1209,15 +1227,17 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 if feedback_items:
                     print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
                     print_dim(console, f"Model: {fix_backend.model}")
-                    for i, item in enumerate(feedback_items, 1):
-                        await phase_fix(fix_backend, work, item, i, len(feedback_items))
-                        fixes_applied += 1
+                    async with phase_scope(DaydreamPhase.FIX):
+                        for i, item in enumerate(feedback_items, 1):
+                            await phase_fix(fix_backend, work, item, i, len(feedback_items))
+                            fixes_applied += 1
                 else:
                     print_info(console, "No feedback items found, skipping fix phase")
 
-            tests_passed, test_retries = await phase_test_and_heal(
-                test_backend, work, feedback_items=feedback_items
-            )
+            async with phase_scope(DaydreamPhase.TEST):
+                tests_passed, test_retries = await phase_test_and_heal(
+                    test_backend, work, feedback_items=feedback_items
+                )
             iteration = 1
 
         print_summary(

@@ -93,6 +93,21 @@ class ClaudeAgentError(Exception):
     """
 
 
+class MaxTurnsError(ClaudeAgentError):
+    """Raised when the Claude agent run terminates by hitting the turn cap.
+
+    A subtype of :class:`ClaudeAgentError` so existing ``except
+    ClaudeAgentError`` handlers keep working, while callers that care about
+    the max-turns case specifically can catch it and record/surface it
+    distinctly. Carries the SDK ``subtype`` (``"error_max_turns"``) so the
+    trajectory recorder can stamp it into the ATIF archive.
+    """
+
+    def __init__(self, message: str, *, subtype: str = "error_max_turns") -> None:
+        super().__init__(message)
+        self.subtype = subtype
+
+
 def _is_read_only_command(cmd: str) -> bool:
     """Return True only if *cmd* is a single allowlisted read-only command.
 
@@ -343,6 +358,11 @@ class ClaudeBackend:
                     elif isinstance(msg, ResultMessage):
                         if msg.is_error:
                             detail = msg.result or msg.subtype or "unknown error"
+                            if msg.subtype == "error_max_turns":
+                                raise MaxTurnsError(
+                                    f"Claude agent run failed: {detail}",
+                                    subtype="error_max_turns",
+                                )
                             raise ClaudeAgentError(f"Claude agent run failed: {detail}")
                         if msg.structured_output is not None:
                             structured_result = msg.structured_output

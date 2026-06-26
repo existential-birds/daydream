@@ -48,6 +48,10 @@ _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+) b/", re.MULTILINE)
 
 _SPECIALIST_TIMEOUT_SECONDS = 300  # 5 minutes
 
+# Cap subagents at 15 turns: on large repos they otherwise exhaust their
+# context window and lose track of the task (D-06 graceful degradation).
+EXPLORATION_MAX_TURNS = 15
+
 
 EXPLORATION_ENVELOPE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -238,9 +242,7 @@ async def pre_scan(
 
     results: dict[str, Any] = {}
 
-    # Cap subagents at 15 turns: on large repos they otherwise exhaust their
-    # context window and lose track of the task (D-06 graceful degradation).
-    specialist_max_turns = 15
+    specialist_max_turns = EXPLORATION_MAX_TURNS
     recorder = get_current_recorder()
 
     async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
