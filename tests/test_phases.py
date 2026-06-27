@@ -274,8 +274,8 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(tmp_pa
     assert "the contract wins" in fix_prompt
 
 
-def _capturing_backend_cls(captured_prompts, *, concise_mode):
-    """Build a CapturingBackend class with the given concise_mode flag."""
+def _capturing_backend_cls(captured_prompts, *, concise_fix_prompts):
+    """Build a CapturingBackend class with the given concise_fix_prompts flag."""
 
     class CapturingBackend:
         model = "test-model"
@@ -294,13 +294,13 @@ def _capturing_backend_cls(captured_prompts, *, concise_mode):
         def format_skill_invocation(self, skill_key, args=""):
             return f"/{skill_key}"
 
-    CapturingBackend.concise_mode = concise_mode
+    CapturingBackend.concise_fix_prompts = concise_fix_prompts
     return CapturingBackend
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_concise_mode_adds_directive(tmp_path, monkeypatch, make_work):
-    """phase_fix appends a CONCISE MODE directive when backend.concise_mode is True."""
+async def test_phase_fix_concise_fix_prompts_adds_directive(tmp_path, monkeypatch, make_work):
+    """phase_fix appends a CONCISE MODE directive when backend.concise_fix_prompts is True."""
     from daydream.phases import phase_fix
 
     monkeypatch.setattr("daydream.phases.print_fix_progress", lambda *a, **kw: None)
@@ -308,7 +308,7 @@ async def test_phase_fix_concise_mode_adds_directive(tmp_path, monkeypatch, make
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
 
     captured_prompts: list[str] = []
-    backend = _capturing_backend_cls(captured_prompts, concise_mode=True)()
+    backend = _capturing_backend_cls(captured_prompts, concise_fix_prompts=True)()
     item = {"id": 1, "description": "Off-by-one", "file": "src/handler.py", "line": 42}
 
     await phase_fix(backend, make_work(tmp_path), item, 1, 1)
@@ -321,7 +321,7 @@ async def test_phase_fix_concise_mode_adds_directive(tmp_path, monkeypatch, make
 
 @pytest.mark.asyncio
 async def test_phase_fix_default_backend_no_concise_directive(tmp_path, monkeypatch, make_work):
-    """phase_fix omits the CONCISE MODE directive when backend.concise_mode is False."""
+    """phase_fix omits the CONCISE MODE directive when backend.concise_fix_prompts is False."""
     from daydream.phases import phase_fix
 
     monkeypatch.setattr("daydream.phases.print_fix_progress", lambda *a, **kw: None)
@@ -329,7 +329,7 @@ async def test_phase_fix_default_backend_no_concise_directive(tmp_path, monkeypa
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
 
     captured_prompts: list[str] = []
-    backend = _capturing_backend_cls(captured_prompts, concise_mode=False)()
+    backend = _capturing_backend_cls(captured_prompts, concise_fix_prompts=False)()
     item = {"id": 1, "description": "Off-by-one", "file": "src/handler.py", "line": 42}
 
     await phase_fix(backend, make_work(tmp_path), item, 1, 1)
@@ -348,7 +348,7 @@ async def test_phase_fix_no_commit_message_references(tmp_path, monkeypatch, mak
     monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
 
     captured_prompts: list[str] = []
-    backend = _capturing_backend_cls(captured_prompts, concise_mode=False)()
+    backend = _capturing_backend_cls(captured_prompts, concise_fix_prompts=False)()
     # Exercise both the contradicts-verdict and intent branches so every former
     # commit-message reference is covered by the captured prompt.
     item = {
@@ -377,11 +377,12 @@ def test_build_fix_prompt_concise_mode():
         [{"file": "src/a.py"}],
         concise_mode=True,
     )
+    assert "CONCISE MODE" in prompt
     assert "Apply the fix directly" in prompt
-    assert "do not explain your approach" in prompt
+    assert "Output only the tool calls needed to apply the fix" in prompt
 
     prompt_default = _build_fix_prompt("test output failed", [{"file": "src/a.py"}])
-    assert "do not explain your approach" not in prompt_default
+    assert "CONCISE MODE" not in prompt_default
 
 
 @pytest.mark.asyncio
@@ -561,6 +562,27 @@ async def test_phase_fix_batched_prompt_lists_all_findings(tmp_path, monkeypatch
     # Shared scope/precedence guardrails carried over from phase_fix.
     assert "Anchor the change" in prompt
     assert "the contract wins" in prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_batched_concise_fix_prompts_adds_directive(tmp_path, monkeypatch, make_work):
+    """Batched same-file fixes carry backend concise-fix-prompt guidance."""
+    from daydream.phases import phase_fix_batched
+
+    _silence_fix_output(monkeypatch)
+    backend = _CapturingBatchBackend()
+    backend.concise_fix_prompts = True
+    items = [
+        {"id": 1, "description": "Off-by-one in loop bound", "file": "src/handler.py", "line": 42},
+        {"id": 2, "description": "Unchecked None deref", "file": "src/handler.py", "line": 88},
+    ]
+
+    await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
+
+    assert len(backend.prompts) == 1
+    prompt = backend.prompts[0]
+    assert "CONCISE MODE" in prompt
+    assert "Apply the fix directly" in prompt
 
 
 @pytest.mark.asyncio

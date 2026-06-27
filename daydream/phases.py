@@ -65,6 +65,23 @@ VERIFY_MAX_TURNS = 40
 _PR_BODY_MAX_CHARS = 8000
 
 
+_FIX_CONCISE_STYLE = (
+    "CONCISE MODE: Apply the fix directly. Do not explain your reasoning "
+    "unless blocked. Do not include a commit message or justification unless "
+    "explicitly asked. Output only the tool calls needed to apply the fix."
+)
+
+
+def _backend_concise_fix_prompts(backend: Backend) -> bool:
+    return bool(getattr(backend, "concise_fix_prompts", False))
+
+
+def _build_fix_style_suffix(concise_fix_prompts: bool) -> str:
+    if not concise_fix_prompts:
+        return ""
+    return f"\n{_FIX_CONCISE_STYLE}\n"
+
+
 def _build_fix_prompt(
     test_output: str,
     feedback_items: list[dict[str, Any]] | None = None,
@@ -104,7 +121,7 @@ def _build_fix_prompt(
             parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
 
     if concise_mode:
-        parts.append("\nFix the failures. Apply the fix directly; do not explain your approach.")
+        parts.append("\nFix the failures.")
     else:
         parts.append("\nAnalyze the failures and fix them.")
     if feedback_items:
@@ -120,7 +137,8 @@ def _build_fix_prompt(
                 "another file, edit it and say which and why."
             )
 
-    return "\n".join(parts)
+    return "\n".join(parts) + _build_fix_style_suffix(concise_mode)
+
 
 
 def _build_setup_investigator_prompt(test_output: str) -> str:
@@ -1844,12 +1862,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
     prompt += _build_intent_suffix(intent_path)
     prompt += _build_verifier_suffix(item)
 
-    if getattr(backend, "concise_mode", False):
-        prompt += (
-            "\nCONCISE MODE: Apply the fix directly. Do not explain your reasoning "
-            "unless blocked. Do not include a commit message or justification unless "
-            "explicitly asked. Output only the tool calls needed to apply the fix.\n"
-        )
+    prompt += _build_fix_style_suffix(_backend_concise_fix_prompts(backend))
 
     if console_lock is not None:
         # Concurrent path: suppress the Live/LiveToolPanelRegistry renderer in
@@ -1955,6 +1968,8 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
         verifier_suffix = _build_verifier_suffix(item)
         if verifier_suffix:
             prompt += f"\nVerifier guidance for finding {idx}:{verifier_suffix}"
+
+    prompt += _build_fix_style_suffix(_backend_concise_fix_prompts(backend))
 
     # Scale budgets linearly with the number of findings so a batched group of N
     # findings gets the same per-finding headroom as a single-finding turn.
@@ -2279,7 +2294,7 @@ async def phase_test_and_heal(
             print_info(console, "Launching agent to fix test failures (auto)...")
             fix_prompt = _build_fix_prompt(
                 output, feedback_items, repo=work.repo,
-                concise_mode=getattr(backend, "concise_mode", False),
+                concise_mode=_backend_concise_fix_prompts(backend),
             )
             _, _, _ = await run_agent(
                 backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
@@ -2337,7 +2352,7 @@ async def phase_test_and_heal(
             print_info(console, "Launching agent to fix test failures...")
             fix_prompt = _build_fix_prompt(
                 output, feedback_items, repo=work.repo,
-                concise_mode=getattr(backend, "concise_mode", False),
+                concise_mode=_backend_concise_fix_prompts(backend),
             )
             _, _, _ = await run_agent(
                 backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,

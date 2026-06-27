@@ -69,7 +69,7 @@ class CodexBackend:
     Translates Codex JSONL events into the unified AgentEvent stream.
     """
 
-    concise_mode = False
+    concise_fix_prompts = False
 
     def __init__(self, model: str):
         self.model = model

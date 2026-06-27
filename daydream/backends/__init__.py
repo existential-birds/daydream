@@ -255,10 +255,10 @@ class Backend(Protocol):
     run concurrently. When absent, the caller falls back to 4 via
     ``getattr(backend, "fanout_concurrency", 4)``.
 
-    Optional extension: backends may expose ``concise_mode: bool`` to request
-    verbosity-suppressing fix-phase prompts (set True for pi/GLM, which produces
-    verbose reasoning). When absent, the caller falls back to False via
-    ``getattr(backend, "concise_mode", False)``.
+    Optional extension: backends may expose ``concise_fix_prompts: bool`` to
+    request verbosity-suppressing fix-phase prompts (set True for pi/GLM, which
+    produces verbose reasoning). When absent, the caller falls back to False via
+    ``getattr(backend, "concise_fix_prompts", False)``.
     """
 
     model: str
