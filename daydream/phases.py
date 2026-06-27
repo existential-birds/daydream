@@ -73,10 +73,12 @@ _FIX_CONCISE_STYLE = (
 
 
 def _backend_concise_fix_prompts(backend: Backend) -> bool:
+    """Return the backend's concise-fix-prompt flag, defaulting to False."""
     return bool(getattr(backend, "concise_fix_prompts", False))
 
 
 def _build_fix_style_suffix(concise_fix_prompts: bool) -> str:
+    """Return the concise-mode style suffix, or empty string when disabled."""
     if not concise_fix_prompts:
         return ""
     return f"\n{_FIX_CONCISE_STYLE}\n"
