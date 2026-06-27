@@ -1008,6 +1008,19 @@ def test_is_retryable_error_message_unknown_pi_error():
     assert _is_retryable_error_message("Unknown Pi error") is False
 
 
+def test_is_retryable_error_message_stream_drop_signatures():
+    """Stream-drop signatures are classified as retryable (z.ai/GLM connection drops)."""
+    for sig in (
+        "terminated",
+        "ECONNRESET",
+        "connection reset",
+        "socket hang up",
+        "premature close",
+        "EPIPE",
+    ):
+        assert _is_retryable_error_message(sig) is True, f"Expected {sig!r} to be retryable"
+
+
 # ---------------------------------------------------------------------------
 # _is_retryable_exit_code
 # ---------------------------------------------------------------------------
