@@ -22,6 +22,7 @@ class _PromptPaths(TypedDict):
     intent_path: Path
     alternatives_path: Path
     output_path: Path
+    cwd: Path
 
 
 def _paths(tmp_path: Path) -> _PromptPaths:
@@ -30,6 +31,7 @@ def _paths(tmp_path: Path) -> _PromptPaths:
         "intent_path": tmp_path / ".daydream" / "deep" / "intent.md",
         "alternatives_path": tmp_path / ".daydream" / "deep" / "alternatives.json",
         "output_path": tmp_path / ".daydream" / "deep" / "stack-python-review.md",
+        "cwd": tmp_path,
     }
 
 
@@ -122,8 +124,13 @@ def test_prompts_embed_no_full_file_contents(tmp_path: Path) -> None:
         files=["api.py"],
         **p,
     )
-    # Heuristic: no line longer than 400 chars (an embedded diff would blow this up)
-    assert all(len(line) < 400 for line in out.splitlines())
+    # Heuristic: no line longer than 400 chars (an embedded diff would blow this
+    # up). The cwd-grounding instruction (issue #221) is one fixed long line and
+    # is not file content, so exclude it from this check.
+    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+
+    grounding = CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path)
+    assert all(len(line) < 400 for line in out.splitlines() if line != grounding)
 
 
 def test_per_stack_prompt_points_at_diff_path(tmp_path: Path) -> None:
@@ -317,6 +324,7 @@ def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) 
         intent_path=tmp_path / "intent.md",
         alternatives_path=tmp_path / "alternatives.json",
         output_path=tmp_path / "out.md",
+        cwd=tmp_path,
     )
     assert "Focus ONLY on these files" not in prompt
     assert "Do NOT review files from other stacks" not in prompt
@@ -336,6 +344,7 @@ def test_build_structural_prompt_omits_exploration_pointer(tmp_path: Path) -> No
         alternatives_path=tmp_path / "alternatives.json",
         output_path=tmp_path / "out.md",
         exploration_dir=tmp_path / "exploration",
+        cwd=tmp_path,
     )
     assert "exploration" not in prompt.lower()
 
@@ -500,3 +509,70 @@ def test_structural_prompt_keeps_diff_pointer_and_read_freedom(tmp_path: Path) -
     assert "read any file in the codebase" in out
     assert str(p["diff_path"]) in out  # keeps its pointer
     assert "Read it directly" in out   # structural prompt unchanged
+
+
+# =============================================================================
+# Issue #221 — cwd grounding injected into every deep prompt builder
+# =============================================================================
+
+
+def test_per_stack_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
+    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
+    assert str(tmp_path) in out
+
+
+def test_structural_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_structural_prompt
+    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+
+    p = _paths(tmp_path)
+    out = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
+        files=["api.py"],
+        **p,
+    )
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
+
+
+def test_arbiter_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_arbiter_prompt
+    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+
+    out = build_arbiter_prompt(
+        arbiter_input_path=tmp_path / "arbiter-input.json",
+        diff_path=tmp_path / "diff.patch",
+        intent_path=tmp_path / "intent.md",
+        alternatives_path=tmp_path / "alternatives.json",
+        cwd=tmp_path,
+    )
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
+
+
+def test_generic_fallback_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
+    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+
+    p = _paths(tmp_path)
+    out = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
+
+
+def test_verification_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_verification_prompt
+    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+
+    out = build_verification_prompt(
+        items=[{"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
+                "line": 10, "description": "x", "rationale": "y"}],
+        cwd=tmp_path,
+        output_path=tmp_path / "verdicts.json",
+    )
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out

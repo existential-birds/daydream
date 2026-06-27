@@ -261,25 +261,33 @@ async def pre_scan(
     # they treat the list as "files to process" and fan out a tool call per
     # entry, so the import-expanded static_files (10K+ on monorepos) would make
     # them run 50+ minutes. The dependency-tracer still gets static_files.
-    changed_paths = sorted({m.group(1) for m in _DIFF_HEADER_RE.finditer(diff_text)})
+    #
+    # Paths handed to specialists are cwd-absolute (rooted at repo_root, the
+    # actual worktree). In a linked worktree the agent must not re-root a bare
+    # relative path via git topology, which points at the sibling main worktree.
+    changed_paths = sorted({str(repo_root / m.group(1)) for m in _DIFF_HEADER_RE.finditer(diff_text)})
+    static_files_abs = [
+        FileInfo(path=str(repo_root / f.path), role=f.role, summary=f.summary) for f in static_files
+    ]
 
     with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS):
         async with anyio.create_task_group() as tg:
             if tier == "single":
-                dep_prompt = build_dependency_tracer_prompt(static_files, diff_ref)
+                dep_prompt = build_dependency_tracer_prompt(static_files_abs, diff_ref, cwd=repo_root)
                 tg.start_soon(_run_specialist, "dependency_tracer", dep_prompt, DEPENDENCY_TRACER_SCHEMA)
             else:  # parallel
                 tg.start_soon(
                     _run_specialist, "pattern_scanner",
-                    build_pattern_scanner_prompt(changed_paths, diff_ref), PATTERN_SCANNER_SCHEMA,
+                    build_pattern_scanner_prompt(changed_paths, diff_ref, cwd=repo_root), PATTERN_SCANNER_SCHEMA,
                 )
                 tg.start_soon(
                     _run_specialist, "dependency_tracer",
-                    build_dependency_tracer_prompt(static_files, diff_ref), DEPENDENCY_TRACER_SCHEMA,
+                    build_dependency_tracer_prompt(static_files_abs, diff_ref, cwd=repo_root),
+                    DEPENDENCY_TRACER_SCHEMA,
                 )
                 tg.start_soon(
                     _run_specialist, "test_mapper",
-                    build_test_mapper_prompt(changed_paths, diff_ref), TEST_MAPPER_SCHEMA,
+                    build_test_mapper_prompt(changed_paths, diff_ref, cwd=repo_root), TEST_MAPPER_SCHEMA,
                 )
 
     if recorder is not None:

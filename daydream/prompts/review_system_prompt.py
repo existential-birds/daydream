@@ -7,6 +7,9 @@ LLM agents with tool use and code execution environments.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
+
+from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
 
 @dataclass
@@ -20,7 +23,7 @@ class CodebaseMetadata:
     changed_files: list[str] | None = None  # For PR reviews
 
 
-def build_review_system_prompt(metadata: CodebaseMetadata) -> str:
+def build_review_system_prompt(metadata: CodebaseMetadata, *, cwd: Path) -> str:
     """
     Build the system prompt for the code review agent.
 
@@ -32,10 +35,16 @@ def build_review_system_prompt(metadata: CodebaseMetadata) -> str:
 
     Args:
         metadata: Information about the codebase to review
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
 
     Returns:
         Complete system prompt string
     """
+    grounding_section = f"""
+## Working Directory
+
+{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
+"""
     languages_str = ", ".join(metadata.languages) if metadata.languages else "Unknown"
     largest_files_str = "\n".join(
         f"  - {path}: {tokens:,} tokens" for path, tokens in metadata.largest_files[:5]
@@ -78,7 +87,7 @@ full content and return summarized findings that fit in your context window.
 
 ### Largest Files
 {largest_files_str}
-{changed_files_section}
+{changed_files_section}{grounding_section}
 ---
 
 ## Available Data Structures
@@ -354,6 +363,8 @@ def build_pr_review_prompt(
     metadata: CodebaseMetadata,
     pr_title: str,
     pr_description: str,
+    *,
+    cwd: Path,
 ) -> str:
     """
     Build a specialized prompt for PR-focused reviews.
@@ -364,11 +375,12 @@ def build_pr_review_prompt(
         metadata: Codebase metadata (should include changed_files)
         pr_title: Title of the pull request
         pr_description: Description/body of the pull request
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
 
     Returns:
         Complete system prompt for PR review
     """
-    base_prompt = build_review_system_prompt(metadata)
+    base_prompt = build_review_system_prompt(metadata, cwd=cwd)
 
     pr_context = f"""
 ---
@@ -405,6 +417,8 @@ def get_review_prompt(
     changed_files: list[str] | None = None,
     pr_title: str | None = None,
     pr_description: str | None = None,
+    *,
+    cwd: Path,
 ) -> str:
     """
     Convenience function to generate a review prompt.
@@ -417,6 +431,7 @@ def get_review_prompt(
         changed_files: Files changed in this PR (optional)
         pr_title: PR title for PR reviews (optional)
         pr_description: PR description for PR reviews (optional)
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
 
     Returns:
         Complete system prompt string
@@ -434,6 +449,7 @@ def get_review_prompt(
             metadata=metadata,
             pr_title=pr_title,
             pr_description=pr_description or "",
+            cwd=cwd,
         )
 
-    return build_review_system_prompt(metadata)
+    return build_review_system_prompt(metadata, cwd=cwd)

@@ -21,7 +21,11 @@ from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk.types import AgentDefinition
 
+from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from daydream.exploration import FileInfo
 
 
@@ -152,7 +156,7 @@ Emit a FileInfo entry with role="test" for each test file you find.
 
 
 # Dynamic prompt builders (per-run prompts injecting diff + affected files)
-def build_pattern_scanner_prompt(affected_files: list[str], diff_ref: str) -> str:
+def build_pattern_scanner_prompt(affected_files: list[str], diff_ref: str, *, cwd: Path) -> str:
     """Build the per-run pattern-scanner prompt.
 
     The prompt passes the affected file list and a diff ref. The specialist
@@ -162,6 +166,7 @@ def build_pattern_scanner_prompt(affected_files: list[str], diff_ref: str) -> st
     Args:
         affected_files: Paths of files touched by the diff under review.
         diff_ref: Git ref (e.g. base branch or SHA) the specialist can diff against.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
 
     Returns:
         The fully-rendered prompt string, including the JSON schema block.
@@ -178,6 +183,8 @@ Instructions:
 - Read any other house-style config files you find (ruff.toml, .editorconfig, tsconfig.json, go.mod, Cargo.toml).
 - Infer conventions from the code itself where config files are silent.
 
+{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
+
 <affected_files>
 {files_block}
 </affected_files>
@@ -190,7 +197,7 @@ work file-by-file so your context stays small.
 """
 
 
-def build_dependency_tracer_prompt(affected_files: list[FileInfo], diff_ref: str) -> str:
+def build_dependency_tracer_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
     """Build the per-run dependency-tracer prompt.
 
     The prompt passes the affected file list and a diff ref. The specialist
@@ -200,6 +207,7 @@ def build_dependency_tracer_prompt(affected_files: list[FileInfo], diff_ref: str
     Args:
         affected_files: FileInfo entries for files reachable from the diff, each carrying a `path` and `role`.
         diff_ref: Git ref the specialist can diff against when probing call sites.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
 
     Returns:
         The fully-rendered prompt string, including the JSON schema block.
@@ -213,6 +221,8 @@ list beyond the static-resolved imports by grepping for call sites and
 reading the implementations. For every import or call edge you confirm,
 emit a Dependency record.
 
+{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
+
 <affected_files>
 {files_block}
 </affected_files>
@@ -225,7 +235,7 @@ work file-by-file so your context stays small.
 """
 
 
-def build_test_mapper_prompt(affected_files: list[str], diff_ref: str) -> str:
+def build_test_mapper_prompt(affected_files: list[str], diff_ref: str, *, cwd: Path) -> str:
     """Build the per-run test-mapper prompt.
 
     The prompt passes the affected file list and a diff ref. The specialist
@@ -235,6 +245,7 @@ def build_test_mapper_prompt(affected_files: list[str], diff_ref: str) -> str:
     Args:
         affected_files: Paths of files touched by the diff under review.
         diff_ref: Git ref the specialist can diff against when locating test files.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
 
     Returns:
         The fully-rendered prompt string, including the JSON schema block.
@@ -247,6 +258,8 @@ def build_test_mapper_prompt(affected_files: list[str], diff_ref: str) -> str:
 source file using conventional path mapping (tests/test_X.py, *.test.ts,
 *_test.go, tests/<crate>_test.rs). Emit a FileInfo with role="test" for
 each test file you find.
+
+{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
 
 <affected_files>
 {files_block}
