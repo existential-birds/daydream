@@ -877,10 +877,32 @@ def log_shas(repo: Path, ref: str, *, since: str) -> list[str]:
         (newest first). Empty list on any soft failure.
     """
     try:
-        proc = _run_git(repo, ["log", "--pretty=%H", f"{since}..{ref}"], timeout=10)
-    except GitError:
+        proc = _run_git(repo, ["log", "--pretty=%H", f"{since}..{ref}"], timeout=30)
+    except GitTimeoutError:
+        _logger.warning(
+            "log_shas: git log %s..%s timed out after retries; "
+            "returning empty list",
+            since,
+            ref,
+        )
+        return []
+    except GitError as exc:
+        _logger.warning(
+            "log_shas: git log %s..%s failed: %s; "
+            "returning empty list",
+            since,
+            ref,
+            exc,
+        )
         return []
     if proc.returncode != 0:
+        _logger.warning(
+            "log_shas: git log %s..%s exited non-zero (%d); "
+            "returning empty list",
+            since,
+            ref,
+            proc.returncode,
+        )
         return []
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
@@ -910,12 +932,21 @@ def log_shas_since(repo: Path, head: str, base: str) -> list[str]:
             ["log", "--pretty=%H", f"{head}..{base}"],
             timeout=30,
         )
-    except GitError:
+    except GitTimeoutError:
         _logger.warning(
-            "log_shas_since: git log %s..%s failed after retries; "
+            "log_shas_since: git log %s..%s timed out after retries; "
             "returning empty window (fix-applied verdict may degrade to unknown)",
             head,
             base,
+        )
+        return []
+    except GitError as exc:
+        _logger.warning(
+            "log_shas_since: git log %s..%s failed: %s; "
+            "returning empty window (fix-applied verdict may degrade to unknown)",
+            head,
+            base,
+            exc,
         )
         return []
     if proc.returncode != 0:

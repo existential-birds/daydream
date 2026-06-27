@@ -1026,14 +1026,6 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
         help="Directory for cached repo clones (default: <cache-dir>/repos/).",
     )
     parser.add_argument(
-        "--fix-applied-window-days",
-        type=int,
-        default=30,
-        dest="fix_applied_window_days",
-        metavar="N",
-        help="Upstream-commit lookback window for the fix-applied cascade (default: 30).",
-    )
-    parser.add_argument(
         "--gh-spacing-sec",
         type=float,
         default=0.8,
@@ -1069,9 +1061,6 @@ def _handle_harvest_command(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     console = create_console()
-    if args.fix_applied_window_days < 1:
-        print_error(console, "Invalid --fix-applied-window-days", "Must be >= 1.")
-        return 1
     if args.gh_spacing_sec < 0.0:
         print_error(console, "Invalid --gh-spacing-sec", "Must be >= 0.0.")
         return 1
@@ -1087,7 +1076,6 @@ def _handle_harvest_command(argv: list[str]) -> int:
         cache_dir=cache_dir,
         repo_clone_root=repo_clone_root,
         session_filter=args.session,
-        fix_applied_window_days=args.fix_applied_window_days,
         gh_request_spacing_sec=args.gh_spacing_sec,
     )
     run_harvest = _harvest.run_harvest

@@ -346,7 +346,6 @@ def _safe_fix_applied(
     *,
     changed_files: list[str],
     repo_clone: Path,
-    window_days: int,
 ) -> FixAppliedSignal:
     """Run :func:`fix_applied_signal`, swallowing missing-data errors.
 
@@ -364,7 +363,6 @@ def _safe_fix_applied(
             diff_fetcher=_diff_name_only,
             commits_in_window_fetcher=_commits_in_window,
             file_at_fetcher=_file_at,
-            window_days=window_days,
         )
     except (FileNotFoundError, OSError, GitError):
         return _FIX_APPLIED_STUB
@@ -411,7 +409,6 @@ def _build_rubric_pr(
     *,
     gh_api: Any,
     repo_clone: Path,
-    window_days: int,
     pr_merge: PRMergeSignal | None = None,
 ) -> Rubric:
     """Compose all four signals for a row that originated from a PR.
@@ -431,7 +428,6 @@ def _build_rubric_pr(
         signal_row,
         changed_files=changed_files,
         repo_clone=repo_clone,
-        window_days=window_days,
     )
     return Rubric(
         pr_merge=pr_merge,
@@ -567,7 +563,6 @@ def build_annotation(
     archive_dir: Path,
     gh_api: Any,
     repo_clone: Path,
-    window_days: int,
     clone_resolved: bool = True,
 ) -> AnnotationPayload:
     """Build one run's bitemporal annotation payload (pure of DB writes).
@@ -607,7 +602,6 @@ def build_annotation(
             the PR posterior + reviewer signals; unused on the local-branch path.
         repo_clone: Local clone root for the fix-applied / local-commit
             cascades.
-        window_days: Lookback window for the fix-applied cascade.
         clone_resolved: Whether a real git working tree was obtained for the
             row. When ``False`` the local-branch posterior is forced to
             ``"unknown"`` rather than risking a ``"rejected"`` mislabel from a
@@ -656,7 +650,6 @@ def build_annotation(
                 row,
                 gh_api=gh_api,
                 repo_clone=repo_clone,
-                window_days=window_days,
                 pr_merge=_pr_merge,
             )
             valid_at = rubric.pr_merge.merged_at
@@ -822,8 +815,6 @@ class HarvestConfig:
             ``cache_dir / 'repos'`` when unset (or ``None`` if ``cache_dir``
             is also unset).
         session_filter: Optional ``session_id`` prefix to restrict the queue.
-        fix_applied_window_days: Lookback window for upstream commits
-            considered by the fix-applied cascade.
         gh_request_spacing_sec: Sleep duration between rows to spread
             ``gh api`` calls under GitHub's secondary rate limits.
     """
@@ -833,7 +824,6 @@ class HarvestConfig:
     cache_dir: Path | None = None
     repo_clone_root: Path | None = None
     session_filter: str | None = None
-    fix_applied_window_days: int = 30
     gh_request_spacing_sec: float = 0.8
 
 
@@ -953,7 +943,6 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                 archive_dir=config.archive_dir,
                 gh_api=gh_api_callable,
                 repo_clone=row_repo_clone or config.archive_dir,
-                window_days=config.fix_applied_window_days,
                 clone_resolved=row_repo_clone is not None,
             )
             if config.dry_run:

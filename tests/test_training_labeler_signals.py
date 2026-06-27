@@ -64,7 +64,7 @@ def test_pr_merge_signal_no_pr() -> None:
 
 def test_fix_applied_signal_layered_cascade_returns_applied(tmp_path: Path) -> None:
     """Hunk content from diff.patch appears verbatim in a post-head commit
-    on the default branch within window_days."""
+    on the default branch."""
     (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
     row = {
         "repo_slug": "org/repo",
@@ -79,7 +79,6 @@ def test_fix_applied_signal_layered_cascade_returns_applied(tmp_path: Path) -> N
         diff_fetcher=lambda repo, base, head: ["app.py"],
         commits_in_window_fetcher=lambda repo, base, head: ["commit1"],
         file_at_fetcher=lambda repo, path, sha: "foo = 1\n",
-        window_days=30,
     )
     assert isinstance(sig, FixAppliedSignal)
     assert sig.verdict == "applied"
@@ -102,7 +101,6 @@ def test_fix_applied_signal_empty_window_returns_unknown(tmp_path: Path) -> None
         diff_fetcher=lambda repo, base, head: [],
         commits_in_window_fetcher=lambda repo, base, head: [],  # empty window
         file_at_fetcher=lambda repo, path, sha: "",
-        window_days=30,
     )
     assert sig.verdict == "unknown"
 
@@ -122,7 +120,6 @@ def test_fix_applied_signal_no_file_overlap_returns_not_applied(tmp_path: Path) 
         diff_fetcher=lambda repo, base, head: ["unrelated.py"],
         commits_in_window_fetcher=lambda repo, base, head: ["c1"],
         file_at_fetcher=lambda repo, path, sha: "",
-        window_days=30,
     )
     assert sig.verdict == "not_applied"
 
@@ -145,7 +142,6 @@ def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
         diff_fetcher=lambda repo, base, head: ["app.py"],
         commits_in_window_fetcher=lambda repo, base, head: ["c1"],
         file_at_fetcher=lambda repo, path, sha: "foo = 1\nbar = 2\n",
-        window_days=30,
     )
     # 2 of 3 hunks applied → applied
     assert sig.verdict == "applied"

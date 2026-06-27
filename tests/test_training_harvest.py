@@ -175,7 +175,7 @@ def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_pat
            "grounding_rate": 1.0, "changed_files": "[]"}
     ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                            gh_api=_fake_gh_merged("2026-02-01T00:00:00+00:00"),
-                           repo_clone=tmp_path, window_days=30)
+                           repo_clone=tmp_path)
     assert ann.labels == ["accepted"]
     assert ann.valid_at == "2026-02-01T00:00:00+00:00"        # PR merge time (Q2)
     assert ann.composite_reward == json.loads(ann.reward_json)["composite"]
@@ -196,7 +196,7 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
 
     payload = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                                gh_api=_fake_gh_not_merged(),
-                               repo_clone=tmp_path, window_days=30)
+                               repo_clone=tmp_path)
 
     assert payload.labels == ["rejected"]
     assert payload.has_posterior is True
@@ -216,7 +216,7 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path, ar
            "grounding_rate": 1.0, "changed_files": "[]"}
     payload = build_annotation(row, run_dir=run_dir, archive_dir=archive_dir,
                                gh_api=_fake_gh_not_merged_with_reviewer("alice"),
-                               repo_clone=tmp_path, window_days=30)
+                               repo_clone=tmp_path)
     assert payload.labels == ["rejected"]
     assert payload.has_posterior is True
     rb = json.loads(payload.reward_json)
@@ -234,7 +234,7 @@ def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_pat
            "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": None,
            "changed_files": "[]"}
     ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
-                           repo_clone=tmp_path, window_days=30)
+                           repo_clone=tmp_path)
     assert ann.valid_at is None                               # collapses to observed_at on write
     rb = json.loads(ann.reward_json)
     assert rb["axes_present"]["correctness"] is False         # shallow: no verdicts
@@ -292,7 +292,6 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path, arch
         archive_dir=archive_dir,
         gh_api=_fake_gh_not_merged_with_reviewer("alice"),
         repo_clone=tmp_path,
-        window_days=30,
     )
     assert payload.labels == ["rejected"]
     rb = json.loads(payload.reward_json)
@@ -313,7 +312,7 @@ def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(tmp_path, 
            "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
            "changed_files": "[]"}
     p = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
-                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path, window_days=30)
+                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path)
     rb = json.loads(p.reward_json)
     assert rb["posterior_cost"] == pytest.approx(0.2)   # max(0, 1.0 - 0.8)
     assert rb["outcome_prior"] == 0.8 and rb["outcome_prior_n"] == 12
@@ -330,7 +329,7 @@ def test_build_annotation_below_threshold_falls_back_to_default_prior(tmp_path, 
            "changed_files": "[]"}
     rb = json.loads(
         build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
-                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path, window_days=30).reward_json
+                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path).reward_json
     )
     assert rb["outcome_prior"] is None and rb["outcome_prior_n"] == 4  # n recorded; prior None -> 0.5
     assert rb["posterior_cost"] == 0.5
@@ -354,7 +353,7 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path, monkeypatch)
            "head_sha": "h", "archive_path": str(run_dir), "grounding_rate": 1.0,
            "changed_files": "[]"}
     p = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
-                         repo_clone=tmp_path, window_days=30)
+                         repo_clone=tmp_path)
     assert p.reviewer_logins == []
     assert p.labels == ["rejected"]
     assert p.has_posterior is True
@@ -376,7 +375,7 @@ def test_build_annotation_asserts_canonical_version(tmp_path, monkeypatch):
            "changed_files": "[]"}
     with pytest.raises((AssertionError, RuntimeError), match="canonical"):
         build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
-                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path, window_days=30)
+                         gh_api=_fake_gh_not_merged(), repo_clone=tmp_path)
 
 
 def test_assemble_reads_verdicts_and_grounding_from_bronze(tmp_path: Path):

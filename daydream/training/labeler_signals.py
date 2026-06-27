@@ -222,7 +222,6 @@ def fix_applied_signal(
     diff_fetcher: Callable[[Path, str, str], list[str]],
     commits_in_window_fetcher: Callable[[Path, str, str], list[str]],
     file_at_fetcher: Callable[[Path, str, str], str],
-    window_days: int = 30,
 ) -> FixAppliedSignal:
     """Run the layered cascade for "did the recommended fix land upstream?".
 
@@ -249,7 +248,6 @@ def fix_applied_signal(
             review window. Called as ``(repo_clone, head_sha,
             base_branch)``.
         file_at_fetcher: Returns file content at a given SHA.
-        window_days: Lookback window for upstream commits.
 
     Returns:
         :class:`FixAppliedSignal` with ``verdict="unknown"`` when the

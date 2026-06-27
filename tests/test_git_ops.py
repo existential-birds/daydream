@@ -9,6 +9,7 @@ unavailable.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 from pathlib import Path
@@ -1177,8 +1178,6 @@ def test_gh_api_timeout_redacts_authorization_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Timeout must redact the Bearer token in both the retry warning and the error."""
-    import logging
-
     repo = _make_repo_with_main(tmp_path)
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -1295,15 +1294,16 @@ def test_log_shas_since_returns_commits_in_range(tmp_path: Path) -> None:
     _commit(repo, "topic-2")
     shas = git_ops.log_shas_since(repo, "main", "topic")
     assert len(shas) == 2
-    # newest first (git log order)
-    topic2_sha = _git(repo, "rev-parse", "topic").strip()
-    assert shas[0] in topic2_sha or len(shas[0]) == 40
+    # newest first (git log order), exact match
+    tip = _git(repo, "rev-parse", "topic").strip()
+    parent = _git(repo, "rev-parse", "topic^").strip()
+    assert shas == [tip, parent]          # newest first, exact, both entries
+    assert all(len(s) == 40 for s in shas)
 
 
 def test_log_shas_since_warns_on_git_error(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """log_shas_since returns [] and logs a warning on git error."""
     repo = _make_repo_with_main(tmp_path)
-    import logging
 
     with caplog.at_level(logging.WARNING, logger="daydream.git_ops"):
         result = git_ops.log_shas_since(repo, "main", "nonexistent-ref")
