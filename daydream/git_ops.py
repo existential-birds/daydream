@@ -877,28 +877,50 @@ def log_shas(repo: Path, ref: str, *, since: str) -> list[str]:
         (newest first). Empty list on any soft failure.
     """
     try:
-        proc = _run_git(repo, ["log", "--pretty=%H", f"{since}..{ref}"], timeout=10)
-    except GitError:
+        proc = _run_git(repo, ["log", "--pretty=%H", f"{since}..{ref}"], timeout=30)
+    except GitTimeoutError:
+        _logger.warning(
+            "log_shas: git log %s..%s timed out after retries; "
+            "returning empty list",
+            since,
+            ref,
+        )
+        return []
+    except GitError as exc:
+        _logger.warning(
+            "log_shas: git log %s..%s failed: %s; "
+            "returning empty list",
+            since,
+            ref,
+            exc,
+        )
         return []
     if proc.returncode != 0:
+        _logger.warning(
+            "log_shas: git log %s..%s exited non-zero (%d); "
+            "returning empty list",
+            since,
+            ref,
+            proc.returncode,
+        )
         return []
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
-def log_shas_since(repo: Path, head: str, base: str, *, since_days: int) -> list[str]:
-    """Return full SHAs of commits on ``head..base`` within *since_days*.
+def log_shas_since(repo: Path, head: str, base: str) -> list[str]:
+    """Return full SHAs of commits on ``head..base``.
 
-    Equivalent to ``git log --since=<n> days ago --pretty=%H head..base``.
-    Used to bound the upstream review window to commits authored recently
-    enough to be plausibly related to a given patch.
+    The ``head..base`` range already bounds the walk; no ``--since`` date
+    filter is needed (it was redundant and caused timeouts on large
+    monorepos — see #167).
 
-    Soft-failure semantics: returns ``[]`` on any git error or non-zero exit.
+    Soft-failure semantics: returns ``[]`` on git error, but logs a
+    warning so a degraded fix-applied verdict is not silent.
 
     Args:
         repo: Repository working directory.
         head: The divergence point; commits reachable from *head* are excluded.
         base: The tip ref; only commits reachable from *base* are included.
-        since_days: How many days back to search.
 
     Returns:
         List of 40-character SHA strings in ``git log`` output order
@@ -907,12 +929,34 @@ def log_shas_since(repo: Path, head: str, base: str, *, since_days: int) -> list
     try:
         proc = _run_git(
             repo,
-            ["log", f"--since={since_days} days ago", "--pretty=%H", f"{head}..{base}"],
-            timeout=10,
+            ["log", "--pretty=%H", f"{head}..{base}"],
+            timeout=30,
         )
-    except GitError:
+    except GitTimeoutError:
+        _logger.warning(
+            "log_shas_since: git log %s..%s timed out after retries; "
+            "returning empty window (fix-applied verdict may degrade to unknown)",
+            head,
+            base,
+        )
+        return []
+    except GitError as exc:
+        _logger.warning(
+            "log_shas_since: git log %s..%s failed: %s; "
+            "returning empty window (fix-applied verdict may degrade to unknown)",
+            head,
+            base,
+            exc,
+        )
         return []
     if proc.returncode != 0:
+        _logger.warning(
+            "log_shas_since: git log %s..%s exited non-zero (%d); "
+            "returning empty window (fix-applied verdict may degrade to unknown)",
+            head,
+            base,
+            proc.returncode,
+        )
         return []
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 

@@ -220,16 +220,16 @@ def fix_applied_signal(
     changed_files: list[str],
     repo_clone: Path,
     diff_fetcher: Callable[[Path, str, str], list[str]],
-    commits_in_window_fetcher: Callable[[Path, str, str, int], list[str]],
+    commits_in_window_fetcher: Callable[[Path, str, str], list[str]],
     file_at_fetcher: Callable[[Path, str, str], str],
-    window_days: int = 30,
 ) -> FixAppliedSignal:
     """Run the layered cascade for "did the recommended fix land upstream?".
 
     Cascade (see ``/tmp/research-fix-applied.md``):
 
-    1. Compute the commit window via ``commits_in_window_fetcher``. If
-       empty → ``verdict="unknown"``.
+    1. Compute the commit window via ``commits_in_window_fetcher``. The
+       ``head..base`` range already bounds the walk; no date filter is
+       needed (see #167). If empty → ``verdict="unknown"``.
     2. Compute the file overlap between ``changed_files`` and the files
        actually touched by ``diff_fetcher``. If empty → ``not_applied``
        with ``hunks_applied=0`` and ``hunks_total = parsed hunks``.
@@ -246,9 +246,8 @@ def fix_applied_signal(
         diff_fetcher: Returns files touched between ``base`` and ``head``.
         commits_in_window_fetcher: Returns ordered commit SHAs in the
             review window. Called as ``(repo_clone, head_sha,
-            base_branch, window_days)``.
+            base_branch)``.
         file_at_fetcher: Returns file content at a given SHA.
-        window_days: Lookback window for upstream commits.
 
     Returns:
         :class:`FixAppliedSignal` with ``verdict="unknown"`` when the
@@ -274,7 +273,7 @@ def fix_applied_signal(
     hunks = _parse_diff_hunks(diff_patch)
     hunks_total = len(hunks)
 
-    window = commits_in_window_fetcher(repo_clone, head_sha, base_branch, window_days)
+    window = commits_in_window_fetcher(repo_clone, head_sha, base_branch)
     if not window:
         return FixAppliedSignal(
             verdict="unknown",
