@@ -121,6 +121,15 @@ findings and conclusions."""
 _PI_DEFAULT_RETRY_ATTEMPTS = 3
 _PI_DEFAULT_RETRY_BASE_DELAY = 2.0
 
+_STREAM_DROP_SIGNATURES = (
+    "terminated",
+    "econnreset",
+    "connection reset",
+    "socket hang up",
+    "premature close",
+    "epipe",
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -190,11 +199,15 @@ def _is_retryable_error_message(message: str) -> bool:
         return True
     if re.search(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b", lower):
         return False
-    return bool(
+    if bool(
         re.search(r"\boverloaded?\b|\boverload(?:ed|ing)?\b", lower)
         or re.search(r"\bcapacity\s+(?:unavailable|exceeded|limit|limited|full|reached)\b", lower)
         or re.search(r"\bthrottl(?:e|ed|ing)\b", lower)
-    )
+    ):
+        return True
+    if any(sig in lower for sig in _STREAM_DROP_SIGNATURES):
+        return True
+    return False
 
 
 def _is_retryable_exit_code(code: int) -> bool:

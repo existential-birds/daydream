@@ -298,3 +298,72 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
     assert backend.call_counts.get("fail-once", 0) == 2
     assert backend.call_counts.get("ok-a", 0) == 1
     assert backend.call_counts.get("ok-b", 0) == 1
+
+
+def test_is_retryable_error_message_stream_drop_signatures() -> None:
+    """Stream-drop signatures are classified as retryable."""
+    from daydream.backends.pi import _is_retryable_error_message
+
+    for sig in (
+        "terminated",
+        "ECONNRESET",
+        "connection reset",
+        "socket hang up",
+        "premature close",
+        "EPIPE",
+    ):
+        assert _is_retryable_error_message(sig) is True, f"Expected {sig!r} to be retryable"
+
+
+def test_is_retryable_error_message_non_retryable() -> None:
+    """Non-transient messages are NOT classified as retryable."""
+    from daydream.backends.pi import _is_retryable_error_message
+
+    for msg in ("some real review failure", "auth failed", "invalid API key"):
+        assert _is_retryable_error_message(msg) is False, f"Expected {msg!r} to NOT be retryable"
+
+
+class _StreamDropThenSuccessBackend:
+    """Raises a stream-drop PiError on the first call, succeeds on the second."""
+
+    model = "test-model"
+    fanout_concurrency = 4
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        self.call_count += 1
+        if self.call_count == 1:
+            raise PiError("terminated", retryable=True)
+        yield TextEvent(text="Review complete after retry")
+        yield ResultEvent(structured_output=None, continuation=None)
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, *a: Any, **kw: Any) -> str:
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_run_agent_retries_on_stream_drop(monkeypatch, tmp_path: Path) -> None:
+    """First call raises PiError('terminated') (stream-drop); second succeeds."""
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
+    backend = _StreamDropThenSuccessBackend()
+
+    output, _, _ = await run_agent(
+        backend, tmp_path, "review this", phase=DaydreamPhase.REVIEW
+    )
+
+    assert output == "Review complete after retry"
+    assert backend.call_count == 2

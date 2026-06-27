@@ -1089,3 +1089,32 @@ async def test_forked_child_write_partial_captures_in_flight_steps(tmp_path: Pat
     assert len(data["steps"]) >= 2, (
         f"Child partial missing in-flight steps: {data['steps']!r}"
     )
+
+
+async def test_recorder_marks_partial_on_exception_exit(tmp_path: Path) -> None:
+    """When __aexit__ receives an exception, the trajectory is marked partial."""
+    recorder = _make_recorder(tmp_path)
+    with pytest.raises(RuntimeError, match="boom"):
+        async with recorder:
+            async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                inv.observe_user_step(prompt="hello")
+                inv.observe(TextEvent(text="partial output"))
+                raise RuntimeError("boom")
+
+    assert recorder.path.exists()
+    traj = _read_trajectory(recorder.path)
+    assert traj.get("extra", {}).get("partial") is True
+
+
+async def test_recorder_does_not_mark_partial_on_clean_exit(tmp_path: Path) -> None:
+    """Clean exit does NOT mark the trajectory as partial."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe_user_step(prompt="hello")
+            inv.observe(TextEvent(text="world"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+    assert recorder.path.exists()
+    traj = _read_trajectory(recorder.path)
+    assert "partial" not in traj.get("extra", {})

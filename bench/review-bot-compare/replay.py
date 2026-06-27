@@ -25,6 +25,8 @@ from pathlib import Path
 
 from common import read_json, repo_slug, run, write_json
 
+from daydream.backends.pi import _STREAM_DROP_SIGNATURES
+
 # daydream resolves a GitHub App identity (and hard-aborts on failure) when these
 # are set and the run is "posting" (--review counts). The benchmark reviews a
 # detached local worktree with no posting, so run it under plain user identity.
@@ -50,20 +52,6 @@ _TRANSIENT_SIGNATURES = (
     "try again later",
 )
 
-# Provider/network stream-drop signatures: the z.ai/GLM provider closes the
-# streaming HTTP connection mid-generation, which undici surfaces as a literal
-# "terminated" error and pi propagates as `PiError: terminated`. These are
-# completed-but-lost reviews worth a retry. Matched case-insensitively, but ONLY
-# inside a backend/fatal error context so an ordinary review finding that merely
-# mentions one of these words in prose is not mistaken for a retryable failure.
-_STREAM_DROP_SIGNATURES = (
-    "terminated",
-    "econnreset",
-    "connection reset",
-    "socket hang up",
-    "premature close",
-    "epipe",
-)
 _ERROR_CONTEXT_MARKERS = (
     "pierror",
     "backend execution error",

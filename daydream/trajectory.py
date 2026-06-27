@@ -903,6 +903,7 @@ class TrajectoryRecorder:
     # Per-Invocation timing summaries registered at _InvocationCM.__aexit__.
     # Serialized into Trajectory.extra["subtrajectories"] when non-empty.
     _subtrajectories: list[dict[str, Any]] = field(default_factory=list)
+    _aborted: bool = False
     on_write: Callable[[TrajectoryRecorder, str], None] | None = None
 
     async def __aenter__(self) -> "TrajectoryRecorder":
@@ -912,6 +913,8 @@ class TrajectoryRecorder:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         try:
+            if exc_type is not None:
+                self._aborted = True
             self._write()
         except Exception as exc:  # noqa: BLE001 - branch on explicit_path per D-06
             if self.explicit_path:
@@ -1240,7 +1243,11 @@ class TrajectoryRecorder:
             return
         trajectory = self.build_trajectory()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        data = json.dumps(trajectory.to_json_dict(), indent=2)
+        trajectory_dict = trajectory.to_json_dict()
+        if self._aborted:
+            extra = trajectory_dict.setdefault("extra", {})
+            extra["partial"] = True
+        data = json.dumps(trajectory_dict, indent=2)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
