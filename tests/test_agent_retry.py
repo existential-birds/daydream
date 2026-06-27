@@ -15,7 +15,7 @@ import pytest
 
 from daydream.agent import run_agent
 from daydream.backends import ResultEvent, TextEvent
-from daydream.backends.pi import PiError
+from daydream.backends.pi import PiError, _is_retryable_error_message
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
 
@@ -302,7 +302,14 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
 
 
 class _StreamDropThenSuccessBackend:
-    """Raises a stream-drop PiError on the first call, succeeds on the second."""
+    """Raises a stream-drop PiError on the first call, succeeds on the second.
+
+    Uses the production classifier ``_is_retryable_error_message`` to set
+    ``retryable``, mirroring how ``PiBackend`` constructs ``PiError`` in
+    production. This ensures the test exercises the real classification path:
+    if ``_is_retryable_error_message("terminated")`` ever returns ``False``,
+    ``run_agent`` would NOT retry and the test would fail.
+    """
 
     model = "test-model"
     fanout_concurrency = 4
@@ -322,7 +329,14 @@ class _StreamDropThenSuccessBackend:
     ):
         self.call_count += 1
         if self.call_count == 1:
-            raise PiError("terminated", retryable=True)
+            # Mirrors production: PiBackend raises PiError with retryable set
+            # by the _is_retryable_error_message classifier. If the classifier
+            # stops recognizing "terminated" as retryable, this raises with
+            # retryable=False and run_agent does NOT retry — the test fails.
+            raise PiError(
+                "terminated",
+                retryable=_is_retryable_error_message("terminated"),
+            )
         yield TextEvent(text="Review complete after retry")
         yield ResultEvent(structured_output=None, continuation=None)
 
