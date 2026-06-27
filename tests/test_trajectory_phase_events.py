@@ -234,6 +234,34 @@ async def test_subtrajectory_step_ids_track_multiple_invocations(tmp_path: Path)
     assert subs[1]["step_ids"] == [2]
 
 
+async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> None:
+    """Fork siblings register subtrajectory entries on the parent (issue #212)."""
+    from daydream.trajectory import maybe_fork
+
+    rec = _make_recorder(tmp_path)
+    async with rec:
+        # Seed a parent step so _write does not take its empty-steps early
+        # return; in a real run the parent always has prior-phase steps.
+        rec._extend_steps([Step(step_id=1, source="user", message="seed")])
+        async with maybe_fork(rec, "fix-src-foo-py") as child:
+            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                inv.observe(TextEvent(text="fixing foo"))
+                inv.observe(ResultEvent(structured_output=None, continuation=None))
+    traj = _read_trajectory(rec.path)
+    subs = traj["extra"].get("subtrajectories", [])
+    assert len(subs) == 1, f"expected 1 fork subtrajectory, got {len(subs)}: {subs}"
+    sub = subs[0]
+    assert sub["phase"] == "fix", f"expected phase 'fix' for descriptor 'fix-src-foo-py', got {sub['phase']!r}"
+    assert sub["descriptor"] == "fix-src-foo-py", f"descriptor missing/incorrect: {sub}"
+    assert sub["started_at"], "started_at must be non-empty"
+    assert sub["ended_at"], "ended_at must be non-empty"
+    assert sub["sibling_trajectory_ref"], "sibling_trajectory_ref must be non-empty"
+    assert "step_ids" not in sub, "step_ids should be replaced by sibling_trajectory_ref"
+    assert ".json" in sub["sibling_trajectory_ref"], (
+        f"sibling_trajectory_ref should be a .json path, got {sub['sibling_trajectory_ref']!r}"
+    )
+
+
 # --- compute_phase_timings -------------------------------------------------
 
 
@@ -518,6 +546,72 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
     for phase in ("intent", "alternatives", "parse", "verify", "fix", "test", "deep"):
         assert phase in phase_timings, (
             f"{phase} missing from deep phase_timings: {phase_timings!r}"
+        )
+
+
+async def test_parallel_fix_registers_subtrajectories(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real-path: parallel fix phase registers per-file subtrajectory entries.
+
+    Drives ``runner.run`` through the deep pipeline with the stub backend,
+    producing >=2 file findings that exercise ``phase_fix_parallel`` and the
+    ``recorder.fork()`` path. Asserts multiple ``fix`` entries appear in
+    ``extra["subtrajectories"]``.
+    """
+    from tests.test_deep_orchestrator import (
+        _install_stub_backend,
+        _merge_item,
+        _noop_commit,
+        _ok,
+        _silence,
+    )
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    # Override merge items to produce 2 findings on distinct files.
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high"),
+        _merge_item(2, "App.tsx", "medium"),
+    ]
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    from daydream.runner import RunConfig, run
+
+    traj = tmp_path / "trajectory.json"
+    config = RunConfig(
+        target=str(multi_stack_target),
+        assume="yes",
+        trajectory_path=traj,
+        cleanup=False,
+    )
+    exit_code = await run(config)
+    assert exit_code == 0
+
+    assert traj.exists(), "deep run must write the trajectory to disk"
+    data = json.loads(traj.read_text(encoding="utf-8"))
+    assert atif_validate(data, validate_images=False) is True
+
+    subs = data["extra"].get("subtrajectories", [])
+    fix_subs = [s for s in subs if s["phase"] == "fix"]
+    assert len(fix_subs) >= 2, (
+        f"expected >=2 fix subtrajectories from parallel forks, got {len(fix_subs)}: {fix_subs}"
+    )
+    for sub in fix_subs:
+        assert sub["descriptor"].startswith("fix-"), (
+            f"fix subtrajectory descriptor must start with 'fix-': {sub}"
+        )
+        assert sub["started_at"], f"fix subtrajectory missing started_at: {sub}"
+        assert sub["ended_at"], f"fix subtrajectory missing ended_at: {sub}"
+        assert sub["sibling_trajectory_ref"], f"fix subtrajectory missing sibling_trajectory_ref: {sub}"
+        assert "step_ids" not in sub, (
+            f"step_ids should be replaced by sibling_trajectory_ref: {sub}"
         )
 
 

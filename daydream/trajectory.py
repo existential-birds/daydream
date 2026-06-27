@@ -1015,6 +1015,26 @@ class TrajectoryRecorder:
             }
         )
 
+    def _register_fork_subtrajectory(
+        self,
+        *,
+        phase: str,
+        descriptor: str,
+        started_at: str,
+        ended_at: str,
+        sibling_trajectory_ref: str,
+    ) -> None:
+        """Register a per-fork timing summary on the parent trajectory."""
+        self._subtrajectories.append(
+            {
+                "phase": phase,
+                "descriptor": descriptor,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "sibling_trajectory_ref": sibling_trajectory_ref,
+            }
+        )
+
     def _next_step_id(self) -> int:
         self._step_id_counter += 1
         return self._step_id_counter
@@ -1331,6 +1351,8 @@ class _ForkCM:
         self._parent = parent
         self._descriptor = descriptor
         self._child: TrajectoryRecorder | None = None
+        self._entered_at: str | None = None
+        self._exited_at: str | None = None
 
     async def __aenter__(self) -> TrajectoryRecorder:
         child = TrajectoryRecorder(
@@ -1348,6 +1370,7 @@ class _ForkCM:
         child._previous_token = _RECORDER_VAR.set(child)
         _ACTIVE_RECORDERS.append(child)
         self._child = child
+        self._entered_at = now_iso()
         return child
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -1370,8 +1393,28 @@ class _ForkCM:
             _ACTIVE_RECORDERS.remove(child)
         except ValueError:
             pass
+        self._exited_at = now_iso()
         if write_ok and child.parent is not None:
             child.parent._register_sibling(child.path, self._descriptor)
+            try:
+                sibling_ref = str(child.path.relative_to(child.parent.target_dir / ".daydream"))
+            except ValueError:
+                sibling_ref = child.path.name
+            phase = DaydreamPhase.FIX.value
+            for step in child.steps:
+                if step.extra is None:
+                    continue
+                candidate = step.extra.get("daydream_phase")
+                if isinstance(candidate, str):
+                    phase = candidate
+                    break
+            child.parent._register_fork_subtrajectory(
+                phase=phase,
+                descriptor=self._descriptor,
+                started_at=self._entered_at or now_iso(),
+                ended_at=self._exited_at or now_iso(),
+                sibling_trajectory_ref=sibling_ref,
+            )
 
 
 class _InvocationCM:
