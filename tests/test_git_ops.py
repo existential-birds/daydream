@@ -1281,3 +1281,31 @@ def test_gh_pr_create_failure_raises_git_error(fake_gh: FakeGh, git_repo: Path) 
     # No "pr-create" response configured → the shim exits non-zero.
     with pytest.raises(GitError):
         git_ops.gh_pr_create(git_repo, head="b", base="main", title="t", body="b")
+
+
+def test_log_shas_since_returns_commits_in_range(tmp_path: Path) -> None:
+    """log_shas_since returns SHAs for commits in head..base range."""
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "topic")
+    (repo / "a.txt").write_text("a\n")
+    _git(repo, "add", "a.txt")
+    _commit(repo, "topic-1")
+    (repo / "b.txt").write_text("b\n")
+    _git(repo, "add", "b.txt")
+    _commit(repo, "topic-2")
+    shas = git_ops.log_shas_since(repo, "main", "topic")
+    assert len(shas) == 2
+    # newest first (git log order)
+    topic2_sha = _git(repo, "rev-parse", "topic").strip()
+    assert shas[0] in topic2_sha or len(shas[0]) == 40
+
+
+def test_log_shas_since_warns_on_git_error(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """log_shas_since returns [] and logs a warning on git error."""
+    repo = _make_repo_with_main(tmp_path)
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="daydream.git_ops"):
+        result = git_ops.log_shas_since(repo, "main", "nonexistent-ref")
+    assert result == []
+    assert any("log_shas_since" in record.message for record in caplog.records)

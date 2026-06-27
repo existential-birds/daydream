@@ -299,12 +299,14 @@ def _diff_name_only(repo: Path, base: str, head: str) -> list[str]:
     return git_ops.diff_name_only(repo, base, head)
 
 
-def _commits_in_window(repo: Path, head: str, base: str, days: int) -> list[str]:
-    """Return commits on ``base`` since ``head``'s ancestor, within ``days``.
+def _commits_in_window(repo: Path, head: str, base: str) -> list[str]:
+    """Return commits on ``base`` since ``head``'s ancestor.
 
     Used by the fix-applied cascade to bound the upstream review window.
+    The ``head..base`` range already bounds the walk; no date filter is
+    needed (see #167).
     """
-    return git_ops.log_shas_since(repo, head, base, since_days=days)
+    return git_ops.log_shas_since(repo, head, base)
 
 
 def _commits_since(repo: Path, branch: str, since: str) -> list[str]:
