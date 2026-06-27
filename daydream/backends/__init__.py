@@ -254,6 +254,11 @@ class Backend(Protocol):
     advertise how many parallel execute() calls phase_per_stack_reviews should
     run concurrently. When absent, the caller falls back to 4 via
     ``getattr(backend, "fanout_concurrency", 4)``.
+
+    Optional extension: backends may expose ``concise_fix_prompts: bool`` to
+    request verbosity-suppressing fix-phase prompts (set True for pi/GLM, which
+    produces verbose reasoning). When absent, the caller falls back to False via
+    ``getattr(backend, "concise_fix_prompts", False)``.
     """
 
     model: str

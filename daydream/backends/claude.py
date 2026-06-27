@@ -216,6 +216,8 @@ class ClaudeBackend:
     Translates Claude SDK message types into the unified AgentEvent stream.
     """
 
+    concise_fix_prompts = False
+
     def __init__(self, model: str):
         self.model = model
         self.fanout_concurrency = 4

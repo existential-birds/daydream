@@ -65,11 +65,31 @@ VERIFY_MAX_TURNS = 40
 _PR_BODY_MAX_CHARS = 8000
 
 
+_FIX_CONCISE_STYLE = (
+    "CONCISE MODE: Apply the fix directly. Do not explain your reasoning "
+    "unless blocked. Do not include a commit message or justification unless "
+    "explicitly asked. Output only the tool calls needed to apply the fix."
+)
+
+
+def _backend_concise_fix_prompts(backend: Backend) -> bool:
+    """Return the backend's concise-fix-prompt flag, defaulting to False."""
+    return bool(getattr(backend, "concise_fix_prompts", False))
+
+
+def _build_fix_style_suffix(concise_fix_prompts: bool) -> str:
+    """Return the concise-mode style suffix, or empty string when disabled."""
+    if not concise_fix_prompts:
+        return ""
+    return f"\n{_FIX_CONCISE_STYLE}\n"
+
+
 def _build_fix_prompt(
     test_output: str,
     feedback_items: list[dict[str, Any]] | None = None,
     *,
     repo: Path | None = None,
+    concise_mode: bool = False,
 ) -> str:
     """Build an enriched prompt for the fix agent with test output and file context.
 
@@ -78,6 +98,8 @@ def _build_fix_prompt(
         feedback_items: Optional list of feedback items with 'file' keys.
         repo: Optional repo root; listed files are mapped to absolute paths when
             they exist under it, so the fix agent's first Read hits.
+        concise_mode: When True, tighten action directives to suppress verbose
+            reasoning (used for backends like pi/GLM).
 
     Returns:
         Prompt string with truncated test output and file list.
@@ -100,15 +122,25 @@ def _build_fix_prompt(
             file_list = "\n".join(f"- {f}" for f in files)
             parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
 
-    parts.append("\nAnalyze the failures and fix them.")
+    if concise_mode:
+        parts.append("\nFix the failures.")
+    else:
+        parts.append("\nAnalyze the failures and fix them.")
     if feedback_items:
         parts.append("Focus on the files listed above.")
-        parts.append(
-            "Start with the files listed above; if a correct fix needs "
-            "another file, edit it and say which and why."
-        )
+        if concise_mode:
+            parts.append(
+                "Start with the files listed above; if a correct fix needs "
+                "another file, edit it and state which file."
+            )
+        else:
+            parts.append(
+                "Start with the files listed above; if a correct fix needs "
+                "another file, edit it and say which and why."
+            )
 
-    return "\n".join(parts)
+    return "\n".join(parts) + _build_fix_style_suffix(concise_mode)
+
 
 
 def _build_setup_investigator_prompt(test_output: str) -> str:
@@ -1695,14 +1727,14 @@ NOT make gratuitous edits to adjacent fields, keys, or functions the fix does
 not require; naming one issue is not license to "tidy" its neighbours. If a
 correct fix genuinely requires an edit the finding didn't name — a caller that
 must change in step, or a file the review step missed — make it, but name and
-justify each out-of-scope edit in your commit message rather than expanding
-silently. If the change balloons far beyond the named site, stop and report.
+justify each out-of-scope edit rather than expanding silently. If the change
+balloons far beyond the named site, stop and report.
 
 If this finding conflicts with an explicit in-code contract — a JSON schema, a
 type signature, or a comment documenting intent — the contract wins (unless
 confirmed author intent below overrides it). Do not override documented intent
-to satisfy the finding; note the conflict in your commit message (or report
-inability to fix). Treat low/medium-confidence findings with extra skepticism
+to satisfy the finding; stop and report the conflict rather than overriding
+documented intent. Treat low/medium-confidence findings with extra skepticism
 here.
 """
 
@@ -1736,7 +1768,7 @@ def _build_intent_suffix(intent_path: Path | None) -> str:
         "the in-code-contract rule above and the finding itself. "
         "If applying this fix would undo, revert, or contradict a decision the "
         "confirmed intent describes as deliberate, do NOT apply it. Report the "
-        "conflict in your commit message (or report inability to fix) instead of "
+        "conflict instead of "
         "overriding the author's deliberate choice.\n"
     )
 
@@ -1767,14 +1799,12 @@ def _build_verifier_suffix(item: dict[str, Any]) -> str:
     if verifier_verdict == "contradicts":
         out += (
             "\nDo NOT apply the recommendation literally if it contradicts the cited spec.\n"
-            "Explain the conflict in your commit message and choose a fix that preserves\n"
-            "the spec, or stop and report inability to fix.\n"
+            "Choose a fix that preserves the spec, or stop and report inability to fix.\n"
         )
     elif verifier_verdict == "uncertain":
         out += (
             "\nThe verifier could not confirm whether this recommendation is correct.\n"
-            "Proceed cautiously: apply the minimal fix and note the uncertainty in your\n"
-            "commit message.\n"
+            "Proceed cautiously: apply the minimal fix. If blocked, stop and report.\n"
         )
     return out
 
@@ -1833,6 +1863,8 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
     # into a fake intent string (see _build_intent_suffix).
     prompt += _build_intent_suffix(intent_path)
     prompt += _build_verifier_suffix(item)
+
+    prompt += _build_fix_style_suffix(_backend_concise_fix_prompts(backend))
 
     if console_lock is not None:
         # Concurrent path: suppress the Live/LiveToolPanelRegistry renderer in
@@ -1938,6 +1970,8 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
         verifier_suffix = _build_verifier_suffix(item)
         if verifier_suffix:
             prompt += f"\nVerifier guidance for finding {idx}:{verifier_suffix}"
+
+    prompt += _build_fix_style_suffix(_backend_concise_fix_prompts(backend))
 
     # Scale budgets linearly with the number of findings so a batched group of N
     # findings gets the same per-finding headroom as a single-finding turn.
@@ -2260,7 +2294,10 @@ async def phase_test_and_heal(
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             console.print()
             print_info(console, "Launching agent to fix test failures (auto)...")
-            fix_prompt = _build_fix_prompt(output, feedback_items, repo=work.repo)
+            fix_prompt = _build_fix_prompt(
+                output, feedback_items, repo=work.repo,
+                concise_mode=_backend_concise_fix_prompts(backend),
+            )
             _, _, _ = await run_agent(
                 backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
                 tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
@@ -2315,7 +2352,10 @@ async def phase_test_and_heal(
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            fix_prompt = _build_fix_prompt(output, feedback_items, repo=work.repo)
+            fix_prompt = _build_fix_prompt(
+                output, feedback_items, repo=work.repo,
+                concise_mode=_backend_concise_fix_prompts(backend),
+            )
             _, _, _ = await run_agent(
                 backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
                 tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,

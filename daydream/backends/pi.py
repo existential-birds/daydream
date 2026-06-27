@@ -328,6 +328,8 @@ class PiBackend:
     so trajectory recording (ATIF v1.6) works identically to Claude/Codex.
     """
 
+    concise_fix_prompts = True  # GLM produces verbose reasoning in fix prompts
+
     def __init__(self, model: str):
         self.model = model
         self.fanout_concurrency = 2

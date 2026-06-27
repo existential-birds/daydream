@@ -3098,6 +3098,7 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    setattr(stub, "concise_fix_prompts", True)
     stub.merge_items = [
         _merge_item(1, "api.py", "high"),
         _merge_item(2, "api.py", "medium"),
@@ -3130,6 +3131,7 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
     assert m is not None
     assert int(m.group(1)) >= 3
     assert Path(m.group(2)).name == "api.py"
+    assert "CONCISE MODE" in batched[0]
     # The batched turn still lands its per-file sentinel (observable apply).
     assert (multi_stack_target / ".fixed-api_py").exists()
     assert (multi_stack_target / ".fixed-App_tsx").exists()
