@@ -107,6 +107,20 @@ def test_create_backend_invalid_raises():
         create_backend("invalid")
 
 
+def test_pi_backend_concise_mode_true():
+    """PiBackend has concise_mode=True by default (GLM verbosity suppression)."""
+    from daydream.backends.pi import PiBackend
+    backend = PiBackend(model="glm-5.2")
+    assert backend.concise_mode is True
+
+
+def test_claude_and_codex_backend_concise_mode_false():
+    """Claude and Codex backends have concise_mode=False by default."""
+    from daydream.backends.codex import CodexBackend
+    assert ClaudeBackend(model="test").concise_mode is False
+    assert CodexBackend(model="test").concise_mode is False
+
+
 def test_agent_definition_importable():
     """AgentDefinition should be importable from claude_agent_sdk.types."""
     from claude_agent_sdk.types import AgentDefinition
