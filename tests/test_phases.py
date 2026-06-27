@@ -3,11 +3,14 @@
 
 import json
 import subprocess
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream.backends import (
+    AgentEvent,
     ContinuationToken,
     ResultEvent,
     TextEvent,
@@ -383,6 +386,200 @@ async def test_phase_fix_passes_turn_budget(tmp_path, monkeypatch, make_work):
 
     assert captured_max_turns == [FIX_MAX_TURNS]
     assert FIX_MAX_TURNS == 40
+
+
+class _CapturingBatchBackend:
+    """Backend that records every prompt it is handed (one per run_agent call)."""
+
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        self.prompts.append(prompt)
+        yield ResultEvent(structured_output=None, continuation=None)
+
+    async def cancel(self):
+        pass
+
+    def format_skill_invocation(self, skill_key, args=""):
+        return f"/{skill_key}"
+
+
+def _silence_fix_output(monkeypatch):
+    monkeypatch.setattr("daydream.phases.print_fix_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_fix_complete", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_batched_prompt_lists_all_findings(tmp_path, monkeypatch, make_work):
+    """Multiple same-file findings collapse into ONE prompt listing every finding."""
+    from daydream.phases import phase_fix_batched
+
+    _silence_fix_output(monkeypatch)
+    backend = _CapturingBatchBackend()
+    items = [
+        {"id": 1, "description": "Off-by-one in loop bound", "file": "src/handler.py", "line": 42},
+        {"id": 2, "description": "Unchecked None deref", "file": "src/handler.py", "line": 88},
+        {"id": 3, "description": "Missing await on coroutine", "file": "src/handler.py", "line": 130},
+    ]
+
+    await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2, 3], 3)
+
+    # One file-group -> exactly one run_agent call.
+    assert len(backend.prompts) == 1
+    prompt = backend.prompts[0]
+    # Every finding's description and line is present.
+    assert "Off-by-one in loop bound" in prompt
+    assert "Unchecked None deref" in prompt
+    assert "Missing await on coroutine" in prompt
+    assert "42" in prompt and "88" in prompt and "130" in prompt
+    # Batched framing.
+    assert "Fix these 3 issues" in prompt
+    assert "address ALL of the above findings in one coherent patch" in prompt
+    # Shared scope/precedence guardrails carried over from phase_fix.
+    assert "Anchor the change" in prompt
+    assert "the contract wins" in prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_batched_single_item_delegates_to_phase_fix(tmp_path, monkeypatch, make_work):
+    """A one-item group delegates to phase_fix instead of building a batched prompt."""
+    from daydream import phases
+
+    _silence_fix_output(monkeypatch)
+
+    calls: list[tuple[dict, int]] = []
+
+    async def _fake_fix(backend, work, item, item_num, total, **kwargs):
+        calls.append((item, item_num))
+
+    monkeypatch.setattr("daydream.phases.phase_fix", _fake_fix)
+    backend = _CapturingBatchBackend()
+    item = {"id": 1, "description": "Solo finding", "file": "src/handler.py", "line": 5}
+
+    await phases.phase_fix_batched(backend, make_work(tmp_path), [item], [7], 9)
+
+    assert len(calls) == 1
+    assert calls[0] == (item, 7)
+    # Delegation means no batched run_agent prompt was emitted.
+    assert backend.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_batched_includes_verifier_verdicts(tmp_path, monkeypatch, make_work):
+    """Per-finding verifier verdict/evidence/assumptions reach the batched prompt."""
+    from daydream.phases import phase_fix_batched
+
+    _silence_fix_output(monkeypatch)
+    backend = _CapturingBatchBackend()
+    items = [
+        {
+            "id": 1,
+            "description": "First issue",
+            "file": "src/handler.py",
+            "line": 10,
+            "verifier_verdict": "contradicts",
+            "evidence": "the spec says otherwise",
+            "unverified_assumptions": ["assumes UTC timezone"],
+        },
+        {
+            "id": 2,
+            "description": "Second issue",
+            "file": "src/handler.py",
+            "line": 20,
+            "verifier_verdict": "uncertain",
+            "evidence": "could not reproduce",
+            "unverified_assumptions": ["assumes single-threaded"],
+        },
+    ]
+
+    await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
+
+    assert len(backend.prompts) == 1
+    prompt = backend.prompts[0]
+    assert "Verifier verdict: contradicts" in prompt
+    assert "the spec says otherwise" in prompt
+    assert "assumes UTC timezone" in prompt
+    assert "Verifier verdict: uncertain" in prompt
+    assert "could not reproduce" in prompt
+    assert "assumes single-threaded" in prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_batches_same_file_findings(monkeypatch):
+    """phase_fix_parallel calls phase_fix_batched once per file-group, never falls back."""
+    from daydream import phases
+
+    batched_calls: list[list[dict]] = []
+
+    async def _fake_batched(backend, work, items, item_nums, total, **kwargs):
+        batched_calls.append(items)
+
+    async def _fail_fix(*a, **kw):
+        raise AssertionError("phase_fix must not be called when batched succeeds")
+
+    monkeypatch.setattr("daydream.phases.phase_fix_batched", _fake_batched)
+    monkeypatch.setattr("daydream.phases.phase_fix", _fail_fix)
+    items = [
+        {"id": 1, "file": "a.py"},
+        {"id": 2, "file": "a.py"},
+        {"id": 3, "file": "a.py"},
+        {"id": 4, "file": "b.py"},
+        {"id": 5, "file": "b.py"},
+    ]
+
+    failures = await phases.phase_fix_parallel(object(), object(), items)
+
+    assert failures == {}
+    # Two file-groups -> two batched calls (NOT five per-finding calls).
+    assert len(batched_calls) == 2
+    grouped = sorted([[i["id"] for i in grp] for grp in batched_calls])
+    assert grouped == [[1, 2, 3], [4, 5]]
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(monkeypatch):
+    """When the batched turn raises, the group retries each finding via phase_fix."""
+    from daydream import phases
+
+    fix_calls: list[int] = []
+
+    async def _flaky_batched(backend, work, items, item_nums, total, **kwargs):
+        if any(i["file"] == "boom.py" for i in items):
+            raise RuntimeError("batched kaboom")
+
+    async def _fake_fix(backend, work, item, item_num, total, **kwargs):
+        fix_calls.append(item["id"])
+
+    monkeypatch.setattr("daydream.phases.phase_fix_batched", _flaky_batched)
+    monkeypatch.setattr("daydream.phases.phase_fix", _fake_fix)
+    items = [
+        {"id": 1, "file": "ok.py"},
+        {"id": 2, "file": "ok.py"},
+        {"id": 3, "file": "boom.py"},
+        {"id": 4, "file": "boom.py"},
+    ]
+
+    failures = await phases.phase_fix_parallel(object(), object(), items)
+
+    # Fallback ran each finding in the failing group individually...
+    assert sorted(fix_calls) == [3, 4]
+    # ...and never touched the successful group.
+    assert 1 not in fix_calls and 2 not in fix_calls
+    # The fallback succeeded, so no failure was collected.
+    assert failures == {}
 
 
 class TestBuildFixPrompt:
@@ -3194,18 +3391,27 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
 
     from daydream import phases
 
-    active_files, order = set(), []
+    active_files, batched_calls, fix_calls = set(), [], []
+
+    async def _fake_batched(backend, work, items, item_nums, total, **kwargs):
+        f = items[0]["file"]
+        batched_calls.append(f)
+        assert f not in active_files, "two concurrent fixes on the same file"
+        active_files.add(f)
+        await anyio.sleep(0)  # force interleave window
+        active_files.discard(f)
 
     async def _fake_fix(backend, work, item, item_num, total, **kwargs):
         f = item["file"]
         if f == "boom.py":
             raise RuntimeError("kaboom")
+        fix_calls.append(f)
         assert f not in active_files, "two concurrent fixes on the same file"
         active_files.add(f)
-        order.append(item["id"])
         await anyio.sleep(0)  # force interleave window
         active_files.discard(f)
 
+    monkeypatch.setattr("daydream.phases.phase_fix_batched", _fake_batched)
     monkeypatch.setattr("daydream.phases.phase_fix", _fake_fix)
     items = [
         {"id": 1, "file": "a.py"},
@@ -3214,6 +3420,8 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
         {"id": 4, "file": "boom.py"},
     ]
     failures = await phases.phase_fix_parallel(object(), object(), items)
-    assert order.count(1) == 1 and order.count(2) == 1 and order.count(3) == 1  # 3 successful calls
-    assert order.index(1) < order.index(2)  # a.py items kept in input order
+    # a.py has 2 findings -> one batched call. b.py and boom.py have 1 finding
+    # each -> direct phase_fix (no batched prompt, no fallback retry).
+    assert batched_calls == ["a.py"]
+    assert sorted(fix_calls) == ["b.py"]
     assert set(failures) == {"boom.py"} and "RuntimeError" in failures["boom.py"]

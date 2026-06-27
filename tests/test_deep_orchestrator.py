@@ -331,7 +331,7 @@ class _StubBackend:
 
         # phase_fix -> "apply" the edit by writing a sentinel file, the observable
         # consequence the --yes real-path test asserts the fix gate auto-approved.
-        if pl.startswith("fix this issue"):
+        if pl.startswith("fix this issue") or pl.startswith("fix these"):
             if self.runaway_fix:
                 # Emit a long burst of tool calls and NEVER a ResultEvent. A
                 # generator that never returns models the 1.5-5h time-tail the
@@ -340,7 +340,11 @@ class _StubBackend:
                     yield ToolStartEvent(id=f"tc-{n}", name="Bash", input={"command": "find /"})
                     await anyio.sleep(self.runaway_fix_sleep_s)
                 return
+            # Single-finding prompts carry "File: <path>"; batched prompts name the
+            # one target file in their "Fix these N issues in <path>:" header.
             m = re.search(r"^File: (.+)$", prompt, re.M)
+            if m is None:
+                m = re.search(r"^Fix these \d+ issues in (.+):$", prompt, re.M)
             fixed_file = m.group(1).strip() if m else "unknown"
             # phase_fix emits an absolute path when the file exists on disk; the stub keys fixes by basename.
             fixed_name = Path(fixed_file).name
@@ -357,10 +361,13 @@ class _StubBackend:
             (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
             (cwd / f".fixed-{fixed_name.replace('.', '_')}").write_text("applied\n")
             if self.fix_append_path is not None and fixed_name == self.fix_append_path.name:
-                tok = re.search(r"marker-\d+", prompt)
+                # A batched fix turn addresses EVERY finding it is handed, so append
+                # each marker the prompt names (in prompt/severity order), not just
+                # the first. A single-finding prompt names exactly one marker.
+                toks = re.findall(r"marker-\d+", prompt) or ["?"]
                 cur = self.fix_append_path.read_text() if self.fix_append_path.exists() else ""
                 await anyio.sleep(0)  # deterministic interleave point
-                self.fix_append_path.write_text(cur + (tok.group(0) if tok else "?") + "\n")
+                self.fix_append_path.write_text(cur + "".join(t + "\n" for t in toks))
             yield TextEvent(text="Applied the fix.")
             yield ResultEvent(structured_output=None, continuation=None)
             return
@@ -621,15 +628,11 @@ async def test_parallel_fix_applies_all_disjoint_files(
 async def test_parallel_fix_same_file_no_race(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """3 items on ONE file (read-modify-write append) + 1 on another. Correct
-    per-file serialization keeps all markers in severity order; a per-ITEM
-    fan-out would lose/interleave appends (the anyio.sleep(0) makes that race
-    deterministic).
-
-    Discrimination validated: temporarily fanning out ``phase_fix_parallel``
-    per item (one task per item) makes this FAIL -- the racing read-modify-write
-    append + anyio.sleep(0) drops/reorders markers in shared.py; the correct
-    per-file-group serialization keeps them ordered. Reverting restores PASS.
+    """3 items on ONE file + 1 on another. The 3 same-file findings collapse into
+    ONE batched fix turn that addresses every marker in severity order, while the
+    other file's group runs concurrently. The read-modify-write append +
+    anyio.sleep(0) makes any cross-file race deterministic; per-file partitioning
+    keeps shared.py's markers ordered and intact.
     """
     from daydream.runner import RunConfig, run
 
@@ -847,7 +850,9 @@ INTENT_SENTINEL = "SKIP_IF_NO_QUERY_IS_A_DELIBERATE_GUARD"
 
 
 def _fix_prompts(stub: _StubBackend) -> list[str]:
-    return [c["prompt"] for c in stub.calls if c["prompt"].startswith("Fix this issue")]
+    # Same-file findings are batched into one "Fix these N issues" turn; a lone
+    # finding still uses the single-finding "Fix this issue" prompt. Match both.
+    return [c["prompt"] for c in stub.calls if c["prompt"].startswith(("Fix this issue", "Fix these"))]
 
 
 async def test_confirmed_intent_reaches_fix_prompt(
@@ -2262,7 +2267,13 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    fix_prompts = [c["prompt"] for c in stub.calls if c["prompt"].lower().startswith("fix this issue:")]
+    # api.py carries two same-file findings, so its fix turn is batched
+    # ("Fix these N issues"); the verdict for id=1 rides in that batched prompt.
+    fix_prompts = [
+        c["prompt"]
+        for c in stub.calls
+        if c["prompt"].lower().startswith(("fix this issue:", "fix these"))
+    ]
     assert fix_prompts, "no fix prompt dispatched -- fix loop did not run"
     assert any("Verifier verdict: contradicts" in p for p in fix_prompts), (
         "contradicts verdict did not propagate into the fix prompt; "
@@ -2396,8 +2407,11 @@ async def test_structural_finding_reaches_fix_loop(
 
     fixed: list[dict[str, Any]] = []
 
-    async def _capture_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
-        fixed.append(item)
+    # Capture at the batched dispatch point: phase_fix_parallel now hands every
+    # file-group (single- or multi-item) to phase_fix_batched, so this is where
+    # every item that reaches the fix loop is observable.
+    async def _capture_fix(backend, work, items, item_nums, total, **kwargs):  # noqa: ARG001
+        fixed.extend(items)
 
     async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
         return (True, 0)
@@ -2408,7 +2422,7 @@ async def test_structural_finding_reaches_fix_loop(
     async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
         return None
 
-    monkeypatch.setattr("daydream.phases.phase_fix", _capture_fix)
+    monkeypatch.setattr("daydream.phases.phase_fix_batched", _capture_fix)
     monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
@@ -3061,6 +3075,66 @@ async def test_run_terminates_under_wall_budget(
     assert "wall_budget_exceeded" in stop_reasons
 
 
+async def test_run_batches_same_file_findings_into_one_fix_turn(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#202 real-path: N findings on ONE file collapse to a single FIX run_agent turn.
+
+    Driven through the real ``runner.run`` -> deep orchestrator ->
+    ``phase_fix_parallel`` -> ``phase_fix_batched`` -> ``run_agent`` path. Several
+    findings target api.py and one targets App.tsx, so the fix stage must issue
+    exactly TWO fix turns (one batched per file-group), never one-per-finding.
+    The batched api.py turn carries a single "Fix these N issues" prompt naming
+    every same-file finding, and still lands the per-file sentinel.
+
+    Discriminating: a per-finding loop (the pre-#202 state) issues one fix turn
+    PER finding, so the fix-prompt count balloons past two and no single batched
+    "Fix these N issues" prompt exists -- both assertions fail.
+    """
+    import re
+
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high"),
+        _merge_item(2, "api.py", "medium"),
+        _merge_item(3, "api.py", "low"),
+        _merge_item(4, "App.tsx", "high"),
+    ]
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+
+    assert exit_code == 0
+
+    fix_prompts = [
+        c["prompt"]
+        for c in stub.calls
+        if c["prompt"].lower().startswith(("fix this issue", "fix these"))
+    ]
+    # Two file-groups -> two fix turns, regardless of how many findings each holds
+    # (the pre-#202 per-finding loop would emit one turn per finding instead).
+    assert len(fix_prompts) == 2
+    batched = [p for p in fix_prompts if p.lower().startswith("fix these")]
+    singles = [p for p in fix_prompts if p.lower().startswith("fix this issue")]
+    assert len(batched) == 1 and len(singles) == 1
+    # The batched api.py turn collapses all three of my api.py findings (the host
+    # may add a structural finding to the same file, so assert >= 3) into one turn.
+    m = re.search(r"^Fix these (\d+) issues in (.+):$", batched[0], re.M)
+    assert m is not None
+    assert int(m.group(1)) >= 3
+    assert Path(m.group(2)).name == "api.py"
+    # The batched turn still lands its per-file sentinel (observable apply).
+    assert (multi_stack_target / ".fixed-api_py").exists()
+    assert (multi_stack_target / ".fixed-App_tsx").exists()
+
+
 async def test_environmental_failure_aborts_heal_loop(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3671,7 +3745,7 @@ async def test_ac_fix_resume_on_tiny_diff(
         RunConfig(target=str(tiny_diff_target), start_at="fix", assume="yes", cleanup=False)
     )
     assert rc == 0
-    fix_prompts = [c for c in stub.calls if c["prompt"].startswith("Fix this issue")]
+    fix_prompts = [c for c in stub.calls if c["prompt"].startswith(("Fix this issue", "Fix these"))]
     assert fix_prompts, "fix loop did not run on --start-at fix resume"
 
 

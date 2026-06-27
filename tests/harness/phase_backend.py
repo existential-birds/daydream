@@ -120,7 +120,7 @@ class PhaseDispatchBackend:
             self._parse_call += 1
             yield TextEvent(text="Parsed.")
             yield ResultEvent(structured_output={"issues": issues}, continuation=None)
-        elif "fix this issue" in prompt_lower:
+        elif "fix this issue" in prompt_lower or prompt_lower.startswith("fix these"):
             yield TextEvent(text="Fixed.")
             yield ResultEvent(structured_output=None, continuation=None)
         elif "test suite" in prompt_lower or "run the project" in prompt_lower:

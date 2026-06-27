@@ -48,9 +48,9 @@ _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+) b/", re.MULTILINE)
 
 _SPECIALIST_TIMEOUT_SECONDS = 300  # 5 minutes
 
-# Cap subagents at 15 turns: on large repos they otherwise exhaust their
+# Cap subagents at 50 turns: on large repos they otherwise exhaust their
 # context window and lose track of the task (D-06 graceful degradation).
-EXPLORATION_MAX_TURNS = 15
+EXPLORATION_MAX_TURNS = 50
 
 
 EXPLORATION_ENVELOPE_SCHEMA: dict[str, Any] = {
