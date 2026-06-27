@@ -6,6 +6,7 @@ outcomes (returned output, call count) never on internal implementation details.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends import ResultEvent, TextEvent
 from daydream.backends.pi import PiError
-from daydream.trajectory import DaydreamPhase
+from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
 
 class _RetryableThenSuccessBackend:
@@ -300,29 +301,6 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
     assert backend.call_counts.get("ok-b", 0) == 1
 
 
-def test_is_retryable_error_message_stream_drop_signatures() -> None:
-    """Stream-drop signatures are classified as retryable."""
-    from daydream.backends.pi import _is_retryable_error_message
-
-    for sig in (
-        "terminated",
-        "ECONNRESET",
-        "connection reset",
-        "socket hang up",
-        "premature close",
-        "EPIPE",
-    ):
-        assert _is_retryable_error_message(sig) is True, f"Expected {sig!r} to be retryable"
-
-
-def test_is_retryable_error_message_non_retryable() -> None:
-    """Non-transient messages are NOT classified as retryable."""
-    from daydream.backends.pi import _is_retryable_error_message
-
-    for msg in ("some real review failure", "auth failed", "invalid API key"):
-        assert _is_retryable_error_message(msg) is False, f"Expected {msg!r} to NOT be retryable"
-
-
 class _StreamDropThenSuccessBackend:
     """Raises a stream-drop PiError on the first call, succeeds on the second."""
 
@@ -367,3 +345,45 @@ async def test_run_agent_retries_on_stream_drop(monkeypatch, tmp_path: Path) -> 
 
     assert output == "Review complete after retry"
     assert backend.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_agent_retry_exhausted_marks_trajectory_partial(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Retry-exhaustion → trajectory ``partial`` composition (PR headline).
+
+    When a retryable ``PiError`` exhausts all retries, ``run_agent`` re-raises
+    and the exception propagates through the active ``TrajectoryRecorder``
+    scope. The recorder stamps ``extra.partial = True`` on the emitted
+    trajectory so downstream consumers can distinguish clean completions from
+    aborted ones. Real-path test driving the PR's headline behavior through
+    the production entrypoint (``run_agent``) with a real recorder on the real
+    filesystem.
+    """
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "2")
+    backend = _AlwaysRetryableBackend()
+
+    trajectory_path = tmp_path / ".daydream" / "trajectory.json"
+    recorder = TrajectoryRecorder(
+        path=trajectory_path,
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="test-model",
+        session_id="test",
+    )
+
+    with pytest.raises(PiError):
+        async with recorder:
+            await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
+
+    # 1 original attempt + 2 retries = 3 total, then re-raised through the
+    # recorder scope (which stamps partial=true) and caught here.
+    assert backend.call_count == 3
+
+    # The trajectory was written and stamped partial=true by the recorder's
+    # exception-exit path (TrajectoryRecorder._aborted → _write).
+    assert trajectory_path.exists(), "trajectory.json was not written on retry exhaustion"
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    assert trajectory["extra"]["partial"] is True

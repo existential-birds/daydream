@@ -1354,6 +1354,8 @@ class _ForkCM:
         child = self._child
         if child is None:
             return
+        if exc_type is not None:
+            child._aborted = True
         write_ok = False
         try:
             child._write()

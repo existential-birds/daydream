@@ -25,7 +25,7 @@ from pathlib import Path
 
 from common import read_json, repo_slug, run, write_json
 
-from daydream.backends.pi import _STREAM_DROP_SIGNATURES
+from daydream.backends.pi import STREAM_DROP_SIGNATURES
 
 # daydream resolves a GitHub App identity (and hard-aborts on failure) when these
 # are set and the run is "posting" (--review counts). The benchmark reviews a
@@ -65,7 +65,7 @@ def _is_transient(stdout: str) -> bool:
         return True
     # Stream-drop signatures only count when daydream actually errored out.
     if any(marker in low for marker in _ERROR_CONTEXT_MARKERS):
-        return any(sig in low for sig in _STREAM_DROP_SIGNATURES)
+        return any(sig in low for sig in STREAM_DROP_SIGNATURES)
     return False
 
 

@@ -121,7 +121,7 @@ findings and conclusions."""
 _PI_DEFAULT_RETRY_ATTEMPTS = 3
 _PI_DEFAULT_RETRY_BASE_DELAY = 2.0
 
-_STREAM_DROP_SIGNATURES = (
+STREAM_DROP_SIGNATURES = (
     "terminated",
     "econnreset",
     "connection reset",
@@ -129,6 +129,9 @@ _STREAM_DROP_SIGNATURES = (
     "premature close",
     "epipe",
 )
+# Public alias; the canonical tuple is also referenced internally as the
+# underscore-prefixed name for backward compatibility.
+_STREAM_DROP_SIGNATURES = STREAM_DROP_SIGNATURES
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +208,17 @@ def _is_retryable_error_message(message: str) -> bool:
         or re.search(r"\bthrottl(?:e|ed|ing)\b", lower)
     ):
         return True
+    # Stream-drop signatures (terminated, econnreset, premature close, ...).
+    #
+    # Unlike bench/review-bot-compare/replay.py:_is_transient — which scans raw
+    # stdout and therefore gates _STREAM_DROP_SIGNATURES behind
+    # _ERROR_CONTEXT_MARKERS so the substrings only count when daydream actually
+    # errored — this function is only ever invoked on a PiError `errorMessage`
+    # (see the turn_end / stopReason == "error" call site below), where error
+    # context is already implied by construction. The asymmetry is deliberate:
+    # the benchmark's _ERROR_CONTEXT_MARKERS gate is the harness's own concern
+    # for stdout scanning, not a contract production must mirror. Matching these
+    # signatures unconditionally here is therefore safe and correct.
     if any(sig in lower for sig in _STREAM_DROP_SIGNATURES):
         return True
     return False
