@@ -300,13 +300,18 @@ def _diff_name_only(repo: Path, base: str, head: str) -> list[str]:
 
 
 def _commits_in_window(repo: Path, head: str, base: str) -> list[str]:
-    """Return commits on ``base`` since ``head``'s ancestor.
+    """Return commits on ``base`` since ``head``'s ancestor, oldest → newest.
 
     Used by the fix-applied cascade to bound the upstream review window.
     The ``head..base`` range already bounds the walk; no date filter is
     needed (see #167).
+
+    :func:`git_ops.log_shas_since` returns newest-first (git log order);
+    we reverse to oldest → newest to match the downstream contract in
+    :func:`daydream.training.labeler_signals.fix_applied_signal`, where
+    ``window[-1]`` is expected to be the latest commit in the window.
     """
-    return git_ops.log_shas_since(repo, head, base)
+    return list(reversed(git_ops.log_shas_since(repo, head, base)))
 
 
 def _commits_since(repo: Path, branch: str, since: str) -> list[str]:
