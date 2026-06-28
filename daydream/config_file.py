@@ -43,6 +43,7 @@ class DaydreamFileConfig:
     model: str | None = None
     backend: str | None = None
     phases: dict[str, dict[str, str]] = field(default_factory=dict)
+    bench: dict[str, Any] = field(default_factory=dict)
     shallow_fanout_threshold: int | None = None
 
     def phase_model(self, phase: str) -> str | None:
@@ -136,6 +137,24 @@ def _merge_section(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
                 else:
                     phases[phase_name] = phase_table
             merged["phases"] = phases
+        elif key == "bench" and isinstance(value, dict) and isinstance(merged.get("bench"), dict):
+            bench: dict[str, Any] = dict(merged["bench"])
+            for bench_key, bench_value in value.items():
+                if (
+                    bench_key == "reviewers"
+                    and isinstance(bench_value, dict)
+                    and isinstance(bench.get("reviewers"), dict)
+                ):
+                    reviewers: dict[str, Any] = dict(bench["reviewers"])
+                    for reviewer_name, reviewer_table in bench_value.items():
+                        if isinstance(reviewer_table, dict) and isinstance(reviewers.get(reviewer_name), dict):
+                            reviewers[reviewer_name] = {**reviewers[reviewer_name], **reviewer_table}
+                        else:
+                            reviewers[reviewer_name] = reviewer_table
+                    bench["reviewers"] = reviewers
+                else:
+                    bench[bench_key] = bench_value
+            merged["bench"] = bench
         else:
             merged[key] = value
     return merged
@@ -203,5 +222,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,
         phases=_coerce_phases(merged.get("phases")),
+        bench=dict(merged["bench"]) if isinstance(merged.get("bench"), dict) else {},
         shallow_fanout_threshold=threshold,
     )
