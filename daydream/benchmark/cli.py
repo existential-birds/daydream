@@ -91,6 +91,15 @@ def _build_bench_parser() -> argparse.ArgumentParser:
         "Whatever resolves drives both the judge and the per-model results dir.",
     )
     parser.add_argument(
+        "--reviewer",
+        type=str,
+        default=None,
+        dest="reviewer",
+        metavar="NAME",
+        help="Expand a [tool.daydream.bench.reviewers.<NAME>] preset into backend/model/provider "
+        "and derive --tool-label as daydream-<NAME>; explicit --reviewer-*/--tool-label flags override",
+    )
+    parser.add_argument(
         "--reviewer-backend",
         type=str,
         choices=["claude", "codex", "pi"],
@@ -115,9 +124,10 @@ def _build_bench_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool-label",
         type=str,
-        default="daydream",
+        default=None,
         dest="tool_label",
-        help="Results key for this reviewer; MUST be distinct per reviewer backend or runs overwrite each other",
+        help="Results key for this reviewer; MUST be distinct per reviewer backend or runs overwrite each other "
+        "(default: daydream, or daydream-<NAME> when --reviewer is set)",
     )
     parser.add_argument(
         "--only",
@@ -158,6 +168,28 @@ def _build_bench_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_reviewer_preset(
+    name: str, bench_cfg: dict, parser: argparse.ArgumentParser
+) -> dict:
+    """Look up a named reviewer preset in the bench config table.
+
+    Args:
+        name: The preset name passed via ``--reviewer``.
+        bench_cfg: The ``[tool.daydream.bench]`` table from ``load_file_config``.
+        parser: The bench parser, used to emit a usage error (``SystemExit``)
+            when the preset is unknown.
+
+    Returns:
+        The preset dict with ``backend``/``model``/``provider`` keys.
+    """
+    preset = bench_cfg.get("reviewers", {}).get(name)
+    if preset is None:
+        parser.error(
+            f"unknown --reviewer '{name}' (define [tool.daydream.bench.reviewers.{name}] in config)"
+        )
+    return preset
+
+
 def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
     """Parse ``daydream bench`` argv into a :class:`BenchConfig`.
 
@@ -192,6 +224,20 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
     bench_root = benchmark_repo / ".daydream-bench"
     cache_dir = args.cache_dir if args.cache_dir is not None else bench_root / "cache"
     trajectory_dir = args.trajectory_dir if args.trajectory_dir is not None else bench_root / "trajectories"
+    # P1: a --reviewer preset is the config layer under explicit --reviewer-*/--tool-label flags.
+    preset: dict = {}
+    if args.reviewer is not None:
+        preset = _resolve_reviewer_preset(args.reviewer, bench, parser)
+    reviewer_backend = args.reviewer_backend if args.reviewer_backend is not None else preset.get("backend")
+    reviewer_model = args.reviewer_model if args.reviewer_model is not None else preset.get("model")
+    reviewer_provider = args.reviewer_provider if args.reviewer_provider is not None else preset.get("provider")
+    tool_label = (
+        args.tool_label
+        if args.tool_label is not None
+        else f"daydream-{args.reviewer}"
+        if args.reviewer is not None
+        else "daydream"
+    )
     return BenchConfig(
         benchmark_repo=benchmark_repo,
         cache_dir=cache_dir,
@@ -201,10 +247,10 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         limit=args.limit,
         trajectory_dir=trajectory_dir,
         model=model,
-        reviewer_backend=args.reviewer_backend,
-        reviewer_model=args.reviewer_model,
-        reviewer_provider=args.reviewer_provider,
-        tool_label=args.tool_label,
+        reviewer_backend=reviewer_backend,
+        reviewer_model=reviewer_model,
+        reviewer_provider=reviewer_provider,
+        tool_label=tool_label,
         verbose=args.verbose,
     )
 

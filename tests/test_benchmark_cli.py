@@ -63,6 +63,26 @@ def test_missing_benchmark_repo_everywhere_errors(tmp_path, monkeypatch):
         _bench_config_from_argv(["--no-score"])
 
 
+def test_reviewer_preset_resolves_and_derives_label(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.daydream.bench]\nbenchmark-repo = "/b"\n'
+        '[tool.daydream.bench.reviewers.glm]\nbackend="pi"\nmodel="z-ai/glm-5.2"\nprovider="openrouter"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv(["--reviewer", "glm", "--no-score"])
+    assert (cfg.reviewer_backend, cfg.reviewer_model, cfg.reviewer_provider, cfg.tool_label) \
+        == ("pi", "z-ai/glm-5.2", "openrouter", "daydream-glm")
+    cfg2 = _bench_config_from_argv(["--reviewer", "glm", "--reviewer-model", "x", "--no-score"])
+    assert cfg2.reviewer_model == "x"  # explicit flag overrides preset
+
+
+def test_unknown_reviewer_preset_errors(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text('[tool.daydream.bench]\nbenchmark-repo="/b"\n')
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        _bench_config_from_argv(["--reviewer", "nope", "--no-score"])
+
+
 def test_bench_parser_accepts_positive_limit():
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--limit", "3"])
     assert cfg.limit == 3
