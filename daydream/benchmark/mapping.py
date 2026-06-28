@@ -26,7 +26,10 @@ def merged_items_to_review_comments(
 
     Returns:
         A list of ``{path, line, body, created_at}`` dicts, one per item with
-        a non-empty ``file``. Items with an empty ``file`` are skipped; a null
+        a non-empty ``file``. Items with an empty ``file`` are skipped, as are
+        items whose assembled ``body`` is empty (no ``description``,
+        ``severity``, ``confidence``, or ``rationale`` text) — an empty-body
+        comment is never emitted. A null
         or non-integer ``line`` is preserved as ``None``. The ``body`` leads
         with the finding ``description``, followed by ``**Severity:**`` and
         ``**Confidence:**`` badges, and the ``rationale`` only when it differs
@@ -47,6 +50,8 @@ def merged_items_to_review_comments(
         if fields.rationale and fields.rationale != fields.description:
             body_parts.append(fields.rationale)
         body = "\n\n".join(body_parts)
+        if not body.strip():
+            continue
         out.append(
             {
                 "path": fields.path,
