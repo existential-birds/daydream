@@ -1,13 +1,16 @@
 """Non-interactive daydream review subprocess wrapper for the benchmark harness.
 
-Issues the exact invocation
-``daydream --non-interactive --base <sha> --trajectory <path> <checkout>``
-(see ``research/daydream-invocation.md`` §0/§1/§3), then returns the path to
-the canonical findings artifact ``<checkout>/.daydream/deep/merged-items.json``.
+Issues the invocation
+``daydream --non-interactive --base <sha> --trajectory <path> [--backend <b>]
+[--model <m>] <checkout>`` (see ``research/daydream-invocation.md`` §0/§1/§3),
+then returns the path to the canonical findings artifact
+``<checkout>/.daydream/deep/merged-items.json``. The reviewer ``provider`` is
+forwarded via the ``PI_PROVIDER`` environment variable, never as an argv flag.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -27,13 +30,25 @@ class DaydreamArtifactError(Exception):
     """Raised when daydream exits 0 but the expected findings artifact is absent."""
 
 
-def run_daydream_review(checkout: Path, *, base_sha: str, trajectory_path: Path) -> Path:
+def run_daydream_review(
+    checkout: Path,
+    *,
+    base_sha: str,
+    trajectory_path: Path,
+    backend: str | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+) -> Path:
     """Run a non-interactive deep daydream review against a checkout.
 
     Args:
         checkout: Path to the target repository checkout to review.
         base_sha: Raw commit-ish (SHA) to diff against, passed verbatim to ``--base``.
         trajectory_path: Destination for the ATIF v1.6 trajectory JSON.
+        backend: Reviewer backend; appended as ``--backend <backend>`` when set.
+        model: Reviewer model; appended as ``--model <model>`` when set.
+        provider: Reviewer provider; forwarded via the ``PI_PROVIDER`` environment
+            variable (never argv) when set.
 
     Returns:
         Path to the canonical ``merged-items.json`` findings artifact.
@@ -49,8 +64,16 @@ def run_daydream_review(checkout: Path, *, base_sha: str, trajectory_path: Path)
         base_sha,
         "--trajectory",
         str(trajectory_path),
-        str(checkout),
     ]
+    if backend:
+        cmd += ["--backend", backend]
+    if model:
+        cmd += ["--model", model]
+    cmd.append(str(checkout))
+
+    env = os.environ.copy()
+    if provider:
+        env["PI_PROVIDER"] = provider
     try:
         result = subprocess.run(  # noqa: S603 - args are harness-controlled, not user input
             cmd,  # noqa: S607 - daydream is a trusted command
@@ -58,6 +81,7 @@ def run_daydream_review(checkout: Path, *, base_sha: str, trajectory_path: Path)
             capture_output=True,
             text=True,
             timeout=_DAYDREAM_TIMEOUT,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise DaydreamRunError(

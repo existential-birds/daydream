@@ -29,6 +29,53 @@ def test_runs_daydream_noninteractive_with_pinned_base_and_trajectory(tmp_path, 
     assert out == checkout / ".daydream" / "deep" / "merged-items.json" and out.exists()
 
 
+def test_forwards_backend_model_argv_and_provider_env(tmp_path, monkeypatch):
+    checkout = tmp_path / "co"
+    (checkout / ".daydream" / "deep").mkdir(parents=True)
+    cap = {}
+
+    def fake_run(cmd, **kw):
+        cap["cmd"] = cmd
+        cap["env"] = kw.get("env")
+        (checkout / ".daydream" / "deep" / "merged-items.json").write_text('{"items": []}')
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.run", fake_run)
+    run_daydream_review(
+        checkout,
+        base_sha="d" * 40,
+        trajectory_path=tmp_path / "t.json",
+        backend="pi",
+        model="glm-5.2",
+        provider="openrouter",
+    )
+    cmd = cap["cmd"]
+    assert cmd[cmd.index("--backend") + 1] == "pi"
+    assert cmd[cmd.index("--model") + 1] == "glm-5.2"
+    assert "--provider" not in cmd  # provider never argv
+    assert cap["env"]["PI_PROVIDER"] == "openrouter"  # provider via env
+
+
+def test_no_overrides_matches_today(tmp_path, monkeypatch):
+    checkout = tmp_path / "co"
+    (checkout / ".daydream" / "deep").mkdir(parents=True)
+    cap = {}
+
+    def fake_run(cmd, **kw):
+        cap["cmd"] = cmd
+        cap["env"] = kw.get("env")
+        (checkout / ".daydream" / "deep" / "merged-items.json").write_text('{"items": []}')
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.run", fake_run)
+    run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json")
+    cmd = cap["cmd"]
+    assert "--backend" not in cmd
+    assert "--model" not in cmd
+    assert "PI_PROVIDER" not in cap["env"]
+
+
 def test_raises_when_artifact_missing(tmp_path, monkeypatch):
     checkout = tmp_path / "co"
     checkout.mkdir()
