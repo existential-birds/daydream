@@ -1686,7 +1686,7 @@ async def phase_verify_recommendations(
 
     prompt = build_verification_prompt(
         items=verifiable,
-        target_dir=work.repo,
+        cwd=work.repo,
         output_path=output_path,
     )
 
@@ -3004,6 +3004,7 @@ async def phase_per_stack_reviews(
                     intent_path=intent_path,
                     alternatives_path=alternatives_path,
                     output_path=output_path,
+                    cwd=work.repo,
                     exploration_dir=exploration_dir,
                     prior_commits=prior_commits,
                 )
@@ -3023,6 +3024,7 @@ async def phase_per_stack_reviews(
                         intent_path=intent_path,
                         alternatives_path=alternatives_path,
                         output_path=output_path,
+                        cwd=work.repo,
                         exploration_dir=exploration_dir,
                         is_docs_only=stack.is_docs_only,
                         prior_commits=prior_commits,
@@ -3039,6 +3041,7 @@ async def phase_per_stack_reviews(
                         intent_path=intent_path,
                         alternatives_path=alternatives_path,
                         output_path=output_path,
+                        cwd=work.repo,
                         exploration_dir=exploration_dir,
                         prior_commits=prior_commits,
                         inline_diff=inline_diff,
@@ -3166,6 +3169,7 @@ async def phase_arbiter_review(
         diff_path=diff_path,
         intent_path=intent_path,
         alternatives_path=alternatives_path,
+        cwd=work.repo,
         exploration_dir=exploration_dir,
     )
     result, _, _ = await run_agent(backend, work.repo, prompt, output_schema=ARBITER_SCHEMA, phase=DaydreamPhase.DEEP)

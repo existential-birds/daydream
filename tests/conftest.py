@@ -120,6 +120,38 @@ def feature_branch_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """A main worktree + a linked worktree on a feature branch (issue #221).
+
+    The main repo lives at ``main_repo`` on ``main`` and contains only
+    ``base.txt``. A ``feature`` branch adds files under ``services/taste/`` that
+    do NOT exist on ``main``. A linked worktree is checked out on ``feature`` at
+    ``linked_worktree``, sharing the main repo's git dir.
+
+    This reproduces the bug's trap: from the linked worktree, git topology
+    (``git rev-parse --git-common-dir`` / ``git worktree list``) points at the
+    MAIN worktree, where ``services/taste/`` does not exist. An agent that
+    re-roots a relative path via git topology reads the wrong worktree.
+
+    Returns:
+        ``(main_repo_path, linked_worktree_path)``.
+    """
+    main_repo = _make_repo_with_main(tmp_path, name="main_repo")
+    _git(main_repo, "checkout", "-b", "feature")
+    taste = main_repo / "services" / "taste"
+    taste.mkdir(parents=True, exist_ok=True)
+    for name in ("parser.go", "lexer.go", "token.go", "ast.go"):
+        (taste / name).write_text(f"package taste\n\n// {name}\nfunc {name[:-3].title()}() {{}}\n")
+    _git(main_repo, "add", "services/taste")
+    _commit(main_repo, "add taste service")
+    # Return the main worktree to `main` so it does NOT contain services/taste/.
+    _git(main_repo, "checkout", "main")
+    linked = tmp_path / "linked_worktree"
+    _git(main_repo, "worktree", "add", str(linked), "feature")
+    return main_repo, linked
+
+
+@pytest.fixture
 def bare_origin(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A bare repo suitable for use as `origin`."""
     path = tmp_path_factory.mktemp("origin") / "remote.git"

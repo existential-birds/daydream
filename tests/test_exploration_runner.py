@@ -26,6 +26,7 @@ from daydream.prompts.exploration_subagents import (
     build_pattern_scanner_prompt,
     build_test_mapper_prompt,
 )
+from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
@@ -34,7 +35,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 def test_pattern_scanner_prompt_includes_guideline_files():
     assert "CLAUDE.md" in PATTERN_SCANNER_SYSTEM_PROMPT
 
-    dynamic = build_pattern_scanner_prompt(["daydream/foo.py"], "main...HEAD")
+    dynamic = build_pattern_scanner_prompt(["daydream/foo.py"], "main...HEAD", cwd=Path("/repo"))
     assert "CLAUDE.md" in dynamic
     assert "main...HEAD" in dynamic
     assert "daydream/foo.py" in dynamic
@@ -50,7 +51,7 @@ def test_pattern_scanner_prompt_includes_guideline_files():
 
 def test_dependency_tracer_prompt_mentions_affected_files():
     files = [FileInfo("daydream/a.py", "modified"), FileInfo("daydream/b.py", "modified")]
-    prompt = build_dependency_tracer_prompt(files, "main...HEAD")
+    prompt = build_dependency_tracer_prompt(files, "main...HEAD", cwd=Path("/repo"))
     assert "daydream/a.py" in prompt
     assert "daydream/b.py" in prompt
     assert "main...HEAD" in prompt
@@ -59,12 +60,34 @@ def test_dependency_tracer_prompt_mentions_affected_files():
 
 
 def test_test_mapper_prompt_instructs_mapping():
-    prompt = build_test_mapper_prompt(["daydream/x.py"], "main...HEAD")
+    prompt = build_test_mapper_prompt(["daydream/x.py"], "main...HEAD", cwd=Path("/repo"))
     assert "test" in prompt.lower()
     assert "daydream/x.py" in prompt
     assert "main...HEAD" in prompt
     assert "```json" in prompt
     assert "<diff>" not in prompt
+
+
+def test_pattern_scanner_prompt_contains_cwd_grounding():
+    cwd = Path("/tmp/linked/worktree")
+    prompt = build_pattern_scanner_prompt(["daydream/foo.py"], "main...HEAD", cwd=cwd)
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
+    assert str(cwd) in prompt
+
+
+def test_dependency_tracer_prompt_contains_cwd_grounding():
+    cwd = Path("/tmp/linked/worktree")
+    files = [FileInfo("daydream/a.py", "modified")]
+    prompt = build_dependency_tracer_prompt(files, "main...HEAD", cwd=cwd)
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
+    assert str(cwd) in prompt
+
+
+def test_test_mapper_prompt_contains_cwd_grounding():
+    cwd = Path("/tmp/linked/worktree")
+    prompt = build_test_mapper_prompt(["daydream/x.py"], "main...HEAD", cwd=cwd)
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
+    assert str(cwd) in prompt
 
 
 def test_schemas_are_valid_objects():
@@ -217,7 +240,11 @@ def test_parallel_tier_routes_correct_file_lists(tmp_path):
     backend = _SpecialistMockBackend()
     anyio.run(pre_scan, backend, tmp_path, diff_text)
 
-    diff_changed = {"daydream_demo/api.py", "daydream_demo/models.py", "src/api.ts", "src/models.ts"}
+    # Paths are now cwd-absolute (issue #221): rooted at repo_root (tmp_path).
+    diff_changed = {
+        str(tmp_path / p)
+        for p in ("daydream_demo/api.py", "daydream_demo/models.py", "src/api.ts", "src/models.ts")
+    }
 
     calls_by_schema = {}
     for call in backend.execute_calls:
@@ -292,3 +319,43 @@ def test_specialist_failure_doesnt_cancel_others(tmp_path):
     assert call_count == 3
     assert ctx.conventions == []  # pattern scanner failed
     assert any(f.path == "daydream/extra.py" for f in ctx.affected_files)
+
+
+def _multifile_diff(paths: list[str]) -> str:
+    return "".join(
+        f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-old\n+new\n"
+        for p in paths
+    )
+
+
+def test_pre_scan_passes_cwd_absolute_changed_paths(tmp_path):
+    # 4 files => parallel tier => pattern_scanner & test_mapper receive changed_paths.
+    paths = [f"services/taste/file{i}.py" for i in range(4)]
+    diff_text = _multifile_diff(paths)
+    backend = _SpecialistMockBackend()
+
+    anyio.run(pre_scan, backend, tmp_path, diff_text)
+
+    joined = "\n".join(c["prompt"] for c in backend.execute_calls)
+    # Specialists receive cwd-absolute paths, never bare relatives.
+    assert str(tmp_path / "services/taste/file0.py") in joined
+    assert "- services/taste/file0.py\n" not in joined
+
+
+def test_pre_scan_passes_cwd_absolute_static_files(tmp_path, monkeypatch):
+    import daydream.exploration_runner as er
+
+    monkeypatch.setattr(
+        er,
+        "detect_affected_files",
+        lambda diff_text, repo_root, depth: [FileInfo("services/taste/dep.py", "imports", "helper")],
+    )
+    # 2 files => single tier => dependency_tracer gets static_files.
+    diff_text = _multifile_diff(["services/taste/a.py", "services/taste/b.py"])
+    backend = _SpecialistMockBackend()
+
+    anyio.run(pre_scan, backend, tmp_path, diff_text)
+
+    dep_prompt = backend.execute_calls[0]["prompt"]
+    assert str(tmp_path / "services/taste/dep.py") in dep_prompt
+    assert "- services/taste/dep.py (" not in dep_prompt

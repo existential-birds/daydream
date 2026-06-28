@@ -27,6 +27,7 @@ from daydream.phases import (
     _exploration_pointer,
     _settled_decisions_block,
 )
+from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
 DOC_REVIEW_NOTICE = (
     "[Notice] Dedicated documentation review (beagle-docs) is planned but not yet "
@@ -206,6 +207,7 @@ def build_per_stack_prompt(
     intent_path: Path,
     alternatives_path: Path,
     output_path: Path,
+    cwd: Path,
     exploration_dir: Path | None = None,
     prior_commits: str | None = None,
     inline_diff: str | None = None,
@@ -220,6 +222,7 @@ def build_per_stack_prompt(
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
         output_path: Where the agent must write its review.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Pre-scan exploration directory (if available).
         prior_commits: Oneline log of prior daydream commits on this branch.
         inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
@@ -236,6 +239,7 @@ def build_per_stack_prompt(
     settled = _settled_decisions_block(prior_commits)
     if settled:
         parts.append(settled)
+    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
@@ -254,6 +258,7 @@ def build_structural_prompt(
     intent_path: Path,
     alternatives_path: Path,
     output_path: Path,
+    cwd: Path,
     exploration_dir: Path | None = None,
     prior_commits: str | None = None,
 ) -> str:
@@ -273,6 +278,7 @@ def build_structural_prompt(
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
         output_path: Where the agent must write its review.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Accepted for signature symmetry with
             ``build_per_stack_prompt``; intentionally ignored in the prompt
             body because the structural reviewer discovers context via tool
@@ -288,6 +294,7 @@ def build_structural_prompt(
     settled = _settled_decisions_block(prior_commits)
     if settled:
         parts.append(settled)
+    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(
         f"You are the structural reviewer. The full change spans: {joined}. "
@@ -312,6 +319,7 @@ def build_arbiter_prompt(
     diff_path: Path,
     intent_path: Path,
     alternatives_path: Path,
+    cwd: Path,
     exploration_dir: Path | None = None,
 ) -> str:
     """Assemble the scoped Opus arbiter prompt (issue #168).
@@ -329,6 +337,7 @@ def build_arbiter_prompt(
         diff_path: Path to the full diff on disk.
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Pre-scan exploration directory (if available).
 
     Returns:
@@ -338,6 +347,7 @@ def build_arbiter_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
+    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(
         f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
@@ -493,7 +503,7 @@ def build_merge_prompt(
 def build_verification_prompt(
     *,
     items: list[dict[str, Any]],
-    target_dir: Path,
+    cwd: Path,
     output_path: Path,
 ) -> str:
     """Assemble the recommendation-verifier prompt.
@@ -518,7 +528,7 @@ def build_verification_prompt(
         items: The non-structural (per-stack / cross-stack) canonical items to
             verify. Rendered inline into the prompt; verdicts are keyed by each
             item's canonical ``id`` (the verdict ``issue_id``).
-        target_dir: Repository root the verifier runs against.
+        cwd: Absolute working directory the verifier runs in (grounds path resolution).
         output_path: Where the verifier must write its JSON verdicts file.
 
     Returns:
@@ -532,7 +542,7 @@ def build_verification_prompt(
         "numbered issue in the finding list below against the actual codebase "
         "and decide whether its recommendation is consistent with trait/interface "
         "specs and sibling implementations.\n\n"
-        f"Repository root: {target_dir}\n"
+        f"{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}\n"
         "The numbered findings to verify (each `issue_id` in your output MUST "
         "match the leading number `N.` of the finding it verifies):\n\n"
         + render_report(items)
@@ -594,6 +604,7 @@ def build_generic_fallback_prompt(
     intent_path: Path,
     alternatives_path: Path,
     output_path: Path,
+    cwd: Path,
     exploration_dir: Path | None = None,
     is_docs_only: bool = False,
     prior_commits: str | None = None,
@@ -609,6 +620,7 @@ def build_generic_fallback_prompt(
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
         output_path: Where the agent must write its review.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Pre-scan exploration directory (if available).
         is_docs_only: Whether the whole diff is docs-only (D-20).
         prior_commits: Oneline log of prior daydream commits on this branch.
@@ -628,6 +640,7 @@ def build_generic_fallback_prompt(
     settled = _settled_decisions_block(prior_commits)
     if settled:
         parts.append(settled)
+    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
