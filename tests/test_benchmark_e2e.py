@@ -66,6 +66,23 @@ def _grafana_daydream_reviews(data: dict) -> dict[str, list]:
     return out
 
 
+def _grafana_tool_reviews(data: dict, tool: str) -> dict[str, list]:
+    """Return {golden_url: review list tagged ``tool``} for grafana entries.
+
+    Unlike :func:`_grafana_daydream_reviews`, this matches the exact ``tool``
+    label (not a substring), so it distinguishes per-backend labels such as
+    ``daydream`` and ``daydream-glm`` that share a prefix.
+    """
+    out: dict[str, list] = {}
+    for url, entry in data.items():
+        if "grafana" not in url.lower():
+            continue
+        tagged = [r for r in entry.get("reviews", []) if isinstance(r, dict) and r.get("tool") == tool]
+        if tagged:
+            out[url] = tagged
+    return out
+
+
 def test_bench_acceptance_2pr_subset_real_run():
     repo_env = os.environ.get("DAYDREAM_BENCH_E2E_REPO")
     assert repo_env, "set DAYDREAM_BENCH_E2E_REPO to the code-review-benchmark/offline checkout"
@@ -124,3 +141,94 @@ def test_bench_acceptance_2pr_subset_real_run():
     after = data_path.read_text()
     assert json.loads(after) == json.loads(before), "re-run mutated the corpus (not incremental)"
     assert len(_grafana_daydream_reviews(json.loads(after))) == 2
+
+
+def test_bench_acceptance_glm_reviewer_real_run():
+    """Any-backend acceptance: run the reviewer-under-test on a non-default backend.
+
+    Drives ``daydream bench`` with the reviewer pinned to the ``pi`` backend
+    running GLM via OpenRouter, tagged under a distinct ``--tool-label`` so its
+    results live alongside (not on top of) the default ``daydream`` label. This
+    is the credentialed proof that reviewer selection (backend/model/provider)
+    flows end-to-end into a real precision/recall number.
+
+    Run manually (skipped by default — spends money + network time):
+
+        set -a; source daydream/.env; set +a
+        export MARTIAN_BASE_URL=https://openrouter.ai/api/v1
+        export MARTIAN_MODEL=anthropic/claude-opus-4.5
+        export PI_API_KEY=sk-or-...        # OpenRouter key for the pi reviewer
+        DAYDREAM_BENCH_E2E_REPO=/path/to/code-review-benchmark/offline \\
+            pytest tests/test_benchmark_e2e.py::test_bench_acceptance_glm_reviewer_real_run \\
+            -s   # (drop the module-level skip mark first)
+
+    The observable contract:
+
+      (a) ``benchmark_data.json`` gains a ``daydream-glm`` review whose comment
+          bodies are non-empty (the reviewer actually produced findings).
+      (b) ``results/<judge>/evaluations.json`` gains a numeric ``daydream-glm``
+          leaf (``tp``/``fp``/``fn`` ints — precision/recall computable).
+      (c) A second identical run is idempotent (zero new reviews, exit 0).
+    """
+    repo_env = os.environ.get("DAYDREAM_BENCH_E2E_REPO")
+    assert repo_env, "set DAYDREAM_BENCH_E2E_REPO to the code-review-benchmark/offline checkout"
+    repo = Path(repo_env)
+    data_path = repo / "results" / "benchmark_data.json"
+    evals_path = repo / "results" / _MODEL.replace("/", "_") / "evaluations.json"
+    assert data_path.exists(), f"missing corpus: {data_path}"
+
+    assert os.environ.get("MARTIAN_API_KEY"), "export MARTIAN_API_KEY before running"
+
+    tool_label = "daydream-glm"
+    cmd = [
+        "daydream",
+        "bench",
+        "--benchmark-repo",
+        str(repo),
+        "--reviewer-backend",
+        "pi",
+        "--reviewer-model",
+        "glm-5.2",
+        "--reviewer-provider",
+        "openrouter",
+        "--tool-label",
+        tool_label,
+        "--only",
+        "grafana",
+        "--limit",
+        "1",
+        "--score",
+    ]
+
+    first = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ})
+    assert first.returncode == 0, f"first run failed: {first.stdout}\n{first.stderr}"
+
+    # Contract (a): benchmark_data.json gained one daydream-glm review with non-empty bodies.
+    data = json.loads(data_path.read_text())
+    injected = _grafana_tool_reviews(data, tool_label)
+    assert len(injected) == 1, f"expected 1 {tool_label} review, got {list(injected)}"
+    for url, reviews in injected.items():
+        comments = [c for review in reviews for c in review.get("review_comments", [])]
+        assert comments, f"{url}: {tool_label} review has no comments"
+        assert all(c.get("body", "").strip() for c in comments), f"{url}: empty comment body in {tool_label} review"
+
+    # Contract (b): evaluations.json has a numeric daydream-glm leaf, keyed by the tool label.
+    evals = json.loads(evals_path.read_text())
+    leaves = {url: tools[tool_label] for url, tools in evals.items() if tool_label in tools}
+    assert len(leaves) == 1, f"expected 1 {tool_label} leaf, got {list(leaves)}"
+    for url, leaf in leaves.items():
+        for key in ("tp", "fp", "fn"):
+            assert isinstance(leaf.get(key), int), f"{url} leaf.{key} not numeric: {leaf.get(key)}"
+        assert isinstance(leaf.get("precision"), (int, float)), url
+        assert isinstance(leaf.get("recall"), (int, float)), url
+
+    # Re-run is incremental — zero new reviews, exit 0, corpus unchanged.
+    before = data_path.read_text()
+    second = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ})
+    assert second.returncode == 0, f"re-run failed: {second.stdout}\n{second.stderr}"
+    second_out = " ".join(second.stdout.split())
+    assert "already present" in second_out, f"expected skip messages: {second.stdout}"
+    assert "Injected daydream review" not in second_out, f"re-run injected anew: {second.stdout}"
+    after = data_path.read_text()
+    assert json.loads(after) == json.loads(before), "re-run mutated the corpus (not incremental)"
+    assert len(_grafana_tool_reviews(json.loads(after), tool_label)) == 1
