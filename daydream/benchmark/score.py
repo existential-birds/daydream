@@ -104,23 +104,24 @@ class DaydreamScores:
     recall: float = 0.0
 
 
-def parse_daydream_scores(evals: dict[str, dict[str, Any]]) -> DaydreamScores:
-    """Extract per-PR and aggregate daydream scores from a parsed evaluations dict.
+def parse_daydream_scores(evals: dict[str, dict[str, Any]], *, tool: str = _TOOL) -> DaydreamScores:
+    """Extract per-PR and aggregate scores for ``tool`` from a parsed evaluations dict.
 
-    Only the `daydream` leaf of each PR entry is retained; other tools' leaves are
+    Only the ``tool`` leaf of each PR entry is retained; other tools' leaves are
     dropped. Aggregate precision/recall are computed from summed TP/FP/FN (micro
     averaging), with a zero denominator yielding 0.0.
 
     Args:
         evals: The parsed `evaluations.json` object — golden PR URL → tool → leaf.
+        tool: Results label to extract (defaults to ``_TOOL``).
 
     Returns:
-        A `DaydreamScores` capturing per-PR daydream leaves and the aggregate.
+        A `DaydreamScores` capturing per-PR tool leaves and the aggregate.
     """
     per_pr: dict[str, dict[str, Any]] = {}
     total_tp = total_fp = total_fn = 0
     for golden_url, tools in evals.items():
-        leaf = tools.get(_TOOL)
+        leaf = tools.get(tool)
         if leaf is None:
             continue
         per_pr[golden_url] = leaf
@@ -141,7 +142,7 @@ def parse_daydream_scores(evals: dict[str, dict[str, Any]]) -> DaydreamScores:
     )
 
 
-def _run_step(module: str, extra_args: list[str], *, cwd: Path) -> None:
+def _run_step(module: str, extra_args: list[str], *, cwd: Path, tool: str = _TOOL) -> None:
     """Run one benchmark step module via `uv run python -m`, inheriting the env.
 
     The step modules read `results/benchmark_data.json` by cwd only, so `cwd` must
@@ -150,14 +151,15 @@ def _run_step(module: str, extra_args: list[str], *, cwd: Path) -> None:
 
     Args:
         module: Dotted module path (e.g. `code_review_benchmark.step3_judge_comments`).
-        extra_args: Module-specific CLI arguments appended after `--tool daydream`.
+        extra_args: Module-specific CLI arguments appended after `--tool <tool>`.
         cwd: The benchmark repo directory.
+        tool: Results label passed as `--tool` (defaults to ``_TOOL``).
 
     Raises:
         BenchmarkStepError: If the step exits non-zero; the message carries the module
             name and a tail of its stderr.
     """
-    cmd = ["uv", "run", "python", "-m", module, "--tool", _TOOL, *extra_args]  # noqa: S607 - uv is a trusted command
+    cmd = ["uv", "run", "python", "-m", module, "--tool", tool, *extra_args]  # noqa: S607 - uv is a trusted command
     try:
         result = subprocess.run(  # noqa: S603 - args are not user-controlled; module names are fixed literals
             cmd,
@@ -176,11 +178,11 @@ def _run_step(module: str, extra_args: list[str], *, cwd: Path) -> None:
         raise BenchmarkStepError(f"{module} failed (exit {result.returncode}):\n{stderr_tail}")
 
 
-def run_scoring(benchmark_repo: Path, model: str, *, pr_count: int | None = None) -> DaydreamScores:
-    """Run step2/2.5/3 against the benchmark repo and parse daydream scores.
+def run_scoring(benchmark_repo: Path, model: str, *, pr_count: int | None = None, tool: str = _TOOL) -> DaydreamScores:
+    """Run step2/2.5/3 against the benchmark repo and parse the tool's scores.
 
     Runs the three benchmark step modules in order (extract → dedup → judge),
-    each with `--tool daydream` and `cwd` set to the benchmark checkout. step3
+    each with `--tool <tool>` and `cwd` set to the benchmark checkout. step3
     additionally receives `--dedup-groups` pointing at step2.5's output.
     Finally loads `evaluations.json` and parses it.
 
@@ -193,6 +195,7 @@ def run_scoring(benchmark_repo: Path, model: str, *, pr_count: int | None = None
         pr_count: When provided, passed as ``--limit`` to step3 so the judge
             only evaluates that many PRs.  Use this to bound judge cost when
             ``--limit`` was passed to the harness.
+        tool: Results label under evaluation (defaults to ``_TOOL``).
 
     Returns:
         The parsed `DaydreamScores`.
@@ -210,12 +213,12 @@ def run_scoring(benchmark_repo: Path, model: str, *, pr_count: int | None = None
     results_dir = model_results_dir(benchmark_repo, model)
     dedup_groups = results_dir / "dedup_groups.json"
 
-    _run_step(_STEP2_MODULE, [], cwd=benchmark_repo)
-    _run_step(_STEP2_5_MODULE, [], cwd=benchmark_repo)
+    _run_step(_STEP2_MODULE, [], cwd=benchmark_repo, tool=tool)
+    _run_step(_STEP2_5_MODULE, [], cwd=benchmark_repo, tool=tool)
     step3_extra: list[str] = ["--dedup-groups", str(dedup_groups)]
     if pr_count is not None:
         step3_extra += ["--limit", str(pr_count)]
-    _run_step(_STEP3_MODULE, step3_extra, cwd=benchmark_repo)
+    _run_step(_STEP3_MODULE, step3_extra, cwd=benchmark_repo, tool=tool)
 
     evaluations_file = results_dir / "evaluations.json"
     if not evaluations_file.exists():
@@ -223,4 +226,4 @@ def run_scoring(benchmark_repo: Path, model: str, *, pr_count: int | None = None
             f"{evaluations_file} not found after step3; the judge step produced no evaluations."
         )
     evals = json.loads(evaluations_file.read_text())
-    return parse_daydream_scores(evals)
+    return parse_daydream_scores(evals, tool=tool)

@@ -12,6 +12,21 @@ from daydream.benchmark.score import (
     run_scoring,
 )
 
+URL = "https://x/pull/1"
+
+
+def test_run_scoring_passes_custom_tool_to_each_step(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
+    calls = []
+    monkeypatch.setattr("daydream.benchmark.score.subprocess.run",
+        lambda cmd, **k: calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+    rdir = tmp_path / "results" / "anthropic_claude-opus-4.5"
+    rdir.mkdir(parents=True)
+    (rdir / "evaluations.json").write_text('{"%s": {"daydream-glm": {"tp":1,"fp":0,"fn":0}}}' % URL)
+    scores = run_scoring(tmp_path, "anthropic/claude-opus-4.5", tool="daydream-glm")
+    assert all(c[c.index("--tool")+1] == "daydream-glm" for c in calls)
+    assert scores.scored_pr_count == 1                  # parse keyed off the custom label
+
 
 def test_model_results_dir_sanitizes_slashes(tmp_path):
     assert model_results_dir(tmp_path, "anthropic/claude-opus-4.5").name == "anthropic_claude-opus-4.5"

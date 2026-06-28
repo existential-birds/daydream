@@ -144,7 +144,7 @@ def run_bench(config: BenchConfig) -> int:
     score_failed = False
     if config.score:
         try:
-            scores = run_scoring(config.benchmark_repo, config.model, pr_count=len(prs))
+            scores = run_scoring(config.benchmark_repo, config.model, pr_count=len(prs), tool=config.tool_label)
         except Exception as exc:  # noqa: BLE001 - report scoring failure without raising past the CLI
             score_failed = True
             print_error(console, "Scoring failed", f"{type(exc).__name__}: {exc}")
