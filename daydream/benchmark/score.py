@@ -2,6 +2,7 @@
 
 Exports:
     preflight_judge_env: Verify the judge credential is present in the environment.
+    assert_judge_model_matches: Verify MARTIAN_MODEL agrees with the judge model.
     model_results_dir: Resolve the per-model results directory for a benchmark repo.
     run_scoring: Run step2/2.5/3 and parse the resulting daydream precision/recall.
     parse_daydream_scores: Extract per-PR and aggregate daydream scores from evaluations.
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 JUDGE_API_KEY_ENV = "MARTIAN_API_KEY"
+JUDGE_MODEL_ENV = "MARTIAN_MODEL"
 
 #: Benchmark step modules, run in order. Each reads `results/benchmark_data.json`
 #: by cwd only, so all three are invoked with ``cwd=benchmark_repo``.
@@ -61,6 +63,33 @@ def preflight_judge_env() -> None:
         raise JudgeEnvError(
             f"{JUDGE_API_KEY_ENV} is not set; export it (e.g. an OpenRouter sk-or-… key) "
             "before running the judge step."
+        )
+
+
+def assert_judge_model_matches(model: str) -> None:
+    """Verify `MARTIAN_MODEL` agrees with the judge model naming the results dir.
+
+    The judge step writes its scores into a per-model results directory derived
+    from ``model`` (see `model_results_dir`), while the judge harness itself
+    selects its model from the `MARTIAN_MODEL` environment variable. If the two
+    diverge, scores would be read from a directory that names one model while
+    the judge actually ran a different one — a silent corruption of results.
+    This preflight aborts in seconds, before any review runs.
+
+    Args:
+        model: Judge model id naming the results directory (e.g.
+            `anthropic/claude-opus-4.5`).
+
+    Raises:
+        JudgeEnvError: If `MARTIAN_MODEL` is set and differs from ``model``.
+    """
+    env_model = os.environ.get(JUDGE_MODEL_ENV)
+    if env_model and env_model != model:
+        raise JudgeEnvError(
+            f"{JUDGE_MODEL_ENV}={env_model!r} does not match the judge model "
+            f"--model={model!r}. The judge harness would run {env_model!r} while "
+            f"scores are read from the results dir named for {model!r}, diverging "
+            f"silently. Unset {JUDGE_MODEL_ENV} or align it with --model."
         )
 
 

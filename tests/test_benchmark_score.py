@@ -6,6 +6,7 @@ import pytest
 from daydream.benchmark.score import (
     BenchmarkArtifactError,
     JudgeEnvError,
+    assert_judge_model_matches,
     model_results_dir,
     parse_daydream_scores,
     preflight_judge_env,
@@ -13,6 +14,19 @@ from daydream.benchmark.score import (
 )
 
 URL = "https://x/pull/1"
+
+
+def test_judge_model_mismatch_raises_clear_error(monkeypatch):
+    monkeypatch.setenv("MARTIAN_MODEL", "openai/gpt-5.2")
+    with pytest.raises(JudgeEnvError, match="MARTIAN_MODEL.*does not match.*--model"):
+        assert_judge_model_matches("anthropic/claude-opus-4.5")
+
+
+def test_judge_model_match_or_unset_ok(monkeypatch):
+    monkeypatch.delenv("MARTIAN_MODEL", raising=False)
+    assert_judge_model_matches("anthropic/claude-opus-4.5")      # unset is allowed
+    monkeypatch.setenv("MARTIAN_MODEL", "anthropic/claude-opus-4.5")
+    assert_judge_model_matches("anthropic/claude-opus-4.5")
 
 
 def test_run_scoring_passes_custom_tool_to_each_step(tmp_path, monkeypatch):

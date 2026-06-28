@@ -34,7 +34,7 @@ from daydream.benchmark.benchmark_data import (
 from daydream.benchmark.daydream_run import run_daydream_review
 from daydream.benchmark.mapping import merged_items_to_review_comments
 from daydream.benchmark.prs import load_evaluable_prs
-from daydream.benchmark.score import preflight_judge_env, run_scoring
+from daydream.benchmark.score import assert_judge_model_matches, preflight_judge_env, run_scoring
 from daydream.ui import print_dim, print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
@@ -110,6 +110,7 @@ def run_bench(config: BenchConfig) -> int:
     """
     if config.score:
         preflight_judge_env()
+        assert_judge_model_matches(config.model)
 
     data_path = _benchmark_data_path(config)
     data = load_benchmark_data(data_path)
