@@ -59,10 +59,11 @@ def _build_bench_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--benchmark-repo",
         type=Path,
-        required=True,
+        default=None,
         dest="benchmark_repo",
         metavar="PATH",
-        help="Path to the external code-review-benchmark checkout",
+        help="Path to the external code-review-benchmark checkout "
+        "(optional when [tool.daydream.bench] benchmark-repo is set)",
     )
     parser.add_argument(
         "--cache-dir",
@@ -170,23 +171,36 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         An immutable :class:`BenchConfig` for the requested run.
     """
     from daydream.benchmark import BenchConfig
+    from daydream.config_file import load_file_config
 
     parser = _build_bench_parser()
     args = parser.parse_args(argv)
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be a positive integer")
-    bench_root = args.benchmark_repo / ".daydream-bench"
+    bench = load_file_config(Path.cwd()).bench
+    # P1: CLI flag > config file > built-in default.
+    benchmark_repo = (
+        args.benchmark_repo
+        if args.benchmark_repo is not None
+        else Path(bench["benchmark-repo"])
+        if "benchmark-repo" in bench
+        else None
+    )
+    model = args.model if args.model is not None else bench.get("model")
+    if benchmark_repo is None:
+        parser.error("--benchmark-repo is required (pass the flag or set [tool.daydream.bench] benchmark-repo)")
+    bench_root = benchmark_repo / ".daydream-bench"
     cache_dir = args.cache_dir if args.cache_dir is not None else bench_root / "cache"
     trajectory_dir = args.trajectory_dir if args.trajectory_dir is not None else bench_root / "trajectories"
     return BenchConfig(
-        benchmark_repo=args.benchmark_repo,
+        benchmark_repo=benchmark_repo,
         cache_dir=cache_dir,
         force=args.force,
         score=args.score,
         only=args.only,
         limit=args.limit,
         trajectory_dir=trajectory_dir,
-        model=args.model,
+        model=model,
         reviewer_backend=args.reviewer_backend,
         reviewer_model=args.reviewer_model,
         reviewer_provider=args.reviewer_provider,

@@ -50,6 +50,19 @@ def test_reviewer_flags_reach_config():
         == ("pi", "glm-5.2", "openrouter", "daydream-glm")
 
 
+def test_config_supplies_benchmark_repo_when_flag_omitted(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text('[tool.daydream.bench]\nbenchmark-repo = "/from/config"\n')
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv(["--no-score"])  # no --benchmark-repo
+    assert cfg.benchmark_repo == Path("/from/config")
+
+
+def test_missing_benchmark_repo_everywhere_errors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no config, no flag
+    with pytest.raises(SystemExit):
+        _bench_config_from_argv(["--no-score"])
+
+
 def test_bench_parser_accepts_positive_limit():
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--limit", "3"])
     assert cfg.limit == 3
