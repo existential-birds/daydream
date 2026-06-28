@@ -88,6 +88,9 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
         checkout,
         base_sha=pr.base_sha,
         trajectory_path=_trajectory_path(config, pr),
+        backend=config.reviewer_backend,
+        model=config.reviewer_model,
+        provider=config.reviewer_provider,
     )
     doc = json.loads(artifact.read_text(encoding="utf-8"))
     comments = merged_items_to_review_comments(doc, created_at=_CREATED_AT)

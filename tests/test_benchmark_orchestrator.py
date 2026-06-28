@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,25 @@ def test_run_bench_injects_a_daydream_review_per_selected_pr(tmp_path, monkeypat
     grafana = [u for u in data if "grafana" in u]
     assert rc == 0 and len(grafana) == 10
     assert all(any(r["tool"] == "daydream" for r in data[u]["reviews"]) for u in grafana)
+
+
+def test_orchestrator_forwards_reviewer_fields(tmp_path, monkeypatch):
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.acquire_checkout",
+        lambda *a, **k: _fake_checkout(tmp_path),
+    )
+
+    def cap_review(checkout, **k):
+        captured.update(k)
+        return _write_items(checkout, [_item("f.py", 1)])
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_daydream_review", cap_review)
+    cfg = _config(tmp_path, data_path, score=False, only="grafana")
+    cfg = replace(cfg, reviewer_backend="pi", reviewer_model="glm-5.2", reviewer_provider="openrouter")
+    run_bench(cfg)
+    assert (captured["backend"], captured["model"], captured["provider"]) == ("pi", "glm-5.2", "openrouter")
 
 
 def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):
