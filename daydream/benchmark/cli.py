@@ -59,6 +59,35 @@ def _build_bench_parser() -> argparse.ArgumentParser:
         help="Judge model id (also names the per-model results dir)",
     )
     parser.add_argument(
+        "--reviewer-backend",
+        type=str,
+        choices=["claude", "codex", "pi"],
+        default=None,
+        dest="reviewer_backend",
+        help="Backend for the reviewer under test (default: daydream's built-in default)",
+    )
+    parser.add_argument(
+        "--reviewer-model",
+        type=str,
+        default=None,
+        dest="reviewer_model",
+        help="Model id for the reviewer under test (default: the backend's default)",
+    )
+    parser.add_argument(
+        "--reviewer-provider",
+        type=str,
+        default=None,
+        dest="reviewer_provider",
+        help="Provider for the reviewer under test, forwarded as PI_PROVIDER (pi backend only)",
+    )
+    parser.add_argument(
+        "--tool-label",
+        type=str,
+        default="daydream",
+        dest="tool_label",
+        help="Results key for this reviewer; MUST be distinct per reviewer backend or runs overwrite each other",
+    )
+    parser.add_argument(
         "--only",
         type=str,
         default=None,
@@ -120,6 +149,10 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         limit=args.limit,
         trajectory_dir=trajectory_dir,
         model=args.model,
+        reviewer_backend=args.reviewer_backend,
+        reviewer_model=args.reviewer_model,
+        reviewer_provider=args.reviewer_provider,
+        tool_label=args.tool_label,
     )
 
 

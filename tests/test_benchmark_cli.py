@@ -27,6 +27,16 @@ def test_bench_config_has_reviewer_defaults():
     assert cfg.tool_label == "daydream"
 
 
+def test_reviewer_flags_reach_config():
+    cfg = _bench_config_from_argv([
+        "--benchmark-repo", "/b", "--no-score",
+        "--reviewer-backend", "pi", "--reviewer-model", "glm-5.2",
+        "--reviewer-provider", "openrouter", "--tool-label", "daydream-glm",
+    ])
+    assert (cfg.reviewer_backend, cfg.reviewer_model, cfg.reviewer_provider, cfg.tool_label) \
+        == ("pi", "glm-5.2", "openrouter", "daydream-glm")
+
+
 def test_bench_parser_accepts_positive_limit():
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--limit", "3"])
     assert cfg.limit == 3
