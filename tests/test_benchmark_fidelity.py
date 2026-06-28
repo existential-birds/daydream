@@ -32,3 +32,14 @@ def test_injected_review_entry_matches_harvested_review_shape():
                            force=False, tool="daydream-glm")
     entry = data[URL]["reviews"][0]
     assert set(entry) == {"tool", "repo_name", "pr_url", "review_comments"}   # step1 review-entry keys
+
+
+def test_corpus_shape_is_backend_independent():
+    items = {"items": [{"file":"a.py","line":1,"description":"d","severity":"high","confidence":"HIGH","rationale":"r"}]}
+    cmts = merged_items_to_review_comments(items, created_at="T")
+    a = {URL: {"reviews": []}}; b = {URL: {"reviews": []}}
+    inject_daydream_review(a, URL, cmts, force=False, tool="daydream-claude")
+    inject_daydream_review(b, URL, cmts, force=False, tool="daydream-glm")
+    ra, rb = a[URL]["reviews"][0], b[URL]["reviews"][0]
+    assert {k: ra[k] for k in ("pr_url","review_comments")} == {k: rb[k] for k in ("pr_url","review_comments")}
+    assert set(ra) == set(rb)                            # identical structure across backends
