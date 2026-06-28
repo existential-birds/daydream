@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+from rich.console import Console
 
 from daydream.benchmark.config import BenchConfig
 from daydream.benchmark.orchestrator import run_bench
@@ -101,6 +104,25 @@ def test_run_bench_injects_a_daydream_review_per_selected_pr(tmp_path, monkeypat
     grafana = [u for u in data if "grafana" in u]
     assert rc == 0 and len(grafana) == 10
     assert all(any(r["tool"] == "daydream" for r in data[u]["reviews"]) for u in grafana)
+
+
+def test_run_bench_announces_and_reports_each_pr(tmp_path, monkeypatch):
+    rec = Console(record=True, force_terminal=True, width=100)
+    monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.acquire_checkout",
+        lambda *a, **k: _fake_checkout(tmp_path),
+    )
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.run_daydream_review",
+        lambda checkout, **k: _write_items(checkout, [_item("f.py", 1)]),
+    )
+    run_bench(replace(_config(tmp_path, data_path, score=False, only="grafana"), limit=1))
+    out = rec.export_text()
+    assert "Reviewing" in out and "grafana" in out  # announced before the blocking review
+    assert re.search(r"\b\d+s\b", out)  # completion shows elapsed
+    assert "1 finding" in out  # finding count for the injected PR
 
 
 def test_orchestrator_forwards_reviewer_fields(tmp_path, monkeypatch):
