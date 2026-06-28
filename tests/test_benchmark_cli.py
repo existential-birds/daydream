@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from daydream.benchmark.cli import _bench_config_from_argv
+from daydream.benchmark.cli import _bench_config_from_argv, _format_elapsed
+
+
+def test_format_elapsed():
+    assert _format_elapsed(45.4) == "45s"
+    assert _format_elapsed(252) == "4m12s"
 
 
 def test_bench_parser_defaults_and_flags():

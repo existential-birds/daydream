@@ -16,6 +16,22 @@ if TYPE_CHECKING:
     from daydream.benchmark import BenchConfig
 
 
+def _format_elapsed(seconds: float) -> str:
+    """Render an elapsed duration as a compact human string.
+
+    Args:
+        seconds: Elapsed wall-clock seconds.
+
+    Returns:
+        ``"{n}s"`` for durations under a minute, else ``"{m}m{s}s"`` with the
+        seconds component not zero-padded (e.g. ``252`` -> ``"4m12s"``).
+    """
+    total = int(seconds)
+    if total < 60:
+        return f"{total}s"
+    return f"{total // 60}m{total % 60}s"
+
+
 def _build_bench_parser() -> argparse.ArgumentParser:
     """Build the parser for the ``daydream bench`` subcommand.
 
