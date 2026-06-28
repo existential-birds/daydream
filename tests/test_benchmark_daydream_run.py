@@ -76,6 +76,27 @@ def test_no_overrides_matches_today(tmp_path, monkeypatch):
     assert "PI_PROVIDER" not in cap["env"]
 
 
+def test_strips_github_app_creds_from_review_env(tmp_path, monkeypatch):
+    """Regression: App creds in the operator's shell must not reach the review
+    subprocess — they make daydream attempt App auth for the upstream owner and
+    exit 1 before any review runs."""
+    checkout = tmp_path / "co"
+    (checkout / ".daydream" / "deep").mkdir(parents=True)
+    cap = {}
+
+    def fake_run(cmd, **kw):
+        cap["env"] = kw.get("env")
+        (checkout / ".daydream" / "deep" / "merged-items.json").write_text('{"items": []}')
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("DAYDREAM_APP_ID", "4014446")
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----")
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.run", fake_run)
+    run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json")
+    assert "DAYDREAM_APP_ID" not in cap["env"]
+    assert "DAYDREAM_APP_PRIVATE_KEY" not in cap["env"]
+
+
 def test_raises_when_artifact_missing(tmp_path, monkeypatch):
     checkout = tmp_path / "co"
     checkout.mkdir()

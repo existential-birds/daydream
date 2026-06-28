@@ -14,6 +14,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV
+
 #: How many trailing characters of stderr to surface in the failure message.
 _STDERR_TAIL = 4000
 
@@ -72,6 +74,13 @@ def run_daydream_review(
     cmd.append(str(checkout))
 
     env = os.environ.copy()
+    # The bench reviews arbitrary local checkouts of upstream repos. GitHub App
+    # credentials inherited from the operator's shell would make daydream attempt
+    # an installation-token resolution for that upstream owner (e.g. grafana),
+    # find no installation, and hard-abort (exit 1) before any review runs. App
+    # auth is never needed to review a local checkout, so strip it from the env.
+    for app_var in (APP_ID_ENV, APP_PRIVATE_KEY_ENV):
+        env.pop(app_var, None)
     if provider:
         env["PI_PROVIDER"] = provider
     try:
@@ -88,9 +97,11 @@ def run_daydream_review(
             f"daydream review timed out after {_DAYDREAM_TIMEOUT}s for {checkout}"
         ) from exc
     if result.returncode != 0:
-        stderr_tail = (result.stderr or "")[-_STDERR_TAIL:]
+        # daydream prints its errors to stdout (Rich console), so a stderr-only
+        # message is frequently empty; surface both streams' tails.
+        tail = f"{result.stdout or ''}\n{result.stderr or ''}".strip()[-_STDERR_TAIL:]
         raise DaydreamRunError(
-            f"daydream review failed (exit {result.returncode}) for {checkout}:\n{stderr_tail}"
+            f"daydream review failed (exit {result.returncode}) for {checkout}:\n{tail}"
         )
 
     artifact = checkout / ".daydream" / "deep" / "merged-items.json"

@@ -34,7 +34,7 @@ from daydream.benchmark.benchmark_data import (
 from daydream.benchmark.daydream_run import run_daydream_review
 from daydream.benchmark.mapping import merged_items_to_review_comments
 from daydream.benchmark.prs import load_evaluable_prs
-from daydream.benchmark.score import assert_judge_model_matches, preflight_judge_env, run_scoring
+from daydream.benchmark.score import preflight_judge_env, resolve_judge_model, run_scoring
 from daydream.ui import print_dim, print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
@@ -108,9 +108,10 @@ def run_bench(config: BenchConfig) -> int:
         requested) succeeded; non-zero if any selected PR failed or scoring
         failed.
     """
+    judge_model = ""
     if config.score:
         preflight_judge_env()
-        assert_judge_model_matches(config.model)
+        judge_model = resolve_judge_model(config.model)
 
     data_path = _benchmark_data_path(config)
     data = load_benchmark_data(data_path)
@@ -145,7 +146,7 @@ def run_bench(config: BenchConfig) -> int:
     score_failed = False
     if config.score:
         try:
-            scores = run_scoring(config.benchmark_repo, config.model, pr_count=len(prs), tool=config.tool_label)
+            scores = run_scoring(config.benchmark_repo, judge_model, pr_count=len(prs), tool=config.tool_label)
         except Exception as exc:  # noqa: BLE001 - report scoring failure without raising past the CLI
             score_failed = True
             print_error(console, "Scoring failed", f"{type(exc).__name__}: {exc}")

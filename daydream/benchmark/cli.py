@@ -54,9 +54,11 @@ def _build_bench_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         type=str,
-        default="anthropic/claude-opus-4.5",
+        default=None,
         dest="model",
-        help="Judge model id (also names the per-model results dir)",
+        help="Judge model id (e.g. anthropic/claude-opus-4-5-20251101). If omitted, "
+        "the MARTIAN_MODEL env is used; one of the two is required for --score. "
+        "Whatever resolves drives both the judge and the per-model results dir.",
     )
     parser.add_argument(
         "--reviewer-backend",

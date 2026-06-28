@@ -4,41 +4,48 @@ from types import SimpleNamespace
 import pytest
 
 from daydream.benchmark.score import (
+    JUDGE_MODEL_ENV,
     BenchmarkArtifactError,
     JudgeEnvError,
-    assert_judge_model_matches,
+    JudgeFailedError,
     model_results_dir,
     parse_daydream_scores,
     preflight_judge_env,
+    resolve_judge_model,
     run_scoring,
 )
 
 URL = "https://x/pull/1"
 
 
-def test_judge_model_mismatch_raises_clear_error(monkeypatch):
-    monkeypatch.setenv("MARTIAN_MODEL", "openai/gpt-5.2")
-    with pytest.raises(JudgeEnvError, match="MARTIAN_MODEL.*does not match.*--model"):
-        assert_judge_model_matches("anthropic/claude-opus-4.5")
+def test_resolve_judge_model(monkeypatch):
+    monkeypatch.delenv(JUDGE_MODEL_ENV, raising=False)
+    with pytest.raises(JudgeEnvError, match="Judge model unspecified"):
+        resolve_judge_model(None)  # no hardcoded default
+    monkeypatch.setenv(JUDGE_MODEL_ENV, "anthropic/claude-opus-4-5-20251101")
+    assert resolve_judge_model(None) == "anthropic/claude-opus-4-5-20251101"
 
 
-def test_judge_model_match_or_unset_ok(monkeypatch):
-    monkeypatch.delenv("MARTIAN_MODEL", raising=False)
-    assert_judge_model_matches("anthropic/claude-opus-4.5")      # unset is allowed
-    monkeypatch.setenv("MARTIAN_MODEL", "anthropic/claude-opus-4.5")
-    assert_judge_model_matches("anthropic/claude-opus-4.5")
-
-
-def test_run_scoring_passes_custom_tool_to_each_step(tmp_path, monkeypatch):
+def test_run_scoring_passes_custom_tool_and_judge_env_to_each_step(tmp_path, monkeypatch):
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
+    monkeypatch.delenv(JUDGE_MODEL_ENV, raising=False)
     calls = []
-    monkeypatch.setattr("daydream.benchmark.score.subprocess.run",
-        lambda cmd, **k: calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""))
-    rdir = tmp_path / "results" / "anthropic_claude-opus-4.5"
+    envs = []
+
+    def fake_run(cmd, **k):
+        calls.append(cmd)
+        envs.append(k["env"])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("daydream.benchmark.score.subprocess.run", fake_run)
+    rdir = tmp_path / "results" / "anthropic_claude-opus-4-5-20251101"
     rdir.mkdir(parents=True)
     (rdir / "evaluations.json").write_text('{"%s": {"daydream-glm": {"tp":1,"fp":0,"fn":0}}}' % URL)
-    scores = run_scoring(tmp_path, "anthropic/claude-opus-4.5", tool="daydream-glm")
+    scores = run_scoring(tmp_path, "anthropic/claude-opus-4-5-20251101", tool="daydream-glm")
     assert all(c[c.index("--tool")+1] == "daydream-glm" for c in calls)
+    # Every step is told which judge model to run via MARTIAN_MODEL — the same
+    # value that names the results dir we read from.
+    assert all(e[JUDGE_MODEL_ENV] == "anthropic/claude-opus-4-5-20251101" for e in envs)
     assert scores.scored_pr_count == 1                  # parse keyed off the custom label
 
 
@@ -70,6 +77,95 @@ def test_parse_daydream_scores_extracts_per_pr_and_aggregate():
     assert s.total_tp == 2 and s.total_fp == 3 and s.total_fn == 4
     assert s.precision == pytest.approx(2 / 5) and s.recall == pytest.approx(2 / 6)
     assert all("coderabbit" not in pr for pr in s.per_pr.values())
+
+
+#: A leaf shaped exactly like the grafana/pull/79265 incident: the judge errored
+#: on every one of the 17 candidates × 5 golden = 85 comparisons (a rejected
+#: ``MARTIAN_API_KEY`` → HTTP 401 on every call), so tp/fp/fn collapse to a
+#: clean-looking zero that is really a total judge failure.
+_ALL_ERRORED_LEAF = {
+    "tp": 0, "fp": 17, "fn": 5,
+    "errors_count": 85, "total_candidates": 17, "total_golden": 5,
+    "precision": 0.0, "recall": 0.0,
+}
+
+
+def test_parse_daydream_scores_raises_when_judge_errored_on_everything():
+    """A judge that 401'd on every comparison must surface loudly, not as a zero.
+
+    Reproduces the grafana/pull/79265 incident: every judge call errored, so the
+    harness reported precision=recall=0.000 — indistinguishable from a genuinely
+    poor review. The guard flips that into a hard `JudgeFailedError`.
+    """
+    evals = {URL: {"daydream-glm": dict(_ALL_ERRORED_LEAF)}}
+    with pytest.raises(JudgeFailedError) as e:
+        parse_daydream_scores(evals, tool="daydream-glm")
+    assert "85/85" in str(e.value) and "MARTIAN_API_KEY" in str(e.value)
+
+
+def test_parse_daydream_scores_genuine_zero_with_no_errors_does_not_raise():
+    """A real zero (judge ran cleanly, nothing matched) must NOT trip the guard.
+
+    The daydream review produced candidates and the judge compared all of them
+    without error — they simply did not match the golden set. errors_count==0, so
+    the scores are trustworthy and the aggregate zero stands.
+    """
+    evals = {URL: {"daydream": {
+        "tp": 0, "fp": 17, "fn": 5,
+        "errors_count": 0, "total_candidates": 17, "total_golden": 5,
+        "precision": 0.0, "recall": 0.0,
+    }}}
+    s = parse_daydream_scores(evals)
+    assert s.scored_pr_count == 1
+    assert s.precision == 0.0 and s.recall == 0.0
+    assert s.total_errors == 0 and s.total_comparisons == 85
+
+
+def test_parse_daydream_scores_no_candidates_does_not_raise():
+    """A PR where daydream emitted nothing (0 candidates) is a legit zero, not a
+    judge failure: no comparisons are attempted, so the ratio guard cannot fire."""
+    evals = {URL: {"daydream": {
+        "tp": 0, "fp": 0, "fn": 5,
+        "errors_count": 0, "total_candidates": 0, "total_golden": 5,
+    }}}
+    s = parse_daydream_scores(evals)
+    assert s.total_comparisons == 0
+    assert s.recall == 0.0
+
+
+def test_parse_daydream_scores_below_threshold_errors_do_not_raise():
+    """A few transient judge errors (below the ratio threshold) are tolerated;
+    the surviving comparisons still produce a usable score."""
+    evals = {URL: {"daydream": {
+        "tp": 2, "fp": 1, "fn": 1,
+        "errors_count": 3, "total_candidates": 3, "total_golden": 3,  # 3/9 ≈ 0.33 < 0.5
+    }}}
+    s = parse_daydream_scores(evals)
+    assert s.total_errors == 3 and s.total_comparisons == 9
+    assert s.total_tp == 2
+
+
+def test_run_scoring_raises_judge_failed_when_evaluations_all_errored(tmp_path, monkeypatch):
+    """Real-path: drive run_scoring end-to-end against an on-disk evaluations.json
+    where every comparison errored, and assert it raises `JudgeFailedError`.
+
+    Only the external judge subprocesses are faked (they 401 in reality); the
+    production path — step ordering, results-dir resolution, artifact read, and
+    parse — runs for real and must convert the silent zero into a loud failure.
+    """
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-bad")
+    model = "anthropic/claude-opus-4-5-20251101"
+    rdir = tmp_path / "results" / "anthropic_claude-opus-4-5-20251101"
+    rdir.mkdir(parents=True)
+    import json as _json
+
+    def fake_run(cmd, **k):
+        (rdir / "evaluations.json").write_text(_json.dumps({URL: {"daydream-glm": dict(_ALL_ERRORED_LEAF)}}))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("daydream.benchmark.score.subprocess.run", fake_run)
+    with pytest.raises(JudgeFailedError):
+        run_scoring(tmp_path, model, pr_count=1, tool="daydream-glm")
 
 
 def test_run_scoring_invokes_three_steps_in_order(tmp_path, monkeypatch):

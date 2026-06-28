@@ -16,7 +16,7 @@ from daydream.benchmark.cli import _bench_config_from_argv
 def test_bench_parser_defaults_and_flags():
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--only", "grafana", "--no-score"])
     assert cfg.benchmark_repo == Path("/b") and cfg.only == "grafana" and cfg.score is False
-    assert cfg.model == "anthropic/claude-opus-4.5"
+    assert cfg.model is None  # no hardcoded default; judge model comes from --model or MARTIAN_MODEL
 
 
 def test_bench_config_has_reviewer_defaults():
