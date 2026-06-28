@@ -28,6 +28,7 @@ class BenchConfig:
         only: Optional PR selector (single PR key) to restrict the run.
         limit: Optional cap on the number of PRs processed.
         trajectory_dir: Directory for per-PR ATIF trajectory files.
+        verbose: Stream the review subprocess output live (vs. the quiet spinner).
     """
 
     benchmark_repo: Path
@@ -42,3 +43,4 @@ class BenchConfig:
     reviewer_model: str | None = None
     reviewer_provider: str | None = None
     tool_label: str = "daydream"
+    verbose: bool = False

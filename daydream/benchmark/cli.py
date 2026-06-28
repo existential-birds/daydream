@@ -128,6 +128,13 @@ def _build_bench_parser() -> argparse.ArgumentParser:
         help="Re-run PRs even if a daydream review already exists",
     )
     parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        dest="verbose",
+        help="Stream the review subprocess output live instead of a quiet spinner",
+    )
+    parser.add_argument(
         "--score",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -171,6 +178,7 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         reviewer_model=args.reviewer_model,
         reviewer_provider=args.reviewer_provider,
         tool_label=args.tool_label,
+        verbose=args.verbose,
     )
 
 

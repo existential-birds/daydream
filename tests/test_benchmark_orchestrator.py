@@ -125,6 +125,26 @@ def test_run_bench_announces_and_reports_each_pr(tmp_path, monkeypatch):
     assert "1 finding" in out  # finding count for the injected PR
 
 
+def test_verbose_streams_child_output(tmp_path, monkeypatch):
+    rec = Console(record=True, force_terminal=True, width=100)
+    monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.acquire_checkout",
+        lambda *a, **k: _fake_checkout(tmp_path),
+    )
+
+    def review(checkout, on_line=None, **k):
+        if on_line:
+            on_line("CHILD-LINE-XYZ\n")
+        return _write_items(checkout, [_item("f.py", 1)])
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_daydream_review", review)
+    cfg = replace(_config(tmp_path, data_path, score=False, only="grafana"), limit=1, verbose=True)
+    run_bench(cfg)
+    assert "CHILD-LINE-XYZ" in rec.export_text()  # verbose forwards child output
+
+
 def test_orchestrator_forwards_reviewer_fields(tmp_path, monkeypatch):
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     captured: dict[str, Any] = {}

@@ -95,6 +95,7 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
         cache_dir=config.cache_dir,
     )
     config.trajectory_dir.mkdir(parents=True, exist_ok=True)
+    on_line = (lambda line: console.out(line, end="", highlight=False)) if config.verbose else None
     artifact = run_daydream_review(
         checkout,
         base_sha=pr.base_sha,
@@ -102,6 +103,7 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
         backend=config.reviewer_backend,
         model=config.reviewer_model,
         provider=config.reviewer_provider,
+        on_line=on_line,
     )
     doc = json.loads(artifact.read_text(encoding="utf-8"))
     comments = merged_items_to_review_comments(doc, created_at=_CREATED_AT)
@@ -145,8 +147,13 @@ def run_bench(config: BenchConfig) -> int:
         elapsed = 0.0
         try:
             started = time.monotonic()
-            with console.status(f"Reviewing {pr.golden_url}…"):
+            if config.verbose:
+                # Streaming and a spinner can't share one console; verbose forwards
+                # the child output live, so the spinner is gated off here.
                 modified = _process_pr(config, pr, data)
+            else:
+                with console.status(f"Reviewing {pr.golden_url}…"):
+                    modified = _process_pr(config, pr, data)
             elapsed = time.monotonic() - started
         except Exception as exc:  # noqa: BLE001 - isolate per-PR failure so the sweep continues
             failed += 1
