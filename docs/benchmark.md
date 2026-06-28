@@ -16,11 +16,43 @@ This runbook takes you from nothing to a scored result.
   - `MARTIAN_BASE_URL` — the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1` (default set by the withmartian step modules, not by daydream); set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
   - `MARTIAN_MODEL` — the judge model id. Defaults to `openai/gpt-4o-mini` (default set by the withmartian step modules, not by daydream); should match `--model` for comparable results.
 
-  The harness reads `os.environ` only — it does **not** parse a `.env` file. If you keep these in a `.env`, you must export them into the shell first:
+  These may live in a `.env` file in the directory you run `daydream bench` from — it is auto-loaded at bench entry (`python-dotenv`, searching from the cwd upward). Already-exported shell variables win, so an inline `MARTIAN_API_KEY=… daydream bench …` still overrides the `.env`; a missing or malformed `.env` is a silent no-op.
 
   ```bash
-  set -a; source .env; set +a
+  # .env beside your invocation
+  MARTIAN_API_KEY=sk-or-…
+  MARTIAN_MODEL=anthropic/claude-opus-4-5-20251101
   ```
+
+## Configuration file (`[tool.daydream.bench]`)
+
+Repeating `--benchmark-repo`, the judge `--model`, and the full reviewer flag set on every invocation gets old. A `[tool.daydream.bench]` table in the `pyproject.toml` (or `.daydream.toml`) of the directory you run `daydream bench` from supplies defaults **under** the CLI flags. Precedence is always **CLI flag > config file > built-in default**: an explicit flag always wins; the config only fills a flag you omit.
+
+```toml
+[tool.daydream.bench]
+benchmark-repo = "../code-review-benchmark/offline"   # makes --benchmark-repo optional
+model = "anthropic/claude-opus-4-5-20251101"           # judge model when --model is omitted
+
+# Named reviewer presets — each expands to --reviewer-backend / -model / -provider.
+[tool.daydream.bench.reviewers.glm]
+backend = "pi"
+model = "z-ai/glm-5.2"
+provider = "openrouter"
+```
+
+With `benchmark-repo` set in config, `--benchmark-repo` becomes optional; omit it both as a flag and in config and the run aborts with a usage error. Presets are **config-only** — there are no built-in reviewer names or model ids baked into daydream; a preset exists only if you define its table.
+
+### `--reviewer <name>` expands a preset
+
+`--reviewer glm` looks up `[tool.daydream.bench.reviewers.glm]`, applies its `backend`/`model`/`provider` as the reviewer fields, and derives `--tool-label` as `daydream-glm` — so its findings file under a distinct results key automatically (see [`--tool-label` isolates per-backend results](#--tool-label-isolates-per-backend-results)). Explicit `--reviewer-backend`/`-model`/`-provider` or `--tool-label` flags still override the preset (CLI > config). An unknown `--reviewer` name is a usage error.
+
+With the table above, the full GLM sweep over one PR collapses to:
+
+```bash
+daydream bench --reviewer glm --only grafana --limit 1
+```
+
+`benchmark-repo` and the judge `model` come from config; `--reviewer glm` supplies the backend/model/provider and the `daydream-glm` label. (Scoring is on by default, so `MARTIAN_API_KEY` must be present — see [Prerequisites](#prerequisites).)
 
 ## Smoke subset
 
@@ -49,6 +81,21 @@ daydream bench --benchmark-repo ../code-review-benchmark/offline --score
 ```
 
 This is the load-bearing, money-spending run: 26 deep reviews plus 26 judge passes.
+
+## Watching progress (`--verbose`)
+
+A deep review of one PR runs for minutes. By default each PR shows a live spinner with the PR label and reviewer, then a completion line with the elapsed time and finding count:
+
+```text
+▶ [1/2] Reviewing https://github.com/grafana/grafana/pull/1234 · reviewer daydream…
+Reviewed https://github.com/grafana/grafana/pull/1234 in 4m12s · 3 findings
+```
+
+Pass `-v`/`--verbose` to stream the underlying `daydream --non-interactive` subprocess output live instead of the spinner (streaming and a spinner can't share one console, so verbose replaces the spinner; the announce and completion lines stay):
+
+```bash
+daydream bench --reviewer glm --only grafana --limit 1 --verbose
+```
 
 ## Selecting the reviewer backend
 
