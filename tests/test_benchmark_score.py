@@ -79,28 +79,50 @@ def test_parse_daydream_scores_extracts_per_pr_and_aggregate():
     assert all("coderabbit" not in pr for pr in s.per_pr.values())
 
 
-#: A leaf shaped exactly like the grafana/pull/79265 incident: the judge errored
-#: on every one of the 17 candidates × 5 golden = 85 comparisons (a rejected
-#: ``MARTIAN_API_KEY`` → HTTP 401 on every call), so tp/fp/fn collapse to a
-#: clean-looking zero that is really a total judge failure.
+#: The verbatim judge error from the daydream-glm incident: MARTIAN_MODEL was the
+#: Anthropic-style dated id, which the OpenRouter gateway rejects on every call.
+_MODEL_ID_ERROR = "anthropic/claude-opus-4-5-20251101 is not a valid model ID"
+
+#: A leaf shaped exactly like the daydream-glm incident: the judge errored on
+#: every one of the 17 candidates × 5 golden = 85 comparisons, so tp/fp/fn
+#: collapse to a clean-looking zero that is really a total judge failure. step3
+#: stores the real per-comparison error text in the ``errors`` list.
 _ALL_ERRORED_LEAF = {
     "tp": 0, "fp": 17, "fn": 5,
     "errors_count": 85, "total_candidates": 17, "total_golden": 5,
     "precision": 0.0, "recall": 0.0,
+    "errors": [{"golden": "g", "candidate": "c", "error": _MODEL_ID_ERROR} for _ in range(85)],
 }
 
 
-def test_parse_daydream_scores_raises_when_judge_errored_on_everything():
-    """A judge that 401'd on every comparison must surface loudly, not as a zero.
+def test_parse_daydream_scores_raises_with_verbatim_judge_error():
+    """A wholesale judge failure must surface the REAL recorded error, not a guess.
 
-    Reproduces the grafana/pull/79265 incident: every judge call errored, so the
-    harness reported precision=recall=0.000 — indistinguishable from a genuinely
-    poor review. The guard flips that into a hard `JudgeFailedError`.
+    Reproduces the daydream-glm incident: every judge call errored, so the harness
+    reported precision=recall=0.000 — indistinguishable from a genuinely poor
+    review. The guard flips that into a hard `JudgeFailedError` whose message
+    quotes the actual step3 error string and never invents a cause.
     """
     evals = {URL: {"daydream-glm": dict(_ALL_ERRORED_LEAF)}}
     with pytest.raises(JudgeFailedError) as e:
         parse_daydream_scores(evals, tool="daydream-glm")
-    assert "85/85" in str(e.value) and "MARTIAN_API_KEY" in str(e.value)
+    msg = str(e.value)
+    assert "85/85" in msg
+    assert _MODEL_ID_ERROR in msg and "(85×)" in msg  # verbatim error + count
+    assert "Most likely" not in msg and "401" not in msg  # no guessed cause
+
+
+def test_parse_daydream_scores_failure_without_error_detail_does_not_invent_cause():
+    """An older corpus leaf may carry errors_count but no ``errors`` text. The guard
+    must still fire, report the count, and NOT fabricate a 401/credential cause."""
+    leaf = {k: v for k, v in _ALL_ERRORED_LEAF.items() if k != "errors"}
+    evals = {URL: {"daydream-glm": leaf}}
+    with pytest.raises(JudgeFailedError) as e:
+        parse_daydream_scores(evals, tool="daydream-glm")
+    msg = str(e.value)
+    assert "85/85" in msg
+    assert "no per-comparison error text" in msg
+    assert "401" not in msg and "Most likely" not in msg
 
 
 def test_parse_daydream_scores_genuine_zero_with_no_errors_does_not_raise():

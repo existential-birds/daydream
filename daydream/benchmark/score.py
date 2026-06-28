@@ -34,11 +34,13 @@ _TOOL = "daydream"
 _STDERR_TAIL = 4000
 
 #: Fraction of attempted judge comparisons that may error before the whole
-#: scoring run is treated as invalid. A bad ``MARTIAN_API_KEY`` makes every
-#: judge call return HTTP 401; the upstream step3 records each as an error and
-#: still exits 0, so without this guard a wholesale-failed judge is reported as
-#: a clean ``precision=0.000 recall=0.000`` — indistinguishable from a genuinely
-#: poor review. Above this ratio the scores are noise, not a real zero.
+#: scoring run is treated as invalid. The upstream step3 records each failed
+#: judge call as an error and still exits 0, so without this guard a
+#: wholesale-failed judge is reported as a clean ``precision=0.000 recall=0.000``
+#: — indistinguishable from a genuinely poor review. Causes vary (rejected
+#: credential, a model id the gateway does not recognize, a wrong base URL,
+#: timeouts); the real per-call message is surfaced in the raised error rather
+#: than guessed. Above this ratio the scores are noise, not a real zero.
 _JUDGE_ERROR_RATIO_THRESHOLD = 0.5
 
 #: Maximum wall-clock seconds to wait for each benchmark step subprocess.
@@ -61,11 +63,12 @@ class BenchmarkArtifactError(Exception):
 class JudgeFailedError(Exception):
     """Raised when the judge errored on too many comparisons to trust the scores.
 
-    The withmartian step3 records each failed judge LLM call (e.g. an HTTP 401
-    from a bad ``MARTIAN_API_KEY``) as an error and still exits 0, emitting an
-    `evaluations.json` whose tp/fp/fn collapse to a clean-looking zero. This is
+    The withmartian step3 records each failed judge LLM call as an error (storing
+    the verbatim message in the leaf's ``errors`` list) and still exits 0, emitting
+    an `evaluations.json` whose tp/fp/fn collapse to a clean-looking zero. This is
     raised when the error ratio crosses `_JUDGE_ERROR_RATIO_THRESHOLD`, so a
-    wholesale-failed judge surfaces loudly instead of as a genuine zero.
+    wholesale-failed judge surfaces loudly instead of as a genuine zero — and the
+    message reports the actual recorded judge error, not a guessed cause.
     """
 
 
@@ -163,6 +166,28 @@ class DaydreamScores:
     recall: float = 0.0
 
 
+def _summarize_judge_errors(errors: list[str], *, cap: int = 3) -> str:
+    """Render distinct judge error strings with occurrence counts, most-common first.
+
+    Args:
+        errors: The verbatim per-comparison error strings collected from the leaves.
+        cap: Maximum number of distinct messages to spell out before summarizing
+            the remainder as a count.
+
+    Returns:
+        A bounded ``"'msg' (N×); 'msg2' (M×)"`` rendering; when more than ``cap``
+        distinct messages exist, the overflow is appended as ``"and K more …"``.
+    """
+    counts: dict[str, int] = {}
+    for msg in errors:
+        counts[msg] = counts.get(msg, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    parts = [f"{msg!r} ({n}×)" for msg, n in ordered[:cap]]
+    if len(ordered) > cap:
+        parts.append(f"and {len(ordered) - cap} more distinct error(s)")
+    return "; ".join(parts)
+
+
 def parse_daydream_scores(evals: dict[str, dict[str, Any]], *, tool: str = _TOOL) -> DaydreamScores:
     """Extract per-PR and aggregate scores for ``tool`` from a parsed evaluations dict.
 
@@ -185,6 +210,7 @@ def parse_daydream_scores(evals: dict[str, dict[str, Any]], *, tool: str = _TOOL
     per_pr: dict[str, dict[str, Any]] = {}
     total_tp = total_fp = total_fn = 0
     total_errors = total_comparisons = 0
+    judge_errors: list[str] = []
     for golden_url, tools in evals.items():
         leaf = tools.get(tool)
         if leaf is None:
@@ -194,17 +220,31 @@ def parse_daydream_scores(evals: dict[str, dict[str, Any]], *, tool: str = _TOOL
         total_fp += int(leaf.get("fp", 0))
         total_fn += int(leaf.get("fn", 0))
         total_errors += int(leaf.get("errors_count", 0))
+        # step3 stores the verbatim per-comparison failure text in each leaf's
+        # ``errors`` list (entries ``{"golden", "candidate", "error"}``). Collect
+        # the actual messages so a wholesale judge failure reports its real cause
+        # instead of a guess.
+        for entry in leaf.get("errors") or []:
+            detail = entry.get("error") if isinstance(entry, dict) else entry
+            if detail:
+                judge_errors.append(str(detail))
         # Each leaf compares every candidate against every golden comment, so the
         # attempted comparison count is the product (matches step3's task grid).
         total_comparisons += int(leaf.get("total_candidates", 0)) * int(leaf.get("total_golden", 0))
 
     if total_comparisons and total_errors / total_comparisons >= _JUDGE_ERROR_RATIO_THRESHOLD:
         ratio = total_errors / total_comparisons
+        if judge_errors:
+            cause = f"The judge reported: {_summarize_judge_errors(judge_errors)}."
+        else:
+            cause = (
+                "The corpus leaf recorded no per-comparison error text, so the cause "
+                "is not captured here; re-run with the judge step's output visible."
+            )
         raise JudgeFailedError(
             f"Judge errored on {total_errors}/{total_comparisons} comparisons "
             f"({ratio:.0%}) for tool {tool!r}; the precision/recall are invalid, not a real "
-            f"zero. Most likely the judge credential ({JUDGE_API_KEY_ENV}) was rejected "
-            f"(HTTP 401). Fix the credential and re-run --score against the saved corpus."
+            f"zero. {cause} Resolve the reported error and re-run --score against the saved corpus."
         )
 
     precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) else 0.0
