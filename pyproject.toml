@@ -9,6 +9,7 @@ dependencies = [
     "rich>=13.0",
     "pyfiglet>=1.0",
     "pydantic>=2.11.7",
+    "python-dotenv>=1.0",
     "PyJWT>=2.0",
     "jsonschema>=4.0",
     "tree-sitter==0.25.2",

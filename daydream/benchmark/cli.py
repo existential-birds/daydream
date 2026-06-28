@@ -12,8 +12,21 @@ import argparse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import dotenv
+
 if TYPE_CHECKING:
     from daydream.benchmark import BenchConfig
+
+
+def _load_bench_dotenv() -> None:
+    """Load a ``.env`` from the invocation cwd so ``MARTIAN_*`` can live there.
+
+    Reads ``.env`` from the operator's current working directory (``usecwd=True``;
+    the library default walks up from this module's file instead). ``override`` is
+    left at its default ``False`` so an inline ``MARTIAN_API_KEY`` still wins over
+    the file. A missing or malformed ``.env`` is a silent no-op.
+    """
+    dotenv.load_dotenv(dotenv.find_dotenv(usecwd=True))
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -200,5 +213,6 @@ def _handle_bench_command(argv: list[str]) -> int:
     """
     from daydream.benchmark import run_bench
 
+    _load_bench_dotenv()
     config = _bench_config_from_argv(argv)
     return run_bench(config)

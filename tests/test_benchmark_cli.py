@@ -10,12 +10,20 @@ from pathlib import Path
 
 import pytest
 
-from daydream.benchmark.cli import _bench_config_from_argv, _format_elapsed
+from daydream.benchmark.cli import _bench_config_from_argv, _format_elapsed, _load_bench_dotenv
 
 
 def test_format_elapsed():
     assert _format_elapsed(45.4) == "45s"
     assert _format_elapsed(252) == "4m12s"
+
+
+def test_load_bench_dotenv_populates_environ(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("MARTIAN_API_KEY=sk-from-dotenv\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MARTIAN_API_KEY", raising=False)
+    _load_bench_dotenv()
+    assert os.environ["MARTIAN_API_KEY"] == "sk-from-dotenv"
 
 
 def test_bench_parser_defaults_and_flags():
@@ -70,6 +78,7 @@ def test_bench_subcommand_preflights_through_compiled_entrypoint(tmp_path):
         capture_output=True,
         text=True,
         env=env,
+        cwd=tmp_path,  # isolate from any developer .env auto-loaded at bench entry
     )
     assert r.returncode != 0 and "MARTIAN_API_KEY" in (r.stdout + r.stderr)
 
