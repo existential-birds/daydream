@@ -2,9 +2,11 @@
 
 The corpus is a JSON object keyed by golden upstream PR URL. Each entry carries
 ``golden_comments`` (the recall denominator) and ``reviews`` — a flat list of
-per-tool review objects scanned/filtered by the ``tool`` field. ``daydream`` is
-not present upstream; it is injected here as a synthetic review so the existing
-scoring steps pick it up automatically.
+per-tool review objects scanned/filtered by the ``tool`` field. The daydream
+reviewer is not present upstream; it is injected here as a synthetic review so
+the existing scoring steps pick it up automatically. The injected/queried tool
+label is configurable (defaulting to ``DAYDREAM_TOOL``) so distinct reviewer
+backends can coexist under separate labels (e.g. ``daydream-glm``).
 
 See ``research/benchmark-pipeline.md`` §1 for the full shape.
 """
@@ -70,16 +72,17 @@ def save_benchmark_data(path: str | Path, data: dict[str, Any]) -> None:
         fcntl.flock(lf, fcntl.LOCK_UN)
 
 
-def has_daydream_review(entry: dict[str, Any]) -> bool:
-    """Report whether a corpus entry already carries a synthetic ``daydream`` review.
+def has_daydream_review(entry: dict[str, Any], *, tool: str = DAYDREAM_TOOL) -> bool:
+    """Report whether a corpus entry already carries a synthetic daydream review.
 
     Args:
         entry: A single golden-PR corpus entry (the value of one ``golden_url`` key).
+        tool: The reviewer tool label to match (defaults to ``DAYDREAM_TOOL``).
 
     Returns:
-        ``True`` if any review in ``entry["reviews"]`` has ``tool == "daydream"``.
+        ``True`` if any review in ``entry["reviews"]`` has ``tool == tool``.
     """
-    return any(review.get("tool") == DAYDREAM_TOOL for review in entry.get("reviews", []))
+    return any(review.get("tool") == tool for review in entry.get("reviews", []))
 
 
 def inject_daydream_review(
@@ -88,8 +91,9 @@ def inject_daydream_review(
     comments: list[dict[str, Any]],
     *,
     force: bool,
+    tool: str = DAYDREAM_TOOL,
 ) -> bool:
-    """Inject a synthetic ``daydream`` review into one golden PR entry.
+    """Inject a synthetic daydream review into one golden PR entry.
 
     Args:
         data: The benchmark corpus dict (mutated in place).
@@ -97,6 +101,8 @@ def inject_daydream_review(
         comments: ``review_comments`` payload for the daydream review.
         force: When a daydream review already exists, replace its
             ``review_comments`` instead of leaving it untouched.
+        tool: The reviewer tool label to inject and match on (defaults to
+            ``DAYDREAM_TOOL``).
 
     Returns:
         ``True`` if the corpus was modified, ``False`` if an existing daydream
@@ -109,7 +115,7 @@ def inject_daydream_review(
     reviews = entry["reviews"]
 
     for review in reviews:
-        if review.get("tool") == DAYDREAM_TOOL:
+        if review.get("tool") == tool:
             if not force:
                 return False
             review["review_comments"] = comments
@@ -117,8 +123,8 @@ def inject_daydream_review(
 
     reviews.append(
         {
-            "tool": DAYDREAM_TOOL,
-            "repo_name": DAYDREAM_TOOL,
+            "tool": tool,
+            "repo_name": tool,
             "pr_url": golden_url,
             "review_comments": comments,
         }

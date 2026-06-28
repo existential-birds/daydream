@@ -94,7 +94,7 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
     )
     doc = json.loads(artifact.read_text(encoding="utf-8"))
     comments = merged_items_to_review_comments(doc, created_at=_CREATED_AT)
-    return inject_daydream_review(data, pr.golden_url, comments, force=config.force)
+    return inject_daydream_review(data, pr.golden_url, comments, force=config.force, tool=config.tool_label)
 
 
 def run_bench(config: BenchConfig) -> int:
@@ -123,7 +123,7 @@ def run_bench(config: BenchConfig) -> int:
             failed += 1
             continue
 
-        if not config.force and has_daydream_review(entry):
+        if not config.force and has_daydream_review(entry, tool=config.tool_label):
             print_dim(console, f"Skipping {pr.golden_url} (daydream review already present)")
             continue
 
