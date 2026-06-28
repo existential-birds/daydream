@@ -10,11 +10,16 @@ forwarded via the ``PI_PROVIDER`` environment variable, never as an argv flag.
 
 from __future__ import annotations
 
+import collections
 import os
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
 
 #: How many trailing characters of stderr to surface in the failure message.
 _STDERR_TAIL = 4000
@@ -32,6 +37,63 @@ class DaydreamArtifactError(Exception):
     """Raised when daydream exits 0 but the expected findings artifact is absent."""
 
 
+def _run_captured(cmd: list[str], env: dict[str, str], checkout: Path) -> None:
+    """Quiet path: run to completion, capturing output; raise on timeout/non-zero."""
+    try:
+        result = subprocess.run(  # noqa: S603 - args are harness-controlled, not user input
+            cmd,  # noqa: S607 - daydream is a trusted command
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_DAYDREAM_TIMEOUT,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DaydreamRunError(
+            f"daydream review timed out after {_DAYDREAM_TIMEOUT}s for {checkout}"
+        ) from exc
+    if result.returncode != 0:
+        # daydream prints its errors to stdout (Rich console), so a stderr-only
+        # message is frequently empty; surface both streams' tails.
+        tail = f"{result.stdout or ''}\n{result.stderr or ''}".strip()[-_STDERR_TAIL:]
+        raise DaydreamRunError(
+            f"daydream review failed (exit {result.returncode}) for {checkout}:\n{tail}"
+        )
+
+
+def _run_streamed(
+    cmd: list[str], env: dict[str, str], checkout: Path, on_line: Callable[[str], None]
+) -> None:
+    """Verbose path: stream merged stdout/stderr line-by-line to ``on_line``.
+
+    A bounded tail of the most recent lines is retained so a non-zero exit can
+    surface the same kind of error context as the captured path.
+    """
+    tail: collections.deque[str] = collections.deque(maxlen=40)
+    with subprocess.Popen(  # noqa: S603 - args are harness-controlled, not user input
+        cmd,  # noqa: S607 - daydream is a trusted command
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    ) as proc:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            on_line(line)
+            tail.append(line)
+        try:
+            returncode = proc.wait(timeout=_DAYDREAM_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            raise DaydreamRunError(
+                f"daydream review timed out after {_DAYDREAM_TIMEOUT}s for {checkout}"
+            ) from exc
+    if returncode != 0:
+        raise DaydreamRunError(
+            f"daydream review failed (exit {returncode}) for {checkout}:\n{'\n'.join(tail)}"
+        )
+
+
 def run_daydream_review(
     checkout: Path,
     *,
@@ -40,6 +102,7 @@ def run_daydream_review(
     backend: str | None = None,
     model: str | None = None,
     provider: str | None = None,
+    on_line: Callable[[str], None] | None = None,
 ) -> Path:
     """Run a non-interactive deep daydream review against a checkout.
 
@@ -51,6 +114,10 @@ def run_daydream_review(
         model: Reviewer model; appended as ``--model <model>`` when set.
         provider: Reviewer provider; forwarded via the ``PI_PROVIDER`` environment
             variable (never argv) when set.
+        on_line: When set, the review runs via ``subprocess.Popen`` and each output
+            line (stdout+stderr merged) is forwarded to this callback live instead of
+            being captured silently. When ``None`` (default), the quiet
+            ``subprocess.run`` capture path is used unchanged.
 
     Returns:
         Path to the canonical ``merged-items.json`` findings artifact.
@@ -83,26 +150,11 @@ def run_daydream_review(
         env.pop(app_var, None)
     if provider:
         env["PI_PROVIDER"] = provider
-    try:
-        result = subprocess.run(  # noqa: S603 - args are harness-controlled, not user input
-            cmd,  # noqa: S607 - daydream is a trusted command
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_DAYDREAM_TIMEOUT,
-            env=env,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise DaydreamRunError(
-            f"daydream review timed out after {_DAYDREAM_TIMEOUT}s for {checkout}"
-        ) from exc
-    if result.returncode != 0:
-        # daydream prints its errors to stdout (Rich console), so a stderr-only
-        # message is frequently empty; surface both streams' tails.
-        tail = f"{result.stdout or ''}\n{result.stderr or ''}".strip()[-_STDERR_TAIL:]
-        raise DaydreamRunError(
-            f"daydream review failed (exit {result.returncode}) for {checkout}:\n{tail}"
-        )
+
+    if on_line is None:
+        _run_captured(cmd, env, checkout)
+    else:
+        _run_streamed(cmd, env, checkout, on_line)
 
     artifact = checkout / ".daydream" / "deep" / "merged-items.json"
     if not artifact.exists():

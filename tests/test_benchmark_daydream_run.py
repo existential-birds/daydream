@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from daydream.benchmark.daydream_run import DaydreamArtifactError, run_daydream_review
+from daydream.benchmark.daydream_run import DaydreamArtifactError, DaydreamRunError, run_daydream_review
 
 
 def test_runs_daydream_noninteractive_with_pinned_base_and_trajectory(tmp_path, monkeypatch):
@@ -95,6 +95,34 @@ def test_strips_github_app_creds_from_review_env(tmp_path, monkeypatch):
     run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json")
     assert "DAYDREAM_APP_ID" not in cap["env"]
     assert "DAYDREAM_APP_PRIVATE_KEY" not in cap["env"]
+
+
+def test_streams_lines_and_keeps_tail_on_failure(tmp_path, monkeypatch):
+    lines: list[str] = []
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter(["a\n", "boom\n"])
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            return 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.Popen", lambda *a, **k: FakeProc())
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    with pytest.raises(DaydreamRunError) as e:
+        run_daydream_review(
+            checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lines.append
+        )
+    assert lines == ["a\n", "boom\n"]  # streamed live
+    assert "boom" in str(e.value)  # tail retained in the error
 
 
 def test_raises_when_artifact_missing(tmp_path, monkeypatch):
