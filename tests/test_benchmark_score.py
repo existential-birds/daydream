@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from daydream.benchmark.score import (
+    JUDGE_BASE_URL_ENV,
     JUDGE_MODEL_ENV,
     BenchmarkArtifactError,
     JudgeEnvError,
@@ -16,6 +17,47 @@ from daydream.benchmark.score import (
 )
 
 URL = "https://x/pull/1"
+
+
+@pytest.mark.parametrize(
+    ("api_key", "pinned_base_url", "expected_base_url"),
+    [
+        # OpenRouter key, no pin → routed to OpenRouter (the 401 regression).
+        ("sk-or-v1-realkey", None, "https://openrouter.ai/api/v1"),
+        # OpenRouter key, explicit pin → preserved (auto-route only fills UNSET).
+        ("sk-or-v1-realkey", "https://api.withmartian.com/v1", "https://api.withmartian.com/v1"),
+        # Non-OpenRouter key → left to the upstream default, never forced to OpenRouter.
+        ("sk-martian-realkey", None, None),
+    ],
+)
+def test_run_scoring_judge_base_url_routing(tmp_path, monkeypatch, api_key, pinned_base_url, expected_base_url):
+    """The judge base URL forwarded to each step: an OpenRouter (sk-or-) key with no
+    pinned base URL is routed to OpenRouter's host (else the upstream Martian default
+    401s it); an explicit pin always wins; a non-OpenRouter key is left untouched."""
+    monkeypatch.setenv("MARTIAN_API_KEY", api_key)
+    monkeypatch.delenv(JUDGE_MODEL_ENV, raising=False)
+    if pinned_base_url is None:
+        monkeypatch.delenv(JUDGE_BASE_URL_ENV, raising=False)
+    else:
+        monkeypatch.setenv(JUDGE_BASE_URL_ENV, pinned_base_url)
+
+    envs: list[dict] = []
+    rdir = tmp_path / "results" / "anthropic_claude-opus-4-5-20251101"
+    rdir.mkdir(parents=True)
+    (rdir / "evaluations.json").write_text('{"%s": {"daydream-glm": {"tp":1,"fp":0,"fn":0}}}' % URL)
+
+    def fake_run(cmd, **k):
+        envs.append(k["env"])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("daydream.benchmark.score.subprocess.run", fake_run)
+    run_scoring(tmp_path, "anthropic/claude-opus-4-5-20251101", tool="daydream-glm")
+
+    assert envs
+    if expected_base_url is None:
+        assert all(JUDGE_BASE_URL_ENV not in e for e in envs)
+    else:
+        assert all(e[JUDGE_BASE_URL_ENV] == expected_base_url for e in envs)
 
 
 def test_resolve_judge_model(monkeypatch):

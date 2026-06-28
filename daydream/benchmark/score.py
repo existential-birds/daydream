@@ -20,6 +20,13 @@ from typing import Any
 
 JUDGE_API_KEY_ENV = "MARTIAN_API_KEY"
 JUDGE_MODEL_ENV = "MARTIAN_MODEL"
+JUDGE_BASE_URL_ENV = "MARTIAN_BASE_URL"
+
+#: OpenRouter API keys carry this prefix. The upstream judge defaults its base
+#: URL to the Martian host, which rejects an OpenRouter key with HTTP 401; such a
+#: key must be sent to OpenRouter's own host instead.
+_OPENROUTER_KEY_PREFIX = "sk-or-"
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 #: Benchmark step modules, run in order. Each reads `results/benchmark_data.json`
 #: by cwd only, so all three are invoked with ``cwd=benchmark_repo``.
@@ -284,6 +291,12 @@ def _run_step(module: str, extra_args: list[str], *, cwd: Path, tool: str = _TOO
     """
     env = os.environ.copy()
     env[JUDGE_MODEL_ENV] = judge_model
+    # An OpenRouter key sent to the upstream judge's default Martian base URL is
+    # rejected with HTTP 401. When the operator supplies an OpenRouter key and has
+    # not pinned a base URL, route the judge to OpenRouter so the key reaches the
+    # host that issued it. An explicit MARTIAN_BASE_URL always wins.
+    if env.get(JUDGE_API_KEY_ENV, "").startswith(_OPENROUTER_KEY_PREFIX) and not env.get(JUDGE_BASE_URL_ENV):
+        env[JUDGE_BASE_URL_ENV] = _OPENROUTER_BASE_URL
     cmd = ["uv", "run", "python", "-m", module, "--tool", tool, *extra_args]  # noqa: S607 - uv is a trusted command
     try:
         result = subprocess.run(  # noqa: S603 - args are not user-controlled; module names are fixed literals
