@@ -19,6 +19,14 @@ def test_bench_parser_defaults_and_flags():
     assert cfg.model == "anthropic/claude-opus-4.5"
 
 
+def test_bench_config_has_reviewer_defaults():
+    cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--no-score"])
+    assert cfg.reviewer_backend is None
+    assert cfg.reviewer_model is None
+    assert cfg.reviewer_provider is None
+    assert cfg.tool_label == "daydream"
+
+
 def test_bench_parser_accepts_positive_limit():
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--limit", "3"])
     assert cfg.limit == 3

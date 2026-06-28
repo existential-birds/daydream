@@ -18,6 +18,10 @@ class BenchConfig:
         benchmark_repo: Path to the external `code-review-benchmark` checkout.
         cache_dir: Directory for per-PR blobless clones and fetched heads.
         model: Judge model id (also names the per-model results dir).
+        reviewer_backend: Optional daydream review backend (claude/codex/pi); None uses the default.
+        reviewer_model: Optional model id for the reviewer backend; None uses the backend default.
+        reviewer_provider: Optional provider for the reviewer backend (forwarded via env); None uses the default.
+        tool_label: Results label for the reviewer tool; must be distinct per reviewer backend.
         force: Re-run PRs even if a `tool:"daydream"` review already exists.
         score: Whether to drive the step2/2.5/3 scoring pipeline.
         only: Optional PR selector (single PR key) to restrict the run.
@@ -33,3 +37,7 @@ class BenchConfig:
     limit: int | None
     trajectory_dir: Path
     model: str = "anthropic/claude-opus-4.5"
+    reviewer_backend: str | None = None
+    reviewer_model: str | None = None
+    reviewer_provider: str | None = None
+    tool_label: str = "daydream"
