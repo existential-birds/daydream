@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -141,6 +143,57 @@ def test_streams_lines_and_keeps_tail_on_failure(tmp_path, monkeypatch):
         )
     assert lines == ["a\n", "boom\n"]  # streamed live
     assert "boom" in str(e.value)  # tail retained in the error
+
+
+def test_streamed_timeout_kills_quiet_child_holding_stdout_open(tmp_path, monkeypatch):
+    """A child that keeps stdout open but emits nothing must be killed by the
+    wall-clock deadline rather than blocking the read loop forever."""
+
+    class BlockingStdout:
+        """Iterator whose ``__next__`` blocks until the proc is killed."""
+
+        def __init__(self):
+            self.released = threading.Event()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.released.wait()  # unblocks only on kill(); never yields a line
+            raise StopIteration
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = BlockingStdout()
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+            self.stdout.released.set()
+
+        def wait(self, timeout=None):
+            return 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    proc = FakeProc()
+    monkeypatch.setattr("daydream.benchmark.daydream_run._DAYDREAM_TIMEOUT", 0.2)
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.Popen", lambda *a, **k: proc)
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+
+    start = time.monotonic()
+    with pytest.raises(DaydreamRunError, match="timed out after 0.2s"):
+        run_daydream_review(
+            checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lambda _: None
+        )
+    elapsed = time.monotonic() - start
+    assert proc.killed  # the deadline killed the child
+    assert elapsed < 5  # bounded by the (patched) timeout, not hung
 
 
 def test_raises_when_artifact_missing(tmp_path, monkeypatch):

@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import collections
 import os
+import queue
 import subprocess
+import threading
+import time
 from typing import TYPE_CHECKING
 
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV
@@ -67,9 +70,14 @@ def _run_streamed(
     """Verbose path: stream merged stdout/stderr line-by-line to ``on_line``.
 
     A bounded tail of the most recent lines is retained so a non-zero exit can
-    surface the same kind of error context as the captured path.
+    surface the same kind of error context as the captured path. A reader thread
+    drains stdout onto a queue so the whole stream is bounded by a single
+    ``_DAYDREAM_TIMEOUT`` wall-clock deadline: a child that holds stdout open
+    without emitting output (or runs past the deadline mid-stream) is killed
+    rather than blocking the read loop forever.
     """
     tail: collections.deque[str] = collections.deque(maxlen=40)
+    lines: queue.Queue[str | None] = queue.Queue()
     with subprocess.Popen(  # noqa: S603 - args are harness-controlled, not user input
         cmd,  # noqa: S607 - daydream is a trusted command
         stdout=subprocess.PIPE,
@@ -78,16 +86,28 @@ def _run_streamed(
         env=env,
     ) as proc:
         assert proc.stdout is not None
-        for line in proc.stdout:
+        stdout = proc.stdout
+
+        def _pump() -> None:
+            for line in stdout:
+                lines.put(line)
+            lines.put(None)  # sentinel: stdout closed (child exiting)
+
+        threading.Thread(target=_pump, daemon=True).start()
+        deadline = time.monotonic() + _DAYDREAM_TIMEOUT
+        while True:
+            try:
+                line = lines.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                proc.kill()
+                raise DaydreamRunError(
+                    f"daydream review timed out after {_DAYDREAM_TIMEOUT}s for {checkout}"
+                ) from None
+            if line is None:
+                break
             on_line(line)
             tail.append(line)
-        try:
-            returncode = proc.wait(timeout=_DAYDREAM_TIMEOUT)
-        except subprocess.TimeoutExpired as exc:
-            proc.kill()
-            raise DaydreamRunError(
-                f"daydream review timed out after {_DAYDREAM_TIMEOUT}s for {checkout}"
-            ) from exc
+        returncode = proc.wait()
     if returncode != 0:
         raise DaydreamRunError(
             f"daydream review failed (exit {returncode}) for {checkout}:\n{'\n'.join(tail)}"

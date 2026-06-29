@@ -107,9 +107,14 @@ def extract_json(text: str) -> Any:
             if parsed is not None and span_len > best_len:
                 best = parsed
                 best_len = span_len
-            # Resume after this balanced span: its nested children can only be
-            # smaller, so skipping them never drops the winner and keeps the
-            # scan near-linear on well-formed payloads.
-            scan_from = end_idx + 1
+            if parsed is not None:
+                # A parsed span's nested children can only be smaller, so
+                # skipping past it never drops the winner and keeps the scan
+                # near-linear on well-formed payloads.
+                scan_from = end_idx + 1
+            else:
+                # Balanced but invalid: a nested {...}/[...] inside may still be
+                # valid JSON, so re-enter the span instead of discarding it.
+                scan_from = start_idx + 1
 
     return best

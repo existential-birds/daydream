@@ -83,6 +83,12 @@ class TestExtractJson:
         assert isinstance(result, dict)
         assert [f["arb_id"] for f in result["findings"]] == [1, 2]
 
+    def test_nested_valid_json_inside_balanced_invalid_span(self):
+        # The outer `{bad {...}}` span is balanced but invalid; the inner
+        # `{"findings": []}` is valid. A scan that jumps past the failed outer
+        # span never examines the inner payload and wrongly returns None.
+        assert extract_json('prefix {bad {"findings": []}} suffix') == {"findings": []}
+
     def test_largest_object_wins_over_smaller_earlier_object(self):
         # Two valid objects; the substantial answer comes second. The earlier,
         # smaller object must not shadow it.

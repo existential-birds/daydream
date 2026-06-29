@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import dotenv
 
@@ -170,7 +170,7 @@ def _build_bench_parser() -> argparse.ArgumentParser:
 
 def _resolve_reviewer_preset(
     name: str, bench_cfg: dict, parser: argparse.ArgumentParser
-) -> dict:
+) -> dict[str, Any]:
     """Look up a named reviewer preset in the bench config table.
 
     Args:
@@ -182,8 +182,9 @@ def _resolve_reviewer_preset(
     Returns:
         The preset dict with ``backend``/``model``/``provider`` keys.
     """
-    preset = bench_cfg.get("reviewers", {}).get(name)
-    if preset is None:
+    reviewers = bench_cfg.get("reviewers", {})
+    preset = reviewers.get(name) if isinstance(reviewers, dict) else None
+    if not isinstance(preset, dict):
         parser.error(
             f"unknown --reviewer '{name}' (define [tool.daydream.bench.reviewers.{name}] in config)"
         )
@@ -234,7 +235,7 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
     cache_dir = args.cache_dir if args.cache_dir is not None else bench_root / "cache"
     trajectory_dir = args.trajectory_dir if args.trajectory_dir is not None else bench_root / "trajectories"
     # P1: a --reviewer preset is the config layer under explicit --reviewer-*/--tool-label flags.
-    preset: dict = {}
+    preset: dict[str, Any] = {}
     if args.reviewer is not None:
         preset = _resolve_reviewer_preset(args.reviewer, bench, parser)
     reviewer_backend = args.reviewer_backend if args.reviewer_backend is not None else preset.get("backend")

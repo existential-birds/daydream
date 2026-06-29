@@ -83,6 +83,24 @@ def test_unknown_reviewer_preset_errors(tmp_path, monkeypatch):
         _bench_config_from_argv(["--reviewer", "nope", "--no-score"])
 
 
+def test_malformed_reviewer_preset_errors(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.daydream.bench]\nbenchmark-repo="/b"\n[tool.daydream.bench.reviewers]\nglm="not-a-table"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        _bench_config_from_argv(["--reviewer", "glm", "--no-score"])
+
+
+def test_non_table_reviewers_section_errors(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.daydream.bench]\nbenchmark-repo="/b"\nreviewers="oops"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        _bench_config_from_argv(["--reviewer", "glm", "--no-score"])
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -145,6 +163,20 @@ def test_bench_subcommand_preflights_through_compiled_entrypoint(tmp_path):
         cwd=tmp_path,  # isolate from any developer .env auto-loaded at bench entry
     )
     assert r.returncode != 0 and "MARTIAN_API_KEY" in (r.stdout + r.stderr)
+
+
+def test_bench_dotenv_autoloads_credential_through_compiled_entrypoint(tmp_path):
+    (tmp_path / ".env").write_text("MARTIAN_API_KEY=sk-from-dotenv\n")
+    env = {**os.environ}
+    env.pop("MARTIAN_API_KEY", None)
+    r = subprocess.run(  # noqa: S603 - args are not user-controlled
+        ["daydream", "bench", "--benchmark-repo", str(tmp_path), "--score"],  # noqa: S607 - daydream is a trusted command
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,  # the .env lives here; the real bench entry must auto-load it from cwd
+    )
+    assert "MARTIAN_API_KEY is not set" not in (r.stdout + r.stderr)
 
 
 def test_bench_help_lists_flags():
