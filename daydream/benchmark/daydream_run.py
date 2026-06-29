@@ -148,8 +148,12 @@ def run_daydream_review(
     # auth is never needed to review a local checkout, so strip it from the env.
     for app_var in (APP_ID_ENV, APP_PRIVATE_KEY_ENV):
         env.pop(app_var, None)
+    # The provider argument is the single source of truth; an inherited
+    # PI_PROVIDER must not leak past a run with no explicit override.
     if provider:
         env["PI_PROVIDER"] = provider
+    else:
+        env.pop("PI_PROVIDER", None)
 
     if on_line is None:
         _run_captured(cmd, env, checkout)

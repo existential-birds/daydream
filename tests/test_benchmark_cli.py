@@ -83,6 +83,37 @@ def test_unknown_reviewer_preset_errors(tmp_path, monkeypatch):
         _bench_config_from_argv(["--reviewer", "nope", "--no-score"])
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        ["--reviewer-backend", "pi"],
+        ["--reviewer-model", "glm-5.2"],
+        ["--reviewer-provider", "openrouter"],
+    ],
+)
+def test_reviewer_override_without_label_errors(override):
+    with pytest.raises(SystemExit):
+        _bench_config_from_argv(["--benchmark-repo", "/b", "--no-score", *override])
+
+
+def test_reviewer_override_with_explicit_label_ok():
+    cfg = _bench_config_from_argv(
+        ["--benchmark-repo", "/b", "--no-score", "--reviewer-backend", "pi", "--tool-label", "daydream-glm"]
+    )
+    assert cfg.tool_label == "daydream-glm"
+
+
+def test_reviewer_override_without_label_fails_through_compiled_entrypoint(tmp_path):
+    r = subprocess.run(  # noqa: S603 - args are not user-controlled
+        ["daydream", "bench", "--benchmark-repo", str(tmp_path),  # noqa: S607 - daydream is a trusted command
+         "--no-score", "--reviewer-backend", "pi"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert r.returncode != 0 and "--tool-label" in (r.stdout + r.stderr)
+
+
 def test_bench_parser_accepts_positive_limit():
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--limit", "3"])
     assert cfg.limit == 3

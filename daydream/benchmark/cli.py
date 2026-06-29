@@ -209,6 +209,15 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
     args = parser.parse_args(argv)
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be a positive integer")
+    if (
+        args.tool_label is None
+        and args.reviewer is None
+        and (args.reviewer_backend is not None or args.reviewer_model is not None or args.reviewer_provider is not None)
+    ):
+        parser.error(
+            "--reviewer-backend/--reviewer-model/--reviewer-provider require --tool-label "
+            "(or a --reviewer preset) so per-backend results stay isolated"
+        )
     bench = load_file_config(Path.cwd()).bench
     # P1: CLI flag > config file > built-in default.
     benchmark_repo = (

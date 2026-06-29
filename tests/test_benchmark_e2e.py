@@ -93,6 +93,7 @@ def test_bench_acceptance_2pr_subset_real_run():
 
     assert os.environ.get("MARTIAN_API_KEY"), "export MARTIAN_API_KEY before running"
 
+    env = {**os.environ, "MARTIAN_MODEL": _MODEL}
     cmd = [
         "daydream",
         "bench",
@@ -105,7 +106,7 @@ def test_bench_acceptance_2pr_subset_real_run():
         "--score",
     ]
 
-    first = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ})
+    first = subprocess.run(cmd, capture_output=True, text=True, env=env)
     assert first.returncode == 0, f"first run failed: {first.stdout}\n{first.stderr}"
 
     # Contract (a): benchmark_data.json gained daydream reviews for 2 PRs.
@@ -133,7 +134,7 @@ def test_bench_acceptance_2pr_subset_real_run():
 
     # Re-run is incremental — zero new reviews, exit 0.
     before = data_path.read_text()
-    second = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ})
+    second = subprocess.run(cmd, capture_output=True, text=True, env=env)
     assert second.returncode == 0, f"re-run failed: {second.stdout}\n{second.stderr}"
     second_out = " ".join(second.stdout.split())
     assert "already present" in second_out, f"expected skip messages: {second.stdout}"
@@ -179,7 +180,8 @@ def test_bench_acceptance_glm_reviewer_real_run():
 
     assert os.environ.get("MARTIAN_API_KEY"), "export MARTIAN_API_KEY before running"
 
-    tool_label = "daydream-glm"
+    env = {**os.environ, "MARTIAN_MODEL": _MODEL}
+    tool_label = f"daydream-glm-{os.getpid()}"
     cmd = [
         "daydream",
         "bench",
@@ -200,8 +202,10 @@ def test_bench_acceptance_glm_reviewer_real_run():
         "--score",
     ]
 
-    first = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ})
+    first = subprocess.run(cmd, capture_output=True, text=True, env=env)
     assert first.returncode == 0, f"first run failed: {first.stdout}\n{first.stderr}"
+    first_out = " ".join(first.stdout.split())
+    assert "Injected daydream review" in first_out, first.stdout
 
     # Contract (a): benchmark_data.json gained one daydream-glm review with non-empty bodies.
     data = json.loads(data_path.read_text())
@@ -224,7 +228,7 @@ def test_bench_acceptance_glm_reviewer_real_run():
 
     # Re-run is incremental — zero new reviews, exit 0, corpus unchanged.
     before = data_path.read_text()
-    second = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ})
+    second = subprocess.run(cmd, capture_output=True, text=True, env=env)
     assert second.returncode == 0, f"re-run failed: {second.stdout}\n{second.stderr}"
     second_out = " ".join(second.stdout.split())
     assert "already present" in second_out, f"expected skip messages: {second.stdout}"
