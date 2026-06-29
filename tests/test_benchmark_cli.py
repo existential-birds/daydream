@@ -101,6 +101,19 @@ def test_non_table_reviewers_section_errors(tmp_path, monkeypatch):
         _bench_config_from_argv(["--reviewer", "glm", "--no-score"])
 
 
+def test_malformed_reviewer_preset_fails_through_compiled_entrypoint(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.daydream.bench]\nbenchmark-repo="/b"\n[tool.daydream.bench.reviewers]\nglm="not-a-table"\n'
+    )
+    r = subprocess.run(  # noqa: S603 - args are not user-controlled
+        ["daydream", "bench", "--reviewer", "glm", "--no-score"],  # noqa: S607 - daydream is a trusted command
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,  # the malformed pyproject.toml lives here; bench reads config from cwd
+    )
+    assert r.returncode != 0 and "unknown --reviewer 'glm'" in (r.stdout + r.stderr)
+
+
 @pytest.mark.parametrize(
     "override",
     [
