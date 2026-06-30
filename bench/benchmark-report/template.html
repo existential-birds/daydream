@@ -260,6 +260,7 @@ const C={navy:"#0A1420",navy2:"#16202C",navy3:"#222C38",ink:"#EAF2EF",dim:"#8FA3
 const NS="http://www.w3.org/2000/svg";
 const DATA=JSON.parse(document.getElementById("DATA").textContent);
 const $=s=>document.querySelector(s);
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function el(tag,attrs,kids){const e=document.createElementNS(NS,tag);for(const k in (attrs||{}))e.setAttribute(k,attrs[k]);
   (kids||[]).forEach(c=>e.appendChild(c));return e;}
 function txt(x,y,s,attrs){const t=el("text",Object.assign({x,y},attrs||{}));t.textContent=s;return t;}
@@ -277,7 +278,7 @@ function renderJudgeBtns(){
   DATA.judges.forEach(j=>{
     const b=document.createElement("button");
     b.className="judgebtn"+(j.id===STATE.judge?" on":"");
-    b.innerHTML=`<span class="jname">${j.display}</span><span class="jmeta">${j.has_daydream?"daydream scored":"not yet scored"} · ${j.field.length} field</span>`;
+    b.innerHTML=`<span class="jname">${esc(j.display)}</span><span class="jmeta">${j.has_daydream?"daydream scored":"not yet scored"} · ${j.field.length} field</span>`;
     b.onclick=()=>{STATE.judge=j.id;renderJudgeBtns();renderJudgeDependent();};
     host.appendChild(b);
   });
@@ -296,7 +297,7 @@ function renderLead(){
   const anchor=DATA.judges.find(j=>j.has_daydream);
   const d=anchor?anchor.daydream:null;const rk=anchor?anchor.ranks:null;
   $("#leadcopy").innerHTML=d?
-    `On <b>${DATA.meta.subset_pr_count} PRs</b> (of ${DATA.meta.total_daydream_attempts} attempted) judged by <b>${anchor.display}</b>, daydream lands <b class="mint">recall ${pct(d.recall)}%</b> (#${rk.recall[0]} of ${rk.recall[1]}) but <b>precision ${pct(d.precision)}%</b> (#${rk.precision[0]} of ${rk.precision[1]}) — <b>top-class recall, bottom-class precision</b>. The story is <b>${d.fp} false positives against ${d.tp} true positives</b>. Every SaaS competitor is recomputed on this exact subset; cost is synthesized from daydream's measured tokens.`
+    `On <b>${DATA.meta.subset_pr_count} PRs</b> (of ${DATA.meta.total_daydream_attempts} attempted) judged by <b>${esc(anchor.display)}</b>, daydream lands <b class="mint">recall ${pct(d.recall)}%</b> (#${rk.recall[0]} of ${rk.recall[1]}) but <b>precision ${pct(d.precision)}%</b> (#${rk.precision[0]} of ${rk.precision[1]}) — <b>top-class recall, bottom-class precision</b>. The story is <b>${d.fp} false positives against ${d.tp} true positives</b>. Every SaaS competitor is recomputed on this exact subset; cost is synthesized from daydream's measured tokens.`
     :"daydream has not been scored under any discovered judge.";
 }
 function renderJudgeNote(){
@@ -311,7 +312,7 @@ function renderKPIs(){
   const j=curJudge();$("#kpi-judgetag").textContent="· "+j.display;
   const host=$("#kpis");host.innerHTML="";
   if(!j.has_daydream||!j.daydream){
-    host.innerHTML=`<div class="placeholder" style="grid-column:1/-1"><div class="big">daydream not yet scored under ${j.display}</div>
+    host.innerHTML=`<div class="placeholder" style="grid-column:1/-1"><div class="big">daydream not yet scored under ${esc(j.display)}</div>
       The ${j.field.length}-tool SaaS field below is computed on the ${DATA.meta.subset_pr_count}-PR daydream subset. Re-judge daydream under this model and the same generator fills these KPIs in — no code change.</div>`;
     return;
   }
@@ -395,7 +396,7 @@ function makeLB(j,axis,title){
     const isdd=r.tool===DDTOOL;
     const realrank=rows.indexOf(r)+1;
     body+=`<tr class="${isdd?'dd':''}"><td class="num" style="color:var(--steel)">${realrank}</td>
-      <td><span class="toolname"><span class="cdot" style="background:${r.color}"></span>${r.display}${r.invalid?' <span class="invalid">⚠ERR</span>':''}</span></td>
+      <td><span class="toolname"><span class="cdot" style="background:${esc(r.color)}"></span>${esc(r.display)}${r.invalid?' <span class="invalid">⚠ERR</span>':''}</span></td>
       <td class="num" style="font-weight:${isdd?700:400};color:${isdd?'var(--orange-soft)':'var(--ink)'}">${pct(r[axis])}</td></tr>`;
   });
   card.innerHTML=`<div class="ct"><span class="dot"></span>${title}</div>
@@ -413,11 +414,11 @@ function renderFP(){
   const j=curJudge();
   if(!j.has_daydream||!j.daydream){
     $("#fp-sub").textContent="daydream not yet scored under this judge — the over-flagging view fills in once it is re-judged.";
-    $("#fp-stack").innerHTML='<div class="placeholder">no daydream FP/TP under '+j.display+'</div>';
+    $("#fp-stack").innerHTML='<div class="placeholder">no daydream FP/TP under '+esc(j.display)+'</div>';
     $("#fp-ratio").innerHTML="";return;
   }
   const d=j.daydream;
-  $("#fp-sub").innerHTML=`Under ${j.display}, daydream emits <b style="color:var(--rust)">${d.fp} false positives</b> for <b style="color:var(--mint)">${d.tp} true positives</b> — a ${(d.fp/d.tp).toFixed(1)}× FP:TP ratio. The field's median FP:TP is far lower; this is the single biggest lever on daydream's score.`;
+  $("#fp-sub").innerHTML=`Under ${esc(j.display)}, daydream emits <b style="color:var(--rust)">${d.fp} false positives</b> for <b style="color:var(--mint)">${d.tp} true positives</b> — a ${(d.fp/d.tp).toFixed(1)}× FP:TP ratio. The field's median FP:TP is far lower; this is the single biggest lever on daydream's score.`;
   const W=420,H=130;const svg=el("svg",{viewBox:`0 0 ${W} ${H}`});
   const tot=d.tp+d.fp;const bx=20,bw=W-40,by=48,bh=34;
   const tpw=bw*d.tp/tot;
@@ -438,7 +439,7 @@ function renderFP(){
     if(!r)return;
     const row=document.createElement("div");row.className="barrow"+(r.dd?" dd":"");
     const w=Math.min(r.v/maxv*100,100);
-    row.innerHTML=`<span class="bn">${r.n}</span><div class="bartrack"><div class="barseg" style="width:${w}%;background:${r.c}"></div></div><span class="bv">${r.v.toFixed(1)}×</span>`;
+    row.innerHTML=`<span class="bn">${esc(r.n)}</span><div class="bartrack"><div class="barseg" style="width:${w}%;background:${esc(r.c)}"></div></div><span class="bv">${r.v.toFixed(1)}×</span>`;
     host.appendChild(row);
   });
 }
@@ -450,7 +451,7 @@ function renderJudgeSens(){
     const card=document.createElement("div");card.className="card";
     if(j.has_daydream&&j.daydream){
       const d=j.daydream;
-      card.innerHTML=`<div class="ct"><span class="dot"></span>${j.display}</div>
+      card.innerHTML=`<div class="ct"><span class="dot"></span>${esc(j.display)}</div>
         <div style="display:flex;gap:18px;margin-top:4px">
           <div><div style="color:var(--ink);font-size:24px;font-weight:700">${pct(d.precision)}<span style="font-size:12px;color:var(--dim)">%</span></div><div style="font-size:9.5px;letter-spacing:.16em;color:var(--dim);text-transform:uppercase">precision</div></div>
           <div><div style="color:var(--mint);font-size:24px;font-weight:700">${pct(d.recall)}<span style="font-size:12px;color:var(--dim)">%</span></div><div style="font-size:9.5px;letter-spacing:.16em;color:var(--dim);text-transform:uppercase">recall</div></div>
@@ -458,7 +459,7 @@ function renderJudgeSens(){
         </div>
         <div style="margin-top:12px;font-size:11px;color:var(--dim)">tp ${d.tp} · fp ${d.fp} · fn ${d.fn} · ${d.n_prs} PRs</div>`;
     } else {
-      card.innerHTML=`<div class="ct"><span class="dot" style="background:var(--amber);box-shadow:0 0 9px var(--amber)"></span>${j.display}</div>
+      card.innerHTML=`<div class="ct"><span class="dot" style="background:var(--amber);box-shadow:0 0 9px var(--amber)"></span>${esc(j.display)}</div>
         <div class="placeholder" style="padding:20px 14px"><div class="big" style="font-size:12px">not yet scored</div>
         <div style="font-size:11px">daydream has no leaf under this judge. The ${j.field.length}-tool field is ready; re-run the judge on daydream to populate.</div></div>`;
     }
@@ -479,11 +480,11 @@ function renderSlices(){
     sl.rows.forEach(r=>{
       const w=r.recall/Math.max(maxR,1)*100;
       const fpr=r.tp?(r.fp/r.tp).toFixed(1)+"×":(r.fp?"∞":"0");
-      rows+=`<div class="barrow"><span class="bn" title="${r.label}">${r.label} <span style="color:var(--steel)">·${r.n_prs}</span></span>
+      rows+=`<div class="barrow"><span class="bn" title="${esc(r.label)}">${esc(r.label)} <span style="color:var(--steel)">·${r.n_prs}</span></span>
         <div class="bartrack"><div class="barseg" style="width:${Math.max(w,2)}%;background:var(--mint-deep)"></div></div>
         <span class="bv">${pct(r.recall)}<span style="color:var(--steel);font-size:9px"> R·${fpr}</span></span></div>`;
     });
-    card.innerHTML=`<div class="ct"><span class="dot"></span>${sl.title} — recall &amp; FP:TP</div>${rows}`;
+    card.innerHTML=`<div class="ct"><span class="dot"></span>${esc(sl.title)} — recall &amp; FP:TP</div>${rows}`;
     grid.appendChild(card);
   });
   host.appendChild(grid);
@@ -491,7 +492,7 @@ function renderSlices(){
 
 function renderCost(){
   const e=DATA.economy;
-  $("#cost-sub").innerHTML=`Computed from measured tokens @ <b>${e.price_model}</b> price card (in $${e.price_card.input} / cached $${e.price_card.cached} / out $${e.price_card.output} per 1M; counters disjoint). Backend records $0 (GLM via z.ai) — this is synthesized, not read. ${e.n_with_trajectory} of ${e.n_prs} PRs have a trajectory.`;
+  $("#cost-sub").innerHTML=`Computed from measured tokens @ <b>${esc(e.price_model)}</b> price card (in $${e.price_card.input} / cached $${e.price_card.cached} / out $${e.price_card.output} per 1M; counters disjoint). Backend records $0 (GLM via z.ai) — this is synthesized, not read. ${e.n_with_trajectory} of ${e.n_prs} PRs have a trajectory.`;
   const host=$("#cost-kpis");host.innerHTML="";
   const ddtp=(DATA.judges.find(j=>j.has_daydream)||{daydream:{tp:1}}).daydream.tp||1;
   const cards=[
@@ -505,7 +506,7 @@ function renderCost(){
   const maxv=Math.max(...rows.map(r=>r.v),0.001);
   const bh=$("#cost-bars");bh.innerHTML="";
   rows.forEach(r=>{const row=document.createElement("div");row.className="barrow";
-    row.innerHTML=`<span class="bn">${r.n}</span><div class="bartrack"><div class="barseg" style="width:${r.v/maxv*100}%;background:var(--orange)"></div></div><span class="bv">$${r.v.toFixed(3)}</span>`;bh.appendChild(row);});
+    row.innerHTML=`<span class="bn">${esc(r.n)}</span><div class="bartrack"><div class="barseg" style="width:${r.v/maxv*100}%;background:var(--orange)"></div></div><span class="bv">$${r.v.toFixed(3)}</span>`;bh.appendChild(row);});
 }
 
 function renderLatency(){
@@ -515,12 +516,12 @@ function renderLatency(){
   const e=DATA.economy;
   dd.innerHTML=`<div class="callout">median <b>${fmtSec(e.median_wall_seconds)}</b> · mean <b>${fmtSec(e.mean_wall_seconds)}</b> over ${e.n_with_wall} PRs. Clock: first→last ATIF phase event.</div>`;
   rows.forEach(r=>{const row=document.createElement("div");row.className="barrow";
-    row.innerHTML=`<span class="bn">${r.n}</span><div class="bartrack"><div class="barseg" style="width:${r.v/maxv*100}%;background:var(--mint-deep)"></div></div><span class="bv">${Math.round(r.v)}s</span>`;dd.appendChild(row);});
+    row.innerHTML=`<span class="bn">${esc(r.n)}</span><div class="bartrack"><div class="barseg" style="width:${r.v/maxv*100}%;background:var(--mint-deep)"></div></div><span class="bv">${Math.round(r.v)}s</span>`;dd.appendChild(row);});
   const saas=$("#lat-saas");
   if(DATA.latency_field&&DATA.latency_field.length){
     saas.innerHTML="";const mv=Math.max(...DATA.latency_field.map(r=>r.median_seconds),1);
     DATA.latency_field.slice(0,14).forEach(r=>{const row=document.createElement("div");row.className="barrow";
-      row.innerHTML=`<span class="bn">${r.display}</span><div class="bartrack"><div class="barseg" style="width:${r.median_seconds/mv*100}%;background:${r.color}"></div></div><span class="bv">${(r.median_seconds/60).toFixed(0)}m</span>`;saas.appendChild(row);});
+      row.innerHTML=`<span class="bn">${esc(r.display)}</span><div class="bartrack"><div class="barseg" style="width:${r.median_seconds/mv*100}%;background:${esc(r.color)}"></div></div><span class="bv">${(r.median_seconds/60).toFixed(0)}m</span>`;saas.appendChild(row);});
   } else {
     saas.innerHTML=`<div class="placeholder"><div class="big" style="font-size:12px">SaaS latency not in this snapshot</div>
       <div style="font-size:11px">SaaS "PR-timeline elapsed" requires a live GitHub trigger→last-comment crawl across ~2,000 forked repos (step_speed_analysis.py). It was not run for this offline report and is never fabricated. Supply <span class="mono-cite">--speed-analysis speed_analysis.json</span> and the same generator renders it here.</div></div>`;
@@ -541,7 +542,7 @@ function renderTokens(){
   rows.sort((a,b)=>(b.p+b.c+b.o)-(a.p+a.c+a.o));
   const bh=$("#token-bars");bh.innerHTML="";
   rows.forEach(r=>{const tot=r.p+r.c+r.o;const row=document.createElement("div");row.className="barrow";
-    row.innerHTML=`<span class="bn">${r.n}</span><div class="bartrack">
+    row.innerHTML=`<span class="bn">${esc(r.n)}</span><div class="bartrack">
       <div class="barseg" style="width:${r.p/maxv*100}%;background:var(--orange)"></div>
       <div class="barseg" style="width:${r.c/maxv*100}%;background:var(--mint-deep)"></div>
       <div class="barseg" style="width:${r.o/maxv*100}%;background:var(--steel)"></div>
@@ -568,8 +569,8 @@ function renderTable(){
   let body="<tbody>";
   rows.forEach(r=>{
     body+="<tr>"+cols.map(c=>{
-      let v=r[c.k];
-      if(c.k==="repo"){const parts=(r.repo||"").split("/");v=`<span class="tag">${parts[0]||""}</span> ${parts[1]||""}`;}
+      let v=r[c.k];let raw=false;
+      if(c.k==="repo"){const parts=(r.repo||"").split("/");v=`<span class="tag">${esc(parts[0]||"")}</span> ${esc(parts[1]||"")}`;raw=true;}
       else if(c.k==="precision"||c.k==="recall")v=scored?pct(v):"—";
       else if(c.k==="tp"||c.k==="fp"||c.k==="fn")v=scored?(v==null?"—":v):"—";
       else if(c.k==="golden")v=(v==null?"—":v);
@@ -577,7 +578,7 @@ function renderTable(){
       else if(c.k==="wall_seconds")v=fmtSec(v);
       else if(v==null)v="—";
       const color=(c.k==="fp"&&scored)?'style="color:var(--rust)"':(c.k==="tp"&&scored)?'style="color:var(--mint)"':"";
-      return `<td class="${c.num?'num':''}" ${color}>${v}</td>`;
+      return `<td class="${c.num?'num':''}" ${color}>${raw?v:esc(v)}</td>`;
     }).join("")+"</tr>";
   });
   body+="</tbody>";
@@ -602,19 +603,19 @@ function renderImprovements(){
     {p:1,cls:"",h:"Confidence-gate / severity-threshold the candidate set",
      body:`daydream flags <b>${d.tp+d.fp}</b> findings to capture <b>${d.tp}</b> true positives — precision ${pct(d.precision)}% (#${anchor.ranks.precision[0]} of ${anchor.ranks.precision[1]}). Drop low-confidence / low-severity candidates before they reach the judge.`,
      pred:`Predict: dropping the bottom ~40% of candidates by confidence cuts FP ${d.fp}→~${Math.round(d.fp*0.55)} while keeping ≥${Math.round(d.tp*0.9)} TP → precision ≈ ${pct(newP)}% (from ${pct(d.precision)}%), F1 ≈ ${pct(2*newP*(d.recall*0.9)/(newP+d.recall*0.9))}%.`,
-     cite:`source: results/${DATA.meta.anchor_judge}/evaluations.json (${DDTOOL} false_positives lists)`},
+     cite:`source: results/${esc(DATA.meta.anchor_judge)}/evaluations.json (${esc(DDTOOL)} false_positives lists)`},
     {p:1,cls:"",h:"De-duplicate near-identical candidates per PR before submission",
      body:`Many FPs are restatements of one concern (e.g. the grafana singleflight finding recurs as three distinct candidates). The harness already runs step2.5 dedup corpus-side; mirror it pre-submission so siblings collapse to one.`,
      pred:`Predict: per-PR candidate dedup removes 15–25% of FP at zero TP loss → precision +3–5 pts independent of item 1.`,
      cite:`source: step2_5_dedup_candidates module · leaf total_candidates vs fp`},
-    {p:2,cls:"p2",h:worst?`Tighten the worst-precision slice: ${worst.dim} = ${worst.label}`:"Tighten the noisiest label slice",
-     body:worst?`The <b>${worst.label}</b> ${worst.dim.toLowerCase()} cohort carries ${worst.fp} FP for ${worst.tp} TP (${worst.ratio.toFixed(1)}× FP:TP) — daydream's noisiest slice. Add slice-specific guardrails or suppress speculative findings there.`:"Add guardrails on the noisiest label cohort.",
+    {p:2,cls:"p2",h:worst?`Tighten the worst-precision slice: ${esc(worst.dim)} = ${esc(worst.label)}`:"Tighten the noisiest label slice",
+     body:worst?`The <b>${esc(worst.label)}</b> ${esc(worst.dim.toLowerCase())} cohort carries ${worst.fp} FP for ${worst.tp} TP (${worst.ratio.toFixed(1)}× FP:TP) — daydream's noisiest slice. Add slice-specific guardrails or suppress speculative findings there.`:"Add guardrails on the noisiest label cohort.",
      pred:worst?`Predict: halving FP on this slice lifts overall precision ~${worstLift} pts.`:"Predict: measurable precision lift on the targeted slice.",
      cite:`source: results/pr_labels.json joined to daydream leaves (Slices panel)`},
     {p:3,cls:"p3",h:"Re-judge daydream under Sonnet 4.5 and GPT-5.2",
-     body:`daydream has a leaf only under <b>${anchor.display}</b>. The other ${DATA.judges.length-1} discovered judges show the field but a placeholder for daydream. Running the judge step under each fills the cross-judge panels and tests whether the precision story is judge-robust.`,
+     body:`daydream has a leaf only under <b>${esc(anchor.display)}</b>. The other ${DATA.judges.length-1} discovered judges show the field but a placeholder for daydream. Running the judge step under each fills the cross-judge panels and tests whether the precision story is judge-robust.`,
      pred:`Predict: F1 moves within ±3 pts across judges (the field's best-F1 tool shifts only ${f1Spread} pts across the three), so daydream's bottom-precision standing is judge-robust.`,
-     cite:`source: discovered judges ${DATA.judges.map(j=>j.id).join(", ")}`},
+     cite:`source: discovered judges ${esc(DATA.judges.map(j=>j.id).join(", "))}`},
   ];
   items.forEach(it=>{const div=document.createElement("div");div.className="imp "+it.cls;
     div.innerHTML=`<div class="pri">${it.p}</div><div class="body"><h4>${it.h}</h4><p>${it.body}</p><div class="pred">▸ ${it.pred}</div><div class="cite">${it.cite}</div></div>`;host.appendChild(div);});
@@ -622,8 +623,8 @@ function renderImprovements(){
 
 function renderFoot(){
   const m=DATA.meta;
-  $("#foot").innerHTML=`<b>METHODOLOGY.</b> ${m.metric_def}. Daydream covers ${m.subset_pr_count} PRs (of ${m.total_daydream_attempts} attempted; ${m.total_daydream_attempts-m.subset_pr_count} failed runs absent). Every SaaS tool is recomputed on this exact subset per judge — never daydream's ${m.subset_pr_count}-PR numbers against a 50-PR field aggregate. Judges with &gt;${(m.judge_error_ratio_threshold*100)}% failed comparisons are flagged ⚠ERR and excluded from rank (guard from daydream/benchmark/score.py). Stale <b>${m.excluded_tool}</b> rows excluded. Cost synthesized from measured ATIF tokens @ ${DATA.economy.price_model} price card (${m.price_source}); the backend's $0 field is not used. SaaS latency shown only when a speed_analysis.json is supplied. <br><br>
-  <b>SOURCES.</b> aggregates: ${m.generated_from} (auto-discovered ${DATA.judges.length} judge panels + ${DATA.skipped_judges.length} skipped). labels: results/pr_labels.json. tokens/wall: .daydream-bench/trajectories/*.json. tool names/colors: analysis/benchmark_dashboard.json. Generated by bench/benchmark-report/build.py — re-run against any corpus, judge, or price card.`;
+  $("#foot").innerHTML=`<b>METHODOLOGY.</b> ${esc(m.metric_def)}. Daydream covers ${m.subset_pr_count} PRs (of ${m.total_daydream_attempts} attempted; ${m.total_daydream_attempts-m.subset_pr_count} failed runs absent). Every SaaS tool is recomputed on this exact subset per judge — never daydream's ${m.subset_pr_count}-PR numbers against a 50-PR field aggregate. Judges with &gt;${(m.judge_error_ratio_threshold*100)}% failed comparisons are flagged ⚠ERR and excluded from rank (guard from daydream/benchmark/score.py). Stale <b>${esc(m.excluded_tool)}</b> rows excluded. Cost synthesized from measured ATIF tokens @ ${esc(DATA.economy.price_model)} price card (${esc(m.price_source)}); the backend's $0 field is not used. SaaS latency shown only when a speed_analysis.json is supplied. <br><br>
+  <b>SOURCES.</b> aggregates: ${esc(m.generated_from)} (auto-discovered ${DATA.judges.length} judge panels + ${DATA.skipped_judges.length} skipped). labels: results/pr_labels.json. tokens/wall: .daydream-bench/trajectories/*.json. tool names/colors: analysis/benchmark_dashboard.json. Generated by bench/benchmark-report/build.py — re-run against any corpus, judge, or price card.`;
 }
 
 function renderJudgeDependent(){
