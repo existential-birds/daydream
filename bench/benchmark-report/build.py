@@ -65,12 +65,40 @@ def judge_display(canon: str) -> str:
     return c
 
 
+def daydream_display(tool: str) -> str:
+    """Human label for the configured daydream tool, e.g. ``daydream-owl-alpha`` -> ``daydream (owl-alpha)``."""
+    variant = tool[len("daydream-"):] if tool.startswith("daydream-") else tool
+    return f"daydream ({variant})"
+
+
 def _safe_div(a: float, b: float) -> float:
     return a / b if b else 0.0
 
 
 def f1(p: float, r: float) -> float:
     return _safe_div(2 * p * r, p + r)
+
+
+def _median(xs: list[float]) -> float:
+    s = sorted(xs)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def _html_script_json(obj: Any) -> str:
+    """Serialize ``obj`` for safe embedding inside an HTML ``<script>`` element.
+
+    Escapes ``<``/``>`` (so a ``</script>`` inside any benchmark string can't close the
+    tag) and the U+2028/U+2029 line separators. Output is still valid JSON.
+    """
+    return (
+        json.dumps(obj)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace(" ", "\\u2028")
+        .replace(" ", "\\u2029")
+    )
 
 
 def discover_judges(results_root: Path, exclude_tool: str) -> dict[str, dict[str, Any]]:
@@ -286,7 +314,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         dd_agg = aggregate_tool(evals, dd_tool, dd_subset) if has_dd else None
         ranks = {}
         if dd_agg:
-            dd_agg["display"] = "daydream (owl-alpha)"
+            dd_agg["display"] = daydream_display(dd_tool)
             dd_agg["color"] = "#FD8017"
             combined = field + [dd_agg]
             ranks = {
@@ -306,7 +334,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "field": sorted(field, key=lambda r: r["f1"], reverse=True),
         })
 
-    # ── daydream economy (judge-independent: it ran once under owl-alpha) ──
+    # ── daydream economy (judge-independent: token/cost/wall come from ATIF trajectories) ──
     anchor_judge = next((j for j in judges_out if j["has_daydream"]), None)
     anchor_evals = judges_raw[dd_source_dir]["evals"]
     per_pr_rows = []
@@ -314,10 +342,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     tot_cost = 0.0
     walls = []
     for pr in sorted(dd_subset):
-        leaf = anchor_evals.get(pr, {}).get(dd_tool, {})
         tj = trajectories.get(traj_key_for_pr(pr), {})
         lab = labels.get(pr, {})
-        tp, fp, fn = int(leaf.get("tp", 0)), int(leaf.get("fp", 0)), int(leaf.get("fn", 0))
         cost = tj.get("cost_usd")
         if tj:
             tot_prompt += tj.get("prompt_tokens", 0)
@@ -335,10 +361,6 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "risk": lab.get("llm_pr_labels", {}).get("risk_level"),
             "change_type": lab.get("llm_pr_labels", {}).get("change_type"),
             "complexity": lab.get("llm_pr_labels", {}).get("code_complexity"),
-            "golden": int(leaf.get("total_golden", 0)),
-            "candidates": int(leaf.get("total_candidates", 0)),
-            "tp": tp, "fp": fp, "fn": fn,
-            "precision": _safe_div(tp, tp + fp), "recall": _safe_div(tp, tp + fn),
             "cost_usd": cost,
             "wall_seconds": tj.get("wall_seconds"),
             "prompt_tokens": tj.get("prompt_tokens"),
@@ -347,6 +369,28 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "steps": tj.get("steps"),
         })
 
+    # ── per-PR daydream scores keyed by judge (judge-SPECIFIC tp/fp/fn) ──
+    # The per-PR log merges these onto the judge-independent rows above on selection,
+    # so each judge's table shows ITS OWN leaf — never the anchor judge's numbers.
+    per_pr_scores: dict[str, dict[str, dict]] = {}
+    for j in judges_out:
+        if not j["has_daydream"]:
+            continue
+        jev = judges_raw[j["id"]]["evals"]
+        scored_prs: dict[str, dict] = {}
+        for pr in dd_subset:
+            leaf = jev.get(pr, {}).get(dd_tool)
+            if not _leaf_present(leaf):
+                continue
+            tp, fp, fn = int(leaf.get("tp", 0)), int(leaf.get("fp", 0)), int(leaf.get("fn", 0))
+            scored_prs[pr] = {
+                "golden": int(leaf.get("total_golden", 0)),
+                "candidates": int(leaf.get("total_candidates", 0)),
+                "tp": tp, "fp": fp, "fn": fn,
+                "precision": _safe_div(tp, tp + fp), "recall": _safe_div(tp, tp + fn),
+            }
+        per_pr_scores[j["id"]] = scored_prs
+
     n_with_traj = sum(1 for r in per_pr_rows if r["cost_usd"] is not None)
     economy = {
         "price_model": price_model, "price_card": price,
@@ -354,7 +398,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "total_prompt_tokens": tot_prompt, "total_completion_tokens": tot_completion,
         "total_cached_tokens": tot_cached, "total_cost_usd": tot_cost,
         "cost_per_pr": _safe_div(tot_cost, n_with_traj) if n_with_traj else 0.0,
-        "median_wall_seconds": (sorted(walls)[len(walls) // 2] if walls else None),
+        "median_wall_seconds": (_median(walls) if walls else None),
         "mean_wall_seconds": (sum(walls) / len(walls) if walls else None),
         "n_with_wall": len(walls),
     }
@@ -384,10 +428,15 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                                   "median_seconds": st["median_seconds"], "n": st["count"]})
     latency_field.sort(key=lambda r: r["median_seconds"])
 
+    # Attempts = recorded daydream runs (one ATIF trajectory each); failed runs leave a
+    # trajectory but no scored leaf, so attempts >= subset. No trajectories -> all scored.
+    total_attempts = len(trajectories) or len(dd_subset)
+
     return {
         "meta": {
             "generated_from": str(results_root),
             "daydream_tool": dd_tool,
+            "daydream_display": daydream_display(dd_tool),
             "excluded_tool": args.exclude_tool,
             "anchor_judge": dd_source_dir,
             "subset_pr_count": len(dd_subset),
@@ -397,12 +446,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                            "F1=2PR/(P+R) — daydream/benchmark/score.py"),
             "price_source": "bench/review-bot-compare/compare.py PRICING",
             "speed_analysis_present": bool(speed),
-            "total_daydream_attempts": 26,
+            "total_daydream_attempts": total_attempts,
         },
         "judges": judges_out,
         "skipped_judges": skipped_judges,
         "economy": economy,
         "per_pr": per_pr_rows,
+        "per_pr_scores": per_pr_scores,
         "slices": slices,
         "latency_field": latency_field,
     }
@@ -441,9 +491,7 @@ def main() -> None:
     # ── Per-run output folder — never overwrite a prior report. ──
     # The benchmark corpus is read-only, so reports are archived under daydream,
     # one self-contained folder per generation (mirrors osprey's <RUN>/report/).
-    # run-id = UTC timestamp + a corpus fingerprint (judge dirs + scored PR set),
-    # so repeated generations are distinct yet a re-run of the *same* corpus at the
-    # same second lands on the same addressable folder.
+    # run-id = UTC timestamp + a corpus fingerprint (judge dirs + scored PR set).
     generated_at = datetime.now(UTC)
     fp_dirs = "|".join(sorted(d for j in data["judges"] for d in j["dirs"]))
     fp_src = fp_dirs + "||" + "|".join(data["meta"]["subset_prs"])
@@ -454,11 +502,19 @@ def main() -> None:
     data["meta"]["corpus_fingerprint"] = fingerprint
 
     out_dir = Path(args.out) if args.out else Path(args.out_root) / run_id
+    # Honor the "one new folder per generation" promise: refuse to clobber an auto-named
+    # report (collides only on --run-id reuse or a same-second rerun). --out is an explicit
+    # "write exactly here" override and is allowed to overwrite.
+    if not args.out and out_dir.exists():
+        raise SystemExit(
+            f"report dir already exists: {out_dir}\n"
+            "refusing to overwrite a prior report — pass a fresh --run-id, or --out to write explicitly."
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "data.json").write_text(json.dumps(data, indent=2))
 
     template = (here / "template.html").read_text()
-    html = template.replace("__DATA__", json.dumps(data))
+    html = template.replace("__DATA__", _html_script_json(data))
     (out_dir / "index.html").write_text(html)
     # Each report is self-contained (offline file://): copy the vendored htmx beside it.
     htmx_src = here / "htmx.min.js"
