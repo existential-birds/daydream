@@ -10,16 +10,49 @@ This runbook takes you from nothing to a scored result.
 - **`daydream` installed.** Run `uv sync` so the `daydream` console script is on `PATH` (the harness invokes it as a subprocess).
 - **`git` and `gh` on `PATH`.** `git` performs the blobless clone and `pull/N/head` fetch per PR.
 - **The Beagle plugin** installed in Claude Code (see the [Quickstart](../README.md#quickstart)) — deep review needs the stack-specific skills.
+- **A backend for the reviewer under test.** By default the reviewer runs daydream's built-in default backend (Claude). To benchmark another backend, select it with `--reviewer-backend` (see [Selecting the reviewer backend](#selecting-the-reviewer-backend)). The `pi` backend driving a GLM model over OpenRouter additionally needs the `pi` CLI on `PATH` and the OpenRouter provider extension registered with `pi` (installed once via `pi install`); the run forwards `--reviewer-provider` to the reviewer as the `PI_PROVIDER` environment variable.
 - **The judge credential, exported.** Scoring requires one env var and accepts two optional overrides:
   - `MARTIAN_API_KEY` — an OpenRouter `sk-or-…` key (or a withmartian key). **Required for `--score`.**
   - `MARTIAN_BASE_URL` — the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1` (default set by the withmartian step modules, not by daydream); set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
   - `MARTIAN_MODEL` — the judge model id. Defaults to `openai/gpt-4o-mini` (default set by the withmartian step modules, not by daydream); should match `--model` for comparable results.
 
-  The harness reads `os.environ` only — it does **not** parse a `.env` file. If you keep these in a `.env`, you must export them into the shell first:
+  These may live in a `.env` file in the directory you run `daydream bench` from — it is auto-loaded at bench entry (`python-dotenv`, searching from the cwd upward). Already-exported shell variables win, so an inline `MARTIAN_API_KEY=… daydream bench …` still overrides the `.env`; a missing or malformed `.env` is a silent no-op.
 
   ```bash
-  set -a; source .env; set +a
+  # .env beside your invocation
+  MARTIAN_API_KEY=sk-or-…
+  MARTIAN_MODEL=anthropic/claude-opus-4-5-20251101
   ```
+
+## Configuration file (`[tool.daydream.bench]`)
+
+Repeating `--benchmark-repo`, the judge `--model`, and the full reviewer flag set on every invocation gets old. A `[tool.daydream.bench]` table in the `pyproject.toml` (or `.daydream.toml`) of the directory you run `daydream bench` from supplies defaults **under** the CLI flags. Precedence is always **CLI flag > config file > built-in default**: an explicit flag always wins; the config only fills a flag you omit.
+
+```toml
+[tool.daydream.bench]
+benchmark-repo = "../code-review-benchmark/offline"   # makes --benchmark-repo optional
+model = "anthropic/claude-opus-4-5-20251101"           # judge model when --model is omitted
+
+# Named reviewer presets — each expands to --reviewer-backend / -model / -provider.
+[tool.daydream.bench.reviewers.glm]
+backend = "pi"
+model = "z-ai/glm-5.2"
+provider = "openrouter"
+```
+
+With `benchmark-repo` set in config, `--benchmark-repo` becomes optional; omit it both as a flag and in config and the run aborts with a usage error. Presets are **config-only** — there are no built-in reviewer names or model ids baked into daydream; a preset exists only if you define its table.
+
+### `--reviewer <name>` expands a preset
+
+`--reviewer glm` looks up `[tool.daydream.bench.reviewers.glm]`, applies its `backend`/`model`/`provider` as the reviewer fields, and derives `--tool-label` as `daydream-glm` — so its findings file under a distinct results key automatically (see [`--tool-label` isolates per-backend results](#--tool-label-isolates-per-backend-results)). Explicit `--reviewer-backend`/`-model`/`-provider` or `--tool-label` flags still override the preset (CLI > config). An unknown `--reviewer` name is a usage error.
+
+With the table above, the full GLM sweep over one PR collapses to:
+
+```bash
+daydream bench --reviewer glm --only grafana --limit 1
+```
+
+`benchmark-repo` and the judge `model` come from config; `--reviewer glm` supplies the backend/model/provider and the `daydream-glm` label. (Scoring is on by default, so `MARTIAN_API_KEY` must be present — see [Prerequisites](#prerequisites).)
 
 ## Smoke subset
 
@@ -49,15 +82,58 @@ daydream bench --benchmark-repo ../code-review-benchmark/offline --score
 
 This is the load-bearing, money-spending run: 26 deep reviews plus 26 judge passes.
 
+## Watching progress (`--verbose`)
+
+A deep review of one PR runs for minutes. By default each PR shows a live spinner with the PR label and reviewer, then a completion line with the elapsed time and finding count:
+
+```text
+▶ [1/2] Reviewing https://github.com/grafana/grafana/pull/1234 · reviewer daydream…
+Reviewed https://github.com/grafana/grafana/pull/1234 in 4m12s · 3 findings
+```
+
+Pass `-v`/`--verbose` to stream the underlying `daydream --non-interactive` subprocess output live instead of the spinner (streaming and a spinner can't share one console, so verbose replaces the spinner; the announce and completion lines stay):
+
+```bash
+daydream bench --reviewer glm --only grafana --limit 1 --verbose
+```
+
+## Selecting the reviewer backend
+
+The harness benchmarks daydream itself, but the *reviewer under test* — the backend/model that produces the findings — is selectable. This is independent of `--model`, which only names the **judge**. Four flags control the reviewer:
+
+- `--reviewer-backend {claude,codex,pi}` — the backend daydream runs its deep review on. Forwarded to the per-PR subprocess as `--backend`. Omit to use daydream's built-in default (Claude).
+- `--reviewer-model <id>` — the reviewer model id. Forwarded as `--model` to the reviewer subprocess. Omit to use the backend's default.
+- `--reviewer-provider <name>` — the reviewer provider, forwarded to the reviewer subprocess as the `PI_PROVIDER` environment variable (never as an argv flag). Used by the `pi` backend to route a model through a specific provider — e.g. `openrouter` to run GLM via OpenRouter. Requires the OpenRouter provider extension registered with `pi` (see Prerequisites).
+- `--tool-label <label>` — the results key this reviewer's findings are filed under (default: `daydream`).
+
+> **Note:** There is no `--provider` flag on the main `daydream` CLI; the reviewer provider crosses the subprocess boundary only as `PI_PROVIDER`. Pass it to the benchmark as `--reviewer-provider`, not `--provider`.
+
+Example — benchmark daydream driven by GLM (`glm-5.2`) on the `pi` backend, routed through OpenRouter, filed under a distinct label:
+
+```bash
+daydream bench --benchmark-repo ../code-review-benchmark/offline \
+  --reviewer-backend pi --reviewer-model glm-5.2 --reviewer-provider openrouter \
+  --tool-label daydream-glm --only grafana --limit 1 --score
+```
+
+### `--tool-label` isolates per-backend results
+
+Every reviewer's findings are injected into `benchmark_data.json` and scored under its `--tool-label`. The label is the **only** thing keeping two reviewer backends from overwriting each other:
+
+- A PR is skipped on re-run when a review with the *same* `--tool-label` already exists. Two backends sharing one label would mean the second never runs (the first's review is "already present").
+- The judge writes each tool's scores into a leaf keyed by the tool label inside `evaluations.json`. Sharing a label silently merges/overwrites the two backends' scores.
+
+So when benchmarking more than the default reviewer, give each backend a distinct label (`daydream` for the default, `daydream-glm` for the GLM/pi reviewer, etc.). Reviews and score leaves for different labels coexist in the same corpus and the same `results/<judge>/` directory, side by side.
+
 ## Where the number lands
 
-For each scored PR the harness writes a `daydream` leaf into:
+For each scored PR the harness writes a leaf (keyed by the reviewer's `--tool-label`, default `daydream`) into:
 
 ```text
 <benchmark-repo>/results/<sanitized-model>/evaluations.json
 ```
 
-`<sanitized-model>` is the `--model` id with `/` replaced by `_`. For the default model the directory is `results/anthropic_claude-opus-4.5/` (the dot is preserved). Each leaf carries `tp`, `fp`, `fn`, `precision`, and `recall` for that PR.
+`<sanitized-model>` is the `--model` (judge) id with `/` replaced by `_`. For the default judge the directory is `results/anthropic_claude-opus-4.5/` (the dot is preserved). Inside each PR's entry the scores are filed under the reviewer's `--tool-label` (default `daydream`; e.g. `daydream-glm` for a GLM reviewer). Each leaf carries `tp`, `fp`, `fn`, `precision`, and `recall` for that PR.
 
 The command also prints to stdout:
 
@@ -77,7 +153,7 @@ Re-running is resumable and idempotent. `benchmark_data.json` is saved after eac
 
 The `--model` value names the per-model results directory; it does **not** select the judge model. The judge model is selected by the `MARTIAN_MODEL` environment variable consumed by the scoring step.
 
-> **Warning:** `--model` and `MARTIAN_MODEL` must agree. The sweep writes `evaluations.json` under a directory derived from `MARTIAN_MODEL`; the scoring step looks up that file under a directory derived from `--model`. If the two values differ, scoring will fail with a hard error (`BenchmarkArtifactError: evaluations.json not found`) — not merely produce non-comparable numbers.
+> **Warning:** `--model` and `MARTIAN_MODEL` must agree. The judge harness runs the model named by `MARTIAN_MODEL`, while scores are read from the `results/` directory derived from `--model`. If the two differ, the judge would score one model while results are filed under a directory named for another — a silent divergence. To prevent this, `--score` runs a **preflight** that aborts in seconds — *before* any expensive review — if `MARTIAN_MODEL` is set and differs from `--model`, raising a hard `JudgeEnvError` that explains the mismatch. Unset `MARTIAN_MODEL` (to accept the judge harness default) or align it with `--model`.
 
 To compare against published benchmark numbers, both the `MARTIAN_MODEL` value and the `--model` label must match the published run. Using a different judge — or a different id string for the same underlying model — lands in a different `results/<dir>` and is not directly apples-to-apples.
 

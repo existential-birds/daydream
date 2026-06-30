@@ -41,3 +41,13 @@ def test_rationale_equal_to_description_not_duplicated():
     doc = {"items": [_item("f.py", 1, description="same", rationale="same")]}
     [c] = merged_items_to_review_comments(doc, created_at=TS)
     assert c["body"].count("same") == 1
+
+
+def test_mapping_skips_items_that_would_produce_empty_body():
+    doc = {"items": [
+        {"file": "a.py", "line": 1, "description": "", "rationale": "", "severity": "", "confidence": ""},
+        {"file": "b.py", "line": 2, "description": "real finding", "severity": "high", "confidence": "HIGH"},
+    ]}
+    out = merged_items_to_review_comments(doc, created_at="T")
+    assert [c["path"] for c in out] == ["b.py"]          # empty-body item dropped
+    assert all(c["body"].strip() for c in out)           # no harvested comment is ever empty

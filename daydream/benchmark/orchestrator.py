@@ -20,6 +20,7 @@ aggregate precision/recall are printed.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,10 +32,11 @@ from daydream.benchmark.benchmark_data import (
     load_benchmark_data,
     save_benchmark_data,
 )
+from daydream.benchmark.cli import _format_elapsed
 from daydream.benchmark.daydream_run import run_daydream_review
 from daydream.benchmark.mapping import merged_items_to_review_comments
 from daydream.benchmark.prs import load_evaluable_prs
-from daydream.benchmark.score import preflight_judge_env, run_scoring
+from daydream.benchmark.score import preflight_judge_env, resolve_judge_model, run_scoring
 from daydream.ui import print_dim, print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
@@ -68,6 +70,15 @@ def _trajectory_path(config: BenchConfig, pr: EvaluablePR) -> Path:
     return config.trajectory_dir / f"{repo}-{pr.pr_number}.json"
 
 
+def _injected_comment_count(data: dict[str, Any], golden_url: str, tool: str) -> int:
+    """Count the review comments injected for *golden_url* under *tool*."""
+    entry = data.get(golden_url, {})
+    for review in entry.get("reviews", []):
+        if review.get("tool") == tool:
+            return len(review.get("review_comments", []))
+    return 0
+
+
 def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> bool:
     """Acquire, review, map, and inject a single PR into *data* (mutated).
 
@@ -84,14 +95,19 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
         cache_dir=config.cache_dir,
     )
     config.trajectory_dir.mkdir(parents=True, exist_ok=True)
+    on_line = (lambda line: console.out(line, end="", highlight=False)) if config.verbose else None
     artifact = run_daydream_review(
         checkout,
         base_sha=pr.base_sha,
         trajectory_path=_trajectory_path(config, pr),
+        backend=config.reviewer_backend,
+        model=config.reviewer_model,
+        provider=config.reviewer_provider,
+        on_line=on_line,
     )
     doc = json.loads(artifact.read_text(encoding="utf-8"))
     comments = merged_items_to_review_comments(doc, created_at=_CREATED_AT)
-    return inject_daydream_review(data, pr.golden_url, comments, force=config.force)
+    return inject_daydream_review(data, pr.golden_url, comments, force=config.force, tool=config.tool_label)
 
 
 def run_bench(config: BenchConfig) -> int:
@@ -105,27 +121,40 @@ def run_bench(config: BenchConfig) -> int:
         requested) succeeded; non-zero if any selected PR failed or scoring
         failed.
     """
+    judge_model = ""
     if config.score:
         preflight_judge_env()
+        judge_model = resolve_judge_model(config.model)
 
     data_path = _benchmark_data_path(config)
     data = load_benchmark_data(data_path)
     prs = _select_prs(config)
 
     failed = 0
-    for pr in prs:
+    total = len(prs)
+    for i, pr in enumerate(prs, start=1):
         entry = data.get(pr.golden_url)
         if entry is None:
             print_warning(console, f"{pr.golden_url} not in benchmark corpus; skipping")
             failed += 1
             continue
 
-        if not config.force and has_daydream_review(entry):
+        if not config.force and has_daydream_review(entry, tool=config.tool_label):
             print_dim(console, f"Skipping {pr.golden_url} (daydream review already present)")
             continue
 
+        print_info(console, f"▶ [{i}/{total}] Reviewing {pr.golden_url} · reviewer {config.tool_label}…")
+        elapsed = 0.0
         try:
-            modified = _process_pr(config, pr, data)
+            started = time.monotonic()
+            if config.verbose:
+                # Streaming and a spinner can't share one console; verbose forwards
+                # the child output live, so the spinner is gated off here.
+                modified = _process_pr(config, pr, data)
+            else:
+                with console.status(f"Reviewing {pr.golden_url}…"):
+                    modified = _process_pr(config, pr, data)
+            elapsed = time.monotonic() - started
         except Exception as exc:  # noqa: BLE001 - isolate per-PR failure so the sweep continues
             failed += 1
             print_error(console, "Benchmark PR failed", f"{pr.golden_url}: {type(exc).__name__}: {exc}")
@@ -135,13 +164,17 @@ def run_bench(config: BenchConfig) -> int:
             save_benchmark_data(data_path, data)
             print_info(console, f"Injected daydream review for {pr.golden_url}")
 
+        count = _injected_comment_count(data, pr.golden_url, config.tool_label)
+        noun = "finding" if count == 1 else "findings"
+        print_success(console, f"Reviewed {pr.golden_url} in {_format_elapsed(elapsed)} · {count} {noun}")
+
     if failed:
         print_warning(console, f"{failed} of {len(prs)} selected PR(s) failed")
 
     score_failed = False
     if config.score:
         try:
-            scores = run_scoring(config.benchmark_repo, config.model, pr_count=len(prs))
+            scores = run_scoring(config.benchmark_repo, judge_model, pr_count=len(prs), tool=config.tool_label)
         except Exception as exc:  # noqa: BLE001 - report scoring failure without raising past the CLI
             score_failed = True
             print_error(console, "Scoring failed", f"{type(exc).__name__}: {exc}")

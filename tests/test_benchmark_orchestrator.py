@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+from rich.console import Console
 
 from daydream.benchmark.config import BenchConfig
 from daydream.benchmark.orchestrator import run_bench
@@ -100,6 +104,64 @@ def test_run_bench_injects_a_daydream_review_per_selected_pr(tmp_path, monkeypat
     grafana = [u for u in data if "grafana" in u]
     assert rc == 0 and len(grafana) == 10
     assert all(any(r["tool"] == "daydream" for r in data[u]["reviews"]) for u in grafana)
+
+
+def test_run_bench_announces_and_reports_each_pr(tmp_path, monkeypatch):
+    rec = Console(record=True, force_terminal=True, width=100)
+    monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.acquire_checkout",
+        lambda *a, **k: _fake_checkout(tmp_path),
+    )
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.run_daydream_review",
+        lambda checkout, **k: _write_items(checkout, [_item("f.py", 1)]),
+    )
+    run_bench(replace(_config(tmp_path, data_path, score=False, only="grafana"), limit=1))
+    out = rec.export_text()
+    assert "Reviewing" in out and "grafana" in out  # announced before the blocking review
+    assert re.search(r"\b\d+s\b", out)  # completion shows elapsed
+    assert "1 finding" in out  # finding count for the injected PR
+
+
+def test_verbose_streams_child_output(tmp_path, monkeypatch):
+    rec = Console(record=True, force_terminal=True, width=100)
+    monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.acquire_checkout",
+        lambda *a, **k: _fake_checkout(tmp_path),
+    )
+
+    def review(checkout, on_line=None, **k):
+        if on_line:
+            on_line("CHILD-LINE-XYZ\n")
+        return _write_items(checkout, [_item("f.py", 1)])
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_daydream_review", review)
+    cfg = replace(_config(tmp_path, data_path, score=False, only="grafana"), limit=1, verbose=True)
+    run_bench(cfg)
+    assert "CHILD-LINE-XYZ" in rec.export_text()  # verbose forwards child output
+
+
+def test_orchestrator_forwards_reviewer_fields(tmp_path, monkeypatch):
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.acquire_checkout",
+        lambda *a, **k: _fake_checkout(tmp_path),
+    )
+
+    def cap_review(checkout, **k):
+        captured.update(k)
+        return _write_items(checkout, [_item("f.py", 1)])
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_daydream_review", cap_review)
+    cfg = _config(tmp_path, data_path, score=False, only="grafana")
+    cfg = replace(cfg, reviewer_backend="pi", reviewer_model="glm-5.2", reviewer_provider="openrouter")
+    run_bench(cfg)
+    assert (captured["backend"], captured["model"], captured["provider"]) == ("pi", "glm-5.2", "openrouter")
 
 
 def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):

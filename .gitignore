@@ -79,3 +79,6 @@ Thumbs.db
 
 # Local git worktrees
 .worktrees/
+
+# Machine-local daydream config (benchmark-repo, reviewer presets)
+.daydream.toml

@@ -10,10 +10,39 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import dotenv
 
 if TYPE_CHECKING:
     from daydream.benchmark import BenchConfig
+
+
+def _load_bench_dotenv() -> None:
+    """Load a ``.env`` from the invocation cwd so ``MARTIAN_*`` can live there.
+
+    Reads ``.env`` from the operator's current working directory (``usecwd=True``;
+    the library default walks up from this module's file instead). ``override`` is
+    left at its default ``False`` so an inline ``MARTIAN_API_KEY`` still wins over
+    the file. A missing or malformed ``.env`` is a silent no-op.
+    """
+    dotenv.load_dotenv(dotenv.find_dotenv(usecwd=True))
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Render an elapsed duration as a compact human string.
+
+    Args:
+        seconds: Elapsed wall-clock seconds.
+
+    Returns:
+        ``"{n}s"`` for durations under a minute, else ``"{m}m{s}s"`` with the
+        seconds component not zero-padded (e.g. ``252`` -> ``"4m12s"``).
+    """
+    total = int(seconds)
+    if total < 60:
+        return f"{total}s"
+    return f"{total // 60}m{total % 60}s"
 
 
 def _build_bench_parser() -> argparse.ArgumentParser:
@@ -30,10 +59,11 @@ def _build_bench_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--benchmark-repo",
         type=Path,
-        required=True,
+        default=None,
         dest="benchmark_repo",
         metavar="PATH",
-        help="Path to the external code-review-benchmark checkout",
+        help="Path to the external code-review-benchmark checkout "
+        "(optional when [tool.daydream.bench] benchmark-repo is set)",
     )
     parser.add_argument(
         "--cache-dir",
@@ -54,9 +84,50 @@ def _build_bench_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         type=str,
-        default="anthropic/claude-opus-4.5",
+        default=None,
         dest="model",
-        help="Judge model id (also names the per-model results dir)",
+        help="Judge model id (e.g. anthropic/claude-opus-4-5-20251101). If omitted, "
+        "the MARTIAN_MODEL env is used; one of the two is required for --score. "
+        "Whatever resolves drives both the judge and the per-model results dir.",
+    )
+    parser.add_argument(
+        "--reviewer",
+        type=str,
+        default=None,
+        dest="reviewer",
+        metavar="NAME",
+        help="Expand a [tool.daydream.bench.reviewers.<NAME>] preset into backend/model/provider "
+        "and derive --tool-label as daydream-<NAME>; explicit --reviewer-*/--tool-label flags override",
+    )
+    parser.add_argument(
+        "--reviewer-backend",
+        type=str,
+        choices=["claude", "codex", "pi"],
+        default=None,
+        dest="reviewer_backend",
+        help="Backend for the reviewer under test (default: daydream's built-in default)",
+    )
+    parser.add_argument(
+        "--reviewer-model",
+        type=str,
+        default=None,
+        dest="reviewer_model",
+        help="Model id for the reviewer under test (default: the backend's default)",
+    )
+    parser.add_argument(
+        "--reviewer-provider",
+        type=str,
+        default=None,
+        dest="reviewer_provider",
+        help="Provider for the reviewer under test, forwarded as PI_PROVIDER (pi backend only)",
+    )
+    parser.add_argument(
+        "--tool-label",
+        type=str,
+        default=None,
+        dest="tool_label",
+        help="Results key for this reviewer; MUST be distinct per reviewer backend or runs overwrite each other "
+        "(default: daydream, or daydream-<NAME> when --reviewer is set)",
     )
     parser.add_argument(
         "--only",
@@ -81,6 +152,13 @@ def _build_bench_parser() -> argparse.ArgumentParser:
         help="Re-run PRs even if a daydream review already exists",
     )
     parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        dest="verbose",
+        help="Stream the review subprocess output live instead of a quiet spinner",
+    )
+    parser.add_argument(
         "--score",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -88,6 +166,29 @@ def _build_bench_parser() -> argparse.ArgumentParser:
         help="Drive the step2/2.5/3 scoring pipeline (default: on; use --no-score to skip)",
     )
     return parser
+
+
+def _resolve_reviewer_preset(
+    name: str, bench_cfg: dict, parser: argparse.ArgumentParser
+) -> dict[str, Any]:
+    """Look up a named reviewer preset in the bench config table.
+
+    Args:
+        name: The preset name passed via ``--reviewer``.
+        bench_cfg: The ``[tool.daydream.bench]`` table from ``load_file_config``.
+        parser: The bench parser, used to emit a usage error (``SystemExit``)
+            when the preset is unknown.
+
+    Returns:
+        The preset dict with ``backend``/``model``/``provider`` keys.
+    """
+    reviewers = bench_cfg.get("reviewers", {})
+    preset = reviewers.get(name) if isinstance(reviewers, dict) else None
+    if not isinstance(preset, dict):
+        parser.error(
+            f"unknown --reviewer '{name}' (define [tool.daydream.bench.reviewers.{name}] in config)"
+        )
+    return preset
 
 
 def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
@@ -103,23 +204,64 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         An immutable :class:`BenchConfig` for the requested run.
     """
     from daydream.benchmark import BenchConfig
+    from daydream.config_file import load_file_config
 
     parser = _build_bench_parser()
     args = parser.parse_args(argv)
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be a positive integer")
-    bench_root = args.benchmark_repo / ".daydream-bench"
+    if (
+        args.tool_label is None
+        and args.reviewer is None
+        and (args.reviewer_backend is not None or args.reviewer_model is not None or args.reviewer_provider is not None)
+    ):
+        parser.error(
+            "--reviewer-backend/--reviewer-model/--reviewer-provider require --tool-label "
+            "(or a --reviewer preset) so per-backend results stay isolated"
+        )
+    bench = load_file_config(Path.cwd()).bench
+    # P1: CLI flag > config file > built-in default.
+    benchmark_repo = (
+        args.benchmark_repo
+        if args.benchmark_repo is not None
+        else Path(bench["benchmark-repo"])
+        if "benchmark-repo" in bench
+        else None
+    )
+    model = args.model if args.model is not None else bench.get("model")
+    if benchmark_repo is None:
+        parser.error("--benchmark-repo is required (pass the flag or set [tool.daydream.bench] benchmark-repo)")
+    bench_root = benchmark_repo / ".daydream-bench"
     cache_dir = args.cache_dir if args.cache_dir is not None else bench_root / "cache"
     trajectory_dir = args.trajectory_dir if args.trajectory_dir is not None else bench_root / "trajectories"
+    # P1: a --reviewer preset is the config layer under explicit --reviewer-*/--tool-label flags.
+    preset: dict[str, Any] = {}
+    if args.reviewer is not None:
+        preset = _resolve_reviewer_preset(args.reviewer, bench, parser)
+    reviewer_backend = args.reviewer_backend if args.reviewer_backend is not None else preset.get("backend")
+    reviewer_model = args.reviewer_model if args.reviewer_model is not None else preset.get("model")
+    reviewer_provider = args.reviewer_provider if args.reviewer_provider is not None else preset.get("provider")
+    tool_label = (
+        args.tool_label
+        if args.tool_label is not None
+        else f"daydream-{args.reviewer}"
+        if args.reviewer is not None
+        else "daydream"
+    )
     return BenchConfig(
-        benchmark_repo=args.benchmark_repo,
+        benchmark_repo=benchmark_repo,
         cache_dir=cache_dir,
         force=args.force,
         score=args.score,
         only=args.only,
         limit=args.limit,
         trajectory_dir=trajectory_dir,
-        model=args.model,
+        model=model,
+        reviewer_backend=reviewer_backend,
+        reviewer_model=reviewer_model,
+        reviewer_provider=reviewer_provider,
+        tool_label=tool_label,
+        verbose=args.verbose,
     )
 
 
@@ -141,5 +283,6 @@ def _handle_bench_command(argv: list[str]) -> int:
     """
     from daydream.benchmark import run_bench
 
+    _load_bench_dotenv()
     config = _bench_config_from_argv(argv)
     return run_bench(config)

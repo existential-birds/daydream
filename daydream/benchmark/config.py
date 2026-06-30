@@ -17,12 +17,18 @@ class BenchConfig:
     Attributes:
         benchmark_repo: Path to the external `code-review-benchmark` checkout.
         cache_dir: Directory for per-PR blobless clones and fetched heads.
-        model: Judge model id (also names the per-model results dir).
+        model: Judge model id; None defers to the MARTIAN_MODEL env. Whatever
+            resolves drives both the judge and the per-model results dir.
+        reviewer_backend: Optional daydream review backend (claude/codex/pi); None uses the default.
+        reviewer_model: Optional model id for the reviewer backend; None uses the backend default.
+        reviewer_provider: Optional provider for the reviewer backend (forwarded via env); None uses the default.
+        tool_label: Results label for the reviewer tool; must be distinct per reviewer backend.
         force: Re-run PRs even if a `tool:"daydream"` review already exists.
         score: Whether to drive the step2/2.5/3 scoring pipeline.
         only: Optional PR selector (single PR key) to restrict the run.
         limit: Optional cap on the number of PRs processed.
         trajectory_dir: Directory for per-PR ATIF trajectory files.
+        verbose: Stream the review subprocess output live (vs. the quiet spinner).
     """
 
     benchmark_repo: Path
@@ -32,4 +38,9 @@ class BenchConfig:
     only: str | None
     limit: int | None
     trajectory_dir: Path
-    model: str = "anthropic/claude-opus-4.5"
+    model: str | None = None
+    reviewer_backend: str | None = None
+    reviewer_model: str | None = None
+    reviewer_provider: str | None = None
+    tool_label: str = "daydream"
+    verbose: bool = False

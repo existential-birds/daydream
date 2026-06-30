@@ -20,11 +20,13 @@ def extract_json(text: str) -> Any:
     1. Strip leading/trailing whitespace.
     2. Strip markdown code fences (```` ```json ... ``` ```` or bare ```` ``` ````).
     3. ``json.loads`` on the cleaned text (fast path for clean JSON).
-    4. If that fails, scan for the first balanced ``{...}`` or ``[...]`` block
-       (depth-counting, string-aware) and parse that substring. Whichever brace
-       type appears earliest in the text is tried first; if a balanced span of
-       that type fails to parse, keep scanning forward for a later valid span of
-       the same type before falling back to the other brace type.
+    4. If that fails, scan for every balanced, parseable ``{...}`` or ``[...]``
+       span (depth-counting, string-aware) and return the LARGEST one. The real
+       structured-output payload is a substantial object/array, so size
+       disambiguates it from incidental brackets in the surrounding prose — e.g.
+       a ``metadata["sender"]`` code snippet, which parses as the tiny list
+       ``["sender"]``. Returning the largest span avoids handing a caller that
+       expects ``{"findings": [...]}`` a bogus bare list grabbed from prose.
 
     Returns the parsed value (dict, list, str, int, …) or ``None`` if no valid
     JSON was found. Never raises.
@@ -50,24 +52,24 @@ def extract_json(text: str) -> Any:
     except ValueError:
         pass
 
-    # Slow path — find the first balanced JSON object/array within the text.
-    # This handles "Here is my analysis:\n{...json...}" patterns.
-    # Try whichever brace type ({ or [) appears earliest in the text first.
-    candidates: list[tuple[int, str, str]] = []
-    brace_idx = cleaned.find("{")
-    bracket_idx = cleaned.find("[")
-    if brace_idx != -1:
-        candidates.append((brace_idx, "{", "}"))
-    if bracket_idx != -1:
-        candidates.append((bracket_idx, "[", "]"))
-    candidates.sort()
-
-    for _, start_char, end_char in candidates:
+    # Slow path — the text is prose with one or more embedded JSON spans. Find
+    # EVERY balanced, parseable {...}/[...] span and return the LARGEST one.
+    #
+    # The largest span is the model's actual answer: a structured-output
+    # response is a substantial object/array, whereas stray brackets in the
+    # surrounding prose (e.g. a `metadata["sender"]` code snippet, which parses
+    # as the one-element list `["sender"]`) are tiny. An earlier-bracket-wins
+    # rule would return that incidental `["sender"]` and hand a bogus bare list
+    # to a caller expecting `{"findings": [...]}`. Size disambiguates reliably:
+    # the real payload dwarfs prose noise.
+    best: Any = None
+    best_len = 0
+    for start_char, end_char in (("{", "}"), ("[", "]")):
         scan_from = 0
         while True:
             start_idx = cleaned.find(start_char, scan_from)
             if start_idx == -1:
-                break  # no more spans of this brace type; try the next candidate
+                break
             depth = 0
             in_string = False
             escape = False
@@ -93,13 +95,26 @@ def extract_json(text: str) -> Any:
                         end_idx = i
                         break
             if end_idx == -1:
-                continue  # unbalanced; scan forward for a later span of this brace type
-            candidate = cleaned[start_idx : end_idx + 1]
+                # Unbalanced from here; advance one char and keep scanning for a
+                # later valid span of this brace type.
+                scan_from = start_idx + 1
+                continue
+            span_len = end_idx + 1 - start_idx
             try:
-                return json.loads(candidate)
+                parsed = json.loads(cleaned[start_idx : end_idx + 1])
             except ValueError:
-                # This balanced span is unparseable; scan forward for a later
-                # valid span of the same brace type before giving up on it.
+                parsed = None
+            if parsed is not None and span_len > best_len:
+                best = parsed
+                best_len = span_len
+            if parsed is not None:
+                # A parsed span's nested children can only be smaller, so
+                # skipping past it never drops the winner and keeps the scan
+                # near-linear on well-formed payloads.
                 scan_from = end_idx + 1
+            else:
+                # Balanced but invalid: a nested {...}/[...] inside may still be
+                # valid JSON, so re-enter the span instead of discarding it.
+                scan_from = start_idx + 1
 
-    return None
+    return best

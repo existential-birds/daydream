@@ -64,3 +64,33 @@ class TestExtractJson:
         # next valid object of the same brace type (not fall back to the inner
         # array, which would return the wrong type).
         assert extract_json('{bad} then {"issues":[1,2]}') == {"issues": [1, 2]}
+
+    def test_stray_prose_bracket_does_not_beat_the_real_object(self):
+        # Regression for the sentry-67876 arbiter crash. The model's prose
+        # referenced a code snippet `metadata["sender"]` BEFORE its real fenced
+        # answer. The earliest-bracket rule parsed `["sender"]` (a valid 1-element
+        # list) and returned that bare list, which crashed the arbiter with
+        # "Arbiter returned no findings list (got list)". The largest-span rule
+        # must instead return the substantial `{"findings": [...]}` object.
+        text = (
+            "**Finding 2 (arb_id=2):** Confirmed. Line 503 does "
+            '`integration.metadata["sender"]["login"]` with direct subscripting.\n\n'
+            "```json\n"
+            '{"findings": [{"arb_id": 1, "keep": true}, {"arb_id": 2, "keep": true}]}\n'
+            "```"
+        )
+        result = extract_json(text)
+        assert isinstance(result, dict)
+        assert [f["arb_id"] for f in result["findings"]] == [1, 2]
+
+    def test_nested_valid_json_inside_balanced_invalid_span(self):
+        # The outer `{bad {...}}` span is balanced but invalid; the inner
+        # `{"findings": []}` is valid. A scan that jumps past the failed outer
+        # span never examines the inner payload and wrongly returns None.
+        assert extract_json('prefix {bad {"findings": []}} suffix') == {"findings": []}
+
+    def test_largest_object_wins_over_smaller_earlier_object(self):
+        # Two valid objects; the substantial answer comes second. The earlier,
+        # smaller object must not shadow it.
+        text = 'note {"k": 1} then {"findings": [{"arb_id": 1, "keep": false, "x": "y"}]}'
+        assert extract_json(text) == {"findings": [{"arb_id": 1, "keep": False, "x": "y"}]}
