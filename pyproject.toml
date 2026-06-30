@@ -37,6 +37,18 @@ daydream = "daydream.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.daydream.bench]
+benchmark-repo = "../code-review-benchmark/offline"
+# Judge model — unprefixed dated id; Anthropic's API accepts it, OpenRouter does not.
+# Genuine Claude Opus 4.5; results land in results/claude-opus-4-5-20251101/.
+# Previous OpenRouter slug: model = "anthropic/claude-opus-4-5"
+model = "claude-opus-4-5-20251101"
+
+[tool.daydream.bench.reviewers.owl-alpha]
+backend = "pi"
+model = "openrouter/owl-alpha"
+provider = "openrouter"
+
 [tool.hatch.build.targets.wheel]
 # Explicitly declare the source package and all non-Python package data so the
 # distribution contract does not rely on hatchling's default discovery heuristics.

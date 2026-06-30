@@ -26,13 +26,17 @@ def test_load_bench_dotenv_populates_environ(tmp_path, monkeypatch):
     assert os.environ["MARTIAN_API_KEY"] == "sk-from-dotenv"
 
 
-def test_bench_parser_defaults_and_flags():
+def test_bench_parser_defaults_and_flags(tmp_path, monkeypatch):
+    # Hermetic: chdir to a config-free dir so the built-in defaults are exercised,
+    # not whatever [tool.daydream.bench] the repo's own pyproject happens to carry.
+    monkeypatch.chdir(tmp_path)
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--only", "grafana", "--no-score"])
     assert cfg.benchmark_repo == Path("/b") and cfg.only == "grafana" and cfg.score is False
     assert cfg.model is None  # no hardcoded default; judge model comes from --model or MARTIAN_MODEL
 
 
-def test_bench_config_has_reviewer_defaults():
+def test_bench_config_has_reviewer_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--no-score"])
     assert cfg.reviewer_backend is None
     assert cfg.reviewer_model is None
@@ -40,7 +44,8 @@ def test_bench_config_has_reviewer_defaults():
     assert cfg.tool_label == "daydream"
 
 
-def test_reviewer_flags_reach_config():
+def test_reviewer_flags_reach_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     cfg = _bench_config_from_argv([
         "--benchmark-repo", "/b", "--no-score",
         "--reviewer-backend", "pi", "--reviewer-model", "glm-5.2",
