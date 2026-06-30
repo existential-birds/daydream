@@ -1,0 +1,3 @@
+# Generated per-run reports — one self-contained folder per generation.
+# These are build artifacts (thousands over time); regenerate with `make benchmark-report`.
+runs/
