@@ -43,7 +43,7 @@ Determine whether Daydream provides materially better pre-merge review than Grep
 | Observability | Missing metrics/logs/traces, silent failure modes, unclear error messages? |
 | Documentation drift | Comments/docs/runbooks/changelog updated to match the diff? |
 
-Security dimensions informed by SeRe dataset categories [11]. Test adequity informed by CR-Bench defect taxonomy [14].
+Security dimensions informed by SeRe dataset categories [11]. Test adequacy informed by CR-Bench defect taxonomy [14].
 
 ### Meta-Quality
 
