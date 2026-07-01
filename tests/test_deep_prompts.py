@@ -643,7 +643,7 @@ def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) ->
         for prompt in prompts:
             # Embedded as methodology prose (the constant carries the
             # protocol name and gate descriptions), never as an invocation.
-            assert "review-verification-protocol" in prompt
+            assert "review-verification-protocol/SKILL.md" in prompt
             assert token not in prompt, (
                 f"{backend_name} protocol invocation token {token!r} leaked into prompt"
             )
