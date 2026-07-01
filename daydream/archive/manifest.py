@@ -131,7 +131,8 @@ class Manifest:
     total_cached_tokens: int | None = None
 
     # wall_clock_seconds and phase_timings are derived from step/phase events
-    # on every run; the remaining metrics below are populated only with --eval.
+    # on every run; the remaining metrics below are populated by the eval pass,
+    # which runs by default (skipped only with --no-eval).
     wall_clock_seconds: float | None = None
     phase_timings: dict[str, Any] | None = None
     total_findings: int | None = None
@@ -281,7 +282,7 @@ def build_manifest(
         archive_path=str(archive_path),
     )
 
-    # Derivable from step timestamps, so populated for every run; the --eval
+    # Derivable from step timestamps, so populated for every run; the eval pass's
     # fork-inclusive value (eval.analyzer.analyze_timing) takes precedence below.
     m.wall_clock_seconds = recorder.compute_wall_clock_seconds()
     # Per-phase breakdown from explicit phase_start/phase_end events (#203).

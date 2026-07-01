@@ -177,7 +177,8 @@ class RunConfig:
         pr_repo: GitHub repository in ``owner/repo`` format. Auto-detected from ``gh``
             in deep (default) mode. Stored in trajectory metadata for eval linkage.
         archive: Archive run artifacts to centralized store. Default True.
-        run_eval: Run deterministic evaluation on archived artifacts. Default False.
+        run_eval: Run deterministic evaluation on archived artifacts. Default True
+            (``analyze_session`` is file-based and cheap); ``--no-eval`` opts out.
         branch: Specific branch to review. If None, uses cwd's HEAD.
         base: Base ref to compare against. If None, auto-resolves.
         output_mode: ``"loop"`` (review→fix→test, default), ``"comment"``
@@ -227,7 +228,7 @@ class RunConfig:
     trajectory_path: Path | None = None
     pr_repo: str | None = None
     archive: bool = True
-    run_eval: bool = False
+    run_eval: bool = True
 
     branch: str | None = None
     base: str | None = None
@@ -1074,6 +1075,19 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         diff_base: str | None = None
         exploration_dir: Path | None = None
 
+        # Recommended-change patch base: snapshot the tracked tree + HEAD BEFORE
+        # any fix runs. stash_create returns None on a clean tree (the common
+        # pre-fix case), so the pre-fix HEAD SHA is the fallback base. HEAD is
+        # captured now because the commit gate below advances it past the fixes.
+        try:
+            pre_fix_snapshot = git_ops.stash_create(target_dir)
+        except GitError:
+            pre_fix_snapshot = None
+        try:
+            pre_fix_head = git_ops.head_sha(target_dir)
+        except GitError:
+            pre_fix_head = None
+
         async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
             """Execute one iteration of the review-parse-fix-test loop.
 
@@ -1272,6 +1286,15 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             elif commit_decision is None:
                 await phase_commit_push(review_backend, work)
             # commit_decision is False -> forced decline, skip commit.
+
+            # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
+            # so training signals score the RECOMMENDED changes, not the diff
+            # under review. Best-effort; never blocks a successful run.
+            git_ops.capture_recommended_patch(
+                target_dir,
+                pre_fix_snapshot or pre_fix_head,
+                target_dir / ".daydream" / "recommended.patch",
+            )
 
             if cleanup_enabled:
                 review_output_path = target_dir / REVIEW_OUTPUT_FILE

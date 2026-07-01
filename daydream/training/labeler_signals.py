@@ -184,6 +184,29 @@ def _hunk_lines_present(added_lines: tuple[str, ...], post_content: str) -> bool
     return all(line in haystack_lines for line in added_lines)
 
 
+def _read_recommended_patch(archive_path: Path) -> str:
+    """Read daydream's recommended-change patch for a run.
+
+    Prefers ``recommended.patch`` — daydream's proposed diff, captured post-fix
+    — so the applied-signal cascades score the RECOMMENDED changes rather than
+    the PR-under-review diff. Falls back to ``diff.patch`` for backward
+    compatibility with archives created before ``recommended.patch`` existed.
+
+    Args:
+        archive_path: The archived run directory (bronze bundle root).
+
+    Returns:
+        The unified-diff text to parse into recommended hunks.
+
+    Raises:
+        OSError: If neither patch file can be read (the fallback ``diff.patch``
+            is expected to exist for every archived run).
+    """
+    recommended = archive_path / "recommended.patch"
+    patch_path = recommended if recommended.is_file() else archive_path / "diff.patch"
+    return patch_path.read_text()
+
+
 # Signal extractors
 
 
@@ -233,7 +256,9 @@ def fix_applied_signal(
     2. Compute the file overlap between ``changed_files`` and the files
        actually touched by ``diff_fetcher``. If empty → ``not_applied``
        with ``hunks_applied=0`` and ``hunks_total = parsed hunks``.
-    3. Parse ``archive_path/diff.patch`` into hunks. For each hunk on a
+    3. Parse the recommended-change patch (``archive_path/recommended.patch``,
+       falling back to ``diff.patch`` for pre-recommended.patch archives) into
+       hunks. For each hunk on a
        file in the overlap, read ``file_at_fetcher(repo, file, window[-1])``
        and check whether every added line appears verbatim.
     4. Verdict: ``applied`` if ``hunks_applied / hunks_total >= 0.5``;
@@ -260,7 +285,8 @@ def fix_applied_signal(
     Raises:
         KeyError: If ``row`` is missing ``head_sha``, ``base_branch``,
             or ``archive_path``.
-        OSError: If ``archive_path/diff.patch`` cannot be read.
+        OSError: If neither ``recommended.patch`` nor ``diff.patch`` can be
+            read from ``archive_path``.
         Exception: Any exception raised by ``diff_fetcher``,
             ``commits_in_window_fetcher``, or ``file_at_fetcher`` is
             propagated unchanged.
@@ -269,7 +295,7 @@ def fix_applied_signal(
     base_branch = row["base_branch"]
     archive_path = Path(row["archive_path"])
 
-    diff_patch = (archive_path / "diff.patch").read_text()
+    diff_patch = _read_recommended_patch(archive_path)
     hunks = _parse_diff_hunks(diff_patch)
     hunks_total = len(hunks)
 
@@ -408,7 +434,8 @@ def local_commit_applied_signal(
 
     See ``/tmp/research-no-pr.md``. Walks the commits on ``row["branch"]``
     that landed after ``row["head_sha"]`` and checks whether any commit
-    contains the added lines from the recommended ``diff.patch``.
+    contains the added lines from the recommended-change patch
+    (``recommended.patch``, falling back to ``diff.patch`` for older archives).
 
     Args:
         row: Manifest row with ``branch``, ``head_sha``, ``archive_path``.
@@ -426,7 +453,8 @@ def local_commit_applied_signal(
     Raises:
         KeyError: If ``row`` is missing ``archive_path``, ``branch``,
             or ``head_sha``.
-        OSError: If ``archive_path/diff.patch`` cannot be read.
+        OSError: If neither ``recommended.patch`` nor ``diff.patch`` can be
+            read from ``archive_path``.
         Exception: Any exception raised by ``commits_since_fetcher`` or
             ``file_at_fetcher`` is propagated unchanged.
     """
@@ -434,7 +462,7 @@ def local_commit_applied_signal(
         return LocalCommitAppliedSignal(verdict="unknown")
 
     archive_path = Path(row["archive_path"])
-    diff_patch = (archive_path / "diff.patch").read_text()
+    diff_patch = _read_recommended_patch(archive_path)
     hunks = _parse_diff_hunks(diff_patch)
 
     commits = commits_since_fetcher(repo_clone, row["branch"], row["head_sha"])

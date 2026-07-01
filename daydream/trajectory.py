@@ -1085,10 +1085,11 @@ class TrajectoryRecorder:
         recorder's steps. Returns ``None`` when fewer than two timestamped
         steps exist (no measurable span).
 
-        Independent of ``--eval``: this mirrors the timestamp-span derivation
+        Independent of the eval pass: this mirrors the timestamp-span derivation
         in :func:`daydream.eval.analyzer.analyze_timing`, but reads in-memory
-        steps so every archived run captures duration without the deterministic
-        evaluation pass. Fork-only steps live in sibling recorders and are not
+        steps so every archived run captures duration even when ``--no-eval``
+        skips the deterministic evaluation pass. Fork-only steps live in sibling
+        recorders and are not
         included here; the main flow's span bounds them because forks are
         dispatched and merged within it.
 

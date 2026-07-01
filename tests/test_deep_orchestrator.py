@@ -102,6 +102,10 @@ class _StubBackend:
         # writes ``.daydream-heal-fix-applied`` -- a sentinel that MUST be absent
         # when the short-circuit aborts before re-entering a fix turn (AC#6b).
         self.environmental_test_failure: bool = False
+        # When set, the fix branch APPENDS this text to the fixed TRACKED file
+        # (in addition to the sentinels), producing a real tracked-tree change so
+        # a test can assert the recommended-change patch captures daydream's edit.
+        self.fix_edit_line: str | None = None
 
     async def execute(
         self,
@@ -360,6 +364,10 @@ class _StubBackend:
                 raise RuntimeError(f"stub fix failure for {fixed_name}")
             (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
             (cwd / f".fixed-{fixed_name.replace('.', '_')}").write_text("applied\n")
+            if self.fix_edit_line is not None:
+                edit_target = Path(fixed_file) if Path(fixed_file).is_absolute() else (cwd / fixed_file)
+                if edit_target.exists():
+                    edit_target.write_text(edit_target.read_text() + self.fix_edit_line)
             if self.fix_append_path is not None and fixed_name == self.fix_append_path.name:
                 # A batched fix turn addresses EVERY finding it is handed, so append
                 # each marker the prompt names (in prompt/severity order), not just

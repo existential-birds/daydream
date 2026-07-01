@@ -421,6 +421,31 @@ def test_assemble_malformed_verdicts_flags_format_invalid(tmp_path: Path):
     assert inputs.format_valid is False
 
 
+def test_score_trajectory_grounding_axis_present_on_default_run(tmp_path: Path):
+    """AC2: a default-run row (eval-by-default populated grounding_rate) yields a
+    non-absent grounding axis; a --no-eval row (grounding_rate=None) omits it.
+
+    Drives the real harvest → reward path: assemble_scoring_inputs reads the
+    indexed ``grounding_rate`` and score_trajectory flags the axis present.
+    """
+    from daydream.training.reward import score_trajectory
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    # Default run: eval ran by default, so the manifest row carries grounding_rate.
+    default_inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 1.0})
+    default_breakdown = score_trajectory(default_inputs)
+    assert default_breakdown.axes_present["grounding"] is True
+    assert default_breakdown.grounding == 1.0
+
+    # --no-eval run: no grounding_rate, so the axis is absent.
+    no_eval_inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": None})
+    no_eval_breakdown = score_trajectory(no_eval_inputs)
+    assert no_eval_breakdown.axes_present["grounding"] is False
+    assert no_eval_breakdown.grounding is None
+
+
 def _seed_archived_deep_run(
     archive_dir: Path, session_id: str, *, merged_at: str, source_path: Path | None = None
 ) -> Path:

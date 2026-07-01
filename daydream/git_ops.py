@@ -840,6 +840,46 @@ def diff_worktree_against(repo: Path, ref: str, paths: list[str]) -> str:
     return proc.stdout
 
 
+def capture_recommended_patch(repo: Path, base_ref: str | None, out_path: Path) -> bool:
+    """Write daydream's proposed diff (``base_ref`` → working tree) to *out_path*.
+
+    Captures the *recommended-change patch*: the difference between the pre-fix
+    tree named by *base_ref* and the current working tree — i.e. the edits
+    daydream applied during the fix phase. This is distinct from ``diff.patch``,
+    which is the PR-under-review diff captured before any fix ran.
+
+    *base_ref* must be resolved by the caller BEFORE fixes run, as
+    ``pre_fix_snapshot or pre_fix_head_sha``: :func:`stash_create` returns
+    ``None`` on a clean tree (the common pre-fix case), so the pre-fix ``HEAD``
+    SHA is the fallback base. The ``HEAD`` SHA must be captured before fixes
+    because the commit phase advances ``HEAD`` past the fix.
+
+    Best-effort: writes nothing and returns ``False`` when *base_ref* is
+    ``None``, the diff is empty (no fix landed), or git fails. Never raises.
+
+    Args:
+        repo: Repository working directory.
+        base_ref: Pre-fix base ref (a ``stash create`` SHA or a ``HEAD`` SHA),
+            or ``None`` when no pre-fix snapshot could be taken.
+        out_path: Destination path for the patch (e.g.
+            ``.daydream/recommended.patch``).
+
+    Returns:
+        ``True`` when a non-empty patch was written, else ``False``.
+    """
+    if not base_ref:
+        return False
+    try:
+        recommended = diff_worktree_against(repo, base_ref, ["."])
+    except GitError:
+        return False
+    if not recommended.strip():
+        return False
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(recommended)
+    return True
+
+
 def log(repo: Path, base: str, head: str = "HEAD") -> str:
     """Return the one-line commit log for ``base..head``.
 
