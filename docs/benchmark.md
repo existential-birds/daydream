@@ -151,19 +151,15 @@ Re-running is resumable and idempotent. `benchmark_data.json` is saved after eac
 
 ## Comparability caveat
 
-The `--model` value names the per-model results directory; it does **not** select the judge model. The judge model is selected by the `MARTIAN_MODEL` environment variable consumed by the scoring step.
+When comparing results, what matters is the reviewer model (the model doing the review) and the judge model (the model scoring the findings) are both reported. A different reviewer model produces different findings; a different judge model scores the same findings differently. The offline HTML report at `bench/benchmark-report/runs/latest/index.html` shows both for each run.
 
-> **Warning:** `--model` and `MARTIAN_MODEL` must agree. The judge harness runs the model named by `MARTIAN_MODEL`, while scores are read from the `results/` directory derived from `--model`. If the two differ, the judge would score one model while results are filed under a directory named for another; a silent divergence. To prevent this, `--score` runs a **preflight** that aborts in seconds, *before* any expensive review, if `MARTIAN_MODEL` is set and differs from `--model`, raising a hard `JudgeEnvError` that explains the mismatch. Unset `MARTIAN_MODEL` (to accept the judge harness default) or align it with `--model`.
-
-To compare against published benchmark numbers, both the `MARTIAN_MODEL` value and the `--model` label must match the published run. Using a different judge, or a different id string for the same underlying model, lands in a different `results/<dir>` and is not directly apples-to-apples.
-
-The published Martian run used the dated id `anthropic/claude-opus-4-5-20251101` → `results/anthropic_claude-opus-4-5-20251101/`; the default here is `anthropic/claude-opus-4.5` → `results/anthropic_claude-opus-4.5/`, a distinct directory. Scores are model-determined rather than string-determined, and the judge prompt and `temperature: 0.0` are identical, so the same underlying model under a different id string is broadly comparable. But routing through a different gateway can shift outputs slightly (system-prompt injection, sampling, schema handling), so for the closest apples-to-apples comparison run without structured output and note the gateway difference. To reuse the existing published directory exactly, set `--model` to that dated id only if OpenRouter accepts it as a model id.
+The `daydream bench` `--model` flag sets the judge model label (for the results directory). The judge's underlying model is set by `MARTIAN_MODEL`. The runner's model is set by `--reviewer-model`. Both are documented in the report metadata.
 
 ## First measured baseline (provisional)
 
-A first full sweep was run on **2026-06-04** to validate the harness end-to-end. These numbers are a **single-sweep provisional baseline**, not a published result. For the published commercial-bot numbers these are ultimately measured against, see the [Martian Code Review Benchmark leaderboard (offline mode)](https://codereview.withmartian.com/?mode=offline).
+A first full sweep was run on **2026-06-04** to validate the harness end-to-end. These numbers are a **single-sweep provisional baseline**, not a published result. For the published commercial-bot numbers these are ultimately measured against, see the [Martian Code Review Benchmark leaderboard (offline mode)](https://codereview.withmartian.com/?mode=offline). Daydream ran on `claude-opus-4-5` (the `daydream-owl-alpha` tool label) with default deep multi-stack review.
 
-The benchmark report generator (`make benchmark-report`) renders an offline comparison from the same `results/` data. The report generated **2026-06-30** scores daydream against 42 competing review tools on the 22-PR subset daydream covered, judged by `claude-opus-4-5-20251101`:
+The benchmark report generator (`make benchmark-report`) renders an offline comparison from the same `results/` data against 42 competing review tools on the 22-PR subset daydream covered:
 
 | Metric | Value | Rank (of 42 tools) |
 |---|---|---|
@@ -180,4 +176,4 @@ Caveats:
 - **Single sweep.** No variance band; the LLM judge runs at `temperature: 0.0` but is not fully deterministic.
 - **4 PRs unscored.** The offline set has 26 evaluable PRs; daydream's sweep covered 22 (the remainder exceeded per-PR time caps or hit transient failures). The sweep is resumable.
 - **Precision gap.** 36 TP against 139 FP. Precision (0.206) sits below the README's 50% target. Recall (0.590) is competitive, ranking 10th of 42 tools. The precision gap is what the training milestone is meant to close.
-- **Tied to this setup.** Judge model, gateway, daydream model, and date all move the number.
+- **Tied to this setup.** Daydream model, judge model, date all move the number.
