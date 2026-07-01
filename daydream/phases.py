@@ -1344,7 +1344,8 @@ def build_alternative_review_prompt(
         f"tie to a concrete downside.\n\n"
         f"Return a numbered list of issues. For each issue, include: a sequential id "
         f"number, a brief title, a description of the concrete problem and the evidence "
-        f"for it, a severity level (high/medium/low), and the relevant file paths.\n\n"
+        f"for it, a severity level (high/medium/low), a concrete recommendation for how "
+        f"to address it, and the relevant file paths.\n\n"
         f"If the implementation is solid and you wouldn't change anything, return an empty issues list.\n"
     )
     parts.append(body)
@@ -2815,8 +2816,8 @@ async def phase_alternative_review(
     """Phase: Evaluate whether there's a better way to implement the PR.
 
     A fresh agent receives the confirmed intent summary and explores the
-    codebase to identify issues — both architectural alternatives and
-    incremental improvements.
+    codebase to identify concrete, evidence-backed problems — correctness bugs,
+    design decisions that cause real failures, and convention violations.
 
     Args:
         backend: The Backend to execute against.
