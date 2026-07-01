@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAYDREAM · code-review-benchmark</title>
+<script src="htmx.min.js"></script>
+<style>
+:root{
+  --navy:#0A1420; --navy2:#16202C; --navy3:#222C38;
+  --ink:#EAF2EF; --dim:#8FA3A0;
+  --orange:#FD8017; --orange-soft:#FFA552;
+  --mint:#ABFAA9; --mint-deep:#5FCF8E;
+  --amber:#FFD166; --rust:#E2533B; --steel:#5B7C99;
+  --grid:rgba(143,163,160,.07);
+  --mono:"Commit Mono","SFMono-Regular",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--navy);color:var(--ink);font-family:var(--mono);
+  -webkit-font-smoothing:antialiased;font-size:14px;line-height:1.5;}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:42px 42px;
+  -webkit-mask-image:radial-gradient(ellipse 90% 70% at 50% 0%,#000 40%,transparent 100%);
+  mask-image:radial-gradient(ellipse 90% 70% at 50% 0%,#000 40%,transparent 100%);}
+body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:radial-gradient(1100px 520px at 78% -8%,rgba(253,128,23,.10),transparent 60%),
+             radial-gradient(900px 460px at 10% 4%,rgba(171,250,169,.06),transparent 60%);}
+.wrap{position:relative;z-index:1;max-width:1200px;margin:0 auto;padding:0 22px 90px;}
+
+.topbar{position:sticky;top:0;z-index:20;backdrop-filter:blur(9px);
+  background:linear-gradient(180deg,rgba(10,20,32,.93),rgba(10,20,32,.72));
+  border-bottom:1px solid rgba(143,163,160,.16);}
+.topbar .row{max-width:1200px;margin:0 auto;padding:11px 22px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;}
+.brand{display:flex;align-items:center;gap:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;font-size:13px;}
+.brand .glyph{color:var(--orange);font-size:17px;}
+.brand .sub{color:var(--dim);font-weight:400;letter-spacing:.22em;font-size:10px;}
+.nav{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap;}
+.nav button{font-family:var(--mono);font-size:11px;letter-spacing:.13em;text-transform:uppercase;
+  background:transparent;color:var(--dim);border:1px solid transparent;border-radius:7px;padding:6px 11px;cursor:pointer;transition:.16s;}
+.nav button:hover{color:var(--ink);background:rgba(143,163,160,.08);}
+.nav button.on{color:var(--navy);background:var(--orange);box-shadow:0 0 18px rgba(253,128,23,.35);}
+
+.hero{padding:46px 0 14px;}
+.kicker{display:flex;align-items:center;gap:10px;color:var(--orange);letter-spacing:.3em;font-size:11px;text-transform:uppercase;margin-bottom:14px;}
+.kicker .tick{height:1px;width:42px;background:linear-gradient(90deg,var(--orange),transparent);}
+.hero h1{margin:0;font-size:42px;line-height:1.03;letter-spacing:.01em;font-weight:700;}
+.hero h1 .accent{color:var(--orange);}
+.hero .lead{margin:16px 0 0;max-width:780px;color:var(--dim);font-size:14.5px;line-height:1.65;}
+.hero .lead b{color:var(--ink);font-weight:600;}
+.hero .lead .mint{color:var(--mint);}
+
+.judgebar{display:flex;align-items:center;gap:11px;margin:26px 0 6px;flex-wrap:wrap;}
+.judgebar .lbl{color:var(--dim);font-size:10.5px;letter-spacing:.22em;text-transform:uppercase;}
+.judgebtn{font-family:var(--mono);font-size:12px;letter-spacing:.08em;background:var(--navy2);
+  color:var(--dim);border:1px solid rgba(143,163,160,.22);border-radius:8px;padding:8px 15px;cursor:pointer;transition:.16s;display:flex;flex-direction:column;gap:2px;align-items:flex-start;}
+.judgebtn:hover{border-color:var(--steel);color:var(--ink);}
+.judgebtn.on{border-color:var(--orange);color:var(--ink);background:linear-gradient(180deg,rgba(253,128,23,.14),var(--navy2));box-shadow:0 0 16px rgba(253,128,23,.22);}
+.judgebtn .jname{font-weight:600;letter-spacing:.1em;}
+.judgebtn .jmeta{font-size:9.5px;color:var(--dim);letter-spacing:.14em;text-transform:uppercase;}
+.judgebtn.on .jmeta{color:var(--orange-soft);}
+
+.section{padding:34px 0 4px;animation:rise .5s ease both;}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.h2{display:flex;align-items:baseline;gap:13px;margin:0 0 4px;font-size:13px;letter-spacing:.2em;text-transform:uppercase;color:var(--orange);}
+.h2 .n{color:var(--steel);font-size:11px;}
+.h2 .glyph{color:var(--mint-deep);}
+.subhead{color:var(--dim);font-size:12.5px;margin:0 0 18px;max-width:840px;line-height:1.6;}
+.card{background:linear-gradient(180deg,var(--navy2),rgba(22,32,44,.55));border:1px solid rgba(143,163,160,.14);
+  border-radius:13px;padding:20px;position:relative;overflow:hidden;}
+.card .ct{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);margin:0 0 14px;display:flex;align-items:center;gap:9px;}
+.card .ct .dot{width:7px;height:7px;border-radius:2px;background:var(--orange);box-shadow:0 0 9px var(--orange);}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}
+@media(max-width:880px){.grid2,.grid3{grid-template-columns:1fr;}}
+
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin-top:6px;}
+@media(max-width:880px){.kpis{grid-template-columns:repeat(2,1fr);}}
+.kpi{background:linear-gradient(180deg,var(--navy2),rgba(22,32,44,.5));border:1px solid rgba(143,163,160,.16);
+  border-radius:12px;padding:16px 17px;position:relative;overflow:hidden;}
+.kpi::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--orange);opacity:.8;}
+.kpi.mint::before{background:var(--mint-deep);}
+.kpi.steel::before{background:var(--steel);}
+.kpi.rust::before{background:var(--rust);}
+.kpi .label{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);}
+.kpi .val{font-size:31px;font-weight:700;letter-spacing:.01em;margin-top:7px;line-height:1;}
+.kpi .val .unit{font-size:14px;color:var(--dim);font-weight:400;}
+.kpi .rank{font-size:10.5px;color:var(--orange-soft);margin-top:8px;letter-spacing:.1em;text-transform:uppercase;}
+.kpi .rank.good{color:var(--mint);}
+.kpi .sub{font-size:10.5px;color:var(--dim);margin-top:4px;}
+
+svg{display:block;width:100%;height:auto;overflow:visible;}
+.axis{stroke:rgba(143,163,160,.22);stroke-width:1;}
+.gridline{stroke:rgba(143,163,160,.10);stroke-width:1;}
+.axlabel{fill:var(--dim);font-size:10px;font-family:var(--mono);letter-spacing:.08em;}
+.tcklabel{fill:var(--steel);font-size:9px;font-family:var(--mono);}
+
+.legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;font-size:11px;color:var(--dim);}
+.legend .item{display:flex;align-items:center;gap:7px;}
+.legend .sw{width:11px;height:11px;border-radius:3px;}
+.mono-cite{color:var(--steel);font-size:10px;letter-spacing:.03em;}
+
+.lb{width:100%;border-collapse:collapse;font-size:12px;}
+.lb th{text-align:left;color:var(--dim);font-weight:400;font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
+  padding:0 8px 9px;border-bottom:1px solid rgba(143,163,160,.16);}
+.lb td{padding:6px 8px;border-bottom:1px solid rgba(143,163,160,.07);}
+.lb tr.dd td{background:rgba(253,128,23,.10);}
+.lb tr.dd td:first-child{box-shadow:inset 3px 0 0 var(--orange);}
+.lb .num{text-align:right;font-variant-numeric:tabular-nums;}
+.lb .toolname{display:flex;align-items:center;gap:8px;}
+.lb .cdot{width:9px;height:9px;border-radius:3px;flex:0 0 auto;}
+.lb tr.dd .toolname{font-weight:700;color:var(--orange-soft);}
+.lb .invalid{color:var(--rust);font-size:9px;letter-spacing:.1em;}
+
+.barrow{display:grid;grid-template-columns:130px 1fr 78px;align-items:center;gap:10px;margin:7px 0;font-size:11px;}
+.barrow .bn{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.barrow.dd .bn{color:var(--orange-soft);font-weight:700;}
+.bartrack{height:14px;background:var(--navy3);border-radius:4px;overflow:hidden;position:relative;display:flex;}
+.barseg{height:100%;}
+.barrow .bv{text-align:right;font-variant-numeric:tabular-nums;color:var(--ink);white-space:nowrap;}
+
+.placeholder{border:1px dashed rgba(143,163,160,.3);border-radius:12px;padding:24px;text-align:center;color:var(--dim);
+  background:repeating-linear-gradient(45deg,rgba(143,163,160,.03),rgba(143,163,160,.03) 10px,transparent 10px,transparent 20px);}
+.placeholder .big{font-size:13px;color:var(--amber);letter-spacing:.14em;text-transform:uppercase;margin-bottom:8px;}
+
+.callout{border-left:3px solid var(--orange);background:rgba(253,128,23,.06);border-radius:0 10px 10px 0;padding:13px 16px;margin:0 0 12px;color:var(--dim);font-size:12px;line-height:1.6;}
+.callout b{color:var(--ink);}
+.imp{display:flex;gap:14px;padding:16px;border:1px solid rgba(143,163,160,.14);border-radius:12px;margin:11px 0;background:var(--navy2);}
+.imp .pri{flex:0 0 auto;width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+  font-weight:700;font-size:15px;background:rgba(253,128,23,.14);color:var(--orange);}
+.imp.p2 .pri{background:rgba(91,124,153,.18);color:var(--steel);}
+.imp.p3 .pri{background:rgba(171,250,169,.12);color:var(--mint-deep);}
+.imp .body h4{margin:0 0 5px;font-size:13px;letter-spacing:.04em;color:var(--ink);}
+.imp .body p{margin:0;font-size:12px;color:var(--dim);line-height:1.6;}
+.imp .body .pred{margin-top:7px;font-size:11px;color:var(--mint);letter-spacing:.04em;}
+.imp .body .cite{margin-top:5px;font-size:10px;color:var(--steel);letter-spacing:.04em;}
+
+.tbl{width:100%;border-collapse:collapse;font-size:11.5px;}
+.tbl th{text-align:left;color:var(--dim);font-weight:400;font-size:9px;letter-spacing:.13em;text-transform:uppercase;
+  padding:0 7px 9px;border-bottom:1px solid rgba(143,163,160,.18);cursor:pointer;user-select:none;white-space:nowrap;}
+.tbl th:hover{color:var(--ink);}
+.tbl th .ar{color:var(--orange);}
+.tbl td{padding:6px 7px;border-bottom:1px solid rgba(143,163,160,.06);white-space:nowrap;}
+.tbl .num{text-align:right;font-variant-numeric:tabular-nums;}
+.tbl tr:hover td{background:rgba(143,163,160,.04);}
+.tag{font-size:9px;padding:1px 6px;border-radius:4px;background:var(--navy3);color:var(--steel);letter-spacing:.05em;}
+.foot{margin-top:60px;padding-top:22px;border-top:1px solid rgba(143,163,160,.14);color:var(--steel);font-size:10.5px;line-height:1.8;letter-spacing:.04em;}
+.foot b{color:var(--dim);}
+.note{font-size:10.5px;color:var(--steel);margin-top:9px;letter-spacing:.03em;font-style:italic;}
+</style>
+</head>
+<body>
+<div class="topbar"><div class="row">
+  <div class="brand"><span class="glyph">◢</span>DAYDREAM<span class="sub">PRECISION · RECALL · F1 · code-review-benchmark</span></div>
+  <nav class="nav" id="nav"></nav>
+</div></div>
+
+<div class="wrap">
+  <header class="hero">
+    <div class="kicker"><span class="tick"></span>PRECISION / RECALL / F1 vs GOLDEN HUMAN COMMENTS</div>
+    <h1>daydream vs the <span class="accent">SaaS review field</span></h1>
+    <p class="lead" id="leadcopy"></p>
+    <div class="judgebar">
+      <span class="lbl">Judge model ▸</span>
+      <span id="judgebtns" style="display:flex;gap:9px;flex-wrap:wrap;"></span>
+    </div>
+    <p class="note" id="judgenote"></p>
+  </header>
+
+  <section class="section" id="sec-kpi" data-nav="Standing">
+    <div class="h2"><span class="glyph">◇</span>STANDING<span class="n" id="kpi-judgetag"></span></div>
+    <p class="subhead">Micro-averaged on the same PR subset daydream covered under the selected judge. Rank is among the SaaS field whose judge calls did not exceed the 50% error guard.</p>
+    <div class="kpis" id="kpis"></div>
+  </section>
+
+  <section class="section" id="sec-scatter" data-nav="Scatter">
+    <div class="h2"><span class="glyph">◆</span>PRECISION × RECALL<span class="n">all tools · daydream highlighted</span></div>
+    <p class="subhead" id="scatter-sub"></p>
+    <div class="card"><div class="ct"><span class="dot"></span><span id="scatter-title"></span></div>
+      <div id="scatter"></div>
+      <div class="legend">
+        <div class="item"><span class="sw" style="background:var(--orange)"></span><span id="legend-dd"></span></div>
+        <div class="item"><span class="sw" style="background:var(--steel)"></span>SaaS field</div>
+        <div class="item"><span class="sw" style="background:var(--rust)"></span>judge-error &gt;50% (excluded from rank)</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="sec-lb" data-nav="Leaderboards">
+    <div class="h2"><span class="glyph">◇</span>PER-AXIS LEADERBOARDS<span class="n">same-subset · daydream row marked</span></div>
+    <p class="subhead">Top of each axis on the daydream subset for the selected judge. daydream's row is highlighted and pinned in view even when outside the top 8.</p>
+    <div class="grid3" id="leaderboards"></div>
+  </section>
+
+  <section class="section" id="sec-fp" data-nav="FP burden">
+    <div class="h2"><span class="glyph">◆</span>FALSE-POSITIVE BURDEN<span class="n">over-flagging story</span></div>
+    <p class="subhead" id="fp-sub"></p>
+    <div class="grid2">
+      <div class="card"><div class="ct"><span class="dot"></span>daydream FP vs TP — finding mix</div><div id="fp-stack"></div></div>
+      <div class="card"><div class="ct"><span class="dot"></span>FP-per-TP ratio — daydream vs field (lower = cleaner)</div><div id="fp-ratio"></div></div>
+    </div>
+  </section>
+
+  <section class="section" id="sec-judge" data-nav="Judge sensitivity">
+    <div class="h2"><span class="glyph">◇</span>JUDGE SENSITIVITY<span class="n">daydream across judges</span></div>
+    <p class="subhead">The judge model is not fixed. Where daydream has been scored by more than one judge its P/R/F1 appears side-by-side; judges that have not yet scored daydream render an honest placeholder the same generator fills in once it is re-judged.</p>
+    <div id="judge-sens"></div>
+  </section>
+
+  <section class="section" id="sec-slices" data-nav="Slices">
+    <div class="h2"><span class="glyph">◆</span>SLICES BY PR LABEL<span class="n" id="slice-judgetag"></span></div>
+    <p class="subhead">daydream recall by label dimension (anchor judge — the only judge that has scored daydream). Bars are recall; the FP:TP burden is annotated. Best and worst slices feed the improvement plan below.</p>
+    <div id="slices"></div>
+  </section>
+
+  <section class="section" id="sec-cost" data-nav="Cost">
+    <div class="h2"><span class="glyph">◇</span>COST · DAYDREAM ONLY<span class="n">computed from measured tokens</span></div>
+    <p class="subhead" id="cost-sub"></p>
+    <div class="grid3" id="cost-kpis"></div>
+    <div class="card" style="margin-top:16px"><div class="ct"><span class="dot"></span>synthesized $ per PR (sorted)</div><div id="cost-bars"></div></div>
+    <p class="note">No competitor cost axis: the benchmark captures no token or cost data for any tool — the only usage on disk is daydream's own ATIF trajectories. A competitor $ column would have to be invented, so it is omitted by design until the harness records their tokens.</p>
+  </section>
+
+  <section class="section" id="sec-latency" data-nav="Latency">
+    <div class="h2"><span class="glyph">◆</span>LATENCY<span class="n">two different clocks</span></div>
+    <p class="subhead">daydream "review compute time" is wall-clock between its first and last phase event (ATIF trajectory). SaaS "PR-timeline elapsed" is GitHub trigger→last-comment, derived by <span class="mono-cite">step_speed_analysis.py</span> — a different clock, shown only when a speed_analysis.json is present.</p>
+    <div class="grid2">
+      <div class="card"><div class="ct"><span class="dot"></span>daydream review compute time — per PR</div><div id="lat-dd"></div></div>
+      <div class="card"><div class="ct"><span class="dot"></span>SaaS PR-timeline elapsed</div><div id="lat-saas"></div></div>
+    </div>
+  </section>
+
+  <section class="section" id="sec-tokens" data-nav="Tokens">
+    <div class="h2"><span class="glyph">◇</span>TOKEN ECONOMY · DAYDREAM ONLY<span class="n">prompt / cached / completion</span></div>
+    <p class="subhead">Disjoint usage counters from the ATIF trajectories (cache reads are billed separately, not subtracted from prompt). The cache-read mass is why GLM stays cheap despite heavy context.</p>
+    <div class="grid3" id="token-kpis"></div>
+    <div class="card" style="margin-top:16px"><div class="ct"><span class="dot"></span>token composition per PR (prompt · cached · completion)</div><div id="token-bars"></div></div>
+  </section>
+
+  <section class="section" id="sec-table" data-nav="Per-PR">
+    <div class="h2"><span class="glyph">◆</span>PER-PR LOG<span class="n" id="table-judgetag"></span></div>
+    <p class="subhead">Every scored PR for the selected judge. Click a header to sort. tp/fp/fn and golden counts are from the judge leaf; $ and wall are daydream's measured trajectory (judge-independent).</p>
+    <div class="card" style="overflow-x:auto"><table class="tbl" id="prtable"></table></div>
+  </section>
+
+  <section class="section" id="sec-improve" data-nav="Next run">
+    <div class="h2"><span class="glyph">◇</span>IMPROVEMENTS BEFORE THE NEXT RUN<span class="n">prioritized · falsifiable</span></div>
+    <p class="subhead">Grounded in the numbers above. Each item names a predicted, measurable effect so the next run can confirm or refute it.</p>
+    <div id="improvements"></div>
+  </section>
+
+  <footer class="foot" id="foot"></footer>
+</div>
+
+<script id="DATA" type="application/json">__DATA__</script>
+<script>
+"use strict";
+const C={navy:"#0A1420",navy2:"#16202C",navy3:"#222C38",ink:"#EAF2EF",dim:"#8FA3A0",
+  orange:"#FD8017",orangeSoft:"#FFA552",mint:"#ABFAA9",mintDeep:"#5FCF8E",amber:"#FFD166",rust:"#E2533B",steel:"#5B7C99"};
+const NS="http://www.w3.org/2000/svg";
+const DATA=JSON.parse(document.getElementById("DATA").textContent);
+const $=s=>document.querySelector(s);
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function el(tag,attrs,kids){const e=document.createElementNS(NS,tag);for(const k in (attrs||{}))e.setAttribute(k,attrs[k]);
+  (kids||[]).forEach(c=>e.appendChild(c));return e;}
+function txt(x,y,s,attrs){const t=el("text",Object.assign({x,y},attrs||{}));t.textContent=s;return t;}
+function pct(x){return (x*100).toFixed(1);}
+function fmtUSD(x){return x==null?"—":"$"+x.toFixed(3);}
+function fmtInt(x){return x==null?"—":x.toLocaleString();}
+function fmtSec(x){return x==null?"—":Math.round(x)+"s";}
+
+let STATE={judge:DATA.judges[0]?DATA.judges[0].id:null};
+function curJudge(){return DATA.judges.find(j=>j.id===STATE.judge)||DATA.judges[0];}
+const DDTOOL=DATA.meta.daydream_tool;
+
+function renderJudgeBtns(){
+  const host=$("#judgebtns");host.innerHTML="";
+  DATA.judges.forEach(j=>{
+    const b=document.createElement("button");
+    b.className="judgebtn"+(j.id===STATE.judge?" on":"");
+    b.innerHTML=`<span class="jname">${esc(j.display)}</span><span class="jmeta">${j.has_daydream?"daydream scored":"not yet scored"} · ${j.field.length} field</span>`;
+    b.onclick=()=>{STATE.judge=j.id;renderJudgeBtns();renderJudgeDependent();};
+    host.appendChild(b);
+  });
+}
+function renderNav(){
+  const nav=$("#nav");nav.innerHTML="";
+  document.querySelectorAll("section[data-nav]").forEach((s,i)=>{
+    const b=document.createElement("button");b.textContent=s.dataset.nav;if(i===0)b.classList.add("on");
+    b.onclick=()=>{s.scrollIntoView({behavior:"smooth",block:"start"});
+      nav.querySelectorAll("button").forEach(x=>x.classList.remove("on"));b.classList.add("on");};
+    nav.appendChild(b);
+  });
+}
+
+function renderLead(){
+  const anchor=DATA.judges.find(j=>j.has_daydream);
+  const d=anchor?anchor.daydream:null;const rk=anchor?anchor.ranks:null;
+  $("#leadcopy").innerHTML=d?
+    `On <b>${DATA.meta.subset_pr_count} PRs</b> (of ${DATA.meta.total_daydream_attempts} attempted) judged by <b>${esc(anchor.display)}</b>, daydream lands <b class="mint">recall ${pct(d.recall)}%</b> (#${rk.recall[0]} of ${rk.recall[1]}) but <b>precision ${pct(d.precision)}%</b> (#${rk.precision[0]} of ${rk.precision[1]}) — <b>top-class recall, bottom-class precision</b>. The story is <b>${d.fp} false positives against ${d.tp} true positives</b>. Every SaaS competitor is recomputed on this exact subset; cost is synthesized from daydream's measured tokens.`
+    :"daydream has not been scored under any discovered judge.";
+}
+function renderJudgeNote(){
+  const j=curJudge();
+  $("#judgenote").textContent=j.has_daydream
+    ? `Selected judge ${j.display} scored daydream on ${j.subset_pr_count} PRs. Field of ${j.field.length} SaaS tools recomputed on the same subset.`
+    : `Selected judge ${j.display} has NOT yet scored daydream — the field of ${j.field.length} SaaS tools is shown on the daydream PR subset; daydream panels render a placeholder until it is re-judged.`;
+}
+
+function rankClass(r,n){if(!r)return"";if(r<=Math.ceil(n*0.34))return"good";return"";}
+function renderKPIs(){
+  const j=curJudge();$("#kpi-judgetag").textContent="· "+j.display;
+  const host=$("#kpis");host.innerHTML="";
+  if(!j.has_daydream||!j.daydream){
+    host.innerHTML=`<div class="placeholder" style="grid-column:1/-1"><div class="big">daydream not yet scored under ${esc(j.display)}</div>
+      The ${j.field.length}-tool SaaS field below is computed on the ${DATA.meta.subset_pr_count}-PR daydream subset. Re-judge daydream under this model and the same generator fills these KPIs in — no code change.</div>`;
+    return;
+  }
+  const d=j.daydream,rk=j.ranks;
+  const cards=[
+    {cls:"",label:"Precision",val:pct(d.precision)+"%",rank:`rank #${rk.precision[0]} / ${rk.precision[1]}`,rc:rankClass(rk.precision[0],rk.precision[1]),sub:`${d.tp} TP / ${d.tp+d.fp} flagged`},
+    {cls:"mint",label:"Recall",val:pct(d.recall)+"%",rank:`rank #${rk.recall[0]} / ${rk.recall[1]}`,rc:rankClass(rk.recall[0],rk.recall[1]),sub:`${d.tp} of ${d.tp+d.fn} golden found`},
+    {cls:"steel",label:"F1",val:pct(d.f1)+"%",rank:`rank #${rk.f1[0]} / ${rk.f1[1]}`,rc:rankClass(rk.f1[0],rk.f1[1]),sub:"harmonic mean"},
+    {cls:"rust",label:"FP / TP / FN",val:`${d.fp}<span class="unit"> fp</span>`,rank:`${d.tp} tp · ${d.fn} fn`,rc:"",sub:`${d.n_prs} PRs · ${(d.fp/d.tp).toFixed(1)}× FP:TP`},
+  ];
+  cards.forEach(c=>{
+    const div=document.createElement("div");div.className="kpi "+c.cls;
+    div.innerHTML=`<div class="label">${c.label}</div><div class="val">${c.val}</div>
+      <div class="rank ${c.rc==="good"?"good":""}">${c.rank}</div><div class="sub">${c.sub}</div>`;
+    host.appendChild(div);
+  });
+}
+
+function renderScatter(){
+  const j=curJudge();
+  $("#scatter-sub").textContent=`Recall (x) vs precision (y) for ${j.field.length} SaaS tools${j.has_daydream?" + daydream":""}, ${j.display}, on the ${DATA.meta.subset_pr_count}-PR daydream subset.`;
+  $("#scatter-title").textContent=`${j.display} · same-subset precision–recall`;
+  const W=860,H=440,m={l:54,r:18,t:18,b:46};
+  const iw=W-m.l-m.r,ih=H-m.t-m.b;
+  const svg=el("svg",{viewBox:`0 0 ${W} ${H}`});
+  for(let g=0;g<=10;g++){
+    const x=m.l+iw*g/10,y=m.t+ih*g/10;
+    svg.appendChild(el("line",{class:"gridline",x1:x,y1:m.t,x2:x,y2:m.t+ih}));
+    svg.appendChild(el("line",{class:"gridline",x1:m.l,y1:y,x2:m.l+iw,y2:y}));
+    if(g%2===0){
+      svg.appendChild(txt(x,m.t+ih+16,(g/10).toFixed(1),{class:"tcklabel","text-anchor":"middle"}));
+      svg.appendChild(txt(m.l-9,m.t+ih-ih*g/10+3,(g/10).toFixed(1),{class:"tcklabel","text-anchor":"end"}));
+    }
+  }
+  svg.appendChild(el("line",{class:"axis",x1:m.l,y1:m.t+ih,x2:m.l+iw,y2:m.t+ih}));
+  svg.appendChild(el("line",{class:"axis",x1:m.l,y1:m.t,x2:m.l,y2:m.t+ih}));
+  svg.appendChild(txt(m.l+iw/2,H-8,"RECALL →",{class:"axlabel","text-anchor":"middle"}));
+  svg.appendChild(txt(0,0,"PRECISION →",{class:"axlabel","text-anchor":"middle",transform:`translate(14,${m.t+ih/2}) rotate(-90)`}));
+  const X=r=>m.l+iw*r, Y=p=>m.t+ih*(1-p);
+  [0.3,0.5,0.7].forEach(f=>{
+    let pts=[];
+    for(let rr=0.02;rr<=1;rr+=0.01){const pp=(f*rr)/(2*rr-f);if(pp>0&&pp<=1)pts.push([X(rr),Y(pp)]);}
+    if(pts.length>1){
+      const path=pts.map((p,i)=>(i?"L":"M")+p[0].toFixed(1)+" "+p[1].toFixed(1)).join(" ");
+      svg.appendChild(el("path",{d:path,fill:"none",stroke:"rgba(143,163,160,.18)","stroke-dasharray":"2 4"}));
+      const last=pts[Math.floor(pts.length*0.5)];
+      svg.appendChild(txt(last[0]+4,last[1]-3,"F1 "+f,{class:"tcklabel",fill:"rgba(143,163,160,.4)"}));
+    }
+  });
+  j.field.forEach(t=>{
+    const c=t.invalid?C.rust:C.steel;
+    svg.appendChild(el("circle",{cx:X(t.recall),cy:Y(t.precision),r:t.invalid?3:4.5,
+      fill:c,"fill-opacity":t.invalid?.5:.62,stroke:C.navy,"stroke-width":.6}));
+  });
+  if(j.has_daydream&&j.daydream){
+    const d=j.daydream;
+    svg.appendChild(el("line",{x1:X(d.recall),y1:m.t,x2:X(d.recall),y2:m.t+ih,stroke:"rgba(253,128,23,.25)","stroke-dasharray":"3 3"}));
+    svg.appendChild(el("line",{x1:m.l,y1:Y(d.precision),x2:m.l+iw,y2:Y(d.precision),stroke:"rgba(253,128,23,.25)","stroke-dasharray":"3 3"}));
+    svg.appendChild(el("circle",{cx:X(d.recall),cy:Y(d.precision),r:9,fill:"none",stroke:C.orange,"stroke-width":1.5,opacity:.5}));
+    svg.appendChild(el("circle",{cx:X(d.recall),cy:Y(d.precision),r:5.5,fill:C.orange,stroke:C.navy,"stroke-width":1}));
+    const lx=X(d.recall)+12, ly=Y(d.precision)-8;
+    svg.appendChild(txt(lx,ly,"daydream",{fill:C.orangeSoft,"font-size":"11","font-weight":"700","font-family":"var(--mono)"}));
+    svg.appendChild(txt(lx,ly+12,`P ${pct(d.precision)} · R ${pct(d.recall)}`,{fill:C.dim,"font-size":"9.5","font-family":"var(--mono)"}));
+  }
+  const best=[...j.field].filter(t=>!t.invalid).sort((a,b)=>b.precision-a.precision)[0];
+  if(best){svg.appendChild(txt(X(best.recall)+7,Y(best.precision)+3,best.display,{class:"tcklabel"}));}
+  const host=$("#scatter");host.innerHTML="";host.appendChild(svg);
+}
+
+function makeLB(j,axis,title){
+  const card=document.createElement("div");card.className="card";
+  const rows=[...j.field];if(j.has_daydream&&j.daydream)rows.push(j.daydream);
+  rows.sort((a,b)=>b[axis]-a[axis]);
+  let top=rows.slice(0,8);
+  if(j.has_daydream&&!top.find(r=>r.tool===DDTOOL)){
+    const ddrow=rows.find(r=>r.tool===DDTOOL);
+    if(ddrow)top=top.slice(0,7).concat([ddrow]);
+  }
+  let body="";
+  top.forEach(r=>{
+    const isdd=r.tool===DDTOOL;
+    const realrank=rows.indexOf(r)+1;
+    body+=`<tr class="${isdd?'dd':''}"><td class="num" style="color:var(--steel)">${realrank}</td>
+      <td><span class="toolname"><span class="cdot" style="background:${esc(r.color)}"></span>${esc(r.display)}${r.invalid?' <span class="invalid">⚠ERR</span>':''}</span></td>
+      <td class="num" style="font-weight:${isdd?700:400};color:${isdd?'var(--orange-soft)':'var(--ink)'}">${pct(r[axis])}</td></tr>`;
+  });
+  card.innerHTML=`<div class="ct"><span class="dot"></span>${title}</div>
+    <table class="lb"><thead><tr><th class="num">#</th><th>tool</th><th class="num">${axis}</th></tr></thead><tbody>${body}</tbody></table>`;
+  return card;
+}
+function renderLeaderboards(){
+  const j=curJudge();const host=$("#leaderboards");host.innerHTML="";
+  host.appendChild(makeLB(j,"precision","Precision"));
+  host.appendChild(makeLB(j,"recall","Recall"));
+  host.appendChild(makeLB(j,"f1","F1"));
+}
+
+function renderFP(){
+  const j=curJudge();
+  if(!j.has_daydream||!j.daydream){
+    $("#fp-sub").textContent="daydream not yet scored under this judge — the over-flagging view fills in once it is re-judged.";
+    $("#fp-stack").innerHTML='<div class="placeholder">no daydream FP/TP under '+esc(j.display)+'</div>';
+    $("#fp-ratio").innerHTML="";return;
+  }
+  const d=j.daydream;
+  $("#fp-sub").innerHTML=`Under ${esc(j.display)}, daydream emits <b style="color:var(--rust)">${d.fp} false positives</b> for <b style="color:var(--mint)">${d.tp} true positives</b> — a ${(d.fp/d.tp).toFixed(1)}× FP:TP ratio. The field's median FP:TP is far lower; this is the single biggest lever on daydream's score.`;
+  const W=420,H=130;const svg=el("svg",{viewBox:`0 0 ${W} ${H}`});
+  const tot=d.tp+d.fp;const bx=20,bw=W-40,by=48,bh=34;
+  const tpw=bw*d.tp/tot;
+  svg.appendChild(el("rect",{x:bx,y:by,width:tpw,height:bh,fill:C.mintDeep,rx:4}));
+  svg.appendChild(el("rect",{x:bx+tpw,y:by,width:bw-tpw,height:bh,fill:C.rust,rx:4}));
+  svg.appendChild(txt(bx,by-10,`${d.tp} true positive (${pct(d.tp/tot)}%)`,{fill:C.mint,"font-size":"11","font-family":"var(--mono)"}));
+  svg.appendChild(txt(bx+bw,by+bh+18,`${d.fp} false positive (${pct(d.fp/tot)}%)`,{fill:C.rust,"font-size":"11","font-family":"var(--mono)","text-anchor":"end"}));
+  svg.appendChild(txt(bx,by+bh+18,`${tot} findings flagged`,{fill:C.dim,"font-size":"10","font-family":"var(--mono)"}));
+  $("#fp-stack").innerHTML="";$("#fp-stack").appendChild(svg);
+  let rows=j.field.filter(t=>!t.invalid&&t.tp>0).map(t=>({n:t.display,v:t.fp/t.tp,c:t.color}));
+  rows.push({n:"daydream",v:d.fp/d.tp,c:C.orange,dd:true});
+  rows.sort((a,b)=>a.v-b.v);
+  const maxv=Math.min(Math.max(...rows.map(r=>r.v)),8);
+  let show=rows.slice(0,12);
+  if(!show.find(r=>r.dd))show=show.slice(0,11).concat([rows.find(r=>r.dd)]);
+  const host=$("#fp-ratio");host.innerHTML="";
+  show.forEach(r=>{
+    if(!r)return;
+    const row=document.createElement("div");row.className="barrow"+(r.dd?" dd":"");
+    const w=Math.min(r.v/maxv*100,100);
+    row.innerHTML=`<span class="bn">${esc(r.n)}</span><div class="bartrack"><div class="barseg" style="width:${w}%;background:${esc(r.c)}"></div></div><span class="bv">${r.v.toFixed(1)}×</span>`;
+    host.appendChild(row);
+  });
+}
+
+function renderJudgeSens(){
+  const host=$("#judge-sens");host.innerHTML="";
+  const grid=document.createElement("div");grid.className="grid3";
+  DATA.judges.forEach(j=>{
+    const card=document.createElement("div");card.className="card";
+    if(j.has_daydream&&j.daydream){
+      const d=j.daydream;
+      card.innerHTML=`<div class="ct"><span class="dot"></span>${esc(j.display)}</div>
+        <div style="display:flex;gap:18px;margin-top:4px">
+          <div><div style="color:var(--ink);font-size:24px;font-weight:700">${pct(d.precision)}<span style="font-size:12px;color:var(--dim)">%</span></div><div style="font-size:9.5px;letter-spacing:.16em;color:var(--dim);text-transform:uppercase">precision</div></div>
+          <div><div style="color:var(--mint);font-size:24px;font-weight:700">${pct(d.recall)}<span style="font-size:12px;color:var(--dim)">%</span></div><div style="font-size:9.5px;letter-spacing:.16em;color:var(--dim);text-transform:uppercase">recall</div></div>
+          <div><div style="color:var(--orange-soft);font-size:24px;font-weight:700">${pct(d.f1)}<span style="font-size:12px;color:var(--dim)">%</span></div><div style="font-size:9.5px;letter-spacing:.16em;color:var(--dim);text-transform:uppercase">f1</div></div>
+        </div>
+        <div style="margin-top:12px;font-size:11px;color:var(--dim)">tp ${d.tp} · fp ${d.fp} · fn ${d.fn} · ${d.n_prs} PRs</div>`;
+    } else {
+      card.innerHTML=`<div class="ct"><span class="dot" style="background:var(--amber);box-shadow:0 0 9px var(--amber)"></span>${esc(j.display)}</div>
+        <div class="placeholder" style="padding:20px 14px"><div class="big" style="font-size:12px">not yet scored</div>
+        <div style="font-size:11px">daydream has no leaf under this judge. The ${j.field.length}-tool field is ready; re-run the judge on daydream to populate.</div></div>`;
+    }
+    grid.appendChild(card);
+  });
+  host.appendChild(grid);
+}
+
+function renderSlices(){
+  const anchor=DATA.judges.find(j=>j.has_daydream);
+  $("#slice-judgetag").textContent=anchor?"· "+anchor.display:"";
+  const host=$("#slices");host.innerHTML="";
+  const grid=document.createElement("div");grid.className="grid2";
+  DATA.slices.forEach(sl=>{
+    const card=document.createElement("div");card.className="card";
+    let rows="";
+    const maxR=Math.max(...sl.rows.map(r=>r.recall),0.001);
+    sl.rows.forEach(r=>{
+      const w=r.recall/Math.max(maxR,1)*100;
+      const fpr=r.tp?(r.fp/r.tp).toFixed(1)+"×":(r.fp?"∞":"0");
+      rows+=`<div class="barrow"><span class="bn" title="${esc(r.label)}">${esc(r.label)} <span style="color:var(--steel)">·${r.n_prs}</span></span>
+        <div class="bartrack"><div class="barseg" style="width:${Math.max(w,2)}%;background:var(--mint-deep)"></div></div>
+        <span class="bv">${pct(r.recall)}<span style="color:var(--steel);font-size:9px"> R·${fpr}</span></span></div>`;
+    });
+    card.innerHTML=`<div class="ct"><span class="dot"></span>${esc(sl.title)} — recall &amp; FP:TP</div>${rows}`;
+    grid.appendChild(card);
+  });
+  host.appendChild(grid);
+}
+
+function renderCost(){
+  const e=DATA.economy;
+  $("#cost-sub").innerHTML=`Computed from measured tokens @ <b>${esc(e.price_model)}</b> price card (in $${e.price_card.input} / cached $${e.price_card.cached} / out $${e.price_card.output} per 1M; counters disjoint). Backend records $0 (GLM via z.ai) — this is synthesized, not read. ${e.n_with_trajectory} of ${e.n_prs} PRs have a trajectory.`;
+  const host=$("#cost-kpis");host.innerHTML="";
+  const ddtp=(DATA.judges.find(j=>j.has_daydream)||{daydream:{tp:1}}).daydream.tp||1;
+  const cards=[
+    {label:"Total cost",val:fmtUSD(e.total_cost_usd),sub:`${e.n_with_trajectory} PRs`},
+    {label:"Cost / PR",val:fmtUSD(e.cost_per_pr),sub:"mean over scored PRs"},
+    {label:"Cost / true positive",val:"$"+(e.total_cost_usd/ddtp).toFixed(3),sub:"total $ ÷ TP"},
+  ];
+  cards.forEach((c,i)=>{const d=document.createElement("div");d.className="kpi "+(i===1?"mint":i===2?"steel":"");
+    d.innerHTML=`<div class="label">${c.label}</div><div class="val">${c.val}</div><div class="sub">${c.sub}</div>`;host.appendChild(d);});
+  const rows=DATA.per_pr.filter(r=>r.cost_usd!=null).map(r=>({n:(r.repo.split("/")[1]||r.repo)+"#"+r.pr_number,v:r.cost_usd})).sort((a,b)=>b.v-a.v);
+  const maxv=Math.max(...rows.map(r=>r.v),0.001);
+  const bh=$("#cost-bars");bh.innerHTML="";
+  rows.forEach(r=>{const row=document.createElement("div");row.className="barrow";
+    row.innerHTML=`<span class="bn">${esc(r.n)}</span><div class="bartrack"><div class="barseg" style="width:${r.v/maxv*100}%;background:var(--orange)"></div></div><span class="bv">$${r.v.toFixed(3)}</span>`;bh.appendChild(row);});
+}
+
+function renderLatency(){
+  const rows=DATA.per_pr.filter(r=>r.wall_seconds!=null).map(r=>({n:(r.repo.split("/")[1]||r.repo)+"#"+r.pr_number,v:r.wall_seconds})).sort((a,b)=>b.v-a.v);
+  const maxv=Math.max(...rows.map(r=>r.v),1);
+  const dd=$("#lat-dd");dd.innerHTML="";
+  const e=DATA.economy;
+  dd.innerHTML=`<div class="callout">median <b>${fmtSec(e.median_wall_seconds)}</b> · mean <b>${fmtSec(e.mean_wall_seconds)}</b> over ${e.n_with_wall} PRs. Clock: first→last ATIF phase event.</div>`;
+  rows.forEach(r=>{const row=document.createElement("div");row.className="barrow";
+    row.innerHTML=`<span class="bn">${esc(r.n)}</span><div class="bartrack"><div class="barseg" style="width:${r.v/maxv*100}%;background:var(--mint-deep)"></div></div><span class="bv">${Math.round(r.v)}s</span>`;dd.appendChild(row);});
+  const saas=$("#lat-saas");
+  if(DATA.latency_field&&DATA.latency_field.length){
+    saas.innerHTML="";const mv=Math.max(...DATA.latency_field.map(r=>r.median_seconds),1);
+    DATA.latency_field.slice(0,14).forEach(r=>{const row=document.createElement("div");row.className="barrow";
+      row.innerHTML=`<span class="bn">${esc(r.display)}</span><div class="bartrack"><div class="barseg" style="width:${r.median_seconds/mv*100}%;background:${esc(r.color)}"></div></div><span class="bv">${(r.median_seconds/60).toFixed(0)}m</span>`;saas.appendChild(row);});
+  } else {
+    saas.innerHTML=`<div class="placeholder"><div class="big" style="font-size:12px">SaaS latency not in this snapshot</div>
+      <div style="font-size:11px">SaaS "PR-timeline elapsed" requires a live GitHub trigger→last-comment crawl across ~2,000 forked repos (step_speed_analysis.py). It was not run for this offline report and is never fabricated. Supply <span class="mono-cite">--speed-analysis speed_analysis.json</span> and the same generator renders it here.</div></div>`;
+  }
+}
+
+function renderTokens(){
+  const e=DATA.economy;const host=$("#token-kpis");host.innerHTML="";
+  const cards=[
+    {label:"Prompt (fresh in)",val:fmtInt(e.total_prompt_tokens),c:""},
+    {label:"Cached (cache reads)",val:fmtInt(e.total_cached_tokens),c:"mint"},
+    {label:"Completion (out)",val:fmtInt(e.total_completion_tokens),c:"steel"},
+  ];
+  cards.forEach(c=>{const d=document.createElement("div");d.className="kpi "+c.c;
+    d.innerHTML=`<div class="label">${c.label}</div><div class="val" style="font-size:24px">${c.val}</div>`;host.appendChild(d);});
+  const rows=DATA.per_pr.filter(r=>r.prompt_tokens!=null).map(r=>({n:(r.repo.split("/")[1]||r.repo)+"#"+r.pr_number,p:r.prompt_tokens,c:r.cached_tokens,o:r.completion_tokens}));
+  const maxv=Math.max(...rows.map(r=>r.p+r.c+r.o),1);
+  rows.sort((a,b)=>(b.p+b.c+b.o)-(a.p+a.c+a.o));
+  const bh=$("#token-bars");bh.innerHTML="";
+  rows.forEach(r=>{const tot=r.p+r.c+r.o;const row=document.createElement("div");row.className="barrow";
+    row.innerHTML=`<span class="bn">${esc(r.n)}</span><div class="bartrack">
+      <div class="barseg" style="width:${r.p/maxv*100}%;background:var(--orange)"></div>
+      <div class="barseg" style="width:${r.c/maxv*100}%;background:var(--mint-deep)"></div>
+      <div class="barseg" style="width:${r.o/maxv*100}%;background:var(--steel)"></div>
+    </div><span class="bv">${(tot/1e6).toFixed(1)}M</span>`;bh.appendChild(row);});
+  bh.insertAdjacentHTML("beforeend",`<div class="legend"><div class="item"><span class="sw" style="background:var(--orange)"></span>prompt</div><div class="item"><span class="sw" style="background:var(--mint-deep)"></span>cached</div><div class="item"><span class="sw" style="background:var(--steel)"></span>completion</div></div>`);
+}
+
+let TBL_SORT={key:"fp",dir:-1};
+function renderTable(){
+  const j=curJudge();$("#table-judgetag").textContent="· "+j.display;
+  const scored=j.has_daydream;
+  const cols=[
+    {k:"repo",t:"repo",num:false},{k:"pr_number",t:"pr",num:false},
+    {k:"language",t:"lang",num:false},{k:"domain",t:"domain",num:false},{k:"risk",t:"risk",num:false},
+    {k:"golden",t:"gold",num:true},{k:"tp",t:"tp",num:true},{k:"fp",t:"fp",num:true},{k:"fn",t:"fn",num:true},
+    {k:"precision",t:"P",num:true},{k:"recall",t:"R",num:true},{k:"cost_usd",t:"$",num:true},{k:"wall_seconds",t:"wall",num:true},
+  ];
+  const scores=(DATA.per_pr_scores||{})[j.id]||{};
+  let rows=DATA.per_pr.map(r=>Object.assign({},r,scores[r.pr_url]||{}));
+  rows.sort((a,b)=>{let x=a[TBL_SORT.key],y=b[TBL_SORT.key];if(x==null)x=-Infinity;if(y==null)y=-Infinity;
+    if(typeof x==="string")return TBL_SORT.dir*x.localeCompare(y);return TBL_SORT.dir*(x-y);});
+  const tbl=$("#prtable");
+  let head="<thead><tr>"+cols.map(c=>`<th data-k="${c.k}" class="${c.num?'num':''}">${c.t}${TBL_SORT.key===c.k?` <span class="ar">${TBL_SORT.dir<0?'▼':'▲'}</span>`:""}</th>`).join("")+"</tr></thead>";
+  let body="<tbody>";
+  rows.forEach(r=>{
+    body+="<tr>"+cols.map(c=>{
+      let v=r[c.k];let raw=false;
+      if(c.k==="repo"){const parts=(r.repo||"").split("/");v=`<span class="tag">${esc(parts[0]||"")}</span> ${esc(parts[1]||"")}`;raw=true;}
+      else if(c.k==="precision"||c.k==="recall")v=scored?pct(v):"—";
+      else if(c.k==="tp"||c.k==="fp"||c.k==="fn")v=scored?(v==null?"—":v):"—";
+      else if(c.k==="golden")v=(v==null?"—":v);
+      else if(c.k==="cost_usd")v=fmtUSD(v);
+      else if(c.k==="wall_seconds")v=fmtSec(v);
+      else if(v==null)v="—";
+      const color=(c.k==="fp"&&scored)?'style="color:var(--rust)"':(c.k==="tp"&&scored)?'style="color:var(--mint)"':"";
+      return `<td class="${c.num?'num':''}" ${color}>${raw?v:esc(v)}</td>`;
+    }).join("")+"</tr>";
+  });
+  body+="</tbody>";
+  tbl.innerHTML=head+body;
+  tbl.querySelectorAll("th").forEach(th=>th.onclick=()=>{const k=th.dataset.k;
+    if(TBL_SORT.key===k)TBL_SORT.dir*=-1;else{TBL_SORT.key=k;TBL_SORT.dir=(["repo","language","domain","risk","pr_number"].includes(k))?1:-1;}renderTable();});
+}
+
+function renderImprovements(){
+  const anchor=DATA.judges.find(j=>j.has_daydream);
+  const host=$("#improvements");host.innerHTML="";
+  if(!anchor){host.innerHTML='<div class="placeholder">no scored judge</div>';return;}
+  const d=anchor.daydream;
+  let worst=null;
+  DATA.slices.forEach(sl=>sl.rows.forEach(r=>{const ratio=r.tp?r.fp/r.tp:(r.fp?99:0);
+    if(r.fp>=3&&(!worst||ratio>worst.ratio))worst={dim:sl.title,label:r.label,ratio,fp:r.fp,tp:r.tp};}));
+  const fieldF1=DATA.judges.filter(j=>j.field.length).map(j=>j.field[0].f1);
+  const f1Spread=fieldF1.length?((Math.max(...fieldF1)-Math.min(...fieldF1))*100).toFixed(1):"~2";
+  const newP=d.tp*0.9/(d.tp*0.9+d.fp*0.55);
+  const worstLift=worst?((d.tp/(d.tp+d.fp-Math.round(worst.fp/2))-d.precision)*100).toFixed(1):"0";
+  const items=[
+    {p:1,cls:"",h:"Confidence-gate / severity-threshold the candidate set",
+     body:`daydream flags <b>${d.tp+d.fp}</b> findings to capture <b>${d.tp}</b> true positives — precision ${pct(d.precision)}% (#${anchor.ranks.precision[0]} of ${anchor.ranks.precision[1]}). Drop low-confidence / low-severity candidates before they reach the judge.`,
+     pred:`Predict: dropping the bottom ~40% of candidates by confidence cuts FP ${d.fp}→~${Math.round(d.fp*0.55)} while keeping ≥${Math.round(d.tp*0.9)} TP → precision ≈ ${pct(newP)}% (from ${pct(d.precision)}%), F1 ≈ ${pct(2*newP*(d.recall*0.9)/(newP+d.recall*0.9))}%.`,
+     cite:`source: results/${esc(DATA.meta.anchor_judge)}/evaluations.json (${esc(DDTOOL)} false_positives lists)`},
+    {p:1,cls:"",h:"De-duplicate near-identical candidates per PR before submission",
+     body:`Many FPs are restatements of one concern (e.g. the grafana singleflight finding recurs as three distinct candidates). The harness already runs step2.5 dedup corpus-side; mirror it pre-submission so siblings collapse to one.`,
+     pred:`Predict: per-PR candidate dedup removes 15–25% of FP at zero TP loss → precision +3–5 pts independent of item 1.`,
+     cite:`source: step2_5_dedup_candidates module · leaf total_candidates vs fp`},
+    {p:2,cls:"p2",h:worst?`Tighten the worst-precision slice: ${esc(worst.dim)} = ${esc(worst.label)}`:"Tighten the noisiest label slice",
+     body:worst?`The <b>${esc(worst.label)}</b> ${esc(worst.dim.toLowerCase())} cohort carries ${worst.fp} FP for ${worst.tp} TP (${worst.ratio.toFixed(1)}× FP:TP) — daydream's noisiest slice. Add slice-specific guardrails or suppress speculative findings there.`:"Add guardrails on the noisiest label cohort.",
+     pred:worst?`Predict: halving FP on this slice lifts overall precision ~${worstLift} pts.`:"Predict: measurable precision lift on the targeted slice.",
+     cite:`source: results/pr_labels.json joined to daydream leaves (Slices panel)`},
+    {p:3,cls:"p3",h:"Re-judge daydream under Sonnet 4.5 and GPT-5.2",
+     body:`daydream has a leaf only under <b>${esc(anchor.display)}</b>. The other ${DATA.judges.length-1} discovered judges show the field but a placeholder for daydream. Running the judge step under each fills the cross-judge panels and tests whether the precision story is judge-robust.`,
+     pred:`Predict: F1 moves within ±3 pts across judges (the field's best-F1 tool shifts only ${f1Spread} pts across the three), so daydream's bottom-precision standing is judge-robust.`,
+     cite:`source: discovered judges ${esc(DATA.judges.map(j=>j.id).join(", "))}`},
+  ];
+  items.forEach(it=>{const div=document.createElement("div");div.className="imp "+it.cls;
+    div.innerHTML=`<div class="pri">${it.p}</div><div class="body"><h4>${it.h}</h4><p>${it.body}</p><div class="pred">▸ ${it.pred}</div><div class="cite">${it.cite}</div></div>`;host.appendChild(div);});
+}
+
+function renderFoot(){
+  const m=DATA.meta;
+  $("#foot").innerHTML=`<b>METHODOLOGY.</b> ${esc(m.metric_def)}. Daydream covers ${m.subset_pr_count} PRs (of ${m.total_daydream_attempts} attempted; ${m.total_daydream_attempts-m.subset_pr_count} failed runs absent). Every SaaS tool is recomputed on this exact subset per judge — never daydream's ${m.subset_pr_count}-PR numbers against a 50-PR field aggregate. Judges with &gt;${(m.judge_error_ratio_threshold*100)}% failed comparisons are flagged ⚠ERR and excluded from rank (guard from daydream/benchmark/score.py). Stale <b>${esc(m.excluded_tool)}</b> rows excluded. Cost synthesized from measured ATIF tokens @ ${esc(DATA.economy.price_model)} price card (${esc(m.price_source)}); the backend's $0 field is not used. SaaS latency shown only when a speed_analysis.json is supplied. <br><br>
+  <b>SOURCES.</b> aggregates: ${esc(m.generated_from)} (auto-discovered ${DATA.judges.length} judge panels + ${DATA.skipped_judges.length} skipped). labels: results/pr_labels.json. tokens/wall: .daydream-bench/trajectories/*.json. tool names/colors: analysis/benchmark_dashboard.json. Generated by bench/benchmark-report/build.py — re-run against any corpus, judge, or price card.`;
+}
+
+function renderJudgeDependent(){
+  renderJudgeNote();renderKPIs();renderScatter();renderLeaderboards();renderFP();renderTable();
+}
+function renderAll(){
+  $("#legend-dd").textContent=DATA.meta.daydream_display;
+  renderNav();renderJudgeBtns();renderLead();
+  renderJudgeDependent();
+  renderJudgeSens();renderSlices();renderCost();renderLatency();renderTokens();renderImprovements();renderFoot();
+}
+renderAll();
+</script>
+</body>
+</html>

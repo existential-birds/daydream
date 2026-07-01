@@ -117,6 +117,29 @@ Missing the precision, F1, or addressed-comments targets auto-triggers [Mileston
 
 `daydream bench` scores deep-review findings against [Martian's Code Review Benchmark](https://github.com/withmartian/code-review-benchmark) offline set and writes per-PR precision/recall into `results/<model>/evaluations.json`. See the [benchmark runbook](docs/benchmark.md) for the full setup-to-result sequence.
 
+#### Benchmark report
+
+Once a benchmark run has produced `results/<judge>/evaluations.json` leaves, render the
+self-contained offline report (daydream vs the SaaS field on precision/recall/F1,
+cost synthesized from measured tokens, sortable per-PR log) with one command:
+
+```bash
+make benchmark-report                                   # defaults to ../code-review-benchmark/offline
+make benchmark-report BENCH=/path/to/benchmark/offline  # point at any run
+make benchmark-report RUN=opus-4-5-baseline             # name the report folder
+make benchmark-report DAYDREAM_TOOL=daydream-owl-beta PRICE_MODEL=glm-5.2  # override label / price card
+```
+
+The generator (`bench/benchmark-report/build.py`) auto-discovers every judge model under
+`results/`, recomputes each SaaS competitor on the same PR subset daydream covered per judge,
+and writes a **new self-contained report folder per run** — it never overwrites a prior report.
+Each run lands at `bench/benchmark-report/runs/<run-id>/{index.html,data.json,htmx.min.js}`,
+where `<run-id>` is `RUN` if given, else a UTC timestamp + corpus fingerprint; `runs/latest`
+symlinks the freshest. Open any `index.html` via `file://` — no network, htmx vendored, all
+charts hand-rolled SVG. It reads the benchmark corpus only and never modifies it; judges that
+have not yet scored daydream render an honest placeholder. The `runs/` folder is git-ignored
+(generated build artifacts).
+
 ## CLI Reference
 
 ### Output Modes
