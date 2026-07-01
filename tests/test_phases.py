@@ -1631,6 +1631,42 @@ def test_issue_producing_builders_use_shared_instructions(tmp_path):
         assert "Confidence and Convention Rules" in prompt
 
 
+def test_prompts_eliminate_speculative_language(tmp_path):
+    """Speculative/breadth-padding phrases removed from review prompts (#228)."""
+    from daydream.phases import (
+        build_alternative_review_prompt,
+        build_plan_prompt,
+        build_review_prompt,
+    )
+
+    # Removed phrases absent from all issue-producing builders
+    for builder in (
+        build_review_prompt,
+        build_alternative_review_prompt,
+        build_plan_prompt,
+    ):
+        prompt = builder(exploration_dir=tmp_path)
+        assert "Prefer LOW over MEDIUM" not in prompt
+        assert "inferred from the diff alone" not in prompt
+
+    # Alternative-review-specific removals
+    alt_prompt = build_alternative_review_prompt(
+        intent_summary="test", diff_path="/x", exploration_dir=tmp_path
+    )
+    assert "Would you have done this differently" not in alt_prompt
+    assert "incremental improvements" not in alt_prompt
+    assert "could be better" not in alt_prompt
+
+    # New grounding instruction present in all three (via shared fragment)
+    for builder in (
+        build_review_prompt,
+        build_alternative_review_prompt,
+        build_plan_prompt,
+    ):
+        prompt = builder(exploration_dir=tmp_path)
+        assert "ground" in prompt.lower()
+
+
 def test_intent_builder_omits_issue_instructions(tmp_path):
     from daydream.phases import build_intent_prompt
 
