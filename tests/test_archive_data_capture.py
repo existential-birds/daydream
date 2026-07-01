@@ -158,7 +158,17 @@ class _FixEditingBackend:
             yield TextEvent(text="Parsed.")
             yield ResultEvent(
                 structured_output={
-                    "issues": [{"id": 1, "description": "Add a guard", "file": "main.py", "line": 1}]
+                    "issues": [
+                        {
+                            "id": 1,
+                            "description": "Add a guard",
+                            "file": "main.py",
+                            "line": 1,
+                            "confidence": "HIGH",
+                            "rationale": "guard missing",
+                            "evidence": "main.py:1",
+                        }
+                    ]
                 },
                 continuation=None,
             )
