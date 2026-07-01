@@ -3502,6 +3502,83 @@ async def test_verifier_excludes_structural_lens(tmp_path, monkeypatch, make_wor
     assert verdicts_path(dd).is_file()
 
 
+async def test_verifier_prompt_carries_gate_zero_protocol(tmp_path, monkeypatch, make_work):
+    """Real-path: ``phase_verify_recommendations`` embeds the Gate-0 anti-confabulation
+    protocol in the prompt actually handed to the backend.
+
+    Guards issue #229's wiring at the production seam — the verifier prompt the
+    agent receives must carry the same-turn-echo anti-confabulation gate, not just
+    the standalone builder (unit-tested in test_deep_prompts.py).
+    """
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+    from daydream.phases import phase_verify_recommendations
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    work = make_work(tmp_path)
+    dd = deep_dir(work.repo)
+    dd.mkdir(parents=True, exist_ok=True)
+
+    items = {
+        "items": [
+            {
+                "id": 1,
+                "lens": "per-stack",
+                "file": "a.py",
+                "line": 9,
+                "severity": "low",
+                "description": "bug",
+                "confidence": "HIGH",
+                "rationale": "r",
+            }
+        ]
+    }
+    items_path = merged_items_path(dd)
+    items_path.write_text(json.dumps(items))
+
+    structured = {
+        "verdicts": [
+            {
+                "issue_id": 1,
+                "verdict": "consistent",
+                "evidence": "e",
+                "unverified_assumptions": [],
+            }
+        ]
+    }
+
+    class VerifyBackend:
+        model = "test-model"
+        fanout_concurrency = 4
+
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
+            self.prompt = prompt
+            yield ResultEvent(structured_output=structured, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    backend = VerifyBackend()
+    await phase_verify_recommendations(
+        backend,
+        work,
+        merged_items_path=items_path,
+        deep_dir=dd,
+    )
+
+    assert "Gate-0" in backend.prompt
+    assert "anti-confabulation" in backend.prompt
+    assert "same-turn echo" in backend.prompt
+
+
 def test_group_items_by_file_preserves_order_within_and_across_groups():
     from daydream.phases import group_items_by_file
 
