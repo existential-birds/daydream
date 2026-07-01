@@ -4197,10 +4197,8 @@ async def test_deep_findings_out_emits_artifact_and_stops(
     monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda target_dir, n: pr)
 
     out = multi_stack_target / "findings.json"
-    tree_before = subprocess.run(  # noqa: S603
-        ["git", "status", "--porcelain"],  # noqa: S607
-        cwd=multi_stack_target, capture_output=True, text=True, check=True,
-    ).stdout
+    reviewed_sources = ("api.py", "App.tsx", "README.md")
+    source_before = {name: (multi_stack_target / name).read_text() for name in reviewed_sources}
 
     rc = await run(RunConfig(
         target=str(multi_stack_target),
@@ -4219,14 +4217,12 @@ async def test_deep_findings_out_emits_artifact_and_stops(
     assert data["head_sha"] == head
     assert data["repo"] == "o/r"
     assert all(re.fullmatch(r"[0-9a-f]{64}", f["fingerprint"]) for f in data["findings"])
-    # (d) no fix applied -- tracked tree unchanged, no fix sentinels
-    tree_after = subprocess.run(  # noqa: S603
-        ["git", "status", "--porcelain"],  # noqa: S607
-        cwd=multi_stack_target, capture_output=True, text=True, check=True,
-    ).stdout
-    tracked_after = "\n".join(
-        line for line in tree_after.splitlines() if not line.strip().endswith("findings.json")
-    )
-    assert tracked_after == tree_before.rstrip("\n"), f"tree changed: {tracked_after!r}"
+    # (d) no fix applied -- the reviewed source is byte-identical and no fix sentinel
+    # exists. This is the real "no fix ran" signal: it ignores daydream's own gitignored
+    # artifacts (.daydream/, .review-output.md), which the deep pipeline always writes and
+    # which are not fixes. (An earlier git-status tree-diff conflated those artifacts with
+    # fixes and only passed where a global gitignore happened to mask them.)
+    for name in reviewed_sources:
+        assert (multi_stack_target / name).read_text() == source_before[name], f"{name} was modified -- a fix ran"
     assert not list(multi_stack_target.glob(".fixed-*")), "fix sentinel present -- a fix ran"
     assert not (multi_stack_target / ".daydream-fix-applied").exists()
