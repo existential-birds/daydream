@@ -179,7 +179,7 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
     Args:
         parser: The parser (or subparser) to add the shared arguments to.
         full_help: When False, advanced flags (``--trajectory``, ``--no-archive``,
-            ``--eval``, ``--non-interactive``) are added with their help text
+            ``--no-eval``, ``--non-interactive``) are added with their help text
             suppressed so the default ``--help`` stays focused on common flags.
             They still parse and populate ``RunConfig`` unchanged; ``--help-all``
             re-builds the parser with ``full_help=True`` to surface them.
@@ -203,11 +203,12 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         help="Disable automatic archival to ~/.daydream/archive/" if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--eval",
-        action="store_true",
-        default=False,
+        "--no-eval",
+        action="store_false",
+        default=True,
         dest="run_eval",
-        help="Run deterministic evaluation analysis and store evaluation.json in archive"
+        help="Skip the deterministic evaluation analysis during archive "
+        "(eval runs by default: it is file-based and cheap)"
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(

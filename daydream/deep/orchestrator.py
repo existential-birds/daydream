@@ -1140,6 +1140,17 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 print_warning(console, f"Could not snapshot tree before fixes: {exc}")
                 pre_fix_snapshot = None
                 pre_fix_untracked = set()
+            # Pre-fix HEAD is the recommended-patch base only when the tree was
+            # clean (stash_create returns None then) -- otherwise the snapshot is
+            # the base and HEAD is unused, so skip the rev-parse. Captured now
+            # because the commit phase below advances HEAD past the fix.
+            if pre_fix_snapshot is None:
+                try:
+                    pre_fix_head = git_ops.head_sha(work.repo)
+                except git_ops.GitError:
+                    pre_fix_head = None
+            else:
+                pre_fix_head = None
             async with phase_scope(DaydreamPhase.FIX):
                 fix_failures = await phase_fix_parallel(
                     _resolve_backend(config, "fix", backend_cache),
@@ -1147,6 +1158,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     items,
                     intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
                 )
+            # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
+            # NOW, before the fix-failure and test-failure early returns below, so
+            # a run that generated a recommendation always archives it — even when
+            # tests fail or a fix group is reverted. Best-effort; never raises.
+            git_ops.capture_recommended_patch_with_base(
+                work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
+            )
             fix_failures_p = fix_failures_path(dd)
             if fix_failures:
                 # Persist so the archive marks the run "partial" instead of

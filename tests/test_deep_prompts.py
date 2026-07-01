@@ -576,3 +576,74 @@ def test_verification_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
         output_path=tmp_path / "verdicts.json",
     )
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
+
+
+def test_build_structural_prompt_includes_verification_protocol(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_structural_prompt
+
+    p = _paths(tmp_path)
+    prompt = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
+        files=["api.py"],
+        **p,
+    )
+    assert "review-verification-protocol" in prompt
+    assert "anchor" in prompt
+    assert "evidence" in prompt
+
+
+def test_build_generic_fallback_prompt_includes_verification_protocol(tmp_path: Path) -> None:
+    p = _paths(tmp_path)
+    out = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    assert "review-verification-protocol" in out
+    assert "anchor" in out
+    assert "evidence" in out
+
+
+def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_verification_prompt
+
+    items = [{"id": "1", "file": "x.py", "line": 10, "description": "Test finding"}]
+    out = build_verification_prompt(
+        items=items,
+        cwd=tmp_path,
+        output_path=tmp_path / "verdicts.json",
+    )
+    assert "Gate-0" in out or "anti-confabulation" in out
+    assert "same-turn echo" in out or "file:line" in out
+
+
+def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) -> None:
+    """The protocol is user-invocable:false — embedded as instruction text, never
+    routed through ``backend.format_skill_invocation``.
+
+    Observed at the production prompt-builder seam: the structural and
+    generic-fallback prompts are the only builders that embed the protocol
+    directly (the per-stack reviewers bundle it inside their Beagle skill).
+    Build them with a real backend formatter and assert the embedded
+    instruction is present while the protocol's invocation token — as each
+    real backend would emit it — never leaks into the prompt.
+    """
+    from daydream.backends import create_backend
+    from daydream.deep.prompts import build_structural_prompt
+
+    p = _paths(tmp_path)
+    prompts = [
+        build_structural_prompt(
+            skill_invocation="/beagle-core:review-structure",
+            files=["api.py"],
+            **p,
+        ),
+        build_generic_fallback_prompt(files=["config.yaml"], **p),
+    ]
+
+    for backend_name in ("claude", "codex", "pi"):
+        backend = create_backend(backend_name)
+        token = backend.format_skill_invocation("review-verification-protocol")
+        for prompt in prompts:
+            # Embedded as methodology prose (the constant carries the
+            # protocol name and gate descriptions), never as an invocation.
+            assert "review-verification-protocol/SKILL.md" in prompt
+            assert token not in prompt, (
+                f"{backend_name} protocol invocation token {token!r} leaked into prompt"
+            )

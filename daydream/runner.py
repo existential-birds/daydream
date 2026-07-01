@@ -177,7 +177,8 @@ class RunConfig:
         pr_repo: GitHub repository in ``owner/repo`` format. Auto-detected from ``gh``
             in deep (default) mode. Stored in trajectory metadata for eval linkage.
         archive: Archive run artifacts to centralized store. Default True.
-        run_eval: Run deterministic evaluation on archived artifacts. Default False.
+        run_eval: Run deterministic evaluation on archived artifacts. Default True
+            (``analyze_session`` is file-based and cheap); ``--no-eval`` opts out.
         branch: Specific branch to review. If None, uses cwd's HEAD.
         base: Base ref to compare against. If None, auto-resolves.
         output_mode: ``"loop"`` (review→fix→test, default), ``"comment"``
@@ -227,7 +228,7 @@ class RunConfig:
     trajectory_path: Path | None = None
     pr_repo: str | None = None
     archive: bool = True
-    run_eval: bool = False
+    run_eval: bool = True
 
     branch: str | None = None
     base: str | None = None
@@ -1074,6 +1075,21 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         diff_base: str | None = None
         exploration_dir: Path | None = None
 
+        # Recommended-change patch base: snapshot the tracked tree + HEAD BEFORE
+        # any fix runs. stash_create returns None on a clean tree (the common
+        # pre-fix case), so the pre-fix HEAD SHA is the fallback base. HEAD is
+        # captured now because the commit gate below advances it past the fixes.
+        # Captured once before the loop so the final file is the cumulative fix
+        # against the pre-first-fix base (recommended.patch is overwritten each iteration).
+        try:
+            pre_fix_snapshot = git_ops.stash_create(target_dir)
+        except GitError:
+            pre_fix_snapshot = None
+        try:
+            pre_fix_head = git_ops.head_sha(target_dir)
+        except GitError:
+            pre_fix_head = None
+
         async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
             """Execute one iteration of the review-parse-fix-test loop.
 
@@ -1112,6 +1128,16 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 for i, item in enumerate(items, 1):
                     await phase_fix(fix_backend, work, item, i, len(items))
                     fixes_count += 1
+
+            # Capture the recommended patch NOW, before tests run and a failure
+            # reverts the tree below. Overwritten each iteration so the file holds
+            # the cumulative fix against the pre-first-fix base. Best-effort.
+            git_ops.capture_recommended_patch_with_base(
+                target_dir,
+                pre_fix_snapshot,
+                pre_fix_head,
+                target_dir / ".daydream" / "recommended.patch",
+            )
 
             async with phase_scope(DaydreamPhase.TEST):
                 passed, retries = await phase_test_and_heal(test_backend, work, feedback_items=items)
@@ -1233,6 +1259,15 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                             fixes_applied += 1
                 else:
                     print_info(console, "No feedback items found, skipping fix phase")
+
+            # Capture the recommended patch NOW, before tests run and a failure
+            # returns early below. Best-effort; never blocks the run.
+            git_ops.capture_recommended_patch_with_base(
+                target_dir,
+                pre_fix_snapshot,
+                pre_fix_head,
+                target_dir / ".daydream" / "recommended.patch",
+            )
 
             async with phase_scope(DaydreamPhase.TEST):
                 tests_passed, test_retries = await phase_test_and_heal(

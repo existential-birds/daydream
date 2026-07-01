@@ -34,6 +34,13 @@ class Manifest:
 
     Attributes:
         schema_version: Manifest schema version for forward compatibility.
+        recommended_patch_supported: Provenance flag read by training signals.
+            ``True`` for every manifest written by recommended.patch-aware
+            daydream. When ``True``, a missing ``recommended.patch`` means the
+            run made no recommendation (review-only / all-declined / wash), not
+            a legacy archive — so ``_read_recommended_patch`` returns ``""``
+            instead of falling back to ``diff.patch``. Legacy manifests omit the
+            key.
         session_id: UUID4 session identifier from the trajectory recorder.
         archived_at: ISO 8601 timestamp of when the archive was created.
         status: Run status — ``complete``, ``partial``, or ``failed``.
@@ -92,6 +99,12 @@ class Manifest:
     """
 
     schema_version: str = MANIFEST_SCHEMA_VERSION
+    # Provenance flag consumed by labeler_signals._read_recommended_patch:
+    # when True, a missing recommended.patch means "no recommendation"
+    # (review-only / all-declined / wash), NOT a legacy archive, so the
+    # diff.patch fallback must not fire. Defaults True for every new manifest;
+    # legacy manifests simply omit the key.
+    recommended_patch_supported: bool = True
     session_id: str = ""
     archived_at: str = ""
     status: str = "complete"
@@ -131,7 +144,8 @@ class Manifest:
     total_cached_tokens: int | None = None
 
     # wall_clock_seconds and phase_timings are derived from step/phase events
-    # on every run; the remaining metrics below are populated only with --eval.
+    # on every run; the remaining metrics below are populated by the eval pass,
+    # which runs by default (skipped only with --no-eval).
     wall_clock_seconds: float | None = None
     phase_timings: dict[str, Any] | None = None
     total_findings: int | None = None
@@ -151,6 +165,7 @@ class Manifest:
         """Return a JSON-serializable dict."""
         return {
             "schema_version": self.schema_version,
+            "recommended_patch_supported": self.recommended_patch_supported,
             "session_id": self.session_id,
             "archived_at": self.archived_at,
             "status": self.status,
@@ -281,7 +296,7 @@ def build_manifest(
         archive_path=str(archive_path),
     )
 
-    # Derivable from step timestamps, so populated for every run; the --eval
+    # Derivable from step timestamps, so populated for every run; the eval pass's
     # fork-inclusive value (eval.analyzer.analyze_timing) takes precedence below.
     m.wall_clock_seconds = recorder.compute_wall_clock_seconds()
     # Per-phase breakdown from explicit phase_start/phase_end events (#203).

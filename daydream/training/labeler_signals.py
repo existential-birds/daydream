@@ -23,6 +23,7 @@ HTTP calls.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -82,7 +83,8 @@ class FixAppliedSignal:
             if no window commits exist.
         hunks_applied: Count of hunks whose added lines appear verbatim
             in the post-window file content.
-        hunks_total: Total hunks parsed from the recommended ``diff.patch``.
+        hunks_total: Total hunks parsed from ``recommended.patch`` (daydream's
+            proposed diff); ``diff.patch`` is the legacy-only fallback.
         window_commits: Ordered commit SHAs considered (oldest → newest).
     """
 
@@ -184,6 +186,62 @@ def _hunk_lines_present(added_lines: tuple[str, ...], post_content: str) -> bool
     return all(line in haystack_lines for line in added_lines)
 
 
+def _archive_is_recommended_patch_aware(archive_path: Path) -> bool:
+    """Return True if *archive_path*'s manifest was written by recommended.patch-aware daydream.
+
+    Reads the archived ``manifest.json`` provenance flag
+    ``recommended_patch_supported``. When set, a missing ``recommended.patch``
+    means the run made no recommendation (review-only, all-declined, reverted,
+    or wash) — not a legacy archive — so callers must NOT fall back to
+    ``diff.patch`` (the PR-under-review diff). A missing or unparseable manifest
+    is treated as legacy, preserving the backward-compatible ``diff.patch``
+    fallback for archives created before ``recommended.patch`` existed.
+    """
+    try:
+        data = json.loads((archive_path / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return data.get("recommended_patch_supported") is True
+
+
+def _read_recommended_patch(archive_path: Path) -> str:
+    """Read daydream's recommended-change patch for a run.
+
+    Prefers ``recommended.patch`` — daydream's proposed diff, captured post-fix
+    — so the applied-signal cascades score the RECOMMENDED changes rather than
+    the PR-under-review diff. When ``recommended.patch`` is absent the behaviour
+    depends on archive provenance (``manifest.json`` →
+    ``recommended_patch_supported``):
+
+    * **New-format archive** (flag set): absence means daydream made no
+      recommendation (review-only, all-declined, reverted, or wash). Returns
+      ``""`` so the cascade scores no hunks — it must NOT fall back to
+      ``diff.patch``, which is the PR-under-review diff and would mislabel such
+      runs as "applied".
+    * **Legacy archive** (flag absent / no manifest): falls back to
+      ``diff.patch`` for backward compatibility with archives created before
+      ``recommended.patch`` existed.
+
+    Args:
+        archive_path: The archived run directory (bronze bundle root).
+
+    Returns:
+        The unified-diff text to parse into recommended hunks (``""`` for a
+        new-format run that made no recommendation).
+
+    Raises:
+        OSError: For a legacy archive (no ``recommended.patch``) when
+            ``diff.patch`` cannot be read. New-format archives with no
+            ``recommended.patch`` return ``""`` rather than raising.
+    """
+    recommended = archive_path / "recommended.patch"
+    if recommended.is_file():
+        return recommended.read_text()
+    if _archive_is_recommended_patch_aware(archive_path):
+        return ""
+    return (archive_path / "diff.patch").read_text()
+
+
 # Signal extractors
 
 
@@ -233,7 +291,9 @@ def fix_applied_signal(
     2. Compute the file overlap between ``changed_files`` and the files
        actually touched by ``diff_fetcher``. If empty → ``not_applied``
        with ``hunks_applied=0`` and ``hunks_total = parsed hunks``.
-    3. Parse ``archive_path/diff.patch`` into hunks. For each hunk on a
+    3. Parse the recommended-change patch (``archive_path/recommended.patch``,
+       falling back to ``diff.patch`` for pre-recommended.patch archives) into
+       hunks. For each hunk on a
        file in the overlap, read ``file_at_fetcher(repo, file, window[-1])``
        and check whether every added line appears verbatim.
     4. Verdict: ``applied`` if ``hunks_applied / hunks_total >= 0.5``;
@@ -260,7 +320,10 @@ def fix_applied_signal(
     Raises:
         KeyError: If ``row`` is missing ``head_sha``, ``base_branch``,
             or ``archive_path``.
-        OSError: If ``archive_path/diff.patch`` cannot be read.
+        OSError: For a legacy archive (no ``recommended.patch``) when
+            ``diff.patch`` cannot be read from ``archive_path``. New-format
+            archives with no ``recommended.patch`` yield an empty patch rather
+            than raising (see :func:`_read_recommended_patch`).
         Exception: Any exception raised by ``diff_fetcher``,
             ``commits_in_window_fetcher``, or ``file_at_fetcher`` is
             propagated unchanged.
@@ -269,7 +332,7 @@ def fix_applied_signal(
     base_branch = row["base_branch"]
     archive_path = Path(row["archive_path"])
 
-    diff_patch = (archive_path / "diff.patch").read_text()
+    diff_patch = _read_recommended_patch(archive_path)
     hunks = _parse_diff_hunks(diff_patch)
     hunks_total = len(hunks)
 
@@ -408,7 +471,8 @@ def local_commit_applied_signal(
 
     See ``/tmp/research-no-pr.md``. Walks the commits on ``row["branch"]``
     that landed after ``row["head_sha"]`` and checks whether any commit
-    contains the added lines from the recommended ``diff.patch``.
+    contains the added lines from the recommended-change patch
+    (``recommended.patch``, falling back to ``diff.patch`` for older archives).
 
     Args:
         row: Manifest row with ``branch``, ``head_sha``, ``archive_path``.
@@ -426,7 +490,10 @@ def local_commit_applied_signal(
     Raises:
         KeyError: If ``row`` is missing ``archive_path``, ``branch``,
             or ``head_sha``.
-        OSError: If ``archive_path/diff.patch`` cannot be read.
+        OSError: For a legacy archive (no ``recommended.patch``) when
+            ``diff.patch`` cannot be read from ``archive_path``. New-format
+            archives with no ``recommended.patch`` yield an empty patch rather
+            than raising (see :func:`_read_recommended_patch`).
         Exception: Any exception raised by ``commits_since_fetcher`` or
             ``file_at_fetcher`` is propagated unchanged.
     """
@@ -434,7 +501,7 @@ def local_commit_applied_signal(
         return LocalCommitAppliedSignal(verdict="unknown")
 
     archive_path = Path(row["archive_path"])
-    diff_patch = (archive_path / "diff.patch").read_text()
+    diff_patch = _read_recommended_patch(archive_path)
     hunks = _parse_diff_hunks(diff_patch)
 
     commits = commits_since_fetcher(repo_clone, row["branch"], row["head_sha"])
