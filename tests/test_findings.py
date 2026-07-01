@@ -165,6 +165,48 @@ async def test_review_mode_writes_findings_artifact(feature_branch_repo, monkeyp
     assert data["findings"], "scripted issue must survive to the artifact"
 
 
+async def test_review_mode_does_not_write_a_plan(feature_branch_repo, monkeypatch, tmp_path):
+    """`--review` emits the findings artifact and stops — it never runs the plan phase.
+
+    Regression guard: the ENVISION/plan gate only feeds ``--comment`` output
+    (embedded via ``plan_data``); in review mode a plan is dead work and used to
+    leave a stray ``.daydream/plan-*.md`` on disk. Enters from ``runner.run`` with
+    a real temp git repo, scripting one issue so the flow reaches the plan gate;
+    only the backend and GitHub lookups are mocked. Asserts no plan file is
+    written even though issues were found.
+    """
+    out = tmp_path / "findings.json"
+    issue = {
+        "id": 1,
+        "title": "Greeting changed without tests",
+        "description": "`hello` now returns a different greeting with no test coverage",
+        "recommendation": "Add a regression test for the new greeting",
+        "severity": "medium",
+        "confidence": "HIGH",
+        "files": ["main.py"],
+        "rationale": "",
+    }
+    backend = PhaseDispatchBackend(events=[
+        TextEvent(text="Review complete."),
+        ResultEvent(structured_output={"issues": [issue]}, continuation=None),
+    ])
+    head = git_ops.head_sha(feature_branch_repo)
+    base = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", "rev-parse", "main"],  # noqa: S607 - git is a trusted command
+        cwd=feature_branch_repo, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main",
+                owner="o", repo="r", url="https://example.invalid/pr/7")
+
+    with _review_run_env(feature_branch_repo, monkeypatch, out, backend, pr) as config:
+        assert await run(config) == 0
+
+    findings = json.loads(out.read_text())["findings"]
+    assert findings, "the scripted issue must reach the artifact (flow reached the plan gate)"
+    plans = list((feature_branch_repo / ".daydream").glob("plan-*.md"))
+    assert plans == [], f"--review must not write a plan; found {plans}"
+
+
 async def test_review_mode_errored_agent_never_writes_clean_artifact(
     feature_branch_repo, monkeypatch, tmp_path
 ):

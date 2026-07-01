@@ -913,10 +913,13 @@ async def _run_review_or_comment(
             print_success(console, "No issues found — the implementation looks good!")
             return 0
 
-        # Generate plan. ``--comment`` skips ENVISION by default (latency for a
-        # prompt-only flow); ``--plan`` opts back in and feeds it to the comment prompt.
+        # Generate plan. The plan is only consumed by ``--comment`` (embedded in
+        # the PR comment via ``plan_data``), and even there only when ``--plan``
+        # opts in — ``--comment`` skips ENVISION by default for latency. ``--review``
+        # emits the findings artifact and stops; it never consumes a plan, so the
+        # plan runs only for ``--comment --plan``.
         plan_data: dict[str, Any] | None = None
-        skip_plan = post_to_pr and not config.plan
+        skip_plan = not (post_to_pr and config.plan)
         try:
             if not skip_plan:
                 async with phase_scope(DaydreamPhase.PLAN):
@@ -931,7 +934,7 @@ async def _run_review_or_comment(
                 shutil.rmtree(exploration_cleanup)
 
         # Post findings as inline PR comments (``--comment`` only; ``--review``
-        # exits with the plan on disk).
+        # exits after emitting the findings artifact).
         if post_to_pr:
             from daydream.pr_review import post_review_to_pr_from_alt_issues
 

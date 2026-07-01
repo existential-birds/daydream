@@ -618,7 +618,12 @@ async def test_parallel_fix_registers_subtrajectories(
 async def test_review_flow_emits_phase_events_and_manifest_timings(
     feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review-only flow records intent, alternatives, and plan timings."""
+    """Review-only flow records intent and alternatives timings, and no plan.
+
+    ``--review`` emits the findings artifact and stops; the plan phase only feeds
+    ``--comment`` output, so it must never run here (and must not appear in the
+    recorded phase events or manifest timings).
+    """
     import subprocess
     from unittest.mock import patch
 
@@ -673,22 +678,28 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     data = json.loads(traj.read_text(encoding="utf-8"))
     assert atif_validate(data, validate_images=False) is True
 
-    # Review-only flow records intent, alternatives, and plan phases.
+    # Review-only flow records intent and alternatives phases, never plan.
     events = data["extra"].get("phase_events", [])
     event_phases = {e["phase"] for e in events}
-    for phase in ("intent", "alternatives", "plan"):
+    for phase in ("intent", "alternatives"):
         assert phase in event_phases, (
             f"{phase} phase_events missing; got phases: {sorted(event_phases)!r}"
         )
+    assert "plan" not in event_phases, (
+        f"--review must not emit a plan phase; got phases: {sorted(event_phases)!r}"
+    )
 
     # Manifest: phase_timings must be non-null (was null before the fix) and
-    # carry the wrapped review phases.
+    # carry the wrapped review phases -- but not plan.
     manifest_files = list((tmp_path / "archive").rglob("manifest.json"))
     assert manifest_files, "manifest.json not written"
     manifest = json.loads(manifest_files[0].read_text())
     phase_timings = manifest["metrics"]["phase_timings"]
     assert phase_timings is not None, "review flow phase_timings must not be null"
-    for phase in ("intent", "alternatives", "plan"):
+    for phase in ("intent", "alternatives"):
         assert phase in phase_timings, (
             f"{phase} missing from review phase_timings: {phase_timings!r}"
         )
+    assert "plan" not in phase_timings, (
+        f"--review must not record a plan timing: {phase_timings!r}"
+    )
