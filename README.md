@@ -197,7 +197,7 @@ daydream --start-at fix /path/to/project      # resume from a specific phase
 daydream --trajectory /tmp/run.json /path/to/project
 daydream --ignore-path vendor /path/to/project
 daydream --worktree /path/to/project          # force ephemeral worktree
-daydream --no-eval /path/to/project           # skip the deterministic trajectory analysis (on by default)
+daydream --no-eval /path/to/project           # skip the deterministic evaluation analysis (on by default)
 daydream --no-archive /path/to/project        # skip run archival
 daydream --non-interactive /path/to/project   # run unattended; take every prompt's safe default
 ```

@@ -12,6 +12,7 @@
     "code_context",
     "review_output",
     "fix_diff_ref",
+    "recommended_diff_ref",
     "outcome_label",
     "grounding_score",
     "spans",
@@ -68,6 +69,22 @@
       "type": ["string", "null"]
     },
     "fix_diff_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "available",
+        "archive_relative_path"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "archive_relative_path": {
+          "type": "string"
+        }
+      }
+    },
+    "recommended_diff_ref": {
       "type": "object",
       "additionalProperties": false,
       "required": [

@@ -1139,12 +1139,16 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 print_warning(console, f"Could not snapshot tree before fixes: {exc}")
                 pre_fix_snapshot = None
                 pre_fix_untracked = set()
-            # Pre-fix HEAD is the recommended-patch base when the tree is clean
-            # (stash_create returns None then). Captured now because the commit
-            # phase below advances HEAD past the fix.
-            try:
-                pre_fix_head = git_ops.head_sha(work.repo)
-            except git_ops.GitError:
+            # Pre-fix HEAD is the recommended-patch base only when the tree was
+            # clean (stash_create returns None then) -- otherwise the snapshot is
+            # the base and HEAD is unused, so skip the rev-parse. Captured now
+            # because the commit phase below advances HEAD past the fix.
+            if pre_fix_snapshot is None:
+                try:
+                    pre_fix_head = git_ops.head_sha(work.repo)
+                except git_ops.GitError:
+                    pre_fix_head = None
+            else:
                 pre_fix_head = None
             async with phase_scope(DaydreamPhase.FIX):
                 fix_failures = await phase_fix_parallel(
@@ -1208,8 +1212,8 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
             # so training signals score the RECOMMENDED changes, not the diff
             # under review. Best-effort; never blocks a successful run.
-            git_ops.capture_recommended_patch(
-                work.repo, pre_fix_snapshot or pre_fix_head, daydream_dir / "recommended.patch"
+            git_ops.capture_recommended_patch_with_base(
+                work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
             )
             return 0
 

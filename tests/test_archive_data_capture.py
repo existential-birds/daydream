@@ -259,13 +259,18 @@ def test_capture_recommended_patch_none_base_writes_nothing(tmp_path: Path) -> N
     assert not out.exists()
 
 
-def test_capture_recommended_patch_no_change_writes_nothing(tmp_path: Path) -> None:
-    """When nothing changed (base == worktree) no patch is written."""
+def test_capture_recommended_patch_no_change_writes_empty_marker(tmp_path: Path) -> None:
+    """When nothing changed (no fix landed) an EMPTY recommended.patch marker is
+    written so the run is distinguishable from a legacy archive (which has no
+    recommended.patch at all). This prevents _read_recommended_patch from
+    falling back to diff.patch (the PR-under-review diff) and mislabeling a
+    no-recommendation run as 'applied'. Returns False (no non-empty patch)."""
     repo = _init_repo_with_commit(tmp_path)
     base = git_ops.head_sha(repo)
     out = repo / ".daydream" / "recommended.patch"
     assert git_ops.capture_recommended_patch(repo, base, out) is False
-    assert not out.exists()
+    assert out.is_file()
+    assert out.read_text() == ""
 
 
 # --- AC4: applied-signal cascades read recommended.patch (fallback to diff.patch) ---
@@ -334,6 +339,38 @@ def test_fix_applied_signal_falls_back_to_diff_patch(tmp_path: Path) -> None:
     )
     assert sig.verdict == "applied"
     assert sig.hunks_total == 1
+
+
+def test_fix_applied_signal_new_archive_no_recommendation_skips_fallback(tmp_path: Path) -> None:
+    """A new-format archive (manifest ``recommended_patch_supported=True``) with
+    no ``recommended.patch`` made NO recommendation (review-only / all-declined /
+    wash). The cascade must score zero hunks and NOT fall back to ``diff.patch``
+    (the PR-under-review diff), even when diff.patch's line is present
+    post-window — otherwise such runs are mislabeled 'applied'."""
+    from daydream.training.labeler_signals import fix_applied_signal
+
+    (tmp_path / "diff.patch").write_text(_diff_adding("reviewed = 2"))
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"schema_version": "1.0", "recommended_patch_supported": True})
+    )
+    row = {
+        "repo_slug": "org/repo",
+        "head_sha": "abc",
+        "base_branch": "main",
+        "archive_path": str(tmp_path),
+    }
+    # Post-window carries the REVIEWED line; diff.patch would match if the
+    # (forbidden) fallback fired.
+    sig = fix_applied_signal(
+        row,
+        changed_files=["app.py"],
+        repo_clone=tmp_path,
+        diff_fetcher=lambda repo, base, head: ["app.py"],
+        commits_in_window_fetcher=lambda repo, base, head: ["c1"],
+        file_at_fetcher=lambda repo, path, sha: "existing\nreviewed = 2\n",
+    )
+    assert sig.hunks_total == 0
+    assert sig.verdict == "not_applied"
 
 
 def test_local_commit_applied_signal_prefers_recommended_patch(tmp_path: Path) -> None:

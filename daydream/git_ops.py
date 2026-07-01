@@ -855,7 +855,12 @@ def capture_recommended_patch(repo: Path, base_ref: str | None, out_path: Path) 
     because the commit phase advances ``HEAD`` past the fix.
 
     Best-effort: writes nothing and returns ``False`` when *base_ref* is
-    ``None``, the diff is empty (no fix landed), or git fails. Never raises.
+    ``None`` or git fails. When the diff is empty (no fix landed) it writes an
+    *empty* marker file (and returns ``False``) so the run is distinguishable
+    from a legacy archive, which has no ``recommended.patch`` at all —
+    otherwise ``_read_recommended_patch`` falls back to ``diff.patch`` (the
+    PR-under-review diff) and mislabels a no-recommendation run as "applied".
+    Never raises.
 
     Args:
         repo: Repository working directory.
@@ -873,11 +878,53 @@ def capture_recommended_patch(repo: Path, base_ref: str | None, out_path: Path) 
         recommended = diff_worktree_against(repo, base_ref, ["."])
     except GitError:
         return False
-    if not recommended.strip():
-        return False
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not recommended.strip():
+        # Empty marker: a present-but-empty recommended.patch distinguishes a
+        # no-fix run from a legacy archive (no file at all), preventing the
+        # diff.patch fallback in _read_recommended_patch. Returns False since
+        # no non-empty patch was written.
+        out_path.write_text("")
+        return False
     out_path.write_text(recommended)
     return True
+
+
+def capture_recommended_patch_with_base(
+    repo: Path,
+    pre_fix_snapshot: str | None,
+    pre_fix_head: str | None,
+    out_path: Path,
+) -> bool:
+    """Capture the recommended patch, resolving the pre-fix base centrally.
+
+    Thin wrapper over :func:`capture_recommended_patch` that resolves the
+    pre-fix base as ``pre_fix_snapshot or pre_fix_head`` in one place, so the
+    deep and shallow fix paths cannot drift apart in how they pick the base.
+
+    *pre_fix_snapshot* is a ``stash create`` SHA of the tracked tree taken
+    before fixes; :func:`stash_create` returns ``None`` on a clean tree (the
+    common pre-fix case), so *pre_fix_head* -- the pre-fix ``HEAD`` SHA -- is
+    the fallback base. *pre_fix_head* is therefore only consulted when the
+    snapshot is ``None`` and need not be captured otherwise. Both must be
+    captured *before* the fix/commit phase, which advances ``HEAD`` past the
+    fix.
+
+    Best-effort: never raises (see :func:`capture_recommended_patch`).
+
+    Args:
+        repo: Repository working directory.
+        pre_fix_snapshot: ``stash create`` SHA, or ``None`` when the tree was
+            clean or the snapshot failed.
+        pre_fix_head: Pre-fix ``HEAD`` SHA, or ``None``. Used only when
+            *pre_fix_snapshot* is ``None``.
+        out_path: Destination path for the patch.
+
+    Returns:
+        ``True`` when a non-empty patch was written, else ``False``.
+    """
+    base_ref = pre_fix_snapshot or pre_fix_head
+    return capture_recommended_patch(repo, base_ref, out_path)
 
 
 def log(repo: Path, base: str, head: str = "HEAD") -> str:

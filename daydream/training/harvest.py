@@ -340,10 +340,10 @@ _FIX_APPLIED_STUB = FixAppliedSignal(
     hunks_total=0,
     window_commits=[],
 )
-"""Returned when the fix-applied cascade cannot run (missing diff.patch,
-empty changed_files, or any subprocess error). The rubric still carries
-the field for schema stability; outcome derivation does not depend on it
-for the PR-review path."""
+"""Returned when the fix-applied cascade cannot run (missing recommended.patch
+/ diff.patch, empty changed_files, or any subprocess error). The rubric still
+carries the field for schema stability; outcome derivation does not depend on
+it for the PR-review path."""
 
 
 def _safe_fix_applied(
@@ -354,9 +354,10 @@ def _safe_fix_applied(
 ) -> FixAppliedSignal:
     """Run :func:`fix_applied_signal`, swallowing missing-data errors.
 
-    The cascade needs ``archive_path/diff.patch`` to exist. When the archive
-    directory is missing (older runs, dry fixtures), or when ``changed_files``
-    is empty, return :data:`_FIX_APPLIED_STUB`.
+    The cascade reads ``recommended.patch`` (falling back to ``diff.patch``
+    for legacy archives). When the archive directory is missing (older runs,
+    dry fixtures), or when ``changed_files`` is empty, return
+    :data:`_FIX_APPLIED_STUB`.
     """
     if not changed_files:
         return _FIX_APPLIED_STUB

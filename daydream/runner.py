@@ -1079,6 +1079,8 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         # any fix runs. stash_create returns None on a clean tree (the common
         # pre-fix case), so the pre-fix HEAD SHA is the fallback base. HEAD is
         # captured now because the commit gate below advances it past the fixes.
+        # Captured once before the loop so the final file is the cumulative fix
+        # against the pre-first-fix base (recommended.patch is overwritten each iteration).
         try:
             pre_fix_snapshot = git_ops.stash_create(target_dir)
         except GitError:
@@ -1290,9 +1292,10 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
             # so training signals score the RECOMMENDED changes, not the diff
             # under review. Best-effort; never blocks a successful run.
-            git_ops.capture_recommended_patch(
+            git_ops.capture_recommended_patch_with_base(
                 target_dir,
-                pre_fix_snapshot or pre_fix_head,
+                pre_fix_snapshot,
+                pre_fix_head,
                 target_dir / ".daydream" / "recommended.patch",
             )
 
