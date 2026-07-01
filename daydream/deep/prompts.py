@@ -309,6 +309,13 @@ def build_structural_prompt(
         f"returns empty and hides committed changes."
     )
     parts.append(skill_invocation)
+    parts.append(
+        "Before writing findings, load the review-verification-protocol skill "
+        "(read review-verification-protocol/SKILL.md from the beagle-core plugin) "
+        "and apply its anchor-evidence-severity gates (gate 1: anchor file:line, "
+        "gate 2: produce evidence artifacts, gate 3: calibrate severity). "
+        "Do NOT report a finding that fails any gate."
+    )
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
 
@@ -561,6 +568,17 @@ def build_verification_prompt(
         "to narrow the search before opening files with Read."
     )
     parts.append(
+        "Gate-0 anti-confabulation (MANDATORY — applies before any verdict):\n"
+        "  Before issuing ANY verdict (consistent/contradicts/uncertain), you MUST "
+        "echo the exact artifact you are judging, quoted from a source read in THIS "
+        "turn:\n"
+        "    - The file:line plus the cited code, read freshly now (not recalled "
+        "from earlier in the session).\n"
+        "  The artifact is the only source of truth. A verdict issued without a "
+        "same-turn echo of its target is INVALID — emit the echo first, or do not "
+        "emit the verdict."
+    )
+    parts.append(
         "For EACH numbered issue in the merged report, perform these five steps:\n\n"
         "  1. Locate the `impl` / interface / protocol declaration the changed "
         "code participates in. If absent, set `verdict=consistent` only if no "
@@ -649,6 +667,13 @@ def build_generic_fallback_prompt(
     parts.append(
         "Review these files for correctness, clarity, and consistency with the "
         "author's intent. Apply language-agnostic review practices."
+    )
+    parts.append(
+        "Before writing findings, load the review-verification-protocol skill "
+        "(read review-verification-protocol/SKILL.md from the beagle-core plugin) "
+        "and apply its anchor-evidence-severity gates (gate 1: anchor file:line, "
+        "gate 2: produce evidence artifacts, gate 3: calibrate severity). "
+        "Do NOT report a finding that fails any gate."
     )
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)

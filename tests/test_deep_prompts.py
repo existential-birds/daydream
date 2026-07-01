@@ -576,3 +576,53 @@ def test_verification_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
         output_path=tmp_path / "verdicts.json",
     )
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
+
+
+def test_build_structural_prompt_includes_verification_protocol(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_structural_prompt
+
+    p = _paths(tmp_path)
+    prompt = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
+        files=["api.py"],
+        **p,
+    )
+    assert "review-verification-protocol" in prompt
+    assert "anchor" in prompt
+    assert "evidence" in prompt
+
+
+def test_build_generic_fallback_prompt_includes_verification_protocol(tmp_path: Path) -> None:
+    p = _paths(tmp_path)
+    out = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    assert "review-verification-protocol" in out
+    assert "anchor" in out
+    assert "evidence" in out
+
+
+def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_verification_prompt
+
+    items = [{"id": "1", "file": "x.py", "line": 10, "description": "Test finding"}]
+    out = build_verification_prompt(
+        items=items,
+        cwd=tmp_path,
+        output_path=tmp_path / "verdicts.json",
+    )
+    assert "Gate-0" in out or "anti-confabulation" in out
+    assert "same-turn echo" in out or "file:line" in out
+
+
+def test_no_format_skill_invocation_for_verification_protocol() -> None:
+    """The protocol is user-invocable:false — must not be used with format_skill_invocation."""
+    import subprocess
+
+    repo_root = Path(__file__).parent.parent
+    result = subprocess.run(
+        ["grep", "-rn", "format_skill_invocation", "daydream/"],
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
+    )
+    for line in result.stdout.splitlines():
+        assert "review-verification-protocol" not in line, f"format_skill_invocation references protocol: {line}"
