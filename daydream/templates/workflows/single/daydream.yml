@@ -1,0 +1,251 @@
+# Daydream review bot — single-file workflow (optional).
+#
+# Collapses the three-file split (daydream-review.yml + daydream-command.yml +
+# daydream-post.yml) into ONE workflow whose jobs are ordered by `needs:`. This
+# removes the cross-workflow `workflow_dispatch` that the split setup uses on the
+# `@<bot> review` path — and with it the App's `actions: write` permission: a
+# `workflow_dispatch` made with GITHUB_TOKEN never fires a downstream
+# `workflow_run`, which is the only reason the split setup dispatches with an App
+# token carrying `actions: write`. Here the review and post jobs run in the same
+# workflow run, chained by `needs:`, so nothing is dispatched.
+#
+# The App requests only `Pull requests: read & write`, `Contents: read`, and
+# `Metadata: read` — NOT `Actions: read & write`.
+#
+# The privilege split is preserved at the JOB level (no single job holds both PR
+# code and the App key):
+#   - gate:            App key (👀 ack), no checkout.
+#   - analyze:         checks out untrusted PR code, holds NO App key.
+#   - post:            App key, no PR-code checkout.
+#   - surface-failure: App key, no checkout.
+#
+# All untrusted event data (comment body, etc.) reaches shells via `env:` only,
+# never `${{ }}` interpolation (footgun 2). Tokens reach `gh` via `env:` and
+# never appear in a `run:` body (footgun 3).
+
+name: Daydream
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  # Decides whether to proceed and resolves the PR number. Holds the App key for
+  # the 👀 acknowledgement but never checks out code, so it may be privileged.
+  gate:
+    runs-on: ubuntu-latest
+    # Auto-review a same-repo PR on open (unless disabled), OR a trusted, non-bot
+    # `@<bot> review` comment on a PR. Fork auto-review is intentionally excluded
+    # (fork PRs get no secrets); forks are served by the comment path.
+    if: >-
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       vars.DAYDREAM_AUTO_REVIEW != 'false') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+       github.event.comment.user.type != 'Bot')
+    permissions: {}
+    outputs:
+      proceed: ${{ steps.decide.outputs.proceed }}
+      pr_number: ${{ steps.decide.outputs.pr_number }}
+    steps:
+      # For pull_request the event carries the PR number directly. For a comment,
+      # match the exact `@<handle> review` command (body via env only, footgun 2);
+      # a non-matching comment sets proceed=false and the downstream jobs skip.
+      - name: Decide and resolve PR
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BODY: ${{ github.event.comment.body }}
+          BOT_HANDLE: ${{ vars.DAYDREAM_BOT_HANDLE }}
+          PR_EVENT_NUMBER: ${{ github.event.pull_request.number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${PR_EVENT_NUMBER}" >> "$GITHUB_OUTPUT"
+          else
+            # Single-quoted sed script holds literal regex metacharacters, not shell expansions.
+            # shellcheck disable=SC2016
+            ESCAPED_HANDLE=$(printf '%s' "$BOT_HANDLE" | sed 's/[].[\*^$()+?{}|\\]/\\&/g')
+            if printf '%s' "$BODY" | grep -Eq "(^|[[:space:]])@${ESCAPED_HANDLE}[[:space:]]+review([[:space:]]|$)"; then
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+              echo "pr_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+            else
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      # Mint the App token so the 👀 reaction is signed by the bot identity rather
+      # than github-actions[bot]. Scoped to pull-requests: write only — no
+      # actions: write, because nothing is dispatched. The token never appears in
+      # a run: body.
+      - name: Mint ack token
+        id: token
+        if: github.event_name == 'issue_comment' && steps.decide.outputs.proceed == 'true'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.DAYDREAM_APP_ID }}
+          private-key: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+
+      - name: Acknowledge with eyes reaction
+        if: github.event_name == 'issue_comment' && steps.decide.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes
+
+  # Runs the reviewer over the checked-out PR head. Touches untrusted PR code, so
+  # it holds NO App credentials — ANTHROPIC_API_KEY is its only secret and the
+  # GITHUB_TOKEN is read-only.
+  analyze:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          # This job handles untrusted PR code; don't leave the GITHUB_TOKEN in .git/config.
+          persist-credentials: false
+
+      # Resolve the base ref, then fetch and detach the PR head. `refs/pull/N/head`
+      # resolves the same for same-repo and fork PRs. PR number via env, never
+      # inline interpolation (footgun 2).
+      - name: Fetch PR head and base ref
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          BASE_REF="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName --jq .baseRefName)"
+          git fetch origin "refs/pull/${PR_NUMBER}/head"
+          git checkout --detach FETCH_HEAD
+          git fetch origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+
+      - name: Install daydream
+        # Pinned to a release tag (not `main`) so the bot runs a known daydream
+        # version: reproducible and immune to main-drift / uv-cache staleness.
+        # Bump in lockstep with the package version on release (a test enforces this).
+        run: uv tool install git+https://github.com/existential-birds/daydream@v0.21.0
+
+      - name: Run daydream review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+        run: |
+          mkdir -p findings
+          daydream --review --non-interactive --pr-number "$PR_NUMBER" \
+            --findings-out findings/findings.json --base "origin/$BASE_REF" .
+
+      - name: Upload findings artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daydream-findings
+          path: findings/
+
+  # Posts the findings as the operator's App bot. Holds the App key, so it NEVER
+  # checks out PR code — it installs daydream from the pinned release and consumes
+  # only the passive findings artifact, validated by `daydream post-findings`
+  # against a strict schema and against the LIVE PR head (the trust anchor).
+  post:
+    needs: [gate, analyze]
+    if: needs.gate.outputs.proceed == 'true' && needs.analyze.result == 'success'
+    runs-on: ubuntu-latest
+    # Same-run artifact download needs no GITHUB_TOKEN scope (that is only required
+    # to reach across runs); the App token carries every write.
+    permissions: {}
+    steps:
+      - name: Mint posting token
+        id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.DAYDREAM_APP_ID }}
+          private-key: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+          permission-contents: read
+          permission-metadata: read
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+
+      - name: Install daydream
+        run: uv tool install git+https://github.com/existential-birds/daydream@v0.21.0
+
+      - name: Download findings artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daydream-findings
+          path: findings
+
+      # The PR number comes from the trusted intra-run gate output; the LIVE PR
+      # head fetched from the API is the trust anchor. post-findings validates the
+      # artifact's declared head_sha against it and aborts on mismatch.
+      - name: Resolve head SHA
+        id: target
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+        run: |
+          HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .head.sha)"
+          if [ -z "$HEAD_SHA" ]; then
+            echo "could not resolve the head SHA for PR ${PR_NUMBER}" >&2
+            exit 1
+          fi
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Post findings
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+        run: |
+          daydream post-findings findings/findings.json \
+            --pr "$PR_NUMBER" --head-sha "$HEAD_SHA" --repo "$REPO"
+
+  # Any non-success analyze result (failure, cancelled, timed_out) routes here
+  # instead of silently skipping. Holds the App key but never checks out code.
+  # `post` gates on `== 'success'`, so the two are mutually exclusive.
+  surface-failure:
+    needs: [gate, analyze]
+    if: always() && needs.gate.outputs.proceed == 'true' && needs.analyze.result != 'success'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Mint posting token
+        id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.DAYDREAM_APP_ID }}
+          private-key: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+
+      - name: Comment on the PR
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -f body="daydream review failed — see run ${RUN_URL}"

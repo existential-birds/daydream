@@ -230,10 +230,12 @@ def _build_record(
 ) -> dict[str, Any]:
     """Assemble a training record matching ``schema/v1.json``.
 
-    The returned dict carries refs (``fix_diff_ref``, ``trajectory_ref``,
-    ``spans[*].content_path``) instead of embedded content, so records stay
-    small and downstream consumers materialize bytes from the archive on
-    demand.
+    The returned dict carries refs (``fix_diff_ref``, ``recommended_diff_ref``,
+    ``trajectory_ref``, ``spans[*].content_path``) instead of embedded content,
+    so records stay small and downstream consumers materialize bytes from the
+    archive on demand. ``fix_diff_ref`` is the reviewed-INPUT diff
+    (``diff.patch``); ``recommended_diff_ref`` is daydream's OUTCOME diff
+    (``recommended.patch``, the proposed base->worktree edit).
 
     ``base_sha`` and ``changed_files`` are *read* from the on-disk
     ``manifest.json`` (passed as ``manifest``) via its ``code_context`` block.
@@ -304,10 +306,23 @@ def _build_record(
         A dict that validates against ``daydream/training/schema/v1.json``.
     """
     archive_path = Path(manifest_row.get("archive_path", ""))
+    # fix_diff_ref points at the REVIEWED-INPUT diff (diff.patch = the PR-under-
+    # review diff daydream was asked to review), NOT daydream's own fix. The
+    # name is retained for schema-v1 compatibility; treat it as the input.
     diff_path = archive_path / "diff.patch"
     fix_diff_ref = {
         "available": diff_path.is_file(),
         "archive_relative_path": "diff.patch",
+    }
+    # recommended_diff_ref points at the OUTCOME diff (recommended.patch =
+    # daydream's proposed base->worktree edit, captured best-effort after the
+    # fix phase). Best-effort capture writes nothing on no-fix/legacy runs, so
+    # available=False there; deliberately does NOT fall back to diff.patch,
+    # which would collapse the input/outcome split.
+    recommended_path = archive_path / "recommended.patch"
+    recommended_diff_ref = {
+        "available": recommended_path.is_file(),
+        "archive_relative_path": "recommended.patch",
     }
 
     # Label from the as_of-pinned silver annotation (NOT runs.outcome_labels);
@@ -350,6 +365,7 @@ def _build_record(
         },
         "review_output": review_output,
         "fix_diff_ref": fix_diff_ref,
+        "recommended_diff_ref": recommended_diff_ref,
         "outcome_label": _single_outcome_label(labels, manifest_row["session_id"]),
         "grounding_score": manifest_row.get("grounding_rate"),
         "spans": _build_spans(trajectory),

@@ -164,6 +164,16 @@ The exact, current contents ship inside the `daydream` package under
 roles, trigger matrix, and security model are documented in that directory's
 [`README.md`](../daydream/templates/workflows/README.md).
 
+> **Alternative — single-file workflow.** A manual-copy variant collapses these
+> three files into one (`daydream/templates/workflows/single/daydream.yml`). It
+> chains the review and post steps as `needs:`-ordered jobs in a single run
+> instead of dispatching a second workflow, so the App does **not** need
+> **Actions: Read and write** — omit that permission in step 1 if you use it.
+> Copy only `single/daydream.yml` (not the three files above); see its
+> [`README.md`](../daydream/templates/workflows/single/README.md). `daydream
+> setup` always lands the three-file split, so this variant is browser/manual
+> only.
+
 ### 7. Confirm
 
 Open a pull request in the repo. With auto-review on, the bot reviews it and

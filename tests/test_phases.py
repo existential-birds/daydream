@@ -220,7 +220,13 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch, make_wo
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
             max_turns=None, read_only=False,
         ):
-            yield TextEvent(text='{"issues": [{"id": 1, "description": "Bug", "file": "foo.py", "line": 10}]}')
+            yield TextEvent(
+                text=(
+                    '{"issues": [{"id": 1, "description": "Bug", "file": "foo.py", '
+                    '"line": 10, "confidence": "HIGH", "rationale": "r", '
+                    '"evidence": "foo.py:10"}]}'
+                )
+            )
             yield ResultEvent(structured_output=None, continuation=None)
 
         async def cancel(self):
@@ -232,6 +238,70 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch, make_wo
     result = await phase_parse_feedback(JsonTextBackend(), make_work(tmp_path))
     assert len(result) == 1
     assert result[0]["file"] == "foo.py"
+
+
+@pytest.mark.asyncio
+async def test_phase_parse_feedback_default_path_drops_speculative(tmp_path, monkeypatch, make_work):
+    """Issue #227 (AC3): the default (shallow) parse path drops speculative
+    findings before they reach the fix loop -- the grounding gate the deep
+    merge path applies is enforced here too, so AC3 holds for ``--shallow``
+    and PR-feedback ingestion.
+
+    Real path through ``phase_parse_feedback`` (input_path=None): the backend
+    returns one grounded finding and one evidence-free speculative finding;
+    only the grounded one survives.
+    """
+    from daydream.phases import phase_parse_feedback
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    (tmp_path / REVIEW_OUTPUT_FILE).write_text("# Issues\n")
+
+    class _Backend:
+        model = "test-model"
+        fanout_concurrency = 4
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None,
+                          agents=None, max_turns=None, read_only=False):
+            yield ResultEvent(
+                structured_output={
+                    "issues": [
+                        {
+                            "id": 1,
+                            "description": "grounded",
+                            "file": "a.py",
+                            "line": 7,
+                            "confidence": "HIGH",
+                            "rationale": "r",
+                            "evidence": "a.py:7",
+                        },
+                        {
+                            "id": 2,
+                            "description": "speculative gut feeling",
+                            "file": "",
+                            "line": 0,
+                            "confidence": "MEDIUM",
+                            "rationale": "inferred from the diff alone",
+                            "evidence": "gut feeling",
+                        },
+                    ]
+                },
+                continuation=None,
+            )
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    result = await phase_parse_feedback(_Backend(), make_work(tmp_path))
+    assert [i["description"] for i in result] == ["grounded"], (
+        f"speculative finding leaked past the shallow-path gate: {result}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1420,8 +1490,9 @@ def test_feedback_schema_requires_confidence_and_rationale():
     required = FEEDBACK_SCHEMA["properties"]["issues"]["items"]["required"]
     assert "confidence" in required
     assert "rationale" in required
+    assert "evidence" in required
     confidence = FEEDBACK_SCHEMA["properties"]["issues"]["items"]["properties"]["confidence"]
-    assert confidence["enum"] == ["HIGH", "MEDIUM", "LOW"]
+    assert confidence["enum"] == ["HIGH", "MEDIUM"]
 
 
 def test_alternative_review_schema_requires_confidence_and_rationale():
@@ -1430,15 +1501,65 @@ def test_alternative_review_schema_requires_confidence_and_rationale():
     required = ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["required"]
     assert "confidence" in required
     assert "rationale" in required
+    assert "evidence" in required
     confidence = ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["properties"]["confidence"]
-    assert confidence["enum"] == ["HIGH", "MEDIUM", "LOW"]
+    assert confidence["enum"] == ["HIGH", "MEDIUM"]
 
 
-def test_parse_feedback_rejects_unlabeled():
-    from daydream.phases import _validate_issue
+def test_is_evidenced_gate_branches():
+    """Issue #227: _is_evidenced grounds on evidence content and confidence tier."""
+    from daydream.phases import _is_evidenced
 
-    with pytest.raises(ValueError):
-        _validate_issue({"id": "1", "description": "x", "file": "a.py", "line": 1})
+    base = {"confidence": "HIGH", "rationale": "cites a real edge", "file": "api.py", "line": 42}
+    # Grounded: non-blank evidence + real file:line.
+    assert _is_evidenced({**base, "evidence": "api.py:42"}) is True
+    # Grounded via a path:line citation inside evidence even without file/line.
+    assert _is_evidenced(
+        {"confidence": "MEDIUM", "rationale": "r", "file": "", "line": 0, "evidence": "src/foo.py:7"}
+    ) is True
+    # Speculative: blank / placeholder evidence.
+    assert _is_evidenced({**base, "evidence": ""}) is False
+    assert _is_evidenced({**base, "evidence": "n/a"}) is False
+    assert _is_evidenced({**base, "evidence": "none"}) is False
+    # Speculative: "no exploration evidence" rationale.
+    assert _is_evidenced(
+        {**base, "evidence": "api.py:42", "rationale": "no exploration evidence"}
+    ) is False
+    # Speculative: inbound LOW confidence (legacy tolerance, AC4).
+    assert _is_evidenced({**base, "confidence": "LOW", "evidence": "api.py:42"}) is False
+    # Non-blank evidence but no grounded citation and no file:line -> dropped.
+    assert _is_evidenced(
+        {"confidence": "HIGH", "rationale": "r", "file": "", "line": 0, "evidence": "trust me"}
+    ) is False
+    # Issue #227: the citation heuristic requires a path component (``.`` or
+    # ``/``) before ``:`` + digits, so non-citations are not admitted.
+    assert _is_evidenced(
+        {**base, "file": "", "line": 0, "evidence": "listen on port:8080"}
+    ) is False
+    assert _is_evidenced(
+        {"confidence": "MEDIUM", "rationale": "r", "file": "", "line": 0,
+         "evidence": "ratio 3:2 is odd"}
+    ) is False
+    # A path-bearing citation still grounds even without file/line.
+    assert _is_evidenced(
+        {"confidence": "MEDIUM", "rationale": "r", "file": "", "line": 0,
+         "evidence": "see src/util.py:88"}
+    ) is True
+    # Issue #227: structural (host-tagged, whole-file) findings survive with
+    # ``line: 0`` + colon-free evidence -- they must not be demoted.
+    assert _is_evidenced(
+        {"confidence": "HIGH", "rationale": "r", "lens": "structural",
+         "file": "big.py", "line": 0, "evidence": "big.py is 1200 lines"}
+    ) is True
+    # Structural still drops on LOW / blank evidence.
+    assert _is_evidenced(
+        {"confidence": "LOW", "rationale": "r", "lens": "structural",
+         "file": "big.py", "line": 0, "evidence": "big.py:1"}
+    ) is False
+    assert _is_evidenced(
+        {"confidence": "HIGH", "rationale": "r", "lens": "structural",
+         "file": "big.py", "line": 0, "evidence": ""}
+    ) is False
 
 
 def test_review_prompt_includes_dependency_impact(tmp_path):
@@ -3324,6 +3445,7 @@ async def test_merge_writes_canonical_json_and_renders_markdown(tmp_path, monkey
                 "description": "bug",
                 "confidence": "HIGH",
                 "rationale": "r",
+                "evidence": "a.py:9",
             }
         ]
     }
@@ -3348,7 +3470,8 @@ async def test_merge_writes_canonical_json_and_renders_markdown(tmp_path, monkey
     # Structural records file: the parsed FEEDBACK_SCHEMA shape produced upstream.
     struct_path = tmp_path / "stack-structure-records.json"
     struct_path.write_text(
-        json.dumps([{"id": 1, "description": "1k-line file", "file": "big.py", "line": 1}])
+        json.dumps([{"id": 1, "description": "1k-line file", "file": "big.py", "line": 1,
+                     "evidence": "big.py:1"}])
     )
 
     report_path = await phase_cross_stack_merge(
@@ -3500,6 +3623,83 @@ async def test_verifier_excludes_structural_lens(tmp_path, monkeypatch, make_wor
     assert "bug" in backend.prompt
     # Verdicts file is written for downstream consumers.
     assert verdicts_path(dd).is_file()
+
+
+async def test_verifier_prompt_carries_gate_zero_protocol(tmp_path, monkeypatch, make_work):
+    """Real-path: ``phase_verify_recommendations`` embeds the Gate-0 anti-confabulation
+    protocol in the prompt actually handed to the backend.
+
+    Guards issue #229's wiring at the production seam — the verifier prompt the
+    agent receives must carry the same-turn-echo anti-confabulation gate, not just
+    the standalone builder (unit-tested in test_deep_prompts.py).
+    """
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+    from daydream.phases import phase_verify_recommendations
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_dim", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    work = make_work(tmp_path)
+    dd = deep_dir(work.repo)
+    dd.mkdir(parents=True, exist_ok=True)
+
+    items = {
+        "items": [
+            {
+                "id": 1,
+                "lens": "per-stack",
+                "file": "a.py",
+                "line": 9,
+                "severity": "low",
+                "description": "bug",
+                "confidence": "HIGH",
+                "rationale": "r",
+            }
+        ]
+    }
+    items_path = merged_items_path(dd)
+    items_path.write_text(json.dumps(items))
+
+    structured = {
+        "verdicts": [
+            {
+                "issue_id": 1,
+                "verdict": "consistent",
+                "evidence": "e",
+                "unverified_assumptions": [],
+            }
+        ]
+    }
+
+    class VerifyBackend:
+        model = "test-model"
+        fanout_concurrency = 4
+
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
+            self.prompt = prompt
+            yield ResultEvent(structured_output=structured, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    backend = VerifyBackend()
+    await phase_verify_recommendations(
+        backend,
+        work,
+        merged_items_path=items_path,
+        deep_dir=dd,
+    )
+
+    assert "Gate-0" in backend.prompt
+    assert "anti-confabulation" in backend.prompt
+    assert "same-turn echo" in backend.prompt
 
 
 def test_group_items_by_file_preserves_order_within_and_across_groups():

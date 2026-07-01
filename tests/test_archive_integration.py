@@ -3,7 +3,7 @@
 
 Verifies that the on_write callback fires at the right times, that the full
 archive round-trip produces valid bundles, and that CLI flags for --no-archive
-and --eval are parsed correctly into RunConfig.
+and --no-eval are parsed correctly into RunConfig.
 """
 
 from __future__ import annotations
@@ -230,22 +230,22 @@ def test_cli_no_archive_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.archive is False
 
 
-# CLI --eval flag
-def test_cli_eval_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--eval sets config.run_eval to True."""
+# CLI --no-eval flag
+def test_cli_no_eval_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--no-eval opts out: sets config.run_eval to False."""
     from daydream.cli import _parse_args
 
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--eval"])
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--no-eval"])
     config = _parse_args()
-    assert config.run_eval is True
+    assert config.run_eval is False
 
 
 # CLI defaults for archive and eval
 def test_cli_defaults_archive_and_eval(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without --no-archive or --eval, archive=True and run_eval=False."""
+    """Without --no-archive or --no-eval, archive=True and run_eval=True (eval on by default)."""
     from daydream.cli import _parse_args
 
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake"])
     config = _parse_args()
     assert config.archive is True
-    assert config.run_eval is False
+    assert config.run_eval is True

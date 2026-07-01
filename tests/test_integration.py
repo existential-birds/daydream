@@ -727,6 +727,7 @@ async def test_exploration_enriched_output_both_flows(tmp_path, make_work):
         "line": 1,
         "confidence": "HIGH",
         "rationale": "verified by Convention snake_case_modules",
+        "evidence": "a.py:1",
     }
     enriched_trust_issue = {
         "id": 1,

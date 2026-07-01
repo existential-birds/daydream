@@ -118,6 +118,21 @@ class PhaseDispatchBackend:
                 else []
             )
             self._parse_call += 1
+            # The shallow parse path now applies the #227 evidence gate, which
+            # drops findings lacking grounded evidence. These harness items
+            # model loop behaviour (not the gate), so default each to a grounded
+            # shape so it survives to the fix phase. Explicit per-item fields
+            # still win (``**it`` last) so a test can deliberately emit a
+            # speculative item.
+            issues = [
+                {
+                    "confidence": "HIGH",
+                    "rationale": "harness fixture",
+                    "evidence": f"{it.get('file') or 'harness.py'}:{it.get('line') or 1}",
+                    **it,
+                }
+                for it in issues
+            ]
             yield TextEvent(text="Parsed.")
             yield ResultEvent(structured_output={"issues": issues}, continuation=None)
         elif "fix this issue" in prompt_lower or prompt_lower.startswith("fix these"):

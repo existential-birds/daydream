@@ -55,7 +55,7 @@ def archive_run(
     target_dir: Path,
     config: RunConfig,
     status: str = "complete",
-    run_eval: bool = False,
+    run_eval: bool = True,
     work: WorkContext | None = None,
 ) -> None:
     """Copy artifact bundle to archive and index in SQLite.
@@ -250,10 +250,15 @@ def _copy_bundle(target_dir: Path, run_dir: Path, recorder: TrajectoryRecorder) 
     if deep_dir.is_dir():
         shutil.copytree(deep_dir, run_dir / "deep", dirs_exist_ok=True)
 
-    # Diff patch
+    # Diff patch (the PR-under-review diff, captured before fixes)
     diff_patch = daydream_dir / "diff.patch"
     if diff_patch.is_file():
         shutil.copy2(diff_patch, run_dir / "diff.patch")
+
+    # Recommended-change patch (daydream's proposed diff, captured after fixes)
+    recommended_patch = daydream_dir / "recommended.patch"
+    if recommended_patch.is_file():
+        shutil.copy2(recommended_patch, run_dir / "recommended.patch")
 
 
 def _run_eval(target_dir: Path, session_id: str, run_dir: Path) -> dict[str, Any] | None:
