@@ -923,7 +923,12 @@ def _is_evidenced(item: dict[str, Any]) -> bool:
     - ``rationale`` contains ``no exploration evidence`` (the exact string the
       legacy LOW-confidence prompt language emitted) -- case-insensitive;
     - there is no grounded citation: neither a real ``file`` + ``line`` > 0 nor a
-      ``path:line`` pattern anywhere in the evidence string.
+      ``path:line`` (path component + ``:`` + digits) token in the evidence string.
+
+    Items tagged ``lens="structural"`` are exempt from the grounded-citation
+    requirement: they are host-tagged, inherently whole-file findings (file-size
+    budgets, layering) that may legitimately carry ``line: 0`` with colon-free
+    evidence, so non-blank evidence is sufficient grounding for them.
 
     Args:
         item: A finding dict (per-stack, cross-stack, or structural).
@@ -950,7 +955,23 @@ def _is_evidenced(item: dict[str, Any]) -> bool:
     file_val = str(item.get("file", ""))
     line_val = item.get("line", 0)
     has_file_line = bool(file_val) and isinstance(line_val, int) and line_val > 0
-    has_citation = bool(re.search(r"\S+:\d+", evidence))
+    # A grounded citation is a ``path:line`` token (e.g. ``src/foo.py:42``).
+    # Require a path component (``.`` or ``/``) in the prefix so non-citations
+    # like ``port:8080`` / ``ratio 3:2`` / ``see LIFO:1`` are not admitted as
+    # citations (issue #227). This only narrows what counts as a citation, so
+    # a bare symbol like ``helper:42`` (no path separator) no longer satisfies
+    # the gate on its own -- such findings must ground via ``file`` + ``line``.
+    has_citation = bool(re.search(r"\S*[./]\S*:\d+", evidence))
+
+    # Structural findings are host-tagged (``lens="structural"``) and inherently
+    # whole-file (file-size budgets, layering) -- they may legitimately carry
+    # ``line: 0`` with colon-free evidence. They are a different trust class
+    # than agent-emitted per-stack findings, so the grounded-citation
+    # requirement does not apply; non-blank evidence (checked above) is
+    # sufficient grounding (issue #227: the structural lens is high-conviction
+    # by construction and must not be demoted).
+    if item.get("lens") == "structural":
+        return True
 
     return has_file_line or has_citation
 
@@ -1159,37 +1180,6 @@ def _dependency_impact_instructions() -> str:
         "any issues. When an individual issue's rationale cites a dependency, include the "
         "file:symbol reference inline within that issue."
     )
-
-
-def _validate_issue(issue: dict[str, Any]) -> None:
-    """Content-validate a parsed feedback issue for the evidence gate (issue #227).
-
-    The shallow loop and ``phase_parse_feedback`` never produce
-    ``merged-items.json`` and so bypass the structural gate in
-    ``_append_structural_and_write_merged``. This is the parallel enforcement
-    point for those paths: rather than drop, it raises ``ValueError`` (the
-    existing caught-in-runner contract) so a speculative finding cannot survive.
-
-    Args:
-        issue: Issue dict produced by structured-output parsing.
-
-    Raises:
-        ValueError: If ``confidence`` is missing/invalid or ``LOW``, if
-            ``rationale`` is missing or claims "no exploration evidence", or if
-            ``evidence`` is missing/blank.
-
-    """
-    confidence = issue.get("confidence")
-    if not confidence or confidence not in ("HIGH", "MEDIUM"):
-        raise ValueError(f"Issue is missing or has invalid confidence label: {issue!r}")
-    rationale = issue.get("rationale")
-    if not rationale:
-        raise ValueError(f"Issue is missing rationale: {issue!r}")
-    if "no exploration evidence" in str(rationale).lower():
-        raise ValueError(f"Issue is speculative (rationale claims no exploration evidence): {issue!r}")
-    evidence = issue.get("evidence")
-    if not evidence or not str(evidence).strip():
-        raise ValueError(f"Issue is missing evidence: {issue!r}")
 
 
 def _exploration_pointer(exploration_dir: Path | None) -> str:
@@ -1664,6 +1654,29 @@ If there are no actionable issues, return: {{"issues": []}}
         return []
 
     feedback_items = result["issues"]
+
+    # Structural evidence gate (issue #227, AC3): the default parse path
+    # (shallow loop + PR-feedback ingestion, ``input_path is None``) never
+    # produces merged-items.json, so it bypasses the gate in
+    # ``_append_structural_and_write_merged``. Apply the same ``_is_evidenced``
+    # drop the deep merge path uses, but ONLY here: the deep pre-merge
+    # per-stack parse passes ``input_path`` and defers grounding to the merge
+    # epilogue, where structural records are tagged ``lens="structural"`` before
+    # the gate so the structural carve-out applies. Drop (not raise) to match
+    # deep-path semantics and the graceful-degradation contract below.
+    if input_path is None:
+        evidenced: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+        for it in feedback_items:
+            (evidenced if _is_evidenced(it) else dropped).append(it)
+        if dropped:
+            print_info(
+                console,
+                f"Evidence gate: dropped {len(dropped)} speculative finding(s) "
+                f"from the shallow parse (ids: {[d.get('id') for d in dropped]})",
+            )
+        feedback_items = evidenced
+
     issue_count = len(feedback_items)
     print_info(console, f"Found {issue_count} actionable {'issue' if issue_count == 1 else 'issues'}")
     if feedback_items:
@@ -3286,7 +3299,8 @@ def _append_structural_and_write_merged(
         restrictions on repo-root dotfiles).
 
     Callers own the clear-stale step: each clears ``items_path`` /
-    ``report_path`` / ``canonical_path`` at a point appropriate to its own
+    ``report_path`` / ``canonical_path`` (and the ``dropped-speculative.json``
+    audit sidecar) at a point appropriate to its own
     failure semantics (``phase_cross_stack_merge`` clears *before* the merge
     agent runs so a crash leaves no stale output; the single-stack bypass has
     no agent, so it clears immediately before this call). Keeping clear-stale
@@ -3431,6 +3445,9 @@ def _write_single_stack_merged_items(
     canonical_path.unlink(missing_ok=True)
     report_path.unlink(missing_ok=True)
     items_path.unlink(missing_ok=True)
+    # Clear the evidence-gate audit sidecar too, so a prior run that dropped
+    # findings can't leave phantom drops on a resume that drops none (#227).
+    (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
 
     # Tag per-stack records (the merge agent normally sets lens; here the host
     # does it). ``severity`` is already present from PER_STACK_RECORD_SCHEMA.
@@ -3514,6 +3531,9 @@ async def phase_cross_stack_merge(
     canonical_path.unlink(missing_ok=True)
     report_path.unlink(missing_ok=True)
     items_path.unlink(missing_ok=True)
+    # Clear the evidence-gate audit sidecar too, so a prior run that dropped
+    # findings can't leave phantom drops on a resume that drops none (#227).
+    (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
 
     prompt = build_merge_prompt(
         per_stack_records_paths=per_stack_records_paths,

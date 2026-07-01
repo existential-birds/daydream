@@ -52,6 +52,7 @@ async def test_parse_feedback_renders_issue_table(monkeypatch, tmp_path, make_wo
                 "line": 3,
                 "confidence": "HIGH",
                 "rationale": "crashes on None",
+                "evidence": "f.py:3",
             }
         ]
     }

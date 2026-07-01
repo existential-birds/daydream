@@ -220,7 +220,13 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch, make_wo
             self, cwd, prompt, output_schema=None, continuation=None, agents=None,
             max_turns=None, read_only=False,
         ):
-            yield TextEvent(text='{"issues": [{"id": 1, "description": "Bug", "file": "foo.py", "line": 10}]}')
+            yield TextEvent(
+                text=(
+                    '{"issues": [{"id": 1, "description": "Bug", "file": "foo.py", '
+                    '"line": 10, "confidence": "HIGH", "rationale": "r", '
+                    '"evidence": "foo.py:10"}]}'
+                )
+            )
             yield ResultEvent(structured_output=None, continuation=None)
 
         async def cancel(self):
@@ -232,6 +238,70 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, monkeypatch, make_wo
     result = await phase_parse_feedback(JsonTextBackend(), make_work(tmp_path))
     assert len(result) == 1
     assert result[0]["file"] == "foo.py"
+
+
+@pytest.mark.asyncio
+async def test_phase_parse_feedback_default_path_drops_speculative(tmp_path, monkeypatch, make_work):
+    """Issue #227 (AC3): the default (shallow) parse path drops speculative
+    findings before they reach the fix loop -- the grounding gate the deep
+    merge path applies is enforced here too, so AC3 holds for ``--shallow``
+    and PR-feedback ingestion.
+
+    Real path through ``phase_parse_feedback`` (input_path=None): the backend
+    returns one grounded finding and one evidence-free speculative finding;
+    only the grounded one survives.
+    """
+    from daydream.phases import phase_parse_feedback
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_warning", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    (tmp_path / REVIEW_OUTPUT_FILE).write_text("# Issues\n")
+
+    class _Backend:
+        model = "test-model"
+        fanout_concurrency = 4
+
+        async def execute(self, cwd, prompt, output_schema=None, continuation=None,
+                          agents=None, max_turns=None, read_only=False):
+            yield ResultEvent(
+                structured_output={
+                    "issues": [
+                        {
+                            "id": 1,
+                            "description": "grounded",
+                            "file": "a.py",
+                            "line": 7,
+                            "confidence": "HIGH",
+                            "rationale": "r",
+                            "evidence": "a.py:7",
+                        },
+                        {
+                            "id": 2,
+                            "description": "speculative gut feeling",
+                            "file": "",
+                            "line": 0,
+                            "confidence": "MEDIUM",
+                            "rationale": "inferred from the diff alone",
+                            "evidence": "gut feeling",
+                        },
+                    ]
+                },
+                continuation=None,
+            )
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    result = await phase_parse_feedback(_Backend(), make_work(tmp_path))
+    assert [i["description"] for i in result] == ["grounded"], (
+        f"speculative finding leaked past the shallow-path gate: {result}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1436,44 +1506,6 @@ def test_alternative_review_schema_requires_confidence_and_rationale():
     assert confidence["enum"] == ["HIGH", "MEDIUM"]
 
 
-def test_parse_feedback_rejects_unlabeled():
-    from daydream.phases import _validate_issue
-
-    with pytest.raises(ValueError):
-        _validate_issue({"id": "1", "description": "x", "file": "a.py", "line": 1})
-
-
-def test_validate_issue_rejects_speculative():
-    """Issue #227 (AC3): _validate_issue rejects blank evidence and a
-    "no exploration evidence" rationale, and accepts a grounded finding."""
-    from daydream.phases import _validate_issue
-
-    # Blank / missing evidence is rejected even with a valid confidence+rationale.
-    with pytest.raises(ValueError):
-        _validate_issue({"confidence": "MEDIUM", "rationale": "grounded", "evidence": ""})
-    with pytest.raises(ValueError):
-        _validate_issue({"confidence": "MEDIUM", "rationale": "grounded"})
-    # A rationale that claims "no exploration evidence" is speculative.
-    with pytest.raises(ValueError):
-        _validate_issue(
-            {
-                "confidence": "MEDIUM",
-                "rationale": "inferred from the diff alone, no exploration evidence",
-                "evidence": "api.py:1",
-            }
-        )
-    # An evidenced HIGH/MEDIUM finding passes (AC6).
-    _validate_issue({"confidence": "HIGH", "rationale": "cites api.py:1", "evidence": "api.py:1"})
-
-
-def test_validate_issue_rejects_low_confidence():
-    """Issue #227 (AC4): the collapsed enum rejects inbound LOW confidence."""
-    from daydream.phases import _validate_issue
-
-    with pytest.raises(ValueError):
-        _validate_issue({"confidence": "LOW", "rationale": "grounded", "evidence": "api.py:1"})
-
-
 def test_is_evidenced_gate_branches():
     """Issue #227: _is_evidenced grounds on evidence content and confidence tier."""
     from daydream.phases import _is_evidenced
@@ -1498,6 +1530,35 @@ def test_is_evidenced_gate_branches():
     # Non-blank evidence but no grounded citation and no file:line -> dropped.
     assert _is_evidenced(
         {"confidence": "HIGH", "rationale": "r", "file": "", "line": 0, "evidence": "trust me"}
+    ) is False
+    # Issue #227: the citation heuristic requires a path component (``.`` or
+    # ``/``) before ``:`` + digits, so non-citations are not admitted.
+    assert _is_evidenced(
+        {**base, "file": "", "line": 0, "evidence": "listen on port:8080"}
+    ) is False
+    assert _is_evidenced(
+        {"confidence": "MEDIUM", "rationale": "r", "file": "", "line": 0,
+         "evidence": "ratio 3:2 is odd"}
+    ) is False
+    # A path-bearing citation still grounds even without file/line.
+    assert _is_evidenced(
+        {"confidence": "MEDIUM", "rationale": "r", "file": "", "line": 0,
+         "evidence": "see src/util.py:88"}
+    ) is True
+    # Issue #227: structural (host-tagged, whole-file) findings survive with
+    # ``line: 0`` + colon-free evidence -- they must not be demoted.
+    assert _is_evidenced(
+        {"confidence": "HIGH", "rationale": "r", "lens": "structural",
+         "file": "big.py", "line": 0, "evidence": "big.py is 1200 lines"}
+    ) is True
+    # Structural still drops on LOW / blank evidence.
+    assert _is_evidenced(
+        {"confidence": "LOW", "rationale": "r", "lens": "structural",
+         "file": "big.py", "line": 0, "evidence": "big.py:1"}
+    ) is False
+    assert _is_evidenced(
+        {"confidence": "HIGH", "rationale": "r", "lens": "structural",
+         "file": "big.py", "line": 0, "evidence": ""}
     ) is False
 
 

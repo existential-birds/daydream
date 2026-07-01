@@ -3994,3 +3994,151 @@ async def test_evidence_gate_all_speculative_yields_empty(
     dropped_desc = json.dumps(dropped["dropped_items"])
     assert "speculative generic finding" in dropped_desc
     assert "speculative structural finding" in dropped_desc
+
+
+async def test_evidence_gate_keeps_whole_file_structural_finding(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #227 (findings 3/5): a structural (host-tagged, whole-file) finding
+    with ``line: 0`` and colon-free evidence SURVIVES the gate -- the structural
+    lens is high-conviction by construction and must not be demoted.
+
+    Real path through ``runner.run`` (``--start-at merge`` tiny-diff bypass).
+    Primes a structural record whose evidence has no ``path:line`` token and
+    whose ``line`` is 0: without the structural carve-out it would fail both
+    ``has_file_line`` and ``has_citation`` and be dropped as speculative.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tiny_diff_target)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    deep = tiny_diff_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    (deep / "stack-generic-records.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "gen-1",
+                    "description": "grounded generic finding",
+                    "file": "api.py",
+                    "line": 1,
+                    "confidence": "MEDIUM",
+                    "rationale": "r",
+                    "evidence": "api.py:1",
+                }
+            ]
+        )
+    )
+    (deep / "stack-structure-records.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "structure-1",
+                    "description": "module exceeds 800 LOC budget",
+                    "file": "big.py",
+                    "line": 0,
+                    "confidence": "HIGH",
+                    "rationale": "file-size budget violated",
+                    "evidence": "big.py is 800 lines",
+                }
+            ]
+        )
+    )
+
+    rc = await run(RunConfig(target=str(tiny_diff_target), start_at="merge", cleanup=False))
+    assert rc == 0
+
+    items = json.loads((deep / "merged-items.json").read_text())["items"]
+    structural = [
+        i for i in items
+        if i.get("lens") == "structural"
+        and i.get("description") == "module exceeds 800 LOC budget"
+    ]
+    assert structural, (
+        f"whole-file structural finding was dropped by the gate: {items}"
+    )
+    assert structural[0].get("line") == 0
+
+
+async def test_evidence_gate_clears_stale_dropped_sidecar(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #227 (findings 4/6): a resume that drops 0 findings clears a stale
+    ``dropped-speculative.json`` left by a prior run, so the sidecar cannot
+    report phantom drops to eval/benchmark/human auditors.
+
+    Real path through ``runner.run`` (``--start-at merge`` tiny-diff bypass).
+    Primes a stale sidecar alongside well-evidenced records (0 drops) and
+    asserts the sidecar is gone after the run.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tiny_diff_target)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    deep = tiny_diff_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    (deep / "stack-generic-records.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "gen-1",
+                    "description": "grounded generic finding",
+                    "file": "api.py",
+                    "line": 1,
+                    "confidence": "MEDIUM",
+                    "rationale": "r",
+                    "evidence": "api.py:1",
+                }
+            ]
+        )
+    )
+    (deep / "stack-structure-records.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "structure-1",
+                    "description": "grounded structural finding",
+                    "file": "big.py",
+                    "line": 1,
+                    "confidence": "HIGH",
+                    "rationale": "r",
+                    "evidence": "big.py:1",
+                }
+            ]
+        )
+    )
+    # Stale sidecar from a prior run that dropped a finding.
+    (deep / "dropped-speculative.json").write_text(
+        json.dumps({"dropped_count": 1, "dropped_ids": [99], "dropped_items": [{"id": 99}]})
+    )
+
+    rc = await run(RunConfig(target=str(tiny_diff_target), start_at="merge", cleanup=False))
+    assert rc == 0
+
+    # The well-evidenced records survive (0 drops), so the sidecar is neither
+    # rewritten nor left stale -- it must be gone.
+    items = json.loads((deep / "merged-items.json").read_text())["items"]
+    assert any(i.get("description") == "grounded generic finding" for i in items), items
+    assert not (deep / "dropped-speculative.json").exists(), (
+        "stale dropped-speculative.json survived a 0-drop resume"
+    )
