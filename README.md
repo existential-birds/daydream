@@ -9,7 +9,7 @@ The goal is an open-weight code-review model (Qwen2.5-Coder-7B, QLoRA) trained o
 
 ## Quick Start
 
-Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and [Claude Code](https://claude.ai/code) CLI.
+Requires Python 3.12.13+, [uv](https://docs.astral.sh/uv/), and [Claude Code](https://claude.ai/code) CLI.
 
 ```bash
 git clone https://github.com/existential-birds/daydream.git
@@ -24,7 +24,7 @@ claude plugin marketplace add https://github.com/existential-birds/beagle
 claude plugin install beagle
 ```
 
-Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`.
+Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`. [Pi CLI](https://pi.dev) for `--backend pi` (z.ai GLM models).
 
 ### Golden paths
 
@@ -57,17 +57,19 @@ To update: `git pull && uv sync`
 
 Two modes: deep (default) and shallow (`--shallow`).
 
-**Deep review** runs a five-stage pipeline:
+**Deep review** runs a multi-stage pipeline:
 
 1. **Exploration pre-scan**: tree-sitter import resolution and convention detection
-2. **Intent analysis**: understands the diff and commit history
-3. **Alternative review**: identifies improvements as numbered findings
-4. **Per-stack reviews**: parallel Beagle skill invocations, one per detected stack (Python, TypeScript, Go, Rust, Elixir, iOS)
-5. **Cross-stack merge**: deduplicates per-stack findings into a unified report
+2. **Intent analysis**: reads the PR description to align review focus with what the author set out to do
+3. **Alternative review**: identifies improvements as numbered findings (gated by diff size)
+4. **Per-stack reviews**: parallel Beagle skill invocations, one per detected stack (Python, TypeScript, Go, Rust, Elixir, iOS). A structural review pass runs independently for cross-cutting concerns.
+5. **Arbiter review**: scoped Opus pass over high-severity and contested findings
+6. **Cross-stack merge**: deduplicates per-stack findings into a unified report
+7. **Recommendation verification**: validates each merged finding's recommendation against trait/interface contracts and sibling implementations
 
-After merge, an optional fix gate applies fixes one-by-one and validates with the project's test suite.
+After merge, an optional fix gate applies fixes in parallel (batched per-file) and validates with the project's test suite. Small diffs short-circuit the fan-out: the pipeline inlines diff hunks directly into a single review prompt, skipping subagent spawns.
 
-**Shallow review** (`--shallow`) runs a single-skill loop: review → parse → fix → test. Useful for single-stack projects or when you want to force a specific Beagle skill.
+**Shallow review** (`--shallow`) runs a single-skill loop: review, parse, fix, test. Useful for single-stack projects or when you want to force a specific Beagle skill.
 
 ### Trajectory Recording
 
@@ -83,10 +85,10 @@ The training data pipeline converts archived trajectories into fine-tuning datas
 
 - **correctness** (w=0.6): mean over per-finding verifier verdicts (`consistent→1.0`, `uncertain→0.5`, `contradicts→0.0`)
 - **grounding** (w=0.4): `grounding_rate ∈ [0,1]`
-- **format_valid**: dominating gate — `False` floors the composite to 0.0 (after DeepSeek-R1, arXiv:2501.12948)
+- **format_valid**: dominating gate. `False` floors the composite to 0.0 (after DeepSeek-R1, arXiv:2501.12948)
 - **length**: bounded saturating penalty (w=0.2)
 
-Composite = `round(clip(credit − w_len·len_norm, 0, 1), 4)`. Missing signals are `None`, never imputed as 0. When a maintainer accept/reject label is supplied, scoring also returns a posterior false-positive cost as a sibling field — it never alters the composite. See `reward.py` for the posterior breakdown and weight details.
+Composite = `round(clip(credit − w_len·len_norm, 0, 1), 4)`. Missing signals are `None`, never imputed as 0. When a maintainer accept/reject label is supplied, scoring also returns a posterior false-positive cost as a sibling field. It never alters the composite. See `reward.py` for the posterior breakdown and weight details.
 
 **Build corpus** (`daydream corpus build`): Projects `as_of`-pinned silver annotations into JSONL training records, filtered by outcome label, reward threshold, stack, exclusion list, and license. Writes a `lineage.json` manifest (content-addressed `trajectory_set_hash`, labeler/reward versions, `as_of` pin) for byte-for-byte reproducibility, with a temporal-leakage guard that drops annotations newer than the pin.
 
@@ -115,7 +117,9 @@ Missing the precision, F1, or addressed-comments targets auto-triggers [Mileston
 
 ### Benchmarking
 
-`daydream bench` scores deep-review findings against [Martian's Code Review Benchmark](https://github.com/withmartian/code-review-benchmark) offline set and writes per-PR precision/recall into `results/<model>/evaluations.json`. See the [benchmark runbook](docs/benchmark.md) for the full setup-to-result sequence.
+`daydream bench` scores deep-review findings against [Martian's Code Review Benchmark](https://github.com/withmartian/code-review-benchmark) offline set and writes per-PR precision/recall into `results/<model>/evaluations.json`. Any reviewer backend can be benchmarked (including GLM via OpenRouter). See the [benchmark runbook](docs/benchmark.md) for the full setup-to-result sequence.
+
+A separate [review-bot comparison harness](bench/review-bot-compare/README.md) replays daydream against any GitHub review bot (CodeRabbit, Greptile) on real PR history at the exact snapshot the bot reviewed, with deterministic and LLM-judged overlap scoring.
 
 #### Benchmark report
 
@@ -132,10 +136,10 @@ make benchmark-report DAYDREAM_TOOL=daydream-owl-beta PRICE_MODEL=glm-5.2  # ove
 
 The generator (`bench/benchmark-report/build.py`) auto-discovers every judge model under
 `results/`, recomputes each SaaS competitor on the same PR subset daydream covered per judge,
-and writes a **new self-contained report folder per run** — it never overwrites a prior report.
+and writes a **new self-contained report folder per run**. It never overwrites a prior report.
 Each run lands at `bench/benchmark-report/runs/<run-id>/{index.html,data.json,htmx.min.js}`,
 where `<run-id>` is `RUN` if given, else a UTC timestamp + corpus fingerprint; `runs/latest`
-symlinks the freshest. Open any `index.html` via `file://` — no network, htmx vendored, all
+symlinks the freshest. Open any `index.html` via `file://` with no network needed, htmx vendored, all
 charts hand-rolled SVG. It reads the benchmark corpus only and never modifies it; judges that
 have not yet scored daydream render an honest placeholder. The `runs/` folder is git-ignored
 (generated build artifacts).
@@ -146,11 +150,22 @@ have not yet scored daydream render an honest placeholder. The `runs/` folder is
 
 | Flag | Behavior |
 |------|----------|
-| _(default)_ | Deep multi-stack review → fix → test loop |
-| `--shallow` | Single-stack review → parse → fix → test |
+| _(default)_ | Deep multi-stack review, fix, test loop |
+| `--shallow` | Single-stack review, parse, fix, test |
 | `--review` | Write report to terminal/markdown, then exit |
 | `--comment` | Post inline PR comments, then exit |
-| `--comment --plan` | Post comments + implementation plan |
+| `--comment --plan` | Post comments plus implementation plan |
+
+### Additional Commands
+
+```bash
+daydream summarize <path>                          # print run-info markdown for a trajectory/run dir
+daydream setup /path/to/repo --repo OWNER/REPO    # one-command self-hosted review bot setup
+daydream setup /path/to/repo --verify             # read-only install audit (checks secrets, workflows, App)
+daydream post-findings findings.json --pr 7 --head-sha <sha> --repo owner/repo  # Phase B: validate + post
+daydream --review --findings-out findings.json --pr-number 7 /path  # Phase A: emit findings artifact
+daydream feedback 42 --bot "<bot-login>[bot]" /path  # ingest and fix bot PR comments
+```
 
 ### Corpus Commands
 
@@ -169,7 +184,7 @@ daydream corpus label <session_id> --outcome accepted  # manual outcome label ov
 
 ```bash
 daydream -s python /path/to/project           # force a specific Beagle skill
-daydream --backend codex /path/to/project     # override backend for this run
+daydream --backend codex /path/to/project     # override backend (claude, codex, pi)
 daydream --model claude-haiku-4-5 /path/to/project  # overrides ALL phases (beats config-file overrides)
 daydream --loop 3 /path/to/project            # repeat up to 3 review-fix-test rounds
 daydream --yes /path/to/project               # auto-apply fixes without prompting
@@ -182,12 +197,14 @@ daydream --start-at fix /path/to/project      # resume from a specific phase
 daydream --trajectory /tmp/run.json /path/to/project
 daydream --ignore-path vendor /path/to/project
 daydream --worktree /path/to/project          # force ephemeral worktree
+daydream --eval /path/to/project              # run deterministic trajectory analysis
+daydream --no-archive /path/to/project        # skip run archival
 daydream --non-interactive /path/to/project   # run unattended; take every prompt's safe default
 ```
 
 `--non-interactive` takes each prompt's safe default: on test failure it writes a `handoff.md` and exits non-zero instead of looping, otherwise it declines fixes and exits 0. It is orthogonal to `--yes`: `--non-interactive` controls *whether* daydream may block on stdin, while `--yes` pre-decides every yes/no gate as "yes". A non-TTY or CI environment (`CI` set) auto-enables non-interactive mode without the flag.
 
-Per-phase model and backend overrides are no longer CLI flags — set them in the config file (see [Configuration](#configuration)).
+Per-phase model and backend overrides are no longer CLI flags. Set them in the config file (see [Configuration](#configuration)).
 
 ## Configuration
 
@@ -226,7 +243,7 @@ Phase names: `exploration`, `review`, `parse`, `fix`, `test`, `verify`, `merge` 
 So `--model` beats a `[tool.daydream.phases.*]` override, which beats the
 per-backend table in `daydream/config.py`. The same order applies to backend
 selection via `--backend` / config / the `claude` fallback. (There is no
-environment-variable tier — `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
+environment-variable tier. `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
 
 ### Cost Pricing
 
@@ -236,9 +253,9 @@ the cost the Claude SDK already supplies and typically do not pass through this 
 
 Per-model cost is resolved in this order, highest first:
 
-**backend-reported `cost_usd` > user `prices.toml` > built-in price table > `—` (with footnote).**
+**backend-reported `cost_usd` > user `prices.toml` > built-in price table > `-` (with footnote).**
 
-A model present in neither the user file nor the built-in table renders `—` with
+A model present in neither the user file nor the built-in table renders `-` with
 the "not in the price table" footnote rather than a fabricated cost.
 
 To override or extend the built-in prices, create `~/.daydream/prices.toml`. The
@@ -246,10 +263,10 @@ To override or extend the built-in prices, create `~/.daydream/prices.toml`. The
 power-user escape hatch). The schema is one `[prices."<model>"]` table per model;
 each requires `input` and `output` (USD per 1M tokens) and accepts an optional
 `cached_input` that defaults to `input`. All prices must be non-negative. Overrides
-replace a built-in entry wholesale per model — there is no per-field merge.
+replace a built-in entry wholesale per model. There is no per-field merge.
 
 ```toml
-# ~/.daydream/prices.toml — USD per 1M tokens. User entries override built-ins per-model.
+# ~/.daydream/prices.toml: USD per 1M tokens. User entries override built-ins per-model.
 [prices."gpt-5.5"]
 input = 4.50
 cached_input = 0.45
@@ -293,10 +310,14 @@ Behavior notes:
 - Neither var set → ambient `gh` identity, exactly as before (the App identity is opt-in).
 - Setting only one of the two vars aborts with an error naming the missing one.
 - Posting runs (`--comment`, `--review`, `feedback`) abort if the owner/repo
-  cannot be determined or token minting fails — daydream never silently falls
+  cannot be determined or token minting fails. daydream never silently falls
   back to posting under your personal identity. Non-posting runs fall back to
   the ambient identity and continue.
 - The private key and minted tokens are redacted from logs and trajectory files.
+
+## Self-hosted Review Bot
+
+Daydream can run as a self-hosted PR review bot in your own repository's GitHub Actions, posting under your own GitHub App identity. The `daydream setup` command automates the full install (App registration, secret deposit, workflow PR). See the [setup guide](docs/self-hosted-bot-setup.md) for details.
 
 ## Output Files
 
