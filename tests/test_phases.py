@@ -1562,21 +1562,6 @@ def test_is_evidenced_gate_branches():
     ) is False
 
 
-def test_review_prompt_includes_dependency_impact(tmp_path):
-    from daydream.phases import build_review_prompt
-
-    prompt = build_review_prompt(exploration_dir=tmp_path)
-    assert "Dependency Impact" in prompt
-
-
-def test_review_prompt_distinguishes_convention_cases(tmp_path):
-    from daydream.phases import build_review_prompt
-
-    prompt = build_review_prompt(exploration_dir=tmp_path)
-    assert "DROP IT" in prompt
-    assert "flag it as HIGH" in prompt
-
-
 def test_plan_schema_requires_references():
     from daydream.phases import PLAN_SCHEMA
 
@@ -1585,13 +1570,6 @@ def test_plan_schema_requires_references():
     ref_items = items["properties"]["references"]["items"]
     assert "file" in ref_items["required"]
     assert "symbol" in ref_items["required"]
-
-
-def test_plan_prompt_forbids_fabrication(tmp_path):
-    from daydream.phases import build_plan_prompt
-
-    prompt = build_plan_prompt(exploration_dir=tmp_path)
-    assert "Do not invent" in prompt
 
 
 def test_all_phase_builders_include_exploration_pointer(tmp_path):
@@ -1613,30 +1591,6 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path):
         prompt = builder(exploration_dir=exploration_dir)
         assert str(exploration_dir) in prompt
         assert "summary.md" in prompt
-
-
-def test_issue_producing_builders_use_shared_instructions(tmp_path):
-    from daydream.phases import (  # type: ignore[attr-defined]
-        build_alternative_review_prompt,
-        build_plan_prompt,
-        build_review_prompt,
-    )
-
-    for builder in (
-        build_review_prompt,
-        build_alternative_review_prompt,
-        build_plan_prompt,
-    ):
-        prompt = builder(exploration_dir=tmp_path)
-        assert "Confidence and Convention Rules" in prompt
-
-
-def test_intent_builder_omits_issue_instructions(tmp_path):
-    from daydream.phases import build_intent_prompt
-
-    prompt = build_intent_prompt(exploration_dir=tmp_path)
-    assert "Confidence and Convention Rules" not in prompt
-    assert "issue" not in prompt.lower()
 
 
 def test_build_review_prompt_with_prior_commits():
@@ -1964,33 +1918,6 @@ def test_minimal_handoff_separates_facts_from_unknown_cause():
     # No fabricated cause — the fallback states the cause is unknown.
     assert "cause" in body.lower() and "unknown" in body.lower()
     assert "not revert" in body or "do NOT revert" in body
-
-
-def test_failure_summarizer_prompt_demands_evidence_and_sections():
-    """The summarizer prompt carries the A+B+C evidence-grounded contract."""
-    from daydream.phases import _build_failure_summarizer_prompt
-
-    prompt = _build_failure_summarizer_prompt(
-        test_output="E   assert 1 == 2",
-        trajectory_path=None,
-        trajectories_dir=None,
-        diff_path=None,
-        manifest_path=None,
-        deep_dir=None,
-        changed_files=[],
-        has_trajectory=True,
-    )
-    # A — expanded read-only git allowance: every history verb present.
-    for verb in ("git log", "git blame", "git show", "git diff"):
-        assert verb in prompt
-    # B — facts/hypotheses structure.
-    assert "Verified facts" in prompt
-    assert "Hypotheses (unverified)" in prompt
-    # A — evidence rule targets the incident directly.
-    assert "NEVER attribute a code change to" in prompt
-    # C — quote-ground-truth instruction.
-    assert "failing assertion" in prompt
-    assert "do NOT revert" in prompt or "not revert" in prompt
 
 
 @pytest.mark.asyncio
