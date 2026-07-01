@@ -1157,6 +1157,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                     items,
                     intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
                 )
+            # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
+            # NOW, before the fix-failure and test-failure early returns below, so
+            # a run that generated a recommendation always archives it — even when
+            # tests fail or a fix group is reverted. Best-effort; never raises.
+            git_ops.capture_recommended_patch_with_base(
+                work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
+            )
             fix_failures_p = fix_failures_path(dd)
             if fix_failures:
                 # Persist so the archive marks the run "partial" instead of
@@ -1208,12 +1215,6 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # the fix backend (no separate "commit" phase identifier).
             await phase_commit_push(
                 _resolve_backend(config, "fix", backend_cache), work
-            )
-            # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
-            # so training signals score the RECOMMENDED changes, not the diff
-            # under review. Best-effort; never blocks a successful run.
-            git_ops.capture_recommended_patch_with_base(
-                work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
             )
             return 0
 

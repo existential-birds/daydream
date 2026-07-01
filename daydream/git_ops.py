@@ -878,6 +878,16 @@ def capture_recommended_patch(repo: Path, base_ref: str | None, out_path: Path) 
         recommended = diff_worktree_against(repo, base_ref, ["."])
     except GitError:
         return False
+    # `git diff <base_ref>` only reports tracked-file changes, so new files the
+    # fix phase created are absent. Append a creation hunk for each via
+    # `git diff --no-index /dev/null <file>` (exit 1 = "files differ", expected).
+    try:
+        for rel in list_untracked(repo):
+            proc = _run_git(repo, ["diff", "--no-index", "/dev/null", rel], timeout=30, retries=0)
+            if proc.returncode in (0, 1):
+                recommended += proc.stdout
+    except GitError:
+        return False
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if not recommended.strip():
         # Empty marker: a present-but-empty recommended.patch distinguishes a

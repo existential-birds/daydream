@@ -12,7 +12,6 @@
     "code_context",
     "review_output",
     "fix_diff_ref",
-    "recommended_diff_ref",
     "outcome_label",
     "grounding_score",
     "spans",

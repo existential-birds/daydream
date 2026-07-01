@@ -1129,6 +1129,16 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                     await phase_fix(fix_backend, work, item, i, len(items))
                     fixes_count += 1
 
+            # Capture the recommended patch NOW, before tests run and a failure
+            # reverts the tree below. Overwritten each iteration so the file holds
+            # the cumulative fix against the pre-first-fix base. Best-effort.
+            git_ops.capture_recommended_patch_with_base(
+                target_dir,
+                pre_fix_snapshot,
+                pre_fix_head,
+                target_dir / ".daydream" / "recommended.patch",
+            )
+
             async with phase_scope(DaydreamPhase.TEST):
                 passed, retries = await phase_test_and_heal(test_backend, work, feedback_items=items)
 
@@ -1250,6 +1260,15 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
                 else:
                     print_info(console, "No feedback items found, skipping fix phase")
 
+            # Capture the recommended patch NOW, before tests run and a failure
+            # returns early below. Best-effort; never blocks the run.
+            git_ops.capture_recommended_patch_with_base(
+                target_dir,
+                pre_fix_snapshot,
+                pre_fix_head,
+                target_dir / ".daydream" / "recommended.patch",
+            )
+
             async with phase_scope(DaydreamPhase.TEST):
                 tests_passed, test_retries = await phase_test_and_heal(
                     test_backend, work, feedback_items=feedback_items
@@ -1288,16 +1307,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             elif commit_decision is None:
                 await phase_commit_push(review_backend, work)
             # commit_decision is False -> forced decline, skip commit.
-
-            # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
-            # so training signals score the RECOMMENDED changes, not the diff
-            # under review. Best-effort; never blocks a successful run.
-            git_ops.capture_recommended_patch_with_base(
-                target_dir,
-                pre_fix_snapshot,
-                pre_fix_head,
-                target_dir / ".daydream" / "recommended.patch",
-            )
 
             if cleanup_enabled:
                 review_output_path = target_dir / REVIEW_OUTPUT_FILE
