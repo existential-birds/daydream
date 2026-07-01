@@ -157,7 +157,7 @@ The `daydream bench` `--model` flag sets the judge model label (for the results 
 
 ## First measured baseline (provisional)
 
-A first full sweep was run on **2026-06-04** to validate the harness end-to-end. These numbers are a **single-sweep provisional baseline**, not a published result. For the published commercial-bot numbers these are ultimately measured against, see the [Martian Code Review Benchmark leaderboard (offline mode)](https://codereview.withmartian.com/?mode=offline). Daydream ran on `claude-opus-4-5` (the `daydream-owl-alpha` tool label) with default deep multi-stack review.
+A first full sweep was run on **2026-06-04** to validate the harness end-to-end. These numbers are a **single-sweep provisional baseline**, not a published result. For the published commercial-bot numbers these are ultimately measured against, see the [Martian Code Review Benchmark leaderboard (offline mode)](https://codereview.withmartian.com/?mode=offline). The reviewer (tool label `daydream-owl-alpha`, Daydream's default deep multi-stack pipeline) was scored by the judge model `claude-opus-4-5`.
 
 The benchmark report generator (`make benchmark-report`) renders an offline comparison from the same `results/` data against 42 competing review tools on the 22-PR subset daydream covered:
 
