@@ -11,7 +11,7 @@ This runbook takes you from nothing to a scored result.
 - **`git` and `gh` on `PATH`.** `git` performs the blobless clone and `pull/N/head` fetch per PR.
 - **The Beagle plugin** installed in Claude Code (see the [Quickstart](../README.md#quickstart)). Deep review needs the stack-specific skills.
 - **A backend for the reviewer under test.** By default the reviewer runs daydream's built-in default backend (Claude). To benchmark another backend, select it with `--reviewer-backend` (see [Selecting the reviewer backend](#selecting-the-reviewer-backend)). The `pi` backend driving a GLM model over OpenRouter additionally needs the `pi` CLI on `PATH` and the OpenRouter provider extension registered with `pi` (installed once via `pi install`); the run forwards `--reviewer-provider` to the reviewer as the `PI_PROVIDER` environment variable.
-- **The judge credential, exported.** Scoring requires one env var and accepts two optional overrides:
+- **Scoring credential, exported.** Scoring requires one env var and accepts two optional overrides:
   - `MARTIAN_API_KEY`: an OpenRouter `sk-or-…` key (or a withmartian key). **Required for `--score`.**
   - `MARTIAN_BASE_URL`: the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1` (default set by the withmartian step modules, not by daydream); set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
   - `MARTIAN_MODEL`: the judge model id. Defaults to `openai/gpt-4o-mini` (default set by the withmartian step modules, not by daydream); should match `--model` for comparable results.
@@ -26,12 +26,12 @@ This runbook takes you from nothing to a scored result.
 
 ## Configuration file (`[tool.daydream.bench]`)
 
-Repeating `--benchmark-repo`, the judge `--model`, and the full reviewer flag set on every invocation gets old. A `[tool.daydream.bench]` table in the `pyproject.toml` (or `.daydream.toml`) of the directory you run `daydream bench` from supplies defaults **under** the CLI flags. Precedence is always **CLI flag > config file > built-in default**: an explicit flag always wins; the config only fills a flag you omit.
+Repeating `--benchmark-repo`, the scoring `--model`, and the full reviewer flag set on every invocation gets old. A `[tool.daydream.bench]` table in the `pyproject.toml` (or `.daydream.toml`) of the directory you run `daydream bench` from supplies defaults **under** the CLI flags. Precedence is always **CLI flag > config file > built-in default**: an explicit flag always wins; the config only fills a flag you omit.
 
 ```toml
 [tool.daydream.bench]
 benchmark-repo = "../code-review-benchmark/offline"   # makes --benchmark-repo optional
-model = "anthropic/claude-opus-4-5-20251101"           # judge model when --model is omitted
+model = "anthropic/claude-opus-4-5-20251101"           # scoring model when --model is omitted
 
 # Named reviewer presets: each expands to --reviewer-backend / -model / -provider.
 [tool.daydream.bench.reviewers.glm]
@@ -52,7 +52,7 @@ With the table above, the full GLM sweep over one PR collapses to:
 daydream bench --reviewer glm --only grafana --limit 1
 ```
 
-`benchmark-repo` and the judge `model` come from config; `--reviewer glm` supplies the backend/model/provider and the `daydream-glm` label. (Scoring is on by default, so `MARTIAN_API_KEY` must be present; see [Prerequisites](#prerequisites).)
+`benchmark-repo` and the scoring `model` come from config; `--reviewer glm` supplies the backend/model/provider and the `daydream-glm` label. (Scoring is on by default, so `MARTIAN_API_KEY` must be present; see [Prerequisites](#prerequisites).)
 
 ## Smoke subset
 
@@ -151,13 +151,13 @@ Re-running is resumable and idempotent. `benchmark_data.json` is saved after eac
 
 ## Comparability caveat
 
-When comparing results, what matters is the reviewer model (the model doing the review) and the judge model (the model scoring the findings) are both reported. A different reviewer model produces different findings; a different judge model scores the same findings differently. The offline HTML report at `bench/benchmark-report/runs/latest/index.html` shows both for each run.
+What matters is the reviewer. A different reviewer pipeline (different backend, model config, or tool label) produces different findings — changing the reviewer changes the numbers. The offline HTML report at `bench/benchmark-report/runs/latest/index.html` documents the reviewer configuration for each run.
 
-The `daydream bench` `--model` flag sets the judge model label (for the results directory). The judge's underlying model is set by `MARTIAN_MODEL`. The runner's model is set by `--reviewer-model`. Both are documented in the report metadata.
+The `daydream bench` `--model` flag sets the scoring model label (for the results directory). The runner's model is set by `--reviewer-model`. Both are documented in the report metadata.
 
 ## First measured baseline (provisional)
 
-A first full sweep was run on **2026-06-04** to validate the harness end-to-end. These numbers are a **single-sweep provisional baseline**, not a published result. For the published commercial-bot numbers these are ultimately measured against, see the [Martian Code Review Benchmark leaderboard (offline mode)](https://codereview.withmartian.com/?mode=offline). The reviewer (tool label `daydream-owl-alpha`, Daydream's default deep multi-stack pipeline) was scored by the judge model `claude-opus-4-5`.
+A first full sweep was run on **2026-06-04** to validate the harness end-to-end. These numbers are a **single-sweep provisional baseline**, not a published result. For the published commercial-bot numbers these are ultimately measured against, see the [Martian Code Review Benchmark leaderboard (offline mode)](https://codereview.withmartian.com/?mode=offline). Daydream's default deep multi-stack pipeline (tool label `daydream-owl-alpha`) produced the following baseline:
 
 The benchmark report generator (`make benchmark-report`) renders an offline comparison from the same `results/` data against 42 competing review tools on the 22-PR subset daydream covered:
 
@@ -176,4 +176,4 @@ Caveats:
 - **Single sweep.** No variance band; the LLM judge runs at `temperature: 0.0` but is not fully deterministic.
 - **4 PRs unscored.** The offline set has 26 evaluable PRs; daydream's sweep covered 22 (the remainder exceeded per-PR time caps or hit transient failures). The sweep is resumable.
 - **Precision gap.** 36 TP against 139 FP. Precision (0.206) sits below the README's 50% target. Recall (0.590) is competitive, ranking 10th of 42 tools. The precision gap is what the training milestone is meant to close.
-- **Tied to this setup.** Daydream model, judge model, date all move the number.
+- **Tied to this setup.** Reviewer pipeline, date both move the number.
