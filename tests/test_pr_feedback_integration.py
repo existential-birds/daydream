@@ -101,6 +101,9 @@ class _PRFeedbackStubBackend:
                             "description": "Align hello() return value with docstring",
                             "file": "api.py",
                             "line": 1,
+                            "confidence": "HIGH",
+                            "rationale": "return value diverges from docstring",
+                            "evidence": "api.py:1",
                         }
                     ]
                 },

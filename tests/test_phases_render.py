@@ -52,6 +52,7 @@ async def test_parse_feedback_renders_issue_table(monkeypatch, tmp_path, make_wo
                 "line": 3,
                 "confidence": "HIGH",
                 "rationale": "crashes on None",
+                "evidence": "f.py:3",
             }
         ]
     }
@@ -77,6 +78,7 @@ async def test_merge_prints_item_count(monkeypatch, tmp_path, make_work):
             "line": i,
             "confidence": "HIGH",
             "rationale": "r",
+            "evidence": f"f{i}.py:{i}",
             "lens": "per-stack",
             "severity": "high",
         }

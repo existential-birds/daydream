@@ -3,6 +3,7 @@
 import copy
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -774,10 +775,11 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
                     "description": {"type": "string"},
                     "file": {"type": "string"},
                     "line": {"type": "integer"},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
                     "rationale": {"type": "string"},
+                    "evidence": {"type": "string"},
                 },
-                "required": ["id", "description", "file", "line", "confidence", "rationale"],
+                "required": ["id", "description", "file", "line", "confidence", "rationale", "evidence"],
                 "additionalProperties": False,
             },
         },
@@ -800,7 +802,7 @@ PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity
     "enum": ["high", "medium", "low"],
 }
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
-    "id", "description", "file", "line", "severity", "confidence", "rationale"
+    "id", "description", "file", "line", "severity", "confidence", "rationale", "evidence"
 ]
 
 ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
@@ -817,8 +819,9 @@ ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
                     "recommendation": {"type": "string"},
                     "severity": {"type": "string", "enum": ["high", "medium", "low"]},
                     "files": {"type": "array", "items": {"type": "string"}},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
                     "rationale": {"type": "string"},
+                    "evidence": {"type": "string"},
                 },
                 "required": [
                     "id",
@@ -829,6 +832,7 @@ ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
                     "files",
                     "confidence",
                     "rationale",
+                    "evidence",
                 ],
                 "additionalProperties": False,
             },
@@ -850,8 +854,9 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                     "description": {"type": "string"},
                     "file": {"type": "string"},
                     "line": {"type": "integer"},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
                     "rationale": {"type": "string"},
+                    "evidence": {"type": "string"},
                     "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural"]},
                     "severity": {"type": "string", "enum": ["high", "medium", "low"]},
                 },
@@ -862,6 +867,7 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                     "line",
                     "confidence",
                     "rationale",
+                    "evidence",
                     "lens",
                     "severity",
                 ],
@@ -897,6 +903,77 @@ def normalize_items(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for new_id, item in enumerate(raw, start=1):
         normalized.append({**item, "id": new_id})
     return normalized
+
+
+# Placeholder evidence strings that are structurally present but carry no
+# grounding -- treated as "no evidence" by the gate (issue #227).
+_PLACEHOLDER_EVIDENCE: frozenset[str] = frozenset({"n/a", "none", "-"})
+
+
+def _is_evidenced(item: dict[str, Any]) -> bool:
+    """Return True if the finding is grounded in evidence, False if speculative.
+
+    The structural evidence gate (issue #227): every finding Daydream emits must
+    carry a concrete, grounded citation. A finding is dropped as speculative when
+    ANY of the following hold:
+
+    - ``confidence`` is ``LOW`` (legacy tolerance for the collapsed HIGH/MEDIUM
+      enum before the sibling prompt-elimination issue lands, AC4);
+    - ``evidence`` is missing, blank, or a placeholder (``n/a`` / ``none`` / ``-``);
+    - ``rationale`` contains ``no exploration evidence`` (the exact string the
+      legacy LOW-confidence prompt language emitted) -- case-insensitive;
+    - there is no grounded citation: neither a real ``file`` + ``line`` > 0 nor a
+      ``path:line`` (path component + ``:`` + digits) token in the evidence string.
+
+    Items tagged ``lens="structural"`` are exempt from the grounded-citation
+    requirement: they are host-tagged, inherently whole-file findings (file-size
+    budgets, layering) that may legitimately carry ``line: 0`` with colon-free
+    evidence, so non-blank evidence is sufficient grounding for them.
+
+    Args:
+        item: A finding dict (per-stack, cross-stack, or structural).
+
+    Returns:
+        True when the finding is grounded and may reach ``merged-items.json``;
+        False when it is speculative and must be dropped.
+    """
+    # Legacy tolerance (AC4): the confidence enum collapsed to HIGH/MEDIUM, but
+    # the sibling prompt-elimination issue still emits LOW today. Treat any
+    # inbound LOW confidence as speculative so this gate is robust before that
+    # prompt change lands.
+    if str(item.get("confidence", "")).upper() == "LOW":
+        return False
+
+    evidence = str(item.get("evidence", "")).strip()
+    if not evidence or evidence.lower() in _PLACEHOLDER_EVIDENCE:
+        return False
+
+    rationale = str(item.get("rationale", ""))
+    if "no exploration evidence" in rationale.lower():
+        return False
+
+    file_val = str(item.get("file", ""))
+    line_val = item.get("line", 0)
+    has_file_line = bool(file_val) and isinstance(line_val, int) and line_val > 0
+    # A grounded citation is a ``path:line`` token (e.g. ``src/foo.py:42``).
+    # Require a path component (``.`` or ``/``) in the prefix so non-citations
+    # like ``port:8080`` / ``ratio 3:2`` / ``see LIFO:1`` are not admitted as
+    # citations (issue #227). This only narrows what counts as a citation, so
+    # a bare symbol like ``helper:42`` (no path separator) no longer satisfies
+    # the gate on its own -- such findings must ground via ``file`` + ``line``.
+    has_citation = bool(re.search(r"\S*[./]\S*:\d+", evidence))
+
+    # Structural findings are host-tagged (``lens="structural"``) and inherently
+    # whole-file (file-size budgets, layering) -- they may legitimately carry
+    # ``line: 0`` with colon-free evidence. They are a different trust class
+    # than agent-emitted per-stack findings, so the grounded-citation
+    # requirement does not apply; non-blank evidence (checked above) is
+    # sufficient grounding (issue #227: the structural lens is high-conviction
+    # by construction and must not be demoted).
+    if item.get("lens") == "structural":
+        return True
+
+    return has_file_line or has_citation
 
 
 # Canonical severity ordering shared by the deep fix loop and the shallow fix
@@ -1103,24 +1180,6 @@ def _dependency_impact_instructions() -> str:
         "any issues. When an individual issue's rationale cites a dependency, include the "
         "file:symbol reference inline within that issue."
     )
-
-
-def _validate_issue(issue: dict[str, Any]) -> None:
-    """Validate a parsed feedback issue carries the required confidence/rationale fields.
-
-    Args:
-        issue: Issue dict produced by structured-output parsing.
-
-    Raises:
-        ValueError: If `confidence` or `rationale` is missing or empty.
-
-    """
-    confidence = issue.get("confidence")
-    if not confidence or confidence not in ("HIGH", "MEDIUM", "LOW"):
-        raise ValueError(f"Issue is missing or has invalid confidence label: {issue!r}")
-    rationale = issue.get("rationale")
-    if not rationale:
-        raise ValueError(f"Issue is missing rationale: {issue!r}")
 
 
 def _exploration_pointer(exploration_dir: Path | None) -> str:
@@ -1595,6 +1654,29 @@ If there are no actionable issues, return: {{"issues": []}}
         return []
 
     feedback_items = result["issues"]
+
+    # Structural evidence gate (issue #227, AC3): the default parse path
+    # (shallow loop + PR-feedback ingestion, ``input_path is None``) never
+    # produces merged-items.json, so it bypasses the gate in
+    # ``_append_structural_and_write_merged``. Apply the same ``_is_evidenced``
+    # drop the deep merge path uses, but ONLY here: the deep pre-merge
+    # per-stack parse passes ``input_path`` and defers grounding to the merge
+    # epilogue, where structural records are tagged ``lens="structural"`` before
+    # the gate so the structural carve-out applies. Drop (not raise) to match
+    # deep-path semantics and the graceful-degradation contract below.
+    if input_path is None:
+        evidenced: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+        for it in feedback_items:
+            (evidenced if _is_evidenced(it) else dropped).append(it)
+        if dropped:
+            print_info(
+                console,
+                f"Evidence gate: dropped {len(dropped)} speculative finding(s) "
+                f"from the shallow parse (ids: {[d.get('id') for d in dropped]})",
+            )
+        feedback_items = evidenced
+
     issue_count = len(feedback_items)
     print_info(console, f"Found {issue_count} actionable {'issue' if issue_count == 1 else 'issues'}")
     if feedback_items:
@@ -3088,11 +3170,12 @@ ARBITER_SCHEMA: dict[str, Any] = {
                     "arb_id": {"type": "integer"},
                     "keep": {"type": "boolean"},
                     "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
                     "description": {"type": "string"},
                     "rationale": {"type": "string"},
+                    "evidence": {"type": "string"},
                 },
-                "required": ["arb_id", "keep", "severity", "confidence", "description", "rationale"],
+                "required": ["arb_id", "keep", "severity", "confidence", "description", "rationale", "evidence"],
                 "additionalProperties": False,
             },
         },
@@ -3159,6 +3242,7 @@ async def phase_arbiter_review(
             "confidence": rec.get("confidence"),
             "description": rec.get("description"),
             "rationale": rec.get("rationale"),
+            "evidence": rec.get("evidence"),
         }
         for i, rec in enumerate(selected_records, start=1)
     ]
@@ -3215,7 +3299,8 @@ def _append_structural_and_write_merged(
         restrictions on repo-root dotfiles).
 
     Callers own the clear-stale step: each clears ``items_path`` /
-    ``report_path`` / ``canonical_path`` at a point appropriate to its own
+    ``report_path`` / ``canonical_path`` (and the ``dropped-speculative.json``
+    audit sidecar) at a point appropriate to its own
     failure semantics (``phase_cross_stack_merge`` clears *before* the merge
     agent runs so a crash leaves no stale output; the single-stack bypass has
     no agent, so it clears immediately before this call). Keeping clear-stale
@@ -3261,7 +3346,37 @@ def _append_structural_and_write_merged(
                 }
             )
 
-    items = normalize_items(base_items + structural_items)
+    # Structural evidence gate (issue #227): drop speculative / evidence-free
+    # findings BEFORE normalization so nothing ungrounded reaches the canonical
+    # merged-items.json (and therefore review-output.md, the fix stage, PR
+    # posting, or the benchmark). This is the single unconditional enforcement
+    # point shared by both merge paths. Dropped items are logged and written to
+    # an audit sidecar -- never silently discarded.
+    evidenced: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for item in base_items + structural_items:
+        (evidenced if _is_evidenced(item) else dropped).append(item)
+
+    if dropped:
+        sidecar_path = items_path.parent / "dropped-speculative.json"
+        dropped_ids = [d.get("id") for d in dropped]
+        sidecar_path.write_text(
+            json.dumps(
+                {
+                    "dropped_count": len(dropped),
+                    "dropped_ids": dropped_ids,
+                    "dropped_items": dropped,
+                },
+                indent=2,
+            )
+        )
+        print_info(
+            console,
+            f"Evidence gate: dropped {len(dropped)} speculative finding(s) "
+            f"(ids: {dropped_ids}), wrote {sidecar_path}",
+        )
+
+    items = normalize_items(evidenced)
     items_path.write_text(json.dumps({"items": items}, indent=2))
     print_info(console, f"Merged into {len(items)} items")
 
@@ -3330,6 +3445,9 @@ def _write_single_stack_merged_items(
     canonical_path.unlink(missing_ok=True)
     report_path.unlink(missing_ok=True)
     items_path.unlink(missing_ok=True)
+    # Clear the evidence-gate audit sidecar too, so a prior run that dropped
+    # findings can't leave phantom drops on a resume that drops none (#227).
+    (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
 
     # Tag per-stack records (the merge agent normally sets lens; here the host
     # does it). ``severity`` is already present from PER_STACK_RECORD_SCHEMA.
@@ -3413,6 +3531,9 @@ async def phase_cross_stack_merge(
     canonical_path.unlink(missing_ok=True)
     report_path.unlink(missing_ok=True)
     items_path.unlink(missing_ok=True)
+    # Clear the evidence-gate audit sidecar too, so a prior run that dropped
+    # findings can't leave phantom drops on a resume that drops none (#227).
+    (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
 
     prompt = build_merge_prompt(
         per_stack_records_paths=per_stack_records_paths,

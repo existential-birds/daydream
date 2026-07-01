@@ -284,6 +284,7 @@ class _FakeSDKClient:
                         "severity": "medium",
                         "confidence": "MEDIUM",
                         "rationale": "The current name is ambiguous.",
+                        "evidence": "foo.py:1",
                     }
                 ]
             else:  # FEEDBACK_SCHEMA (structural parse)
@@ -342,6 +343,7 @@ class _FakeSDKClient:
                                 "description": "Use a more descriptive function name",
                                 "confidence": "MEDIUM",
                                 "rationale": "The current name is ambiguous.",
+                                "evidence": "foo.py:1",
                             }
                         ]
                     },
