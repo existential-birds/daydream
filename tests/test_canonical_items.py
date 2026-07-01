@@ -6,7 +6,8 @@ from daydream.phases import MERGED_ITEMS_SCHEMA, normalize_items
 
 def test_schema_requires_lens_and_severity():
     item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
-            "confidence": "HIGH", "rationale": "r", "lens": "structural", "severity": "high"}
+            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
+            "lens": "structural", "severity": "high"}
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # passes
     bad = {k: v for k, v in item.items() if k != "lens"}
     with pytest.raises(jsonschema.ValidationError):

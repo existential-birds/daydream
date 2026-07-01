@@ -111,8 +111,9 @@ class _RecordingBackend:
                         "line": 1,
                         "severity": "low",
                         "description": "issue",
-                        "confidence": "LOW",
+                        "confidence": "MEDIUM",
                         "rationale": "r",
+                        "evidence": "api.py:1",
                     }
                 ]
             },

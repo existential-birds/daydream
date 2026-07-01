@@ -77,6 +77,7 @@ async def test_merge_prints_item_count(monkeypatch, tmp_path, make_work):
             "line": i,
             "confidence": "HIGH",
             "rationale": "r",
+            "evidence": f"f{i}.py:{i}",
             "lens": "per-stack",
             "severity": "high",
         }

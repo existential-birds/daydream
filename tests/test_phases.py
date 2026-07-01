@@ -1420,8 +1420,9 @@ def test_feedback_schema_requires_confidence_and_rationale():
     required = FEEDBACK_SCHEMA["properties"]["issues"]["items"]["required"]
     assert "confidence" in required
     assert "rationale" in required
+    assert "evidence" in required
     confidence = FEEDBACK_SCHEMA["properties"]["issues"]["items"]["properties"]["confidence"]
-    assert confidence["enum"] == ["HIGH", "MEDIUM", "LOW"]
+    assert confidence["enum"] == ["HIGH", "MEDIUM"]
 
 
 def test_alternative_review_schema_requires_confidence_and_rationale():
@@ -1430,8 +1431,9 @@ def test_alternative_review_schema_requires_confidence_and_rationale():
     required = ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["required"]
     assert "confidence" in required
     assert "rationale" in required
+    assert "evidence" in required
     confidence = ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["properties"]["confidence"]
-    assert confidence["enum"] == ["HIGH", "MEDIUM", "LOW"]
+    assert confidence["enum"] == ["HIGH", "MEDIUM"]
 
 
 def test_parse_feedback_rejects_unlabeled():
@@ -1439,6 +1441,64 @@ def test_parse_feedback_rejects_unlabeled():
 
     with pytest.raises(ValueError):
         _validate_issue({"id": "1", "description": "x", "file": "a.py", "line": 1})
+
+
+def test_validate_issue_rejects_speculative():
+    """Issue #227 (AC3): _validate_issue rejects blank evidence and a
+    "no exploration evidence" rationale, and accepts a grounded finding."""
+    from daydream.phases import _validate_issue
+
+    # Blank / missing evidence is rejected even with a valid confidence+rationale.
+    with pytest.raises(ValueError):
+        _validate_issue({"confidence": "MEDIUM", "rationale": "grounded", "evidence": ""})
+    with pytest.raises(ValueError):
+        _validate_issue({"confidence": "MEDIUM", "rationale": "grounded"})
+    # A rationale that claims "no exploration evidence" is speculative.
+    with pytest.raises(ValueError):
+        _validate_issue(
+            {
+                "confidence": "MEDIUM",
+                "rationale": "inferred from the diff alone, no exploration evidence",
+                "evidence": "api.py:1",
+            }
+        )
+    # An evidenced HIGH/MEDIUM finding passes (AC6).
+    _validate_issue({"confidence": "HIGH", "rationale": "cites api.py:1", "evidence": "api.py:1"})
+
+
+def test_validate_issue_rejects_low_confidence():
+    """Issue #227 (AC4): the collapsed enum rejects inbound LOW confidence."""
+    from daydream.phases import _validate_issue
+
+    with pytest.raises(ValueError):
+        _validate_issue({"confidence": "LOW", "rationale": "grounded", "evidence": "api.py:1"})
+
+
+def test_is_evidenced_gate_branches():
+    """Issue #227: _is_evidenced grounds on evidence content and confidence tier."""
+    from daydream.phases import _is_evidenced
+
+    base = {"confidence": "HIGH", "rationale": "cites a real edge", "file": "api.py", "line": 42}
+    # Grounded: non-blank evidence + real file:line.
+    assert _is_evidenced({**base, "evidence": "api.py:42"}) is True
+    # Grounded via a path:line citation inside evidence even without file/line.
+    assert _is_evidenced(
+        {"confidence": "MEDIUM", "rationale": "r", "file": "", "line": 0, "evidence": "src/foo.py:7"}
+    ) is True
+    # Speculative: blank / placeholder evidence.
+    assert _is_evidenced({**base, "evidence": ""}) is False
+    assert _is_evidenced({**base, "evidence": "n/a"}) is False
+    assert _is_evidenced({**base, "evidence": "none"}) is False
+    # Speculative: "no exploration evidence" rationale.
+    assert _is_evidenced(
+        {**base, "evidence": "api.py:42", "rationale": "no exploration evidence"}
+    ) is False
+    # Speculative: inbound LOW confidence (legacy tolerance, AC4).
+    assert _is_evidenced({**base, "confidence": "LOW", "evidence": "api.py:42"}) is False
+    # Non-blank evidence but no grounded citation and no file:line -> dropped.
+    assert _is_evidenced(
+        {"confidence": "HIGH", "rationale": "r", "file": "", "line": 0, "evidence": "trust me"}
+    ) is False
 
 
 def test_review_prompt_includes_dependency_impact(tmp_path):
@@ -3324,6 +3384,7 @@ async def test_merge_writes_canonical_json_and_renders_markdown(tmp_path, monkey
                 "description": "bug",
                 "confidence": "HIGH",
                 "rationale": "r",
+                "evidence": "a.py:9",
             }
         ]
     }
@@ -3348,7 +3409,8 @@ async def test_merge_writes_canonical_json_and_renders_markdown(tmp_path, monkey
     # Structural records file: the parsed FEEDBACK_SCHEMA shape produced upstream.
     struct_path = tmp_path / "stack-structure-records.json"
     struct_path.write_text(
-        json.dumps([{"id": 1, "description": "1k-line file", "file": "big.py", "line": 1}])
+        json.dumps([{"id": 1, "description": "1k-line file", "file": "big.py", "line": 1,
+                     "evidence": "big.py:1"}])
     )
 
     report_path = await phase_cross_stack_merge(

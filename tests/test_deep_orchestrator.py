@@ -222,7 +222,16 @@ class _StubBackend:
             return
 
         if "extract only actionable issues" in pl:  # phase_parse_feedback
-            issue: dict[str, Any] = {"id": 1, "description": "Sample issue", "file": "api.py", "line": 1}
+            # Evidence gate (#227): every parsed finding carries a grounded
+            # citation so it survives _is_evidenced downstream (structural items
+            # and the tiny-diff bypass route these records straight to the gate).
+            issue: dict[str, Any] = {
+                "id": 1,
+                "description": "Sample issue",
+                "file": "api.py",
+                "line": 1,
+                "evidence": "api.py:1",
+            }
             # Deep per-stack parse requests severity (PER_STACK_RECORD_SCHEMA, #168);
             # emit the configured severity so a test can drive arbiter selection.
             # The structural stack parses with FEEDBACK_SCHEMA (no severity prompt),
@@ -279,6 +288,7 @@ class _StubBackend:
                                 "description": rec.get("description"),
                                 "confidence": rec.get("confidence", "MEDIUM"),
                                 "rationale": rec.get("rationale", "rationale"),
+                                "evidence": rec.get("evidence", "api.py:1"),
                             }
                         )
                         next_id += 1
@@ -302,6 +312,7 @@ class _StubBackend:
                             "description": "Python issue",
                             "confidence": "MEDIUM",
                             "rationale": "rationale",
+                            "evidence": "api.py:1",
                         },
                         {
                             "id": 2,
@@ -312,6 +323,7 @@ class _StubBackend:
                             "description": "React issue",
                             "confidence": "MEDIUM",
                             "rationale": "rationale",
+                            "evidence": "App.tsx:1",
                         },
                         {
                             "id": 3,
@@ -322,6 +334,7 @@ class _StubBackend:
                             "description": "Contract drift between Python handler and React caller",
                             "confidence": "HIGH",
                             "rationale": "rationale",
+                            "evidence": "api.py:1",
                         },
                     ]
                 },
@@ -539,7 +552,7 @@ async def _run_deep(target: Path, *, start_at: str = "review") -> int:
 
 
 def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = None) -> dict[str, Any]:
-    """Build a validated 8-key merged item (shape copied from the stub default)."""
+    """Build a validated merged item (shape copied from the stub default)."""
     return {
         "id": item_id,
         "lens": "per-stack",
@@ -549,6 +562,7 @@ def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = No
         "description": desc if desc is not None else f"{severity} issue in {file}",
         "confidence": "MEDIUM",
         "rationale": "rationale",
+        "evidence": f"{file}:1",
     }
 
 
@@ -2392,6 +2406,7 @@ async def test_structural_finding_reaches_fix_loop(
             "description": "High-severity per-stack issue",
             "confidence": "HIGH",
             "rationale": "rationale",
+            "evidence": "api.py:1",
         },
         {
             "id": 2,
@@ -2400,8 +2415,9 @@ async def test_structural_finding_reaches_fix_loop(
             "line": 1,
             "severity": "low",
             "description": "Low-severity per-stack issue",
-            "confidence": "LOW",
+            "confidence": "MEDIUM",
             "rationale": "rationale",
+            "evidence": "App.tsx:1",
         },
     ]
 
@@ -2885,20 +2901,22 @@ def _prime_merge_resume_records(deep: Path, *, python_severity: str | None) -> N
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "intent.md").write_text("primed intent")
     (deep / "alternatives.json").write_text("[]")
-    py_record: dict[str, Any] = {"id": 1, "description": "py issue", "file": "api.py", "line": 1}
+    py_record: dict[str, Any] = {
+        "id": 1, "description": "py issue", "file": "api.py", "line": 1, "evidence": "api.py:1"
+    }
     if python_severity is not None:
         py_record["severity"] = python_severity
         py_record["confidence"] = "HIGH"
         py_record["rationale"] = "stub"
     (deep / "stack-python-records.json").write_text(json.dumps([py_record]))
     (deep / "stack-react-records.json").write_text(
-        json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1}])
+        json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1, "evidence": "App.tsx:1"}])
     )
     (deep / "stack-generic-records.json").write_text(
-        json.dumps([{"id": 1, "description": "docs issue", "file": "README.md", "line": 1}])
+        json.dumps([{"id": 1, "description": "docs issue", "file": "README.md", "line": 1, "evidence": "README.md:1"}])
     )
     (deep / "stack-structure-records.json").write_text(
-        json.dumps([{"id": 1, "description": "structural issue", "file": "api.py", "line": 1}])
+        json.dumps([{"id": 1, "description": "structural issue", "file": "api.py", "line": 1, "evidence": "api.py:1"}])
     )
 
 
@@ -3797,7 +3815,8 @@ async def test_ac_merge_resume_on_tiny_diff(
     (deep / "alternatives.json").write_text("[]")
     (deep / "stack-generic-records.json").write_text(
         json.dumps(
-            [{"id": "gen-1", "description": "generic per-stack issue", "file": "api.py", "line": 1}]
+            [{"id": "gen-1", "description": "generic per-stack issue", "file": "api.py", "line": 1,
+              "evidence": "api.py:1"}]
         )
     )
     (deep / "stack-structure-records.json").write_text(
@@ -3808,6 +3827,7 @@ async def test_ac_merge_resume_on_tiny_diff(
                     "description": "file-size budget violated",
                     "file": "api.py",
                     "line": 1,
+                    "evidence": "api.py:1",
                 }
             ]
         )
@@ -3833,3 +3853,144 @@ async def test_ac_merge_resume_on_tiny_diff(
         i.get("description") == "file-size budget violated" and i.get("lens") == "structural"
         for i in items
     ), f"structural item missing or mislabeled: {items}"
+
+
+async def test_evidence_gate_drops_speculative_finding(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #227 (AC2/AC3/AC6): the structural evidence gate keeps an evidenced
+    finding but drops a speculative one before it reaches merged-items.json.
+
+    Real path through ``runner.run`` (deep default). The merge agent emits one
+    grounded finding (``evidence: "src/foo.py:42"``, HIGH) and one speculative
+    finding (blank evidence, ``rationale`` claiming "no exploration evidence",
+    LOW). Asserts the speculative finding is ABSENT from both the canonical
+    ``merged-items.json`` and the rendered ``review-output.md`` while the
+    evidenced one survives, and that ``dropped-speculative.json`` records the
+    drop.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [
+        {
+            "id": 1,
+            "lens": "per-stack",
+            "file": "api.py",
+            "line": 42,
+            "severity": "high",
+            "description": "Grounded evidenced finding",
+            "confidence": "HIGH",
+            "rationale": "verified against src/foo.py",
+            "evidence": "src/foo.py:42",
+        },
+        {
+            "id": 2,
+            "lens": "per-stack",
+            "file": "App.tsx",
+            "line": 1,
+            "severity": "low",
+            "description": "Speculative unfounded finding",
+            "confidence": "LOW",
+            "rationale": "inferred from the diff alone, no exploration evidence",
+            "evidence": "",
+        },
+    ]
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    items = json.loads((deep / "merged-items.json").read_text())["items"]
+    descriptions = [i.get("description") for i in items]
+    assert "Grounded evidenced finding" in descriptions, (
+        f"evidenced finding was dropped: {descriptions}"
+    )
+    assert "Speculative unfounded finding" not in descriptions, (
+        f"speculative finding leaked into merged-items.json: {descriptions}"
+    )
+
+    report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
+    assert "Grounded evidenced finding" in report
+    assert "Speculative unfounded finding" not in report, (
+        "speculative finding leaked into review-output.md"
+    )
+
+    dropped = json.loads((deep / "dropped-speculative.json").read_text())
+    assert dropped["dropped_count"] >= 1
+    assert "Speculative unfounded finding" in json.dumps(dropped["dropped_items"])
+    assert 2 in dropped["dropped_ids"]
+
+
+async def test_evidence_gate_all_speculative_yields_empty(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #227 (AC5, N=1): a single-stack run whose only findings are all
+    speculative writes an EMPTY merged-items.json without crashing and records
+    every drop -- never a silent success.
+
+    Drives the ``_write_single_stack_merged_items`` (tiny-diff bypass) gate path
+    via a ``--start-at merge`` resume with two primed speculative records: one
+    with blank evidence + a "no exploration evidence" rationale, one with LOW
+    confidence. Both must be dropped, leaving ``items == []`` and a
+    ``dropped-speculative.json`` recording both.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tiny_diff_target)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    deep = tiny_diff_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    (deep / "stack-generic-records.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "gen-1",
+                    "description": "speculative generic finding",
+                    "file": "api.py",
+                    "line": 1,
+                    "confidence": "MEDIUM",
+                    "rationale": "inferred from the diff alone, no exploration evidence",
+                    "evidence": "",
+                }
+            ]
+        )
+    )
+    (deep / "stack-structure-records.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "structure-1",
+                    "description": "speculative structural finding",
+                    "file": "api.py",
+                    "line": 1,
+                    "confidence": "LOW",
+                    "rationale": "hunch",
+                    "evidence": "api.py:1",
+                }
+            ]
+        )
+    )
+
+    rc = await run(RunConfig(target=str(tiny_diff_target), start_at="merge", cleanup=False))
+    assert rc == 0
+
+    items = json.loads((deep / "merged-items.json").read_text())["items"]
+    assert items == [], f"speculative findings survived the gate: {items}"
+
+    dropped = json.loads((deep / "dropped-speculative.json").read_text())
+    assert dropped["dropped_count"] == 2, dropped
+    dropped_desc = json.dumps(dropped["dropped_items"])
+    assert "speculative generic finding" in dropped_desc
+    assert "speculative structural finding" in dropped_desc

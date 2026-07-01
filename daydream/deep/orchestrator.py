@@ -487,6 +487,7 @@ def _apply_arbiter_verdicts(
             "confidence": verdict.get("confidence", records[record_index].get("confidence")),
             "description": verdict.get("description", records[record_index].get("description")),
             "rationale": verdict.get("rationale", records[record_index].get("rationale")),
+            "evidence": verdict.get("evidence", records[record_index].get("evidence")),
         }
 
     new_records: list[dict[str, Any]] = []
