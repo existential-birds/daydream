@@ -132,7 +132,7 @@ def test_single_setup_preserves_privilege_split() -> None:
     # analyze is the only job that touches untrusted PR code: read-only, no App
     # key, and it must not leave the GITHUB_TOKEN persisted in .git/config.
     analyze = wf["jobs"]["analyze"]
-    assert analyze["permissions"] == {"contents": "read"}
+    assert analyze["permissions"] == {"contents": "read", "pull-requests": "read"}
     assert "DAYDREAM_APP" not in yaml.safe_dump(analyze)
     checkout = next(s for s in analyze["steps"] if "actions/checkout" in s.get("uses", ""))
     assert checkout["with"]["persist-credentials"] is False
@@ -142,6 +142,11 @@ def test_single_setup_preserves_privilege_split() -> None:
     for job_name in ("gate", "post", "surface-failure"):
         assert not has_checkout(wf["jobs"][job_name])
     assert "permission-actions" not in text
+
+    # surface-failure fires on non-success analyze results, so its if: must carry
+    # a status function; without always() GitHub injects an implicit success() and
+    # skips the job on the very failures it exists to surface.
+    assert "always()" in wf["jobs"]["surface-failure"]["if"]
 
     # Same three secrets as the split setup, nothing more.
     assert set(_SECRET_REF_RE.findall(text)) == {

@@ -111,6 +111,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     env:
       PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
     steps:
@@ -227,7 +228,7 @@ jobs:
   # `post` gates on `== 'success'`, so the two are mutually exclusive.
   surface-failure:
     needs: [gate, analyze]
-    if: needs.gate.outputs.proceed == 'true' && needs.analyze.result != 'success'
+    if: always() && needs.gate.outputs.proceed == 'true' && needs.analyze.result != 'success'
     runs-on: ubuntu-latest
     permissions: {}
     steps:
