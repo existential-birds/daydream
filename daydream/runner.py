@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from rich.markup import escape as escape_markup
 
@@ -97,6 +97,9 @@ from daydream.ui import (
     prompt_user,
 )
 from daydream.workspace import WorkContext, open_workspace
+
+if TYPE_CHECKING:
+    from daydream.pr_review import ParsedIssue
 
 # Output mode: ``loop`` runs review→fix→test; ``comment`` posts inline PR
 # comments and exits; ``review`` writes a report and exits.
@@ -777,6 +780,53 @@ def _emit_findings_artifact(
         ``0`` on success, ``1`` when no PR is resolvable.
     """
     from daydream import pr_review
+
+    parsed = pr_review.alt_issues_to_parsed(issues)
+    return _write_findings_for_parsed(target_dir, config, parsed)
+
+
+def _emit_findings_from_items(
+    target_dir: Path, config: RunConfig, items: list[dict[str, Any]],
+) -> int:
+    """Write the Phase A findings artifact from canonical merged items.
+
+    Sibling of :func:`_emit_findings_artifact` for the deep-review path:
+    converts canonical merged items (``file``/``line`` already resolved) via
+    :func:`daydream.pr_review.parsed_issues_from_items` and routes them through
+    the same shared PR-resolution + build + write path.
+
+    Args:
+        target_dir: Repo root containing the PR checkout.
+        config: Run configuration; ``config.findings_out`` must be set.
+        items: Canonical merged finding dicts (may be empty).
+
+    Returns:
+        ``0`` on success, ``1`` when no PR is resolvable.
+    """
+    from daydream import pr_review
+
+    parsed = pr_review.parsed_issues_from_items(items)
+    return _write_findings_for_parsed(target_dir, config, parsed)
+
+
+def _write_findings_for_parsed(
+    target_dir: Path, config: RunConfig, parsed: list["ParsedIssue"],
+) -> int:
+    """Resolve the target PR and write the strict-schema findings artifact.
+
+    Shared body for :func:`_emit_findings_artifact` and
+    :func:`_emit_findings_from_items`. Resolves the target PR — via
+    :func:`daydream.pr_review.find_pr_by_number` when ``config.pr_number`` is
+    pinned, else :func:`daydream.pr_review.find_open_pr` — then writes the
+    artifact. The artifact must declare its target, so an unresolvable PR (or a
+    ``GitError`` from the lookup) is an actionable error, never a silently
+    absent artifact. An empty ``parsed`` list still writes an (empty) artifact
+    so Phase B can resolve all stale comments.
+
+    Returns:
+        ``0`` on success, ``1`` when no PR is resolvable.
+    """
+    from daydream import pr_review
     from daydream.findings import build_findings_artifact, write_findings_artifact
 
     assert config.findings_out is not None  # caller gates on findings_out
@@ -797,7 +847,6 @@ def _emit_findings_artifact(
         )
         return 1
 
-    parsed = pr_review.alt_issues_to_parsed(issues)
     artifact = build_findings_artifact(
         target_dir, pr, parsed, run_info=pr_review._render_review_info_block(),
     )
