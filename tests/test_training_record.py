@@ -159,6 +159,21 @@ def test_record_fix_diff_ref_reflects_archive_state(tmp_path: Path) -> None:
     assert record["fix_diff_ref"]["available"] is True
 
 
+def test_record_recommended_diff_ref_reflects_archive_state(tmp_path: Path) -> None:
+    manifest_row = _make_manifest_row(archive_path=str(tmp_path))
+    trajectory: dict[str, Any] = {"steps": []}
+
+    # No recommended.patch on disk yet (no-fix / legacy archive).
+    record = _build_record(manifest_row, trajectory, stack="python")
+    assert record["recommended_diff_ref"]["available"] is False
+    assert record["recommended_diff_ref"]["archive_relative_path"] == "recommended.patch"
+
+    # Write daydream's outcome diff and confirm the next call sees it.
+    (tmp_path / "recommended.patch").write_text("diff --git a/x b/x\n", encoding="utf-8")
+    record = _build_record(manifest_row, trajectory, stack="python")
+    assert record["recommended_diff_ref"]["available"] is True
+
+
 def test_record_code_context_sourced_from_manifest_dict(tmp_path: Path) -> None:
     """``base_sha`` + ``changed_files`` are read from the manifest dict."""
     manifest_row = _make_manifest_row(archive_path=str(tmp_path))

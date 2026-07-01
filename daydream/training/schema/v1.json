@@ -83,6 +83,22 @@
         }
       }
     },
+    "recommended_diff_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "available",
+        "archive_relative_path"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "archive_relative_path": {
+          "type": "string"
+        }
+      }
+    },
     "outcome_label": {
       "type": ["string", "null"]
     },
