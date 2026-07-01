@@ -27,6 +27,11 @@ The setup guide is the single source of truth for the step-by-step install
 (App permissions, the three secrets, the bot-handle variable, and the PEM
 download). The sections below document what these workflows *do* once installed.
 
+> **Optional single-file variant:** [`single/daydream.yml`](single/README.md)
+> collapses these three workflows into one. It drops the cross-workflow dispatch
+> and with it the App's `Actions: read & write` permission. It is a manual-copy
+> alternative — `daydream setup` still lands the three-file split.
+
 ## Trigger matrix
 
 | Trigger | Path | Notes |
