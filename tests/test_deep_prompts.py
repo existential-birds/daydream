@@ -613,16 +613,37 @@ def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> No
     assert "same-turn echo" in out or "file:line" in out
 
 
-def test_no_format_skill_invocation_for_verification_protocol() -> None:
-    """The protocol is user-invocable:false — must not be used with format_skill_invocation."""
-    import subprocess
+def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) -> None:
+    """The protocol is user-invocable:false — embedded as instruction text, never
+    routed through ``backend.format_skill_invocation``.
 
-    repo_root = Path(__file__).parent.parent
-    result = subprocess.run(
-        ["grep", "-rn", "format_skill_invocation", "daydream/"],
-        capture_output=True,
-        text=True,
-        cwd=str(repo_root),
-    )
-    for line in result.stdout.splitlines():
-        assert "review-verification-protocol" not in line, f"format_skill_invocation references protocol: {line}"
+    Observed at the production prompt-builder seam: the structural and
+    generic-fallback prompts are the only builders that embed the protocol
+    directly (the per-stack reviewers bundle it inside their Beagle skill).
+    Build them with a real backend formatter and assert the embedded
+    instruction is present while the protocol's invocation token — as each
+    real backend would emit it — never leaks into the prompt.
+    """
+    from daydream.backends import create_backend
+    from daydream.deep.prompts import build_structural_prompt
+
+    p = _paths(tmp_path)
+    prompts = [
+        build_structural_prompt(
+            skill_invocation="/beagle-core:review-structure",
+            files=["api.py"],
+            **p,
+        ),
+        build_generic_fallback_prompt(files=["config.yaml"], **p),
+    ]
+
+    for backend_name in ("claude", "codex", "pi"):
+        backend = create_backend(backend_name)
+        token = backend.format_skill_invocation("review-verification-protocol")
+        for prompt in prompts:
+            # Embedded as methodology prose (the constant carries the
+            # protocol name and gate descriptions), never as an invocation.
+            assert "review-verification-protocol" in prompt
+            assert token not in prompt, (
+                f"{backend_name} protocol invocation token {token!r} leaked into prompt"
+            )
