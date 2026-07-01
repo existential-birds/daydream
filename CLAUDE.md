@@ -101,7 +101,7 @@ and unusable.
 
 ### Execution flow
 
-```
+```text
 cli.py -> runner.py -> deep/orchestrator.py -> phases.py -> agent.py -> Backend.execute()
                               \-> ui/ (terminal output)
 ```
@@ -183,7 +183,7 @@ config-file phase override > config-file global > per-backend default. Resolved 
 
 ### Deep-review pipeline
 
-```
+```text
 exploration pre-scan
     -> intent analysis (Sonnet)
     -> alternative review (gated by diff size)

@@ -64,7 +64,7 @@ Security dimensions informed by SeRe dataset categories [11]. Test adequacy info
 
 ### Human Gold Baseline
 
-The single most important methodological requirement: **a human gold baseline is needed to measure recall, not just precision.** This gap was identified across multiple benchmark studies [1][5][9].
+The single most important methodological requirement: **a human gold baseline is needed to measure recall, not just precision.** This gap was identified across multiple benchmark studies [1] [5] [9].
 
 - Subset of 20-40 PRs receives independent human review by 2-3 engineers **before** seeing tool output.
 - Time-boxed: 20-30 min per normal PR, 45-60 min for large PRs (prevents impossibly thorough baseline).
@@ -249,7 +249,7 @@ State in the evaluation: *"We treat differences below 5 F1 points or below 10 pe
 
 For each primary metric, report a table like this:
 
-```
+```text
 Metric              Daydream (95% CI)    Competitor (95% CI)  Difference (95% CI)   Significant?
 Precision           21% [16, 26]         [varies by tool]     --                     TBD
 Recall              59% [49, 69]         [varies by tool]     --                     TBD
@@ -294,7 +294,7 @@ Operational metrics informed by Atlassian RovoDev's production deployment metric
 ### Greptile
 
 - Martian leaderboard: F1 49.9%, precision 71.7%, recall 38.3% [1]. MorphLLM reports slightly different figures (66.2% precision, 40.4% recall, 50.2% F1) due to methodology differences [17].
-- Architecture: codegraph + multi-modal retrieval (not simple RAG) + TREX (runs code in sandbox, generates logs/screenshots/API traces) [2][3].
+- Architecture: codegraph + multi-modal retrieval (not simple RAG) + TREX (runs code in sandbox, generates logs/screenshots/API traces) [2] [3].
 - Known weakness: signal-to-noise historically poor (19% address rate, improved to 55% via embedding-based filtering using ChromaDB on Cloudflare) [2]. Non-deterministic. Pricing complaints on $1/review overage [2].
 - Independence principle: Greptile's core thesis is that "the tool that generates the code should not be the same tool that reviews it" [2].
 

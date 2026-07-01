@@ -317,7 +317,7 @@ Behavior notes:
 
 ## Self-hosted Review Bot
 
-Daydream can run as a self-hosted PR review bot in your own repository's GitHub Actions, posting under your own GitHub App identity. The `daydream setup` command automates the full install (App registration, secret deposit, workflow PR). See the [setup guide](docs/self-hosted-bot-setup.md) for details.
+Daydream can run as a self-hosted PR review bot in your own repository's GitHub Actions, posting under your own GitHub App identity. The `daydream setup` command automates most of the install (App registration via manifest flow, secret deposit, workflow PR); clicking **Install** on the new App stays manual because GitHub requires it. See the [setup guide](docs/self-hosted-bot-setup.md) for details.
 
 ## Output Files
 
