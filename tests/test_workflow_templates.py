@@ -89,6 +89,16 @@ def post_text() -> str:
     return (TEMPLATES_DIR / "daydream-post.yml").read_text(encoding="utf-8")
 
 
+@pytest.fixture(scope="module")
+def single_wf() -> dict[str, Any]:
+    return load_workflow(TEMPLATES_DIR / "single" / "daydream.yml")
+
+
+@pytest.fixture(scope="module")
+def single_text() -> str:
+    return (TEMPLATES_DIR / "single" / "daydream.yml").read_text(encoding="utf-8")
+
+
 # daydream-review.yml (Phase A — unprivileged analyze)
 
 
@@ -304,6 +314,117 @@ def test_post_workflow_surfaces_failures(post_wf: dict[str, Any]) -> None:
     assert comment_steps[0]["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"
 
 
+# single/daydream.yml (optional collapsed variant — one workflow, needs:-ordered jobs)
+
+
+def test_single_collapses_into_needs_ordered_jobs(single_wf: dict[str, Any]) -> None:
+    jobs = single_wf["jobs"]
+    assert set(jobs) == {"gate", "analyze", "post", "surface-failure"}
+    # The chain replaces the split setup's workflow_dispatch + workflow_run.
+    triggers = wf_on(single_wf)
+    assert triggers["pull_request"]["types"] == ["opened", "ready_for_review"]
+    assert triggers["issue_comment"]["types"] == ["created"]
+    assert "workflow_dispatch" not in triggers and "workflow_run" not in triggers
+    assert single_wf["permissions"] == {}
+    assert jobs["analyze"]["needs"] == "gate"
+    assert jobs["post"]["needs"] == ["gate", "analyze"]
+    assert jobs["surface-failure"]["needs"] == ["gate", "analyze"]
+
+
+def test_single_never_grants_actions_write(single_wf: dict[str, Any], single_text: str) -> None:
+    # The whole point of the collapse: no job dispatches, so nothing needs
+    # actions: write and the App can drop the Actions permission entirely.
+    assert "permission-actions" not in single_text
+    for job in single_wf["jobs"].values():
+        perms = job.get("permissions", {})
+        assert "actions" not in perms or perms["actions"] == "read"
+        for step in job["steps"]:
+            grants = {k for k in step.get("with", {}) if k.startswith("permission-")}
+            assert "permission-actions" not in grants
+
+
+def test_single_gate_gates_forks_toggle_and_author(single_wf: dict[str, Any]) -> None:
+    cond = single_wf["jobs"]["gate"]["if"].replace('"', "'")
+    assert "head.repo.full_name == github.repository" in cond  # fork gate on the auto path
+    assert "DAYDREAM_AUTO_REVIEW" in cond  # operator toggle
+    for assoc in ("OWNER", "MEMBER", "COLLABORATOR"):
+        assert assoc in cond  # author gate on the comment path
+    assert "comment.user.type != 'Bot'" in cond
+    assert "issue.pull_request" in cond
+
+
+def test_single_gate_holds_no_code_and_acks_as_bot(single_wf: dict[str, Any]) -> None:
+    steps = job_steps(single_wf, "gate")
+    assert not any("actions/checkout" in s.get("uses", "") for s in steps)  # privileged: no code
+    # Command match reads the body via env only (footgun 2).
+    match = next(s for s in steps if "grep -Eq" in s.get("run", ""))
+    assert match["env"]["BODY"] == "${{ github.event.comment.body }}"
+    assert "github.event" not in match["run"]
+    # Ack token is scoped to pull-requests: write ONLY — no actions: write.
+    mint = next(s for s in steps if "create-github-app-token" in s.get("uses", ""))
+    grants = {k: v for k, v in mint["with"].items() if k.startswith("permission-")}
+    assert grants == {"permission-pull-requests": "write"}
+    # The 👀 reaction is signed by the minted App token, minted before it fires.
+    reaction = next(s for s in steps if "content=eyes" in s.get("run", ""))
+    assert reaction["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"
+    assert steps.index(mint) < steps.index(reaction)
+
+
+def test_single_analyze_is_unprivileged_over_pr_code(single_wf: dict[str, Any]) -> None:
+    analyze = single_wf["jobs"]["analyze"]
+    assert analyze["permissions"] == {"contents": "read"}
+    assert analyze["if"] == "needs.gate.outputs.proceed == 'true'"
+    steps = analyze["steps"]
+    assert any("actions/checkout" in s.get("uses", "") for s in steps)  # touches PR code
+    # No App material anywhere in the job that runs untrusted code (footgun 5).
+    assert "DAYDREAM_APP" not in yaml.safe_dump(analyze)
+    # PR head fetched via refs/pull/N/head (same-repo + fork), PR number via env.
+    fetch = next(s for s in steps if "refs/pull/${PR_NUMBER}/head" in s.get("run", ""))
+    assert "github.event" not in fetch["run"]
+    run = next(s for s in steps if "daydream --review" in s.get("run", ""))["run"]
+    assert "--non-interactive" in run and "${{" not in run
+
+
+def test_single_post_never_checks_out_and_posts_with_app_token(single_wf: dict[str, Any]) -> None:
+    post = single_wf["jobs"]["post"]
+    assert post["if"] == "needs.gate.outputs.proceed == 'true' && needs.analyze.result == 'success'"
+    steps = post["steps"]
+    assert not any("actions/checkout" in s.get("uses", "") for s in steps)  # never PR code
+    mint = next(s for s in steps if "create-github-app-token" in s.get("uses", ""))
+    grants = {k: v for k, v in mint["with"].items() if k.startswith("permission-")}
+    assert grants == {
+        "permission-pull-requests": "write",
+        "permission-contents": "read",
+        "permission-metadata": "read",
+    }
+    download = next(s for s in steps if "actions/download-artifact" in s.get("uses", ""))
+    assert download["with"]["name"] == "daydream-findings"
+    # LIVE PR head is the trust anchor; post-findings validates the artifact against it.
+    target = next(s for s in steps if s.get("id") == "target")
+    assert "repos/" in target["run"] and "/pulls/" in target["run"]
+    post_step = next(s for s in steps if "post-findings" in s.get("run", ""))
+    assert "--head-sha" in post_step["run"] and "${{" not in post_step["run"]
+    for step in steps:  # token never logged
+        assert "steps.token.outputs.token" not in step.get("run", "")
+
+
+def test_single_surfaces_analyze_failure(single_wf: dict[str, Any]) -> None:
+    surface = single_wf["jobs"]["surface-failure"]
+    assert surface["if"] == "needs.gate.outputs.proceed == 'true' && needs.analyze.result == 'failure'"
+    comment = next(s for s in surface["steps"] if "daydream review failed" in s.get("run", ""))
+    assert comment["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"
+    assert "${{" not in comment["run"]  # values via env, never interpolation
+
+
+def test_single_secret_surface_matches_split(single_text: str) -> None:
+    # Same three secrets as the split setup: analyze key + App identity, nothing more.
+    assert set(_SECRET_REF_RE.findall(single_text)) == {
+        "ANTHROPIC_API_KEY",
+        "DAYDREAM_APP_ID",
+        "DAYDREAM_APP_PRIVATE_KEY",
+    }
+
+
 # Injection scan — footgun 2, all templates (env:-only event data in run:)
 
 
@@ -312,7 +433,7 @@ _EVENT_INTERP = re.compile(
 )
 
 
-@pytest.mark.parametrize("wf_path", sorted(TEMPLATES_DIR.glob("*.yml")), ids=lambda p: p.name)
+@pytest.mark.parametrize("wf_path", sorted(TEMPLATES_DIR.rglob("*.yml")), ids=lambda p: p.name)
 def test_no_event_data_interpolated_into_run_steps(wf_path) -> None:
     wf = load_workflow(wf_path)
     for job_name, job in wf["jobs"].items():
@@ -341,7 +462,7 @@ def _package_version() -> str:
     return data["project"]["version"]
 
 
-@pytest.mark.parametrize("name", ["daydream-review.yml", "daydream-post.yml"])
+@pytest.mark.parametrize("name", ["daydream-review.yml", "daydream-post.yml", "single/daydream.yml"])
 def test_daydream_install_is_pinned_to_current_release_tag(name: str) -> None:
     text = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
     refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
