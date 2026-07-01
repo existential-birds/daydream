@@ -115,9 +115,11 @@ jobs:
       PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+          # This job handles untrusted PR code; don't leave the GITHUB_TOKEN in .git/config.
+          persist-credentials: false
 
       # Resolve the base ref, then fetch and detach the PR head. `refs/pull/N/head`
       # resolves the same for same-repo and fork PRs. PR number via env, never
@@ -135,7 +137,7 @@ jobs:
           echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
         # Pinned to a release tag (not `main`) so the bot runs a known daydream
@@ -154,7 +156,7 @@ jobs:
             --findings-out findings/findings.json --base "origin/$BASE_REF" .
 
       - name: Upload findings artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: daydream-findings
           path: findings/
@@ -167,9 +169,9 @@ jobs:
     needs: [gate, analyze]
     if: needs.gate.outputs.proceed == 'true' && needs.analyze.result == 'success'
     runs-on: ubuntu-latest
-    # GITHUB_TOKEN reads the same-run artifact; the App token carries the writes.
-    permissions:
-      actions: read
+    # Same-run artifact download needs no GITHUB_TOKEN scope (that is only required
+    # to reach across runs); the App token carries every write.
+    permissions: {}
     steps:
       - name: Mint posting token
         id: token
@@ -182,13 +184,13 @@ jobs:
           permission-metadata: read
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
         run: uv tool install git+https://github.com/existential-birds/daydream@v0.21.0
 
       - name: Download findings artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: daydream-findings
           path: findings
@@ -220,11 +222,12 @@ jobs:
           daydream post-findings findings/findings.json \
             --pr "$PR_NUMBER" --head-sha "$HEAD_SHA" --repo "$REPO"
 
-  # An analyze failure routes here instead of silently skipping. Holds the App key
-  # but never checks out code.
+  # Any non-success analyze result (failure, cancelled, timed_out) routes here
+  # instead of silently skipping. Holds the App key but never checks out code.
+  # `post` gates on `== 'success'`, so the two are mutually exclusive.
   surface-failure:
     needs: [gate, analyze]
-    if: needs.gate.outputs.proceed == 'true' && needs.analyze.result == 'failure'
+    if: needs.gate.outputs.proceed == 'true' && needs.analyze.result != 'success'
     runs-on: ubuntu-latest
     permissions: {}
     steps:

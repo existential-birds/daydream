@@ -410,10 +410,38 @@ def test_single_post_never_checks_out_and_posts_with_app_token(single_wf: dict[s
 
 def test_single_surfaces_analyze_failure(single_wf: dict[str, Any]) -> None:
     surface = single_wf["jobs"]["surface-failure"]
-    assert surface["if"] == "needs.gate.outputs.proceed == 'true' && needs.analyze.result == 'failure'"
+    # Any non-success analyze result surfaces (failure/cancelled/timed_out), not
+    # only `== 'failure'`; `post` gates on `== 'success'`, so the two never overlap.
+    assert surface["if"] == "needs.gate.outputs.proceed == 'true' && needs.analyze.result != 'success'"
     comment = next(s for s in surface["steps"] if "daydream review failed" in s.get("run", ""))
     assert comment["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"
     assert "${{" not in comment["run"]  # values via env, never interpolation
+
+
+def test_single_pins_every_action_to_a_commit_sha(single_wf: dict[str, Any]) -> None:
+    # A security-sensitive template pins every `uses:` to a full 40-hex commit SHA
+    # (a moving tag could be repointed at malicious code), not just the App-token action.
+    sha_ref = re.compile(r"@[0-9a-f]{40}$")
+    for job_name, job in single_wf["jobs"].items():
+        for step in job["steps"]:
+            uses = step.get("uses")
+            if uses:
+                assert sha_ref.search(uses), f"{job_name}: {uses} must be pinned to a full commit SHA"
+
+
+def test_single_analyze_checkout_drops_persisted_credentials(single_wf: dict[str, Any]) -> None:
+    # The only job that checks out untrusted PR code must not leave the GITHUB_TOKEN
+    # persisted in .git/config.
+    checkout = next(
+        s for s in job_steps(single_wf, "analyze") if "actions/checkout" in s.get("uses", "")
+    )
+    assert checkout["with"]["persist-credentials"] is False
+
+
+def test_single_post_default_token_is_unprivileged(single_wf: dict[str, Any]) -> None:
+    # Same-run artifact download needs no GITHUB_TOKEN scope; every write flows
+    # through the App token, so the default token holds nothing.
+    assert single_wf["jobs"]["post"]["permissions"] == {}
 
 
 def test_single_secret_surface_matches_split(single_text: str) -> None:
