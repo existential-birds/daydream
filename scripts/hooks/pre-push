@@ -14,6 +14,13 @@ set -euo pipefail
 
 echo "Running pre-push checks..."
 
+# Must run before any `uv run` below: `uv run`/`uv sync` silently re-lock a
+# drifted uv.lock, which would mask a release that bumped the version but forgot
+# `uv lock`. `--check` is read-only and errors on drift. CI re-runs this on a
+# fresh checkout of the pushed commit, so a stale lock can never merge.
+echo "→ Verifying uv.lock is in sync..."
+uv lock --check
+
 echo "→ Linting with ruff..."
 uv run ruff check daydream tests
 

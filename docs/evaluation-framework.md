@@ -1,19 +1,19 @@
-# Evaluating Daydream vs. Greptile
+# Evaluation Framework
 
 ## Goal
 
-Determine whether Daydream provides materially better pre-merge review than Greptile, with sufficient rigor that the conclusion is defensible to engineers, leadership, and external observers.
+Determine whether Daydream provides materially better pre-merge review than commercial alternatives (Greptile, CodeRabbit, Copilot, etc.), with sufficient rigor that the conclusion is defensible to engineers, leadership, and external observers.
 
 ## Two Evaluation Arms
 
-### Arm 1 — Quantitative: Martian Code Review Benchmark
+### Arm 1: Quantitative Martian Code Review Benchmark
 
-- **Daydream only** (Greptile already scored on the public leaderboard) [1].
+- **Daydream only** (competitors already scored on the public leaderboard) [1].
 - Martian measures precision, recall, and F1 against golden comments on 50 offline PRs (Sentry, Grafana, Cal.com, Discourse, Keycloak) and an online mode scoring 5,400+ real bot-reviewed PRs [1].
 - Report: overall F1, precision, recall, and high-severity-filtered F1.
 - **Limitations**: ground truth is developer action (not objective correctness), LLM judge introduces variance, offline set is small and potentially leaked, gold sets understate precision for high-recall tools [1].
 
-### Arm 2 — Qualitative: Blinded Engineer Review on Internal PRs
+### Arm 2: Qualitative Blinded Engineer Review on Internal PRs
 
 - Both tools run on identical PR snapshots with equivalent context access.
 - All comments anonymized, normalized, and randomly ordered.
@@ -64,7 +64,7 @@ Security dimensions informed by SeRe dataset categories [11]. Test adequacy info
 
 ### Human Gold Baseline
 
-The single most important methodological requirement: **a human gold baseline is needed to measure recall, not just precision.** This gap was identified across multiple benchmark studies [1][5][9].
+The single most important methodological requirement: **a human gold baseline is needed to measure recall, not just precision.** This gap was identified across multiple benchmark studies [1] [5] [9].
 
 - Subset of 20-40 PRs receives independent human review by 2-3 engineers **before** seeing tool output.
 - Time-boxed: 20-30 min per normal PR, 45-60 min for large PRs (prevents impossibly thorough baseline).
@@ -124,7 +124,7 @@ Use **Krippendorff's alpha** (handles ordinal scales, missing ratings, multiple 
 | 0.60-0.66 | Weak; use with caution |
 | < 0.60 | Revise rubric or retrain raters |
 
-Also report raw agreement percentage. Disagreement itself is signal — ambiguous comments may be poorly grounded.
+Also report raw agreement percentage. Disagreement itself is signal; ambiguous comments may be poorly grounded.
 
 **How alpha works.** Alpha measures how much observed disagreement exceeds what you'd expect by chance:
 
@@ -133,7 +133,7 @@ alpha = 1 - (D_o / D_e)
 ```
 
 - **D_o** (observed disagreement): computed from actual rater pairs who disagree on the same item.
-- **D_e** (expected disagreement): derived from the **marginal distribution** of your own data — the frequency histogram of each score value, pooled across all raters and items.
+- **D_e** (expected disagreement): derived from the **marginal distribution** of your own data: the frequency histogram of each score value, pooled across all raters and items.
 
 **What "marginals" means concretely.** The marginal distribution is the proportion of all ratings that received each score. For example, with 250 total ratings across 100 comments:
 
@@ -151,7 +151,7 @@ Expected disagreement is then:
 D_e = Σ_c Σ_c'  p_c * p_c' * δ²(c, c')
 ```
 
-where δ²(c, c') is the distance metric (see below). In plain terms: for every possible pair of scores, multiply the probability of drawing each score independently times the squared distance between them. D_e is not specified or estimated separately — it falls directly out of the score distribution in your data. Skewed distributions (most ratings cluster at 3) produce low D_e, so alpha demands higher observed agreement to register as reliable.
+where δ²(c, c') is the distance metric (see below). In plain terms: for every possible pair of scores, multiply the probability of drawing each score independently times the squared distance between them. D_e is not specified or estimated separately; it falls directly out of the score distribution in your data. Skewed distributions (most ratings cluster at 3) produce low D_e, so alpha demands higher observed agreement to register as reliable.
 
 **Ordinal vs nominal alpha.** The distance metric δ² determines whether alpha uses the ordering of your scale:
 
@@ -163,7 +163,7 @@ where δ²(c, c') is the distance metric (see below). In plain terms: for every 
 
 For the per-comment rubric (correctness, actionability, etc. on 1-5 scales), use **ordinal** alpha. For binary labels (posted: yes/no), use **nominal** alpha. Report ordinal alpha as the primary IRR statistic.
 
-**Key difference from Cohen's kappa.** Cohen's kappa computes expected agreement from the marginals of two specific raters. Krippendorff's alpha pools across all raters into a single marginal distribution, making it suitable for designs with 2-3 raters per item, uneven assignment, and missing ratings — exactly the comment-scoring design above.
+**Key difference from Cohen's kappa.** Cohen's kappa computes expected agreement from the marginals of two specific raters. Krippendorff's alpha pools across all raters into a single marginal distribution, making it suitable for designs with 2-3 raters per item, uneven assignment, and missing ratings, exactly the comment-scoring design above.
 
 ### Statistical Reporting
 
@@ -185,7 +185,7 @@ The sections below address each.
 
 **For ML researchers:** Use **PR-level bootstrap resampling** (1,000-10,000 iterations). On each iteration, sample PRs with replacement, recompute precision/recall/F1 for both tools on that resampled set, and record the difference. The 2.5th and 97.5th percentiles of the difference distribution give a 95% CI.
 
-**Why PR-level, not comment-level:** Comments within the same PR are not independent — a tool that misses one dependency issue on a PR tends to miss related issues too. Treating comments as independent inflates the apparent sample size and produces artificially tight confidence intervals. PR-level bootstrap respects the clustering structure.
+**Why PR-level, not comment-level:** Comments within the same PR are not independent; a tool that misses one dependency issue on a PR tends to miss related issues too. Treating comments as independent inflates the apparent sample size and produces artificially tight confidence intervals. PR-level bootstrap respects the clustering structure.
 
 **What the CI tells you:** If the 95% CI for the difference (Daydream - Greptile) excludes zero, the difference is statistically significant. If it includes zero, the tools may be equivalent on that metric. Report CIs for all primary metrics, not just point estimates.
 
@@ -232,7 +232,7 @@ State in the evaluation: *"We treat differences below 5 F1 points or below 10 pe
 
 #### Multiple comparisons: the "testing everything" problem
 
-**In plain terms:** If you test 20 different metrics, one will look good purely by chance — just like if you flip 20 coins, one might come up heads 5 times in a row. The more things you measure, the more likely one is a false positive.
+**In plain terms:** If you test 20 different metrics, one will look good purely by chance, just like if you flip 20 coins, one might come up heads 5 times in a row. The more things you measure, the more likely one is a false positive.
 
 **For ML researchers:** With 15+ evaluation dimensions, the family-wise error rate inflates rapidly. Mitigation:
 
@@ -241,24 +241,22 @@ State in the evaluation: *"We treat differences below 5 F1 points or below 10 pe
    - Overall precision
    - Overall recall
    - Engineer-rated usefulness
-2. **Treat all other dimensions as secondary/exploratory** — report them, but don't declare victory on them.
+2. **Treat all other dimensions as secondary/exploratory**; report them, but don't declare victory on them.
 3. **Apply Holm-Bonferroni correction** to primary metrics if formal hypothesis testing is needed. This adjusts the significance threshold downward based on the number of tests performed.
-4. **Prefer effect sizes and confidence intervals over p-values.** A p-value tells you "is there a difference?" An effect size with CI tells you "how big is the difference, and how sure are we?" — which is the more useful question for tool selection.
+4. **Prefer effect sizes and confidence intervals over p-values.** A p-value tells you "is there a difference?" An effect size with CI tells you "how big is the difference, and how sure are we?"; which is the more useful question for tool selection.
 
 #### Putting it together: what to report
 
 For each primary metric, report a table like this:
 
-```
-Metric              Daydream (95% CI)    Greptile (95% CI)    Difference (95% CI)    Significant?
-Precision           68% [61, 75]         54% [47, 61]         +14 pp [+4, +24]       Yes
-Recall              52% [44, 60]         38% [31, 45]         +14 pp [+3, +25]       Yes
-High-sev recall     61% [50, 72]         42% [32, 53]         +19 pp [+4, +34]       Yes
-F1                  0.59 [0.52, 0.66]    0.45 [0.39, 0.51]    +0.14 [+0.04, +0.24]   Yes
-Usefulness (1-5)    3.8 [3.5, 4.1]       2.9 [2.6, 3.2]       +0.9 [+0.5, +1.3]      Yes
+```text
+Metric              Daydream (95% CI)    Competitor (95% CI)  Difference (95% CI)   Significant?
+Precision           21% [16, 26]         [varies by tool]     --                     TBD
+Recall              59% [49, 69]         [varies by tool]     --                     TBD
+F1                  0.31 [0.24, 0.38]    [varies by tool]     --                     TBD
 ```
 
-(Illustrative numbers, not real results.)
+(Provisional single-sweep numbers from the 2026-06-30 benchmark report; CIs not yet computed. The full per-tool comparison lives in the HTML report.)
 
 ### Bias Mitigation Checklist
 
@@ -291,13 +289,20 @@ Operational metrics informed by Atlassian RovoDev's production deployment metric
 
 ---
 
-## Greptile Context
+## Competitor Context
 
-- Martian leaderboard: F1 49.9%, precision 71.7%, recall 38.3% — high precision, lower recall [1]. MorphLLM reports slightly different figures (66.2% precision, 40.4% recall, 50.2% F1) due to methodology differences [17].
-- Architecture: codegraph + multi-modal retrieval (not simple RAG) + TREX (runs code in sandbox, generates logs/screenshots/API traces) [2][3].
+### Greptile
+
+- Martian leaderboard: F1 49.9%, precision 71.7%, recall 38.3% [1]. MorphLLM reports slightly different figures (66.2% precision, 40.4% recall, 50.2% F1) due to methodology differences [17].
+- Architecture: codegraph + multi-modal retrieval (not simple RAG) + TREX (runs code in sandbox, generates logs/screenshots/API traces) [2] [3].
 - Known weakness: signal-to-noise historically poor (19% address rate, improved to 55% via embedding-based filtering using ChromaDB on Cloudflare) [2]. Non-deterministic. Pricing complaints on $1/review overage [2].
-- Market context: best-in-class F1 on Martian is Gemini at 59.5% [1]. Category ARR ~$420M, 133% YoY growth, 44% of teams use AI code review on some PRs [18]. Entire category is mediocre in absolute terms.
 - Independence principle: Greptile's core thesis is that "the tool that generates the code should not be the same tool that reviews it" [2].
+
+### Market landscape
+
+- Best-in-class F1 on Martian is Gemini at 59.5% [1].
+- Category ARR approximately $420M, 133% YoY growth, 44% of teams use AI code review on some PRs [18].
+- The entire category is mediocre in absolute terms, which is the gap daydream targets.
 
 ---
 
@@ -306,7 +311,7 @@ Operational metrics informed by Atlassian RovoDev's production deployment metric
 | Benchmark | Why | N | Source |
 |---|---|---|---|
 | SWR-Bench | Clean PRs enable false-positive/noise measurement | 1,000 PRs | [5] |
-| c-CRAB | Tests actionability via executable tests — does the review guide a correct fix? | varies | [6] |
+| c-CRAB | Tests actionability via executable tests: does the review guide a correct fix? | varies | [6] |
 | Qodo PR-Review-Bench | Injected bugs in multi-language PRs | 100 PRs, 580 issues | [7] |
 | AACR-Bench | Multilingual repo-level context; labels diff/file/repo context requirements | 200 PRs, 10 languages | [8] |
 | CR-Bench / CR-Evaluator | Defect-focused review with signal-to-noise ratio metric | 584 tasks (174 verified) | [14] |
