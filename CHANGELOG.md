@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-06-30
+
+### Added
+
+- **backends:** Add pi coding-agent backend with ATIF trajectory parity ([#195](https://github.com/existential-birds/daydream/pull/195))
+
+  Daydream now supports z.ai GLM models through a new `PiBackend` that spawns the `pi` CLI as a subprocess and parses its JSONL event stream into unified `AgentEvent` types. Implements the same subprocess+JSONL pattern proven by `CodexBackend`, with full ATIF v1.6 trajectory parity including tool-use events, cost reporting, and structured-output emulation. Per-phase model defaults for z.ai models are configured in `config.py`.
+
+- **bench:** Review-bot comparison harness (daydream vs coderabbit/greptile) ([#208](https://github.com/existential-birds/daydream/pull/208))
+
+  Adds `bench/review-bot-compare/` with a replay-driven harness that runs daydream and SaaS review bots (CodeRabbit, Greptile) against the same held-out PRs, harvests their findings, and judges them on a level playing field. Produces per-PR precision/recall metrics so review quality can be compared head-to-head.
+
+- **bench:** Offline benchmark report — daydream vs the SaaS field ([#224](https://github.com/existential-birds/daydream/pull/224))
+
+  Generates a self-contained HTML benchmark report from comparison-harness results, with per-reviewer scorecards and per-PR breakdowns. Renders entirely offline from cached data — no live API calls needed to produce the report.
+
+- **bench:** Select any reviewer backend (incl. GLM via OpenRouter) with evidence-grade submission parity ([#223](https://github.com/existential-birds/daydream/pull/223))
+
+  The benchmark harness now lets you run any backend as the reviewer — including GLM via OpenRouter — with submission parity guarantees so results are comparable across providers regardless of their native output format.
+
+- **deep:** Parallelize the deep fix loop ([#178](https://github.com/existential-birds/daydream/pull/178))
+
+  Same-file findings are now fixed in parallel via `anyio.CapacityLimiter(4)` fan-out instead of sequentially, significantly cutting wall-clock time for fix phases with multiple independent findings.
+
+- **deep:** Ground review intent in the PR description ([#182](https://github.com/existential-birds/daydream/pull/182))
+
+  The deep orchestrator's intent phase now reads the PR description so review focus aligns with what the author set out to do, rather than reviewing the diff in a vacuum.
+
+- **trajectory:** Record phase timing events ([#205](https://github.com/existential-birds/daydream/pull/205))
+
+  Each phase now emits structured timing events into the ATIF trajectory, enabling per-phase wall-clock analysis from the trajectory file without inferring gaps.
+
+- **trajectory:** Register subtrajectory entries for parallel fix-phase forks ([#220](https://github.com/existential-birds/daydream/pull/220))
+
+  Parallel fix-phase fan-outs now register their sibling trajectories in the parent, so the root trajectory records all forks explicitly rather than leaving them as orphaned files.
+
+- **phases:** Batch same-file findings into single run_agent() call ([#216](https://github.com/existential-birds/daydream/pull/216))
+
+  When multiple findings target the same file, they are now passed to a single agent invocation instead of one per finding, reducing redundant context loading and redundant tool calls.
+
+- **backends/pi:** Retry transient stream-drop errors and mark aborted trajectories partial ([#219](https://github.com/existential-birds/daydream/pull/219))
+
+- **backends/pi:** Tighten fix-phase prompts with concise_fix_prompts flag ([#217](https://github.com/existential-birds/daydream/pull/217))
+
+### Changed
+
+- **agent:** Cap runaway run_agent turns with wall-clock and tool-call budgets ([#185](https://github.com/existential-birds/daydream/pull/185))
+
+  Every `run_agent()` call is now bounded by configurable wall-clock and tool-call limits, preventing a single stuck agent from burning through an entire review budget. Limits are tiered by phase.
+
+- **deep:** Short-circuit tiny-diff fan-out and inline diff hunks in per-stack prompts ([#199](https://github.com/existential-birds/daydream/pull/199))
+
+  Small diffs skip the multi-stack fan-out entirely and inline the raw diff hunks into per-stack review prompts, eliminating unnecessary subagent spawns for trivial PRs.
+
+- **deep:** Make verify conditional, demote intent to Sonnet, gate alternatives by diff size ([#197](https://github.com/existential-birds/daydream/pull/197))
+
+  The verification pass now runs conditionally (skipped when no findings need it), the intent phase moves from Opus to Sonnet, and the alternatives phase is gated by diff size — reducing cost and latency on typical PRs without sacrificing quality on complex ones.
+
+- **backends/codex:** Event-layer cost synthesis for provider parity ([#196](https://github.com/existential-birds/daydream/pull/196))
+
+- **backends/codex:** Surface reasoning_output_tokens for cost attribution ([#193](https://github.com/existential-birds/daydream/pull/193))
+
+- **ui:** Split `ui.py` into a `ui/` package ([#183](https://github.com/existential-birds/daydream/pull/183))
+
+  The 3,500-line `ui.py` monolith is now a proper package with separate modules for console, panels, messages, tools, agent text, theme, colorize, and summary rendering.
+
+### Fixed
+
+- **prompts:** Ground review/exploration agents to cwd in linked worktrees ([#222](https://github.com/existential-birds/daydream/pull/222))
+
+- **agent:** Fix `detect_test_success` false-negative on deselected/skipped pytest output ([#204](https://github.com/existential-birds/daydream/pull/204))
+
+  The test-success detector now handles pytest output containing deselected/skipped counts — previously a clean pass with `N deselected` was classified as a failure, aborting the fix loop.
+
+- **backends/claude:** Eliminate cancel-scope RuntimeError on generator cleanup ([#206](https://github.com/existential-birds/daydream/pull/206))
+
+- **backends/pi:** Retry transient 429 and OOM failures ([#215](https://github.com/existential-birds/daydream/pull/215))
+
+- **backends/pi:** Invoke deep review skills natively ([#213](https://github.com/existential-birds/daydream/pull/213))
+
+- **training:** Drop redundant `--since` filter from `log_shas_since`, raise timeout, surface errors ([#218](https://github.com/existential-birds/daydream/pull/218))
+
+- **backends/codex:** Deterministic tool-id pairing and observable parse failures ([#187](https://github.com/existential-birds/daydream/pull/187))
+
+- **backends/codex:** Real-CLI golden contract test, trajectory parity, and cost-synthesis pinning ([#188](https://github.com/existential-birds/daydream/pull/188), [#189](https://github.com/existential-birds/daydream/pull/189), [#190](https://github.com/existential-birds/daydream/pull/190), [#191](https://github.com/existential-birds/daydream/pull/191))
+
 ## [0.20.0] - 2026-06-18
 
 ### Added
@@ -601,7 +687,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.20.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/existential-birds/daydream/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/existential-birds/daydream/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/existential-birds/daydream/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/existential-birds/daydream/compare/v0.17.0...v0.18.0
