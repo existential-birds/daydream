@@ -35,23 +35,9 @@ DOC_REVIEW_NOTICE = (
     "generic-fallback agent (D-20)."
 )
 
-# Shared verification-protocol load instruction appended by both the structural
-# and generic-fallback builders (issue #229). Hoisted to a constant next to
-# ``DOC_REVIEW_NOTICE`` to avoid the drift risk of two hand-copied copies.
-#
-# The protocol skill is ``user-invocable:false`` -- a methodology reference the
-# agent reads (``review-verification-protocol/SKILL.md``), NOT a slash-command --
-# so it is embedded as instruction text and is NOT routed through
-# ``Backend.format_skill_invocation``. That decision is locked in by the
-# ``test_no_format_skill_invocation_for_verification_protocol`` contract, which
-# asserts the literal ``review-verification-protocol/SKILL.md`` reference is
-# present while no backend's invocation token leaks into the prompt.
-#
-# Backend-agnostic: the earlier "from the beagle-core plugin" qualifier named a
-# Claude-Code-only plugin filesystem that the Codex and Pi subprocess backends do
-# not have, so it was dropped. The ``review-verification-protocol/SKILL.md``
-# path reference is retained because the contract above requires it; each
-# backend resolves the load through its own ambient skill availability.
+# Shared verification-protocol instruction for structural and generic-fallback
+# builders (issue #229). Embedded as instruction text, not routed through
+# ``Backend.format_skill_invocation``.
 VERIFICATION_PROTOCOL_INSTRUCTION = (
     "Before writing findings, load the review-verification-protocol skill "
     "(read review-verification-protocol/SKILL.md) and apply its "
