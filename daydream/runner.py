@@ -533,6 +533,12 @@ async def run(config: RunConfig | None = None) -> int:
     except git_ops.GitError as exc:
         print_error(console, "Workspace Error", str(exc))
         return 1
+    except ExtensionError as exc:
+        # ``run_flow``'s pre-flight resolve pass raises ``UnresolvedExtensionError``
+        # naming flow + step before any step executes; the flow helpers let it
+        # propagate here so every broken-extension abort renders the same panel.
+        print_error(console, "Extension Error", str(exc))
+        return 1
 
 
 async def run_feedback(config: RunConfig, pr: int) -> int:
