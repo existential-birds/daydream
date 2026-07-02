@@ -1227,44 +1227,6 @@ async def test_phase_understand_intent_forced_no_interactive_falls_through(tmp_p
         reset_state()
 
 
-def test_parse_issue_selection_all():
-    from daydream.phases import _parse_issue_selection
-    issues = [{"id": 1}, {"id": 2}, {"id": 3}]
-    assert _parse_issue_selection("all", issues) == [1, 2, 3]
-
-
-def test_parse_issue_selection_none():
-    from daydream.phases import _parse_issue_selection
-    issues = [{"id": 1}, {"id": 2}]
-    assert _parse_issue_selection("none", issues) is None
-    assert _parse_issue_selection("", issues) is None
-
-
-def test_parse_issue_selection_specific():
-    from daydream.phases import _parse_issue_selection
-    issues = [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}]
-    assert _parse_issue_selection("1,3,5", issues) == [1, 3, 5]
-
-
-def test_parse_issue_selection_with_spaces():
-    from daydream.phases import _parse_issue_selection
-    issues = [{"id": 1}, {"id": 2}, {"id": 3}]
-    assert _parse_issue_selection("1, 3", issues) == [1, 3]
-
-
-def test_parse_issue_selection_invalid_ignored():
-    from daydream.phases import _parse_issue_selection
-    issues = [{"id": 1}, {"id": 2}]
-    # "99" doesn't exist; silently ignored.
-    assert _parse_issue_selection("1,99", issues) == [1]
-
-
-def test_parse_issue_selection_single():
-    from daydream.phases import _parse_issue_selection
-    issues = [{"id": 1}, {"id": 2}]
-    assert _parse_issue_selection("2", issues) == [2]
-
-
 @pytest.mark.asyncio
 async def test_phase_alternative_review_returns_issues(tmp_path, monkeypatch, make_work):
     """Agent returns numbered issues via structured output."""
@@ -1366,124 +1328,6 @@ async def test_phase_alternative_review_no_issues(tmp_path, monkeypatch, make_wo
     assert issues == []
 
 
-@pytest.mark.asyncio
-async def test_phase_generate_plan_writes_markdown(tmp_path, monkeypatch, make_work):
-    """Selected issues produce a markdown plan file in .daydream/."""
-    from daydream.phases import phase_generate_plan
-
-    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
-
-    structured_plan = {
-        "plan": {
-            "summary": "Refactor auth to use dependency injection",
-            "issues": [
-                {
-                    "id": 1,
-                    "title": "Use dependency injection",
-                    "changes": [
-                        {"file": "src/service.py", "description": "Extract interface", "action": "modify"},
-                    ],
-                },
-            ],
-        }
-    }
-
-    class PlanBackend:
-        model = "test-model"
-        fanout_concurrency = 4
-
-        async def execute(
-            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
-            max_turns=None, read_only=False,
-        ):
-            yield TextEvent(text="Here's the plan.")
-            yield ResultEvent(structured_output=structured_plan, continuation=None)
-
-        async def cancel(self):
-            pass
-
-        def format_skill_invocation(self, skill_key, args=""):
-            return f"/{skill_key}"
-
-    issues = [
-        {"id": 1, "title": "Use dependency injection", "description": "Hard-coded deps",
-         "recommendation": "Use constructor injection", "severity": "high", "files": ["src/service.py"]},
-        {"id": 2, "title": "Missing tests", "description": "No coverage",
-         "recommendation": "Add tests", "severity": "low", "files": ["src/test.py"]},
-    ]
-
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
-
-    diff_file = tmp_path / "diff.patch"
-    diff_file.write_text("diff --git ...")
-
-    plan_path, plan_result = await phase_generate_plan(
-        PlanBackend(), make_work(tmp_path),
-        diff_path=diff_file,
-        intent_summary="Adds authentication service",
-        issues=issues,
-    )
-
-    assert plan_path is not None
-    assert plan_result is not None
-    assert "plan" in plan_result
-    assert plan_path.exists()
-    assert (tmp_path / ".daydream").is_dir()
-    content = plan_path.read_text()
-    assert "Implementation Plan" in content
-    assert "dependency injection" in content.lower()
-
-
-@pytest.mark.asyncio
-async def test_phase_generate_plan_skip_on_none(tmp_path, monkeypatch, make_work):
-    """User enters 'none' — no plan file generated."""
-    from daydream.phases import phase_generate_plan
-
-    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.phases.print_dim", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
-
-    class NeverCalledBackend:
-        model = "test-model"
-        fanout_concurrency = 4
-
-        async def execute(
-            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
-            max_turns=None, read_only=False,
-        ):
-            raise AssertionError("Should not be called when user selects 'none'")
-            yield  # make it an async generator
-
-        async def cancel(self):
-            pass
-
-        def format_skill_invocation(self, skill_key, args=""):
-            return f"/{skill_key}"
-
-    issues = [{"id": 1, "title": "Issue", "description": "Desc",
-               "recommendation": "Fix", "severity": "low", "files": []}]
-
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "none")
-
-    diff_file = tmp_path / "diff.patch"
-    diff_file.write_text("diff ...")
-
-    plan_path, plan_result = await phase_generate_plan(
-        NeverCalledBackend(), make_work(tmp_path),
-        diff_path=diff_file,
-        intent_summary="Test intent",
-        issues=issues,
-    )
-
-    assert plan_path is None
-    assert plan_result is None
-    assert not (tmp_path / ".daydream").exists()
-
-
 def test_feedback_schema_requires_confidence_and_rationale():
     from daydream.phases import FEEDBACK_SCHEMA
 
@@ -1562,21 +1406,25 @@ def test_is_evidenced_gate_branches():
     ) is False
 
 
-def test_plan_schema_requires_references():
-    from daydream.phases import PLAN_SCHEMA
+def test_review_prompt_includes_dependency_impact(tmp_path):
+    from daydream.phases import build_review_prompt
 
-    items = PLAN_SCHEMA["properties"]["plan"]["properties"]["issues"]["items"]["properties"]["changes"]["items"]
-    assert "references" in items["required"]
-    ref_items = items["properties"]["references"]["items"]
-    assert "file" in ref_items["required"]
-    assert "symbol" in ref_items["required"]
+    prompt = build_review_prompt(exploration_dir=tmp_path)
+    assert "Dependency Impact" in prompt
+
+
+def test_review_prompt_distinguishes_convention_cases(tmp_path):
+    from daydream.phases import build_review_prompt
+
+    prompt = build_review_prompt(exploration_dir=tmp_path)
+    assert "DROP IT" in prompt
+    assert "flag it as HIGH" in prompt
 
 
 def test_all_phase_builders_include_exploration_pointer(tmp_path):
     from daydream.phases import (
         build_alternative_review_prompt,
         build_intent_prompt,
-        build_plan_prompt,
         build_review_prompt,
     )
 
@@ -1586,11 +1434,32 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path):
         build_review_prompt,
         build_intent_prompt,
         build_alternative_review_prompt,
-        build_plan_prompt,
     ):
         prompt = builder(exploration_dir=exploration_dir)
         assert str(exploration_dir) in prompt
         assert "summary.md" in prompt
+
+
+def test_issue_producing_builders_use_shared_instructions(tmp_path):
+    from daydream.phases import (  # type: ignore[attr-defined]
+        build_alternative_review_prompt,
+        build_review_prompt,
+    )
+
+    for builder in (
+        build_review_prompt,
+        build_alternative_review_prompt,
+    ):
+        prompt = builder(exploration_dir=tmp_path)
+        assert "Confidence and Convention Rules" in prompt
+
+
+def test_intent_builder_omits_issue_instructions(tmp_path):
+    from daydream.phases import build_intent_prompt
+
+    prompt = build_intent_prompt(exploration_dir=tmp_path)
+    assert "Confidence and Convention Rules" not in prompt
+    assert "issue" not in prompt.lower()
 
 
 def test_build_review_prompt_with_prior_commits():
@@ -3222,69 +3091,6 @@ async def test_phase_alternative_review_prints_model_line_after_hero(
     )
 
     assert any(title == "WONDER" for title, _ in heroes)
-    assert "Model: claude-opus-4-6" in dim_messages
-
-
-@pytest.mark.asyncio
-async def test_phase_generate_plan_prints_model_line_after_hero(
-    tmp_path, monkeypatch, make_work
-):
-    from daydream.phases import phase_generate_plan
-
-    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
-    heroes, dim_messages = _install_hero_dim_spies(monkeypatch)
-
-    structured_plan = {
-        "plan": {
-            "summary": "Refactor auth",
-            "issues": [
-                {
-                    "id": 1,
-                    "title": "Use DI",
-                    "changes": [
-                        {"file": "src/service.py", "description": "Extract iface", "action": "modify"},
-                    ],
-                },
-            ],
-        }
-    }
-
-    class _Backend:
-        model = "claude-opus-4-6"
-        fanout_concurrency = 4
-
-        async def execute(
-            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
-            max_turns=None, read_only=False,
-        ):
-            yield ResultEvent(structured_output=structured_plan, continuation=None)
-
-        async def cancel(self):
-            pass
-
-        def format_skill_invocation(self, skill_key, args=""):
-            return f"/{skill_key}"
-
-    issues = [
-        {"id": 1, "title": "Use DI", "description": "Hard-coded deps",
-         "recommendation": "Inject", "severity": "high", "files": ["src/service.py"]},
-    ]
-
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
-
-    diff_file = tmp_path / "diff.patch"
-    diff_file.write_text("diff ...")
-
-    await phase_generate_plan(
-        _Backend(), make_work(tmp_path),
-        diff_path=diff_file,
-        intent_summary="Adds auth",
-        issues=issues,
-    )
-
-    assert any(title == "ENVISION" for title, _ in heroes)
     assert "Model: claude-opus-4-6" in dim_messages
 
 

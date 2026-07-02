@@ -158,12 +158,6 @@ PHASE_SUBTITLES = {
         "settling the divergence",
         "the deciding voice",
     ],
-    "ENVISION": [
-        "shaping the path forward",
-        "drawing the map",
-        "from thought to intention",
-        "the blueprint emerges",
-    ],
 }
 
 

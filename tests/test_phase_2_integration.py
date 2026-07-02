@@ -63,7 +63,6 @@ _VALID_PHASES = {
     "test",
     "intent",
     "alternatives",
-    "plan",
     "pr_feedback",
     "deep",
     "exploration",

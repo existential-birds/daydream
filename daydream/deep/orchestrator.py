@@ -1030,6 +1030,15 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 )
                 return 1
 
+            # Two-phase findings artifact (Phase A). When --findings-out is set,
+            # convert the canonical merged items into the strict-schema artifact and
+            # STOP: never post to the PR and never apply fixes. Phase B posts later.
+            if config.findings_out is not None:
+                from daydream.runner import _emit_findings_from_items
+
+                findings_items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
+                return _emit_findings_from_items(target_dir, config, findings_items)
+
             # Best-effort recover the render-only markdown from the deep-dir copy for
             # the exit message when the canonical file is absent (e.g. a --start-at fix
             # resume where the copy to the canonical path never ran). Non-fatal.

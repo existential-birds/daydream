@@ -624,20 +624,12 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Extra path to copy into ephemeral worktree (repeatable)." if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--plan",
-        action="store_true",
-        default=False,
-        dest="plan",
-        help="Generate an implementation plan and embed it in PR comments (use with --comment)."
-        if full_help else argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--findings-out",
         default=None,
         metavar="PATH",
         dest="findings_out",
         help="Write a strict-schema findings artifact (Phase A emission for "
-             "`daydream post-findings`; requires --review)."
+             "`daydream post-findings`; works with the default deep review flow or --review)."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -845,8 +837,12 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.assume == "yes" and output_mode != "loop":
         parser.error("--yes has no effect with --review/--comment (no fix phase to auto-apply)")
 
-    if args.findings_out is not None and output_mode != "review":
-        parser.error("--findings-out requires --review (Phase A findings artifact emission)")
+    findings_out_allowed = output_mode == "review" or (output_mode == "loop" and not args.shallow)
+    if args.findings_out is not None and not findings_out_allowed:
+        parser.error(
+            "--findings-out requires --review or the default deep review flow "
+            "(not --comment/--shallow)"
+        )
 
     # ttt/per-stack/merge are deep-pipeline resume stages; not valid for shallow.
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
@@ -917,7 +913,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         force_worktree=args.force_worktree,
         shallow=args.shallow,
         extra_copy=list(args.extra_copy),
-        plan=args.plan,
         non_interactive=args.non_interactive,
         assume=args.assume,
     )

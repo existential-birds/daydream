@@ -146,7 +146,6 @@ async def post_review_to_pr_from_alt_issues(
     alt_issues: list[dict[str, Any]],
     *,
     console: Console,
-    plan_data: dict[str, Any] | None = None,
 ) -> None:
     """Convert alt-review issues (from `--comment`) and offer to post to the PR.
 
@@ -154,14 +153,11 @@ async def post_review_to_pr_from_alt_issues(
         target_dir: Repo root.
         alt_issues: Issue dicts from `phase_alternative_review`.
         console: Rich console for user-facing output.
-        plan_data: Structured plan from ``phase_generate_plan`` (``--plan``).
-            When provided the consolidated agent prompt in the PR comment
-            includes per-issue change instructions from the plan.
     """
     issues = alt_issues_to_parsed(alt_issues)
     if not issues:
         return
-    await _post(target_dir, issues, console=console, plan_data=plan_data)
+    await _post(target_dir, issues, console=console)
 
 
 # --- Parsers ---------------------------------------------------------------
@@ -737,13 +733,9 @@ def _count_labels(
 def _build_consolidated_prompt(
     classified: _ClassifiedIssues,
     pr: PRInfo,
-    *,
-    plan_data: dict[str, Any] | None = None,
 ) -> str:
     """Build a single collapsible prompt block that tells AI agents to fetch and fix review comments."""
     total = len(classified.inline_issues) + len(classified.body_only)
-
-    plan_section = _format_plan_for_prompt(plan_data) if plan_data else ""
 
     prompt_body = (
         f"Fix the {total} review comment(s) posted on this PR.\n"
@@ -761,8 +753,6 @@ def _build_consolidated_prompt(
         "finding against the current code, and fix it if valid. Skip false\n"
         "positives. Commit all fixes when done."
     )
-    if plan_section:
-        prompt_body += "\n\n" + plan_section
 
     return (
         "<details>\n"
@@ -770,31 +760,6 @@ def _build_consolidated_prompt(
         f"```\n{prompt_body}\n```\n\n"
         "</details>"
     )
-
-
-def _format_plan_for_prompt(plan_data: dict[str, Any]) -> str:
-    """Render structured plan data as actionable instructions for the agent prompt."""
-    plan = plan_data.get("plan", plan_data)
-    plan_issues = plan.get("issues", [])
-    if not plan_issues:
-        return ""
-
-    lines = ["## Implementation Plan", ""]
-    for issue in plan_issues:
-        title = issue.get("title", "Untitled")
-        lines.append(f"### #{issue.get('id', '?')} {title}")
-        changes = issue.get("changes", [])
-        for change in changes:
-            action = change.get("action", "modify")
-            file_path = change.get("file", "?")
-            desc = change.get("description", "")
-            lines.append(f"- {action} `{file_path}`: {desc}")
-            refs = change.get("references", [])
-            for ref in refs:
-                lines.append(f"  - ref: `{ref.get('file', '')}:{ref.get('symbol', '')}`")
-        lines.append("")
-
-    return "\n".join(lines)
 
 
 def _resolve_trajectory_paths(
@@ -880,7 +845,6 @@ def build_payload(
     pr: PRInfo,
     classified: _ClassifiedIssues,
     *,
-    plan_data: dict[str, Any] | None = None,
     run_info_override: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
@@ -895,7 +859,6 @@ def build_payload(
     Args:
         pr: Target PR.
         classified: Inline/body-only split from :func:`classify`.
-        plan_data: Optional structured plan rendered into the agent prompt.
         run_info_override: Pre-rendered run-info markdown to use in place of
             the live recorder block (``post-findings`` posts from artifact
             data; there is no recorder in that process). ``None`` renders the
@@ -913,7 +876,7 @@ def build_payload(
 
     # Consolidated AI agent prompt.
     if classified.inline_issues or classified.body_only:
-        body_chunks.append(_build_consolidated_prompt(classified, pr, plan_data=plan_data))
+        body_chunks.append(_build_consolidated_prompt(classified, pr))
 
     # Collapsible review info: enriched run-info (rollup + per-phase
     # breakdown + version footer, owned by the renderer) followed by the
@@ -963,7 +926,6 @@ async def _post(
     issues: list[ParsedIssue],
     *,
     console: Console,
-    plan_data: dict[str, Any] | None = None,
 ) -> None:
     pr = find_open_pr(target_dir)
     if pr is None:
@@ -998,7 +960,7 @@ async def _post(
         print_info(console, "Skipped posting to PR.")
         return
 
-    payload = build_payload(pr, classified, plan_data=plan_data)
+    payload = build_payload(pr, classified)
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:
         # ``error_msg`` carries the GitError text from git_ops, which includes

@@ -146,14 +146,17 @@ jobs:
         # Bump in lockstep with the package version on release (a test enforces this).
         run: uv tool install git+https://github.com/existential-birds/daydream@v0.21.0
 
-      - name: Run daydream review
+      # Runs the DEFAULT deep-review pipeline (not --review). In --non-interactive
+      # the deep run auto-declines the post/fix gates, so it still only produces a
+      # findings artifact — the deep multi-stack reviewer just feeds it.
+      - name: Run daydream deep review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ github.token }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
         run: |
           mkdir -p findings
-          daydream --review --non-interactive --pr-number "$PR_NUMBER" \
+          daydream --non-interactive --pr-number "$PR_NUMBER" \
             --findings-out findings/findings.json --base "origin/$BASE_REF" .
 
       - name: Upload findings artifact

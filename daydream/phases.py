@@ -732,37 +732,6 @@ async def _run_failure_summarizer(
     return body, handoff_path, written
 
 
-def _parse_issue_selection(user_input: str, issues: list[dict[str, Any]]) -> list[int] | None:
-    """Parse user's issue selection into a list of issue IDs.
-
-    Args:
-        user_input: User input string ("all", "none", "", or comma-separated IDs).
-        issues: Full list of issue dicts with "id" keys.
-
-    Returns:
-        List of selected issue IDs, or None for explicit skip.
-
-    """
-    cleaned = user_input.strip().lower()
-
-    if cleaned in ("none", ""):
-        return None
-
-    if cleaned == "all":
-        return [issue["id"] for issue in issues]
-
-    valid_ids = {issue["id"] for issue in issues}
-    selected = []
-    for part in cleaned.split(","):
-        part = part.strip()
-        if part.isdigit():
-            issue_id = int(part)
-            if issue_id in valid_ids:
-                selected.append(issue_id)
-
-    return selected
-
-
 FEEDBACK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1040,60 +1009,6 @@ RECOMMENDATION_VERDICTS_SCHEMA = {
     "additionalProperties": False,
 }
 
-PLAN_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "plan": {
-            "type": "object",
-            "properties": {
-                "summary": {"type": "string"},
-                "issues": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "integer"},
-                            "title": {"type": "string"},
-                            "changes": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "file": {"type": "string"},
-                                        "description": {"type": "string"},
-                                        "action": {"type": "string", "enum": ["modify", "create", "delete"]},
-                                        "references": {
-                                            "type": "array",
-                                            "items": {
-                                                "type": "object",
-                                                "properties": {
-                                                    "file": {"type": "string"},
-                                                    "symbol": {"type": "string"},
-                                                },
-                                                "required": ["file", "symbol"],
-                                                "additionalProperties": False,
-                                            },
-                                        },
-                                    },
-                                    "required": ["file", "description", "action", "references"],
-                                    "additionalProperties": False,
-                                },
-                            },
-                        },
-                        "required": ["id", "title", "changes"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["summary", "issues"],
-            "additionalProperties": False,
-        },
-    },
-    "required": ["plan"],
-    "additionalProperties": False,
-}
-
-
 def _confidence_and_convention_instructions() -> str:
     """Prompt language for QUAL-02 confidence, QUAL-03 conventions, QUAL-04 error handling.
 
@@ -1148,22 +1063,6 @@ def _confidence_and_convention_instructions() -> str:
         "code doesn't already exist should be MEDIUM confidence at most. Focus on\n"
         "concrete sub-findings (bugs, correctness issues) rather than structural\n"
         "opinions about code organization."
-    )
-
-
-def _plan_grounding_instructions() -> str:
-    """Prompt language for OUTP-01 plan reference grounding.
-
-    Returns:
-        Markdown-formatted instruction block as a single string.
-
-    """
-    return (
-        "## Plan Reference Grounding\n\n"
-        "For every change in the plan, populate `references` with `{file, symbol}` entries "
-        "drawn ONLY from the Exploration Context above. Do not invent file paths or symbol "
-        "names. If you cannot ground a step in the Exploration Context, leave `references` "
-        "as an empty array — the renderer will flag ungrounded steps for the user."
     )
 
 
@@ -1351,37 +1250,6 @@ def build_alternative_review_prompt(
     parts.append(body)
     return "\n".join(parts)
 
-
-def build_plan_prompt(
-    *,
-    intent_summary: str = "",
-    issues_text: str = "",
-    diff_path: str = "",
-    exploration_dir: Path | None = None,
-) -> str:
-    """Assemble the prompt for `phase_generate_plan`.
-
-    Returns:
-        Fully assembled prompt string.
-
-    """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    parts.append(_confidence_and_convention_instructions())
-    parts.append(_plan_grounding_instructions())
-    body = (
-        f"The intent of this PR is:\n\n"
-        f"{intent_summary}\n\n"
-        f"Create a detailed implementation plan for fixing these issues:\n"
-        f"{issues_text}\n\n"
-        f"For each issue, specify what files to change, what the change should be, "
-        f"and why. Make this actionable enough to hand to another developer or agent.\n\n"
-        f"The diff is available at {diff_path} for context. Do not invent file paths or symbols.\n"
-    )
-    parts.append(body)
-    return "\n".join(parts)
 
 FixResult = tuple[dict[str, Any], bool, str | None]
 
@@ -2860,157 +2728,6 @@ async def phase_alternative_review(
         print_info(console, "No issues found — the implementation looks good")
 
     return issues
-
-
-def _write_plan_markdown(
-    plan_path: Path,
-    plan_data: dict[str, Any],
-    intent_summary: str,
-    branch: str,
-    original_issues: list[dict[str, Any]],
-) -> None:
-    """Write the plan data as a markdown file.
-
-    Args:
-        plan_path: Path to write the markdown file.
-        plan_data: Structured plan output from the agent.
-        intent_summary: Confirmed intent summary.
-        branch: Current branch name.
-        original_issues: Full issue list (for severity/recommendation metadata).
-
-    """
-    issue_map = {i["id"]: i for i in original_issues}
-    plan = plan_data.get("plan", plan_data)  # Handle both wrapped and unwrapped
-
-    lines = [
-        "# Implementation Plan",
-        f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"**Branch:** {branch}",
-        "",
-        "## Intent",
-        intent_summary,
-        "",
-        "## Plan Summary",
-        plan.get("summary", "No summary provided."),
-        "",
-    ]
-
-    for plan_issue in plan.get("issues", []):
-        issue_id = plan_issue.get("id", "?")
-        title = plan_issue.get("title", "Untitled")
-        original = issue_map.get(issue_id, {})
-
-        lines.append(f"## Issue {issue_id}: {title}")
-        lines.append(f"**Severity:** {original.get('severity', 'unknown')}")
-        if original.get("description"):
-            lines.append(f"**Problem:** {original['description']}")
-        if original.get("recommendation"):
-            lines.append(f"**Recommendation:** {original['recommendation']}")
-        lines.append("")
-
-        changes = plan_issue.get("changes", [])
-        if changes:
-            lines.append("### Changes")
-            for change in changes:
-                action = change.get("action", "modify")
-                file_path = change.get("file", "unknown")
-                desc = change.get("description", "")
-                lines.append(f"- **{action}** `{file_path}` — {desc}")
-            lines.append("")
-
-    plan_path.write_text("\n".join(lines))
-
-
-async def phase_generate_plan(
-    backend: Backend,
-    work: WorkContext,
-    diff_path: Path,
-    intent_summary: str,
-    issues: list[dict[str, Any]],
-    *,
-    exploration_dir: Path | None = None,
-    auto_select_all: bool = False,
-) -> tuple[Path | None, dict[str, Any] | None]:
-    """Phase: Generate an implementation plan for selected issues.
-
-    Prompts the user to select which issues to address, then launches an
-    agent to create a detailed plan. Writes the plan as markdown to
-    .daydream/plan-{timestamp}.md.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context (plan written under ``work.repo``).
-        diff_path: Path to the diff file on disk.
-        intent_summary: Confirmed intent summary.
-        issues: Full list of issues from phase_alternative_review.
-        auto_select_all: Skip the interactive prompt and select all issues.
-
-    Returns:
-        Tuple of (path to plan file, raw plan dict). Either or both may be None.
-
-    """
-    print_phase_hero(console, "ENVISION", phase_subtitle("ENVISION"))
-    print_dim(console, f"Model: {backend.model}")
-
-    if auto_select_all:
-        selected_ids: list[int] = [i["id"] for i in issues]
-    else:
-        console.print()
-        response = prompt_user(
-            console,
-            "Create an implementation plan? Enter issue numbers (e.g., 1,3,5) or 'all', or 'none' to skip",
-            "all",
-        )
-
-        parsed = _parse_issue_selection(response, issues)
-        if parsed is None:
-            print_dim(console, "Skipping plan generation")
-            return None, None
-        if not parsed:
-            print_warning(console, "No valid issue numbers found in selection")
-            return None, None
-        selected_ids = parsed
-
-    selected_issues = [i for i in issues if i["id"] in selected_ids]
-    issues_text = "\n".join(
-        f"- #{i['id']} [{i.get('severity', '?')}] {i.get('title', 'No title')}: "
-        f"{i.get('description', '')} → {i.get('recommendation', '')}"
-        for i in selected_issues
-    )
-
-    prompt = build_plan_prompt(
-        intent_summary=intent_summary,
-        issues_text=issues_text,
-        diff_path=str(diff_path),
-        exploration_dir=exploration_dir,
-    )
-
-    console.print()
-    print_info(console, f"Generating plan for {len(selected_issues)} issue(s)...")
-
-    result, _, _ = await run_agent(backend, work.repo, prompt, output_schema=PLAN_SCHEMA, phase=DaydreamPhase.PLAN)
-
-    if not isinstance(result, dict):
-        if not get_quiet_mode():
-            print_warning(
-                console,
-                f"Failed to generate structured plan; agent returned {type(result).__name__}",
-            )
-        return None, None
-
-    # Ensure .daydream/ directory exists
-    daydream_dir = work.repo / ".daydream"
-    daydream_dir.mkdir(exist_ok=True)
-
-    # Write plan file
-    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    plan_path = daydream_dir / f"plan-{timestamp}.md"
-
-    branch_name = work.head_branch or _git_branch(work.repo)
-    _write_plan_markdown(plan_path, result, intent_summary, branch_name, selected_issues)
-
-    print_success(console, f"Plan written to {plan_path}")
-    return plan_path, result
 
 
 # Deep-mode: per-stack fan-out

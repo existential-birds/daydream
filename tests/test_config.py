@@ -8,7 +8,7 @@ from daydream.config import (
 
 PHASE_NAMES = {
     "review", "per_stack_review", "arbiter", "parse", "fix", "test", "verify",
-    "exploration", "intent", "wonder", "envision", "merge", "pr_feedback",
+    "exploration", "intent", "wonder", "merge", "pr_feedback",
 }
 
 
@@ -27,8 +27,8 @@ def test_phase_default_models_claude_tier_assignments():
     claude = PHASE_DEFAULT_MODELS["claude"]
     # PARSE is the cheap tier
     assert claude["parse"] == "claude-haiku-4-5"
-    # Expensive tier: REVIEW, WONDER, ENVISION, MERGE, PR_FEEDBACK
-    for phase in ("review", "wonder", "envision", "merge", "pr_feedback"):
+    # Expensive tier: REVIEW, WONDER, MERGE, PR_FEEDBACK
+    for phase in ("review", "wonder", "merge", "pr_feedback"):
         assert claude[phase] == "claude-opus-4-8"
     # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT
     for phase in ("fix", "test", "exploration", "per_stack_review", "intent"):

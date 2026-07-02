@@ -4150,3 +4150,79 @@ async def test_evidence_gate_clears_stale_dropped_sidecar(
     assert not (deep / "dropped-speculative.json").exists(), (
         "stale dropped-speculative.json survived a 0-drop resume"
     )
+
+
+async def test_deep_findings_out_emits_artifact_and_stops(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real-path: a deep run with ``--findings-out`` writes the PR-pinned findings
+    artifact from the canonical merged items and STOPS -- no PR post, no fix.
+
+    Enters through ``runner.run`` -> ``run_deep`` (deep is the default dispatch)
+    with a real temp git repo and the scripted ``_StubBackend`` injected through
+    the ``create_backend`` seam. The stub drives the full fan-out to a canonical
+    ``merged-items.json``; only the backend and the GitHub PR lookup are mocked.
+
+    Observable outcomes:
+      (a) the artifact is written to the configured path and pinned to the PR
+          (``pr_number``/``head_sha`` match the run's PR + real head SHA);
+      (b) exit code is 0;
+      (c) NO PR post -- ``post_review_to_pr_from_report`` is replaced with a
+          fail-if-called stub, so any post attempt would raise;
+      (d) NO fix -- the tracked working tree is byte-identical to its pre-run
+          state (real ``git status --porcelain`` empty vs. baseline) and none of
+          the stub's ``.fixed-*`` fix sentinels exist.
+    """
+    from daydream import git_ops
+    from daydream.pr_review import PRInfo
+    from daydream.runner import RunConfig, run
+
+    _silence_gate_noise(monkeypatch)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    async def _post_forbidden(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        raise AssertionError("--findings-out must not post to the PR")
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
+
+    head = git_ops.head_sha(multi_stack_target)
+    base = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+        ["git", "rev-parse", "main"],  # noqa: S607 - git is a trusted command
+        cwd=multi_stack_target, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main",
+                owner="o", repo="r", url="https://example.invalid/pr/7")
+    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda target_dir, n: pr)
+
+    out = multi_stack_target / "findings.json"
+    reviewed_sources = ("api.py", "App.tsx", "README.md")
+    source_before = {name: (multi_stack_target / name).read_text() for name in reviewed_sources}
+
+    rc = await run(RunConfig(
+        target=str(multi_stack_target),
+        pr_number=7,
+        findings_out=str(out),
+        start_at="review",
+        cleanup=False,
+        non_interactive=True,
+    ))
+
+    # (b) exit 0
+    assert rc == 0
+    # (a) artifact written + PR-pinned
+    data = json.loads(out.read_text())
+    assert data["pr_number"] == 7
+    assert data["head_sha"] == head
+    assert data["repo"] == "o/r"
+    assert all(re.fullmatch(r"[0-9a-f]{64}", f["fingerprint"]) for f in data["findings"])
+    # (d) no fix applied -- the reviewed source is byte-identical and no fix sentinel
+    # exists. This is the real "no fix ran" signal: it ignores daydream's own gitignored
+    # artifacts (.daydream/, .review-output.md), which the deep pipeline always writes and
+    # which are not fixes. (An earlier git-status tree-diff conflated those artifacts with
+    # fixes and only passed where a global gitignore happened to mask them.)
+    for name in reviewed_sources:
+        assert (multi_stack_target / name).read_text() == source_before[name], f"{name} was modified -- a fix ran"
+    assert not list(multi_stack_target.glob(".fixed-*")), "fix sentinel present -- a fix ran"
+    assert not (multi_stack_target / ".daydream-fix-applied").exists()

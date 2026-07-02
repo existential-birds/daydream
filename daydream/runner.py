@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from rich.markup import escape as escape_markup
 
@@ -65,7 +65,6 @@ from daydream.phases import (
     phase_commit_push_auto,
     phase_fetch_pr_feedback,
     phase_fix,
-    phase_generate_plan,
     phase_parse_feedback,
     phase_respond_pr_feedback,
     phase_review,
@@ -97,6 +96,9 @@ from daydream.ui import (
     prompt_user,
 )
 from daydream.workspace import WorkContext, open_workspace
+
+if TYPE_CHECKING:
+    from daydream.pr_review import ParsedIssue
 
 # Output mode: ``loop`` runs review→fix→test; ``comment`` posts inline PR
 # comments and exits; ``review`` writes a report and exits.
@@ -188,7 +190,6 @@ class RunConfig:
         force_worktree: Force ephemeral worktree even when ``branch`` is None.
         shallow: Single-stack review (skip multi-stack auto-detection).
         extra_copy: Extra paths to copy into ephemeral worktrees.
-        plan: Generate an implementation plan and embed it in PR comments.
         non_interactive: Run without prompting; take each prompt's safe default
             without reading stdin.
         assume: Forced yes/no answer for interactive gates — ``"yes"`` (``--yes``),
@@ -237,7 +238,6 @@ class RunConfig:
     force_worktree: bool = False
     shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)
-    plan: bool = False
     non_interactive: bool = False
     assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
     identity: str = "unknown"  # resolved GitHub identity; set once by run()
@@ -363,7 +363,7 @@ def _resolve_backend(
     Args:
         config: Run configuration with backend/model and file-config sources.
         phase: Phase name (e.g. ``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
-            ``"intent"``, ``"wonder"``, ``"envision"``, ``"merge"``,
+            ``"intent"``, ``"wonder"``, ``"merge"``,
             ``"exploration"``, ``"pr_feedback"``).
         cache: Optional dict to cache backends by ``(backend_name, model)``.
             When provided, backends are reused only when both the backend kind
@@ -777,6 +777,53 @@ def _emit_findings_artifact(
         ``0`` on success, ``1`` when no PR is resolvable.
     """
     from daydream import pr_review
+
+    parsed = pr_review.alt_issues_to_parsed(issues)
+    return _write_findings_for_parsed(target_dir, config, parsed)
+
+
+def _emit_findings_from_items(
+    target_dir: Path, config: RunConfig, items: list[dict[str, Any]],
+) -> int:
+    """Write the Phase A findings artifact from canonical merged items.
+
+    Sibling of :func:`_emit_findings_artifact` for the deep-review path:
+    converts canonical merged items (``file``/``line`` already resolved) via
+    :func:`daydream.pr_review.parsed_issues_from_items` and routes them through
+    the same shared PR-resolution + build + write path.
+
+    Args:
+        target_dir: Repo root containing the PR checkout.
+        config: Run configuration; ``config.findings_out`` must be set.
+        items: Canonical merged finding dicts (may be empty).
+
+    Returns:
+        ``0`` on success, ``1`` when no PR is resolvable.
+    """
+    from daydream import pr_review
+
+    parsed = pr_review.parsed_issues_from_items(items)
+    return _write_findings_for_parsed(target_dir, config, parsed)
+
+
+def _write_findings_for_parsed(
+    target_dir: Path, config: RunConfig, parsed: list["ParsedIssue"],
+) -> int:
+    """Resolve the target PR and write the strict-schema findings artifact.
+
+    Shared body for :func:`_emit_findings_artifact` and
+    :func:`_emit_findings_from_items`. Resolves the target PR — via
+    :func:`daydream.pr_review.find_pr_by_number` when ``config.pr_number`` is
+    pinned, else :func:`daydream.pr_review.find_open_pr` — then writes the
+    artifact. The artifact must declare its target, so an unresolvable PR (or a
+    ``GitError`` from the lookup) is an actionable error, never a silently
+    absent artifact. An empty ``parsed`` list still writes an (empty) artifact
+    so Phase B can resolve all stale comments.
+
+    Returns:
+        ``0`` on success, ``1`` when no PR is resolvable.
+    """
+    from daydream import pr_review
     from daydream.findings import build_findings_artifact, write_findings_artifact
 
     assert config.findings_out is not None  # caller gates on findings_out
@@ -797,7 +844,6 @@ def _emit_findings_artifact(
         )
         return 1
 
-    parsed = pr_review.alt_issues_to_parsed(issues)
     artifact = build_findings_artifact(
         target_dir, pr, parsed, run_info=pr_review._render_review_info_block(),
     )
@@ -914,30 +960,17 @@ async def _run_review_or_comment(
             print_success(console, "No issues found — the implementation looks good!")
             return 0
 
-        # Generate plan. ``--comment`` skips ENVISION by default (latency for a
-        # prompt-only flow); ``--plan`` opts back in and feeds it to the comment prompt.
-        plan_data: dict[str, Any] | None = None
-        skip_plan = post_to_pr and not config.plan
-        try:
-            if not skip_plan:
-                async with phase_scope(DaydreamPhase.PLAN):
-                    _, plan_data = await phase_generate_plan(
-                        backend, work, diff_path, intent_summary, issues,
-                        exploration_dir=exploration_dir,
-                        auto_select_all=post_to_pr,
-                    )
-        finally:
-            exploration_cleanup = target_dir / ".daydream" / "exploration"
-            if exploration_cleanup.is_dir():
-                shutil.rmtree(exploration_cleanup)
+        exploration_cleanup = target_dir / ".daydream" / "exploration"
+        if exploration_cleanup.is_dir():
+            shutil.rmtree(exploration_cleanup)
 
         # Post findings as inline PR comments (``--comment`` only; ``--review``
-        # exits with the plan on disk).
+        # exits after emitting the findings artifact).
         if post_to_pr:
             from daydream.pr_review import post_review_to_pr_from_alt_issues
 
             await post_review_to_pr_from_alt_issues(
-                target_dir, issues, console=console, plan_data=plan_data,
+                target_dir, issues, console=console,
             )
 
         return 0

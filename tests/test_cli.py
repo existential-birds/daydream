@@ -236,15 +236,26 @@ def test_findings_out_with_review_populates_config(monkeypatch):
     assert config.output_mode == "review"
 
 
-@pytest.mark.parametrize("extra", [[], ["--comment"]])
-def test_findings_out_requires_review_errors(monkeypatch, capsys, extra):
-    """--findings-out is Phase A emission of the review report; it requires --review."""
+@pytest.mark.parametrize("extra", [["--comment"], ["--shallow"]])
+def test_findings_out_rejects_flows_without_pipeline_errors(monkeypatch, capsys, extra):
+    """--findings-out is rejected for flows with no findings pipeline (--comment, --shallow)."""
     monkeypatch.setattr(sys, "argv", ["daydream", *extra, "--findings-out", "f.json", "/tmp/repo"])
     with pytest.raises(SystemExit) as exc_info:
         _parse_args()
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
-    assert "--findings-out" in err and "--review" in err
+    assert "--findings-out" in err
+
+
+def test_findings_out_with_deep_flow_populates_config(monkeypatch):
+    """The default deep loop flow (no --review/--comment/--shallow) permits --findings-out."""
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "--findings-out", "findings/findings.json", "/tmp/repo",
+    ])
+    config = _parse_args()
+    assert config.findings_out == "findings/findings.json"
+    assert config.output_mode == "loop"
+    assert config.shallow is False
 
 
 def test_findings_out_defaults_none(monkeypatch):
@@ -329,12 +340,10 @@ def test_parse_args_feedback_requires_bot(monkeypatch):
         _parse_args()
 
 
-def test_phase_subtitles_include_wonder_and_envision():
+def test_phase_subtitles_include_wonder():
     from daydream.ui import PHASE_SUBTITLES
     assert "WONDER" in PHASE_SUBTITLES
-    assert "ENVISION" in PHASE_SUBTITLES
     assert len(PHASE_SUBTITLES["WONDER"]) >= 2
-    assert len(PHASE_SUBTITLES["ENVISION"]) >= 2
 
 
 def test_print_issues_table_renders():

@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
 from daydream import git_ops
 from daydream.git_ops import BranchNotFoundError
@@ -449,7 +450,7 @@ def test_is_in_place_property_inverse_of_ephemeral() -> None:
 
 
 async def test_stale_local_warning_fires(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo, bare = _make_repo_with_origin(tmp_path)
     # Create + push the feature branch, then add commits on origin so the
@@ -464,16 +465,18 @@ async def test_stale_local_warning_fires(
     _push_origin_commit_via_sidecar(tmp_path, bare, branch="topic")
     # 'topic' is currently checked out in repo and now lags origin/topic.
 
+    # Pin a wide recording console so the warning text is captured intact,
+    # independent of terminal width (the warning renders through the lazily
+    # imported ``daydream.agent.console``).
+    rec = Console(record=True, force_terminal=True, width=200)
+    monkeypatch.setattr("daydream.agent.console", rec)
+
     async with open_workspace(
         repo, branch="topic", base="main", force_ephemeral=False, skip_tests=False
     ) as ctx:
         assert ctx.is_ephemeral is True
 
-    captured = capsys.readouterr()
-    # Rich wraps the panel — collapse whitespace and panel borders before
-    # asserting the message is present.
-    raw = captured.out + captured.err
-    flat = " ".join(raw.replace("│", " ").split())
-    assert "topic is checked out in cwd" in flat
-    assert "2 commits behind origin/topic" in flat
-    assert "reviewing origin/topic" in flat
+    out = rec.export_text()
+    assert "topic is checked out in cwd" in out
+    assert "2 commits behind origin/topic" in out
+    assert "reviewing origin/topic" in out
