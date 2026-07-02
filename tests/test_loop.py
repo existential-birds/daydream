@@ -148,7 +148,7 @@ async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch
 
     reverted = []
     monkeypatch.setattr(
-        "daydream.runner.revert_uncommitted_changes", lambda cwd: (reverted.append(cwd) or True)
+        "daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: (reverted.append(cwd) or True)
     )
 
     config = RunConfig(
@@ -174,8 +174,8 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
 
     captured_summary = {}
 
-    import daydream.runner as runner_mod
-    original_print_summary = runner_mod.print_summary
+    import daydream.flows.shallow as shallow_mod
+    original_print_summary = shallow_mod.print_summary
 
     def capture_summary(console, data):
         captured_summary["feedback_count"] = data.feedback_count
@@ -184,7 +184,7 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
         captured_summary["loop_mode"] = data.loop_mode
         original_print_summary(console, data)
 
-    monkeypatch.setattr("daydream.runner.print_summary", capture_summary)
+    monkeypatch.setattr("daydream.flows.shallow.print_summary", capture_summary)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -249,7 +249,7 @@ async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeyp
     backend = loop_mock_backend(review_results=[[issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
+    monkeypatch.setattr("daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: True)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -269,18 +269,18 @@ async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkey
     backend = loop_mock_backend(review_results=[[issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
+    monkeypatch.setattr("daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: True)
 
     captured_summary: dict[str, Any] = {}
 
-    import daydream.runner as runner_mod
-    original_print_summary = runner_mod.print_summary
+    import daydream.flows.shallow as shallow_mod
+    original_print_summary = shallow_mod.print_summary
 
     def capture_summary(console, data):
         captured_summary["fixes_applied"] = data.fixes_applied
         original_print_summary(console, data)
 
-    monkeypatch.setattr("daydream.runner.print_summary", capture_summary)
+    monkeypatch.setattr("daydream.flows.shallow.print_summary", capture_summary)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -452,7 +452,7 @@ async def test_loop_diff_base_unchanged_on_test_failure(loop_target, mock_ui_loo
     backend = loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
 
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.setattr("daydream.runner.revert_uncommitted_changes", lambda cwd: True)
+    monkeypatch.setattr("daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: True)
 
     sha_calls: list[Path] = []
     original_get_head_sha = None

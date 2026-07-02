@@ -20,6 +20,7 @@ from daydream import runner
 from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
+from tests.harness.phase_backend import PhaseDispatchBackend
 
 
 class RecordingBackend:
@@ -156,4 +157,76 @@ async def test_fork_inserts_custom_phase_into_review_flow(
 
     idx = [i for i, p in enumerate(backend.prompts) if p == "RO-AUDIT-PROMPT"]
     assert idx, "custom phase never reached the backend"
+    assert rc == 0
+
+
+class ShallowRecordingBackend(PhaseDispatchBackend):
+    """The shared shallow phase-dispatch fake, plus full-prompt recording.
+
+    ``PhaseDispatchBackend`` drives the shallow review-parse-fix-test flow
+    past every gate; ``prompts`` records the exact prompt each ``execute``
+    call received so the test can assert the fork phase's prompt arrived.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.prompts: list[str] = []
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        self.prompts.append(prompt)
+        async for event in super().execute(
+            cwd, prompt, output_schema, continuation, agents, max_turns, read_only
+        ):
+            yield event
+
+
+async def test_fork_inserts_phase_before_summary_in_shallow(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daydream_ext phase inserted before ``summary`` runs in ``--shallow``.
+
+    Observable outcomes: exit 0 and the custom phase's prompt reached the
+    backend through the registered ``shallow`` flow (after the iterate loop
+    group, before the summary step).
+    """
+    ext_dir.write_module(
+        "from daydream.extensions import FlowStep\n"
+        "DAYDREAM_EXT_API = 1\n"
+        "async def _ro(ctx):\n"
+        "    from daydream.agent import run_agent\n"
+        "    from daydream.trajectory import DaydreamPhase\n"
+        "    await run_agent(ctx.backend_for('ro_shallow'), ctx.work.repo, 'RO-SHALLOW-PROMPT',\n"
+        "                    phase=DaydreamPhase.REVIEW)\n"
+        "def register(r):\n"
+        "    r.register_phase(FlowStep(name='ro_shallow', run=_ro))\n"
+        "    r.insert_before('shallow', anchor='summary', step='ro_shallow')\n"
+    )
+    backend = ShallowRecordingBackend(
+        parse_results=[[{"id": 1, "description": "Align hello() return value", "file": "api.py", "line": 1}]]
+    )
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            shallow=True,
+            skill="python",
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+        )
+    )
+
+    assert "RO-SHALLOW-PROMPT" in backend.prompts, "fork phase never reached the backend"
     assert rc == 0
