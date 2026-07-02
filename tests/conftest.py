@@ -477,6 +477,34 @@ def _no_harvest_row_spacing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(harvest, "_row_spacing_sleep", _noop)
 
 
+class ExtDir:
+    """Helper for the ``ext_dir`` fixture: writes a ``daydream_ext`` package to tmp."""
+
+    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._root = root
+        self._monkeypatch = monkeypatch
+
+    def write_module(self, source: str) -> Path:
+        """Write ``<tmp>/daydream_ext/__init__.py`` and point ``$DAYDREAM_EXT_DIR`` at it."""
+        package = self._root / "daydream_ext"
+        package.mkdir(exist_ok=True)
+        (package / "__init__.py").write_text(source)
+        self._monkeypatch.setenv("DAYDREAM_EXT_DIR", str(package))
+        return package
+
+
+@pytest.fixture
+def ext_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ExtDir:
+    """A ``daydream_ext`` package writer wired to ``$DAYDREAM_EXT_DIR``.
+
+    The extension loader's explicit-path override (mirroring the
+    ``$DAYDREAM_SKILLS_DIR`` convention) is the test seam: tests write an
+    extension module to tmp and the loader picks it up without touching
+    ``sys.modules``.
+    """
+    return ExtDir(tmp_path, monkeypatch)
+
+
 @pytest.fixture
 def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
     """Install the subprocess ``gh`` shim and shrink the ``gh`` timeout budget.

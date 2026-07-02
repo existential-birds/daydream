@@ -15,6 +15,7 @@ from daydream.extensions.api import (
     Stop,
     UnresolvedExtensionError,
 )
+from daydream.extensions.loader import build_registry, get_registry
 from daydream.extensions.registry import Registry
 
 __all__ = [
@@ -28,4 +29,6 @@ __all__ = [
     "StackRule",
     "Stop",
     "UnresolvedExtensionError",
+    "build_registry",
+    "get_registry",
 ]
