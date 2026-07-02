@@ -46,6 +46,7 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
+from daydream.extensions import get_registry
 from daydream.phases import (
     FEEDBACK_SCHEMA,
     PER_STACK_RECORD_SCHEMA,
@@ -277,10 +278,10 @@ def get_installed_skills() -> set[str] | None:
 
     Reads the Claude Code plugin registry at
     ``$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json`` (default
-    ``~/.claude``) and maps installed plugin names back to ``SKILL_MAP``
-    stack keys. Each stack's Beagle skill lives in a plugin named
-    ``beagle-<stack>``; a stack is considered "installed" iff that plugin
-    is present.
+    ``~/.claude``) and maps installed plugin names back to stack keys via
+    the extension registry's ``stack:<key>`` skill slots, so a remapped
+    stack checks the remapped plugin prefix. A stack is considered
+    "installed" iff its skill's plugin is present.
 
     Returns:
         Set of installed stack keys (subset of ``SKILL_MAP.keys()``), or
@@ -304,10 +305,11 @@ def get_installed_skills() -> set[str] | None:
         return None
     # Keys in the registry look like "<plugin-name>@<marketplace>".
     installed_plugins = {key.split("@", 1)[0] for key in plugins}
+    skill_registry = get_registry()
     installed: set[str] = set()
-    for stack_key, skill_invocation in SKILL_MAP.items():
-        # SKILL_MAP values are "<plugin-name>:<skill-name>".
-        plugin_prefix = skill_invocation.split(":", 1)[0]
+    for stack_key in SKILL_MAP:
+        # Slot values are "<plugin-name>:<skill-name>".
+        plugin_prefix = skill_registry.skill(f"stack:{stack_key}").split(":", 1)[0]
         if plugin_prefix in installed_plugins:
             installed.add(stack_key)
     return installed
