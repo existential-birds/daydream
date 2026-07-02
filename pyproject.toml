@@ -47,7 +47,8 @@ model = "claude-opus-4-5-20251101"
 [tool.hatch.build.targets.wheel]
 # Explicitly declare the source package and all non-Python package data so the
 # distribution contract does not rely on hatchling's default discovery heuristics.
-packages = ["daydream"]
+# daydream_ext is the fork extension package (docs/extensions.md); absent upstream by design.
+packages = ["daydream", "daydream_ext"]
 include = [
     "daydream/templates/**",
     "daydream/training/schema/**",

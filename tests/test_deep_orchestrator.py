@@ -979,7 +979,13 @@ async def test_pr_body_reaches_intent_prompt(
 async def test_no_pr_body_degrades_cleanly(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No PR body -> intent prompt is byte-for-byte today's behavior."""
+    """No PR body -> intent prompt is byte-for-byte today's behavior.
+
+    Also asserts the diff-is-the-target directives: the intent prompt must
+    point at the on-disk diff file, tell the agent the run is not tied to a
+    GitHub pull request (so it never hunts for or asks about open PRs), and
+    forbid skill/slash-command invocation.
+    """
     from daydream.runner import RunConfig, run
 
     _silence(monkeypatch)
@@ -988,8 +994,13 @@ async def test_no_pr_body_degrades_cleanly(
 
     rc = await run(RunConfig(target=str(multi_stack_target), pr_number=7, start_at="review", cleanup=False))
     assert rc == 0
-    assert PR_SENTINEL not in _intent_prompt(stub)
-    assert "pull request description" not in _intent_prompt(stub).lower()
+    intent = _intent_prompt(stub)
+    assert PR_SENTINEL not in intent
+    assert "pull request description" not in intent.lower()
+    assert "Read the diff file at" in intent
+    assert ".daydream/diff.patch" in intent
+    assert "not tied to a GitHub pull request" in intent
+    assert "Do not invoke any skills or slash commands" in intent
 
 
 async def test_non_interactive_intent_prompt_carries_pr_body(

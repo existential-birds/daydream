@@ -6,6 +6,7 @@ the selection menu, and the interactive ``prompt_user`` input.
 
 from rich import box
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.style import Style
 from rich.table import Table
@@ -200,6 +201,35 @@ def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> 
         title_align="left",
         box=box.ROUNDED,
         border_style=STYLE_PINK,
+        padding=(0, 1),
+    )
+    console.print(panel)
+
+
+def print_intent_summary(console: Console, text: str) -> None:
+    """Print the agent's intent understanding in a panel.
+
+    Rendered immediately before the confirm-or-correct gate so the user sees
+    exactly the understanding they are asked to confirm — never just the tail
+    of the live agent transcript.
+
+    Args:
+        console: Rich Console instance for output.
+        text: The intent summary (markdown-ish agent prose). An empty summary
+            renders a placeholder rather than a blank panel.
+
+    """
+    body: Markdown | Text
+    if text.strip():
+        body = Markdown(text)
+    else:
+        body = Text("(the agent produced no intent summary)", style=STYLE_YELLOW)
+    panel = Panel(
+        body,
+        title="🎧 Understanding",
+        title_align="left",
+        box=box.ROUNDED,
+        border_style=STYLE_CYAN,
         padding=(0, 1),
     )
     console.print(panel)

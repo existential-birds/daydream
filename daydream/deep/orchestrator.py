@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
-from daydream.config import REVIEW_OUTPUT_FILE, SKILL_MAP, STRUCTURE_STACK_NAME
+from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME
 from daydream.deep.arbiter import select_arbiter_targets
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
@@ -46,6 +46,9 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
+from daydream.extensions import get_registry
+from daydream.extensions.api import FlowStep, Stop
+from daydream.flows.engine import FlowContext, run_flow
 from daydream.phases import (
     FEEDBACK_SCHEMA,
     PER_STACK_RECORD_SCHEMA,
@@ -71,8 +74,11 @@ from daydream.trajectory import (
 )
 from daydream.ui import (
     format_verdict_join,
+    phase_subtitle,
+    print_dim,
     print_error,
     print_info,
+    print_phase_hero,
     print_preflight_notice,
     print_stage_progress,
     print_success,
@@ -277,13 +283,13 @@ def get_installed_skills() -> set[str] | None:
 
     Reads the Claude Code plugin registry at
     ``$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json`` (default
-    ``~/.claude``) and maps installed plugin names back to ``SKILL_MAP``
-    stack keys. Each stack's Beagle skill lives in a plugin named
-    ``beagle-<stack>``; a stack is considered "installed" iff that plugin
-    is present.
+    ``~/.claude``) and maps installed plugin names back to stack keys via
+    the extension registry's ``stack:<key>`` skill slots, so a remapped
+    stack checks the remapped plugin prefix. A stack is considered
+    "installed" iff its skill's plugin is present.
 
     Returns:
-        Set of installed stack keys (subset of ``SKILL_MAP.keys()``), or
+        Set of installed stack keys (subset of the registry's stack keys), or
         ``None`` if the registry cannot be read (missing file, bad JSON).
         ``None`` signals "unknown" so callers can fall back to optimistic
         availability without forcing every stack through generic.
@@ -304,10 +310,11 @@ def get_installed_skills() -> set[str] | None:
         return None
     # Keys in the registry look like "<plugin-name>@<marketplace>".
     installed_plugins = {key.split("@", 1)[0] for key in plugins}
+    skill_registry = get_registry()
     installed: set[str] = set()
-    for stack_key, skill_invocation in SKILL_MAP.items():
-        # SKILL_MAP values are "<plugin-name>:<skill-name>".
-        plugin_prefix = skill_invocation.split(":", 1)[0]
+    for stack_key in skill_registry.stack_keys():
+        # Slot values are "<plugin-name>:<skill-name>".
+        plugin_prefix = skill_registry.skill(f"stack:{stack_key}").split(":", 1)[0]
         if plugin_prefix in installed_plugins:
             installed.add(stack_key)
     return installed
@@ -597,12 +604,673 @@ def _protect_tree_after_fix_failures(
                     pass
 
 
+async def _step_exploration(ctx: FlowContext) -> None:
+    """Exploration pre-scan (D-43)."""
+    from daydream.runner import _compute_diff_ref
+
+    config = ctx.config
+    target_dir = ctx.work.repo
+    daydream_dir = target_dir / ".daydream"
+    diff = ctx.data["diff"]
+    tier = ctx.data["tier"]
+
+    exploration_dir: Path | None = None
+    if not EXPLORATION_AVAILABLE:
+        print_warning(
+            console,
+            "Exploration infrastructure not installed; running deep pipeline "
+            "without pre-scan grounding",
+        )
+    elif config.exploration_context is None:
+        if tier == "skip":
+            print_dim(console, "Skipping exploration -- trivial diff")
+            config.exploration_context = ExplorationContext()
+        else:
+            print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+            explore_backend = ctx.backend_for("exploration")
+            print_dim(console, f"Exploration model: {explore_backend.model}")
+            async with phase_scope(DaydreamPhase.EXPLORATION):
+                config.exploration_context = await safe_explore(
+                    pre_scan,
+                    explore_backend,
+                    target_dir,
+                    diff,
+                    config.exploration_depth,
+                    diff_ref=_compute_diff_ref(target_dir),
+                )
+            console.print(render_exploration_summary(config.exploration_context))
+    if EXPLORATION_AVAILABLE and config.exploration_context is not None:
+        exploration_dir = config.exploration_context.write_to_dir(
+            daydream_dir / "exploration"
+        )
+    ctx.data["exploration_dir"] = exploration_dir
+
+
+async def _step_intent(ctx: FlowContext) -> None:
+    """TTT intent analysis, grounded by the PR description when it is fresh."""
+    from daydream import git_ops
+
+    config = ctx.config
+    work = ctx.work
+    target_dir = work.repo
+
+    print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
+    pr_description: str | None = None
+    if config.pr_number is not None:
+        pr_view = git_ops.gh_pr_view(target_dir, config.pr_number)
+        if pr_view is not None:
+            pr_state = pr_view.get("state", "")
+            pr_head_oid = pr_view.get("headRefOid", "")
+            local_head = work.head_sha
+            if pr_state and pr_state.upper() != "OPEN":
+                print_warning(
+                    console,
+                    f"PR #{config.pr_number} state is {pr_state!r} (not OPEN); "
+                    "skipping PR description to avoid trusting a stale body",
+                )
+            elif pr_head_oid and local_head and pr_head_oid != local_head:
+                print_warning(
+                    console,
+                    f"PR #{config.pr_number} head SHA ({pr_head_oid[:12]}) "
+                    f"does not match local HEAD ({local_head[:12]}); "
+                    "skipping PR description to avoid trusting a mismatched body",
+                )
+            else:
+                pr_description = pr_view.get("body") or None
+    async with phase_scope(DaydreamPhase.INTENT):
+        ctx.data["intent_summary"] = await phase_understand_intent(
+            ctx.backend_for("intent"),
+            work,
+            ctx.data["diff_path"],
+            ctx.data["log"],
+            ctx.data["branch"],
+            exploration_dir=ctx.data["exploration_dir"],
+            pr_description=pr_description,
+        )
+
+
+async def _step_alternatives(ctx: FlowContext) -> None:
+    """TTT alternative-review (tier-gated) + TTT artifact writes."""
+    intent_summary = ctx.data["intent_summary"]
+
+    print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
+    if ctx.data["tier"] == "skip":
+        alt_issues: list[dict[str, Any]] = []
+        print_dim(console, "Skipping alternatives -- trivial diff")
+    else:
+        async with phase_scope(DaydreamPhase.ALTERNATIVES):
+            alt_issues = await phase_alternative_review(
+                ctx.backend_for("wonder"),
+                ctx.work,
+                ctx.data["diff_path"],
+                intent_summary,
+                exploration_dir=ctx.data["exploration_dir"],
+            )
+
+    ctx.data["intent_path"], ctx.data["alts_path"] = _write_ttt_artifacts(
+        ctx.data["dd"], intent_summary=intent_summary, alt_issues=alt_issues
+    )
+
+
+async def _step_per_stack_reviews(ctx: FlowContext) -> None:
+    """Per-stack review fan-out, with failure persistence and resume reconstruction."""
+    config = ctx.config
+    dd = ctx.data["dd"]
+    stacks = ctx.data["stacks"]
+
+    failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
+    if config.start_at not in ("merge", "fix"):
+        print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
+        async with phase_scope(DaydreamPhase.DEEP, stage="review"):
+            per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
+                ctx.backend_for("per_stack_review"),
+                ctx.work,
+                stacks,
+                diff_path=ctx.data["diff_path"],
+                intent_path=ctx.data["intent_path"],
+                alternatives_path=ctx.data["alts_path"],
+                exploration_dir=ctx.data["exploration_dir"],
+                diff_text=ctx.data["diff"],
+            )
+        # Persist so a later `--start-at merge` resume can still surface
+        # uncovered stacks (the in-memory failure map otherwise dies here).
+        failures_p = per_stack_failures_path(dd)
+        if failed_stacks:
+            failures_p.write_text(json.dumps(failed_stacks, indent=2, sort_keys=True))
+        elif failures_p.exists():
+            # Fresh successful run supersedes any stale failures record.
+            failures_p.unlink()
+    else:
+        # Resume: reconstruct the expected per-stack output paths on disk.
+        from daydream.deep.artifacts import per_stack_review_path
+
+        per_stack_outputs = {
+            stack.stack_name: per_stack_review_path(dd, stack.stack_name)
+            for stack in stacks
+        }
+        # Resume also resurrects any prior failure summary so the merge
+        # prompt can still note uncovered stacks.
+        failures_p = per_stack_failures_path(dd)
+        if failures_p.is_file():
+            try:
+                loaded = json.loads(failures_p.read_text())
+                if isinstance(loaded, dict):
+                    failed_stacks = {str(k): str(v) for k, v in loaded.items()}
+            except json.JSONDecodeError:
+                failed_stacks = {}
+    ctx.data["per_stack_outputs"] = per_stack_outputs
+    ctx.data["failed_stacks"] = failed_stacks
+
+
+async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
+    """Pre-merge parse pass (D-21) + structural partitioning; loads records on a merge resume."""
+    config = ctx.config
+    dd = ctx.data["dd"]
+    stacks = ctx.data["stacks"]
+    failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
+    per_stack_outputs: dict[str, Path] = ctx.data["per_stack_outputs"]
+
+    print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
+
+    per_stack_records_paths: list[Path] = []
+    all_records: list[dict[str, Any]] = []
+    record_sources: list[str] = []
+    if config.start_at == "merge":
+        # Resume: require a records file per detected stack (except ones in
+        # `failed_stacks`). A bare glob would silently drop a stack whose
+        # records file is absent, yielding a merged report missing a bucket.
+        expected_paths: list[Path] = []
+        missing_stacks: list[str] = []
+        for stack in stacks:
+            records_path = per_stack_records_path(dd, stack.stack_name)
+            if records_path.is_file():
+                expected_paths.append(records_path)
+            elif stack.stack_name not in failed_stacks:
+                missing_stacks.append(stack.stack_name)
+        if missing_stacks:
+            print_error(
+                console,
+                "Missing Per-Stack Records",
+                "Missing parsed records for: "
+                + ", ".join(sorted(missing_stacks)),
+            )
+            return Stop(1)
+        for records_path in sorted(expected_paths):
+            records = json.loads(records_path.read_text())
+            per_stack_records_paths.append(records_path)
+            source_name = records_path.name
+            all_records.extend(records)
+            record_sources.extend(source_name for _ in records)
+    else:
+        # Pre-merge parse pass (D-21). Sort by stack_name so merge input
+        # order is independent of parallel-task completion order, keeping
+        # the merge prompt and global issue numbering reproducible.
+        for stack_name, output_path in sorted(per_stack_outputs.items()):
+            # Language stacks carry severity so the scoped arbiter can
+            # select high/contested findings (#168). The structural
+            # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
+            # high-conviction by construction and is partitioned out of
+            # arbitration/dedup below, defaulting to high at merge.
+            record_schema = (
+                FEEDBACK_SCHEMA if stack_name == STRUCTURE_STACK_NAME else PER_STACK_RECORD_SCHEMA
+            )
+            async with phase_scope(DaydreamPhase.PARSE):
+                records = await phase_parse_feedback(
+                    ctx.backend_for("parse"),
+                    ctx.work,
+                    input_path=output_path,
+                    output_schema=record_schema,
+                )
+            records_path = per_stack_records_path(dd, stack_name)
+            records_path.write_text(json.dumps(records, indent=2))
+            per_stack_records_paths.append(records_path)
+            all_records.extend(records)
+            record_sources.extend(stack_name for _ in records)
+
+    # Partition structural meta-stack records out before dedup: its lens
+    # (file-size budgets, layering, canonical-helper gaps) differs from the
+    # language stacks and collapsing it into their dedup pool would demote
+    # those findings. Filter both record_sources forms (resume=filename,
+    # fresh-run=stack_name) together to preserve the index invariant.
+    structural_path_candidate = per_stack_records_path(dd, STRUCTURE_STACK_NAME)
+    if structural_path_candidate in per_stack_records_paths:
+        structural_records_path: Path | None = structural_path_candidate
+        structural_filename = structural_path_candidate.name
+        per_stack_records_paths = [
+            p for p in per_stack_records_paths if p != structural_path_candidate
+        ]
+        kept_pairs = [
+            (rec, src)
+            for rec, src in zip(all_records, record_sources, strict=True)
+            if src != STRUCTURE_STACK_NAME and src != structural_filename
+        ]
+        all_records = [rec for rec, _ in kept_pairs]
+        record_sources = [src for _, src in kept_pairs]
+    else:
+        structural_records_path = None
+
+    ctx.data["records_paths"] = per_stack_records_paths
+    ctx.data["records"] = all_records
+    ctx.data["record_sources"] = record_sources
+    ctx.data["structural_records_path"] = structural_records_path
+    return None
+
+
+async def _step_arbiter(ctx: FlowContext) -> None:
+    """Scoped arbiter over high-severity/contested findings (#168)."""
+    config = ctx.config
+    dd = ctx.data["dd"]
+    all_records: list[dict[str, Any]] = ctx.data["records"]
+    record_sources: list[str] = ctx.data["record_sources"]
+
+    # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
+    # a single heavyweight arbiter now re-reviews ONLY the
+    # high-severity / contested findings and writes its verdicts back
+    # into the per-stack records before merge. A `--start-at merge`
+    # resume re-runs arbitration from the on-disk records UNLESS the
+    # completion marker proves a prior run already finalised them
+    # (#175): a crash between the parse write and the rewrite would
+    # otherwise let unarbitrated high-severity findings reach merge.
+    arbiter_marker = arbiter_complete_path(dd)
+    if config.start_at != "merge" or not arbiter_marker.is_file():
+        arbiter_targets = select_arbiter_targets(all_records, record_sources)
+        if arbiter_targets:
+            async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
+                verdicts = await phase_arbiter_review(
+                    ctx.backend_for("arbiter"),
+                    ctx.work,
+                    selected_records=[all_records[i] for i in arbiter_targets],
+                    diff_path=ctx.data["diff_path"],
+                    intent_path=ctx.data["intent_path"],
+                    alternatives_path=ctx.data["alts_path"],
+                    exploration_dir=ctx.data["exploration_dir"],
+                )
+            all_records, record_sources = _apply_arbiter_verdicts(
+                all_records, record_sources, arbiter_targets, verdicts
+            )
+            _rewrite_stack_records(
+                dd, ctx.data["records_paths"], all_records, record_sources
+            )
+        arbiter_marker.write_text("")
+    ctx.data["records"] = all_records
+    ctx.data["record_sources"] = record_sources
+
+
+async def _step_cross_stack_merge(ctx: FlowContext) -> None:
+    """Dedup pre-filter (D-27) + cross-stack merge (D-23..D-26)."""
+    dd = ctx.data["dd"]
+    alts_p: Path = ctx.data["alts_path"]
+    all_records: list[dict[str, Any]] = ctx.data["records"]
+    failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
+
+    # Dedup pre-filter (D-27).
+    alt_issues_for_dedup: list[dict[str, Any]] = (
+        json.loads(alts_p.read_text()) if alts_p.exists() else []
+    )
+    pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
+    record_pairs = build_record_dedup_candidates(all_records, sources=ctx.data["record_sources"])
+    dedup_p = dedup_candidates_path(dd)
+    dedup_p.write_text(
+        json.dumps(
+            {
+                "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
+                "record_duplicate_pairs": [_candidate_pair_to_json(p) for p in record_pairs],
+            },
+            indent=2,
+        )
+    )
+
+    # Cross-stack merge (D-23..D-26).
+    await phase_cross_stack_merge(
+        ctx.backend_for("merge"),
+        ctx.work,
+        per_stack_records_paths=ctx.data["records_paths"],
+        intent_path=ctx.data["intent_path"],
+        alternatives_path=alts_p,
+        dedup_candidates_path=dedup_p,
+        exploration_dir=ctx.data["exploration_dir"],
+        failed_stacks=failed_stacks or None,
+        structural_records_path=ctx.data["structural_records_path"],
+    )
+
+
+async def _step_single_stack_merge(ctx: FlowContext) -> None:
+    """Tiny-diff single-stack bypass (#172): host-side merged-items write."""
+    failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
+
+    # Issue #172 — tiny-diff single-stack bypass. A ≤2-file diff
+    # has nothing to cross-stack-merge and nothing contested to
+    # arbitrate, so the host writes ``merged-items.json`` directly
+    # via ``normalize_items`` + the exact structural-tagging logic
+    # from ``phase_cross_stack_merge``. No arbiter, no dedup, no
+    # merge agent. Downstream consumers (fix gate, verifier, PR
+    # posting) read the canonical JSON unchanged (AC6).
+    _write_single_stack_merged_items(
+        ctx.work.repo, ctx.data["dd"], ctx.data["records"], ctx.data["structural_records_path"],
+        failed_stacks=failed_stacks or None,
+    )
+
+
+async def _step_load_items(ctx: FlowContext) -> Stop | None:
+    """Host-side merged-items guard + render-only markdown recovery."""
+    target_dir = ctx.work.repo
+    dd = ctx.data["dd"]
+
+    print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
+    merged_report = target_dir / REVIEW_OUTPUT_FILE
+
+    # merged-items.json is the canonical source of truth; review-output.md is
+    # render-only. The missing-input guard keys on the JSON so a --start-at fix
+    # resume with surviving JSON but absent markdown proceeds rather than bailing.
+    items_file = merged_items_path(dd)
+    if not items_file.is_file():
+        print_error(
+            console,
+            "Missing Merged Items",
+            f"Expected canonical merged items at {items_file}",
+        )
+        return Stop(1)
+
+    # Best-effort recover the render-only markdown from the deep-dir copy for
+    # the exit message when the canonical file is absent (e.g. a --start-at fix
+    # resume where the copy to the canonical path never ran). Non-fatal.
+    if not merged_report.exists():
+        from daydream.deep.artifacts import merged_report_path
+
+        deep_copy = merged_report_path(dd)
+        if deep_copy.exists():
+            merged_report.write_text(deep_copy.read_text())
+
+    ctx.data["merged_report"] = merged_report
+    ctx.data["items_file"] = items_file
+    return None
+
+
+async def _step_findings_out(ctx: FlowContext) -> Stop:
+    """Two-phase findings artifact (Phase A): emit the strict-schema artifact and STOP."""
+    from daydream.runner import _emit_findings_from_items
+
+    items_file: Path = ctx.data["items_file"]
+    findings_items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
+    return Stop(_emit_findings_from_items(ctx.work.repo, ctx.config, findings_items))
+
+
+async def _step_post_review(ctx: FlowContext) -> None:
+    """Offer to post findings as inline PR review comments."""
+    from daydream.pr_review import post_review_to_pr_from_report
+
+    await post_review_to_pr_from_report(
+        ctx.work.repo, merged_items_path(ctx.data["dd"]), console=console
+    )
+
+
+async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
+    """Fix-apply gate; on accept, load and severity-sort the canonical items."""
+    # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
+    # an unattended run with no assumption declines (safe_default=False) so a
+    # piped/CI run never mutates without intent; otherwise prompt.
+    decision = resolve_or_prompt(
+        assume=get_assume(),
+        interactive=not get_non_interactive(),
+        safe_default=False,
+        question="Apply fixes now? [y/N]",
+        default="n",
+    )
+    if not decision:
+        print_success(console, f"Report written to {ctx.data['merged_report']}. Exiting.")
+        return Stop(0)
+
+    # Read canonical merged items directly (validated above). Replaces an LLM
+    # re-parse of the markdown, which silently dropped structural findings; here
+    # they are ordinary tagged items that reach phase_fix like any other.
+    items_file: Path = ctx.data["items_file"]
+    items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
+    if not items:
+        print_success(console, "No actionable items -- done.")
+        return Stop(0)
+
+    # Severity-ordered (high before medium before low), stable within a
+    # tier so equal-severity items keep their canonical merge order.
+    ctx.data["items"] = severity_sorted(items)
+    return None
+
+
+async def _step_verify(ctx: FlowContext) -> None:
+    """Recommendation verification (#83) + verdict join rendering."""
+    dd = ctx.data["dd"]
+    items: list[dict[str, Any]] = ctx.data["items"]
+
+    # Recommendation verification (#83). Runs ONLY after the apply-fixes
+    # gate accepts, so a declined run (non-interactive / EOF / explicit "N")
+    # skips both the verify pass and the recommendation-verdicts.json
+    # artifact. A --start-at fix resume still produces verdicts whenever
+    # fixes are applied (the gate still runs on resume; accept => verify runs).
+    async with phase_scope(DaydreamPhase.VERIFY):
+        verdicts_file, verdicts_payload = await phase_verify_recommendations(
+            ctx.backend_for("verify"),
+            ctx.work,
+            merged_items_path=merged_items_path(dd),
+            deep_dir=dd,
+        )
+    print_verification_summary(console, verdicts_file)
+
+    # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
+    items = _attach_verdicts(items, verdicts_payload)
+    ctx.data["items"] = items
+    matched_ids = [i["id"] for i in items if i.get("verifier_verdict") is not None]
+    unmatched_ids = [
+        i["id"]
+        for i in items
+        if isinstance(i.get("id"), int)
+        and i.get("verifier_verdict") is None
+        and i.get("lens") != "structural"
+    ]
+    # Structural findings are verdict-exempt (in neither matched nor unmatched)
+    # but still fixed; itemize them so the "X/Y matched" ratio isn't read as a
+    # total that under-counts the items the fix loop iterates.
+    structural_ids = [i.get("id") for i in items if i.get("lens") == "structural"]
+    # Leftovers (no verdict, non-structural, missing/non-int id) so the
+    # buckets always reconcile to len(items); surfaced only when present.
+    other_ids = [
+        i.get("id")
+        for i in items
+        if i.get("verifier_verdict") is None
+        and i.get("lens") != "structural"
+        and not isinstance(i.get("id"), int)
+    ]
+    console.print(
+        format_verdict_join(
+            matched=matched_ids,
+            unmatched=unmatched_ids,
+            structural=structural_ids,
+            other=other_ids,
+            total=len(items),
+        )
+    )
+
+
+async def _step_fix(ctx: FlowContext) -> Stop | None:
+    """Parallel fix pass: pre-fix snapshot capture, phase_fix_parallel, failure protection."""
+    from daydream import git_ops
+
+    config = ctx.config
+    work = ctx.work
+    target_dir = work.repo
+    daydream_dir = target_dir / ".daydream"
+    dd = ctx.data["dd"]
+    items: list[dict[str, Any]] = ctx.data["items"]
+    intent_p: Path = ctx.data["intent_path"]
+
+    # Only forward confirmed intent when we ran the intent phase in
+    # this invocation.  When resuming via --start-at fix/merge/per-stack
+    # the intent phase was skipped, so intent_p may hold a stale
+    # artifact from a prior run; injecting it as authoritative would
+    # contradict the current diff's context.
+    intent_grounded_this_run = config.start_at not in ("per-stack", "merge", "fix")
+    # Snapshot the tracked tree + untracked set BEFORE fixes so a failed
+    # group's partial, possibly non-compiling edits can be captured and
+    # rolled back to exactly their pre-fix content (#203 follow-up).
+    try:
+        pre_fix_snapshot = git_ops.stash_create(work.repo)
+        pre_fix_untracked = set(git_ops.list_untracked(work.repo))
+    except git_ops.GitError as exc:
+        print_warning(console, f"Could not snapshot tree before fixes: {exc}")
+        pre_fix_snapshot = None
+        pre_fix_untracked = set()
+    # Pre-fix HEAD is the recommended-patch base only when the tree was
+    # clean (stash_create returns None then) -- otherwise the snapshot is
+    # the base and HEAD is unused, so skip the rev-parse. Captured now
+    # because the commit phase below advances HEAD past the fix.
+    if pre_fix_snapshot is None:
+        try:
+            pre_fix_head = git_ops.head_sha(work.repo)
+        except git_ops.GitError:
+            pre_fix_head = None
+    else:
+        pre_fix_head = None
+    async with phase_scope(DaydreamPhase.FIX):
+        fix_failures = await phase_fix_parallel(
+            ctx.backend_for("fix"),
+            work,
+            items,
+            intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
+        )
+    # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
+    # NOW, before the fix-failure and test-failure early returns below, so
+    # a run that generated a recommendation always archives it — even when
+    # tests fail or a fix group is reverted. Best-effort; never raises.
+    git_ops.capture_recommended_patch_with_base(
+        work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
+    )
+    fix_failures_p = fix_failures_path(dd)
+    if fix_failures:
+        # Persist so the archive marks the run "partial" instead of
+        # "complete" -- the tree is no longer a clean success.
+        fix_failures_p.write_text(json.dumps(fix_failures, indent=2, sort_keys=True))
+        _protect_tree_after_fix_failures(
+            work,
+            target_dir,
+            fix_failures,
+            snapshot=pre_fix_snapshot,
+            pre_untracked=pre_fix_untracked,
+        )
+        # Enumerate every untracked path that appeared during the fix
+        # pass and survived protection. Attribution to a specific group
+        # is impossible (shared tree, parallel groups), so we never
+        # delete these -- we record them so the partial state is fully
+        # auditable instead of silently leaving stray files unaccounted.
+        try:
+            leftover = sorted(set(git_ops.list_untracked(work.repo)) - pre_fix_untracked)
+        except git_ops.GitError:
+            leftover = []
+        leftover_p = fix_leftover_untracked_path(dd)
+        if leftover:
+            leftover_p.write_text(json.dumps(leftover, indent=2))
+        elif leftover_p.exists():
+            leftover_p.unlink()
+        print_warning(
+            console,
+            f"{len(fix_failures)} fix group(s) failed: {sorted(fix_failures)}; "
+            "partial edits reverted (patches saved under .daydream/partial-fixes/).",
+        )
+        return Stop(1)
+    # Fresh successful fix supersedes any stale failures record.
+    if fix_failures_p.exists():
+        fix_failures_p.unlink()
+    stale_leftover_p = fix_leftover_untracked_path(dd)
+    if stale_leftover_p.exists():
+        stale_leftover_p.unlink()
+    return None
+
+
+async def _step_test(ctx: FlowContext) -> Stop | None:
+    """Post-fix test validation."""
+    async with phase_scope(DaydreamPhase.TEST):
+        passed, _retries = await phase_test_and_heal(
+            ctx.backend_for("test"), ctx.work, feedback_items=ctx.data["items"]
+        )
+    if not passed:
+        print_warning(console, "Tests failed after fix attempt.")
+        return Stop(1)
+    return None
+
+
+async def _step_commit(ctx: FlowContext) -> None:
+    """Commit-and-push the applied fixes."""
+    # phase_commit_push runs as part of the fix/commit cycle — reuse
+    # the fix backend (no separate "commit" phase identifier).
+    await phase_commit_push(ctx.backend_for("fix"), ctx.work)
+
+
+def _fresh_ttt(ctx: FlowContext) -> bool:
+    # Verbatim resume gate: --start-at per-stack/merge/fix skips the TTT phases.
+    return ctx.config.start_at not in ("per-stack", "merge", "fix")
+
+
+def _before_fix_resume(ctx: FlowContext) -> bool:
+    # Verbatim resume gate: --start-at fix skips everything up to the fix gate.
+    # For post-review, this also keeps the non-idempotent GitHub write off the
+    # resume path (duplicate inline reviews on reruns).
+    return ctx.config.start_at != "fix"
+
+
+def _multi_stack_merge_enabled(ctx: FlowContext) -> bool:
+    return ctx.config.start_at != "fix" and not ctx.data["single_stack_mode"]
+
+
+def _single_stack_merge_enabled(ctx: FlowContext) -> bool:
+    return ctx.config.start_at != "fix" and ctx.data["single_stack_mode"]
+
+
+def _findings_out_enabled(ctx: FlowContext) -> bool:
+    # Two-phase findings artifact (Phase A): emit the artifact and STOP —
+    # never post to the PR and never apply fixes. Phase B posts later.
+    return ctx.config.findings_out is not None
+
+
+# The deep pipeline as a registered flow (D-07):
+#
+#     exploration pre-scan -> TTT intent -> TTT alternative-review ->
+#     per-stack reviews -> per-stack parse + dedup -> arbiter ->
+#     cross-stack merge (or the tiny-diff single-stack bypass) ->
+#     findings-out stop / post-review -> fix gate -> verify -> fix ->
+#     test -> commit.
+#
+# ``register_builtins`` registers :data:`STEPS` and the ``deep`` flow
+# definition; ``run_deep`` keeps the preamble and delegates here via
+# ``run_flow``. The old imperative body's tier / single_stack_mode /
+# ``start_at`` / ``findings_out`` conditions are the ``enabled`` predicates
+# above (whole-block gates) or stay inside step bodies (resume branches).
+STEPS: tuple[FlowStep, ...] = (
+    FlowStep(name="exploration", run=_step_exploration),
+    FlowStep(name="intent", run=_step_intent, enabled=_fresh_ttt),
+    FlowStep(name="alternatives", run=_step_alternatives, config_phase="wonder", enabled=_fresh_ttt),
+    FlowStep(name="per-stack-reviews", run=_step_per_stack_reviews, config_phase="per_stack_review"),
+    FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_before_fix_resume),
+    FlowStep(name="arbiter", run=_step_arbiter, enabled=_multi_stack_merge_enabled),
+    FlowStep(
+        name="cross-stack-merge", run=_step_cross_stack_merge, config_phase="merge", enabled=_multi_stack_merge_enabled
+    ),
+    FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_single_stack_merge_enabled),
+    FlowStep(name="load-items", run=_step_load_items),
+    FlowStep(name="findings-out", run=_step_findings_out, enabled=_findings_out_enabled),
+    FlowStep(name="post-review", run=_step_post_review, enabled=_before_fix_resume),
+    FlowStep(name="fix-gate", run=_step_fix_gate),
+    FlowStep(name="verify", run=_step_verify),
+    FlowStep(name="fix", run=_step_fix),
+    FlowStep(name="test", run=_step_test),
+    # config_phase "fix" mirrors the old body's use of the fix backend for the commit.
+    FlowStep(name="commit", run=_step_commit, config_phase="fix"),
+)
+
+
 async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """Execute the deep-review pipeline (D-07).
 
-    Composes exploration pre-scan, TTT, per-stack fan-out, per-stack parse,
-    dedup pre-filter, cross-stack merge, and the optional fix gate into a
-    single async flow. Supports stage-granular resume via
+    Runs the preamble (diff computation, stack detection, tiny-diff collapse,
+    trajectory recorder, pre-flight notice) and delegates the pipeline to the
+    registered ``deep`` flow (:data:`STEPS`) via ``run_flow``. Supports
+    stage-granular resume via
     ``config.start_at in ("ttt", "per-stack", "merge", "fix")``.
 
     Args:
@@ -621,12 +1289,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     from daydream.git_ops import GitError, GitTimeoutError
     from daydream.phases import _git_branch, _git_log
     from daydream.runner import (
-        _compute_diff_ref,
         _make_archive_callback,
-        _resolve_backend,
         _resolved_backend_name,
     )
-    from daydream.ui import phase_subtitle, print_dim, print_phase_hero
 
     # Cache one Backend instance per (backend_name, resolved_model) so phases that
     # resolve to the same model share an instance and differing models stay isolated.
@@ -634,7 +1299,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
 
     target_dir = work.repo
 
-    # Preamble (mirrors run_trust).
+    # Preamble (mirrors runner._run_loop_shallow).
     try:
         diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
     except GitTimeoutError as exc:
@@ -660,7 +1325,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
     # Diff is immutable from here on; compute the tiering verdict once and reuse
-    # it at both the exploration gate and the alternatives gate below.
+    # it at both the exploration step's gate and the alternatives step's gate.
     tier = select_tier(count_changed_files(diff))
     dd = deep_dir(target_dir)
 
@@ -699,7 +1364,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         # Optimistic fallback when detection fails: SDK-level MissingSkillError is
         # still caught downstream in phase_per_stack_reviews, so preserving the
         # pre-D-16 behavior is safer than routing everything to generic.
-        skill_availability = installed if installed is not None else set(SKILL_MAP.keys())
+        skill_availability = installed if installed is not None else get_registry().stack_keys()
         stacks = detect_stacks(changed_files, skill_availability=skill_availability)
         # Issue #172 — tiny-diff short-circuit. When the diff is small enough
         # (≤ SHALLOW_FANOUT_THRESHOLD files), collapse the per-language fan-out
@@ -733,501 +1398,30 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             exploration_available=EXPLORATION_AVAILABLE,
         )
 
-        # Exploration pre-scan (D-43).
-        exploration_dir: Path | None = None
-        if not EXPLORATION_AVAILABLE:
-            print_warning(
-                console,
-                "Exploration infrastructure not installed; running deep pipeline "
-                "without pre-scan grounding",
-            )
-        elif config.exploration_context is None:
-            if tier == "skip":
-                print_dim(console, "Skipping exploration -- trivial diff")
-                config.exploration_context = ExplorationContext()
-            else:
-                print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                explore_backend = _resolve_backend(config, "exploration", backend_cache)
-                print_dim(console, f"Exploration model: {explore_backend.model}")
-                async with phase_scope(DaydreamPhase.EXPLORATION):
-                    config.exploration_context = await safe_explore(
-                        pre_scan,
-                        explore_backend,
-                        target_dir,
-                        diff,
-                        config.exploration_depth,
-                        diff_ref=_compute_diff_ref(target_dir),
-                    )
-                console.print(render_exploration_summary(config.exploration_context))
-        if EXPLORATION_AVAILABLE and config.exploration_context is not None:
-            exploration_dir = config.exploration_context.write_to_dir(
-                daydream_dir / "exploration"
-            )
+        # Flow context (steps communicate through ctx.data); ctx shares
+        # run_deep's backend cache so instance-sharing semantics are unchanged.
+        ctx = FlowContext(
+            config=config,
+            work=work,
+            registry=get_registry(),
+            data={
+                "diff": diff,
+                "diff_path": diff_path,
+                "tier": tier,
+                "dd": dd,
+                "stacks": stacks,
+                "single_stack_mode": single_stack_mode,
+                "intent_path": _intent_path(dd),
+                "alts_path": _alternatives_path(dd),
+                "log": log,
+                "branch": branch,
+                "failed_stacks": {},
+            },
+            _backend_cache=backend_cache,
+        )
 
         try:
-            intent_p = _intent_path(dd)
-            alts_p = _alternatives_path(dd)
-
-            if config.start_at not in ("per-stack", "merge", "fix"):
-                print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
-                pr_description: str | None = None
-                if config.pr_number is not None:
-                    pr_view = git_ops.gh_pr_view(target_dir, config.pr_number)
-                    if pr_view is not None:
-                        pr_state = pr_view.get("state", "")
-                        pr_head_oid = pr_view.get("headRefOid", "")
-                        local_head = work.head_sha
-                        if pr_state and pr_state.upper() != "OPEN":
-                            print_warning(
-                                console,
-                                f"PR #{config.pr_number} state is {pr_state!r} (not OPEN); "
-                                "skipping PR description to avoid trusting a stale body",
-                            )
-                        elif pr_head_oid and local_head and pr_head_oid != local_head:
-                            print_warning(
-                                console,
-                                f"PR #{config.pr_number} head SHA ({pr_head_oid[:12]}) "
-                                f"does not match local HEAD ({local_head[:12]}); "
-                                "skipping PR description to avoid trusting a mismatched body",
-                            )
-                        else:
-                            pr_description = pr_view.get("body") or None
-                async with phase_scope(DaydreamPhase.INTENT):
-                    intent_summary = await phase_understand_intent(
-                        _resolve_backend(config, "intent", backend_cache),
-                        work,
-                        diff_path,
-                        log,
-                        branch,
-                        exploration_dir=exploration_dir,
-                        pr_description=pr_description,
-                    )
-
-                print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
-                if tier == "skip":
-                    alt_issues: list[dict[str, Any]] = []
-                    print_dim(console, "Skipping alternatives -- trivial diff")
-                else:
-                    async with phase_scope(DaydreamPhase.ALTERNATIVES):
-                        alt_issues = await phase_alternative_review(
-                            _resolve_backend(config, "wonder", backend_cache),
-                            work,
-                            diff_path,
-                            intent_summary,
-                            exploration_dir=exploration_dir,
-                        )
-
-                intent_p, alts_p = _write_ttt_artifacts(
-                    dd, intent_summary=intent_summary, alt_issues=alt_issues
-                )
-
-            failed_stacks: dict[str, str] = {}
-            if config.start_at not in ("merge", "fix"):
-                print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
-                async with phase_scope(DaydreamPhase.DEEP, stage="review"):
-                    per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
-                        _resolve_backend(config, "per_stack_review", backend_cache),
-                        work,
-                        stacks,
-                        diff_path=diff_path,
-                        intent_path=intent_p,
-                        alternatives_path=alts_p,
-                        exploration_dir=exploration_dir,
-                        diff_text=diff,
-                    )
-                # Persist so a later `--start-at merge` resume can still surface
-                # uncovered stacks (the in-memory failure map otherwise dies here).
-                failures_p = per_stack_failures_path(dd)
-                if failed_stacks:
-                    failures_p.write_text(json.dumps(failed_stacks, indent=2, sort_keys=True))
-                elif failures_p.exists():
-                    # Fresh successful run supersedes any stale failures record.
-                    failures_p.unlink()
-            else:
-                # Resume: reconstruct the expected per-stack output paths on disk.
-                from daydream.deep.artifacts import per_stack_review_path
-
-                per_stack_outputs = {
-                    stack.stack_name: per_stack_review_path(dd, stack.stack_name)
-                    for stack in stacks
-                }
-                # Resume also resurrects any prior failure summary so the merge
-                # prompt can still note uncovered stacks.
-                failures_p = per_stack_failures_path(dd)
-                if failures_p.is_file():
-                    try:
-                        loaded = json.loads(failures_p.read_text())
-                        if isinstance(loaded, dict):
-                            failed_stacks = {str(k): str(v) for k, v in loaded.items()}
-                    except json.JSONDecodeError:
-                        failed_stacks = {}
-
-            if config.start_at != "fix":
-                print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
-
-                per_stack_records_paths: list[Path] = []
-                all_records: list[dict[str, Any]] = []
-                record_sources: list[str] = []
-                if config.start_at == "merge":
-                    # Resume: require a records file per detected stack (except ones in
-                    # `failed_stacks`). A bare glob would silently drop a stack whose
-                    # records file is absent, yielding a merged report missing a bucket.
-                    expected_paths: list[Path] = []
-                    missing_stacks: list[str] = []
-                    for stack in stacks:
-                        records_path = per_stack_records_path(dd, stack.stack_name)
-                        if records_path.is_file():
-                            expected_paths.append(records_path)
-                        elif stack.stack_name not in failed_stacks:
-                            missing_stacks.append(stack.stack_name)
-                    if missing_stacks:
-                        print_error(
-                            console,
-                            "Missing Per-Stack Records",
-                            "Missing parsed records for: "
-                            + ", ".join(sorted(missing_stacks)),
-                        )
-                        return 1
-                    for records_path in sorted(expected_paths):
-                        records = json.loads(records_path.read_text())
-                        per_stack_records_paths.append(records_path)
-                        source_name = records_path.name
-                        all_records.extend(records)
-                        record_sources.extend(source_name for _ in records)
-                else:
-                    # Pre-merge parse pass (D-21). Sort by stack_name so merge input
-                    # order is independent of parallel-task completion order, keeping
-                    # the merge prompt and global issue numbering reproducible.
-                    for stack_name, output_path in sorted(per_stack_outputs.items()):
-                        # Language stacks carry severity so the scoped arbiter can
-                        # select high/contested findings (#168). The structural
-                        # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
-                        # high-conviction by construction and is partitioned out of
-                        # arbitration/dedup below, defaulting to high at merge.
-                        record_schema = (
-                            FEEDBACK_SCHEMA if stack_name == STRUCTURE_STACK_NAME else PER_STACK_RECORD_SCHEMA
-                        )
-                        async with phase_scope(DaydreamPhase.PARSE):
-                            records = await phase_parse_feedback(
-                                _resolve_backend(config, "parse", backend_cache),
-                                work,
-                                input_path=output_path,
-                                output_schema=record_schema,
-                            )
-                        records_path = per_stack_records_path(dd, stack_name)
-                        records_path.write_text(json.dumps(records, indent=2))
-                        per_stack_records_paths.append(records_path)
-                        all_records.extend(records)
-                        record_sources.extend(stack_name for _ in records)
-
-                # Partition structural meta-stack records out before dedup: its lens
-                # (file-size budgets, layering, canonical-helper gaps) differs from the
-                # language stacks and collapsing it into their dedup pool would demote
-                # those findings. Filter both record_sources forms (resume=filename,
-                # fresh-run=stack_name) together to preserve the index invariant.
-                structural_path_candidate = per_stack_records_path(dd, STRUCTURE_STACK_NAME)
-                if structural_path_candidate in per_stack_records_paths:
-                    structural_records_path: Path | None = structural_path_candidate
-                    structural_filename = structural_path_candidate.name
-                    per_stack_records_paths = [
-                        p for p in per_stack_records_paths if p != structural_path_candidate
-                    ]
-                    kept_pairs = [
-                        (rec, src)
-                        for rec, src in zip(all_records, record_sources, strict=True)
-                        if src != STRUCTURE_STACK_NAME and src != structural_filename
-                    ]
-                    all_records = [rec for rec, _ in kept_pairs]
-                    record_sources = [src for _, src in kept_pairs]
-                else:
-                    structural_records_path = None
-
-                if not single_stack_mode:
-                    # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
-                    # a single heavyweight arbiter now re-reviews ONLY the
-                    # high-severity / contested findings and writes its verdicts back
-                    # into the per-stack records before merge. A `--start-at merge`
-                    # resume re-runs arbitration from the on-disk records UNLESS the
-                    # completion marker proves a prior run already finalised them
-                    # (#175): a crash between the parse write and the rewrite would
-                    # otherwise let unarbitrated high-severity findings reach merge.
-                    arbiter_marker = arbiter_complete_path(dd)
-                    if config.start_at != "merge" or not arbiter_marker.is_file():
-                        arbiter_targets = select_arbiter_targets(all_records, record_sources)
-                        if arbiter_targets:
-                            async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-                                verdicts = await phase_arbiter_review(
-                                    _resolve_backend(config, "arbiter", backend_cache),
-                                    work,
-                                    selected_records=[all_records[i] for i in arbiter_targets],
-                                    diff_path=diff_path,
-                                    intent_path=intent_p,
-                                    alternatives_path=alts_p,
-                                    exploration_dir=exploration_dir,
-                                )
-                            all_records, record_sources = _apply_arbiter_verdicts(
-                                all_records, record_sources, arbiter_targets, verdicts
-                            )
-                            _rewrite_stack_records(
-                                dd, per_stack_records_paths, all_records, record_sources
-                            )
-                        arbiter_marker.write_text("")
-
-                    # Dedup pre-filter (D-27).
-                    alt_issues_for_dedup: list[dict[str, Any]] = (
-                        json.loads(alts_p.read_text()) if alts_p.exists() else []
-                    )
-                    pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
-                    record_pairs = build_record_dedup_candidates(all_records, sources=record_sources)
-                    dedup_p = dedup_candidates_path(dd)
-                    dedup_p.write_text(
-                        json.dumps(
-                            {
-                                "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
-                                "record_duplicate_pairs": [_candidate_pair_to_json(p) for p in record_pairs],
-                            },
-                            indent=2,
-                        )
-                    )
-
-                    # Cross-stack merge (D-23..D-26).
-                    await phase_cross_stack_merge(
-                        _resolve_backend(config, "merge", backend_cache),
-                        work,
-                        per_stack_records_paths=per_stack_records_paths,
-                        intent_path=intent_p,
-                        alternatives_path=alts_p,
-                        dedup_candidates_path=dedup_p,
-                        exploration_dir=exploration_dir,
-                        failed_stacks=failed_stacks or None,
-                        structural_records_path=structural_records_path,
-                    )
-                else:
-                    # Issue #172 — tiny-diff single-stack bypass. A ≤2-file diff
-                    # has nothing to cross-stack-merge and nothing contested to
-                    # arbitrate, so the host writes ``merged-items.json`` directly
-                    # via ``normalize_items`` + the exact structural-tagging logic
-                    # from ``phase_cross_stack_merge``. No arbiter, no dedup, no
-                    # merge agent. Downstream consumers (fix gate, verifier, PR
-                    # posting) read the canonical JSON unchanged (AC6).
-                    _write_single_stack_merged_items(
-                        work.repo, dd, all_records, structural_records_path,
-                        failed_stacks=failed_stacks or None,
-                    )
-
-            print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
-            merged_report = target_dir / REVIEW_OUTPUT_FILE
-
-            # merged-items.json is the canonical source of truth; review-output.md is
-            # render-only. The missing-input guard keys on the JSON so a --start-at fix
-            # resume with surviving JSON but absent markdown proceeds rather than bailing.
-            items_file = merged_items_path(dd)
-            if not items_file.is_file():
-                print_error(
-                    console,
-                    "Missing Merged Items",
-                    f"Expected canonical merged items at {items_file}",
-                )
-                return 1
-
-            # Two-phase findings artifact (Phase A). When --findings-out is set,
-            # convert the canonical merged items into the strict-schema artifact and
-            # STOP: never post to the PR and never apply fixes. Phase B posts later.
-            if config.findings_out is not None:
-                from daydream.runner import _emit_findings_from_items
-
-                findings_items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
-                return _emit_findings_from_items(target_dir, config, findings_items)
-
-            # Best-effort recover the render-only markdown from the deep-dir copy for
-            # the exit message when the canonical file is absent (e.g. a --start-at fix
-            # resume where the copy to the canonical path never ran). Non-fatal.
-            if not merged_report.exists():
-                from daydream.deep.artifacts import merged_report_path
-
-                deep_copy = merged_report_path(dd)
-                if deep_copy.exists():
-                    merged_report.write_text(deep_copy.read_text())
-
-            # Offer to post findings as inline PR review comments.
-            # `post_review_to_pr_from_report` is a non-idempotent GitHub write, so
-            # `--start-at fix` (resume after the merged report) must skip it to
-            # avoid duplicate inline reviews on reruns.
-            if config.start_at != "fix":
-                from daydream.pr_review import post_review_to_pr_from_report
-
-                await post_review_to_pr_from_report(
-                    target_dir, merged_items_path(dd), console=console
-                )
-
-            # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
-            # an unattended run with no assumption declines (safe_default=False) so a
-            # piped/CI run never mutates without intent; otherwise prompt.
-            decision = resolve_or_prompt(
-                assume=get_assume(),
-                interactive=not get_non_interactive(),
-                safe_default=False,
-                question="Apply fixes now? [y/N]",
-                default="n",
-            )
-            if not decision:
-                print_success(console, f"Report written to {merged_report}. Exiting.")
-                return 0
-
-            # Read canonical merged items directly (validated above). Replaces an LLM
-            # re-parse of the markdown, which silently dropped structural findings; here
-            # they are ordinary tagged items that reach phase_fix like any other.
-            items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
-            if not items:
-                print_success(console, "No actionable items -- done.")
-                return 0
-
-            # Severity-ordered (high before medium before low), stable within a
-            # tier so equal-severity items keep their canonical merge order.
-            items = severity_sorted(items)
-
-            # Recommendation verification (#83). Runs ONLY after the apply-fixes
-            # gate accepts, so a declined run (non-interactive / EOF / explicit "N")
-            # skips both the verify pass and the recommendation-verdicts.json
-            # artifact. A --start-at fix resume still produces verdicts whenever
-            # fixes are applied (the gate still runs on resume; accept => verify runs).
-            async with phase_scope(DaydreamPhase.VERIFY):
-                verdicts_file, verdicts_payload = await phase_verify_recommendations(
-                    _resolve_backend(config, "verify", backend_cache),
-                    work,
-                    merged_items_path=merged_items_path(dd),
-                    deep_dir=dd,
-                )
-            print_verification_summary(console, verdicts_file)
-
-            # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
-            items = _attach_verdicts(items, verdicts_payload)
-            matched_ids = [i["id"] for i in items if i.get("verifier_verdict") is not None]
-            unmatched_ids = [
-                i["id"]
-                for i in items
-                if isinstance(i.get("id"), int)
-                and i.get("verifier_verdict") is None
-                and i.get("lens") != "structural"
-            ]
-            # Structural findings are verdict-exempt (in neither matched nor unmatched)
-            # but still fixed; itemize them so the "X/Y matched" ratio isn't read as a
-            # total that under-counts the items the fix loop iterates.
-            structural_ids = [i.get("id") for i in items if i.get("lens") == "structural"]
-            # Leftovers (no verdict, non-structural, missing/non-int id) so the
-            # buckets always reconcile to len(items); surfaced only when present.
-            other_ids = [
-                i.get("id")
-                for i in items
-                if i.get("verifier_verdict") is None
-                and i.get("lens") != "structural"
-                and not isinstance(i.get("id"), int)
-            ]
-            console.print(
-                format_verdict_join(
-                    matched=matched_ids,
-                    unmatched=unmatched_ids,
-                    structural=structural_ids,
-                    other=other_ids,
-                    total=len(items),
-                )
-            )
-
-            # Only forward confirmed intent when we ran the intent phase in
-            # this invocation.  When resuming via --start-at fix/merge/per-stack
-            # the intent phase was skipped, so intent_p may hold a stale
-            # artifact from a prior run; injecting it as authoritative would
-            # contradict the current diff's context.
-            intent_grounded_this_run = config.start_at not in ("per-stack", "merge", "fix")
-            # Snapshot the tracked tree + untracked set BEFORE fixes so a failed
-            # group's partial, possibly non-compiling edits can be captured and
-            # rolled back to exactly their pre-fix content (#203 follow-up).
-            try:
-                pre_fix_snapshot = git_ops.stash_create(work.repo)
-                pre_fix_untracked = set(git_ops.list_untracked(work.repo))
-            except git_ops.GitError as exc:
-                print_warning(console, f"Could not snapshot tree before fixes: {exc}")
-                pre_fix_snapshot = None
-                pre_fix_untracked = set()
-            # Pre-fix HEAD is the recommended-patch base only when the tree was
-            # clean (stash_create returns None then) -- otherwise the snapshot is
-            # the base and HEAD is unused, so skip the rev-parse. Captured now
-            # because the commit phase below advances HEAD past the fix.
-            if pre_fix_snapshot is None:
-                try:
-                    pre_fix_head = git_ops.head_sha(work.repo)
-                except git_ops.GitError:
-                    pre_fix_head = None
-            else:
-                pre_fix_head = None
-            async with phase_scope(DaydreamPhase.FIX):
-                fix_failures = await phase_fix_parallel(
-                    _resolve_backend(config, "fix", backend_cache),
-                    work,
-                    items,
-                    intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
-                )
-            # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
-            # NOW, before the fix-failure and test-failure early returns below, so
-            # a run that generated a recommendation always archives it — even when
-            # tests fail or a fix group is reverted. Best-effort; never raises.
-            git_ops.capture_recommended_patch_with_base(
-                work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
-            )
-            fix_failures_p = fix_failures_path(dd)
-            if fix_failures:
-                # Persist so the archive marks the run "partial" instead of
-                # "complete" -- the tree is no longer a clean success.
-                fix_failures_p.write_text(json.dumps(fix_failures, indent=2, sort_keys=True))
-                _protect_tree_after_fix_failures(
-                    work,
-                    target_dir,
-                    fix_failures,
-                    snapshot=pre_fix_snapshot,
-                    pre_untracked=pre_fix_untracked,
-                )
-                # Enumerate every untracked path that appeared during the fix
-                # pass and survived protection. Attribution to a specific group
-                # is impossible (shared tree, parallel groups), so we never
-                # delete these -- we record them so the partial state is fully
-                # auditable instead of silently leaving stray files unaccounted.
-                try:
-                    leftover = sorted(set(git_ops.list_untracked(work.repo)) - pre_fix_untracked)
-                except git_ops.GitError:
-                    leftover = []
-                leftover_p = fix_leftover_untracked_path(dd)
-                if leftover:
-                    leftover_p.write_text(json.dumps(leftover, indent=2))
-                elif leftover_p.exists():
-                    leftover_p.unlink()
-                print_warning(
-                    console,
-                    f"{len(fix_failures)} fix group(s) failed: {sorted(fix_failures)}; "
-                    "partial edits reverted (patches saved under .daydream/partial-fixes/).",
-                )
-                return 1
-            # Fresh successful fix supersedes any stale failures record.
-            if fix_failures_p.exists():
-                fix_failures_p.unlink()
-            stale_leftover_p = fix_leftover_untracked_path(dd)
-            if stale_leftover_p.exists():
-                stale_leftover_p.unlink()
-
-            async with phase_scope(DaydreamPhase.TEST):
-                passed, _retries = await phase_test_and_heal(
-                    _resolve_backend(config, "test", backend_cache), work, feedback_items=items
-                )
-            if not passed:
-                print_warning(console, "Tests failed after fix attempt.")
-                return 1
-
-            # phase_commit_push runs as part of the fix/commit cycle — reuse
-            # the fix backend (no separate "commit" phase identifier).
-            await phase_commit_push(
-                _resolve_backend(config, "fix", backend_cache), work
-            )
-            return 0
-
+            return await run_flow(ctx.registry, "deep", ctx)
         finally:
             exploration_cleanup = target_dir / ".daydream" / "exploration"
             if exploration_cleanup.is_dir():

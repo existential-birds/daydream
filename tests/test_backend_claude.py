@@ -706,3 +706,120 @@ async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk) ->
     assert second_text_idx < turn_ends[1][0]
 
 
+# Skill guard tests
+
+
+@pytest.mark.parametrize("prompt,expected", [
+    (
+        "/beagle-python:review-python\nWrite the full review output to .review-output.md",
+        {"beagle-python:review-python"},
+    ),
+    ("/beagle-core:fetch-pr-feedback 42 --bot x", {"beagle-core:fetch-pr-feedback"}),
+    ("Read the diff file at /Users/ka/proj/.daydream/diff.patch", set()),
+    ("compare /path/to/base against /path/to/head", set()),
+    ("Analyze the staged diff and report intent.", set()),
+])
+def test_prompt_skill_keys(prompt, expected):
+    """_prompt_skill_keys extracts anchored /{key} invocations, never filesystem paths."""
+    from daydream.backends.claude import _prompt_skill_keys
+
+    assert _prompt_skill_keys(prompt) == frozenset(expected)
+
+
+@pytest.mark.asyncio
+async def test_skill_guard_allows_non_skill_tool_and_prompt_invoked_skill():
+    """The skill guard passes non-Skill tools untouched and allows prompt-invoked keys."""
+    from daydream.backends.claude import _make_skill_guard
+
+    guard = _make_skill_guard(frozenset({"beagle-python:review-python"}))
+
+    allow_bash = await guard({"tool_name": "Bash", "tool_input": {"command": "ls"}}, None, {})
+    assert "hookSpecificOutput" not in allow_bash
+
+    allow_invoked = await guard(
+        {"tool_name": "Skill", "tool_input": {"skill": "beagle-python:review-python"}}, None, {},
+    )
+    assert "hookSpecificOutput" not in allow_invoked
+
+
+@pytest.mark.asyncio
+async def test_skill_guard_allows_unreferenced_beagle_namespaced_skill():
+    """Beagle skills chain, so a beagle-* key stays invocable even with an empty allowed set."""
+    from daydream.backends.claude import _make_skill_guard
+
+    guard = _make_skill_guard(frozenset())
+
+    allow_chained = await guard(
+        {"tool_name": "Skill", "tool_input": {"skill": "beagle-core:review-verification-protocol"}},
+        None,
+        {},
+    )
+    assert "hookSpecificOutput" not in allow_chained
+
+
+@pytest.mark.asyncio
+async def test_skill_guard_denies_builtin_review():
+    """Claude Code's built-in /review is denied when the prompt invoked no skill."""
+    from daydream.backends.claude import _make_skill_guard
+
+    guard = _make_skill_guard(frozenset())
+
+    deny = await guard({"tool_name": "Skill", "tool_input": {"skill": "review"}}, None, {})
+    assert deny["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "review" in deny["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.asyncio
+async def test_skill_guard_fails_closed_on_malformed_input():
+    """Missing tool_input or a non-string skill name denies (fail closed)."""
+    from daydream.backends.claude import _make_skill_guard
+
+    guard = _make_skill_guard(frozenset({"beagle-python:review-python"}))
+
+    deny_no_input = await guard({"tool_name": "Skill"}, None, {})
+    assert deny_no_input["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    deny_non_string = await guard({"tool_name": "Skill", "tool_input": {"skill": 42}}, None, {})
+    assert deny_non_string["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_execute_registers_skill_guard(patch_sdk):
+    """execute() wires the always-on skill guard scoped to the prompt's invocations.
+
+    With a prompt that invokes no skill, the PreToolUse hooks registered on the
+    production options must deny Claude Code's built-in ``review`` skill while
+    still allowing a beagle-namespaced key (skills chain within the plugin).
+    """
+    patch_sdk(MockClaudeSDKClientCapture)
+    backend = ClaudeBackend(model="opus")
+
+    async for _ in backend.execute(Path("/tmp"), "Analyze the staged diff and report intent."):
+        pass
+
+    opts = MockClaudeSDKClientCapture.captured_options
+    assert opts is not None
+    hooks = opts.hooks
+    assert hooks is not None and "PreToolUse" in hooks
+    matchers = hooks["PreToolUse"]
+    assert len(matchers) == 1
+    matcher = matchers[0]
+    assert matcher.hooks  # callbacks registered
+
+    async def decide(payload):
+        # Mirror the SDK: run every registered hook; first deny wins.
+        for hook in matcher.hooks:
+            out = await hook(payload, None, {})
+            if out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
+                return out
+        return {}
+
+    deny_builtin = await decide({"tool_name": "Skill", "tool_input": {"skill": "review"}})
+    assert deny_builtin["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    allow_beagle = await decide(
+        {"tool_name": "Skill", "tool_input": {"skill": "beagle-core:review-verification-protocol"}}
+    )
+    assert "hookSpecificOutput" not in allow_beagle
+
+

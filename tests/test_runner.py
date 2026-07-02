@@ -275,9 +275,11 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
 
     chosen_model = "fixture-model-xyz"
 
+    # ``FlowContext.backend_for`` resolves through ``daydream.runner._resolve_backend``
+    # (late import) and passes ``cache=`` by keyword.
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, _cache=None: _StubBackend(chosen_model),
+        lambda _config, _phase, cache=None: _StubBackend(chosen_model),
     )
 
     async def _no_op_fetch(*_args, **_kwargs):
@@ -286,8 +288,9 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
     async def _empty_parse(*_args, **_kwargs):
         return []
 
-    monkeypatch.setattr("daydream.runner.phase_fetch_pr_feedback", _no_op_fetch)
-    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _empty_parse)
+    # The fetch/parse call sites moved into the registered pr-feedback flow steps.
+    monkeypatch.setattr("daydream.flows.pr_feedback.phase_fetch_pr_feedback", _no_op_fetch)
+    monkeypatch.setattr("daydream.flows.pr_feedback.phase_parse_feedback", _empty_parse)
 
     captured: list[str] = []
     monkeypatch.setattr(
@@ -394,7 +397,7 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, phase, _cache=None: backends_by_phase[phase],
+        lambda _config, phase, cache=None: backends_by_phase[phase],
     )
 
     async def _stub_phase_parse_feedback(_backend, _work):
@@ -409,10 +412,10 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
     async def _stub_phase_commit_push(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.runner.phase_fix", _stub_phase_fix)
-    monkeypatch.setattr("daydream.runner.phase_test_and_heal", _stub_phase_test_and_heal)
-    monkeypatch.setattr("daydream.runner.phase_commit_push", _stub_phase_commit_push)
+    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _stub_phase_fix)
+    monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", _stub_phase_test_and_heal)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _stub_phase_commit_push)
 
     # Capture hero + dim calls in order.
     calls: list[tuple[str, str]] = []  # (kind, payload)
@@ -423,14 +426,14 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
     def _dim_spy(_console, message):
         calls.append(("dim", message))
 
-    monkeypatch.setattr("daydream.runner.print_phase_hero", _hero_spy)
-    monkeypatch.setattr("daydream.runner.print_dim", _dim_spy)
+    monkeypatch.setattr("daydream.flows.shallow.print_phase_hero", _hero_spy)
+    monkeypatch.setattr("daydream.flows.shallow.print_dim", _dim_spy)
 
     # Silence misc UI noise.
     monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
 
     config = RunConfig(
@@ -485,7 +488,7 @@ async def test_shallow_items_canonicalized_and_severity_ordered(monkeypatch, tmp
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, _cache=None: _StubBackend("stub-model"),
+        lambda _config, _phase, cache=None: _StubBackend("stub-model"),
     )
 
     async def _stub_phase_parse_feedback(_backend, _work):
@@ -506,10 +509,10 @@ async def test_shallow_items_canonicalized_and_severity_ordered(monkeypatch, tmp
     async def _stub_phase_commit_push(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.runner.phase_fix", _spy_phase_fix)
-    monkeypatch.setattr("daydream.runner.phase_test_and_heal", _stub_phase_test_and_heal)
-    monkeypatch.setattr("daydream.runner.phase_commit_push", _stub_phase_commit_push)
+    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _spy_phase_fix)
+    monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", _stub_phase_test_and_heal)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _stub_phase_commit_push)
 
     # Silence UI noise.
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
@@ -517,7 +520,7 @@ async def test_shallow_items_canonicalized_and_severity_ordered(monkeypatch, tmp
     monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
 
     config = RunConfig(
@@ -607,7 +610,7 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch,
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, _cache=None: _StubBackend(),
+        lambda _config, _phase, cache=None: _StubBackend(),
     )
 
     async def _stub_phase_parse_feedback(_backend, _work):
@@ -628,18 +631,18 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch,
     async def _spy_phase_commit_push(*_args, **_kwargs):
         interactive_calls.append(True)
 
-    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.runner.phase_fix", _stub_phase_fix)
-    monkeypatch.setattr("daydream.runner.phase_test_and_heal", _stub_phase_test_and_heal)
-    monkeypatch.setattr("daydream.runner.phase_commit_push_auto", _spy_phase_commit_push_auto)
-    monkeypatch.setattr("daydream.runner.phase_commit_push", _spy_phase_commit_push)
+    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _stub_phase_fix)
+    monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", _stub_phase_test_and_heal)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push_auto", _spy_phase_commit_push_auto)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _spy_phase_commit_push)
 
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_dim", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
 
     config = RunConfig(
@@ -703,7 +706,7 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkey
         model = "stub-model"
         fanout_concurrency = 4
 
-    def _resolve(_config, phase, _cache=None):
+    def _resolve(_config, phase, cache=None):
         return test_backend if phase == "test" else _StubBackend()
 
     monkeypatch.setattr("daydream.runner._resolve_backend", _resolve)
@@ -722,10 +725,10 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkey
     async def _spy_phase_commit_push(*_args, **_kwargs):
         commit_calls.append(True)
 
-    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.runner.phase_fix", _stub_phase_fix)
-    monkeypatch.setattr("daydream.runner.phase_commit_push_auto", _spy_phase_commit_push_auto)
-    monkeypatch.setattr("daydream.runner.phase_commit_push", _spy_phase_commit_push)
+    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _stub_phase_fix)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push_auto", _spy_phase_commit_push_auto)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _spy_phase_commit_push)
 
     def _forbidden_input(*_a: Any, **_kw: Any) -> str:
         raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
@@ -737,7 +740,7 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkey
     monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
     monkeypatch.setattr(
         "daydream.phases.console",
@@ -821,7 +824,7 @@ async def test_yes_shallow_failing_tests_bounded_fix_and_abort(monkeypatch, tmp_
         model = "stub-model"
         fanout_concurrency = 4
 
-    def _resolve(_config, phase, _cache=None):
+    def _resolve(_config, phase, cache=None):
         return test_backend if phase == "test" else _StubBackend()
 
     monkeypatch.setattr("daydream.runner._resolve_backend", _resolve)
@@ -840,10 +843,10 @@ async def test_yes_shallow_failing_tests_bounded_fix_and_abort(monkeypatch, tmp_
     async def _spy_phase_commit_push(*_args, **_kwargs):
         commit_calls.append(True)
 
-    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.runner.phase_fix", _stub_phase_fix)
-    monkeypatch.setattr("daydream.runner.phase_commit_push_auto", _spy_phase_commit_push_auto)
-    monkeypatch.setattr("daydream.runner.phase_commit_push", _spy_phase_commit_push)
+    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _stub_phase_fix)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push_auto", _spy_phase_commit_push_auto)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _spy_phase_commit_push)
 
     def _forbidden_input(*_a: Any, **_kw: Any) -> str:
         raise AssertionError("input() must not be called under --yes")
@@ -855,7 +858,7 @@ async def test_yes_shallow_failing_tests_bounded_fix_and_abort(monkeypatch, tmp_
     monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_summary", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
     monkeypatch.setattr(
         "daydream.phases.console",

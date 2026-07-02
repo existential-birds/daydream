@@ -354,7 +354,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     async def _ok_test(*_a: Any, **_kw: Any) -> tuple[bool, int]:
         return True, 0
 
-    monkeypatch.setattr("daydream.runner.phase_test_and_heal", _ok_test)
+    monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", _ok_test)
 
     for name in (
         "print_phase_hero",
@@ -362,11 +362,19 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
         "print_success",
         "print_warning",
         "print_dim",
-        "print_summary",
         "print_skipped_phases",
-        "print_iteration_divider",
     ):
         monkeypatch.setattr(f"daydream.runner.{name}", lambda *a, **kw: None)
+    for name in (
+        "print_phase_hero",
+        "print_info",
+        "print_success",
+        "print_warning",
+        "print_dim",
+        "print_summary",
+        "print_iteration_divider",
+    ):
+        monkeypatch.setattr(f"daydream.flows.shallow.{name}", lambda *a, **kw: None)
 
     traj = tmp_path / "trajectory.json"
     config = RunConfig(

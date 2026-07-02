@@ -649,7 +649,7 @@ async def test_run_populates_exploration_context(monkeypatch, target_project: Pa
     )
 
     # Force the diff source so exploration runs even in a tmp dir.
-    monkeypatch.setattr("daydream.runner._git_diff", lambda cwd, exclude=None: diff_text)
+    monkeypatch.setattr("daydream.flows.shallow._git_diff", lambda cwd, exclude=None: diff_text)
 
     captured: dict[str, Any] = {}
 
@@ -667,10 +667,10 @@ async def test_run_populates_exploration_context(monkeypatch, target_project: Pa
     async def fake_phase_commit_push(backend, work):
         return None
 
-    monkeypatch.setattr("daydream.runner.phase_review", fake_phase_review)
-    monkeypatch.setattr("daydream.runner.phase_parse_feedback", fake_phase_parse_feedback)
-    monkeypatch.setattr("daydream.runner.phase_test_and_heal", fake_phase_test_and_heal)
-    monkeypatch.setattr("daydream.runner.phase_commit_push", fake_phase_commit_push)
+    monkeypatch.setattr("daydream.flows.shallow.phase_review", fake_phase_review)
+    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", fake_phase_parse_feedback)
+    monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", fake_phase_test_and_heal)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", fake_phase_commit_push)
     monkeypatch.setattr(
         "daydream.runner.create_backend",
         lambda name, model=None: _AgentsRecordingMockBackend(),

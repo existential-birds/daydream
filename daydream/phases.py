@@ -27,6 +27,7 @@ from daydream.agent import (
 from daydream.backends import Backend, ContinuationToken
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
+from daydream.extensions import get_registry
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.trajectory import (
     DaydreamPhase,
@@ -47,6 +48,7 @@ from daydream.ui import (
     print_fix_complete,
     print_fix_progress,
     print_info,
+    print_intent_summary,
     print_issues_table,
     print_menu,
     print_phase_hero,
@@ -1207,7 +1209,11 @@ def build_intent_prompt(
     body = (
         f"You have full access to explore the codebase. Read the diff file at {diff_path} "
         f"and examine the codebase to understand the intent of these changes. "
-        f"Present your understanding concisely — what problem is being solved and how.\n\n"
+        f"That diff is the complete review target, already computed against the "
+        f"repository's base branch — this run is not tied to a GitHub pull request, so "
+        f"do not look up, list, or ask about pull requests. Do not invoke any skills or "
+        f"slash commands. Present your understanding concisely — what problem is being "
+        f"solved and how — as plain text in your reply.\n\n"
         f"Branch: {branch}\n\n"
         f"Commit log:\n{log}\n"
     )
@@ -1424,7 +1430,7 @@ async def phase_review(
         )
 
     prior_commits = _prior_daydream_commits(work)
-    prompt = build_review_prompt(
+    prompt = get_registry().prompt("review")(
         skill_invocation=skill_invocation,
         diff_instruction=diff_instruction,
         review_output_path=str(review_output_path),
@@ -1621,7 +1627,6 @@ async def phase_verify_recommendations(
     # from daydream.phases). Same pattern used by phase_per_stack_reviews and
     # phase_cross_stack_merge above.
     from daydream.deep.artifacts import verdicts_path
-    from daydream.deep.prompts import build_verification_prompt
 
     output_path = verdicts_path(deep_dir)
 
@@ -1638,7 +1643,7 @@ async def phase_verify_recommendations(
         output_path.write_text(json.dumps(empty_payload, indent=2))
         return output_path, empty_payload
 
-    prompt = build_verification_prompt(
+    prompt = get_registry().prompt("verify")(
         items=verifiable,
         cwd=work.repo,
         output_path=output_path,
@@ -2248,7 +2253,7 @@ async def phase_test_and_heal(
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             console.print()
             print_info(console, "Launching agent to fix test failures (auto)...")
-            fix_prompt = _build_fix_prompt(
+            fix_prompt = get_registry().prompt("fix")(
                 output, feedback_items, repo=work.repo,
                 concise_mode=_backend_concise_fix_prompts(backend),
             )
@@ -2306,7 +2311,7 @@ async def phase_test_and_heal(
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            fix_prompt = _build_fix_prompt(
+            fix_prompt = get_registry().prompt("fix")(
                 output, feedback_items, repo=work.repo,
                 concise_mode=_backend_concise_fix_prompts(backend),
             )
@@ -2491,7 +2496,7 @@ async def phase_fetch_pr_feedback(
     print_dim(console, f"Model: {backend.model}")
 
     skill_invocation = backend.format_skill_invocation(
-        "beagle-core:fetch-pr-feedback", f"--pr {pr_number} --bot {bot}"
+        get_registry().skill("pr-feedback-fetch"), f"--pr {pr_number} --bot {bot}"
     )
 
     await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
@@ -2566,7 +2571,7 @@ async def phase_respond_pr_feedback(
     print_info(console, f"Responding to PR #{pr_number} with {len(successful)} fix result(s)...")
 
     skill_invocation = backend.format_skill_invocation(
-        "beagle-core:respond-pr-feedback", f"--pr {pr_number} --bot {bot}"
+        get_registry().skill("pr-feedback-respond"), f"--pr {pr_number} --bot {bot}"
     )
 
     await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
@@ -2610,7 +2615,7 @@ async def phase_understand_intent(
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
     print_dim(console, f"Model: {backend.model}")
 
-    prompt = build_intent_prompt(
+    prompt = get_registry().prompt("intent")(
         diff_path=str(diff_path),
         branch=branch,
         log=log,
@@ -2629,6 +2634,10 @@ async def phase_understand_intent(
         )
         intent_text = output if isinstance(output, str) else str(output)
 
+        console.print()
+        # Show the understanding the gate below asks about — the live transcript
+        # above may end on tool noise rather than the summary itself.
+        print_intent_summary(console, intent_text)
         console.print()
         # Confirm-or-correct gate. ``--yes`` and unattended runs accept the
         # understanding as-is and proceed (this read step is non-mutating, so the
@@ -2665,6 +2674,8 @@ async def phase_understand_intent(
 The user corrected your understanding: {response}
 
 Re-examine the codebase and the diff at {diff_path}, and present an updated understanding of the intent.
+The diff is the complete review target — do not look up pull requests or invoke any skills
+or slash commands; reply with your updated understanding as plain text.
 
 Branch: {branch}
 
@@ -2701,7 +2712,7 @@ async def phase_alternative_review(
     print_phase_hero(console, "WONDER", phase_subtitle("WONDER"))
     print_dim(console, f"Model: {backend.model}")
 
-    prompt = build_alternative_review_prompt(
+    prompt = get_registry().prompt("alternatives")(
         intent_summary=intent_summary,
         diff_path=str(diff_path),
         exploration_dir=exploration_dir,
@@ -2775,8 +2786,7 @@ async def phase_per_stack_reviews(
             dropped.
 
     """
-    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
-    from daydream.deep import prompts as _prompts
+    from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep.artifacts import deep_dir as _deep_dir
     from daydream.deep.artifacts import per_stack_review_path
     from daydream.deep.prompts import _diff_blocks_for_files
@@ -2798,9 +2808,9 @@ async def phase_per_stack_reviews(
                 # through the backend formatter so each backend emits its own
                 # invocation syntax.
                 structural_invocation = backend.format_skill_invocation(
-                    stack.skill_invocation or STRUCTURE_SKILL
+                    stack.skill_invocation or get_registry().skill("structural")
                 )
-                prompt = _prompts.build_structural_prompt(
+                prompt = get_registry().prompt("structural")(
                     skill_invocation=structural_invocation,
                     files=stack.files,
                     diff_path=diff_path,
@@ -2821,7 +2831,7 @@ async def phase_per_stack_reviews(
                     else None
                 )
                 if stack.skill_invocation is None:
-                    prompt = _prompts.build_generic_fallback_prompt(
+                    prompt = get_registry().prompt("generic-fallback")(
                         files=stack.files,
                         diff_path=diff_path,
                         intent_path=intent_path,
@@ -2836,7 +2846,7 @@ async def phase_per_stack_reviews(
                 else:
                     # Route the raw Beagle stack key through the backend
                     # formatter so each backend emits its own invocation syntax.
-                    prompt = _prompts.build_per_stack_prompt(
+                    prompt = get_registry().prompt("per-stack")(
                         skill_invocation=backend.format_skill_invocation(stack.skill_invocation),
                         stack_name=stack.stack_name,
                         files=stack.files,
@@ -2946,7 +2956,6 @@ async def phase_arbiter_review(
 
     """
     from daydream.deep.artifacts import arbiter_input_path, deep_dir
-    from daydream.deep.prompts import build_arbiter_prompt
 
     print_phase_hero(console, "ARBITRATE", phase_subtitle("ARBITRATE"))
     print_dim(console, f"Model: {backend.model}")
@@ -2969,7 +2978,7 @@ async def phase_arbiter_review(
     ]
     input_path.write_text(json.dumps(arbiter_input, indent=2))
 
-    prompt = build_arbiter_prompt(
+    prompt = get_registry().prompt("arbiter")(
         arbiter_input_path=input_path,
         diff_path=diff_path,
         intent_path=intent_path,
@@ -3240,7 +3249,6 @@ async def phase_cross_stack_merge(
 
     """
     from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path
-    from daydream.deep.prompts import build_merge_prompt
 
     dd = deep_dir(work.repo)
     canonical_path = work.repo / REVIEW_OUTPUT_FILE
@@ -3256,7 +3264,7 @@ async def phase_cross_stack_merge(
     # findings can't leave phantom drops on a resume that drops none (#227).
     (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
 
-    prompt = build_merge_prompt(
+    prompt = get_registry().prompt("merge")(
         per_stack_records_paths=per_stack_records_paths,
         intent_path=intent_path,
         alternatives_path=alternatives_path,

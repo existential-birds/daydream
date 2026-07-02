@@ -5,20 +5,25 @@ the workspace via :func:`daydream.workspace.open_workspace` and then dispatches
 to a private helper based on ``config.bot`` / ``config.output_mode`` /
 ``config.shallow``::
 
-    bot set (feedback mode)  -> _run_pr_feedback (PR feedback flow)
-    output_mode == "comment" -> _run_comment    (review + post inline PR comments)
-    output_mode == "review"  -> _run_review     (review report only, no posting)
+    bot set (feedback mode)  -> _run_pr_feedback (registered "pr-feedback" flow)
+    output_mode == "comment" -> _run_comment    (registered "review" flow, posts inline PR comments)
+    output_mode == "review"  -> _run_review     (registered "review" flow, report only, no posting)
     output_mode == "loop":
-        config.shallow       -> _run_loop_shallow (single-stack review-fix-test)
+        config.shallow       -> _run_loop_shallow (registered "shallow" flow, single-stack review-fix-test)
         else                 -> _run_loop_deep    (deep multi-stack pipeline, default)
 
 ``run_feedback`` is the entry point used by the ``daydream feedback <pr#>``
 subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
 :func:`run`.
+
+``run`` builds the per-run extension registry (builtins + optional
+``daydream_ext``) and sets it on the registry ContextVar before dispatch;
+migrated flows (pr-feedback, review/comment, shallow) keep their preamble in
+the flow helper and run their phase sequence through
+:func:`daydream.flows.run_flow` against the registered flow definition.
 """
 
 import os
-import shutil
 import sys
 import uuid
 from collections.abc import Callable
@@ -30,11 +35,9 @@ from rich.markup import escape as escape_markup
 
 from daydream import git_ops, github_app
 from daydream.agent import (
-    MissingSkillError,
     console,
     get_assume,
     get_non_interactive,
-    resolve_gate,
     resolve_or_prompt,
     set_assume,
     set_non_interactive,
@@ -43,55 +46,34 @@ from daydream.agent import (
 from daydream.backends import Backend, create_backend
 from daydream.config import (
     PHASE_DEFAULT_MODELS,
-    REVIEW_OUTPUT_FILE,
     REVIEW_SKILLS,
-    SKILL_MAP,
     ReviewSkillChoice,
 )
 from daydream.config_file import DaydreamFileConfig
-from daydream.exploration import ExplorationContext, safe_explore
-from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
+from daydream.exploration import ExplorationContext
+from daydream.extensions import ExtensionError, build_registry, get_registry, set_registry
+from daydream.flows import FlowContext, run_flow
 from daydream.git_ops import GitError
 from daydream.phases import (
-    FixResult,
     _detect_default_branch,
     _git_branch,
-    _git_diff,
     _git_log,
     check_review_file_exists,
-    phase_alternative_review,
-    phase_commit_iteration,
-    phase_commit_push,
-    phase_commit_push_auto,
-    phase_fetch_pr_feedback,
-    phase_fix,
-    phase_parse_feedback,
-    phase_respond_pr_feedback,
-    phase_review,
-    phase_test_and_heal,
-    phase_understand_intent,
-    revert_uncommitted_changes,
-    severity_sorted,
 )
 from daydream.trajectory import (
-    DaydreamPhase,
     DaydreamRunFlow,
     TrajectoryRecorder,
     default_trajectory_path,
-    phase_scope,
 )
 from daydream.ui import (
-    SummaryData,
     phase_subtitle,
     print_dim,
     print_error,
     print_info,
-    print_iteration_divider,
     print_menu,
     print_phase_hero,
     print_skipped_phases,
     print_success,
-    print_summary,
     print_warning,
     prompt_user,
 )
@@ -496,6 +478,14 @@ async def run(config: RunConfig | None = None) -> int:
     set_non_interactive(not _resolve_interactive(config))
     set_assume(config.assume)
 
+    # Build the per-run registry (builtins + optional daydream_ext) and set it
+    # on the ContextVar so every downstream phase resolves through it.
+    try:
+        set_registry(build_registry())
+    except ExtensionError as exc:
+        print_error(console, "Extension Error", str(exc))
+        return 1
+
     # Resolve target dir outside the workspace context so path-validation errors
     # short-circuit before any git work.
     if config.target is not None:
@@ -540,6 +530,12 @@ async def run(config: RunConfig | None = None) -> int:
         raise
     except git_ops.GitError as exc:
         print_error(console, "Workspace Error", str(exc))
+        return 1
+    except ExtensionError as exc:
+        # ``run_flow``'s pre-flight resolve pass raises ``UnresolvedExtensionError``
+        # naming flow + step before any step executes; the flow helpers let it
+        # propagate here so every broken-extension abort renders the same panel.
+        print_error(console, "Extension Error", str(exc))
         return 1
 
 
@@ -617,10 +613,11 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
 
 
 async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
-    """Today's PR feedback body, refactored to receive ``work`` from the dispatch.
+    """PR-feedback preamble; the phase sequence runs through the flow registry.
 
-    Fetches bot review comments, parses them, applies fixes one-by-one,
-    commits/pushes, and posts a "fixed" reply on each addressed comment.
+    Validates args, opens the trajectory recorder, prints the info block,
+    then delegates to the registered ``pr-feedback`` flow (fetch -> parse ->
+    fix -> commit/push -> respond; steps in ``daydream/flows/pr_feedback.py``).
     """
     if config.pr_number is None or config.bot is None:
         print_error(
@@ -633,11 +630,6 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
     pr_number = config.pr_number
     bot = config.bot
     target_dir = work.repo
-
-    backend_cache: dict[tuple[str, str | None], Backend] = {}
-    review_backend = _resolve_backend(config, "review", backend_cache)
-    parse_backend = _resolve_backend(config, "parse", backend_cache)
-    fix_backend = _resolve_backend(config, "fix", backend_cache)
 
     session_id = str(uuid.uuid4())
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
@@ -652,72 +644,20 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         pr_repo=config.pr_repo,
         on_write=_make_archive_callback(config, target_dir, work),
     ):
+        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx.data["pr_number"] = pr_number
+        ctx.data["bot"] = bot
+
         console.print()
         print_info(console, f"PR feedback mode: PR #{pr_number}")
         print_info(console, f"Bot: {bot}")
         print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {review_backend.model}")
+        print_info(console, f"Model: {ctx.backend_for('review').model}")
         # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
-        await phase_fetch_pr_feedback(review_backend, work, pr_number, bot)
-
-        try:
-            async with phase_scope(DaydreamPhase.PARSE):
-                feedback_items = await phase_parse_feedback(parse_backend, work)
-        except ValueError:
-            print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
-            return 1
-
-        if not feedback_items:
-            print_info(console, "No actionable feedback found in PR comments.")
-            return 0
-
-        # Fix sequentially to avoid concurrent access to one mutable backend.
-        results: list[FixResult] = []
-        total_items = len(feedback_items)
-        async with phase_scope(DaydreamPhase.FIX):
-            for idx, item in enumerate(feedback_items, start=1):
-                try:
-                    await phase_fix(fix_backend, work, item, idx, total_items)
-                    results.append((item, True, None))
-                except Exception as e:
-                    results.append((item, False, f"{type(e).__name__}: {e}"))
-
-        successful = [r for r in results if r[1]]
-        failed = [r for r in results if not r[1]]
-
-        if not successful:
-            print_error(
-                console,
-                "All Fixes Failed",
-                f"All {len(failed)} fix(es) failed. Aborting before commit.",
-            )
-            return 1
-
-        try:
-            await phase_commit_push_auto(
-                review_backend, work, items=[item for item, _ok, _err in results if _ok],
-            )
-        except Exception as e:
-            print_error(console, "Commit/Push Failed", str(e))
-            return 1
-
-        try:
-            await phase_respond_pr_feedback(review_backend, work, pr_number, bot, results)
-        except Exception as e:
-            print_warning(console, f"Failed to respond to PR comments: {e}")
-            print_info(console, "Fixes were already pushed successfully.")
-
-        console.print()
-        print_success(
-            console,
-            f"PR #{pr_number}: {len(successful)} fix(es) applied"
-            + (f", {len(failed)} failed" if failed else ""),
-        )
-
-        return 0
+        return await run_flow(ctx.registry, "pr-feedback", ctx)
 
 
 # Helper: comment mode (--comment)
@@ -856,16 +796,18 @@ def _write_findings_for_parsed(
 async def _run_review_or_comment(
     work: WorkContext, config: RunConfig, *, post_to_pr: bool,
 ) -> int:
-    """Shared body for ``--comment`` and ``--review``.
+    """Shared preamble for ``--comment`` and ``--review``.
 
-    Lifted from today's ``run_trust`` body. The differences between the two
-    modes: only ``--comment`` posts the alternative-review issues to the PR
-    via :func:`daydream.pr_review.post_review_to_pr_from_alt_issues`, and only
+    Gathers git context, writes the diff file, opens the trajectory recorder,
+    prints the info block, then delegates to the registered ``review`` flow
+    (exploration -> intent -> alternatives -> emit-findings -> no-issues-exit
+    -> post-comments; steps in ``daydream/flows/review.py``).
+    ``ctx.data["post_to_pr"]`` carries the mode: only ``--comment`` posts the
+    alternative-review issues to the PR via
+    :func:`daydream.pr_review.post_review_to_pr_from_alt_issues`, and only
     ``--review`` honours ``config.findings_out`` (Phase A artifact emission
     via :func:`_emit_findings_artifact`).
     """
-    backend_cache: dict[tuple[str, str | None], Backend] = {}
-    backend = _resolve_backend(config, "review", backend_cache)
     target_dir = work.repo
 
     # Gather git context using the resolved base branch from work (no
@@ -904,87 +846,39 @@ async def _run_review_or_comment(
         pr_repo=config.pr_repo,
         on_write=_make_archive_callback(config, target_dir, work),
     ):
+        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx.data["post_to_pr"] = post_to_pr
+        ctx.data["diff"] = diff
+        ctx.data["log"] = log
+        ctx.data["branch"] = branch
+        ctx.data["daydream_dir"] = daydream_dir
+        ctx.data["diff_path"] = diff_path
+
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
-        print_info(console, f"Model: {backend.model}")
+        print_info(console, f"Model: {ctx.backend_for('review').model}")
         # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
-        # Pre-scan exploration, unless already populated (injected by caller/tests).
-        if config.exploration_context is None:
-            tier = select_tier(count_changed_files(diff or ""))
-            if tier == "skip":
-                print_dim(console, "Skipping exploration -- trivial diff")
-                config.exploration_context = ExplorationContext()
-            else:
-                print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                explore_backend = _resolve_backend(config, "exploration", backend_cache)
-                print_dim(console, f"Exploration model: {explore_backend.model}")
-                async with phase_scope(DaydreamPhase.EXPLORATION):
-                    config.exploration_context = await safe_explore(
-                        pre_scan,
-                        explore_backend,
-                        target_dir,
-                        diff,
-                        config.exploration_depth,
-                        diff_ref=_compute_diff_ref(target_dir),
-                    )
-
-        # Materialise exploration to disk so phase prompts can reference files.
-        exploration_dir: Path | None = None
-        if config.exploration_context is not None:
-            exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
-
-        async with phase_scope(DaydreamPhase.INTENT):
-            intent_summary = await phase_understand_intent(
-                backend, work, diff_path, log, branch,
-                exploration_dir=exploration_dir,
-            )
-
-        async with phase_scope(DaydreamPhase.ALTERNATIVES):
-            issues = await phase_alternative_review(
-                backend, work, diff_path, intent_summary,
-                exploration_dir=exploration_dir,
-            )
-
-        # Phase A artifact emission (--findings-out, review only); before the
-        # zero-issues early return.
-        if not post_to_pr and config.findings_out is not None:
-            rc = _emit_findings_artifact(target_dir, config, issues)
-            if rc != 0:
-                return rc
-
-        if not issues:
-            print_success(console, "No issues found — the implementation looks good!")
-            return 0
-
-        exploration_cleanup = target_dir / ".daydream" / "exploration"
-        if exploration_cleanup.is_dir():
-            shutil.rmtree(exploration_cleanup)
-
-        # Post findings as inline PR comments (``--comment`` only; ``--review``
-        # exits after emitting the findings artifact).
-        if post_to_pr:
-            from daydream.pr_review import post_review_to_pr_from_alt_issues
-
-            await post_review_to_pr_from_alt_issues(
-                target_dir, issues, console=console,
-            )
-
-        return 0
+        return await run_flow(ctx.registry, "review", ctx)
 
 
 # Helper: shallow loop (single-stack review-fix-test)
 
 
 async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
-    """Single-stack review → fix → test → loop body.
+    """Single-stack review → fix → test preamble.
 
-    This is today's ``run`` body lifted into a helper. The workspace
-    bootstrapping and target-dir resolution have moved up to :func:`run`;
-    everything else is unchanged.
+    Keeps the preamble (skill resolution incl. the ``phase:review`` slot,
+    review-file check, cleanup gate, trajectory recorder + info block,
+    pre-fix snapshot/HEAD capture) and delegates the phase sequence to the
+    registered ``shallow`` flow (exploration -> loop-preflight ->
+    [review -> parse -> fix -> test -> commit-iteration]* -> loop-exhausted
+    -> summary -> commit-gate; steps in ``daydream/flows/shallow.py``).
+    The ``--loop`` iteration is the flow's ``iterate`` loop group, run once
+    in single-pass mode.
     """
     target_dir = work.repo
 
@@ -992,13 +886,16 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
     skill: str | None = None
     if config.start_at == "review":
         if config.skill is not None:
-            if config.skill in SKILL_MAP:
-                skill = SKILL_MAP[config.skill]
-            elif config.skill in REVIEW_SKILLS.values():
+            if (resolved := get_registry().skill_if_registered(f"stack:{config.skill}")) is not None:
+                skill = resolved
+            elif config.skill in get_registry().skill_slots().values():
                 skill = config.skill
             else:
                 print_error(console, "Invalid Skill", f"'{config.skill}' is not a valid skill")
                 return 1
+        elif (slot_skill := get_registry().skill_if_registered("phase:review")) is not None:
+            # Precedence: --skill (CLI) > phase:review slot (extension) > prompt/error.
+            skill = slot_skill
         else:
             if get_non_interactive():
                 print_error(
@@ -1049,12 +946,6 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             default="n",
         )
 
-    backend_cache: dict[tuple[str, str | None], Backend] = {}
-    review_backend = _resolve_backend(config, "review", backend_cache)
-    parse_backend = _resolve_backend(config, "parse", backend_cache)
-    fix_backend = _resolve_backend(config, "fix", backend_cache)
-    test_backend = _resolve_backend(config, "test", backend_cache)
-
     session_id = str(uuid.uuid4())
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
     async with TrajectoryRecorder(
@@ -1068,9 +959,21 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         pr_repo=config.pr_repo,
         on_write=_make_archive_callback(config, target_dir, work),
     ):
+        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx.data["skill"] = skill
+        ctx.data["cleanup_enabled"] = cleanup_enabled
+        ctx.data["feedback_items"] = []
+        ctx.data["fixes_applied"] = 0
+        ctx.data["test_retries"] = 0
+        ctx.data["tests_passed"] = True
+        ctx.data["iteration"] = 0
+        ctx.data["diff_base"] = None
+        ctx.data["exploration_dir"] = None
+        ctx.data["loop_broke"] = False
+
         console.print()
         print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {review_backend.model}")
+        print_info(console, f"Model: {ctx.backend_for('review').model}")
         # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         if skill:
@@ -1079,277 +982,22 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             print_skipped_phases(console, config.start_at)
         console.print()
 
-        # Pre-scan exploration before the first review; only when starting at
-        # "review" (later start phases skip review, so it'd be wasted).
-        if config.start_at == "review" and config.exploration_context is None:
-            diff_text = _git_diff(target_dir, exclude=config.ignore_paths) or ""
-            tier = select_tier(count_changed_files(diff_text))
-            if tier == "skip":
-                print_dim(console, "Skipping exploration -- trivial diff")
-                config.exploration_context = ExplorationContext()
-            else:
-                print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                explore_backend = _resolve_backend(config, "exploration", backend_cache)
-                print_dim(console, f"Exploration model: {explore_backend.model}")
-                config.exploration_context = await safe_explore(
-                    pre_scan,
-                    explore_backend,
-                    target_dir,
-                    diff_text,
-                    config.exploration_depth,
-                    diff_ref=_compute_diff_ref(target_dir),
-                )
-
-        feedback_items: list[dict[str, Any]] = []
-        fixes_applied = 0
-        test_retries = 0
-        tests_passed = True
-        iteration = 0
-        diff_base: str | None = None
-        exploration_dir: Path | None = None
-
         # Recommended-change patch base: snapshot the tracked tree + HEAD BEFORE
         # any fix runs. stash_create returns None on a clean tree (the common
         # pre-fix case), so the pre-fix HEAD SHA is the fallback base. HEAD is
-        # captured now because the commit gate below advances it past the fixes.
-        # Captured once before the loop so the final file is the cumulative fix
+        # captured now because the commit gate advances it past the fixes.
+        # Captured once before the flow so the final file is the cumulative fix
         # against the pre-first-fix base (recommended.patch is overwritten each iteration).
         try:
-            pre_fix_snapshot = git_ops.stash_create(target_dir)
+            ctx.data["pre_fix_snapshot"] = git_ops.stash_create(target_dir)
         except GitError:
-            pre_fix_snapshot = None
+            ctx.data["pre_fix_snapshot"] = None
         try:
-            pre_fix_head = git_ops.head_sha(target_dir)
+            ctx.data["pre_fix_head"] = git_ops.head_sha(target_dir)
         except GitError:
-            pre_fix_head = None
+            ctx.data["pre_fix_head"] = None
 
-        async def _run_loop_iteration() -> tuple[list[dict[str, Any]], int, int, bool, bool]:
-            """Execute one iteration of the review-parse-fix-test loop.
-
-            Returns:
-                Tuple of (items, fixes_count, retries, tests_passed, should_continue).
-                should_continue is False if the loop should break (clean review or test failure).
-            """
-            nonlocal diff_base
-
-            if iteration > 1:
-                (target_dir / REVIEW_OUTPUT_FILE).unlink(missing_ok=True)
-                print_iteration_divider(console, iteration, config.max_iterations)
-
-            assert skill is not None, "skill must be set when starting at review phase"
-            async with phase_scope(DaydreamPhase.REVIEW):
-                await phase_review(
-                    review_backend, work, skill, diff_base=diff_base,
-                    exploration_dir=exploration_dir,
-                    exclude=config.ignore_paths,
-                )
-
-            async with phase_scope(DaydreamPhase.PARSE):
-                items = await phase_parse_feedback(parse_backend, work)
-
-            if not items:
-                print_info(console, f"Clean review on iteration {iteration}")
-                return [], 0, 0, True, False  # should_continue=False (clean)
-
-            # Canonicalize onto the lens/severity axes, then fix high→low.
-            items = severity_sorted(to_canonical_shallow(items))
-
-            print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
-            print_dim(console, f"Model: {fix_backend.model}")
-            fixes_count = 0
-            async with phase_scope(DaydreamPhase.FIX):
-                for i, item in enumerate(items, 1):
-                    await phase_fix(fix_backend, work, item, i, len(items))
-                    fixes_count += 1
-
-            # Capture the recommended patch NOW, before tests run and a failure
-            # reverts the tree below. Overwritten each iteration so the file holds
-            # the cumulative fix against the pre-first-fix base. Best-effort.
-            git_ops.capture_recommended_patch_with_base(
-                target_dir,
-                pre_fix_snapshot,
-                pre_fix_head,
-                target_dir / ".daydream" / "recommended.patch",
-            )
-
-            async with phase_scope(DaydreamPhase.TEST):
-                passed, retries = await phase_test_and_heal(test_backend, work, feedback_items=items)
-
-            if not passed:
-                print_warning(console, f"Tests failed on iteration {iteration}, reverting changes")
-                if revert_uncommitted_changes(target_dir):
-                    print_info(console, "Reverted to last committed state")
-                else:
-                    print_warning(console, "Failed to revert changes")
-                return items, fixes_count, retries, False, False  # should_continue=False (failed)
-
-            # Record the pre-commit SHA so the next iteration reviews this
-            # iteration's changes.
-            diff_base = _get_head_sha(target_dir)
-
-            # Commit so the next review sees a clean tree.
-            await phase_commit_iteration(fix_backend, work, iteration)
-
-            return items, fixes_count, retries, True, True  # should_continue=True
-
-        if config.loop:
-            # Loop mode reverts uncommitted changes on failure; refuse a dirty tree.
-            try:
-                porcelain = git_ops.status_porcelain(target_dir)
-            except GitError:
-                porcelain = None
-            if porcelain is None or porcelain.strip():
-                print_error(
-                    console,
-                    "Dirty Working Tree",
-                    "Loop mode requires a clean repo because failed iterations"
-                    " discard uncommitted changes.",
-                )
-                return 1
-
-            # Materialise exploration to disk so phase prompts can reference files.
-            if config.exploration_context is not None:
-                exp_parent = target_dir / ".daydream"
-                exp_parent.mkdir(exist_ok=True)
-                exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
-
-            while iteration < config.max_iterations:
-                iteration += 1
-
-                try:
-                    items, fixes_count, retries, passed, should_continue = await _run_loop_iteration()
-                except MissingSkillError as e:
-                    _print_missing_skill_error(e.skill_name)
-                    return 1
-                except ValueError as exc:
-                    print_error(console, "Phase 2 Error", str(exc))
-                    print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
-                    return 1
-
-                feedback_items.extend(items)
-                test_retries += retries
-                tests_passed = passed
-                if passed:
-                    fixes_applied += fixes_count
-
-                if not should_continue:
-                    break
-
-            else:
-                # while loop exhausted without break — max iterations reached
-                if feedback_items:
-                    # Deduplicate by (file, line, description) to avoid inflated counts
-                    unique_issues = {
-                        (item.get("file"), item.get("line"), item.get("description"))
-                        for item in feedback_items
-                    }
-                    print_warning(
-                        console,
-                        f"Reached max iterations ({config.max_iterations}), "
-                        f"{len(unique_issues)} unique issues found across all iterations",
-                    )
-                    tests_passed = False
-
-        else:
-            # Single-pass mode.
-            # Materialise exploration to disk so phase prompts can reference files.
-            if config.exploration_context is not None:
-                exp_parent = target_dir / ".daydream"
-                exp_parent.mkdir(exist_ok=True)
-                exploration_dir = config.exploration_context.write_to_dir(exp_parent / "exploration")
-
-            if config.start_at == "review":
-                assert skill is not None, "skill must be set when starting at review phase"
-                try:
-                    async with phase_scope(DaydreamPhase.REVIEW):
-                        await phase_review(
-                            review_backend, work, skill,
-                            exploration_dir=exploration_dir,
-                            exclude=config.ignore_paths,
-                        )
-                except MissingSkillError as e:
-                    _print_missing_skill_error(e.skill_name)
-                    return 1
-
-            if config.start_at in ("review", "parse", "fix"):
-                try:
-                    async with phase_scope(DaydreamPhase.PARSE):
-                        feedback_items = await phase_parse_feedback(parse_backend, work)
-                except ValueError as exc:
-                    print_error(console, "Phase 2 Error", str(exc))
-                    print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
-                    return 1
-                # Canonicalize onto the lens/severity axes, then fix high→low.
-                feedback_items = severity_sorted(to_canonical_shallow(feedback_items))
-
-            if config.start_at in ("review", "parse", "fix"):
-                if feedback_items:
-                    print_phase_hero(console, "HEAL", phase_subtitle("HEAL"))
-                    print_dim(console, f"Model: {fix_backend.model}")
-                    async with phase_scope(DaydreamPhase.FIX):
-                        for i, item in enumerate(feedback_items, 1):
-                            await phase_fix(fix_backend, work, item, i, len(feedback_items))
-                            fixes_applied += 1
-                else:
-                    print_info(console, "No feedback items found, skipping fix phase")
-
-            # Capture the recommended patch NOW, before tests run and a failure
-            # returns early below. Best-effort; never blocks the run.
-            git_ops.capture_recommended_patch_with_base(
-                target_dir,
-                pre_fix_snapshot,
-                pre_fix_head,
-                target_dir / ".daydream" / "recommended.patch",
-            )
-
-            async with phase_scope(DaydreamPhase.TEST):
-                tests_passed, test_retries = await phase_test_and_heal(
-                    test_backend, work, feedback_items=feedback_items
-                )
-            iteration = 1
-
-        print_summary(
-            console,
-            SummaryData(
-                skill=skill or "N/A",
-                target=str(target_dir),
-                feedback_count=len(feedback_items),
-                fixes_applied=fixes_applied,
-                test_retries=test_retries,
-                tests_passed=tests_passed,
-                loop_mode=config.loop,
-                iterations_used=iteration if config.loop else 1,
-            ),
-        )
-
-        exploration_cleanup = target_dir / ".daydream" / "exploration"
-        if exploration_cleanup.is_dir():
-            shutil.rmtree(exploration_cleanup)
-
-        # Commit gate. Unattended auto-commits (safe_default=True) so a green run's
-        # commit isn't silently dropped on non-TTY stdin; --yes auto-commits, a
-        # forced --no skips, an interactive run gets the y/N prompt.
-        if tests_passed:
-            commit_decision = resolve_gate(
-                assume=get_assume(),
-                interactive=not get_non_interactive(),
-                safe_default=True,
-            )
-            if commit_decision is True:
-                await phase_commit_push_auto(review_backend, work)
-            elif commit_decision is None:
-                await phase_commit_push(review_backend, work)
-            # commit_decision is False -> forced decline, skip commit.
-
-            if cleanup_enabled:
-                review_output_path = target_dir / REVIEW_OUTPUT_FILE
-                if review_output_path.exists():
-                    review_output_path.unlink()
-                    print_success(console, f"Cleaned up {REVIEW_OUTPUT_FILE}")
-
-            return 0
-        else:
-            return 1
+        return await run_flow(ctx.registry, "shallow", ctx)
 
 
 # Helper: deep loop (multi-stack pipeline)
