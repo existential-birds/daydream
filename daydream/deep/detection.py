@@ -24,7 +24,7 @@ import fnmatch
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
-from daydream.config import SKILL_MAP, STRUCTURE_STACK_NAME
+from daydream.config import STRUCTURE_STACK_NAME
 from daydream.extensions import Registry, StackRule, get_registry
 
 # Extension -> stack-key (lowercase, matches SKILL_MAP keys). Keep in sync with
@@ -153,9 +153,9 @@ def detect_stacks(
     Args:
         changed_files: Paths (POSIX-style, repo-relative) of files that changed in the diff.
         skill_availability: Lower-case stack keys for which a Beagle skill is installed.
-            Defaults to all keys in SKILL_MAP (optimistic availability — runtime
-            MissingSkillError would be handled separately). Fork-registered stacks
-            are exempt (they are not Beagle plugins).
+            Defaults to all of the registry's ``stack:<key>`` slot keys (optimistic
+            availability — runtime MissingSkillError would be handled separately).
+            Fork-registered stacks are exempt (they are not Beagle plugins).
         registry: Extension registry for fork stack rules and skill-slot resolution.
             Defaults to the current context's registry (``get_registry()``).
 
@@ -170,10 +170,10 @@ def detect_stacks(
         then structure last. Ordering is informational only — the orchestrator
         iterates the full list in parallel.
     """
-    if skill_availability is None:
-        skill_availability = set(SKILL_MAP.keys())
     if registry is None:
         registry = get_registry()
+    if skill_availability is None:
+        skill_availability = registry.stack_keys()
     rules = registry.stack_rules()
     fork_rules = {rule.stack_name: rule for rule in rules}
 

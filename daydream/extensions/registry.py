@@ -116,6 +116,10 @@ class Registry:
         """Return the slot's skill string, or None; never raises."""
         return self._skills.get(slot)
 
+    def stack_keys(self) -> set[str]:
+        """Return the stack keys of every registered ``stack:<key>`` skill slot."""
+        return {slot.removeprefix("stack:") for slot in self._skills if slot.startswith("stack:")}
+
     # -- prompts ----------------------------------------------------------
 
     def override_prompt(self, name: str, builder: Callable[..., str]) -> None:

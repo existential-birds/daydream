@@ -42,3 +42,13 @@ def test_replace_requires_flag_and_skill_prompt_roundtrip() -> None:
     assert reg.skill("stack:python") == "ro:review-python"
     reg.override_prompt("review", lambda **kw: "X")
     assert reg.prompt("review")() == "X"
+
+
+def test_stack_keys_returns_stack_slot_keys_only() -> None:
+    reg = Registry()
+    assert reg.stack_keys() == set()
+    reg.override_skill("stack:python", "ro:review-python")
+    reg.override_skill("stack:proto", "ro:review-proto")
+    reg.override_skill("structural", "ro:review-structure")
+    reg.override_skill("pr-feedback-fetch", "ro:fetch-pr-feedback")
+    assert reg.stack_keys() == {"python", "proto"}

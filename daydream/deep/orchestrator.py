@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
-from daydream.config import REVIEW_OUTPUT_FILE, SKILL_MAP, STRUCTURE_STACK_NAME
+from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME
 from daydream.deep.arbiter import select_arbiter_targets
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
@@ -284,7 +284,7 @@ def get_installed_skills() -> set[str] | None:
     "installed" iff its skill's plugin is present.
 
     Returns:
-        Set of installed stack keys (subset of ``SKILL_MAP.keys()``), or
+        Set of installed stack keys (subset of the registry's stack keys), or
         ``None`` if the registry cannot be read (missing file, bad JSON).
         ``None`` signals "unknown" so callers can fall back to optimistic
         availability without forcing every stack through generic.
@@ -307,7 +307,7 @@ def get_installed_skills() -> set[str] | None:
     installed_plugins = {key.split("@", 1)[0] for key in plugins}
     skill_registry = get_registry()
     installed: set[str] = set()
-    for stack_key in SKILL_MAP:
+    for stack_key in skill_registry.stack_keys():
         # Slot values are "<plugin-name>:<skill-name>".
         plugin_prefix = skill_registry.skill(f"stack:{stack_key}").split(":", 1)[0]
         if plugin_prefix in installed_plugins:
@@ -701,7 +701,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         # Optimistic fallback when detection fails: SDK-level MissingSkillError is
         # still caught downstream in phase_per_stack_reviews, so preserving the
         # pre-D-16 behavior is safer than routing everything to generic.
-        skill_availability = installed if installed is not None else set(SKILL_MAP.keys())
+        skill_availability = installed if installed is not None else get_registry().stack_keys()
         stacks = detect_stacks(changed_files, skill_availability=skill_availability)
         # Issue #172 — tiny-diff short-circuit. When the diff is small enough
         # (≤ SHALLOW_FANOUT_THRESHOLD files), collapse the per-language fan-out
