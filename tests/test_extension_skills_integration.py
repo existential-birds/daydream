@@ -1,0 +1,133 @@
+"""Real-path tests: extension skill slots reach the pr-feedback and shallow flows.
+
+Drives the production entrypoints (``runner.run_feedback`` / ``runner.run``)
+against a real temp git repo, mocking ONLY the backend seam
+(``daydream.runner.create_backend``) per the testing standard — the same shape
+as ``tests/test_pr_feedback_integration.py``. A ``daydream_ext`` package
+written by the ``ext_dir`` fixture overrides skill slots; assertions are on
+the prompts the backend actually received and the exit code.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from daydream import runner
+from daydream.backends import ResultEvent, TextEvent
+from daydream.runner import RunConfig
+from tests.conftest import ExtDir
+
+
+class RecordingBackend:
+    """Prompt-recording stub modelled on ``_PRFeedbackStubBackend``.
+
+    Dispatches on prompt content just enough to drive each flow to a clean
+    exit: writes the review-output file for review/fetch prompts, returns an
+    empty issues list for parse prompts, and reports passing tests.
+    """
+
+    model = "mock-model"
+    fanout_concurrency = 4
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        self.prompts.append(prompt)
+        pl = prompt.lower()
+
+        if "fetch-pr-feedback" in pl or "review the changes" in pl:
+            (cwd / ".review-output.md").write_text("# Review\n\nNo issues found.\n")
+            yield TextEvent(text="")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        if "extract only actionable issues" in pl:
+            yield TextEvent(text="")
+            yield ResultEvent(structured_output={"issues": []}, continuation=None)
+            return
+
+        if "test suite" in pl:
+            yield TextEvent(text="All tests passed")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        yield TextEvent(text="")
+        yield ResultEvent(structured_output=None, continuation=None)
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        # Mirror ClaudeBackend: append args so the test can read the slot from the prompt.
+        result = f"/{skill_key}"
+        if args:
+            result = f"{result} {args}"
+        return result
+
+
+async def test_fork_overrides_pr_feedback_fetch_skill(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daydream_ext override of the pr-feedback-fetch slot reaches the fetch prompt.
+
+    Observable outcomes: exit 0, the overridden skill string appears in a
+    prompt the backend received, and the built-in literal appears in none.
+    """
+    ext_dir.write_module(
+        "DAYDREAM_EXT_API = 1\n"
+        "def register(r):\n"
+        "    r.override_skill('pr-feedback-fetch', 'ro-core:fetch-pr-feedback')\n"
+    )
+    backend = RecordingBackend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+
+    rc = await runner.run_feedback(
+        RunConfig(target=str(multi_stack_target), bot="x[bot]", non_interactive=True), pr=1
+    )
+
+    assert rc == 0
+    assert any("ro-core:fetch-pr-feedback" in p for p in backend.prompts)
+    assert not any("beagle-core:fetch-pr-feedback" in p for p in backend.prompts)
+
+
+async def test_phase_review_slot_supplies_shallow_skill(
+    ext_dir: ExtDir, feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bound phase:review slot replaces the non-interactive "Missing --skill" error.
+
+    Runs the shallow flow through ``runner.run`` non-interactively WITHOUT
+    ``--skill`` — today that config exits 1 with "Missing --skill". With the
+    slot bound, the run must exit 0 and the review prompt must carry the
+    bound skill invocation.
+    """
+    ext_dir.write_module(
+        "DAYDREAM_EXT_API = 1\n"
+        "def register(r):\n"
+        "    r.override_skill('phase:review', 'ro-python:review-python')\n"
+    )
+    backend = RecordingBackend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+
+    config = RunConfig(
+        target=str(feature_branch_repo),
+        shallow=True,
+        non_interactive=True,
+        cleanup=False,
+    )
+    rc = await runner.run(config)
+
+    assert rc == 0
+    assert any("ro-python:review-python" in p for p in backend.prompts)

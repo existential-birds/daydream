@@ -51,6 +51,8 @@ from daydream.config import (
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
+from daydream.extensions import build_registry, get_registry
+from daydream.extensions.loader import set_registry
 from daydream.git_ops import GitError
 from daydream.phases import (
     FixResult,
@@ -495,6 +497,10 @@ async def run(config: RunConfig | None = None) -> int:
     # orthogonal ``assume`` axis (--yes) both feed ``resolve_gate`` at each gate.
     set_non_interactive(not _resolve_interactive(config))
     set_assume(config.assume)
+
+    # Build the per-run registry (builtins + optional daydream_ext) and set it
+    # on the ContextVar so every downstream phase resolves through it.
+    set_registry(build_registry())
 
     # Resolve target dir outside the workspace context so path-validation errors
     # short-circuit before any git work.
@@ -999,6 +1005,9 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             else:
                 print_error(console, "Invalid Skill", f"'{config.skill}' is not a valid skill")
                 return 1
+        elif (slot_skill := get_registry().skill_if_registered("phase:review")) is not None:
+            # Precedence: --skill (CLI) > phase:review slot (extension) > prompt/error.
+            skill = slot_skill
         else:
             if get_non_interactive():
                 print_error(

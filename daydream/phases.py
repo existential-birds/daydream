@@ -27,6 +27,7 @@ from daydream.agent import (
 from daydream.backends import Backend, ContinuationToken
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
+from daydream.extensions import get_registry
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.trajectory import (
     DaydreamPhase,
@@ -2491,7 +2492,7 @@ async def phase_fetch_pr_feedback(
     print_dim(console, f"Model: {backend.model}")
 
     skill_invocation = backend.format_skill_invocation(
-        "beagle-core:fetch-pr-feedback", f"--pr {pr_number} --bot {bot}"
+        get_registry().skill("pr-feedback-fetch"), f"--pr {pr_number} --bot {bot}"
     )
 
     await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
@@ -2566,7 +2567,7 @@ async def phase_respond_pr_feedback(
     print_info(console, f"Responding to PR #{pr_number} with {len(successful)} fix result(s)...")
 
     skill_invocation = backend.format_skill_invocation(
-        "beagle-core:respond-pr-feedback", f"--pr {pr_number} --bot {bot}"
+        get_registry().skill("pr-feedback-respond"), f"--pr {pr_number} --bot {bot}"
     )
 
     await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
@@ -2775,7 +2776,7 @@ async def phase_per_stack_reviews(
             dropped.
 
     """
-    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
+    from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep import prompts as _prompts
     from daydream.deep.artifacts import deep_dir as _deep_dir
     from daydream.deep.artifacts import per_stack_review_path
@@ -2798,7 +2799,7 @@ async def phase_per_stack_reviews(
                 # through the backend formatter so each backend emits its own
                 # invocation syntax.
                 structural_invocation = backend.format_skill_invocation(
-                    stack.skill_invocation or STRUCTURE_SKILL
+                    stack.skill_invocation or get_registry().skill("structural")
                 )
                 prompt = _prompts.build_structural_prompt(
                     skill_invocation=structural_invocation,
