@@ -48,6 +48,7 @@ from daydream.ui import (
     print_fix_complete,
     print_fix_progress,
     print_info,
+    print_intent_summary,
     print_issues_table,
     print_menu,
     print_phase_hero,
@@ -1208,7 +1209,11 @@ def build_intent_prompt(
     body = (
         f"You have full access to explore the codebase. Read the diff file at {diff_path} "
         f"and examine the codebase to understand the intent of these changes. "
-        f"Present your understanding concisely — what problem is being solved and how.\n\n"
+        f"That diff is the complete review target, already computed against the "
+        f"repository's base branch — this run is not tied to a GitHub pull request, so "
+        f"do not look up, list, or ask about pull requests. Do not invoke any skills or "
+        f"slash commands. Present your understanding concisely — what problem is being "
+        f"solved and how — as plain text in your reply.\n\n"
         f"Branch: {branch}\n\n"
         f"Commit log:\n{log}\n"
     )
@@ -2630,6 +2635,10 @@ async def phase_understand_intent(
         intent_text = output if isinstance(output, str) else str(output)
 
         console.print()
+        # Show the understanding the gate below asks about — the live transcript
+        # above may end on tool noise rather than the summary itself.
+        print_intent_summary(console, intent_text)
+        console.print()
         # Confirm-or-correct gate. ``--yes`` and unattended runs accept the
         # understanding as-is and proceed (this read step is non-mutating, so the
         # safe unattended outcome is to continue, not to block); only an
@@ -2665,6 +2674,8 @@ async def phase_understand_intent(
 The user corrected your understanding: {response}
 
 Re-examine the codebase and the diff at {diff_path}, and present an updated understanding of the intent.
+The diff is the complete review target — do not look up pull requests or invoke any skills
+or slash commands; reply with your updated understanding as plain text.
 
 Branch: {branch}
 

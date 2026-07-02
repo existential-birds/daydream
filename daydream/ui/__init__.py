@@ -21,6 +21,7 @@ from daydream.ui.messages import (
     print_error,
     print_feedback_table,
     print_info,
+    print_intent_summary,
     print_menu,
     print_skipped_phases,
     print_success,

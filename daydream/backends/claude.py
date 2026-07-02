@@ -210,6 +210,55 @@ async def _dangerous_command_guard(input_data: Any, tool_use_id: Any, context: A
     return {}
 
 
+# A skill invocation daydream embeds in a prompt: a whitespace/line-anchored
+# ``/{skill_key}`` token as emitted by ``format_skill_invocation`` (e.g.
+# ``/beagle-python:review-python``). A filesystem path never matches — the key
+# must end at whitespace/EOL, never at another ``/``.
+_PROMPT_SKILL_PATTERN = re.compile(r"(?:^|(?<=\s))/([\w.-]+(?::[\w.-]+)*)(?=\s|$)")
+
+# Beagle skills chain (e.g. a review skill loads review-verification-protocol),
+# so any beagle-namespaced key stays invocable even when not in the prompt.
+_CHAINABLE_SKILL_NAMESPACE_PREFIX = "beagle-"
+
+
+def _prompt_skill_keys(prompt: str) -> frozenset[str]:
+    """Skill keys explicitly invoked by *prompt* (see ``_PROMPT_SKILL_PATTERN``)."""
+    return frozenset(_PROMPT_SKILL_PATTERN.findall(prompt))
+
+
+def _make_skill_guard(allowed_skills: frozenset[str]) -> HookCallback:
+    """Build the always-on PreToolUse hook that scopes the Skill tool.
+
+    ``setting_sources=["user"]`` exposes every skill in the operator's Claude
+    Code install — including the built-in ``/review``, which hunts for an open
+    PR to review — and ``bypassPermissions`` leaves the Skill tool unguarded.
+    The guard allows a Skill call only when the key was explicitly invoked by
+    the prompt daydream sent, or is beagle-namespaced (skills chain within the
+    plugin). Everything else — notably un-namespaced Claude Code built-ins —
+    is denied with a redirect back to the prompt. Fails closed when the skill
+    name is missing or malformed.
+    """
+
+    async def _skill_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
+        tool_name = input_data.get("tool_name") if isinstance(input_data, dict) else None
+        if tool_name != "Skill":
+            return {}
+        tool_input = input_data.get("tool_input") if isinstance(input_data, dict) else None
+        requested = tool_input.get("skill") if isinstance(tool_input, dict) else None
+        if isinstance(requested, str) and (
+            requested in allowed_skills
+            or requested.split(":", 1)[0].startswith(_CHAINABLE_SKILL_NAMESPACE_PREFIX)
+        ):
+            return {}
+        return _read_only_deny(
+            f"skill {requested!r} was not requested by this task — do not invoke "
+            "skills or slash commands on your own; follow the prompt instructions "
+            "directly and reply with your analysis as plain text"
+        )
+
+    return _skill_guard
+
+
 class ClaudeBackend:
     """Backend that wraps the Claude Agent SDK.
 
@@ -265,9 +314,12 @@ class ClaudeBackend:
 
         # PreToolUse hooks — NOT allowed_tools — are the enforcement, since
         # bypassPermissions leaves the tool list unrestricted. The dangerous-command
-        # guard is always-on (all phases, #177); the read-only guard composes on top
-        # when read_only=True.
-        pre_tool_use_hooks: list[HookCallback] = [_dangerous_command_guard]
+        # and skill guards are always-on (all phases); the read-only guard composes
+        # on top when read_only=True.
+        pre_tool_use_hooks: list[HookCallback] = [
+            _dangerous_command_guard,
+            _make_skill_guard(_prompt_skill_keys(prompt)),
+        ]
         if read_only:
             pre_tool_use_hooks.append(_read_only_guard)
         options = ClaudeAgentOptions(

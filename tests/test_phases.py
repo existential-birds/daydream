@@ -1069,6 +1069,24 @@ def test_build_intent_prompt_escapes_closing_delimiter_in_body():
     assert "&lt;pr_description>" in prompt
 
 
+def test_build_intent_prompt_contains_no_pr_and_no_skill_directives():
+    """The intent prompt anchors the agent to the on-disk diff: no PR lookups, no skill invocations."""
+    from daydream.phases import build_intent_prompt
+
+    prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="feat/x", log="abc1234 add x")
+    # The core anchors are still present.
+    assert "/tmp/d.diff" in prompt
+    assert "Branch: feat/x" in prompt
+    assert "abc1234 add x" in prompt
+    # The diff is framed as the complete, pre-computed review target...
+    assert "complete review target" in prompt
+    # ...so the agent must not go hunting for a pull request or invoke skills.
+    assert "not tied to a GitHub pull request" in prompt
+    assert "do not look up, list, or ask about pull requests" in prompt
+    assert "Do not invoke any skills or slash commands" in prompt
+    assert "as plain text" in prompt
+
+
 @pytest.mark.asyncio
 async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch, make_work):
     """User confirms the agent's understanding on the first attempt."""
@@ -1162,6 +1180,69 @@ async def test_phase_understand_intent_correction_then_confirm(tmp_path, monkeyp
     assert "login" in result.lower()
 
 
+@pytest.mark.asyncio
+async def test_phase_understand_intent_correction_prompt_keeps_no_pr_no_skill_directives(
+    tmp_path, monkeypatch, make_work
+):
+    """The rebuilt prompt after a user correction still forbids PR lookups and skill invocations."""
+    from daydream.phases import phase_understand_intent
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.console", type("C", (), {"print": lambda *a, **kw: None})())
+
+    captured_prompts: list[str] = []
+
+    class IntentBackend:
+        model = "test-model"
+        fanout_concurrency = 4
+
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
+            captured_prompts.append(prompt)
+            if len(captured_prompts) == 1:
+                yield TextEvent(text="This PR adds a signup page.")
+            else:
+                yield TextEvent(text="This PR adds a login page with OAuth support.")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    correction = "No, it's a login page with OAuth, not signup"
+    responses = iter([correction, "y"])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(responses))
+
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git ...")
+
+    result = await phase_understand_intent(
+        IntentBackend(), make_work(tmp_path),
+        diff_path=diff_file,
+        log="abc1234 add login",
+        branch="feat/login",
+    )
+
+    assert len(captured_prompts) == 2
+    # Initial prompt carries the full directive set.
+    assert "not tied to a GitHub pull request" in captured_prompts[0]
+    assert "Do not invoke any skills or slash commands" in captured_prompts[0]
+    # The rebuilt correction prompt keeps the correction AND the no-PR/no-skill directives.
+    second = captured_prompts[1]
+    assert correction in second
+    assert str(diff_file) in second
+    assert "complete review target" in second
+    assert "do not look up pull requests" in second
+    assert "invoke any skills" in second
+    assert "slash commands" in second
+    assert "login" in result.lower()
+
+
 async def test_phase_understand_intent_forced_no_interactive_falls_through(tmp_path, monkeypatch, make_work):
     """A forced ``no`` (assume="no") in interactive mode must enter the correction flow.
 
@@ -1225,6 +1306,95 @@ async def test_phase_understand_intent_forced_no_interactive_falls_through(tmp_p
         assert "signup" in result.lower()
     finally:
         reset_state()
+
+
+def _make_intent_backend(summary: str) -> Any:
+    """Backend whose intent reply is exactly *summary* (may be empty)."""
+
+    class IntentBackend:
+        model = "test-model"
+        fanout_concurrency = 4
+
+        async def execute(
+            self, cwd, prompt, output_schema=None, continuation=None, agents=None,
+            max_turns=None, read_only=False,
+        ):
+            if summary:
+                yield TextEvent(text=summary)
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self):
+            pass
+
+        def format_skill_invocation(self, skill_key, args=""):
+            return f"/{skill_key}"
+
+    return IntentBackend()
+
+
+@pytest.mark.asyncio
+async def test_phase_understand_intent_renders_summary_panel_before_gate(tmp_path, monkeypatch, make_work):
+    """The intent summary is printed in the Understanding panel before the confirm gate.
+
+    Uses a recording console (not capsys scraping — that flakes in the no-TTY
+    CI sandbox) and asserts on ``export_text()``.
+    """
+    from rich.console import Console
+
+    from daydream.phases import phase_understand_intent
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    recording = Console(record=True, force_terminal=True, width=200)
+    monkeypatch.setattr("daydream.phases.console", recording)
+
+    summary = "This change adds a login page with email and password authentication."
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git ...")
+
+    result = await phase_understand_intent(
+        _make_intent_backend(summary), make_work(tmp_path),
+        diff_path=diff_file,
+        log="abc1234 add login",
+        branch="feat/login",
+    )
+
+    rendered = recording.export_text()
+    assert "Understanding" in rendered
+    assert summary in rendered
+    assert result == summary
+
+
+@pytest.mark.asyncio
+async def test_phase_understand_intent_renders_placeholder_for_empty_summary(tmp_path, monkeypatch, make_work):
+    """An empty intent reply renders the dim placeholder, not a blank panel."""
+    from rich.console import Console
+
+    from daydream.phases import phase_understand_intent
+
+    monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
+    recording = Console(record=True, force_terminal=True, width=200)
+    monkeypatch.setattr("daydream.phases.console", recording)
+
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git ...")
+
+    result = await phase_understand_intent(
+        _make_intent_backend(""), make_work(tmp_path),
+        diff_path=diff_file,
+        log="abc1234 add login",
+        branch="feat/login",
+    )
+
+    rendered = recording.export_text()
+    assert "Understanding" in rendered
+    assert "(the agent produced no intent summary)" in rendered
+    assert result == ""
 
 
 @pytest.mark.asyncio
