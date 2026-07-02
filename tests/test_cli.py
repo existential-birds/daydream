@@ -340,12 +340,10 @@ def test_parse_args_feedback_requires_bot(monkeypatch):
         _parse_args()
 
 
-def test_phase_subtitles_include_wonder_and_envision():
+def test_phase_subtitles_include_wonder():
     from daydream.ui import PHASE_SUBTITLES
     assert "WONDER" in PHASE_SUBTITLES
-    assert "ENVISION" in PHASE_SUBTITLES
     assert len(PHASE_SUBTITLES["WONDER"]) >= 2
-    assert len(PHASE_SUBTITLES["ENVISION"]) >= 2
 
 
 def test_print_issues_table_renders():

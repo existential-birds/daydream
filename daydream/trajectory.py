@@ -169,7 +169,6 @@ class DaydreamPhase(str, Enum):
     TEST = "test"
     INTENT = "intent"
     ALTERNATIVES = "alternatives"
-    PLAN = "plan"
     PR_FEEDBACK = "pr_feedback"
     DEEP = "deep"
     EXPLORATION = "exploration"

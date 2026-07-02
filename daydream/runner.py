@@ -65,7 +65,6 @@ from daydream.phases import (
     phase_commit_push_auto,
     phase_fetch_pr_feedback,
     phase_fix,
-    phase_generate_plan,
     phase_parse_feedback,
     phase_respond_pr_feedback,
     phase_review,
@@ -191,7 +190,6 @@ class RunConfig:
         force_worktree: Force ephemeral worktree even when ``branch`` is None.
         shallow: Single-stack review (skip multi-stack auto-detection).
         extra_copy: Extra paths to copy into ephemeral worktrees.
-        plan: Generate an implementation plan and embed it in PR comments.
         non_interactive: Run without prompting; take each prompt's safe default
             without reading stdin.
         assume: Forced yes/no answer for interactive gates — ``"yes"`` (``--yes``),
@@ -240,7 +238,6 @@ class RunConfig:
     force_worktree: bool = False
     shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)
-    plan: bool = False
     non_interactive: bool = False
     assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
     identity: str = "unknown"  # resolved GitHub identity; set once by run()
@@ -366,7 +363,7 @@ def _resolve_backend(
     Args:
         config: Run configuration with backend/model and file-config sources.
         phase: Phase name (e.g. ``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
-            ``"intent"``, ``"wonder"``, ``"envision"``, ``"merge"``,
+            ``"intent"``, ``"wonder"``, ``"merge"``,
             ``"exploration"``, ``"pr_feedback"``).
         cache: Optional dict to cache backends by ``(backend_name, model)``.
             When provided, backends are reused only when both the backend kind
@@ -963,25 +960,9 @@ async def _run_review_or_comment(
             print_success(console, "No issues found — the implementation looks good!")
             return 0
 
-        # Generate plan. The plan is only consumed by ``--comment`` (embedded in
-        # the PR comment via ``plan_data``), and even there only when ``--plan``
-        # opts in — ``--comment`` skips ENVISION by default for latency. ``--review``
-        # emits the findings artifact and stops; it never consumes a plan, so the
-        # plan runs only for ``--comment --plan``.
-        plan_data: dict[str, Any] | None = None
-        skip_plan = not (post_to_pr and config.plan)
-        try:
-            if not skip_plan:
-                async with phase_scope(DaydreamPhase.PLAN):
-                    _, plan_data = await phase_generate_plan(
-                        backend, work, diff_path, intent_summary, issues,
-                        exploration_dir=exploration_dir,
-                        auto_select_all=post_to_pr,
-                    )
-        finally:
-            exploration_cleanup = target_dir / ".daydream" / "exploration"
-            if exploration_cleanup.is_dir():
-                shutil.rmtree(exploration_cleanup)
+        exploration_cleanup = target_dir / ".daydream" / "exploration"
+        if exploration_cleanup.is_dir():
+            shutil.rmtree(exploration_cleanup)
 
         # Post findings as inline PR comments (``--comment`` only; ``--review``
         # exits after emitting the findings artifact).
@@ -989,7 +970,7 @@ async def _run_review_or_comment(
             from daydream.pr_review import post_review_to_pr_from_alt_issues
 
             await post_review_to_pr_from_alt_issues(
-                target_dir, issues, console=console, plan_data=plan_data,
+                target_dir, issues, console=console,
             )
 
         return 0

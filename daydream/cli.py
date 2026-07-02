@@ -624,14 +624,6 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Extra path to copy into ephemeral worktree (repeatable)." if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--plan",
-        action="store_true",
-        default=False,
-        dest="plan",
-        help="Generate an implementation plan and embed it in PR comments (use with --comment)."
-        if full_help else argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--findings-out",
         default=None,
         metavar="PATH",
@@ -921,7 +913,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         force_worktree=args.force_worktree,
         shallow=args.shallow,
         extra_copy=list(args.extra_copy),
-        plan=args.plan,
         non_interactive=args.non_interactive,
         assume=args.assume,
     )

@@ -44,13 +44,13 @@ DEFAULT_TOOL_CALL_BUDGET = 50
 # ``PHASE_DEFAULT_MODELS[backend_name][phase_name]`` when no explicit per-phase
 # flag is supplied. Phase names are lowercase and match the strings passed by
 # every call site (``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
-# ``"exploration"``, ``"intent"``, ``"wonder"``, ``"envision"``, ``"merge"``,
+# ``"exploration"``, ``"intent"``, ``"wonder"``, ``"merge"``,
 # ``"pr_feedback"``).
 #
 # Claude tiering:
 #   - cheap (haiku):   PARSE
 #   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT
-#   - heavy (opus):    REVIEW, WONDER, ENVISION, MERGE, PR_FEEDBACK, ARBITER
+#   - heavy (opus):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER
 #
 # ``per_stack_review`` and ``arbiter`` split the deep per-stack fan-out off the
 # heavy ``review`` tier (issue #168): the N per-stack reviewers run on Sonnet
@@ -76,7 +76,6 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "review": "claude-opus-4-8",
         "arbiter": "claude-opus-4-8",
         "wonder": "claude-opus-4-8",
-        "envision": "claude-opus-4-8",
         "merge": "claude-opus-4-8",
         "intent": "claude-sonnet-4-6",
         "pr_feedback": "claude-opus-4-8",
@@ -91,7 +90,6 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "review": "gpt-5.5",
         "arbiter": "gpt-5.5",
         "wonder": "gpt-5.5",
-        "envision": "gpt-5.5",
         "merge": "gpt-5.5",
         "intent": "gpt-5.5",
         "pr_feedback": "gpt-5.5",
@@ -106,7 +104,6 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "review": "glm-5.2",
         "arbiter": "glm-5.2",
         "wonder": "glm-5.2",
-        "envision": "glm-5.2",
         "merge": "glm-5.2",
         "intent": "glm-5.2",
         "pr_feedback": "glm-5.2",

@@ -527,23 +527,6 @@ async def test_run_comment_full_flow(tmp_path, monkeypatch):
                     },
                     continuation=None,
                 )
-            elif call_count == 3:
-                # Phase 3: generate plan
-                yield TextEvent(text="Plan generated.")
-                yield ResultEvent(
-                    structured_output={
-                        "plan": {
-                            "summary": "Extract string to constant",
-                            "issues": [{
-                                "id": 1, "title": "Use constants",
-                                "changes": [
-                                    {"file": "app.py", "description": "Extract to constant", "action": "modify"}
-                                ],
-                            }],
-                        }
-                    },
-                    continuation=None,
-                )
 
         async def cancel(self):
             pass
@@ -568,26 +551,31 @@ async def test_run_comment_full_flow(tmp_path, monkeypatch):
     monkeypatch.setattr("daydream.runner.print_success", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.runner.console", type("C", (), {"print": lambda *a, **kw: None})())
 
-    # Phase 1: user confirms intent; Phase 3: user selects "all" issues
-    prompt_calls = iter(["y", "all"])
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: next(prompt_calls))
+    # Phase 1: user confirms intent.
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    # Capture the issues that reach the PR-posting step -- the comment path.
+    posted: list[dict] = []
+
+    async def fake_post(target_dir, alt_issues, *, console):
+        posted.extend(alt_issues)
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_alt_issues", fake_post)
 
     config = RunConfig(
         target=str(tmp_path),
         output_mode="comment",
-        plan=True,
     )
 
     exit_code = await run(config)
 
     assert exit_code == 0
-    assert call_count == 3
-    daydream_dir = tmp_path / ".daydream"
-    assert daydream_dir.exists()
-    plan_files = list(daydream_dir.glob("plan-*.md"))
-    assert len(plan_files) == 1
-    content = plan_files[0].read_text()
-    assert "Implementation Plan" in content
+    assert call_count == 2  # intent + alternative review
+    # The alternative-review issue was handed to the PR-posting step.
+    assert len(posted) == 1
+    assert posted[0]["title"] == "Use constants"
+    # The diff was materialised for the review prompts.
+    assert (tmp_path / ".daydream" / "diff.patch").exists()
 
 
 @pytest.mark.asyncio

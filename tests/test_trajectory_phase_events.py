@@ -678,19 +678,16 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     data = json.loads(traj.read_text(encoding="utf-8"))
     assert atif_validate(data, validate_images=False) is True
 
-    # Review-only flow records intent and alternatives phases, never plan.
+    # Review-only flow records intent and alternatives phases.
     events = data["extra"].get("phase_events", [])
     event_phases = {e["phase"] for e in events}
     for phase in ("intent", "alternatives"):
         assert phase in event_phases, (
             f"{phase} phase_events missing; got phases: {sorted(event_phases)!r}"
         )
-    assert "plan" not in event_phases, (
-        f"--review must not emit a plan phase; got phases: {sorted(event_phases)!r}"
-    )
 
     # Manifest: phase_timings must be non-null (was null before the fix) and
-    # carry the wrapped review phases -- but not plan.
+    # carry the wrapped review phases.
     manifest_files = list((tmp_path / "archive").rglob("manifest.json"))
     assert manifest_files, "manifest.json not written"
     manifest = json.loads(manifest_files[0].read_text())
@@ -700,6 +697,3 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
         assert phase in phase_timings, (
             f"{phase} missing from review phase_timings: {phase_timings!r}"
         )
-    assert "plan" not in phase_timings, (
-        f"--review must not record a plan timing: {phase_timings!r}"
-    )

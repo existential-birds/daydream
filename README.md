@@ -154,7 +154,6 @@ have not yet scored daydream render an honest placeholder. The `runs/` folder is
 | `--shallow` | Single-stack review, parse, fix, test |
 | `--review` | Write report to terminal/markdown, then exit |
 | `--comment` | Post inline PR comments, then exit |
-| `--comment --plan` | Post comments plus implementation plan |
 
 ### Additional Commands
 
@@ -236,7 +235,7 @@ backend = "codex"
 ```
 
 Phase names: `exploration`, `review`, `parse`, `fix`, `test`, `verify`, `merge` (plus
-`intent`, `wonder`, `envision`, `pr_feedback`). Resolution precedence, highest first:
+`intent`, `wonder`, `pr_feedback`). Resolution precedence, highest first:
 
 **CLI > config file (phase, then global) > built-in per-backend default.**
 
