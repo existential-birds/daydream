@@ -6,8 +6,8 @@ to a private helper based on ``config.bot`` / ``config.output_mode`` /
 ``config.shallow``::
 
     bot set (feedback mode)  -> _run_pr_feedback (registered "pr-feedback" flow)
-    output_mode == "comment" -> _run_comment    (review + post inline PR comments)
-    output_mode == "review"  -> _run_review     (review report only, no posting)
+    output_mode == "comment" -> _run_comment    (registered "review" flow, posts inline PR comments)
+    output_mode == "review"  -> _run_review     (registered "review" flow, report only, no posting)
     output_mode == "loop":
         config.shallow       -> _run_loop_shallow (single-stack review-fix-test)
         else                 -> _run_loop_deep    (deep multi-stack pipeline, default)
@@ -18,9 +18,9 @@ subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
 
 ``run`` builds the per-run extension registry (builtins + optional
 ``daydream_ext``) and sets it on the registry ContextVar before dispatch;
-migrated flows (pr-feedback) keep their preamble in the flow helper and run
-their phase sequence through :func:`daydream.flows.run_flow` against the
-registered flow definition.
+migrated flows (pr-feedback, review/comment) keep their preamble in the flow
+helper and run their phase sequence through :func:`daydream.flows.run_flow`
+against the registered flow definition.
 """
 
 import os
@@ -67,7 +67,6 @@ from daydream.phases import (
     _git_diff,
     _git_log,
     check_review_file_exists,
-    phase_alternative_review,
     phase_commit_iteration,
     phase_commit_push,
     phase_commit_push_auto,
@@ -75,7 +74,6 @@ from daydream.phases import (
     phase_parse_feedback,
     phase_review,
     phase_test_and_heal,
-    phase_understand_intent,
     revert_uncommitted_changes,
     severity_sorted,
 )
@@ -814,16 +812,18 @@ def _write_findings_for_parsed(
 async def _run_review_or_comment(
     work: WorkContext, config: RunConfig, *, post_to_pr: bool,
 ) -> int:
-    """Shared body for ``--comment`` and ``--review``.
+    """Shared preamble for ``--comment`` and ``--review``.
 
-    Lifted from today's ``run_trust`` body. The differences between the two
-    modes: only ``--comment`` posts the alternative-review issues to the PR
-    via :func:`daydream.pr_review.post_review_to_pr_from_alt_issues`, and only
+    Gathers git context, writes the diff file, opens the trajectory recorder,
+    prints the info block, then delegates to the registered ``review`` flow
+    (exploration -> intent -> alternatives -> emit-findings -> no-issues-exit
+    -> post-comments; steps in ``daydream/flows/review.py``).
+    ``ctx.data["post_to_pr"]`` carries the mode: only ``--comment`` posts the
+    alternative-review issues to the PR via
+    :func:`daydream.pr_review.post_review_to_pr_from_alt_issues`, and only
     ``--review`` honours ``config.findings_out`` (Phase A artifact emission
     via :func:`_emit_findings_artifact`).
     """
-    backend_cache: dict[tuple[str, str | None], Backend] = {}
-    backend = _resolve_backend(config, "review", backend_cache)
     target_dir = work.repo
 
     # Gather git context using the resolved base branch from work (no
@@ -862,76 +862,23 @@ async def _run_review_or_comment(
         pr_repo=config.pr_repo,
         on_write=_make_archive_callback(config, target_dir, work),
     ):
+        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx.data["post_to_pr"] = post_to_pr
+        ctx.data["diff"] = diff
+        ctx.data["log"] = log
+        ctx.data["branch"] = branch
+        ctx.data["daydream_dir"] = daydream_dir
+        ctx.data["diff_path"] = diff_path
+
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
-        print_info(console, f"Model: {backend.model}")
+        print_info(console, f"Model: {ctx.backend_for('review').model}")
         # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
-        # Pre-scan exploration, unless already populated (injected by caller/tests).
-        if config.exploration_context is None:
-            tier = select_tier(count_changed_files(diff or ""))
-            if tier == "skip":
-                print_dim(console, "Skipping exploration -- trivial diff")
-                config.exploration_context = ExplorationContext()
-            else:
-                print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                explore_backend = _resolve_backend(config, "exploration", backend_cache)
-                print_dim(console, f"Exploration model: {explore_backend.model}")
-                async with phase_scope(DaydreamPhase.EXPLORATION):
-                    config.exploration_context = await safe_explore(
-                        pre_scan,
-                        explore_backend,
-                        target_dir,
-                        diff,
-                        config.exploration_depth,
-                        diff_ref=_compute_diff_ref(target_dir),
-                    )
-
-        # Materialise exploration to disk so phase prompts can reference files.
-        exploration_dir: Path | None = None
-        if config.exploration_context is not None:
-            exploration_dir = config.exploration_context.write_to_dir(daydream_dir / "exploration")
-
-        async with phase_scope(DaydreamPhase.INTENT):
-            intent_summary = await phase_understand_intent(
-                backend, work, diff_path, log, branch,
-                exploration_dir=exploration_dir,
-            )
-
-        async with phase_scope(DaydreamPhase.ALTERNATIVES):
-            issues = await phase_alternative_review(
-                backend, work, diff_path, intent_summary,
-                exploration_dir=exploration_dir,
-            )
-
-        # Phase A artifact emission (--findings-out, review only); before the
-        # zero-issues early return.
-        if not post_to_pr and config.findings_out is not None:
-            rc = _emit_findings_artifact(target_dir, config, issues)
-            if rc != 0:
-                return rc
-
-        if not issues:
-            print_success(console, "No issues found — the implementation looks good!")
-            return 0
-
-        exploration_cleanup = target_dir / ".daydream" / "exploration"
-        if exploration_cleanup.is_dir():
-            shutil.rmtree(exploration_cleanup)
-
-        # Post findings as inline PR comments (``--comment`` only; ``--review``
-        # exits after emitting the findings artifact).
-        if post_to_pr:
-            from daydream.pr_review import post_review_to_pr_from_alt_issues
-
-            await post_review_to_pr_from_alt_issues(
-                target_dir, issues, console=console,
-            )
-
-        return 0
+        return await run_flow(ctx.registry, "review", ctx)
 
 
 # Helper: shallow loop (single-stack review-fix-test)

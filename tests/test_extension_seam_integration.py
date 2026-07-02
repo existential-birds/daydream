@@ -118,3 +118,42 @@ async def test_fork_disables_respond_step(
     assert rc == 0
     assert any("fetch" in p.lower() for p in backend.prompts)  # flow still ran
     assert not any("respond-pr-feedback" in p for p in backend.prompts)  # removed step never invoked
+
+
+async def test_fork_inserts_custom_phase_into_review_flow(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daydream_ext phase inserted after ``alternatives`` runs in ``--review``.
+
+    Observable outcomes: exit 0 and the custom phase's prompt reached the
+    backend through the registered ``review`` flow.
+    """
+    ext_dir.write_module(
+        "from daydream.extensions import FlowStep\n"
+        "DAYDREAM_EXT_API = 1\n"
+        "async def _ro(ctx):\n"
+        "    from daydream.agent import run_agent\n"
+        "    from daydream.trajectory import DaydreamPhase\n"
+        "    await run_agent(ctx.backend_for('ro_audit'), ctx.work.repo, 'RO-AUDIT-PROMPT',\n"
+        "                    phase=DaydreamPhase.REVIEW)\n"
+        "def register(r):\n"
+        "    r.register_phase(FlowStep(name='ro_audit', run=_ro))\n"
+        "    r.insert_after('review', anchor='alternatives', step='ro_audit')\n"
+    )
+    backend = RecordingBackend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            output_mode="review",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    idx = [i for i, p in enumerate(backend.prompts) if p == "RO-AUDIT-PROMPT"]
+    assert idx, "custom phase never reached the backend"
+    assert rc == 0
