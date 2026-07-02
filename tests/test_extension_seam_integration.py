@@ -276,3 +276,83 @@ async def test_fork_disables_alternatives_in_deep(
     assert rc == 0
     assert any("intent" in p.lower() for p in prompts)  # pipeline still ran
     assert not any(ALTERNATIVES_MARKER in p for p in prompts)  # removed step never sent its prompt
+
+
+# Task 17 fixture source: a fork registers phase ``ro_gate`` whose run() resolves
+# its OWN backend (``ctx.backend_for('ro_gate')`` -> per-phase config), its OWN
+# registered prompt (``prompt('ro_gate')``), and its phase-bound skill slot
+# (``skill('phase:ro_gate')``), then inserts it into the deep flow after ``intent``.
+FULL_RO_EXT = (
+    "from daydream.extensions import FlowStep, get_registry\n"
+    "DAYDREAM_EXT_API = 1\n"
+    "def _ro_prompt(skill):\n"
+    "    return f'RO-GATE {skill}'\n"
+    "async def _ro(ctx):\n"
+    "    from daydream.agent import run_agent\n"
+    "    from daydream.trajectory import DaydreamPhase\n"
+    "    r = get_registry()\n"
+    "    prompt = r.prompt('ro_gate')(skill=r.skill('phase:ro_gate'))\n"
+    "    await run_agent(ctx.backend_for('ro_gate'), ctx.work.repo, prompt,\n"
+    "                    phase=DaydreamPhase.REVIEW)\n"
+    "def register(r):\n"
+    "    r.register_phase(FlowStep(name='ro_gate', run=_ro))\n"
+    "    r.override_prompt('ro_gate', _ro_prompt)\n"
+    "    r.override_skill('phase:ro_gate', 'ro-core:gate-skill')\n"
+    "    r.insert_after('deep', anchor='intent', step='ro_gate')\n"
+)
+
+
+async def test_custom_phase_full_stack(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seam acceptance (Task 17): custom phase end-to-end through ``runner.run``.
+
+    Proves the four must-haves are wired together: a fork-registered phase runs
+    inside the deep flow, builds its prompt from its OWN registered prompt
+    builder, resolves its OWN phase-bound skill slot, and gets its backend
+    through ``[tool.daydream.phases.ro_gate]`` per-phase config (Assumption 7:
+    ``_coerce_phases`` / ``_resolved_model`` accept arbitrary phase strings).
+
+    Observable outcomes: exit 0, the ``RO-GATE`` prompt containing the bound
+    skill reached the backend, and ``create_backend`` was called with the
+    per-phase model from ``.daydream.toml``.
+    """
+    from daydream.config_file import load_file_config
+    from tests.test_deep_orchestrator import _silence, _StubBackend
+
+    ext_dir.write_module(FULL_RO_EXT)
+    (multi_stack_target / ".daydream.toml").write_text('[phases.ro_gate]\nmodel = "test-model-x"\n')
+
+    backend = _StubBackend(multi_stack_target)
+    created: list[tuple[str, str | None]] = []
+
+    def fake_create(name: str, model: str | None = None) -> _StubBackend:
+        created.append((name, model))
+        return backend
+
+    monkeypatch.setattr("daydream.runner.create_backend", fake_create)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    _silence(monkeypatch)
+
+    # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+            file_config=load_file_config(multi_stack_target),
+        )
+    )
+
+    prompts = [call["prompt"] for call in backend.calls]
+    ro_prompts = [p for p in prompts if p.startswith("RO-GATE")]
+    assert rc == 0
+    assert ro_prompts and "ro-core:gate-skill" in ro_prompts[0]  # own prompt + bound skill
+    assert ("claude", "test-model-x") in created  # [tool.daydream.phases.ro_gate] honored
