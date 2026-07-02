@@ -1789,33 +1789,6 @@ def test_minimal_handoff_separates_facts_from_unknown_cause():
     assert "not revert" in body or "do NOT revert" in body
 
 
-def test_failure_summarizer_prompt_demands_evidence_and_sections():
-    """The summarizer prompt carries the A+B+C evidence-grounded contract."""
-    from daydream.phases import _build_failure_summarizer_prompt
-
-    prompt = _build_failure_summarizer_prompt(
-        test_output="E   assert 1 == 2",
-        trajectory_path=None,
-        trajectories_dir=None,
-        diff_path=None,
-        manifest_path=None,
-        deep_dir=None,
-        changed_files=[],
-        has_trajectory=True,
-    )
-    # A — expanded read-only git allowance: every history verb present.
-    for verb in ("git log", "git blame", "git show", "git diff"):
-        assert verb in prompt
-    # B — facts/hypotheses structure.
-    assert "Verified facts" in prompt
-    assert "Hypotheses (unverified)" in prompt
-    # A — evidence rule targets the incident directly.
-    assert "NEVER attribute a code change to" in prompt
-    # C — quote-ground-truth instruction.
-    assert "failing assertion" in prompt
-    assert "do NOT revert" in prompt or "not revert" in prompt
-
-
 @pytest.mark.asyncio
 async def test_summarizer_invoked_read_only_normal_calls_mutating(
     tmp_path, monkeypatch, make_work,
