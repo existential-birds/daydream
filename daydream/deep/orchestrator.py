@@ -47,6 +47,7 @@ from daydream.deep.artifacts import (
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.extensions import get_registry
+from daydream.flows.engine import FlowContext
 from daydream.phases import (
     FEEDBACK_SCHEMA,
     PER_STACK_RECORD_SCHEMA,
@@ -72,8 +73,11 @@ from daydream.trajectory import (
 )
 from daydream.ui import (
     format_verdict_join,
+    phase_subtitle,
+    print_dim,
     print_error,
     print_info,
+    print_phase_hero,
     print_preflight_notice,
     print_stage_progress,
     print_success,
@@ -599,6 +603,114 @@ def _protect_tree_after_fix_failures(
                     pass
 
 
+async def _step_exploration(ctx: FlowContext) -> None:
+    """Exploration pre-scan (D-43)."""
+    from daydream.runner import _compute_diff_ref
+
+    config = ctx.config
+    target_dir = ctx.work.repo
+    daydream_dir = target_dir / ".daydream"
+    diff = ctx.data["diff"]
+    tier = ctx.data["tier"]
+
+    exploration_dir: Path | None = None
+    if not EXPLORATION_AVAILABLE:
+        print_warning(
+            console,
+            "Exploration infrastructure not installed; running deep pipeline "
+            "without pre-scan grounding",
+        )
+    elif config.exploration_context is None:
+        if tier == "skip":
+            print_dim(console, "Skipping exploration -- trivial diff")
+            config.exploration_context = ExplorationContext()
+        else:
+            print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
+            explore_backend = ctx.backend_for("exploration")
+            print_dim(console, f"Exploration model: {explore_backend.model}")
+            async with phase_scope(DaydreamPhase.EXPLORATION):
+                config.exploration_context = await safe_explore(
+                    pre_scan,
+                    explore_backend,
+                    target_dir,
+                    diff,
+                    config.exploration_depth,
+                    diff_ref=_compute_diff_ref(target_dir),
+                )
+            console.print(render_exploration_summary(config.exploration_context))
+    if EXPLORATION_AVAILABLE and config.exploration_context is not None:
+        exploration_dir = config.exploration_context.write_to_dir(
+            daydream_dir / "exploration"
+        )
+    ctx.data["exploration_dir"] = exploration_dir
+
+
+async def _step_intent(ctx: FlowContext) -> None:
+    """TTT intent analysis, grounded by the PR description when it is fresh."""
+    from daydream import git_ops
+
+    config = ctx.config
+    work = ctx.work
+    target_dir = work.repo
+
+    print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
+    pr_description: str | None = None
+    if config.pr_number is not None:
+        pr_view = git_ops.gh_pr_view(target_dir, config.pr_number)
+        if pr_view is not None:
+            pr_state = pr_view.get("state", "")
+            pr_head_oid = pr_view.get("headRefOid", "")
+            local_head = work.head_sha
+            if pr_state and pr_state.upper() != "OPEN":
+                print_warning(
+                    console,
+                    f"PR #{config.pr_number} state is {pr_state!r} (not OPEN); "
+                    "skipping PR description to avoid trusting a stale body",
+                )
+            elif pr_head_oid and local_head and pr_head_oid != local_head:
+                print_warning(
+                    console,
+                    f"PR #{config.pr_number} head SHA ({pr_head_oid[:12]}) "
+                    f"does not match local HEAD ({local_head[:12]}); "
+                    "skipping PR description to avoid trusting a mismatched body",
+                )
+            else:
+                pr_description = pr_view.get("body") or None
+    async with phase_scope(DaydreamPhase.INTENT):
+        ctx.data["intent_summary"] = await phase_understand_intent(
+            ctx.backend_for("intent"),
+            work,
+            ctx.data["diff_path"],
+            ctx.data["log"],
+            ctx.data["branch"],
+            exploration_dir=ctx.data["exploration_dir"],
+            pr_description=pr_description,
+        )
+
+
+async def _step_alternatives(ctx: FlowContext) -> None:
+    """TTT alternative-review (tier-gated) + TTT artifact writes."""
+    intent_summary = ctx.data["intent_summary"]
+
+    print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
+    if ctx.data["tier"] == "skip":
+        alt_issues: list[dict[str, Any]] = []
+        print_dim(console, "Skipping alternatives -- trivial diff")
+    else:
+        async with phase_scope(DaydreamPhase.ALTERNATIVES):
+            alt_issues = await phase_alternative_review(
+                ctx.backend_for("wonder"),
+                ctx.work,
+                ctx.data["diff_path"],
+                intent_summary,
+                exploration_dir=ctx.data["exploration_dir"],
+            )
+
+    ctx.data["intent_path"], ctx.data["alts_path"] = _write_ttt_artifacts(
+        ctx.data["dd"], intent_summary=intent_summary, alt_issues=alt_issues
+    )
+
+
 async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """Execute the deep-review pipeline (D-07).
 
@@ -623,12 +735,10 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     from daydream.git_ops import GitError, GitTimeoutError
     from daydream.phases import _git_branch, _git_log
     from daydream.runner import (
-        _compute_diff_ref,
         _make_archive_callback,
         _resolve_backend,
         _resolved_backend_name,
     )
-    from daydream.ui import phase_subtitle, print_dim, print_phase_hero
 
     # Cache one Backend instance per (backend_name, resolved_model) so phases that
     # resolve to the same model share an instance and differing models stay isolated.
@@ -735,95 +845,42 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             exploration_available=EXPLORATION_AVAILABLE,
         )
 
+        # Flow context (steps communicate through ctx.data). The imperative
+        # step calls below become registered flow steps run via the engine in
+        # a later task; ctx shares run_deep's backend cache so instance-sharing
+        # semantics are unchanged during the migration.
+        ctx = FlowContext(
+            config=config,
+            work=work,
+            registry=get_registry(),
+            data={
+                "diff": diff,
+                "diff_path": diff_path,
+                "tier": tier,
+                "dd": dd,
+                "stacks": stacks,
+                "single_stack_mode": single_stack_mode,
+                "intent_path": _intent_path(dd),
+                "alts_path": _alternatives_path(dd),
+                "log": log,
+                "branch": branch,
+                "failed_stacks": {},
+            },
+            _backend_cache=backend_cache,
+        )
+
         # Exploration pre-scan (D-43).
-        exploration_dir: Path | None = None
-        if not EXPLORATION_AVAILABLE:
-            print_warning(
-                console,
-                "Exploration infrastructure not installed; running deep pipeline "
-                "without pre-scan grounding",
-            )
-        elif config.exploration_context is None:
-            if tier == "skip":
-                print_dim(console, "Skipping exploration -- trivial diff")
-                config.exploration_context = ExplorationContext()
-            else:
-                print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
-                explore_backend = _resolve_backend(config, "exploration", backend_cache)
-                print_dim(console, f"Exploration model: {explore_backend.model}")
-                async with phase_scope(DaydreamPhase.EXPLORATION):
-                    config.exploration_context = await safe_explore(
-                        pre_scan,
-                        explore_backend,
-                        target_dir,
-                        diff,
-                        config.exploration_depth,
-                        diff_ref=_compute_diff_ref(target_dir),
-                    )
-                console.print(render_exploration_summary(config.exploration_context))
-        if EXPLORATION_AVAILABLE and config.exploration_context is not None:
-            exploration_dir = config.exploration_context.write_to_dir(
-                daydream_dir / "exploration"
-            )
+        await _step_exploration(ctx)
+        exploration_dir: Path | None = ctx.data["exploration_dir"]
 
         try:
-            intent_p = _intent_path(dd)
-            alts_p = _alternatives_path(dd)
-
             if config.start_at not in ("per-stack", "merge", "fix"):
-                print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
-                pr_description: str | None = None
-                if config.pr_number is not None:
-                    pr_view = git_ops.gh_pr_view(target_dir, config.pr_number)
-                    if pr_view is not None:
-                        pr_state = pr_view.get("state", "")
-                        pr_head_oid = pr_view.get("headRefOid", "")
-                        local_head = work.head_sha
-                        if pr_state and pr_state.upper() != "OPEN":
-                            print_warning(
-                                console,
-                                f"PR #{config.pr_number} state is {pr_state!r} (not OPEN); "
-                                "skipping PR description to avoid trusting a stale body",
-                            )
-                        elif pr_head_oid and local_head and pr_head_oid != local_head:
-                            print_warning(
-                                console,
-                                f"PR #{config.pr_number} head SHA ({pr_head_oid[:12]}) "
-                                f"does not match local HEAD ({local_head[:12]}); "
-                                "skipping PR description to avoid trusting a mismatched body",
-                            )
-                        else:
-                            pr_description = pr_view.get("body") or None
-                async with phase_scope(DaydreamPhase.INTENT):
-                    intent_summary = await phase_understand_intent(
-                        _resolve_backend(config, "intent", backend_cache),
-                        work,
-                        diff_path,
-                        log,
-                        branch,
-                        exploration_dir=exploration_dir,
-                        pr_description=pr_description,
-                    )
+                await _step_intent(ctx)
+                await _step_alternatives(ctx)
+            intent_p: Path = ctx.data["intent_path"]
+            alts_p: Path = ctx.data["alts_path"]
 
-                print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
-                if tier == "skip":
-                    alt_issues: list[dict[str, Any]] = []
-                    print_dim(console, "Skipping alternatives -- trivial diff")
-                else:
-                    async with phase_scope(DaydreamPhase.ALTERNATIVES):
-                        alt_issues = await phase_alternative_review(
-                            _resolve_backend(config, "wonder", backend_cache),
-                            work,
-                            diff_path,
-                            intent_summary,
-                            exploration_dir=exploration_dir,
-                        )
-
-                intent_p, alts_p = _write_ttt_artifacts(
-                    dd, intent_summary=intent_summary, alt_issues=alt_issues
-                )
-
-            failed_stacks: dict[str, str] = {}
+            failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
             if config.start_at not in ("merge", "fix"):
                 print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
                 async with phase_scope(DaydreamPhase.DEEP, stage="review"):
