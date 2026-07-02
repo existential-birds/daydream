@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from rich.console import Console
+
 from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
@@ -31,7 +33,7 @@ class _MinimalBackend:
     def format_skill_invocation(self, key: str) -> str: return f"/{key}"
 
 
-async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkeypatch, capsys):
+async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkeypatch):
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
 
@@ -41,12 +43,17 @@ async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkey
                        output_mode="review", shallow=True, skill="python", quiet=False,
                        pr_repo="myorg/myrepo")
 
+    # Pin a wide recording console so the identity line is captured at the
+    # rendered content level, independent of terminal width / TTY / Live state.
+    rec = Console(record=True, force_terminal=True, width=200)
+    monkeypatch.setattr("daydream.runner.console", rec)
+
     with patch("daydream.github_app.mint_installation_token",
                return_value=("ghs_injected", "my-app[bot]")) as mock_mint, \
          patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
         exit_code = await run(config)
 
-    out = capsys.readouterr().out
+    out = rec.export_text()
     assert "my-app[bot]" in out            # identity surfaced in banner
     assert config.identity == "my-app[bot]"  # raw login on config, escaping only at print
     assert mock_mint.called                 # token minted from App creds
