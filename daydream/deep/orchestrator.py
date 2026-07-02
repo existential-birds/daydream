@@ -951,6 +951,257 @@ async def _step_single_stack_merge(ctx: FlowContext) -> None:
     )
 
 
+async def _step_load_items(ctx: FlowContext) -> Stop | None:
+    """Host-side merged-items guard + render-only markdown recovery."""
+    target_dir = ctx.work.repo
+    dd = ctx.data["dd"]
+
+    print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
+    merged_report = target_dir / REVIEW_OUTPUT_FILE
+
+    # merged-items.json is the canonical source of truth; review-output.md is
+    # render-only. The missing-input guard keys on the JSON so a --start-at fix
+    # resume with surviving JSON but absent markdown proceeds rather than bailing.
+    items_file = merged_items_path(dd)
+    if not items_file.is_file():
+        print_error(
+            console,
+            "Missing Merged Items",
+            f"Expected canonical merged items at {items_file}",
+        )
+        return Stop(1)
+
+    # Best-effort recover the render-only markdown from the deep-dir copy for
+    # the exit message when the canonical file is absent (e.g. a --start-at fix
+    # resume where the copy to the canonical path never ran). Non-fatal.
+    if not merged_report.exists():
+        from daydream.deep.artifacts import merged_report_path
+
+        deep_copy = merged_report_path(dd)
+        if deep_copy.exists():
+            merged_report.write_text(deep_copy.read_text())
+
+    ctx.data["merged_report"] = merged_report
+    ctx.data["items_file"] = items_file
+    return None
+
+
+async def _step_findings_out(ctx: FlowContext) -> Stop:
+    """Two-phase findings artifact (Phase A): emit the strict-schema artifact and STOP."""
+    from daydream.runner import _emit_findings_from_items
+
+    items_file: Path = ctx.data["items_file"]
+    findings_items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
+    return Stop(_emit_findings_from_items(ctx.work.repo, ctx.config, findings_items))
+
+
+async def _step_post_review(ctx: FlowContext) -> None:
+    """Offer to post findings as inline PR review comments."""
+    from daydream.pr_review import post_review_to_pr_from_report
+
+    await post_review_to_pr_from_report(
+        ctx.work.repo, merged_items_path(ctx.data["dd"]), console=console
+    )
+
+
+async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
+    """Fix-apply gate; on accept, load and severity-sort the canonical items."""
+    # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
+    # an unattended run with no assumption declines (safe_default=False) so a
+    # piped/CI run never mutates without intent; otherwise prompt.
+    decision = resolve_or_prompt(
+        assume=get_assume(),
+        interactive=not get_non_interactive(),
+        safe_default=False,
+        question="Apply fixes now? [y/N]",
+        default="n",
+    )
+    if not decision:
+        print_success(console, f"Report written to {ctx.data['merged_report']}. Exiting.")
+        return Stop(0)
+
+    # Read canonical merged items directly (validated above). Replaces an LLM
+    # re-parse of the markdown, which silently dropped structural findings; here
+    # they are ordinary tagged items that reach phase_fix like any other.
+    items_file: Path = ctx.data["items_file"]
+    items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
+    if not items:
+        print_success(console, "No actionable items -- done.")
+        return Stop(0)
+
+    # Severity-ordered (high before medium before low), stable within a
+    # tier so equal-severity items keep their canonical merge order.
+    ctx.data["items"] = severity_sorted(items)
+    return None
+
+
+async def _step_verify(ctx: FlowContext) -> None:
+    """Recommendation verification (#83) + verdict join rendering."""
+    dd = ctx.data["dd"]
+    items: list[dict[str, Any]] = ctx.data["items"]
+
+    # Recommendation verification (#83). Runs ONLY after the apply-fixes
+    # gate accepts, so a declined run (non-interactive / EOF / explicit "N")
+    # skips both the verify pass and the recommendation-verdicts.json
+    # artifact. A --start-at fix resume still produces verdicts whenever
+    # fixes are applied (the gate still runs on resume; accept => verify runs).
+    async with phase_scope(DaydreamPhase.VERIFY):
+        verdicts_file, verdicts_payload = await phase_verify_recommendations(
+            ctx.backend_for("verify"),
+            ctx.work,
+            merged_items_path=merged_items_path(dd),
+            deep_dir=dd,
+        )
+    print_verification_summary(console, verdicts_file)
+
+    # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
+    items = _attach_verdicts(items, verdicts_payload)
+    ctx.data["items"] = items
+    matched_ids = [i["id"] for i in items if i.get("verifier_verdict") is not None]
+    unmatched_ids = [
+        i["id"]
+        for i in items
+        if isinstance(i.get("id"), int)
+        and i.get("verifier_verdict") is None
+        and i.get("lens") != "structural"
+    ]
+    # Structural findings are verdict-exempt (in neither matched nor unmatched)
+    # but still fixed; itemize them so the "X/Y matched" ratio isn't read as a
+    # total that under-counts the items the fix loop iterates.
+    structural_ids = [i.get("id") for i in items if i.get("lens") == "structural"]
+    # Leftovers (no verdict, non-structural, missing/non-int id) so the
+    # buckets always reconcile to len(items); surfaced only when present.
+    other_ids = [
+        i.get("id")
+        for i in items
+        if i.get("verifier_verdict") is None
+        and i.get("lens") != "structural"
+        and not isinstance(i.get("id"), int)
+    ]
+    console.print(
+        format_verdict_join(
+            matched=matched_ids,
+            unmatched=unmatched_ids,
+            structural=structural_ids,
+            other=other_ids,
+            total=len(items),
+        )
+    )
+
+
+async def _step_fix(ctx: FlowContext) -> Stop | None:
+    """Parallel fix pass: pre-fix snapshot capture, phase_fix_parallel, failure protection."""
+    from daydream import git_ops
+
+    config = ctx.config
+    work = ctx.work
+    target_dir = work.repo
+    daydream_dir = target_dir / ".daydream"
+    dd = ctx.data["dd"]
+    items: list[dict[str, Any]] = ctx.data["items"]
+    intent_p: Path = ctx.data["intent_path"]
+
+    # Only forward confirmed intent when we ran the intent phase in
+    # this invocation.  When resuming via --start-at fix/merge/per-stack
+    # the intent phase was skipped, so intent_p may hold a stale
+    # artifact from a prior run; injecting it as authoritative would
+    # contradict the current diff's context.
+    intent_grounded_this_run = config.start_at not in ("per-stack", "merge", "fix")
+    # Snapshot the tracked tree + untracked set BEFORE fixes so a failed
+    # group's partial, possibly non-compiling edits can be captured and
+    # rolled back to exactly their pre-fix content (#203 follow-up).
+    try:
+        pre_fix_snapshot = git_ops.stash_create(work.repo)
+        pre_fix_untracked = set(git_ops.list_untracked(work.repo))
+    except git_ops.GitError as exc:
+        print_warning(console, f"Could not snapshot tree before fixes: {exc}")
+        pre_fix_snapshot = None
+        pre_fix_untracked = set()
+    # Pre-fix HEAD is the recommended-patch base only when the tree was
+    # clean (stash_create returns None then) -- otherwise the snapshot is
+    # the base and HEAD is unused, so skip the rev-parse. Captured now
+    # because the commit phase below advances HEAD past the fix.
+    if pre_fix_snapshot is None:
+        try:
+            pre_fix_head = git_ops.head_sha(work.repo)
+        except git_ops.GitError:
+            pre_fix_head = None
+    else:
+        pre_fix_head = None
+    async with phase_scope(DaydreamPhase.FIX):
+        fix_failures = await phase_fix_parallel(
+            ctx.backend_for("fix"),
+            work,
+            items,
+            intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
+        )
+    # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
+    # NOW, before the fix-failure and test-failure early returns below, so
+    # a run that generated a recommendation always archives it — even when
+    # tests fail or a fix group is reverted. Best-effort; never raises.
+    git_ops.capture_recommended_patch_with_base(
+        work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
+    )
+    fix_failures_p = fix_failures_path(dd)
+    if fix_failures:
+        # Persist so the archive marks the run "partial" instead of
+        # "complete" -- the tree is no longer a clean success.
+        fix_failures_p.write_text(json.dumps(fix_failures, indent=2, sort_keys=True))
+        _protect_tree_after_fix_failures(
+            work,
+            target_dir,
+            fix_failures,
+            snapshot=pre_fix_snapshot,
+            pre_untracked=pre_fix_untracked,
+        )
+        # Enumerate every untracked path that appeared during the fix
+        # pass and survived protection. Attribution to a specific group
+        # is impossible (shared tree, parallel groups), so we never
+        # delete these -- we record them so the partial state is fully
+        # auditable instead of silently leaving stray files unaccounted.
+        try:
+            leftover = sorted(set(git_ops.list_untracked(work.repo)) - pre_fix_untracked)
+        except git_ops.GitError:
+            leftover = []
+        leftover_p = fix_leftover_untracked_path(dd)
+        if leftover:
+            leftover_p.write_text(json.dumps(leftover, indent=2))
+        elif leftover_p.exists():
+            leftover_p.unlink()
+        print_warning(
+            console,
+            f"{len(fix_failures)} fix group(s) failed: {sorted(fix_failures)}; "
+            "partial edits reverted (patches saved under .daydream/partial-fixes/).",
+        )
+        return Stop(1)
+    # Fresh successful fix supersedes any stale failures record.
+    if fix_failures_p.exists():
+        fix_failures_p.unlink()
+    stale_leftover_p = fix_leftover_untracked_path(dd)
+    if stale_leftover_p.exists():
+        stale_leftover_p.unlink()
+    return None
+
+
+async def _step_test(ctx: FlowContext) -> Stop | None:
+    """Post-fix test validation."""
+    async with phase_scope(DaydreamPhase.TEST):
+        passed, _retries = await phase_test_and_heal(
+            ctx.backend_for("test"), ctx.work, feedback_items=ctx.data["items"]
+        )
+    if not passed:
+        print_warning(console, "Tests failed after fix attempt.")
+        return Stop(1)
+    return None
+
+
+async def _step_commit(ctx: FlowContext) -> None:
+    """Commit-and-push the applied fixes."""
+    # phase_commit_push runs as part of the fix/commit cycle — reuse
+    # the fix backend (no separate "commit" phase identifier).
+    await phase_commit_push(ctx.backend_for("fix"), ctx.work)
+
+
 async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """Execute the deep-review pipeline (D-07).
 
@@ -976,7 +1227,6 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     from daydream.phases import _git_branch, _git_log
     from daydream.runner import (
         _make_archive_callback,
-        _resolve_backend,
         _resolved_backend_name,
     )
 
@@ -1116,7 +1366,6 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             if config.start_at not in ("per-stack", "merge", "fix"):
                 await _step_intent(ctx)
                 await _step_alternatives(ctx)
-            intent_p: Path = ctx.data["intent_path"]
 
             await _step_per_stack_reviews(ctx)
 
@@ -1131,217 +1380,37 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 else:
                     await _step_single_stack_merge(ctx)
 
-            print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
-            merged_report = target_dir / REVIEW_OUTPUT_FILE
-
-            # merged-items.json is the canonical source of truth; review-output.md is
-            # render-only. The missing-input guard keys on the JSON so a --start-at fix
-            # resume with surviving JSON but absent markdown proceeds rather than bailing.
-            items_file = merged_items_path(dd)
-            if not items_file.is_file():
-                print_error(
-                    console,
-                    "Missing Merged Items",
-                    f"Expected canonical merged items at {items_file}",
-                )
-                return 1
+            signal = await _step_load_items(ctx)
+            if isinstance(signal, Stop):
+                return signal.exit_code
 
             # Two-phase findings artifact (Phase A). When --findings-out is set,
             # convert the canonical merged items into the strict-schema artifact and
             # STOP: never post to the PR and never apply fixes. Phase B posts later.
             if config.findings_out is not None:
-                from daydream.runner import _emit_findings_from_items
+                return (await _step_findings_out(ctx)).exit_code
 
-                findings_items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
-                return _emit_findings_from_items(target_dir, config, findings_items)
-
-            # Best-effort recover the render-only markdown from the deep-dir copy for
-            # the exit message when the canonical file is absent (e.g. a --start-at fix
-            # resume where the copy to the canonical path never ran). Non-fatal.
-            if not merged_report.exists():
-                from daydream.deep.artifacts import merged_report_path
-
-                deep_copy = merged_report_path(dd)
-                if deep_copy.exists():
-                    merged_report.write_text(deep_copy.read_text())
-
-            # Offer to post findings as inline PR review comments.
             # `post_review_to_pr_from_report` is a non-idempotent GitHub write, so
             # `--start-at fix` (resume after the merged report) must skip it to
             # avoid duplicate inline reviews on reruns.
             if config.start_at != "fix":
-                from daydream.pr_review import post_review_to_pr_from_report
+                await _step_post_review(ctx)
 
-                await post_review_to_pr_from_report(
-                    target_dir, merged_items_path(dd), console=console
-                )
+            signal = await _step_fix_gate(ctx)
+            if isinstance(signal, Stop):
+                return signal.exit_code
 
-            # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
-            # an unattended run with no assumption declines (safe_default=False) so a
-            # piped/CI run never mutates without intent; otherwise prompt.
-            decision = resolve_or_prompt(
-                assume=get_assume(),
-                interactive=not get_non_interactive(),
-                safe_default=False,
-                question="Apply fixes now? [y/N]",
-                default="n",
-            )
-            if not decision:
-                print_success(console, f"Report written to {merged_report}. Exiting.")
-                return 0
+            await _step_verify(ctx)
 
-            # Read canonical merged items directly (validated above). Replaces an LLM
-            # re-parse of the markdown, which silently dropped structural findings; here
-            # they are ordinary tagged items that reach phase_fix like any other.
-            items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
-            if not items:
-                print_success(console, "No actionable items -- done.")
-                return 0
+            signal = await _step_fix(ctx)
+            if isinstance(signal, Stop):
+                return signal.exit_code
 
-            # Severity-ordered (high before medium before low), stable within a
-            # tier so equal-severity items keep their canonical merge order.
-            items = severity_sorted(items)
+            signal = await _step_test(ctx)
+            if isinstance(signal, Stop):
+                return signal.exit_code
 
-            # Recommendation verification (#83). Runs ONLY after the apply-fixes
-            # gate accepts, so a declined run (non-interactive / EOF / explicit "N")
-            # skips both the verify pass and the recommendation-verdicts.json
-            # artifact. A --start-at fix resume still produces verdicts whenever
-            # fixes are applied (the gate still runs on resume; accept => verify runs).
-            async with phase_scope(DaydreamPhase.VERIFY):
-                verdicts_file, verdicts_payload = await phase_verify_recommendations(
-                    _resolve_backend(config, "verify", backend_cache),
-                    work,
-                    merged_items_path=merged_items_path(dd),
-                    deep_dir=dd,
-                )
-            print_verification_summary(console, verdicts_file)
-
-            # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
-            items = _attach_verdicts(items, verdicts_payload)
-            matched_ids = [i["id"] for i in items if i.get("verifier_verdict") is not None]
-            unmatched_ids = [
-                i["id"]
-                for i in items
-                if isinstance(i.get("id"), int)
-                and i.get("verifier_verdict") is None
-                and i.get("lens") != "structural"
-            ]
-            # Structural findings are verdict-exempt (in neither matched nor unmatched)
-            # but still fixed; itemize them so the "X/Y matched" ratio isn't read as a
-            # total that under-counts the items the fix loop iterates.
-            structural_ids = [i.get("id") for i in items if i.get("lens") == "structural"]
-            # Leftovers (no verdict, non-structural, missing/non-int id) so the
-            # buckets always reconcile to len(items); surfaced only when present.
-            other_ids = [
-                i.get("id")
-                for i in items
-                if i.get("verifier_verdict") is None
-                and i.get("lens") != "structural"
-                and not isinstance(i.get("id"), int)
-            ]
-            console.print(
-                format_verdict_join(
-                    matched=matched_ids,
-                    unmatched=unmatched_ids,
-                    structural=structural_ids,
-                    other=other_ids,
-                    total=len(items),
-                )
-            )
-
-            # Only forward confirmed intent when we ran the intent phase in
-            # this invocation.  When resuming via --start-at fix/merge/per-stack
-            # the intent phase was skipped, so intent_p may hold a stale
-            # artifact from a prior run; injecting it as authoritative would
-            # contradict the current diff's context.
-            intent_grounded_this_run = config.start_at not in ("per-stack", "merge", "fix")
-            # Snapshot the tracked tree + untracked set BEFORE fixes so a failed
-            # group's partial, possibly non-compiling edits can be captured and
-            # rolled back to exactly their pre-fix content (#203 follow-up).
-            try:
-                pre_fix_snapshot = git_ops.stash_create(work.repo)
-                pre_fix_untracked = set(git_ops.list_untracked(work.repo))
-            except git_ops.GitError as exc:
-                print_warning(console, f"Could not snapshot tree before fixes: {exc}")
-                pre_fix_snapshot = None
-                pre_fix_untracked = set()
-            # Pre-fix HEAD is the recommended-patch base only when the tree was
-            # clean (stash_create returns None then) -- otherwise the snapshot is
-            # the base and HEAD is unused, so skip the rev-parse. Captured now
-            # because the commit phase below advances HEAD past the fix.
-            if pre_fix_snapshot is None:
-                try:
-                    pre_fix_head = git_ops.head_sha(work.repo)
-                except git_ops.GitError:
-                    pre_fix_head = None
-            else:
-                pre_fix_head = None
-            async with phase_scope(DaydreamPhase.FIX):
-                fix_failures = await phase_fix_parallel(
-                    _resolve_backend(config, "fix", backend_cache),
-                    work,
-                    items,
-                    intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
-                )
-            # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
-            # NOW, before the fix-failure and test-failure early returns below, so
-            # a run that generated a recommendation always archives it — even when
-            # tests fail or a fix group is reverted. Best-effort; never raises.
-            git_ops.capture_recommended_patch_with_base(
-                work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
-            )
-            fix_failures_p = fix_failures_path(dd)
-            if fix_failures:
-                # Persist so the archive marks the run "partial" instead of
-                # "complete" -- the tree is no longer a clean success.
-                fix_failures_p.write_text(json.dumps(fix_failures, indent=2, sort_keys=True))
-                _protect_tree_after_fix_failures(
-                    work,
-                    target_dir,
-                    fix_failures,
-                    snapshot=pre_fix_snapshot,
-                    pre_untracked=pre_fix_untracked,
-                )
-                # Enumerate every untracked path that appeared during the fix
-                # pass and survived protection. Attribution to a specific group
-                # is impossible (shared tree, parallel groups), so we never
-                # delete these -- we record them so the partial state is fully
-                # auditable instead of silently leaving stray files unaccounted.
-                try:
-                    leftover = sorted(set(git_ops.list_untracked(work.repo)) - pre_fix_untracked)
-                except git_ops.GitError:
-                    leftover = []
-                leftover_p = fix_leftover_untracked_path(dd)
-                if leftover:
-                    leftover_p.write_text(json.dumps(leftover, indent=2))
-                elif leftover_p.exists():
-                    leftover_p.unlink()
-                print_warning(
-                    console,
-                    f"{len(fix_failures)} fix group(s) failed: {sorted(fix_failures)}; "
-                    "partial edits reverted (patches saved under .daydream/partial-fixes/).",
-                )
-                return 1
-            # Fresh successful fix supersedes any stale failures record.
-            if fix_failures_p.exists():
-                fix_failures_p.unlink()
-            stale_leftover_p = fix_leftover_untracked_path(dd)
-            if stale_leftover_p.exists():
-                stale_leftover_p.unlink()
-
-            async with phase_scope(DaydreamPhase.TEST):
-                passed, _retries = await phase_test_and_heal(
-                    _resolve_backend(config, "test", backend_cache), work, feedback_items=items
-                )
-            if not passed:
-                print_warning(console, "Tests failed after fix attempt.")
-                return 1
-
-            # phase_commit_push runs as part of the fix/commit cycle — reuse
-            # the fix backend (no separate "commit" phase identifier).
-            await phase_commit_push(
-                _resolve_backend(config, "fix", backend_cache), work
-            )
+            await _step_commit(ctx)
             return 0
 
         finally:
