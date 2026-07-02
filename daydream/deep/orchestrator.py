@@ -47,6 +47,7 @@ from daydream.deep.artifacts import (
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.extensions import get_registry
+from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
 from daydream.phases import (
     FEEDBACK_SCHEMA,
@@ -711,6 +712,245 @@ async def _step_alternatives(ctx: FlowContext) -> None:
     )
 
 
+async def _step_per_stack_reviews(ctx: FlowContext) -> None:
+    """Per-stack review fan-out, with failure persistence and resume reconstruction."""
+    config = ctx.config
+    dd = ctx.data["dd"]
+    stacks = ctx.data["stacks"]
+
+    failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
+    if config.start_at not in ("merge", "fix"):
+        print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
+        async with phase_scope(DaydreamPhase.DEEP, stage="review"):
+            per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
+                ctx.backend_for("per_stack_review"),
+                ctx.work,
+                stacks,
+                diff_path=ctx.data["diff_path"],
+                intent_path=ctx.data["intent_path"],
+                alternatives_path=ctx.data["alts_path"],
+                exploration_dir=ctx.data["exploration_dir"],
+                diff_text=ctx.data["diff"],
+            )
+        # Persist so a later `--start-at merge` resume can still surface
+        # uncovered stacks (the in-memory failure map otherwise dies here).
+        failures_p = per_stack_failures_path(dd)
+        if failed_stacks:
+            failures_p.write_text(json.dumps(failed_stacks, indent=2, sort_keys=True))
+        elif failures_p.exists():
+            # Fresh successful run supersedes any stale failures record.
+            failures_p.unlink()
+    else:
+        # Resume: reconstruct the expected per-stack output paths on disk.
+        from daydream.deep.artifacts import per_stack_review_path
+
+        per_stack_outputs = {
+            stack.stack_name: per_stack_review_path(dd, stack.stack_name)
+            for stack in stacks
+        }
+        # Resume also resurrects any prior failure summary so the merge
+        # prompt can still note uncovered stacks.
+        failures_p = per_stack_failures_path(dd)
+        if failures_p.is_file():
+            try:
+                loaded = json.loads(failures_p.read_text())
+                if isinstance(loaded, dict):
+                    failed_stacks = {str(k): str(v) for k, v in loaded.items()}
+            except json.JSONDecodeError:
+                failed_stacks = {}
+    ctx.data["per_stack_outputs"] = per_stack_outputs
+    ctx.data["failed_stacks"] = failed_stacks
+
+
+async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
+    """Pre-merge parse pass (D-21) + structural partitioning; loads records on a merge resume."""
+    config = ctx.config
+    dd = ctx.data["dd"]
+    stacks = ctx.data["stacks"]
+    failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
+    per_stack_outputs: dict[str, Path] = ctx.data["per_stack_outputs"]
+
+    print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
+
+    per_stack_records_paths: list[Path] = []
+    all_records: list[dict[str, Any]] = []
+    record_sources: list[str] = []
+    if config.start_at == "merge":
+        # Resume: require a records file per detected stack (except ones in
+        # `failed_stacks`). A bare glob would silently drop a stack whose
+        # records file is absent, yielding a merged report missing a bucket.
+        expected_paths: list[Path] = []
+        missing_stacks: list[str] = []
+        for stack in stacks:
+            records_path = per_stack_records_path(dd, stack.stack_name)
+            if records_path.is_file():
+                expected_paths.append(records_path)
+            elif stack.stack_name not in failed_stacks:
+                missing_stacks.append(stack.stack_name)
+        if missing_stacks:
+            print_error(
+                console,
+                "Missing Per-Stack Records",
+                "Missing parsed records for: "
+                + ", ".join(sorted(missing_stacks)),
+            )
+            return Stop(1)
+        for records_path in sorted(expected_paths):
+            records = json.loads(records_path.read_text())
+            per_stack_records_paths.append(records_path)
+            source_name = records_path.name
+            all_records.extend(records)
+            record_sources.extend(source_name for _ in records)
+    else:
+        # Pre-merge parse pass (D-21). Sort by stack_name so merge input
+        # order is independent of parallel-task completion order, keeping
+        # the merge prompt and global issue numbering reproducible.
+        for stack_name, output_path in sorted(per_stack_outputs.items()):
+            # Language stacks carry severity so the scoped arbiter can
+            # select high/contested findings (#168). The structural
+            # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
+            # high-conviction by construction and is partitioned out of
+            # arbitration/dedup below, defaulting to high at merge.
+            record_schema = (
+                FEEDBACK_SCHEMA if stack_name == STRUCTURE_STACK_NAME else PER_STACK_RECORD_SCHEMA
+            )
+            async with phase_scope(DaydreamPhase.PARSE):
+                records = await phase_parse_feedback(
+                    ctx.backend_for("parse"),
+                    ctx.work,
+                    input_path=output_path,
+                    output_schema=record_schema,
+                )
+            records_path = per_stack_records_path(dd, stack_name)
+            records_path.write_text(json.dumps(records, indent=2))
+            per_stack_records_paths.append(records_path)
+            all_records.extend(records)
+            record_sources.extend(stack_name for _ in records)
+
+    # Partition structural meta-stack records out before dedup: its lens
+    # (file-size budgets, layering, canonical-helper gaps) differs from the
+    # language stacks and collapsing it into their dedup pool would demote
+    # those findings. Filter both record_sources forms (resume=filename,
+    # fresh-run=stack_name) together to preserve the index invariant.
+    structural_path_candidate = per_stack_records_path(dd, STRUCTURE_STACK_NAME)
+    if structural_path_candidate in per_stack_records_paths:
+        structural_records_path: Path | None = structural_path_candidate
+        structural_filename = structural_path_candidate.name
+        per_stack_records_paths = [
+            p for p in per_stack_records_paths if p != structural_path_candidate
+        ]
+        kept_pairs = [
+            (rec, src)
+            for rec, src in zip(all_records, record_sources, strict=True)
+            if src != STRUCTURE_STACK_NAME and src != structural_filename
+        ]
+        all_records = [rec for rec, _ in kept_pairs]
+        record_sources = [src for _, src in kept_pairs]
+    else:
+        structural_records_path = None
+
+    ctx.data["records_paths"] = per_stack_records_paths
+    ctx.data["records"] = all_records
+    ctx.data["record_sources"] = record_sources
+    ctx.data["structural_records_path"] = structural_records_path
+    return None
+
+
+async def _step_arbiter(ctx: FlowContext) -> None:
+    """Scoped arbiter over high-severity/contested findings (#168)."""
+    config = ctx.config
+    dd = ctx.data["dd"]
+    all_records: list[dict[str, Any]] = ctx.data["records"]
+    record_sources: list[str] = ctx.data["record_sources"]
+
+    # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
+    # a single heavyweight arbiter now re-reviews ONLY the
+    # high-severity / contested findings and writes its verdicts back
+    # into the per-stack records before merge. A `--start-at merge`
+    # resume re-runs arbitration from the on-disk records UNLESS the
+    # completion marker proves a prior run already finalised them
+    # (#175): a crash between the parse write and the rewrite would
+    # otherwise let unarbitrated high-severity findings reach merge.
+    arbiter_marker = arbiter_complete_path(dd)
+    if config.start_at != "merge" or not arbiter_marker.is_file():
+        arbiter_targets = select_arbiter_targets(all_records, record_sources)
+        if arbiter_targets:
+            async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
+                verdicts = await phase_arbiter_review(
+                    ctx.backend_for("arbiter"),
+                    ctx.work,
+                    selected_records=[all_records[i] for i in arbiter_targets],
+                    diff_path=ctx.data["diff_path"],
+                    intent_path=ctx.data["intent_path"],
+                    alternatives_path=ctx.data["alts_path"],
+                    exploration_dir=ctx.data["exploration_dir"],
+                )
+            all_records, record_sources = _apply_arbiter_verdicts(
+                all_records, record_sources, arbiter_targets, verdicts
+            )
+            _rewrite_stack_records(
+                dd, ctx.data["records_paths"], all_records, record_sources
+            )
+        arbiter_marker.write_text("")
+    ctx.data["records"] = all_records
+    ctx.data["record_sources"] = record_sources
+
+
+async def _step_cross_stack_merge(ctx: FlowContext) -> None:
+    """Dedup pre-filter (D-27) + cross-stack merge (D-23..D-26)."""
+    dd = ctx.data["dd"]
+    alts_p: Path = ctx.data["alts_path"]
+    all_records: list[dict[str, Any]] = ctx.data["records"]
+    failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
+
+    # Dedup pre-filter (D-27).
+    alt_issues_for_dedup: list[dict[str, Any]] = (
+        json.loads(alts_p.read_text()) if alts_p.exists() else []
+    )
+    pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
+    record_pairs = build_record_dedup_candidates(all_records, sources=ctx.data["record_sources"])
+    dedup_p = dedup_candidates_path(dd)
+    dedup_p.write_text(
+        json.dumps(
+            {
+                "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
+                "record_duplicate_pairs": [_candidate_pair_to_json(p) for p in record_pairs],
+            },
+            indent=2,
+        )
+    )
+
+    # Cross-stack merge (D-23..D-26).
+    await phase_cross_stack_merge(
+        ctx.backend_for("merge"),
+        ctx.work,
+        per_stack_records_paths=ctx.data["records_paths"],
+        intent_path=ctx.data["intent_path"],
+        alternatives_path=alts_p,
+        dedup_candidates_path=dedup_p,
+        exploration_dir=ctx.data["exploration_dir"],
+        failed_stacks=failed_stacks or None,
+        structural_records_path=ctx.data["structural_records_path"],
+    )
+
+
+async def _step_single_stack_merge(ctx: FlowContext) -> None:
+    """Tiny-diff single-stack bypass (#172): host-side merged-items write."""
+    failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
+
+    # Issue #172 — tiny-diff single-stack bypass. A ≤2-file diff
+    # has nothing to cross-stack-merge and nothing contested to
+    # arbitrate, so the host writes ``merged-items.json`` directly
+    # via ``normalize_items`` + the exact structural-tagging logic
+    # from ``phase_cross_stack_merge``. No arbiter, no dedup, no
+    # merge agent. Downstream consumers (fix gate, verifier, PR
+    # posting) read the canonical JSON unchanged (AC6).
+    _write_single_stack_merged_items(
+        ctx.work.repo, ctx.data["dd"], ctx.data["records"], ctx.data["structural_records_path"],
+        failed_stacks=failed_stacks or None,
+    )
+
+
 async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """Execute the deep-review pipeline (D-07).
 
@@ -871,208 +1111,25 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
 
         # Exploration pre-scan (D-43).
         await _step_exploration(ctx)
-        exploration_dir: Path | None = ctx.data["exploration_dir"]
 
         try:
             if config.start_at not in ("per-stack", "merge", "fix"):
                 await _step_intent(ctx)
                 await _step_alternatives(ctx)
             intent_p: Path = ctx.data["intent_path"]
-            alts_p: Path = ctx.data["alts_path"]
 
-            failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
-            if config.start_at not in ("merge", "fix"):
-                print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
-                async with phase_scope(DaydreamPhase.DEEP, stage="review"):
-                    per_stack_outputs, failed_stacks = await phase_per_stack_reviews(
-                        _resolve_backend(config, "per_stack_review", backend_cache),
-                        work,
-                        stacks,
-                        diff_path=diff_path,
-                        intent_path=intent_p,
-                        alternatives_path=alts_p,
-                        exploration_dir=exploration_dir,
-                        diff_text=diff,
-                    )
-                # Persist so a later `--start-at merge` resume can still surface
-                # uncovered stacks (the in-memory failure map otherwise dies here).
-                failures_p = per_stack_failures_path(dd)
-                if failed_stacks:
-                    failures_p.write_text(json.dumps(failed_stacks, indent=2, sort_keys=True))
-                elif failures_p.exists():
-                    # Fresh successful run supersedes any stale failures record.
-                    failures_p.unlink()
-            else:
-                # Resume: reconstruct the expected per-stack output paths on disk.
-                from daydream.deep.artifacts import per_stack_review_path
-
-                per_stack_outputs = {
-                    stack.stack_name: per_stack_review_path(dd, stack.stack_name)
-                    for stack in stacks
-                }
-                # Resume also resurrects any prior failure summary so the merge
-                # prompt can still note uncovered stacks.
-                failures_p = per_stack_failures_path(dd)
-                if failures_p.is_file():
-                    try:
-                        loaded = json.loads(failures_p.read_text())
-                        if isinstance(loaded, dict):
-                            failed_stacks = {str(k): str(v) for k, v in loaded.items()}
-                    except json.JSONDecodeError:
-                        failed_stacks = {}
+            await _step_per_stack_reviews(ctx)
 
             if config.start_at != "fix":
-                print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
-
-                per_stack_records_paths: list[Path] = []
-                all_records: list[dict[str, Any]] = []
-                record_sources: list[str] = []
-                if config.start_at == "merge":
-                    # Resume: require a records file per detected stack (except ones in
-                    # `failed_stacks`). A bare glob would silently drop a stack whose
-                    # records file is absent, yielding a merged report missing a bucket.
-                    expected_paths: list[Path] = []
-                    missing_stacks: list[str] = []
-                    for stack in stacks:
-                        records_path = per_stack_records_path(dd, stack.stack_name)
-                        if records_path.is_file():
-                            expected_paths.append(records_path)
-                        elif stack.stack_name not in failed_stacks:
-                            missing_stacks.append(stack.stack_name)
-                    if missing_stacks:
-                        print_error(
-                            console,
-                            "Missing Per-Stack Records",
-                            "Missing parsed records for: "
-                            + ", ".join(sorted(missing_stacks)),
-                        )
-                        return 1
-                    for records_path in sorted(expected_paths):
-                        records = json.loads(records_path.read_text())
-                        per_stack_records_paths.append(records_path)
-                        source_name = records_path.name
-                        all_records.extend(records)
-                        record_sources.extend(source_name for _ in records)
-                else:
-                    # Pre-merge parse pass (D-21). Sort by stack_name so merge input
-                    # order is independent of parallel-task completion order, keeping
-                    # the merge prompt and global issue numbering reproducible.
-                    for stack_name, output_path in sorted(per_stack_outputs.items()):
-                        # Language stacks carry severity so the scoped arbiter can
-                        # select high/contested findings (#168). The structural
-                        # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
-                        # high-conviction by construction and is partitioned out of
-                        # arbitration/dedup below, defaulting to high at merge.
-                        record_schema = (
-                            FEEDBACK_SCHEMA if stack_name == STRUCTURE_STACK_NAME else PER_STACK_RECORD_SCHEMA
-                        )
-                        async with phase_scope(DaydreamPhase.PARSE):
-                            records = await phase_parse_feedback(
-                                _resolve_backend(config, "parse", backend_cache),
-                                work,
-                                input_path=output_path,
-                                output_schema=record_schema,
-                            )
-                        records_path = per_stack_records_path(dd, stack_name)
-                        records_path.write_text(json.dumps(records, indent=2))
-                        per_stack_records_paths.append(records_path)
-                        all_records.extend(records)
-                        record_sources.extend(stack_name for _ in records)
-
-                # Partition structural meta-stack records out before dedup: its lens
-                # (file-size budgets, layering, canonical-helper gaps) differs from the
-                # language stacks and collapsing it into their dedup pool would demote
-                # those findings. Filter both record_sources forms (resume=filename,
-                # fresh-run=stack_name) together to preserve the index invariant.
-                structural_path_candidate = per_stack_records_path(dd, STRUCTURE_STACK_NAME)
-                if structural_path_candidate in per_stack_records_paths:
-                    structural_records_path: Path | None = structural_path_candidate
-                    structural_filename = structural_path_candidate.name
-                    per_stack_records_paths = [
-                        p for p in per_stack_records_paths if p != structural_path_candidate
-                    ]
-                    kept_pairs = [
-                        (rec, src)
-                        for rec, src in zip(all_records, record_sources, strict=True)
-                        if src != STRUCTURE_STACK_NAME and src != structural_filename
-                    ]
-                    all_records = [rec for rec, _ in kept_pairs]
-                    record_sources = [src for _, src in kept_pairs]
-                else:
-                    structural_records_path = None
+                signal = await _step_per_stack_parse(ctx)
+                if isinstance(signal, Stop):
+                    return signal.exit_code
 
                 if not single_stack_mode:
-                    # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
-                    # a single heavyweight arbiter now re-reviews ONLY the
-                    # high-severity / contested findings and writes its verdicts back
-                    # into the per-stack records before merge. A `--start-at merge`
-                    # resume re-runs arbitration from the on-disk records UNLESS the
-                    # completion marker proves a prior run already finalised them
-                    # (#175): a crash between the parse write and the rewrite would
-                    # otherwise let unarbitrated high-severity findings reach merge.
-                    arbiter_marker = arbiter_complete_path(dd)
-                    if config.start_at != "merge" or not arbiter_marker.is_file():
-                        arbiter_targets = select_arbiter_targets(all_records, record_sources)
-                        if arbiter_targets:
-                            async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-                                verdicts = await phase_arbiter_review(
-                                    _resolve_backend(config, "arbiter", backend_cache),
-                                    work,
-                                    selected_records=[all_records[i] for i in arbiter_targets],
-                                    diff_path=diff_path,
-                                    intent_path=intent_p,
-                                    alternatives_path=alts_p,
-                                    exploration_dir=exploration_dir,
-                                )
-                            all_records, record_sources = _apply_arbiter_verdicts(
-                                all_records, record_sources, arbiter_targets, verdicts
-                            )
-                            _rewrite_stack_records(
-                                dd, per_stack_records_paths, all_records, record_sources
-                            )
-                        arbiter_marker.write_text("")
-
-                    # Dedup pre-filter (D-27).
-                    alt_issues_for_dedup: list[dict[str, Any]] = (
-                        json.loads(alts_p.read_text()) if alts_p.exists() else []
-                    )
-                    pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
-                    record_pairs = build_record_dedup_candidates(all_records, sources=record_sources)
-                    dedup_p = dedup_candidates_path(dd)
-                    dedup_p.write_text(
-                        json.dumps(
-                            {
-                                "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
-                                "record_duplicate_pairs": [_candidate_pair_to_json(p) for p in record_pairs],
-                            },
-                            indent=2,
-                        )
-                    )
-
-                    # Cross-stack merge (D-23..D-26).
-                    await phase_cross_stack_merge(
-                        _resolve_backend(config, "merge", backend_cache),
-                        work,
-                        per_stack_records_paths=per_stack_records_paths,
-                        intent_path=intent_p,
-                        alternatives_path=alts_p,
-                        dedup_candidates_path=dedup_p,
-                        exploration_dir=exploration_dir,
-                        failed_stacks=failed_stacks or None,
-                        structural_records_path=structural_records_path,
-                    )
+                    await _step_arbiter(ctx)
+                    await _step_cross_stack_merge(ctx)
                 else:
-                    # Issue #172 — tiny-diff single-stack bypass. A ≤2-file diff
-                    # has nothing to cross-stack-merge and nothing contested to
-                    # arbitrate, so the host writes ``merged-items.json`` directly
-                    # via ``normalize_items`` + the exact structural-tagging logic
-                    # from ``phase_cross_stack_merge``. No arbiter, no dedup, no
-                    # merge agent. Downstream consumers (fix gate, verifier, PR
-                    # posting) read the canonical JSON unchanged (AC6).
-                    _write_single_stack_merged_items(
-                        work.repo, dd, all_records, structural_records_path,
-                        failed_stacks=failed_stacks or None,
-                    )
+                    await _step_single_stack_merge(ctx)
 
             print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
             merged_report = target_dir / REVIEW_OUTPUT_FILE
