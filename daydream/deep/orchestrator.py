@@ -1299,7 +1299,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
 
     target_dir = work.repo
 
-    # Preamble (mirrors run_trust).
+    # Preamble (mirrors runner._run_loop_shallow).
     try:
         diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
     except GitTimeoutError as exc:
