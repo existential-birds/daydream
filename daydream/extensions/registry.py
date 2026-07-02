@@ -66,6 +66,14 @@ class Registry:
         """Return the flow's ordered entry list, or raise ``UnresolvedExtensionError``."""
         return list(self._entries(flow_name))
 
+    def phase_names(self) -> tuple[str, ...]:
+        """Return every registered phase name in registration order."""
+        return tuple(self._phases)
+
+    def flow_names(self) -> tuple[str, ...]:
+        """Return every registered flow name in registration order."""
+        return tuple(self._flows)
+
     def insert_before(self, flow_name: str, *, anchor: str, step: FlowEntry) -> None:
         """Insert ``step`` immediately before ``anchor`` in the named flow."""
         self._insert(flow_name, anchor=anchor, step=step, offset=0)
@@ -116,6 +124,10 @@ class Registry:
         """Return the slot's skill string, or None; never raises."""
         return self._skills.get(slot)
 
+    def skill_slots(self) -> dict[str, str]:
+        """Return a copy of the slot-to-skill-invocation mapping."""
+        return dict(self._skills)
+
     def stack_keys(self) -> set[str]:
         """Return the stack keys of every registered ``stack:<key>`` skill slot."""
         return {slot.removeprefix("stack:") for slot in self._skills if slot.startswith("stack:")}
@@ -132,6 +144,10 @@ class Registry:
             return self._prompts[name]
         except KeyError:
             raise UnresolvedExtensionError(f"prompt '{name}' is not registered; {_VALIDATE_HINT}") from None
+
+    def prompt_names(self) -> tuple[str, ...]:
+        """Return every registered prompt name in registration order."""
+        return tuple(self._prompts)
 
     # -- stack rules ------------------------------------------------------
 

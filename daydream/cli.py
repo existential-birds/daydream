@@ -22,6 +22,8 @@ top-level ``TARGET`` positional):
       into a JSONL training corpus plus a lineage manifest
     - ``corpus label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
       — record an authoritative human outcome label that overrides automated ones
+- ``daydream ext validate`` — load the ``daydream_ext`` extension and
+  resolve-check the registry (flows, phases, skill slots, prompts)
 """
 
 import argparse
@@ -31,6 +33,7 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anyio
 
@@ -51,10 +54,13 @@ from daydream.ui import (
     set_shutdown_panel,
 )
 
+if TYPE_CHECKING:
+    from daydream.extensions import Registry
+
 # Verb-first dispatch table. ``_first_verb`` classifies the leading argv token;
 # anything that isn't an explicit verb (bare path, leading flag, empty argv)
 # falls through to the ``review`` golden path via the default-verb shim.
-KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench", "post-findings", "setup"}
+KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench", "post-findings", "setup", "ext"}
 
 
 def _first_verb(argv: list[str]) -> str:
@@ -1230,6 +1236,129 @@ def _handle_corpus_command(argv: list[str]) -> int:
     return int(handler(argv[1:]))
 
 
+def _print_ext_help(*, error: bool = False) -> None:
+    """Print usage for the ``ext`` namespace.
+
+    Args:
+        error: When ``True`` write to stderr (unknown sub-verb error path);
+            when ``False`` (default) write to stdout (bare invocation / help
+            request path).
+    """
+    from rich.console import Console
+
+    from daydream.ui import NEON_THEME
+
+    ext_console = Console(stderr=error, theme=NEON_THEME)
+    ext_console.print(
+        "usage: daydream ext {validate} ...\n"
+        "\n"
+        "Extension sub-verbs:\n"
+        "  validate   load the daydream_ext extension and resolve-check the registry"
+    )
+
+
+def _ext_resolve_failure(registry: "Registry") -> str | None:
+    """Resolve-check the registry; return the first failure message, or None.
+
+    Mirrors ``run_flow``'s pre-flight pass (every flow entry — including
+    loop-group bodies — must name a registered phase), then checks that every
+    step's config key is a string and that every skill slot and fork stack
+    rule carries a non-empty skill invocation.
+    """
+    from daydream.extensions import UnresolvedExtensionError
+
+    for flow_name in registry.flow_names():
+        for entry in registry.flow(flow_name):
+            names = (entry,) if isinstance(entry, str) else entry.steps
+            for name in names:
+                try:
+                    registry.phase(name)
+                except UnresolvedExtensionError:
+                    return f"flow '{flow_name}' references step '{name}', which is not a registered phase"
+    for name in registry.phase_names():
+        phase_key = registry.phase(name).phase_key
+        if not isinstance(phase_key, str):
+            return f"phase '{name}' has a non-string config key: {phase_key!r}"
+    for slot, skill in registry.skill_slots().items():
+        if not skill:
+            return f"skill slot '{slot}' has an empty skill invocation"
+    for rule in registry.stack_rules():
+        if not rule.skill:
+            return f"stack rule '{rule.stack_name}' has an empty skill invocation"
+    return None
+
+
+def _handle_ext_validate_command() -> int:
+    """Handle ``daydream ext validate``.
+
+    Builds the per-run registry for real (builtins seeded, extension module
+    discovered, version-gated, and applied), reports the extension source and
+    API version, then resolve-checks every namespace. Runs anywhere —
+    validation is registry-shaped, not repo-shaped, so no target directory is
+    required.
+
+    Returns:
+        int: ``0`` when the registry resolves clean; ``1`` when the extension
+        fails to load or a registered piece does not resolve.
+    """
+    import importlib.util
+    import os
+
+    from daydream.extensions import EXTENSION_API_VERSION, ExtensionError, build_registry
+
+    try:
+        registry = build_registry()
+    except ExtensionError as exc:
+        print_error(console, "Extension Error", str(exc))
+        return 1
+
+    ext_dir = os.environ.get("DAYDREAM_EXT_DIR")
+    if ext_dir:
+        source = f"extension source: $DAYDREAM_EXT_DIR = {ext_dir}"
+    elif importlib.util.find_spec("daydream_ext") is not None:
+        source = "extension source: import daydream_ext"
+    else:
+        source = "extension source: no extension found (builtins only)"
+    console.print(source, soft_wrap=True)
+    console.print(f"extension API version {EXTENSION_API_VERSION}")
+
+    failure = _ext_resolve_failure(registry)
+    if failure is not None:
+        print_error(console, "Extension Error", failure)
+        return 1
+
+    console.print(
+        f"registry OK: {len(registry.phase_names())} phases, "
+        f"{len(registry.flow_names())} flows, "
+        f"{len(registry.skill_slots())} skill slots, "
+        f"{len(registry.prompt_names())} prompts"
+    )
+    return 0
+
+
+def _handle_ext_command(argv: list[str]) -> int:
+    """Dispatch an ``ext`` sub-verb (mirrors the ``corpus`` namespace shape).
+
+    A bare ``daydream ext`` prints help to stdout and exits 2; an unknown
+    sub-verb (or trailing arguments — ``validate`` takes none) prints help to
+    stderr and exits 2.
+
+    Args:
+        argv: The argument vector after the ``ext`` verb.
+
+    Returns:
+        int: The sub-handler's exit code; ``2`` for a bare (no-arg)
+        invocation or an unknown sub-verb.
+    """
+    if not argv:
+        _print_ext_help(error=False)
+        return 2
+    if argv[0] != "validate" or argv[1:]:
+        _print_ext_help(error=True)
+        return 2
+    return _handle_ext_validate_command()
+
+
 def _build_post_findings_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream post-findings <artifact> --pr ... --head-sha ... --repo ...``.
 
@@ -1416,6 +1545,8 @@ def main() -> None:
           findings to the PR (privileged Phase B poster; unattended)
         - ``setup`` — register the review-bot GitHub App, deposit credentials,
           and land the workflows via a PR (``--verify`` for the doctor)
+        - ``ext`` — extension namespace (``validate`` loads the
+          ``daydream_ext`` extension and resolve-checks the registry)
 
     Returns:
         None: This function does not return; it exits via sys.exit().
@@ -1451,6 +1582,11 @@ def main() -> None:
 
         if verb == "setup":
             sys.exit(_handle_setup_command(argv[1:]))
+
+        # ``ext`` is sync (registry build + resolve-check, no agent work), so
+        # short-circuit before anyio.run.
+        if verb == "ext":
+            sys.exit(_handle_ext_command(argv[1:]))
 
         config = _parse_args()
         if verb == "feedback":

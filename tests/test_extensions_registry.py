@@ -44,6 +44,21 @@ def test_replace_requires_flag_and_skill_prompt_roundtrip() -> None:
     assert reg.prompt("review")() == "X"
 
 
+def test_introspection_lists_names_in_registration_order() -> None:
+    """`daydream ext validate` enumerates namespaces through these accessors."""
+    reg = Registry()
+    reg.register_phase(FlowStep(name="b", run=_noop))
+    reg.register_phase(FlowStep(name="a", run=_noop))
+    reg.set_flow("deep", ["b", "a"])
+    reg.set_flow("custom", ["ghost"])  # unresolved names are allowed until pre-flight
+    reg.override_skill("stack:python", "ro:review-python")
+    reg.override_prompt("review", lambda **kw: "X")
+    assert reg.phase_names() == ("b", "a")
+    assert reg.flow_names() == ("deep", "custom")
+    assert reg.skill_slots() == {"stack:python": "ro:review-python"}
+    assert reg.prompt_names() == ("review",)
+
+
 def test_stack_keys_returns_stack_slot_keys_only() -> None:
     reg = Registry()
     assert reg.stack_keys() == set()
