@@ -25,3 +25,26 @@ def register_builtins(registry: Registry) -> None:
     registry.override_skill("structural", config.STRUCTURE_SKILL)
     registry.override_skill("pr-feedback-fetch", config.PR_FEEDBACK_FETCH_SKILL)
     registry.override_skill("pr-feedback-respond", config.PR_FEEDBACK_RESPOND_SKILL)
+
+    _register_builtin_prompts(registry)
+
+
+def _register_builtin_prompts(registry: Registry) -> None:
+    """Seed the v1 named-prompt inventory (contract content, see docs/extensions.md).
+
+    Parse/test/commit/setup-investigator/failure-summarizer prompts are
+    intentionally NOT registered: they are schema- and control-loop-coupled.
+    """
+    from daydream import phases
+    from daydream.deep import prompts as deep_prompts
+
+    registry.override_prompt("review", phases.build_review_prompt)
+    registry.override_prompt("intent", phases.build_intent_prompt)
+    registry.override_prompt("alternatives", phases.build_alternative_review_prompt)
+    registry.override_prompt("fix", phases._build_fix_prompt)
+    registry.override_prompt("per-stack", deep_prompts.build_per_stack_prompt)
+    registry.override_prompt("structural", deep_prompts.build_structural_prompt)
+    registry.override_prompt("generic-fallback", deep_prompts.build_generic_fallback_prompt)
+    registry.override_prompt("arbiter", deep_prompts.build_arbiter_prompt)
+    registry.override_prompt("merge", deep_prompts.build_merge_prompt)
+    registry.override_prompt("verify", deep_prompts.build_verification_prompt)

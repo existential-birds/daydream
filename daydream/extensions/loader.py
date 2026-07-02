@@ -121,11 +121,13 @@ def get_registry() -> Registry:
 
     The lazy fallback lets direct phase calls in unit tests resolve built-ins
     without any runner setup; it deliberately skips extension discovery —
-    extensions apply only through :func:`build_registry` at run entry.
+    extensions apply only through :func:`build_registry` at run entry. It also
+    deliberately does NOT cache into the ContextVar: a sync caller before
+    :func:`set_registry` would otherwise pin a stale builtins snapshot on the
+    process-level context, leaking across pytest tests.
     """
     registry = _REGISTRY_VAR.get()
     if registry is None:
         registry = Registry()
         register_builtins(registry)
-        _REGISTRY_VAR.set(registry)
     return registry
