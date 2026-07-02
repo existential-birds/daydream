@@ -54,9 +54,12 @@ class Registry:
     # -- flows ------------------------------------------------------------
 
     def set_flow(self, flow_name: str, entries: Sequence[FlowEntry]) -> None:
-        """Define a flow as an ordered list of phase names and loop groups."""
-        for entry in entries:
-            self._require_entry_phases(flow_name, entry)
+        """Define a flow as an ordered list of phase names and loop groups.
+
+        Entry names are resolved against registered phases by ``run_flow``'s
+        pre-flight pass (and ``daydream ext validate``), not at definition time,
+        so registration order between phases and flows does not matter.
+        """
         self._flows[flow_name] = list(entries)
 
     def flow(self, flow_name: str) -> list[FlowEntry]:
@@ -78,7 +81,6 @@ class Registry:
 
     def _insert(self, flow_name: str, *, anchor: str, step: FlowEntry, offset: int) -> None:
         entries = self._entries(flow_name)
-        self._require_entry_phases(flow_name, step)
         entries.insert(self._index_of(flow_name, entries, anchor) + offset, step)
 
     def _entries(self, flow_name: str) -> list[FlowEntry]:
@@ -96,14 +98,6 @@ class Registry:
             if self._entry_name(entry) == name:
                 return index
         raise UnresolvedExtensionError(f"flow '{flow_name}' has no step '{name}'; {_VALIDATE_HINT}")
-
-    def _require_entry_phases(self, flow_name: str, entry: FlowEntry) -> None:
-        names = (entry,) if isinstance(entry, str) else entry.steps
-        for name in names:
-            if name not in self._phases:
-                raise UnresolvedExtensionError(
-                    f"flow '{flow_name}' references step '{name}', which is not a registered phase; {_VALIDATE_HINT}"
-                )
 
     # -- skill slots ------------------------------------------------------
 
