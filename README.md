@@ -71,6 +71,16 @@ After merge, an optional fix gate applies fixes in parallel (batched per-file) a
 
 **Shallow review** (`--shallow`) runs a single-skill loop: review, parse, fix, test. Useful for single-stack projects or when you want to force a specific Beagle skill.
 
+### Extension Seam
+
+Each flow (deep, shallow, review, pr-feedback) is an ordered list of named steps in a per-run registry. A fork customizes which phases run, which skills those phases use, and the prompts — entirely from a top-level `daydream_ext` package, without editing anything under `daydream/`: insert, remove, replace, or reorder steps; remap a stack's Beagle skill; add new stacks via glob rules; bind a skill to a phase; override any of the named prompts wholesale. The package is discovered via `$DAYDREAM_EXT_DIR`, else `import daydream_ext`; a missing extension is silent, a broken one is a hard, named error.
+
+```bash
+daydream ext validate   # load the extension and resolve-check every flow entry, skill slot, and stack rule
+```
+
+The versioned contract — module shape, name inventories, bump policy — is [docs/extensions.md](docs/extensions.md).
+
 ### Trajectory Recording
 
 Every run produces an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory at `<target>/.daydream/runs/<id>/trajectory.json` capturing prompts, responses, tool calls, and per-step token/cost metrics. Parallel fan-outs fork sibling trajectories under `.daydream/runs/<id>/trajectories/`; secrets are redacted before writing and interrupted runs flush a `.partial` file.
@@ -164,6 +174,7 @@ daydream setup /path/to/repo --verify             # read-only install audit (che
 daydream post-findings findings.json --pr 7 --head-sha <sha> --repo owner/repo  # Phase B: validate + post
 daydream --review --findings-out findings.json --pr-number 7 /path  # Phase A: emit findings artifact
 daydream feedback 42 --bot "<bot-login>[bot]" /path  # ingest and fix bot PR comments
+daydream ext validate                              # resolve-check the daydream_ext extension registry
 ```
 
 ### Corpus Commands
@@ -234,8 +245,11 @@ model = "claude-opus-4-8"
 backend = "codex"
 ```
 
-Phase names: `exploration`, `review`, `parse`, `fix`, `test`, `verify`, `merge` (plus
-`intent`, `wonder`, `pr_feedback`). Resolution precedence, highest first:
+Phase names are the flow-step config keys (`exploration`, `intent`, `wonder`,
+`per_stack_review`, `arbiter`, `merge`, `review`, `parse`, `fix`, `test`, `verify`,
+`pr_feedback`, …); any name is accepted, including phases a fork defines through the
+[extension seam](docs/extensions.md), which lists the per-flow key tables.
+Resolution precedence, highest first:
 
 **CLI > config file (phase, then global) > built-in per-backend default.**
 

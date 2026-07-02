@@ -51,6 +51,9 @@ daydream corpus harvest                            # annotate archived runs (rew
 daydream corpus build --out out.jsonl              # project labeled runs to JSONL training corpus
 daydream corpus label <session_id> --outcome accepted
 
+# Extension seam
+daydream ext validate                              # load daydream_ext, resolve-check flows/skills/prompts/stacks
+
 # Benchmark
 daydream bench --benchmark-repo ../code-review-benchmark/offline --score
 
@@ -102,12 +105,17 @@ and unusable.
 ### Execution flow
 
 ```text
-cli.py -> runner.py -> deep/orchestrator.py -> phases.py -> agent.py -> Backend.execute()
-                              \-> ui/ (terminal output)
+cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
+              -> deep/orchestrator.py | flows/{shallow,review,pr_feedback}.py
+              -> phases.py -> agent.py -> Backend.execute()
+              \-> ui/ (terminal output)
 ```
 
-- `runner.run()` is the async entry. Dispatches one of: deep multi-stack (default),
-  shallow single-stack, `--comment`, `--review`, or `daydream feedback <pr#>`.
+- `runner.run()` is the async entry. It builds the per-run extension `Registry`
+  (`build_registry()`), sets it on a `ContextVar`, and dispatches one of four
+  registered flows — `deep` (default), `shallow`, `review` (`--review`/`--comment`),
+  or `pr-feedback` (`daydream feedback <pr#>`) — each a preamble plus
+  `flows.run_flow()` over the flow's ordered `FlowStep` list.
 - `agent.run_agent()` is the only agent call site. Never call a backend/SDK directly
   from phases. It wraps `Backend.execute()` and drives the Rich UI + trajectory recorder.
 - Subagent fan-out (exploration, per-stack review, parallel fix) is N parallel
@@ -120,8 +128,10 @@ cli.py -> runner.py -> deep/orchestrator.py -> phases.py -> agent.py -> Backend.
 | Component | Responsibility | File |
 |-----------|----------------|------|
 | CLI | Arg parsing, signal handling, process lifecycle, subcommand dispatch | `cli.py` |
-| Runner | Flow selection, backend creation, phase sequencing, loop control | `runner.py` |
-| Deep orchestrator | Deep-review pipeline wiring (exploration, intent, alternatives, per-stack, arbiter, merge, verify, fix) | `deep/orchestrator.py` |
+| Runner | Flow preambles (workspace, diff, recorder), backend resolution, registry build, flow dispatch | `runner.py` |
+| Flows | `FlowContext` + `run_flow()` engine (ordering, `enabled` gates, `Stop`/`BreakLoop`, loop groups); shallow/review/pr-feedback step functions | `flows/` |
+| Extensions | Versioned extension API: `Registry` (phases+flows, skill slots, named prompts, stack rules), `daydream_ext` loader, built-in seeding | `extensions/` |
+| Deep orchestrator | Deep-flow step functions (exploration, intent, alternatives, per-stack, arbiter, merge, verify, fix) | `deep/orchestrator.py` |
 | Phases | Stateless async `phase_*()` workflow steps and prompt builders | `phases.py` |
 | Agent | Backend wrapper, event stream to UI, global state, budget enforcement | `agent.py` |
 | Trajectory | ATIF v1.6 recorder, redaction, ContextVar propagation | `trajectory.py` |
@@ -179,7 +189,9 @@ Per-phase overrides are config-file-only (`[tool.daydream]` /
 `[tool.daydream.phases.<phase>]` in `pyproject.toml` or `.daydream.toml`). There are
 no per-phase CLI flags. Precedence (highest first): CLI `--model`/`--backend` >
 config-file phase override > config-file global > per-backend default. Resolved in
-`runner._resolve_backend()`.
+`runner._resolve_backend()`. `[tool.daydream.phases.<phase>]` accepts any registered
+step's config key, including fork-defined phases (per-flow key tables in
+`docs/extensions.md`).
 
 ### Deep-review pipeline
 
@@ -202,7 +214,9 @@ hunks are inlined directly into a single review prompt.
 
 A fork customizes phases, skills, and prompts from a top-level `daydream_ext` package
 (discovered via `$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`.
-The versioned contract — name inventories, module shape, bump policy — is `docs/extensions.md`.
+The module exports `DAYDREAM_EXT_API` equal to `EXTENSION_API_VERSION` (currently 1);
+`daydream ext validate` resolve-checks the loaded registry. The versioned contract —
+name inventories, module shape, bump policy — is `docs/extensions.md`.
 
 ## Constraints
 
@@ -250,6 +264,7 @@ The versioned contract — name inventories, module shape, bump policy — is `d
 | `DAYDREAM_PRICES_FILE` | Cost pricing | Override path to `prices.toml` |
 | `DAYDREAM_ARCHIVE_DIR` | Archive | Override archive directory |
 | `DAYDREAM_SKILLS_DIR` | Pi backend | Override Beagle skill-directory resolution |
+| `DAYDREAM_EXT_DIR` | Extensions | Explicit path to the `daydream_ext` package (overrides `import daydream_ext`) |
 | `DAYDREAM_GH_TIMEOUT_SECONDS` | Git ops | Override `gh` CLI timeout |
 | `DAYDREAM_GH_TIMEOUT_RETRIES` | Git ops | Override `gh` timeout retry count |
 | `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags |
