@@ -198,6 +198,12 @@ exploration pre-scan
 Small diffs short-circuit the fan-out: the multi-stack pipeline is skipped and diff
 hunks are inlined directly into a single review prompt.
 
+### Extension seam
+
+A fork customizes phases, skills, and prompts from a top-level `daydream_ext` package
+(discovered via `$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`.
+The versioned contract — name inventories, module shape, bump policy — is `docs/extensions.md`.
+
 ## Constraints
 
 - **SDK**: `claude-agent-sdk==0.2.108`. Agent capabilities go through the `Backend` /
