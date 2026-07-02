@@ -256,7 +256,7 @@ Recall              59% [49, 69]         [varies by tool]     --                
 F1                  0.31 [0.24, 0.38]    [varies by tool]     --                     TBD
 ```
 
-(Provisional single-sweep numbers from the 2026-06-30 benchmark report; CIs not yet computed. The full per-tool comparison lives in the HTML report.)
+(Provisional numbers from the 2026-06-04 single-sweep baseline in [benchmark.md](benchmark.md); CIs not yet computed. The full per-tool comparison lives in the HTML report.)
 
 ### Bias Mitigation Checklist
 
