@@ -47,8 +47,8 @@ from daydream.deep.artifacts import (
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.extensions import get_registry
-from daydream.extensions.api import Stop
-from daydream.flows.engine import FlowContext
+from daydream.extensions.api import FlowStep, Stop
+from daydream.flows.engine import FlowContext, run_flow
 from daydream.phases import (
     FEEDBACK_SCHEMA,
     PER_STACK_RECORD_SCHEMA,
@@ -1202,12 +1202,75 @@ async def _step_commit(ctx: FlowContext) -> None:
     await phase_commit_push(ctx.backend_for("fix"), ctx.work)
 
 
+def _fresh_ttt(ctx: FlowContext) -> bool:
+    # Verbatim resume gate: --start-at per-stack/merge/fix skips the TTT phases.
+    return ctx.config.start_at not in ("per-stack", "merge", "fix")
+
+
+def _before_fix_resume(ctx: FlowContext) -> bool:
+    # Verbatim resume gate: --start-at fix skips everything up to the fix gate.
+    # For post-review, this also keeps the non-idempotent GitHub write off the
+    # resume path (duplicate inline reviews on reruns).
+    return ctx.config.start_at != "fix"
+
+
+def _multi_stack_merge_enabled(ctx: FlowContext) -> bool:
+    return ctx.config.start_at != "fix" and not ctx.data["single_stack_mode"]
+
+
+def _single_stack_merge_enabled(ctx: FlowContext) -> bool:
+    return ctx.config.start_at != "fix" and ctx.data["single_stack_mode"]
+
+
+def _findings_out_enabled(ctx: FlowContext) -> bool:
+    # Two-phase findings artifact (Phase A): emit the artifact and STOP —
+    # never post to the PR and never apply fixes. Phase B posts later.
+    return ctx.config.findings_out is not None
+
+
+# The deep pipeline as a registered flow (D-07):
+#
+#     exploration pre-scan -> TTT intent -> TTT alternative-review ->
+#     per-stack reviews -> per-stack parse + dedup -> arbiter ->
+#     cross-stack merge (or the tiny-diff single-stack bypass) ->
+#     findings-out stop / post-review -> fix gate -> verify -> fix ->
+#     test -> commit.
+#
+# ``register_builtins`` registers :data:`STEPS` and the ``deep`` flow
+# definition; ``run_deep`` keeps the preamble and delegates here via
+# ``run_flow``. The old imperative body's tier / single_stack_mode /
+# ``start_at`` / ``findings_out`` conditions are the ``enabled`` predicates
+# above (whole-block gates) or stay inside step bodies (resume branches).
+STEPS: tuple[FlowStep, ...] = (
+    FlowStep(name="exploration", run=_step_exploration),
+    FlowStep(name="intent", run=_step_intent, enabled=_fresh_ttt),
+    FlowStep(name="alternatives", run=_step_alternatives, config_phase="wonder", enabled=_fresh_ttt),
+    FlowStep(name="per-stack-reviews", run=_step_per_stack_reviews, config_phase="per_stack_review"),
+    FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_before_fix_resume),
+    FlowStep(name="arbiter", run=_step_arbiter, enabled=_multi_stack_merge_enabled),
+    FlowStep(
+        name="cross-stack-merge", run=_step_cross_stack_merge, config_phase="merge", enabled=_multi_stack_merge_enabled
+    ),
+    FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_single_stack_merge_enabled),
+    FlowStep(name="load-items", run=_step_load_items),
+    FlowStep(name="findings-out", run=_step_findings_out, enabled=_findings_out_enabled),
+    FlowStep(name="post-review", run=_step_post_review, enabled=_before_fix_resume),
+    FlowStep(name="fix-gate", run=_step_fix_gate),
+    FlowStep(name="verify", run=_step_verify),
+    FlowStep(name="fix", run=_step_fix),
+    FlowStep(name="test", run=_step_test),
+    # config_phase "fix" mirrors the old body's use of the fix backend for the commit.
+    FlowStep(name="commit", run=_step_commit, config_phase="fix"),
+)
+
+
 async def run_deep(config: RunConfig, work: WorkContext) -> int:
     """Execute the deep-review pipeline (D-07).
 
-    Composes exploration pre-scan, TTT, per-stack fan-out, per-stack parse,
-    dedup pre-filter, cross-stack merge, and the optional fix gate into a
-    single async flow. Supports stage-granular resume via
+    Runs the preamble (diff computation, stack detection, tiny-diff collapse,
+    trajectory recorder, pre-flight notice) and delegates the pipeline to the
+    registered ``deep`` flow (:data:`STEPS`) via ``run_flow``. Supports
+    stage-granular resume via
     ``config.start_at in ("ttt", "per-stack", "merge", "fix")``.
 
     Args:
@@ -1262,7 +1325,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
     # Diff is immutable from here on; compute the tiering verdict once and reuse
-    # it at both the exploration gate and the alternatives gate below.
+    # it at both the exploration step's gate and the alternatives step's gate.
     tier = select_tier(count_changed_files(diff))
     dd = deep_dir(target_dir)
 
@@ -1335,10 +1398,8 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             exploration_available=EXPLORATION_AVAILABLE,
         )
 
-        # Flow context (steps communicate through ctx.data). The imperative
-        # step calls below become registered flow steps run via the engine in
-        # a later task; ctx shares run_deep's backend cache so instance-sharing
-        # semantics are unchanged during the migration.
+        # Flow context (steps communicate through ctx.data); ctx shares
+        # run_deep's backend cache so instance-sharing semantics are unchanged.
         ctx = FlowContext(
             config=config,
             work=work,
@@ -1359,60 +1420,8 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             _backend_cache=backend_cache,
         )
 
-        # Exploration pre-scan (D-43).
-        await _step_exploration(ctx)
-
         try:
-            if config.start_at not in ("per-stack", "merge", "fix"):
-                await _step_intent(ctx)
-                await _step_alternatives(ctx)
-
-            await _step_per_stack_reviews(ctx)
-
-            if config.start_at != "fix":
-                signal = await _step_per_stack_parse(ctx)
-                if isinstance(signal, Stop):
-                    return signal.exit_code
-
-                if not single_stack_mode:
-                    await _step_arbiter(ctx)
-                    await _step_cross_stack_merge(ctx)
-                else:
-                    await _step_single_stack_merge(ctx)
-
-            signal = await _step_load_items(ctx)
-            if isinstance(signal, Stop):
-                return signal.exit_code
-
-            # Two-phase findings artifact (Phase A). When --findings-out is set,
-            # convert the canonical merged items into the strict-schema artifact and
-            # STOP: never post to the PR and never apply fixes. Phase B posts later.
-            if config.findings_out is not None:
-                return (await _step_findings_out(ctx)).exit_code
-
-            # `post_review_to_pr_from_report` is a non-idempotent GitHub write, so
-            # `--start-at fix` (resume after the merged report) must skip it to
-            # avoid duplicate inline reviews on reruns.
-            if config.start_at != "fix":
-                await _step_post_review(ctx)
-
-            signal = await _step_fix_gate(ctx)
-            if isinstance(signal, Stop):
-                return signal.exit_code
-
-            await _step_verify(ctx)
-
-            signal = await _step_fix(ctx)
-            if isinstance(signal, Stop):
-                return signal.exit_code
-
-            signal = await _step_test(ctx)
-            if isinstance(signal, Stop):
-                return signal.exit_code
-
-            await _step_commit(ctx)
-            return 0
-
+            return await run_flow(ctx.registry, "deep", ctx)
         finally:
             exploration_cleanup = target_dir / ".daydream" / "exploration"
             if exploration_cleanup.is_dir():

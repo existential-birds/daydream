@@ -131,9 +131,14 @@ def _is_comment_mode(ctx: FlowContext) -> bool:
 
 
 STEPS: tuple[FlowStep, ...] = (
-    FlowStep(name="exploration", run=_step_exploration),
-    FlowStep(name="intent", run=_step_intent),
-    FlowStep(name="alternatives", run=_step_alternatives, config_phase="wonder"),
+    # Phase names are a single registry namespace and the deep flow owns the
+    # plain "exploration"/"intent"/"alternatives" names, so this flow's
+    # variants get flow-qualified names (the shallow-exploration convention).
+    # config_phase keeps each step's original per-phase config key, so
+    # [tool.daydream.phases.*] resolution is unchanged.
+    FlowStep(name="review-exploration", run=_step_exploration, config_phase="exploration"),
+    FlowStep(name="review-intent", run=_step_intent, config_phase="intent"),
+    FlowStep(name="review-alternatives", run=_step_alternatives, config_phase="wonder"),
     FlowStep(name="emit-findings", run=_step_emit_findings, enabled=_is_review_with_findings_out),
     FlowStep(name="no-issues-exit", run=_step_no_issues_exit),
     FlowStep(name="post-comments", run=_step_post_comments, enabled=_is_comment_mode),

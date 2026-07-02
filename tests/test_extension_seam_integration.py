@@ -124,7 +124,7 @@ async def test_fork_disables_respond_step(
 async def test_fork_inserts_custom_phase_into_review_flow(
     ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A daydream_ext phase inserted after ``alternatives`` runs in ``--review``.
+    """A daydream_ext phase inserted after ``review-alternatives`` runs in ``--review``.
 
     Observable outcomes: exit 0 and the custom phase's prompt reached the
     backend through the registered ``review`` flow.
@@ -139,7 +139,7 @@ async def test_fork_inserts_custom_phase_into_review_flow(
         "                    phase=DaydreamPhase.REVIEW)\n"
         "def register(r):\n"
         "    r.register_phase(FlowStep(name='ro_audit', run=_ro))\n"
-        "    r.insert_after('review', anchor='alternatives', step='ro_audit')\n"
+        "    r.insert_after('review', anchor='review-alternatives', step='ro_audit')\n"
     )
     backend = RecordingBackend()
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
@@ -230,3 +230,49 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
 
     assert "RO-SHALLOW-PROMPT" in backend.prompts, "fork phase never reached the backend"
     assert rc == 0
+
+
+# Distinctive literal from ``build_alternative_review_prompt``'s body: present in
+# every alternatives prompt, absent from every other prompt builder.
+ALTERNATIVES_MARKER = "Given this intent, explore the codebase and evaluate the implementation"
+
+
+async def test_fork_disables_alternatives_in_deep(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daydream_ext removal of ``alternatives`` skips only that step in deep.
+
+    Observable outcomes: exit 0, the deep pipeline still ran (the intent prompt
+    reached the backend), and the removed alternatives step never sent its
+    prompt. The presence + exit-code assertions make the absence assertion
+    discriminating: a run that no-ops entirely fails the presence check.
+    """
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
+
+    ext_dir.write_module(
+        "DAYDREAM_EXT_API = 1\n"
+        "def register(r):\n"
+        "    r.remove('deep', 'alternatives')\n"
+    )
+    backend = _install_stub_backend(monkeypatch, multi_stack_target)
+    _silence(monkeypatch)
+
+    # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+        )
+    )
+
+    prompts = [call["prompt"] for call in backend.calls]
+    assert rc == 0
+    assert any("intent" in p.lower() for p in prompts)  # pipeline still ran
+    assert not any(ALTERNATIVES_MARKER in p for p in prompts)  # removed step never sent its prompt

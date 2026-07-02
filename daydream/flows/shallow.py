@@ -396,15 +396,17 @@ def _iterate_max_iterations(ctx: FlowContext) -> int:
 
 
 STEPS: tuple[FlowStep, ...] = (
-    # "exploration" is already a registered phase (the review flow's step, a
-    # different body: phase_scope + ctx.data["diff"]); phase names are a
-    # single registry namespace, so the shallow variant gets a unique name.
+    # Phase names are a single registry namespace: the deep flow owns the
+    # plain "exploration"/"fix"/"test" names, so the shallow variants get
+    # flow-qualified names. config_phase keeps each step's original
+    # per-phase config key, so [tool.daydream.phases.*] resolution is
+    # unchanged.
     FlowStep(name="shallow-exploration", run=_step_exploration, config_phase="exploration"),
     FlowStep(name="loop-preflight", run=_step_loop_preflight, enabled=_is_loop_mode),
     FlowStep(name="review", run=_step_review, enabled=_review_enabled),
     FlowStep(name="parse", run=_step_parse, enabled=_parse_fix_enabled),
-    FlowStep(name="fix", run=_step_fix, enabled=_parse_fix_enabled),
-    FlowStep(name="test", run=_step_test),
+    FlowStep(name="shallow-fix", run=_step_fix, config_phase="fix", enabled=_parse_fix_enabled),
+    FlowStep(name="shallow-test", run=_step_test, config_phase="test"),
     # config_phase "fix" mirrors the old body's use of the fix backend for the commit.
     FlowStep(name="commit-iteration", run=_step_commit_iteration, config_phase="fix", enabled=_is_loop_mode),
     FlowStep(name="loop-exhausted", run=_step_loop_exhausted, enabled=_is_loop_mode),
@@ -418,7 +420,7 @@ FLOW: tuple[FlowEntry, ...] = (
     "loop-preflight",
     LoopGroup(
         name="iterate",
-        steps=("review", "parse", "fix", "test", "commit-iteration"),
+        steps=("review", "parse", "shallow-fix", "shallow-test", "commit-iteration"),
         max_iterations=_iterate_max_iterations,
     ),
     "loop-exhausted",
