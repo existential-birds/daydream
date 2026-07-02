@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-02
+
+### Added
+
+- **extensions:** Versioned extension seam with `daydream_ext` discovery, flow engine, and `daydream ext validate` CLI ([#241](https://github.com/existential-birds/daydream/pull/241))
+
+  Daydream now has a first-class, versioned extension API. An installed `daydream_ext` package is auto-discovered with a version gate and exposed through a `Registry` on a `ContextVar`. The registry routes skill slots (stack, structural, pr-feedback, phase-bound), named prompts (with wholesale override), and stack rules through a single seam, replacing scattered hardcoded lookups. All four flows (deep, shallow, review, pr-feedback) now run through a `run_flow()` engine with enabled gating, `Stop`/`BreakLoop` control, and loop groups. New `daydream ext validate` CLI resolve-checks the entire extension registry.
+
+- **deep:** `--findings-out` drives the deep pipeline and stops before post/fix ([#239](https://github.com/existential-birds/daydream/pull/239))
+
+  The single-file review-bot workflow now points at the default deep pipeline so the bot consumes the validated, arbiter-merged review. When `--findings-out` is set, the orchestrator writes the artifact from merged-items.json and returns before the PR-post block and apply-fixes gate. Also removes the vestigial `--plan`/ENVISION advisory pass and fixes `--review` to stop after findings instead of writing a stray plan file.
+
+- **review:** Structural evidence gate drops speculative/no-evidence findings before merge ([#236](https://github.com/existential-birds/daydream/pull/236))
+
+  Adds a first-class `evidence` field to all finding schemas. A structural gate in the merge path drops any finding without a grounded citation (path:line) before it reaches merged-items.json, review-output.md, the fix stage, PR posting, or the benchmark. Dropped items are logged to a `dropped-speculative.json` audit sidecar. Applies to both the cross-stack merge and the tiny-diff single-stack bypass. The confidence enum collapses to HIGH/MEDIUM (LOW/no-evidence removed).
+
+- **prompts:** Eliminate speculative and breadth-padding generation in review prompts ([#238](https://github.com/existential-birds/daydream/pull/238))
+
+  Removes language that invites evidence-free guesses and scope creep: drops the LOW/no-evidence confidence tier, replaces "Prefer LOW over MEDIUM" with a grounding directive, removes the "Would you have done this differently?" breadth invitation from alternative review, and requires concrete recommendations per issue rather than just the problem.
+
+- **review:** Wire review-verification-protocol into structural and generic-fallback reviewers ([#235](https://github.com/existential-birds/daydream/pull/235))
+
+  The structural and generic-fallback review prompts now load the review-verification-protocol skill (anchor/evidence/severity gates). The verification prompt adds a gate-0 anti-confabulation echo requirement. Product default is unchanged: verdicts stay advisory, zero findings dropped.
+
+- **templates:** Optional single-file review-bot workflow (drops `actions: write`) ([#237](https://github.com/existential-birds/daydream/pull/237))
+
+  Adds `daydream/templates/workflows/single/daydream.yml` as an optional manual-copy alternative to the three-file split. It chains gate, analyze, and post as `needs:`-ordered jobs in one workflow run, replacing the cross-workflow `workflow_dispatch` that required `actions: write`. The privilege split is preserved at the job level: gate holds the App key but no code, analyze holds PR code but no App key, post holds the App key but no PR code. Every action is pinned to a full commit SHA.
+
+- **training:** Eval-on-by-default and recommended-change patch capture ([#234](https://github.com/existential-birds/daydream/pull/234))
+
+  Eval is now on by default (`--eval` becomes `--no-eval` opt-out); `analyze_session` runs on every archive unless explicitly skipped, populating all four eval metrics (grounding_rate, total_findings, coverage_ratio, cost_per_finding_usd). A separate `recommended.patch` (daydream's proposed diff) is captured distinct from the PR-under-review `diff.patch`, with backward-compat fallback for legacy archives. Untracked files created during the fix phase are included in the capture.
+
 ## [0.21.0] - 2026-06-30
 
 ### Added
@@ -687,7 +719,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.21.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/existential-birds/daydream/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/existential-birds/daydream/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/existential-birds/daydream/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/existential-birds/daydream/compare/v0.18.0...v0.19.0
