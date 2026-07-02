@@ -275,9 +275,11 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
 
     chosen_model = "fixture-model-xyz"
 
+    # ``FlowContext.backend_for`` resolves through ``daydream.runner._resolve_backend``
+    # (late import) and passes ``cache=`` by keyword.
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, _cache=None: _StubBackend(chosen_model),
+        lambda _config, _phase, cache=None: _StubBackend(chosen_model),
     )
 
     async def _no_op_fetch(*_args, **_kwargs):
@@ -286,8 +288,9 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
     async def _empty_parse(*_args, **_kwargs):
         return []
 
-    monkeypatch.setattr("daydream.runner.phase_fetch_pr_feedback", _no_op_fetch)
-    monkeypatch.setattr("daydream.runner.phase_parse_feedback", _empty_parse)
+    # The fetch/parse call sites moved into the registered pr-feedback flow steps.
+    monkeypatch.setattr("daydream.flows.pr_feedback.phase_fetch_pr_feedback", _no_op_fetch)
+    monkeypatch.setattr("daydream.flows.pr_feedback.phase_parse_feedback", _empty_parse)
 
     captured: list[str] = []
     monkeypatch.setattr(

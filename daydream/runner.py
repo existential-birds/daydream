@@ -5,7 +5,7 @@ the workspace via :func:`daydream.workspace.open_workspace` and then dispatches
 to a private helper based on ``config.bot`` / ``config.output_mode`` /
 ``config.shallow``::
 
-    bot set (feedback mode)  -> _run_pr_feedback (PR feedback flow)
+    bot set (feedback mode)  -> _run_pr_feedback (registered "pr-feedback" flow)
     output_mode == "comment" -> _run_comment    (review + post inline PR comments)
     output_mode == "review"  -> _run_review     (review report only, no posting)
     output_mode == "loop":
@@ -15,6 +15,12 @@ to a private helper based on ``config.bot`` / ``config.output_mode`` /
 ``run_feedback`` is the entry point used by the ``daydream feedback <pr#>``
 subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
 :func:`run`.
+
+``run`` builds the per-run extension registry (builtins + optional
+``daydream_ext``) and sets it on the registry ContextVar before dispatch;
+migrated flows (pr-feedback) keep their preamble in the flow helper and run
+their phase sequence through :func:`daydream.flows.run_flow` against the
+registered flow definition.
 """
 
 import os
@@ -51,11 +57,11 @@ from daydream.config import (
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
-from daydream.extensions import build_registry, get_registry
+from daydream.extensions import ExtensionError, build_registry, get_registry
 from daydream.extensions.loader import set_registry
+from daydream.flows import FlowContext, run_flow
 from daydream.git_ops import GitError
 from daydream.phases import (
-    FixResult,
     _detect_default_branch,
     _git_branch,
     _git_diff,
@@ -65,10 +71,8 @@ from daydream.phases import (
     phase_commit_iteration,
     phase_commit_push,
     phase_commit_push_auto,
-    phase_fetch_pr_feedback,
     phase_fix,
     phase_parse_feedback,
-    phase_respond_pr_feedback,
     phase_review,
     phase_test_and_heal,
     phase_understand_intent,
@@ -500,7 +504,11 @@ async def run(config: RunConfig | None = None) -> int:
 
     # Build the per-run registry (builtins + optional daydream_ext) and set it
     # on the ContextVar so every downstream phase resolves through it.
-    set_registry(build_registry())
+    try:
+        set_registry(build_registry())
+    except ExtensionError as exc:
+        print_error(console, "Extension Error", str(exc))
+        return 1
 
     # Resolve target dir outside the workspace context so path-validation errors
     # short-circuit before any git work.
@@ -623,10 +631,11 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
 
 
 async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
-    """Today's PR feedback body, refactored to receive ``work`` from the dispatch.
+    """PR-feedback preamble; the phase sequence runs through the flow registry.
 
-    Fetches bot review comments, parses them, applies fixes one-by-one,
-    commits/pushes, and posts a "fixed" reply on each addressed comment.
+    Validates args, opens the trajectory recorder, prints the info block,
+    then delegates to the registered ``pr-feedback`` flow (fetch -> parse ->
+    fix -> commit/push -> respond; steps in ``daydream/flows/pr_feedback.py``).
     """
     if config.pr_number is None or config.bot is None:
         print_error(
@@ -639,11 +648,6 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
     pr_number = config.pr_number
     bot = config.bot
     target_dir = work.repo
-
-    backend_cache: dict[tuple[str, str | None], Backend] = {}
-    review_backend = _resolve_backend(config, "review", backend_cache)
-    parse_backend = _resolve_backend(config, "parse", backend_cache)
-    fix_backend = _resolve_backend(config, "fix", backend_cache)
 
     session_id = str(uuid.uuid4())
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
@@ -658,72 +662,20 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
         pr_repo=config.pr_repo,
         on_write=_make_archive_callback(config, target_dir, work),
     ):
+        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx.data["pr_number"] = pr_number
+        ctx.data["bot"] = bot
+
         console.print()
         print_info(console, f"PR feedback mode: PR #{pr_number}")
         print_info(console, f"Bot: {bot}")
         print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {review_backend.model}")
+        print_info(console, f"Model: {ctx.backend_for('review').model}")
         # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
-        await phase_fetch_pr_feedback(review_backend, work, pr_number, bot)
-
-        try:
-            async with phase_scope(DaydreamPhase.PARSE):
-                feedback_items = await phase_parse_feedback(parse_backend, work)
-        except ValueError:
-            print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
-            return 1
-
-        if not feedback_items:
-            print_info(console, "No actionable feedback found in PR comments.")
-            return 0
-
-        # Fix sequentially to avoid concurrent access to one mutable backend.
-        results: list[FixResult] = []
-        total_items = len(feedback_items)
-        async with phase_scope(DaydreamPhase.FIX):
-            for idx, item in enumerate(feedback_items, start=1):
-                try:
-                    await phase_fix(fix_backend, work, item, idx, total_items)
-                    results.append((item, True, None))
-                except Exception as e:
-                    results.append((item, False, f"{type(e).__name__}: {e}"))
-
-        successful = [r for r in results if r[1]]
-        failed = [r for r in results if not r[1]]
-
-        if not successful:
-            print_error(
-                console,
-                "All Fixes Failed",
-                f"All {len(failed)} fix(es) failed. Aborting before commit.",
-            )
-            return 1
-
-        try:
-            await phase_commit_push_auto(
-                review_backend, work, items=[item for item, _ok, _err in results if _ok],
-            )
-        except Exception as e:
-            print_error(console, "Commit/Push Failed", str(e))
-            return 1
-
-        try:
-            await phase_respond_pr_feedback(review_backend, work, pr_number, bot, results)
-        except Exception as e:
-            print_warning(console, f"Failed to respond to PR comments: {e}")
-            print_info(console, "Fixes were already pushed successfully.")
-
-        console.print()
-        print_success(
-            console,
-            f"PR #{pr_number}: {len(successful)} fix(es) applied"
-            + (f", {len(failed)} failed" if failed else ""),
-        )
-
-        return 0
+        return await run_flow(ctx.registry, "pr-feedback", ctx)
 
 
 # Helper: comment mode (--comment)

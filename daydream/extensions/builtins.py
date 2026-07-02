@@ -2,7 +2,8 @@
 
 ``register_builtins(registry)`` seeds the registry with everything daydream
 does today: built-in skill slots, prompt names, and flow definitions. It grows
-across Tasks 5-15 of the extension-seam plan; for now it seeds the skill slots.
+across Tasks 5-15 of the extension-seam plan; for now it seeds the skill
+slots, the named prompts, and the pr-feedback flow.
 
 Uses only function-local late imports (import-cycle guard): this module must
 not import from ``daydream.runner`` or ``daydream.phases`` at module level.
@@ -27,6 +28,7 @@ def register_builtins(registry: Registry) -> None:
     registry.override_skill("pr-feedback-respond", config.PR_FEEDBACK_RESPOND_SKILL)
 
     _register_builtin_prompts(registry)
+    _register_builtin_flows(registry)
 
 
 def _register_builtin_prompts(registry: Registry) -> None:
@@ -48,3 +50,12 @@ def _register_builtin_prompts(registry: Registry) -> None:
     registry.override_prompt("arbiter", deep_prompts.build_arbiter_prompt)
     registry.override_prompt("merge", deep_prompts.build_merge_prompt)
     registry.override_prompt("verify", deep_prompts.build_verification_prompt)
+
+
+def _register_builtin_flows(registry: Registry) -> None:
+    """Seed the built-in flow definitions (grows across Tasks 9-15)."""
+    from daydream.flows import pr_feedback
+
+    for step in pr_feedback.STEPS:
+        registry.register_phase(step)
+    registry.set_flow("pr-feedback", [step.name for step in pr_feedback.STEPS])

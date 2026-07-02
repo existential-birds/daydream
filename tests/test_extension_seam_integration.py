@@ -1,0 +1,120 @@
+"""Real-path tests: fork flow mutations reach the registered flow definitions.
+
+Drives the production entrypoints (``runner.run_feedback`` / ``runner.run``)
+against a real temp git repo, mocking ONLY the backend seam
+(``daydream.runner.create_backend``) per the testing standard. A
+``daydream_ext`` package written by the ``ext_dir`` fixture mutates the flow
+definitions (remove/insert steps); assertions are on the prompts the backend
+actually received and the exit code. Grows across Tasks 9-15 of the
+extension-seam plan, one flow migration at a time.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from daydream import runner
+from daydream.backends import ResultEvent, TextEvent
+from daydream.runner import RunConfig
+from tests.conftest import ExtDir
+
+
+class RecordingBackend:
+    """Prompt-recording stub modelled on ``_PRFeedbackStubBackend``.
+
+    Dispatches on prompt content just enough to drive the pr-feedback flow
+    past every gate: writes the review-output file for the fetch prompt,
+    yields ONE parseable feedback item for the parse prompt, and no-ops
+    everything else (fix, commit, respond).
+    """
+
+    model = "mock-model"
+    fanout_concurrency = 4
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        self.prompts.append(prompt)
+        pl = prompt.lower()
+
+        if "fetch-pr-feedback" in pl:
+            (cwd / ".review-output.md").write_text(
+                "# PR Feedback\n\n"
+                "## x[bot]\n\n"
+                "1. [api.py:1] `hello()` returns 'universe' but the docstring "
+                "says 'world' — align the return value.\n"
+            )
+            yield TextEvent(text="")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        if "extract only actionable issues" in pl:
+            yield TextEvent(text="")
+            yield ResultEvent(
+                structured_output={
+                    "issues": [
+                        {
+                            "id": 1,
+                            "description": "Align hello() return value with docstring",
+                            "file": "api.py",
+                            "line": 1,
+                            "confidence": "HIGH",
+                            "rationale": "return value diverges from docstring",
+                            "evidence": "api.py:1",
+                        }
+                    ]
+                },
+                continuation=None,
+            )
+            return
+
+        yield TextEvent(text="")
+        yield ResultEvent(structured_output=None, continuation=None)
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        # Mirror ClaudeBackend: append args so the test can read the slot from the prompt.
+        result = f"/{skill_key}"
+        if args:
+            result = f"{result} {args}"
+        return result
+
+
+async def test_fork_disables_respond_step(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daydream_ext removal of ``respond-feedback`` skips only that step.
+
+    Observable outcomes: exit 0, the flow still ran (fetch prompt reached the
+    backend), and the removed respond step never invoked its skill.
+    """
+    ext_dir.write_module(
+        "DAYDREAM_EXT_API = 1\n"
+        "def register(r):\n"
+        "    r.remove('pr-feedback', 'respond-feedback')\n"
+    )
+    backend = RecordingBackend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+
+    rc = await runner.run_feedback(
+        RunConfig(target=str(multi_stack_target), bot="x[bot]", non_interactive=True), pr=1
+    )
+
+    assert rc == 0
+    assert any("fetch" in p.lower() for p in backend.prompts)  # flow still ran
+    assert not any("respond-pr-feedback" in p for p in backend.prompts)  # removed step never invoked
