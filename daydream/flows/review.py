@@ -137,8 +137,8 @@ STEPS: tuple[FlowStep, ...] = (
     # config_phase keeps each step's original per-phase config key, so
     # [tool.daydream.phases.*] resolution is unchanged.
     FlowStep(name="review-exploration", run=_step_exploration, config_phase="exploration"),
-    FlowStep(name="review-intent", run=_step_intent, config_phase="intent"),
-    FlowStep(name="review-alternatives", run=_step_alternatives, config_phase="wonder"),
+    FlowStep(name="review-intent", run=_step_intent, config_phase="review"),
+    FlowStep(name="review-alternatives", run=_step_alternatives, config_phase="review"),
     FlowStep(name="emit-findings", run=_step_emit_findings, enabled=_is_review_with_findings_out),
     FlowStep(name="no-issues-exit", run=_step_no_issues_exit),
     FlowStep(name="post-comments", run=_step_post_comments, enabled=_is_comment_mode),

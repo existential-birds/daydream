@@ -137,8 +137,8 @@ an existing config key.
 | # | Step | Config key |
 |---|------|------------|
 | 1 | `review-exploration` | `exploration` |
-| 2 | `review-intent` | `intent` |
-| 3 | `review-alternatives` | `wonder` |
+| 2 | `review-intent` | `review` |
+| 3 | `review-alternatives` | `review` |
 | 4 | `emit-findings` | `emit-findings` |
 | 5 | `no-issues-exit` | `no-issues-exit` |
 | 6 | `post-comments` | `post-comments` |

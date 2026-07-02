@@ -137,7 +137,7 @@ def _nearest_ancestor_stack(path: str, assigned: dict[str, str]) -> str | None:
 def _match_stack_rule(path: str, rules: tuple[StackRule, ...]) -> StackRule | None:
     """Return the first fork rule whose glob matches ``path`` (registration order)."""
     for rule in rules:
-        if any(fnmatch.fnmatch(path, pattern) for pattern in rule.patterns):
+        if any(fnmatch.fnmatchcase(path, pattern) for pattern in rule.patterns):
             return rule
     return None
 
