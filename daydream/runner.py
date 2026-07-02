@@ -47,13 +47,11 @@ from daydream.backends import Backend, create_backend
 from daydream.config import (
     PHASE_DEFAULT_MODELS,
     REVIEW_SKILLS,
-    SKILL_MAP,
     ReviewSkillChoice,
 )
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext
-from daydream.extensions import ExtensionError, build_registry, get_registry
-from daydream.extensions.loader import set_registry
+from daydream.extensions import ExtensionError, build_registry, get_registry, set_registry
 from daydream.flows import FlowContext, run_flow
 from daydream.git_ops import GitError
 from daydream.phases import (
@@ -888,9 +886,9 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
     skill: str | None = None
     if config.start_at == "review":
         if config.skill is not None:
-            if config.skill in SKILL_MAP:
-                skill = SKILL_MAP[config.skill]
-            elif config.skill in REVIEW_SKILLS.values():
+            if (resolved := get_registry().skill_if_registered(f"stack:{config.skill}")) is not None:
+                skill = resolved
+            elif config.skill in get_registry().skill_slots().values():
                 skill = config.skill
             else:
                 print_error(console, "Invalid Skill", f"'{config.skill}' is not a valid skill")

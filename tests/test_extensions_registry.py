@@ -7,6 +7,7 @@ import pytest
 from daydream.extensions import (
     ExtensionError,
     FlowStep,
+    LoopGroup,
     Registry,
     UnresolvedExtensionError,
 )
@@ -57,6 +58,15 @@ def test_introspection_lists_names_in_registration_order() -> None:
     assert reg.flow_names() == ("deep", "custom")
     assert reg.skill_slots() == {"stack:python": "ro:review-python"}
     assert reg.prompt_names() == ("review",)
+
+
+def test_remove_loop_internal_step_raises_descriptive_error() -> None:
+    """remove() names the containing LoopGroup when the step is loop-internal."""
+    reg = Registry()
+    loop = LoopGroup(name="fix-loop", steps=("inner_step",), max_iterations=lambda ctx: 3)
+    reg.set_flow("deep", [loop])
+    with pytest.raises(UnresolvedExtensionError, match="inside loop group 'fix-loop'"):
+        reg.remove("deep", "inner_step")
 
 
 def test_stack_keys_returns_stack_slot_keys_only() -> None:

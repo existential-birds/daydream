@@ -103,6 +103,37 @@ async def test_fork_overrides_pr_feedback_fetch_skill(
     assert not any("beagle-core:fetch-pr-feedback" in p for p in backend.prompts)
 
 
+async def test_stack_slot_override_reaches_shallow_skill_flag(
+    ext_dir: ExtDir, feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--skill python`` resolves through the ``stack:python`` slot, not SKILL_MAP.
+
+    With a daydream_ext override of ``stack:python``, the shallow flow's
+    review prompt must carry the overridden invocation and never the built-in
+    ``beagle-python:review-python`` literal.
+    """
+    ext_dir.write_module(
+        "DAYDREAM_EXT_API = 1\n"
+        "def register(r):\n"
+        "    r.override_skill('stack:python', 'ro-python:review-python')\n"
+    )
+    backend = RecordingBackend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+
+    config = RunConfig(
+        target=str(feature_branch_repo),
+        shallow=True,
+        skill="python",
+        non_interactive=True,
+        cleanup=False,
+    )
+    rc = await runner.run(config)
+
+    assert rc == 0
+    assert any("ro-python:review-python" in p for p in backend.prompts)
+    assert not any("beagle-python:review-python" in p for p in backend.prompts)
+
+
 async def test_phase_review_slot_supplies_shallow_skill(
     ext_dir: ExtDir, feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

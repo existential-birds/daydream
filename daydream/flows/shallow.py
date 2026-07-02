@@ -39,6 +39,7 @@ from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.exploration import ExplorationContext, safe_explore
 from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
 from daydream.extensions.api import BreakLoop, FlowStep, LoopGroup, Stop
+from daydream.extensions.registry import FlowEntry
 from daydream.git_ops import GitError
 from daydream.phases import (
     _git_diff,
@@ -68,8 +69,6 @@ from daydream.ui import (
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
-
-FlowEntry = str | LoopGroup
 
 
 async def _step_exploration(ctx: FlowContext) -> None:

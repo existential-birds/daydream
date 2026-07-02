@@ -24,7 +24,7 @@ from daydream.extensions.api import (
 
 if TYPE_CHECKING:
     from daydream.backends import Backend
-    from daydream.extensions.registry import Registry
+    from daydream.extensions.registry import FlowEntry, Registry
     from daydream.runner import RunConfig
     from daydream.workspace import WorkContext
 
@@ -58,10 +58,10 @@ class FlowContext:
         return _resolve_backend(self.config, phase, cache=self._backend_cache)
 
 
-def _resolve_steps(registry: Registry, flow_name: str) -> dict[str, FlowStep]:
+def _resolve_steps(registry: Registry, flow_name: str, entries: list[FlowEntry]) -> dict[str, FlowStep]:
     """Pre-flight resolve pass: every entry (including loop-group bodies) must be a registered phase."""
     steps: dict[str, FlowStep] = {}
-    for entry in registry.flow(flow_name):
+    for entry in entries:
         names = (entry,) if isinstance(entry, str) else entry.steps
         for name in names:
             try:
@@ -107,8 +107,9 @@ async def run_flow(registry: Registry, flow_name: str, ctx: FlowContext) -> int:
     falling off the end returns 0. A ``BreakLoop`` outside a loop group is
     ignored.
     """
-    steps = _resolve_steps(registry, flow_name)
-    for entry in registry.flow(flow_name):
+    entries = registry.flow(flow_name)
+    steps = _resolve_steps(registry, flow_name, entries)
+    for entry in entries:
         if isinstance(entry, str):
             signal = await _run_step(steps[entry], ctx)
         else:

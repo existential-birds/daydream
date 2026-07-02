@@ -105,6 +105,14 @@ class Registry:
         for index, entry in enumerate(entries):
             if self._entry_name(entry) == name:
                 return index
+        # Check whether the name exists inside a LoopGroup body so the error
+        # message names the containing group instead of implying the step is absent.
+        for entry in entries:
+            if isinstance(entry, LoopGroup) and name in entry.steps:
+                raise UnresolvedExtensionError(
+                    f"flow '{flow_name}' step '{name}' is inside loop group '{entry.name}'"
+                    f" and cannot be addressed directly; {_VALIDATE_HINT}"
+                )
         raise UnresolvedExtensionError(f"flow '{flow_name}' has no step '{name}'; {_VALIDATE_HINT}")
 
     # -- skill slots ------------------------------------------------------

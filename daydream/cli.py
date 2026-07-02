@@ -1260,21 +1260,19 @@ def _print_ext_help(*, error: bool = False) -> None:
 def _ext_resolve_failure(registry: "Registry") -> str | None:
     """Resolve-check the registry; return the first failure message, or None.
 
-    Mirrors ``run_flow``'s pre-flight pass (every flow entry — including
+    Runs ``run_flow``'s pre-flight pass (every flow entry — including
     loop-group bodies — must name a registered phase), then checks that every
     step's config key is a string and that every skill slot and fork stack
     rule carries a non-empty skill invocation.
     """
     from daydream.extensions import UnresolvedExtensionError
+    from daydream.flows.engine import _resolve_steps
 
     for flow_name in registry.flow_names():
-        for entry in registry.flow(flow_name):
-            names = (entry,) if isinstance(entry, str) else entry.steps
-            for name in names:
-                try:
-                    registry.phase(name)
-                except UnresolvedExtensionError:
-                    return f"flow '{flow_name}' references step '{name}', which is not a registered phase"
+        try:
+            _resolve_steps(registry, flow_name, registry.flow(flow_name))
+        except UnresolvedExtensionError as exc:
+            return str(exc)
     for name in registry.phase_names():
         phase_key = registry.phase(name).phase_key
         if not isinstance(phase_key, str):
