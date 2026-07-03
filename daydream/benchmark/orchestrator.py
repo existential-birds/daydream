@@ -123,7 +123,7 @@ def run_bench(config: BenchConfig) -> int:
     """
     judge_model = ""
     if config.score:
-        preflight_judge_env()
+        preflight_judge_env(judge_route=config.judge_route)
         judge_model = resolve_judge_model(config.model)
 
     data_path = _benchmark_data_path(config)

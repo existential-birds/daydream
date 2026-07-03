@@ -204,6 +204,27 @@ def test_bench_subcommand_preflights_through_compiled_entrypoint(tmp_path):
     assert r.returncode != 0 and "MARTIAN_API_KEY" in (r.stdout + r.stderr)
 
 
+def test_direct_anthropic_preflight_fails_through_compiled_entrypoint(tmp_path):
+    env = {**os.environ, "MARTIAN_MODEL": "claude-opus-4-5-20251101"}
+    env.pop("ANTHROPIC_API_KEY", None)
+    r = subprocess.run(  # noqa: S603 - args are not user-controlled
+        [  # noqa: S607 - daydream is a trusted command
+            "daydream",
+            "bench",
+            "--benchmark-repo",
+            str(tmp_path),
+            "--judge-route",
+            "anthropic-direct",
+            "--score",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+    )
+    assert r.returncode != 0 and "ANTHROPIC_API_KEY" in (r.stdout + r.stderr)
+
+
 def test_bench_dotenv_autoloads_credential_through_compiled_entrypoint(tmp_path):
     (tmp_path / ".env").write_text("MARTIAN_API_KEY=sk-from-dotenv\n")
     env = {**os.environ}

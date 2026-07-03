@@ -1,7 +1,7 @@
 """Judge-step scoring helpers for the benchmark harness.
 
 Exports:
-    preflight_judge_env: Verify the judge credential is present in the environment.
+    preflight_judge_env: Verify the route-specific judge credential/config is present.
     resolve_judge_model: Resolve the judge model from --model or the MARTIAN_MODEL env.
     model_results_dir: Resolve the per-model results directory for a benchmark repo.
     run_scoring: Run step2/2.5/3 and parse the resulting daydream precision/recall.
@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 JUDGE_API_KEY_ENV = "MARTIAN_API_KEY"
+ANTHROPIC_JUDGE_API_KEY_ENV = "ANTHROPIC_API_KEY"
 JUDGE_MODEL_ENV = "MARTIAN_MODEL"
 JUDGE_BASE_URL_ENV = "MARTIAN_BASE_URL"
 
@@ -56,7 +57,7 @@ _STEP_TIMEOUT = 1800
 
 
 class JudgeEnvError(Exception):
-    """Raised when the judge API credential is absent from the environment."""
+    """Raised when the judge environment is missing or route-inconsistent."""
 
 
 class BenchmarkStepError(Exception):
@@ -79,15 +80,36 @@ class JudgeFailedError(Exception):
     """
 
 
-def preflight_judge_env() -> None:
-    """Verify the judge API credential is present in the process environment.
+def preflight_judge_env(*, judge_route: str = "martian") -> None:
+    """Verify route-specific judge configuration before expensive benchmark work.
 
-    Reads `os.environ` only (no `.env` or secret-file parsing). The credential
-    value is never logged.
+    Reads `os.environ` only (no `.env` or secret-file parsing). Credential values
+    are never logged.
+
+    Args:
+        judge_route: ``"martian"`` for the existing OpenAI-compatible judge path,
+            or ``"anthropic-direct"`` for direct Anthropic scoring preflight.
 
     Raises:
-        JudgeEnvError: If `MARTIAN_API_KEY` is unset or empty.
+        JudgeEnvError: If the route-specific credential is unset or the direct
+            Anthropic route is configured with proxy/OpenAI-compatible settings.
     """
+    if judge_route == "anthropic-direct":
+        key = os.environ.get(ANTHROPIC_JUDGE_API_KEY_ENV)
+        if not key:
+            raise JudgeEnvError(
+                f"{ANTHROPIC_JUDGE_API_KEY_ENV} is not set; export it before running "
+                "the Anthropic-direct judge step."
+            )
+        if key.startswith(_OPENROUTER_KEY_PREFIX):
+            raise JudgeEnvError("OpenRouter key supplied for Anthropic-direct judge")
+        if os.environ.get(JUDGE_BASE_URL_ENV):
+            raise JudgeEnvError(
+                f"{JUDGE_BASE_URL_ENV} is invalid for direct Anthropic scoring; "
+                "unset it when --judge-route anthropic-direct is selected."
+            )
+        return
+
     if not os.environ.get(JUDGE_API_KEY_ENV):
         raise JudgeEnvError(
             f"{JUDGE_API_KEY_ENV} is not set; export it (e.g. an OpenRouter sk-or-… key) "

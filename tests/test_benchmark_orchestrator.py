@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import pytest
 from rich.console import Console
 
 from daydream.benchmark.config import BenchConfig
@@ -162,6 +163,20 @@ def test_orchestrator_forwards_reviewer_fields(tmp_path, monkeypatch):
     cfg = replace(cfg, reviewer_backend="pi", reviewer_model="glm-5.2", reviewer_provider="openrouter")
     run_bench(cfg)
     assert (captured["backend"], captured["model"], captured["provider"]) == ("pi", "glm-5.2", "openrouter")
+
+
+def test_direct_anthropic_preflight_runs_before_review(tmp_path, monkeypatch):
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    calls = {"review": 0}
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.run_daydream_review",
+        lambda *a, **k: calls.__setitem__("review", 1),
+    )
+    cfg = replace(_config(tmp_path, data_path, score=True, only="grafana"), judge_route="anthropic-direct")
+    with pytest.raises(Exception, match="ANTHROPIC_API_KEY"):
+        run_bench(cfg)
+    assert calls["review"] == 0
 
 
 def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):

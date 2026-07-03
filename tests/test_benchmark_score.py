@@ -107,6 +107,28 @@ def test_preflight_passes_when_key_present(monkeypatch):
     preflight_judge_env()
 
 
+def test_direct_anthropic_preflight_requires_anthropic_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
+    with pytest.raises(JudgeEnvError, match="ANTHROPIC_API_KEY"):
+        preflight_judge_env(judge_route="anthropic-direct")
+
+
+def test_direct_anthropic_preflight_rejects_openrouter_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-or-not-direct")
+    monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
+    with pytest.raises(JudgeEnvError, match="OpenRouter key supplied for Anthropic-direct judge"):
+        preflight_judge_env(judge_route="anthropic-direct")
+
+
+def test_direct_anthropic_preflight_rejects_martian_base_url(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-direct")
+    monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
+    monkeypatch.setenv("MARTIAN_BASE_URL", "https://api.anthropic.com")
+    with pytest.raises(JudgeEnvError, match="MARTIAN_BASE_URL is invalid for direct Anthropic scoring"):
+        preflight_judge_env(judge_route="anthropic-direct")
+
+
 def test_parse_daydream_scores_extracts_per_pr_and_aggregate():
     evals = {
       "url1": {"daydream": {"tp": 2, "fp": 1, "fn": 1, "precision": 0.667, "recall": 0.667,
