@@ -183,6 +183,7 @@ def test_direct_anthropic_preflight_runs_before_review(tmp_path, monkeypatch):
 def test_orchestrator_passes_judge_route_to_scoring(tmp_path, monkeypatch):
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-direct")
+    monkeypatch.delenv("MARTIAN_BASE_URL", raising=False)
     monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
     monkeypatch.setattr("daydream.benchmark.orchestrator.acquire_checkout", lambda *a, **k: _fake_checkout(tmp_path))
     monkeypatch.setattr(
