@@ -7,6 +7,7 @@ from daydream.benchmark.score import (
     JUDGE_BASE_URL_ENV,
     JUDGE_MODEL_ENV,
     BenchmarkArtifactError,
+    DaydreamScores,
     JudgeEnvError,
     JudgeFailedError,
     model_results_dir,
@@ -66,6 +67,25 @@ def test_resolve_judge_model(monkeypatch):
         resolve_judge_model(None)  # no hardcoded default
     monkeypatch.setenv(JUDGE_MODEL_ENV, "anthropic/claude-opus-4-5-20251101")
     assert resolve_judge_model(None) == "anthropic/claude-opus-4-5-20251101"
+
+
+def test_run_scoring_dispatches_to_anthropic_direct(tmp_path, monkeypatch):
+    called = {}
+
+    async def fake_direct(repo, model, *, pr_count, tool):
+        called.update(repo=repo, model=model, pr_count=pr_count, tool=tool)
+        return DaydreamScores(scored_pr_count=1, total_tp=1, precision=1.0, recall=1.0)
+
+    monkeypatch.setattr("daydream.benchmark.score.run_anthropic_scoring", fake_direct)
+    scores = run_scoring(
+        tmp_path,
+        "claude-opus-4-5-20251101",
+        pr_count=1,
+        tool="daydream",
+        judge_route="anthropic-direct",
+    )
+    assert called == {"repo": tmp_path, "model": "claude-opus-4-5-20251101", "pr_count": 1, "tool": "daydream"}
+    assert scores.scored_pr_count == 1
 
 
 def test_run_scoring_passes_custom_tool_and_judge_env_to_each_step(tmp_path, monkeypatch):

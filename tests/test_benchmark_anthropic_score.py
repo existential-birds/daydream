@@ -2,7 +2,12 @@ import json
 
 import pytest
 
-from daydream.benchmark.anthropic_score import AnthropicJsonClient, run_anthropic_dedup, run_anthropic_extraction
+from daydream.benchmark.anthropic_score import (
+    AnthropicJsonClient,
+    run_anthropic_dedup,
+    run_anthropic_extraction,
+    run_anthropic_scoring,
+)
 from daydream.benchmark.score import model_results_dir
 
 URL = "https://x/pull/1"
@@ -23,6 +28,7 @@ def seed_benchmark_data(tmp_path, *, tool, body):
         json.dumps(
             {
                 URL: {
+                    "golden_comments": [{"comment": body, "severity": "medium"}],
                     "reviews": [
                         {
                             "tool": tool,
@@ -43,6 +49,12 @@ def seed_candidates(tmp_path, *, model, tool, texts):
     (scores_dir / "candidates.json").write_text(
         json.dumps({URL: {tool: [{"text": text, "path": None, "line": None} for text in texts]}})
     )
+
+
+def seed_dedup_groups(tmp_path, *, model, tool, groups):
+    scores_dir = model_results_dir(tmp_path, model)
+    scores_dir.mkdir(parents=True, exist_ok=True)
+    (scores_dir / "dedup_groups.json").write_text(json.dumps({URL: {tool: groups}}))
 
 
 class FakeResponse:
@@ -107,3 +119,27 @@ async def test_direct_dedup_invalid_response_uses_singletons(tmp_path):
 
     groups = json.loads((model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "dedup_groups.json").read_text())
     assert groups[URL]["daydream"] == [[0], [1]]
+
+
+@pytest.mark.asyncio
+async def test_direct_judge_writes_evaluations_and_metadata(tmp_path):
+    seed_benchmark_data(tmp_path, tool="daydream", body="candidate")
+    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=["candidate"])
+    seed_dedup_groups(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", groups=[[0]])
+    client = FakeAnthropicJson([{"reasoning": "same bug", "match": True, "confidence": 0.91}])
+
+    scores = await run_anthropic_scoring(
+        tmp_path,
+        "claude-opus-4-5-20251101",
+        pr_count=1,
+        tool="daydream",
+        client=client,
+    )
+
+    assert scores.scored_pr_count == 1
+    assert scores.total_tp == 1 and scores.total_fp == 0 and scores.total_fn == 0
+    evals = json.loads((model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "evaluations.json").read_text())
+    leaf = evals[URL]["daydream"]
+    assert leaf["judge_route"] == "anthropic-direct"
+    assert leaf["judge_model"] == "claude-opus-4-5-20251101"
+    assert leaf["tp"] == 1 and leaf["precision"] == 1.0 and leaf["recall"] == 1.0
