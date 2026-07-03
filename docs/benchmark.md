@@ -10,18 +10,30 @@ This runbook takes you from nothing to a scored result.
 - **`daydream` installed.** Run `uv sync` so the `daydream` console script is on `PATH` (the harness invokes it as a subprocess).
 - **`git` and `gh` on `PATH`.** `git` performs the blobless clone and `pull/N/head` fetch per PR.
 - **The Beagle plugin** installed in Claude Code (see the [Quickstart](../README.md#quickstart)). Deep review needs the stack-specific skills.
-- **A backend for the reviewer under test.** By default the reviewer runs daydream's built-in default backend (Claude). To benchmark another backend, select it with `--reviewer-backend` (see [Selecting the reviewer backend](#selecting-the-reviewer-backend)). The `pi` backend driving a GLM model over OpenRouter additionally needs the `pi` CLI on `PATH` and the OpenRouter provider extension registered with `pi` (installed once via `pi install`); the run forwards `--reviewer-provider` to the reviewer as the `PI_PROVIDER` environment variable.
-- **Scoring credential, exported.** Scoring requires one env var and accepts two optional overrides:
-  - `MARTIAN_API_KEY`: an OpenRouter `sk-or-…` key (or a withmartian key). **Required for `--score`.**
-  - `MARTIAN_BASE_URL`: the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1` (default set by the withmartian step modules, not by daydream); set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
-  - `MARTIAN_MODEL`: the judge model id. Defaults to `openai/gpt-4o-mini` (default set by the withmartian step modules, not by daydream); should match `--model` for comparable results.
+- **A backend for the reviewer under test.** By default the reviewer runs daydream's built-in default backend (Claude), using the normal credentials for that backend. To benchmark another reviewer, select it with `--reviewer-backend` and optionally `--reviewer-model` / `--reviewer-provider` (see [Selecting the reviewer backend](#selecting-the-reviewer-backend)). These reviewer settings are separate from the judge route and judge `--model`. The `pi` backend driving a GLM model over OpenRouter additionally needs the `pi` CLI on `PATH` and the OpenRouter provider extension registered with `pi` (installed once via `pi install`); the run forwards `--reviewer-provider` to the reviewer as the `PI_PROVIDER` environment variable.
+- **A judge route and judge credential.** Scoring is controlled by `--judge-route` and the judge `--model`; this is independent of the reviewer backend/model that produced the findings.
 
-  These may live in a `.env` file in the directory you run `daydream bench` from; it is auto-loaded at bench entry (`python-dotenv`, searching from the cwd upward). Already-exported shell variables win, so an inline `MARTIAN_API_KEY=… daydream bench …` still overrides the `.env`; a missing or malformed `.env` is a silent no-op.
+  `--judge-route martian` is the default, backward-compatible OpenAI-compatible Martian/OpenRouter route. It drives the benchmark step2/2.5/3 modules through their OpenAI Chat Completions-compatible client.
+  - `MARTIAN_API_KEY`: an OpenRouter `sk-or-...` key (or a withmartian key). Required for `--score` on this route.
+  - `MARTIAN_BASE_URL`: the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1` (default set by the withmartian step modules, not by daydream); set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
+  - `MARTIAN_MODEL`: the judge model id fallback when `--model` is omitted. Defaults to `openai/gpt-4o-mini` in the withmartian step modules.
+
+  `--judge-route anthropic-direct` sends scoring calls directly to the Anthropic Messages API for extraction, deduplication, and final judging. It is not a `MARTIAN_BASE_URL` setting and it is not an OpenAI-compatible proxy route.
+  - `ANTHROPIC_API_KEY`: required for `--score` on this route.
+  - `--model`: the Anthropic judge model id, for example `claude-opus-4-5-20251101`. If omitted, `MARTIAN_MODEL` is used as the judge model fallback and result-directory label.
+  - `MARTIAN_BASE_URL is invalid` for direct Anthropic scoring. Unset it when selecting `--judge-route anthropic-direct`; `https://api.anthropic.com` is not an OpenAI Chat Completions-compatible endpoint.
+
+  These env vars may live in a `.env` file in the directory you run `daydream bench` from; it is auto-loaded at bench entry (`python-dotenv`, searching from the cwd upward). Already-exported shell variables win, so an inline `ANTHROPIC_API_KEY=... daydream bench ...` still overrides the `.env`; a missing or malformed `.env` is a silent no-op.
 
   ```bash
-  # .env beside your invocation
-  MARTIAN_API_KEY=sk-or-…
+  # .env beside your invocation, OpenAI-compatible Martian/OpenRouter judge route
+  MARTIAN_API_KEY=sk-or-...
+  MARTIAN_BASE_URL=https://openrouter.ai/api/v1
   MARTIAN_MODEL=anthropic/claude-opus-4-5-20251101
+
+  # .env beside your invocation, direct Anthropic judge route
+  ANTHROPIC_API_KEY=sk-ant-...
+  MARTIAN_MODEL=claude-opus-4-5-20251101
   ```
 
 ## Configuration file (`[tool.daydream.bench]`)
@@ -32,6 +44,7 @@ Repeating `--benchmark-repo`, the scoring `--model`, and the full reviewer flag 
 [tool.daydream.bench]
 benchmark-repo = "../code-review-benchmark/offline"   # makes --benchmark-repo optional
 model = "anthropic/claude-opus-4-5-20251101"           # scoring model when --model is omitted
+judge-route = "martian"                               # or "anthropic-direct"
 
 # Named reviewer presets: each expands to --reviewer-backend / -model / -provider.
 [tool.daydream.bench.reviewers.glm]
@@ -52,7 +65,7 @@ With the table above, the full GLM sweep over one PR collapses to:
 daydream bench --reviewer glm --only grafana --limit 1
 ```
 
-`benchmark-repo` and the scoring `model` come from config; `--reviewer glm` supplies the backend/model/provider and the `daydream-glm` label. (Scoring is on by default, so `MARTIAN_API_KEY` must be present; see [Prerequisites](#prerequisites).)
+`benchmark-repo`, `judge-route`, and the scoring `model` come from config; `--reviewer glm` supplies the backend/model/provider and the `daydream-glm` label. (Scoring is on by default, so the selected judge route's credential must be present; see [Prerequisites](#prerequisites).)
 
 ## Smoke subset
 
@@ -64,10 +77,21 @@ Wire the pipeline cheaply before spending on the paid judge. Run two Grafana PRs
 daydream bench --benchmark-repo ../code-review-benchmark/offline --only grafana --limit 2 --no-score
 ```
 
-This acquires the checkouts, runs deep review, and injects two `daydream` reviews into `benchmark_data.json`; no judge calls. When the wiring looks right, add the judge:
+This acquires the checkouts, runs deep review, and injects two `daydream` reviews into `benchmark_data.json`; no judge calls. When the wiring looks right, add the default OpenAI-compatible Martian/OpenRouter judge:
 
 ```bash
-daydream bench --benchmark-repo ../code-review-benchmark/offline --only grafana --limit 2 --score
+daydream bench --benchmark-repo ../code-review-benchmark/offline \
+  --judge-route martian \
+  --only grafana --limit 2 --score
+```
+
+For direct Anthropic scoring, keep the default Claude reviewer and select the Anthropic Messages API judge route explicitly:
+
+```bash
+daydream bench --benchmark-repo ../code-review-benchmark/offline \
+  --judge-route anthropic-direct \
+  --model claude-opus-4-5-20251101 \
+  --only grafana --limit 2 --score
 ```
 
 `--only` matches a source-repo name (`sentry`, `grafana`, `cal.com`) or a golden-URL substring. `--limit N` caps how many of the selected PRs run.
@@ -77,7 +101,18 @@ daydream bench --benchmark-repo ../code-review-benchmark/offline --only grafana 
 Drop `--only` and `--limit` to run all 26 evaluable PRs:
 
 ```bash
-daydream bench --benchmark-repo ../code-review-benchmark/offline --score
+daydream bench --benchmark-repo ../code-review-benchmark/offline \
+  --judge-route martian \
+  --score
+```
+
+Full sweep with the default Claude reviewer and direct Anthropic judge:
+
+```bash
+daydream bench --benchmark-repo ../code-review-benchmark/offline \
+  --judge-route anthropic-direct \
+  --model claude-opus-4-5-20251101 \
+  --score
 ```
 
 This is the load-bearing, money-spending run: 26 deep reviews plus 26 judge passes.
@@ -133,7 +168,7 @@ For each scored PR the harness writes a leaf (keyed by the reviewer's `--tool-la
 <benchmark-repo>/results/<sanitized-model>/evaluations.json
 ```
 
-`<sanitized-model>` is the `--model` (judge) id with `/` replaced by `_`. For the default judge the directory is `results/anthropic_claude-opus-4.5/` (the dot is preserved). Inside each PR's entry the scores are filed under the reviewer's `--tool-label` (default `daydream`; e.g. `daydream-glm` for a GLM reviewer). Each leaf carries `tp`, `fp`, `fn`, `precision`, and `recall` for that PR.
+`<sanitized-model>` is the resolved judge model id with `/` replaced by `_`; `--model` wins over the route-specific environment fallback. Inside each PR's entry the scores are filed under the reviewer's `--tool-label` (default `daydream`; e.g. `daydream-glm` for a GLM reviewer). Each leaf carries `tp`, `fp`, `fn`, `precision`, and `recall` for that PR. Leaves produced by `--judge-route anthropic-direct` also carry `judge_route: "anthropic-direct"`.
 
 The command also prints to stdout:
 
