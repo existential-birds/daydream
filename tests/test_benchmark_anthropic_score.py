@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from daydream.benchmark.anthropic_score import AnthropicJsonClient, run_anthropic_extraction
+from daydream.benchmark.anthropic_score import AnthropicJsonClient, run_anthropic_dedup, run_anthropic_extraction
 from daydream.benchmark.score import model_results_dir
 
 URL = "https://x/pull/1"
@@ -34,6 +34,14 @@ def seed_benchmark_data(tmp_path, *, tool, body):
                 }
             }
         )
+    )
+
+
+def seed_candidates(tmp_path, *, model, tool, texts):
+    scores_dir = model_results_dir(tmp_path, model)
+    scores_dir.mkdir(parents=True)
+    (scores_dir / "candidates.json").write_text(
+        json.dumps({URL: {tool: [{"text": text, "path": None, "line": None} for text in texts]}})
     )
 
 
@@ -77,3 +85,25 @@ async def test_direct_extraction_writes_martian_candidates(tmp_path):
     leaf = candidates[URL]["daydream"]
     assert [c["text"] for c in leaf] == ["Bug one", "Bug two"]
     assert all(c["source"] == "extracted" and c["path"] is None and c["line"] is None for c in leaf)
+
+
+@pytest.mark.asyncio
+async def test_direct_dedup_writes_groups_and_falls_back_to_singletons(tmp_path):
+    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=["same bug", "same issue"])
+    client = FakeAnthropicJson([{"groups": [[0, 1]]}])
+
+    await run_anthropic_dedup(tmp_path, "claude-opus-4-5-20251101", tool="daydream", client=client)
+
+    groups = json.loads((model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "dedup_groups.json").read_text())
+    assert groups[URL]["daydream"] == [[0, 1]]
+
+
+@pytest.mark.asyncio
+async def test_direct_dedup_invalid_response_uses_singletons(tmp_path):
+    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=["a", "b"])
+    client = FakeAnthropicJson([{"groups": [[0, 0]]}])
+
+    await run_anthropic_dedup(tmp_path, "claude-opus-4-5-20251101", tool="daydream", client=client)
+
+    groups = json.loads((model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "dedup_groups.json").read_text())
+    assert groups[URL]["daydream"] == [[0], [1]]

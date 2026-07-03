@@ -17,9 +17,12 @@ _ANTHROPIC_VERSION = "2023-06-01"
 _REQUEST_TIMEOUT = 60.0
 _MAX_RETRIES = 3
 _MAX_EXTRACTION_TOKENS = 4096
+_MAX_DEDUP_TOKENS = 4096
+_MIN_DEDUP_CANDIDATES = 2
 _TOOL = "daydream"
 
 _EXTRACTION_SYSTEM = "You extract code review issues from comments. Always respond with valid JSON."
+_DEDUP_SYSTEM = "You group duplicate code review comments. Always respond with valid JSON only."
 
 _EXTRACTION_PROMPT = """You are analyzing an AI code review comment to extract individual issues mentioned.
 
@@ -49,6 +52,38 @@ Example output:
 
 Respond with ONLY a JSON object:
 {{"issues": ["issue 1", "issue 2", ...]}}"""
+
+_DEDUP_PROMPT = """You are identifying duplicate code review comments.
+
+Below is a numbered list of issues extracted from an AI tool's code review.
+Some tools post the same issue in both a summary comment and an inline comment,
+creating near-identical duplicates. Your job is to find those duplicates.
+
+Two candidates are duplicates ONLY IF:
+- They describe the same problem AND
+- A single code change would fix both (i.e., they would be one bug report)
+
+Two candidates are NOT duplicates if:
+- They describe the same TYPE of bug but in different files, functions, or
+  classes (e.g., "negative slicing in OptimizedCursorPaginator" vs "negative
+  slicing in BasePaginator" are separate issues - fixing one does not fix
+  the other)
+- They describe related but distinct problems (e.g., "returns wrong type" vs
+  "caller crashes because of wrong type" are separate issues)
+
+When in doubt, keep candidates separate - it is better to leave a duplicate
+ungrouped than to incorrectly merge two distinct issues.
+
+Candidates:
+{candidates}
+
+Return ONLY a JSON object where each group is a list of 0-based indices.
+Singletons (no duplicate) must still appear as single-element groups.
+
+Example for 4 candidates where 0 and 2 are duplicates:
+{{"groups": [[0, 2], [1], [3]]}}
+
+Your response:"""
 
 
 class _AsyncHttpClient(Protocol):
@@ -144,6 +179,58 @@ async def run_anthropic_extraction(
     candidates_file.write_text(json.dumps(all_candidates, indent=2))
 
 
+async def run_anthropic_dedup(
+    benchmark_repo: Path,
+    judge_model: str,
+    *,
+    tool: str = _TOOL,
+    client: _AnthropicJsonCompleter,
+) -> None:
+    """Write Martian-compatible dedup groups using direct Anthropic JSON calls."""
+    results_dir = model_results_dir(benchmark_repo, judge_model)
+    candidates_file = results_dir / "candidates.json"
+    if not candidates_file.exists():
+        raise BenchmarkArtifactError(f"{candidates_file} not found; cannot deduplicate benchmark candidates.")
+
+    all_candidates = json.loads(candidates_file.read_text())
+    if not isinstance(all_candidates, dict):
+        raise BenchmarkStepError(f"{candidates_file} must contain a JSON object.")
+
+    groups_file = results_dir / "dedup_groups.json"
+    if groups_file.exists():
+        all_groups = json.loads(groups_file.read_text())
+        if not isinstance(all_groups, dict):
+            raise BenchmarkStepError(f"{groups_file} must contain a JSON object.")
+    else:
+        all_groups = {}
+
+    for golden_url, tools in all_candidates.items():
+        if not isinstance(tools, dict):
+            continue
+        candidates = tools.get(tool)
+        if not isinstance(candidates, list) or len(candidates) < _MIN_DEDUP_CANDIDATES:
+            continue
+
+        texts = _candidate_texts(candidates)
+        if len(texts) < _MIN_DEDUP_CANDIDATES:
+            continue
+
+        try:
+            response = await client.complete_json(
+                system=_DEDUP_SYSTEM,
+                user=_DEDUP_PROMPT.format(candidates=_numbered_candidates(texts)),
+                max_tokens=_MAX_DEDUP_TOKENS,
+            )
+        except Exception:
+            response = None
+        groups = _extract_dedup_groups(response, len(texts)) if isinstance(response, dict) else None
+        if groups is None:
+            groups = _singleton_groups(len(texts))
+        all_groups.setdefault(golden_url, {})[tool] = groups
+
+    groups_file.write_text(json.dumps(all_groups, indent=2))
+
+
 def _get_all_comment_text(review_comments: Any) -> str:
     if not isinstance(review_comments, list):
         return ""
@@ -158,6 +245,45 @@ def _extract_issues(response: dict[str, Any]) -> list[str]:
     if not isinstance(issues, list) or not all(isinstance(issue, str) for issue in issues):
         raise BenchmarkStepError("Anthropic extraction response 'issues' must be a list of strings.")
     return issues
+
+
+def _candidate_texts(candidates: list[Any]) -> list[str]:
+    return [
+        candidate["text"]
+        for candidate in candidates
+        if isinstance(candidate, dict) and isinstance(candidate.get("text"), str) and candidate["text"].strip()
+    ]
+
+
+def _numbered_candidates(texts: list[str]) -> str:
+    return "\n".join(f"{index}. {text}" for index, text in enumerate(texts))
+
+
+def _extract_dedup_groups(response: dict[str, Any], n_candidates: int) -> list[list[int]] | None:
+    groups = response.get("groups")
+    if not isinstance(groups, list):
+        return None
+
+    seen: set[int] = set()
+    parsed_groups: list[list[int]] = []
+    for group in groups:
+        if not isinstance(group, list):
+            return None
+        parsed_group: list[int] = []
+        for idx in group:
+            if not isinstance(idx, int) or idx < 0 or idx >= n_candidates or idx in seen:
+                return None
+            seen.add(idx)
+            parsed_group.append(idx)
+        parsed_groups.append(parsed_group)
+
+    if seen != set(range(n_candidates)):
+        return None
+    return parsed_groups
+
+
+def _singleton_groups(n_candidates: int) -> list[list[int]]:
+    return [[index] for index in range(n_candidates)]
 
 
 async def _complete_json_with_http(
