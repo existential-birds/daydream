@@ -83,7 +83,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -110,12 +110,13 @@ from daydream.training.labeler_signals import (
     comment_resolution_signal,
     fix_applied_signal,
     local_commit_applied_signal,
+    per_finding_resolution_signal,
     pr_link_signal,
     pr_merge_signal,
     reviewer_logins_signal,
 )
 from daydream.training.reward import ScoringInputs, score_trajectory
-from daydream.training.rubric import Rubric, derive_outcome_label
+from daydream.training.rubric import Rubric, derive_outcome_label, derive_per_finding_labels
 from daydream.ui import create_console, print_warning
 
 _VERDICTS_FILE = "recommendation-verdicts.json"
@@ -393,6 +394,32 @@ def _row_is_pr(row: dict[str, Any]) -> bool:
     return bool(row.get("pr_repo")) and row.get("pr_number") is not None
 
 
+def _row_recorded_fingerprints(row: dict[str, Any]) -> list[str]:
+    """Return the finding fingerprints recorded for a row, in order.
+
+    Prefers a pre-extracted ``findings_fingerprints`` column; otherwise reads
+    the archived ``findings.json`` artifact and collects each finding's
+    ``fingerprint``. Returns ``[]`` when neither source is available or the
+    artifact is missing / malformed — a row with no recorded findings simply
+    yields no per-finding join.
+    """
+    pre_extracted = row.get("findings_fingerprints")
+    if isinstance(pre_extracted, list):
+        return [str(fp) for fp in pre_extracted]
+
+    archive_path = row.get("archive_path")
+    if not archive_path:
+        return []
+    try:
+        data = json.loads((Path(archive_path) / "findings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    findings = data.get("findings") if isinstance(data, dict) else None
+    if not isinstance(findings, list):
+        return []
+    return [str(f["fingerprint"]) for f in findings if isinstance(f, dict) and "fingerprint" in f]
+
+
 # HTTP statuses meaning the PR/commit is genuinely absent (fork/deleted PR 404,
 # unpushed-SHA 422) so a row may degrade to its local posterior; every other gh
 # failure is transient and must propagate so resume retries, not mislabel (#166).
@@ -435,13 +462,20 @@ def _build_rubric_pr(
         changed_files=changed_files,
         repo_clone=repo_clone,
     )
-    return Rubric(
+    rubric = Rubric(
         pr_merge=pr_merge,
         fix_applied=fix,
         comment_resolution=comments,
         local_commit_applied=None,
         posterior_source="pr_review",
     )
+    recorded_fingerprints = _row_recorded_fingerprints(row)
+    if recorded_fingerprints:
+        per_finding = per_finding_resolution_signal(
+            signal_row, recorded_fingerprints=recorded_fingerprints, gh_api=gh_api
+        )
+        rubric = replace(rubric, per_finding_labels=list(derive_per_finding_labels(rubric, per_finding)))
+    return rubric
 
 
 def _build_rubric_local(

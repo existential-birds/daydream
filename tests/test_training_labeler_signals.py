@@ -9,15 +9,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from daydream.pr_review import DAYDREAM_FOOTER
+from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
     LocalCommitAppliedSignal,
+    PerFindingResolution,
     PRMergeSignal,
     comment_resolution_signal,
     fix_applied_signal,
     local_commit_applied_signal,
+    per_finding_resolution_signal,
     pr_link_signal,
     pr_merge_signal,
     reviewer_logins_signal,
@@ -304,3 +306,76 @@ def test_pr_link_signal_returns_none_when_no_head_sha_match() -> None:
 def test_pr_link_signal_returns_none_without_required_fields() -> None:
     gh = _fake_commits_pulls([])  # must NOT be called (missing head_sha short-circuits)
     assert pr_link_signal({"repo_slug": "org/repo"}, gh_api=gh) is None
+
+
+_FP_A = "a" * 64
+_FP_B = "b" * 64
+_FP_C = "c" * 64
+
+
+def _daydream_finding_comment(comment_id: int, fingerprint: str) -> dict:
+    """A top-level daydream review comment carrying the footer + finding marker."""
+    return {
+        "id": comment_id,
+        "in_reply_to_id": None,
+        "user": {"login": "daydream-runner"},
+        "body": f"A finding.\n\n{finding_marker(fingerprint)}\n\n{DAYDREAM_FOOTER}",
+    }
+
+
+def test_per_finding_resolution_signal_mixed_outcomes() -> None:
+    """Two findings: one replied (resolved), one not (unresolved)."""
+    row = {"pr_repo": "org/repo", "pr_number": 42}
+    gh = _fake_gh_responder(
+        {
+            ("org/repo", "repos/org/repo/pulls/42/comments"): [
+                _daydream_finding_comment(1, _FP_A),
+                _daydream_finding_comment(2, _FP_B),
+                {"id": 3, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "fixed"},
+            ],
+        }
+    )
+    result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A, _FP_B], gh_api=gh)
+    assert result == [
+        PerFindingResolution(fingerprint=_FP_A, resolved=True, comment_id=1),
+        PerFindingResolution(fingerprint=_FP_B, resolved=False, comment_id=2),
+    ]
+
+
+def test_per_finding_resolution_signal_deleted_comment() -> None:
+    """A recorded fingerprint with no surviving comment → comment_id=None, unresolved."""
+    row = {"pr_repo": "org/repo", "pr_number": 42}
+    gh = _fake_gh_responder(
+        {
+            ("org/repo", "repos/org/repo/pulls/42/comments"): [
+                _daydream_finding_comment(1, _FP_A),
+            ],
+        }
+    )
+    result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A, _FP_C], gh_api=gh)
+    assert result == [
+        PerFindingResolution(fingerprint=_FP_A, resolved=False, comment_id=1),
+        PerFindingResolution(fingerprint=_FP_C, resolved=False, comment_id=None),
+    ]
+
+
+def test_per_finding_resolution_signal_single_finding() -> None:
+    """Standard single-finding case with a reply → resolved."""
+    row = {"pr_repo": "org/repo", "pr_number": 42}
+    gh = _fake_gh_responder(
+        {
+            ("org/repo", "repos/org/repo/pulls/42/comments"): [
+                _daydream_finding_comment(9, _FP_A),
+                {"id": 10, "in_reply_to_id": 9, "user": {"login": "human"}, "body": "ack"},
+            ],
+        }
+    )
+    result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A], gh_api=gh)
+    assert result == [PerFindingResolution(fingerprint=_FP_A, resolved=True, comment_id=9)]
+
+
+def test_per_finding_resolution_signal_no_pr() -> None:
+    """No PR (repo/number None) → empty list, no API call."""
+    row = {"pr_repo": None, "pr_number": None}
+    result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A], gh_api=_fake_gh_responder({}))
+    assert result == []
