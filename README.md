@@ -53,7 +53,7 @@ To update: `git pull && uv sync`
 
 ## Architecture
 
-Daydream runs a deep multi-stack review pipeline (exploration, intent analysis, alternative review, per-stack Beagle skill reviews, arbiter pass, cross-stack merge, recommendation verification), with a `--shallow` single-skill mode for simpler projects. Every run is recorded as an ATIF v1.6 trajectory and archived. A bitemporal corpus pipeline harvests, scores, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
+Daydream runs a deep multi-stack review pipeline (exploration, intent analysis, alternative review, per-stack Beagle skill reviews, arbiter pass, cross-stack merge, recommendation verification), with a `--shallow` single-skill mode for simpler projects. Every run is recorded as an ATIF v1.6 trajectory and archived (unless `--no-archive` is passed). A bitemporal corpus pipeline harvests, scores, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
 
 Full architectural details — review pipeline stages, trajectory recording format, corpus pipeline, training roadmap, and benchmarking methodology — are documented on the [project page](https://existentialbirds.com/projects/daydream).
 
