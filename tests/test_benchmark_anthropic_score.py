@@ -143,3 +143,26 @@ async def test_direct_judge_writes_evaluations_and_metadata(tmp_path):
     assert leaf["judge_route"] == "anthropic-direct"
     assert leaf["judge_model"] == "claude-opus-4-5-20251101"
     assert leaf["tp"] == 1 and leaf["precision"] == 1.0 and leaf["recall"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_direct_route_artifacts_are_martian_compatible(tmp_path):
+    seed_benchmark_data(tmp_path, tool="daydream", body="candidate")
+    client = FakeAnthropicJson(
+        [
+            {"issues": ["candidate"]},
+            {"reasoning": "same", "match": True, "confidence": 1.0},
+        ]
+    )
+    scores = await run_anthropic_scoring(
+        tmp_path,
+        "claude-opus-4-5-20251101",
+        pr_count=1,
+        tool="daydream",
+        client=client,
+    )
+    model_dir = model_results_dir(tmp_path, "claude-opus-4-5-20251101")
+    assert (model_dir / "candidates.json").exists()
+    assert (model_dir / "dedup_groups.json").exists()
+    assert (model_dir / "evaluations.json").exists()
+    assert scores.total_tp == 1

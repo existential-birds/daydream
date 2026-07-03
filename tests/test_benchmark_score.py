@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,6 +114,30 @@ def test_run_scoring_passes_custom_tool_and_judge_env_to_each_step(tmp_path, mon
 
 def test_model_results_dir_sanitizes_slashes(tmp_path):
     assert model_results_dir(tmp_path, "anthropic/claude-opus-4.5").name == "anthropic_claude-opus-4.5"
+
+
+def test_scoring_routes_share_model_dir_and_score_parser_contract(tmp_path, monkeypatch):
+    model = "claude-opus-4-5-20251101"
+    direct_dir = model_results_dir(tmp_path, model)
+    direct_dir.mkdir(parents=True)
+    (direct_dir / "evaluations.json").write_text(
+        json.dumps(
+            {
+                URL: {
+                    "daydream": {
+                        "tp": 1,
+                        "fp": 0,
+                        "fn": 0,
+                        "total_candidates": 1,
+                        "total_golden": 1,
+                    }
+                }
+            }
+        )
+    )
+    scores = parse_daydream_scores(json.loads((direct_dir / "evaluations.json").read_text()))
+    assert scores.scored_pr_count == 1
+    assert direct_dir.name == "claude-opus-4-5-20251101"
 
 
 def test_preflight_raises_when_key_unset(monkeypatch):
@@ -263,10 +288,9 @@ def test_run_scoring_raises_judge_failed_when_evaluations_all_errored(tmp_path, 
     model = "anthropic/claude-opus-4-5-20251101"
     rdir = tmp_path / "results" / "anthropic_claude-opus-4-5-20251101"
     rdir.mkdir(parents=True)
-    import json as _json
 
     def fake_run(cmd, **k):
-        (rdir / "evaluations.json").write_text(_json.dumps({URL: {"daydream-glm": dict(_ALL_ERRORED_LEAF)}}))
+        (rdir / "evaluations.json").write_text(json.dumps({URL: {"daydream-glm": dict(_ALL_ERRORED_LEAF)}}))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("daydream.benchmark.score.subprocess.run", fake_run)

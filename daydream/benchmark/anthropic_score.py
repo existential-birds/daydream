@@ -190,7 +190,7 @@ async def run_anthropic_extraction(
                 continue
 
             all_text = _get_all_comment_text(review.get("review_comments", []))
-            if not all_text or len(all_text.strip()) < 20:
+            if not all_text.strip():
                 continue
 
             response = await client.complete_json(
@@ -467,7 +467,7 @@ async def _evaluate_review(
         meta = task_meta[index]
         golden_text = meta["golden"]
         candidate = meta["candidate"]
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             errors.append({"golden": golden_text, "candidate": candidate, "error": str(result)})
             continue
         if result.get("error"):
