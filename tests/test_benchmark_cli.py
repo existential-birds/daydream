@@ -32,7 +32,19 @@ def test_bench_parser_defaults_and_flags(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--only", "grafana", "--no-score"])
     assert cfg.benchmark_repo == Path("/b") and cfg.only == "grafana" and cfg.score is False
-    assert cfg.model is None  # no hardcoded default; judge model comes from --model or MARTIAN_MODEL
+    assert cfg.model is None  # no hardcoded default; judge model comes from --model or route-specific env
+
+
+def test_bench_parser_accepts_direct_anthropic_judge_route(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv([
+        "--benchmark-repo", "/b",
+        "--judge-route", "anthropic-direct",
+        "--model", "claude-opus-4-5-20251101",
+        "--no-score",
+    ])
+    assert cfg.judge_route == "anthropic-direct"
+    assert cfg.model == "claude-opus-4-5-20251101"
 
 
 def test_bench_config_has_reviewer_defaults(tmp_path, monkeypatch):
@@ -60,6 +72,15 @@ def test_config_supplies_benchmark_repo_when_flag_omitted(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
     cfg = _bench_config_from_argv(["--no-score"])  # no --benchmark-repo
     assert cfg.benchmark_repo == Path("/from/config")
+
+
+def test_config_supplies_judge_route_when_flag_omitted(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.daydream.bench]\nbenchmark-repo="/b"\njudge-route="anthropic-direct"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv(["--no-score"])
+    assert cfg.judge_route == "anthropic-direct"
 
 
 def test_missing_benchmark_repo_everywhere_errors(tmp_path, monkeypatch):
