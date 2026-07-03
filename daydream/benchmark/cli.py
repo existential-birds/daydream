@@ -173,6 +173,20 @@ def _build_bench_parser() -> argparse.ArgumentParser:
         dest="score",
         help="Drive the step2/2.5/3 scoring pipeline (default: on; use --no-score to skip)",
     )
+    parser.add_argument(
+        "--min-confidence",
+        choices=["LOW", "MEDIUM", "HIGH"],
+        default=None,
+        dest="min_confidence",
+        help="Drop findings below this confidence from benchmark submission (default: submit all)",
+    )
+    parser.add_argument(
+        "--min-severity",
+        choices=["low", "medium", "high"],
+        default=None,
+        dest="min_severity",
+        help="Drop findings below this severity from benchmark submission (default: submit all)",
+    )
     return parser
 
 
@@ -240,6 +254,12 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
     judge_route = args.judge_route if args.judge_route is not None else bench.get("judge-route", "martian")
     if judge_route not in {"martian", "anthropic-direct"}:
         parser.error("--judge-route must be one of: martian, anthropic-direct")
+    min_confidence = args.min_confidence if args.min_confidence is not None else bench.get("min-confidence")
+    min_severity = args.min_severity if args.min_severity is not None else bench.get("min-severity")
+    if min_confidence is not None and min_confidence.lower() not in {"low", "medium", "high"}:
+        parser.error("--min-confidence must be one of: LOW, MEDIUM, HIGH")
+    if min_severity is not None and min_severity.lower() not in {"low", "medium", "high"}:
+        parser.error("--min-severity must be one of: low, medium, high")
     if benchmark_repo is None:
         parser.error("--benchmark-repo is required (pass the flag or set [tool.daydream.bench] benchmark-repo)")
     bench_root = benchmark_repo / ".daydream-bench"
@@ -274,6 +294,8 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         reviewer_provider=reviewer_provider,
         tool_label=tool_label,
         verbose=args.verbose,
+        min_confidence=min_confidence,
+        min_severity=min_severity,
     )
 
 
