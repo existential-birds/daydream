@@ -20,6 +20,7 @@ from daydream.benchmark.score import (
     parse_daydream_scores,
 )
 
+
 class _NonRetryableError(BenchmarkStepError):
     """Raised for HTTP 4xx (non-429) and JSON-parse failures that must not be retried."""
 
