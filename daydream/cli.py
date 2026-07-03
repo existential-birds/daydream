@@ -31,7 +31,6 @@ import inspect
 import signal
 import sys
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -446,18 +445,6 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
     else:
         labels = tuple(args.label) if args.label else ("accepted",)
 
-    if args.as_of is not None:
-        raw = args.as_of.replace("Z", "+00:00") if args.as_of.endswith("Z") else args.as_of
-        try:
-            dt = datetime.fromisoformat(raw)
-        except ValueError:
-            print_error(create_console(), "Invalid --as-of", "Must be an ISO-8601 timestamp.")
-            return 1
-        if dt.tzinfo is None or dt.utcoffset() != timedelta(0):
-            print_error(create_console(), "Invalid --as-of", "Must be a UTC timestamp (ending in Z or +00:00).")
-            return 1
-        args.as_of = dt.astimezone(timezone.utc).isoformat()
-
     filters = CorpusFilters(
         skill=args.skill,
         repos=tuple(args.repo),
@@ -468,15 +455,21 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
         allow_copyleft=frozenset(args.allow_copyleft),
         min_reward=args.min_reward,
     )
-    config = BuildCorpusConfig(
-        out_path=args.out,
-        filters=filters,
-        stratify_by=args.stratify_by,
-        max_stack_share=args.max_stack_share,
-        dry_run=args.dry_run,
-        emit_schema_only=args.emit_schema_only,
-        as_of=args.as_of,
-    )
+    try:
+        # BuildCorpusConfig is the single validation boundary for --as-of
+        # (UTC-only, canonical +00:00 spelling out).
+        config = BuildCorpusConfig(
+            out_path=args.out,
+            filters=filters,
+            stratify_by=args.stratify_by,
+            max_stack_share=args.max_stack_share,
+            dry_run=args.dry_run,
+            emit_schema_only=args.emit_schema_only,
+            as_of=args.as_of,
+        )
+    except ValueError as exc:
+        print_error(create_console(), "Invalid --as-of", str(exc))
+        return 1
     run_build_corpus(config)
     return 0
 

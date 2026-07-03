@@ -212,6 +212,58 @@ def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
         conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
 
 
+def _purge_legacy_z_valid_at(conn: sqlite3.Connection) -> None:
+    """Delete ``label_observations`` rows whose ``valid_at`` uses the legacy ``Z`` spelling.
+
+    The write layer canonicalizes ``valid_at`` to the ``datetime.isoformat()``
+    UTC spelling (``+00:00`` suffix) — the same spelling ``observed_at`` has
+    always used — so every cutoff over the column stays a chronologically
+    correct lexical comparison. Rows written before that convergence carry a
+    ``Z`` suffix and would sort after every ``+00:00`` string with an equal
+    prefix; per the clean-recreate policy (see
+    :func:`_recreate_label_observations_if_stale`) they are deleted rather than
+    shimmed at read time — repopulate via ``harvest``. The denormalized
+    ``runs`` cache is refreshed for each affected session so it never points at
+    a deleted winner. Idempotent: once no ``Z`` rows remain this is a no-op.
+
+    Args:
+        conn: An open connection whose ``label_observations`` table exists.
+    """
+    sessions = [
+        row[0]
+        for row in conn.execute(
+            "SELECT DISTINCT session_id FROM label_observations WHERE valid_at LIKE '%Z'"
+        ).fetchall()
+    ]
+    if not sessions:
+        return
+    warnings.warn(
+        f"Deleting legacy 'Z'-suffixed label_observations rows for {len(sessions)} session(s) — "
+        "the archive stores canonical '+00:00' UTC timestamps only. Repopulate via `harvest`.",
+        stacklevel=2,
+    )
+    conn.execute("DELETE FROM label_observations WHERE valid_at LIKE '%Z'")
+    for session_id in sessions:
+        winner = conn.execute(
+            f"SELECT labels, observed_at, rubric_json, composite_reward, has_posterior "
+            f"FROM label_observations WHERE session_id = ? "
+            f"ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if winner is None:
+            conn.execute(
+                "UPDATE runs SET outcome_labels = '[]', labeled_at = NULL, rubric_json = NULL, "
+                "composite_reward = NULL, has_posterior = 0 WHERE session_id = ?",
+                (session_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ?, "
+                "composite_reward = ?, has_posterior = ? WHERE session_id = ?",
+                (winner[0], winner[1], winner[2], winner[3], winner[4], session_id),
+            )
+
+
 def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
     """Additively ALTER-ADD columns missing from a live ``label_observations`` table.
 

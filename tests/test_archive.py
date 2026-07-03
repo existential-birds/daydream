@@ -19,9 +19,11 @@ from daydream.archive.git_context import GitContext, _parse_repo_slug, capture_g
 from daydream.archive.index import (
     append_label_observation,
     bulk_latest_label_observations,
+    canonical_utc_iso,
     label_count_summary,
     label_observation_history,
     latest_label_observation,
+    normalize_as_of,
     query_runs,
     reviewer_set_penalty_prior,
     set_run_pr_link,
@@ -1135,3 +1137,139 @@ def test_update_labels_is_backward_compat_thin_wrapper(tmp_path: Path) -> None:
     assert len(hist) == 1
     rows = query_runs(tmp_path, "session_id = ?", ("sess-5",))
     assert json.loads(rows[0]["outcome_labels"]) == ["accepted"]
+
+
+# Canonical UTC timestamp contract: one spelling at write time, strict as_of
+# validation at the entry boundary, and legacy "Z" rows purged at bootstrap.
+
+
+def test_canonical_utc_iso_converts_and_rejects():
+    assert canonical_utc_iso("2026-02-01T00:00:00Z") == "2026-02-01T00:00:00+00:00"
+    assert canonical_utc_iso("2026-02-01T00:00:00+00:00") == "2026-02-01T00:00:00+00:00"
+    # A foreign offset is an unambiguous instant — converted, not rejected.
+    assert canonical_utc_iso("2026-02-01T05:30:00+05:30") == "2026-02-01T00:00:00+00:00"
+    # Sub-second precision survives canonically (six digits or absent).
+    assert canonical_utc_iso("2026-02-01T00:00:00.500000Z") == "2026-02-01T00:00:00.500000+00:00"
+    with pytest.raises(ValueError, match="naive"):
+        canonical_utc_iso("2026-02-01T00:00:00")
+    with pytest.raises(ValueError):
+        canonical_utc_iso("not-a-timestamp")
+
+
+def test_normalize_as_of_is_strict_utc_only():
+    assert normalize_as_of("2026-04-01T00:00:00Z") == "2026-04-01T00:00:00+00:00"
+    assert normalize_as_of("2026-04-01T00:00:00+00:00") == "2026-04-01T00:00:00+00:00"
+    with pytest.raises(ValueError, match="must be a UTC timestamp"):
+        normalize_as_of("2026-04-01T05:00:00+05:00")
+    with pytest.raises(ValueError, match="must be a UTC timestamp"):
+        normalize_as_of("2026-04-01T00:00:00")
+    with pytest.raises(ValueError, match="not a valid ISO-8601"):
+        normalize_as_of("yesterday")
+
+
+def test_append_label_observation_canonicalizes_valid_at_spelling(tmp_path: Path):
+    """The write chokepoint converges every caller (GitHub 'Z' merge timestamps
+    included) on the '+00:00' isoformat spelling."""
+    _seed_one_run(tmp_path, "sess-z")
+    append_label_observation(
+        tmp_path, "sess-z", labels=["accepted"], pr_state="merged",
+        labeler_version="v1", evidence_sha=None,
+        valid_at="2026-02-01T00:00:00Z",
+    )
+    row = latest_label_observation(tmp_path, "sess-z")
+    assert row is not None
+    assert row["valid_at"] == "2026-02-01T00:00:00+00:00"
+
+
+def test_append_label_observation_rejects_naive_valid_at(tmp_path: Path):
+    _seed_one_run(tmp_path, "sess-naive")
+    with pytest.raises(ValueError, match="naive"):
+        append_label_observation(
+            tmp_path, "sess-naive", labels=["accepted"], pr_state="merged",
+            labeler_version="v1", evidence_sha=None,
+            valid_at="2026-02-01T00:00:00",
+        )
+
+
+def test_reviewer_prior_bound_spelling_cannot_misorder(tmp_path: Path):
+    """A 'Z'-spelled before_valid_at bound is canonicalized before the lexical
+    SQL cutoff, so it can never mis-order against the '+00:00' stored column.
+
+    Chronology: the pooled row's valid_at is 0.5s AFTER the bound instant, so
+    the strict `valid_at < bound` must exclude it. Raw lexical comparison of
+    the mixed spellings ("...00.500000+00:00" < "...00Z") would wrongly
+    include it.
+    """
+    _seed_one_run(tmp_path, "s_late")
+    _seed_one_run(tmp_path, "cur")
+    append_label_observation(
+        tmp_path, "s_late", labels=["rejected"], pr_state="closed",
+        labeler_version="v1", evidence_sha=None,
+        valid_at="2026-03-01T00:00:00.500000+00:00",
+        reviewer_logins=["alice"], has_posterior=True,
+    )
+    prior, n = reviewer_set_penalty_prior(
+        tmp_path, ["alice"], before_valid_at="2026-03-01T00:00:00Z", exclude_session="cur"
+    )
+    assert (prior, n) == (None, 0)
+    # And a bound safely after the row still pools it, regardless of spelling.
+    prior2, n2 = reviewer_set_penalty_prior(
+        tmp_path, ["alice"], before_valid_at="2026-03-01T00:00:01Z", exclude_session="cur"
+    )
+    assert prior2 == pytest.approx(1.0) and n2 == 1
+
+
+def test_legacy_z_valid_at_rows_are_purged_at_bootstrap(tmp_path: Path):
+    """Legacy 'Z'-spelled rows are deleted (not shimmed) on the next connection,
+    and the denormalized runs cache is refreshed to the surviving winner."""
+    _seed_one_run(tmp_path, "sess-legacy")
+    append_label_observation(
+        tmp_path, "sess-legacy", labels=["accepted"], pr_state="merged",
+        labeler_version="v1", evidence_sha="e1",
+        valid_at="2026-02-01T00:00:00+00:00",
+    )
+    # Hand-write a legacy row (bypassing the canonicalizing writer) that also
+    # wins the cache, as pre-convergence archives would contain.
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    conn.execute(
+        "INSERT INTO label_observations "
+        "(session_id, observed_at, labels, labeler_version, valid_at, source) "
+        "VALUES ('sess-legacy', '2027-01-01T00:00:00+00:00', '[\"rejected\"]', 'v0', "
+        "'2026-01-15T00:00:00Z', 'auto')"
+    )
+    conn.execute(
+        "UPDATE runs SET outcome_labels = '[\"rejected\"]' WHERE session_id = 'sess-legacy'"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.warns(UserWarning, match="legacy 'Z'-suffixed"):
+        hist = label_observation_history(tmp_path, "sess-legacy")
+
+    # Only the canonical row survives, and the cache points at it again.
+    assert [json.loads(r["labels"]) for r in hist] == [["accepted"]]
+    rows = query_runs(tmp_path, "session_id = ?", ("sess-legacy",))
+    assert json.loads(rows[0]["outcome_labels"]) == ["accepted"]
+
+
+def test_purge_resets_cache_when_no_rows_survive(tmp_path: Path):
+    _seed_one_run(tmp_path, "sess-only-legacy")
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    conn.execute(
+        "INSERT INTO label_observations "
+        "(session_id, observed_at, labels, labeler_version, valid_at, source) "
+        "VALUES ('sess-only-legacy', '2026-01-01T00:00:00+00:00', '[\"accepted\"]', 'v0', "
+        "'2026-01-01T00:00:00Z', 'auto')"
+    )
+    conn.execute(
+        "UPDATE runs SET outcome_labels = '[\"accepted\"]', labeled_at = '2026-01-01T00:00:00+00:00' "
+        "WHERE session_id = 'sess-only-legacy'"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.warns(UserWarning, match="legacy 'Z'-suffixed"):
+        assert label_observation_history(tmp_path, "sess-only-legacy") == []
+    rows = query_runs(tmp_path, "session_id = ?", ("sess-only-legacy",))
+    assert json.loads(rows[0]["outcome_labels"]) == []
+    assert rows[0]["labeled_at"] is None

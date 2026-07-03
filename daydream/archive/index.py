@@ -29,6 +29,33 @@ Exports:
         a session in chronological order.
     label_count_summary: Return label counts for all runs in a single aggregate
         query (replaces N+1 per-session lookups).
+    canonical_utc_iso: Convert an ISO-8601 timestamp to the canonical UTC
+        spelling this index stores and compares (``+00:00`` suffix).
+    normalize_as_of: Validate and canonicalize a user-supplied ``as_of`` pin
+        (strict: UTC-only input) for lexical comparison against ``observed_at``.
+
+Timestamp canonicalization contract
+-----------------------------------
+
+The bitemporal columns are TEXT and every cutoff (``observed_at <= as_of``,
+``valid_at < before_valid_at``) is a lexical string comparison, which matches
+chronological order only when both sides share one spelling. The canonical
+spelling is ``datetime.isoformat()`` in UTC — ``YYYY-MM-DDTHH:MM:SS[.ffffff]+00:00``
+(fractional seconds absent or exactly six digits, never a ``Z`` suffix).
+
+- ``observed_at`` has a single writer (:func:`append_label_observation` stamps
+  ``datetime.now(timezone.utc).isoformat()``), so the stored column is uniformly
+  canonical and ``observed_at <= as_of`` / ``ORDER BY observed_at`` are safe once
+  ``as_of`` is canonical (enforced at its entry boundary via
+  :func:`normalize_as_of`).
+- ``valid_at`` historically mixed spellings: caller-supplied values (GitHub
+  merge timestamps, harvest fallbacks) arrived ``Z``-suffixed while the
+  ``None``→``observed_at`` collapse stored ``+00:00``. All rows are now
+  canonicalized at write time (:func:`canonical_utc_iso` in
+  :func:`append_label_observation`), and legacy ``Z``-suffixed rows are deleted
+  at connection bootstrap (``_purge_legacy_z_valid_at`` — repopulate via
+  ``harvest``), so the stored column is uniformly canonical and plain lexical
+  cutoffs (``valid_at < before_valid_at``) compare chronologically.
 """
 
 from __future__ import annotations
@@ -49,6 +76,7 @@ from daydream.archive._schema import (
     SCHEMA_VERSION,
     _migrate_label_observations_schema,
     _migrate_schema,
+    _purge_legacy_z_valid_at,
     _recreate_label_observations_if_stale,
 )
 from daydream.archive.manifest import Manifest
@@ -69,7 +97,70 @@ __all__ = [
     "label_count_summary",
     "pr_attached_label_coverage",
     "set_run_pr_link",
+    "canonical_utc_iso",
+    "normalize_as_of",
 ]
+
+
+def canonical_utc_iso(ts: str) -> str:
+    """Return *ts* in the canonical UTC spelling stored by this index.
+
+    Parses any valid ISO-8601 timestamp (``Z`` or numeric offset, any
+    sub-second precision) and re-emits ``datetime.isoformat()`` in UTC:
+    ``YYYY-MM-DDTHH:MM:SS[.ffffff]+00:00``. Aware non-UTC offsets are
+    *converted* to UTC — a data timestamp in a foreign zone is an unambiguous
+    instant, so conversion is always chronologically correct. Idempotent for
+    already-canonical input.
+
+    Args:
+        ts: ISO-8601 timestamp string with an explicit UTC offset.
+
+    Returns:
+        The canonical UTC spelling of the same instant.
+
+    Raises:
+        ValueError: When *ts* is not parseable ISO-8601, or is naive (no
+            offset) — a naive timestamp names no single instant, so it cannot
+            be canonicalized.
+    """
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise ValueError(f"naive timestamp {ts!r}: an explicit UTC offset is required")
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def normalize_as_of(value: str) -> str:
+    """Validate and canonicalize a user-supplied ``as_of`` pin.
+
+    The single entry-boundary normalizer for ``as_of``: call it once where the
+    pin enters the system (``BuildCorpusConfig``); downstream consumers — the
+    ``observed_at <= as_of`` SQL cutoffs here and the valid-time leakage guard
+    in ``daydream.training.corpus`` — receive the canonical spelling and never
+    re-normalize.
+
+    Stricter than :func:`canonical_utc_iso`: a non-UTC offset is *rejected*,
+    not converted. An operator writing ``+05:00`` on a reproducibility pin is
+    almost certainly thinking in local time; silently shifting the pin five
+    hours invites irreproducible corpora, so the input must already be UTC
+    (``Z`` or ``+00:00``, any sub-second precision).
+
+    Args:
+        value: User-supplied ISO-8601 timestamp string.
+
+    Returns:
+        The canonical UTC spelling (``+00:00`` suffix).
+
+    Raises:
+        ValueError: When *value* is not parseable ISO-8601, is naive, or
+            carries a non-UTC offset.
+    """
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"as_of {value!r} is not a valid ISO-8601 timestamp") from None
+    if dt.tzinfo is None or dt.utcoffset() != timedelta(0):
+        raise ValueError(f"as_of {value!r} must be a UTC timestamp (ending in Z or +00:00)")
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def _get_connection(archive_dir: Path) -> sqlite3.Connection:
@@ -94,6 +185,7 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
     _recreate_label_observations_if_stale(conn)
     _migrate_label_observations_schema(conn)
+    _purge_legacy_z_valid_at(conn)
     _migrate_schema(conn)
     for idx_sql in _CREATE_INDEXES:
         conn.execute(idx_sql)
@@ -204,7 +296,10 @@ def append_label_observation(
             decision; ``None`` when no concrete evidence applies.
         rubric_json: Optional JSON-serialised rubric (``Rubric.to_dict()``).
         valid_at: ISO 8601 valid time — when the outcome the annotation
-            describes became true (e.g. a PR merge timestamp). ``None`` for
+            describes became true (e.g. a PR merge timestamp). Canonicalized
+            via :func:`canonical_utc_iso` before storage so the column
+            converges on one spelling regardless of the caller's (GitHub emits
+            ``Z``; the collapse path emits ``+00:00``). ``None`` for
             non-PR/local runs, in which case it collapses to ``observed_at``
             so an ``as_of``-pinned corpus never spuriously drops the run (Q2).
         reward_version: Version tag of the reward reducer that produced
@@ -243,8 +338,11 @@ def append_label_observation(
         appends a fresh generation.
 
     Raises:
-        ValueError: When ``session_id`` is not present in the ``runs`` table.
+        ValueError: When ``session_id`` is not present in the ``runs`` table,
+            or when ``valid_at`` is not a parseable aware ISO-8601 timestamp.
     """
+    if valid_at is not None:
+        valid_at = canonical_utc_iso(valid_at)
     observed_dt = datetime.now(timezone.utc)
     labels_json = json.dumps(labels)
     reviewer_logins_json = json.dumps(reviewer_logins) if reviewer_logins is not None else None
@@ -351,7 +449,9 @@ def latest_label_observation(
     Args:
         archive_dir: Path to the archive root.
         session_id: Full session UUID.
-        as_of: Optional ISO 8601 cutoff timestamp.
+        as_of: Optional ISO 8601 cutoff timestamp in the canonical UTC
+            spelling (see :func:`normalize_as_of` — the entry boundary
+            normalizes once; this lexical cutoff assumes canonical input).
 
     Returns:
         The row as a dict, or ``None`` when no matching observation exists.
@@ -396,7 +496,9 @@ def bulk_latest_label_observations(
     Args:
         archive_dir: Path to the archive root.
         session_ids: Collection of session UUIDs to look up.
-        as_of: Optional ISO 8601 cutoff timestamp.
+        as_of: Optional ISO 8601 cutoff timestamp in the canonical UTC
+            spelling (see :func:`normalize_as_of` — the entry boundary
+            normalizes once; this lexical cutoff assumes canonical input).
 
     Returns:
         Mapping of ``session_id`` → row dict for every session that has at
@@ -478,6 +580,9 @@ def reviewer_set_penalty_prior(
         archive_dir: Path to the archive root.
         logins: The current run's reviewer set. Empty → no pool.
         before_valid_at: ISO 8601 strict upper bound on ``valid_at``.
+            Canonicalized via :func:`canonical_utc_iso` so the lexical ``<``
+            against the (uniformly canonical) stored column compares
+            chronologically regardless of the caller's spelling.
         exclude_session: Session id to exclude (the current run).
         repo_slug: When provided, restrict the pool to observations whose
             parent run shares this ``repo_slug`` (joined via ``runs``).
@@ -489,6 +594,9 @@ def reviewer_set_penalty_prior(
     """
     if not logins:
         return None, 0
+    # Canonicalize the bound so the lexical < against the canonical stored
+    # column stays chronological regardless of the caller's spelling.
+    before_valid_at = canonical_utc_iso(before_valid_at)
     login_set = set(logins)
     penalty_map = _REVIEWER_PENALTY_MAP
 

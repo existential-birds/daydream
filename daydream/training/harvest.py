@@ -673,7 +673,7 @@ def build_annotation(
                 pooled, prior_n = reviewer_set_penalty_prior(
                     archive_dir,
                     reviewer_logins,
-                    before_valid_at=valid_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    before_valid_at=valid_at or datetime.now(timezone.utc).isoformat(),
                     exclude_session=row["session_id"],
                     repo_slug=row.get("repo_slug"),
                 )

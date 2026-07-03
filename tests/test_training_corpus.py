@@ -40,6 +40,7 @@ def _seed_run_with_annotation(
     reward_json: str | None = None,
     composite_reward: float | None = None,
     reward_version: str = "r1",
+    rubric_json: str | None = None,
     observed_at: str,
     valid_at: str,
 ) -> Path:
@@ -60,6 +61,7 @@ def _seed_run_with_annotation(
         reward_json: Serialised ``RewardBreakdown.to_dict()`` JSON, or ``None``.
         composite_reward: Cached composite scalar mirrored onto the row.
         reward_version: Version tag stamped on the annotation.
+        rubric_json: Serialised rubric dict stored on the annotation, or ``None``.
         observed_at: ISO-8601 transaction time. The test patches this onto the
             row directly because :func:`append_label_observation` stamps wall
             clock; we override it post-write for deterministic ``as_of`` pins.
@@ -110,6 +112,7 @@ def _seed_run_with_annotation(
         reward_version=reward_version,
         reward_json=reward_json,
         composite_reward=composite_reward,
+        rubric_json=rubric_json,
     )
     # append_label_observation stamps observed_at with wall clock; overwrite it
     # so as_of pins in tests are deterministic.

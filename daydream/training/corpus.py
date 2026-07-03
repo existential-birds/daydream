@@ -14,9 +14,17 @@ pin against posterior label leakage: an annotation may be *recorded* before
 merge timestamp) lands *after* the pin. When ``valid_at > as_of`` the
 posterior-derived ``outcome_label`` is dropped (the run is treated as
 unlabeled); the intrinsic, capture-time reward fields survive and may still
-admit the run via the ``min_reward`` path. The comparison is **lexical** on
-ISO-8601/UTC strings — no datetime parsing — mirroring the ``observed_at <=
-as_of`` SQL pin. When ``as_of`` is ``None`` no valid-time exclusion applies.
+admit the run via the ``min_reward`` path. The comparison is **chronological**
+(parsed datetimes), so any ISO-8601 spelling difference — ``Z`` vs ``+00:00``,
+sub-second precision, a non-UTC offset — can never mis-order the guard. When
+``as_of`` is ``None`` no valid-time exclusion applies.
+
+``as_of`` is validated and canonicalized exactly once, at its entry boundary:
+:class:`BuildCorpusConfig` normalizes it via
+:func:`daydream.archive.index.normalize_as_of` (UTC-only input; canonical
+``+00:00`` spelling out), so both consumers — the lexical ``observed_at <=
+as_of`` SQL pin in :func:`daydream.archive.index.bulk_latest_label_observations`
+and :func:`_is_posterior_leak` — receive the same canonical string.
 
 Every snapshot writes a lineage manifest (``lineage.json``) beside the JSONL,
 pinning the snapshot's provenance: a content-addressed ``trajectory_set_hash``
@@ -54,7 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive import get_archive_dir
-from daydream.archive.index import bulk_latest_label_observations, count_runs, query_runs
+from daydream.archive.index import bulk_latest_label_observations, count_runs, normalize_as_of, query_runs
 from daydream.config import REVIEW_SKILLS
 from daydream.training.exclusion import is_copyleft, load_copyleft_list, load_exclusion_list
 from daydream.training.harvest import _read_review_output
@@ -704,6 +712,15 @@ class BuildCorpusConfig:
             reproducible: a re-projection at the same ``as_of`` reproduces the
             prior corpus even after a re-harvest appends newer generations.
             ``None`` resolves the latest annotation per run (no pin).
+            Validated and canonicalized here — the single entry boundary — via
+            :func:`daydream.archive.index.normalize_as_of`: input must be UTC
+            (``Z`` or ``+00:00``; naive or non-UTC offsets raise ``ValueError``)
+            and is stored in the canonical ``+00:00`` isoformat spelling that
+            the ``observed_at <= as_of`` SQL pin and :func:`_is_posterior_leak`
+            both consume.
+
+    Raises:
+        ValueError: When ``as_of`` is not a parseable UTC ISO-8601 timestamp.
     """
 
     out_path: Path
@@ -714,6 +731,10 @@ class BuildCorpusConfig:
     dry_run: bool = False
     emit_schema_only: bool = False
     as_of: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.as_of is not None:
+            object.__setattr__(self, "as_of", normalize_as_of(self.as_of))
 
 
 def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> bool:
@@ -726,35 +747,31 @@ def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> 
     fields (the outcome label and posterior reward axes) would leak future
     information into a corpus pinned to ``as_of``, so they are dropped.
 
-    The comparison is **lexical** on ISO-8601 strings. ``valid_at`` is written
-    in UTC (the per-run builder uses ``PRMergeSignal.merged_at``; local runs
-    collapse ``None`` to ``observed_at`` at write time, also UTC), so the
-    lexical ordering of the strings matches chronological order — no datetime
-    parsing is required, mirroring the ``observed_at <= as_of`` SQL pin in
-    :func:`daydream.archive.index.latest_label_observation`.
-
-    Both strings are normalised to the ``+00:00`` suffix before comparison so
-    that the ``Z`` and ``+00:00`` UTC spellings sort identically.
+    The comparison is **chronological**: both sides are parsed with
+    :func:`datetime.fromisoformat` and compared as aware datetimes, so spelling
+    differences — ``Z`` vs ``+00:00``, differing sub-second precision, or a
+    non-UTC offset — can never mis-order the guard. In the production path both
+    strings are already canonical UTC (``as_of`` is normalized once at the
+    :class:`BuildCorpusConfig` boundary; ``valid_at`` is canonicalized at write
+    time by ``append_label_observation``), making the parse a semantic
+    statement rather than a compatibility shim.
 
     Args:
         annotation: The ``as_of``-pinned ``label_observations`` row, or ``None``.
-        as_of: The transaction-time pin. When ``None`` no valid-time exclusion
-            applies (every recorded annotation is in-time).
+        as_of: The transaction-time pin (aware ISO-8601). When ``None`` no
+            valid-time exclusion applies (every recorded annotation is in-time).
 
     Returns:
-        ``True`` when ``valid_at`` is non-null and lexically greater than
+        ``True`` when ``valid_at`` is non-null and chronologically after
         ``as_of`` — the outcome is posterior to the pin and must be excluded.
+        ``valid_at == as_of`` is in-time, not a leak.
     """
     if annotation is None or as_of is None:
         return False
     valid_at = annotation.get("valid_at")
     if valid_at is None:
         return False
-    # Normalise the UTC suffix so "Z" and "+00:00" compare identically.
-    def _norm(s: str) -> str:
-        return s.replace("Z", "+00:00") if s.endswith("Z") else s
-
-    return _norm(valid_at) > _norm(as_of)
+    return datetime.fromisoformat(valid_at) > datetime.fromisoformat(as_of)
 
 
 def _is_admitted(label: str | None, composite_reward: float | None, filters: CorpusFilters) -> bool:

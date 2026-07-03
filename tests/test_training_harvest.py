@@ -551,6 +551,17 @@ async def test_harvest_writes_one_annotation(tmp_path, archive_dir, monkeypatch)
     assert obs["valid_at"] == "2026-02-01T00:00:00+00:00" and obs["composite_reward"] is not None
 
 
+async def test_harvest_stores_github_z_merge_timestamp_canonically(tmp_path, archive_dir, monkeypatch):
+    """Real-path writer convergence: GitHub reports merged_at with a 'Z' suffix;
+    the stored valid_at must be the canonical '+00:00' spelling."""
+    _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00Z")
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _fake_gh_merged("2026-02-01T00:00:00Z"))
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+    obs = latest_label_observation(archive_dir, "s1")
+    assert summary["annotated"] == 1
+    assert obs["valid_at"] == "2026-02-01T00:00:00+00:00"
+
+
 async def test_harvest_labels_unresolved_daydream_comment_contested(tmp_path, archive_dir, monkeypatch):
     """Real-path: a merged PR whose daydream comment is unresolved → ``contested``.
 
