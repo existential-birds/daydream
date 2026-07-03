@@ -2,7 +2,7 @@
 
 Mirrors the transforms in :func:`daydream.pr_review.parsed_issues_from_items`,
 but folds ``description`` into the comment ``body`` and emits the benchmark
-``review_comments`` shape (``{path, line, body, created_at}``) instead of a
+``review_comments`` shape (``{path, line, body, created_at, confidence, severity}``) instead of a
 ``ParsedIssue``. Pure and deterministic — no I/O, no LLM.
 """
 
@@ -25,15 +25,18 @@ def merged_items_to_review_comments(
         created_at: Timestamp passed verbatim onto every emitted comment.
 
     Returns:
-        A list of ``{path, line, body, created_at}`` dicts, one per item with
-        a non-empty ``file``. Items with an empty ``file`` are skipped, as are
-        items whose assembled ``body`` is empty (no ``description``,
-        ``severity``, ``confidence``, or ``rationale`` text) — an empty-body
-        comment is never emitted. A null
+        A list of ``{path, line, body, created_at, confidence, severity}``
+        dicts, one per item with a non-empty ``file``. Items with an empty
+        ``file`` are skipped, as are items whose assembled ``body`` is empty
+        (no ``description``, ``severity``, ``confidence``, or ``rationale``
+        text) — an empty-body comment is never emitted. A null
         or non-integer ``line`` is preserved as ``None``. The ``body`` leads
         with the finding ``description``, followed by ``**Severity:**`` and
         ``**Confidence:**`` badges, and the ``rationale`` only when it differs
-        from the description; sections are joined with ``"\\n\\n"``.
+        from the description; sections are joined with ``"\\n\\n"``. The
+        structured ``confidence`` (uppercased) and ``severity`` (lowercased)
+        fields carry the same values, ``None`` when absent; the body badges
+        are kept for human/judge readability.
     """
     out: list[dict[str, Any]] = []
     for raw in doc.get("items", []):
@@ -58,6 +61,8 @@ def merged_items_to_review_comments(
                 "line": fields.line_int,
                 "body": body,
                 "created_at": created_at,
+                "confidence": fields.confidence,
+                "severity": fields.severity,
             }
         )
     return out

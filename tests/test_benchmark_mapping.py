@@ -24,7 +24,32 @@ def test_maps_fields_and_folds_description_into_body():
     [c] = merged_items_to_review_comments({"items": [_item("a/b.go", 48)]}, created_at=TS)
     assert c["path"] == "a/b.go" and c["line"] == 48 and c["created_at"] == TS
     assert "Race on cache write" in c["body"] and "Two goroutines" in c["body"]
-    assert set(c) == {"path", "line", "body", "created_at"}
+    assert set(c) == {"path", "line", "body", "created_at", "confidence", "severity"}
+
+
+def test_structured_confidence_severity_preserved():
+    doc = {"items": [
+        _item("a/b.go", 48, id=1, severity="high", confidence="HIGH"),
+        _item("f.py", None, id=2, severity="", confidence="", description="y", rationale="y"),
+        _item("c.rs", 10, id=3, severity="CRITICAL", confidence="low"),
+        _item("d.ts", 5, id=4, lens="cross-stack", severity="medium", confidence="MEDIUM"),
+    ]}
+    out = merged_items_to_review_comments(doc, created_at=TS)
+    by_path = {c["path"]: c for c in out}
+
+    a = by_path["a/b.go"]
+    assert a["severity"] == "high" and a["confidence"] == "HIGH"
+    assert "**Severity:** high" in a["body"] and "**Confidence:** HIGH" in a["body"]
+
+    b = by_path["f.py"]
+    assert b["severity"] is None and b["confidence"] is None and b["line"] is None
+
+    c = by_path["c.rs"]
+    assert c["severity"] == "critical" and c["confidence"] == "LOW"
+
+    d = by_path["d.ts"]
+    assert d["severity"] == "medium" and d["confidence"] == "MEDIUM"
+    assert "**Severity:** medium" in d["body"] and "**Confidence:** MEDIUM" in d["body"]
 
 
 def test_empty_items_yields_no_comments():
