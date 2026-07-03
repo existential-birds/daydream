@@ -2,7 +2,7 @@
 
 Mirrors the transforms in :func:`daydream.pr_review.parsed_issues_from_items`,
 but folds ``description`` into the comment ``body`` and emits the benchmark
-``review_comments`` shape (``{path, line, body, created_at}``) instead of a
+``review_comments`` shape (``{path, line, body, created_at, confidence, severity}``) instead of a
 ``ParsedIssue``. Pure and deterministic — no I/O, no LLM.
 """
 
