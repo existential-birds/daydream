@@ -24,10 +24,13 @@ from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
     LocalCommitAppliedSignal,
+    PerFindingResolution,
     PRMergeSignal,
 )
 
 PosteriorSource = Literal["pr_review", "local_branch", "none"]
+
+PerFindingLabel = Literal["accepted", "contested", "rejected", "unknown", "missing"]
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,9 @@ class Rubric:
             row originated from a PR.
         posterior_source: Discriminator selecting which sub-signal
             carries the authoritative outcome label.
+        per_finding_labels: One outcome label per recorded finding
+            (fingerprint-joined), or ``None`` when no per-finding join was
+            performed.
     """
 
     pr_merge: PRMergeSignal
@@ -50,6 +56,7 @@ class Rubric:
     comment_resolution: CommentResolutionSignal
     local_commit_applied: LocalCommitAppliedSignal | None
     posterior_source: PosteriorSource
+    per_finding_labels: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation with explicit key order.
@@ -77,6 +84,8 @@ class Rubric:
         }
         if self.local_commit_applied is not None:
             out["local_commit_applied"] = {"verdict": self.local_commit_applied.verdict}
+        if self.per_finding_labels is not None:
+            out["per_finding_outcomes"] = list(self.per_finding_labels)
         return out
 
 
@@ -119,3 +128,44 @@ def derive_outcome_label(rubric: Rubric) -> str:
             return "rejected"
         return "unknown"
     return "unknown"
+
+
+def derive_per_finding_labels(
+    rubric: Rubric,
+    per_finding: list[PerFindingResolution],
+) -> list[PerFindingLabel]:
+    """Reduce per-finding resolutions to one outcome label per finding.
+
+    Only ``posterior_source == "pr_review"`` yields decisive per-finding
+    labels; any other source is inconclusive at finding granularity:
+
+    * ``"pr_review"`` on a **merged** PR:
+      - resolved (replied) → ``"accepted"``
+      - unresolved with a surviving comment → ``"contested"``
+      - unresolved with no comment (deleted / never posted) → ``"missing"``
+    * ``"pr_review"`` on an **unmerged** PR → all ``"rejected"``.
+    * any other posterior source → all ``"unknown"``.
+
+    Args:
+        rubric: The rubric whose posterior source and merge state decide
+            the mapping.
+        per_finding: The per-finding resolutions to label, in order.
+
+    Returns:
+        One :data:`PerFindingLabel` per entry in ``per_finding``, order
+        preserved.
+    """
+    if rubric.posterior_source != "pr_review":
+        return ["unknown" for _ in per_finding]
+    if not rubric.pr_merge.merged:
+        return ["rejected" for _ in per_finding]
+
+    labels: list[PerFindingLabel] = []
+    for resolution in per_finding:
+        if resolution.resolved:
+            labels.append("accepted")
+        elif resolution.comment_id is not None:
+            labels.append("contested")
+        else:
+            labels.append("missing")
+    return labels

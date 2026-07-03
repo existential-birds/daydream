@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from daydream.pr_review import parse_finding_markers
+
 # Version-stable footer prefix: matching only this prefix (not the full
 # version-pinned DAYDREAM_FOOTER) recognises comments from any daydream release.
 _DAYDREAM_FOOTER_PREFIX = "<sub>🧙 Posted by [daydream v"
@@ -107,6 +109,24 @@ class CommentResolutionSignal:
     total: int
     replied: int
     unresolved: int
+
+
+@dataclass(frozen=True)
+class PerFindingResolution:
+    """Resolution state for one recorded finding, joined by fingerprint.
+
+    Attributes:
+        fingerprint: The 64-hex finding fingerprint recorded at review time.
+        resolved: ``True`` when the finding's posted comment received at
+            least one reply (proxy for "addressed").
+        comment_id: GitHub review-comment ID carrying the finding marker,
+            or ``None`` when no surviving comment carries the fingerprint
+            (deleted, edited away, or never posted).
+    """
+
+    fingerprint: str
+    resolved: bool
+    comment_id: int | None
 
 
 @dataclass(frozen=True)
@@ -421,6 +441,69 @@ def comment_resolution_signal(
     total = len(top_level_daydream_ids)
     replied = sum(1 for cid in top_level_daydream_ids if replies_by_parent.get(cid, 0) >= 1)
     return CommentResolutionSignal(total=total, replied=replied, unresolved=total - replied)
+
+
+def per_finding_resolution_signal(
+    row: dict[str, Any],
+    *,
+    recorded_fingerprints: list[str],
+    gh_api: Callable[..., Any],
+) -> list[PerFindingResolution]:
+    """Resolve each recorded finding to its posted comment and reply state.
+
+    Joins the fingerprints recorded at review time (``recorded_fingerprints``)
+    against the PR's live review comments by the hidden
+    ``<!-- daydream-finding: <fp> -->`` marker embedded in each daydream
+    comment body. A finding is ``resolved`` when its comment received at
+    least one reply; a fingerprint with no surviving comment yields
+    ``comment_id=None`` (deleted / edited away / never posted).
+
+    Args:
+        row: Manifest row carrying ``pr_repo`` and ``pr_number``.
+        recorded_fingerprints: Fingerprints captured at review time. The
+            returned list preserves this order, one entry per fingerprint.
+        gh_api: Callable returning the parsed comment list.
+
+    Returns:
+        One :class:`PerFindingResolution` per recorded fingerprint, or an
+        empty list when the row has no associated PR.
+    """
+    repo = row.get("pr_repo")
+    number = row.get("pr_number")
+    if repo is None or number is None:
+        return []
+
+    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
+
+    # Pass 1: top-level daydream comment IDs.
+    top_level_daydream_ids: set[int] = set()
+    for comment in comments:
+        if comment.get("in_reply_to_id") is None and _is_daydream_comment(comment):
+            top_level_daydream_ids.add(comment["id"])
+
+    # Pass 2: which top-level comments received a reply.
+    replied_ids: set[int] = set()
+    for comment in comments:
+        in_reply_to = comment.get("in_reply_to_id")
+        if in_reply_to in top_level_daydream_ids:
+            replied_ids.add(in_reply_to)
+
+    # Pass 3: map fingerprint -> the comment ID that carries its marker.
+    comment_id_by_fingerprint: dict[str, int] = {}
+    for comment in comments:
+        if comment["id"] not in top_level_daydream_ids:
+            continue
+        for fingerprint in parse_finding_markers(comment.get("body") or ""):
+            comment_id_by_fingerprint.setdefault(fingerprint, comment["id"])
+
+    resolutions: list[PerFindingResolution] = []
+    for fingerprint in recorded_fingerprints:
+        comment_id = comment_id_by_fingerprint.get(fingerprint)
+        resolved = comment_id is not None and comment_id in replied_ids
+        resolutions.append(
+            PerFindingResolution(fingerprint=fingerprint, resolved=resolved, comment_id=comment_id)
+        )
+    return resolutions
 
 
 def pr_link_signal(

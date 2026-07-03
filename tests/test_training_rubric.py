@@ -6,9 +6,15 @@ from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
     LocalCommitAppliedSignal,
+    PerFindingResolution,
     PRMergeSignal,
 )
-from daydream.training.rubric import Rubric, derive_outcome_label
+from daydream.training.rubric import (
+    PosteriorSource,
+    Rubric,
+    derive_outcome_label,
+    derive_per_finding_labels,
+)
 
 
 def test_rubric_serializes_to_dict_with_pr_source() -> None:
@@ -101,3 +107,51 @@ def test_outcome_label_unknown_when_no_signal_at_all() -> None:
         posterior_source="none",
     )
     assert derive_outcome_label(rub) == "unknown"
+
+
+def _pr_rubric(*, merged: bool, source: PosteriorSource = "pr_review") -> Rubric:
+    """A minimal rubric for per-finding label derivation."""
+    return Rubric(
+        pr_merge=PRMergeSignal(merged, "2026-01-01T00:00:00Z" if merged else None),
+        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
+        comment_resolution=CommentResolutionSignal(0, 0, 0),
+        local_commit_applied=None if source == "pr_review" else LocalCommitAppliedSignal("unknown"),
+        posterior_source=source,
+    )
+
+
+def test_derive_per_finding_labels_mixed() -> None:
+    """Merged PR: a replied finding is accepted, an unreplied one contested."""
+    rub = _pr_rubric(merged=True)
+    per_finding = [
+        PerFindingResolution(fingerprint="a" * 64, resolved=True, comment_id=1),
+        PerFindingResolution(fingerprint="b" * 64, resolved=False, comment_id=2),
+    ]
+    assert derive_per_finding_labels(rub, per_finding) == ["accepted", "contested"]
+
+
+def test_derive_per_finding_labels_rejected() -> None:
+    """Unmerged PR: every finding is rejected regardless of reply state."""
+    rub = _pr_rubric(merged=False)
+    per_finding = [
+        PerFindingResolution(fingerprint="a" * 64, resolved=True, comment_id=1),
+        PerFindingResolution(fingerprint="b" * 64, resolved=False, comment_id=None),
+    ]
+    assert derive_per_finding_labels(rub, per_finding) == ["rejected", "rejected"]
+
+
+def test_derive_per_finding_labels_missing() -> None:
+    """Merged PR: an unresolved finding whose comment vanished is missing."""
+    rub = _pr_rubric(merged=True)
+    per_finding = [PerFindingResolution(fingerprint="a" * 64, resolved=False, comment_id=None)]
+    assert derive_per_finding_labels(rub, per_finding) == ["missing"]
+
+
+def test_derive_per_finding_labels_local_branch() -> None:
+    """Non-pr_review posterior yields unknown for every finding."""
+    rub = _pr_rubric(merged=False, source="local_branch")
+    per_finding = [
+        PerFindingResolution(fingerprint="a" * 64, resolved=True, comment_id=1),
+        PerFindingResolution(fingerprint="b" * 64, resolved=False, comment_id=2),
+    ]
+    assert derive_per_finding_labels(rub, per_finding) == ["unknown", "unknown"]

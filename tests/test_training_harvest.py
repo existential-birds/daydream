@@ -20,7 +20,7 @@ from daydream.archive.index import (
 )
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
-from daydream.pr_review import DAYDREAM_FOOTER
+from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
 from daydream.training import harvest
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.harvest import (
@@ -179,6 +179,56 @@ def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_pat
     assert ann.labels == ["accepted"]
     assert ann.valid_at == "2026-02-01T00:00:00+00:00"        # PR merge time (Q2)
     assert ann.composite_reward == json.loads(ann.reward_json)["composite"]
+
+
+def _fake_gh_merged_per_finding(merged_at: str, fp_replied: str, fp_unreplied: str):
+    """A merged PR with two daydream finding comments: one replied, one not.
+
+    Reuses the labeler responder shape but the ``comments`` endpoint carries
+    two footer-marked daydream comments whose bodies embed the finding
+    markers; a human reply targets only the first.
+    """
+
+    def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/comments"):
+            return [
+                {
+                    "id": 1,
+                    "in_reply_to_id": None,
+                    "user": {"login": "daydream-runner"},
+                    "body": f"finding\n\n{finding_marker(fp_replied)}\n\n{DAYDREAM_FOOTER}",
+                },
+                {
+                    "id": 2,
+                    "in_reply_to_id": None,
+                    "user": {"login": "daydream-runner"},
+                    "body": f"finding\n\n{finding_marker(fp_unreplied)}\n\n{DAYDREAM_FOOTER}",
+                },
+                {"id": 3, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "fixed"},
+            ]
+        if endpoint.endswith("/reviews"):
+            return []
+        return {"merged": True, "merged_at": merged_at}
+
+    return responder
+
+
+def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path):
+    """A merged PR with a findings.json in the archive yields per-finding labels
+    joined by fingerprint: the replied finding is accepted, the unreplied one contested."""
+    fp_a = "a" * 64
+    fp_b = "b" * 64
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    (run_dir / "findings.json").write_text(
+        json.dumps({"findings": [{"fingerprint": fp_a}, {"fingerprint": fp_b}]})
+    )
+    row = {"session_id": "s_pf", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir),
+           "grounding_rate": 1.0, "changed_files": "[]"}
+    ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
+                           gh_api=_fake_gh_merged_per_finding("2026-02-01T00:00:00+00:00", fp_a, fp_b),
+                           repo_clone=tmp_path)
+    assert json.loads(ann.rubric_json)["per_finding_outcomes"] == ["accepted", "contested"]
 
 
 def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
