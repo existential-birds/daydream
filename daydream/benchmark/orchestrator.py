@@ -7,8 +7,8 @@ synthetic ``daydream`` review into the corpus.
 
 Path convention: the benchmark corpus is read from and written to
 ``config.benchmark_repo / "results" / "benchmark_data.json"`` (the layout the
-withmartian ``code-review-benchmark`` step modules expect). The corpus is saved
-after every PR so an interrupted sweep is resumable.
+benchmark scoring artifacts expect). The corpus is saved after every PR so an
+interrupted sweep is resumable.
 
 A single PR's failure is logged and recorded but does not abort the sweep; the
 returned exit code is non-zero if any selected PR failed. When ``config.score``
@@ -174,7 +174,13 @@ def run_bench(config: BenchConfig) -> int:
     score_failed = False
     if config.score:
         try:
-            scores = run_scoring(config.benchmark_repo, judge_model, pr_count=len(prs), tool=config.tool_label)
+            scores = run_scoring(
+                config.benchmark_repo,
+                judge_model,
+                pr_count=len(prs),
+                tool=config.tool_label,
+                judge_route=config.judge_route,
+            )
         except Exception as exc:  # noqa: BLE001 - report scoring failure without raising past the CLI
             score_failed = True
             print_error(console, "Scoring failed", f"{type(exc).__name__}: {exc}")
