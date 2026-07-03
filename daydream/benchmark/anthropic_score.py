@@ -1,0 +1,697 @@
+"""Direct Anthropic JSON client for benchmark judge steps."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+import httpx
+
+from daydream.benchmark.score import (
+    ANTHROPIC_JUDGE_API_KEY_ENV,
+    BenchmarkArtifactError,
+    BenchmarkStepError,
+    DaydreamScores,
+    model_results_dir,
+    parse_daydream_scores,
+)
+
+
+class _NonRetryableError(BenchmarkStepError):
+    """Raised for HTTP 4xx (non-429) and JSON-parse failures that must not be retried."""
+
+
+_ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+_ANTHROPIC_VERSION = "2023-06-01"
+_REQUEST_TIMEOUT = 60.0
+_MAX_RETRIES = 3
+_MAX_EXTRACTION_TOKENS = 4096
+_MAX_DEDUP_TOKENS = 4096
+_MAX_JUDGE_TOKENS = 1024
+_MIN_DEDUP_CANDIDATES = 2
+_JUDGE_CONCURRENCY = 10  # max parallel judge calls; mirrors CapacityLimiter convention in phases.py
+_TOOL = "daydream"
+
+_EXTRACTION_SYSTEM = "You extract code review issues from comments. Always respond with valid JSON."
+_DEDUP_SYSTEM = "You group duplicate code review comments. Always respond with valid JSON only."
+_JUDGE_SYSTEM = "You are a precise code review evaluator. Always respond with valid JSON."
+
+_EXTRACTION_PROMPT = """You are analyzing an AI code review comment to extract individual issues mentioned.
+
+The comment may discuss multiple distinct problems. Extract each separate issue as a standalone item.
+
+Code Review Comment:
+{comment}
+
+Instructions:
+- Extract each distinct code issue, bug, or concern mentioned
+- Each issue should be a single, specific problem (not a general observation)
+- Ignore meta-commentary like "I found 2 issues" - extract the actual issues
+- Ignore sign-offs, greetings, or formatting instructions
+- If the comment contains no actionable code review issues, return an empty list
+
+Example input:
+"Found several problems: 1) The getUserById function doesn't handle null input, which will cause a crash.
+2) The cache key uses user.name but should use user.id for uniqueness.
+Also, consider adding retry logic for the API call."
+
+Example output:
+{{"issues": [
+  "getUserById function doesn't handle null input, causing potential crash",
+  "Cache key uses user.name instead of user.id, breaking uniqueness",
+  "Missing retry logic for API call"
+]}}
+
+Respond with ONLY a JSON object:
+{{"issues": ["issue 1", "issue 2", ...]}}"""
+
+_DEDUP_PROMPT = """You are identifying duplicate code review comments.
+
+Below is a numbered list of issues extracted from an AI tool's code review.
+Some tools post the same issue in both a summary comment and an inline comment,
+creating near-identical duplicates. Your job is to find those duplicates.
+
+Two candidates are duplicates ONLY IF:
+- They describe the same problem AND
+- A single code change would fix both (i.e., they would be one bug report)
+
+Two candidates are NOT duplicates if:
+- They describe the same TYPE of bug but in different files, functions, or
+  classes (e.g., "negative slicing in OptimizedCursorPaginator" vs "negative
+  slicing in BasePaginator" are separate issues - fixing one does not fix
+  the other)
+- They describe related but distinct problems (e.g., "returns wrong type" vs
+  "caller crashes because of wrong type" are separate issues)
+
+When in doubt, keep candidates separate - it is better to leave a duplicate
+ungrouped than to incorrectly merge two distinct issues.
+
+Candidates:
+{candidates}
+
+Return ONLY a JSON object where each group is a list of 0-based indices.
+Singletons (no duplicate) must still appear as single-element groups.
+
+Example for 4 candidates where 0 and 2 are duplicates:
+{{"groups": [[0, 2], [1], [3]]}}
+
+Your response:"""
+
+_JUDGE_PROMPT = """You are evaluating AI code review tools.
+Determine if the candidate issue matches the golden (expected) comment.
+
+Golden Comment (the issue we're looking for):
+{golden_comment}
+
+Candidate Issue (from the tool's review):
+{candidate}
+
+Instructions:
+- Determine if the candidate identifies the SAME underlying issue as the golden comment
+- Accept semantic matches - different wording is fine if it's the same problem
+- Focus on whether they point to the same bug, concern, or code issue
+
+Respond with ONLY a JSON object:
+{{"reasoning": "brief explanation", "match": true/false, "confidence": 0.0-1.0}}"""
+
+
+class _AsyncHttpClient(Protocol):
+    async def post(
+        self, url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: float
+    ) -> Any:
+        ...
+
+
+class _AnthropicJsonCompleter(Protocol):
+    async def complete_json(self, *, system: str, user: str, max_tokens: int) -> dict[str, Any]:
+        ...
+
+
+@dataclass
+class AnthropicJsonClient:
+    """Small Messages API client that returns strict parsed JSON objects."""
+
+    api_key: str
+    model: str
+    http: _AsyncHttpClient | None = None
+
+    async def complete_json(self, *, system: str, user: str, max_tokens: int) -> dict[str, Any]:
+        """POST a Messages API request and parse the first returned text block as JSON."""
+        payload = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": _ANTHROPIC_VERSION,
+            "content-type": "application/json",
+        }
+
+        if self.http is not None:
+            return await _complete_json_with_http(self.http, payload=payload, headers=headers)
+        async with httpx.AsyncClient() as http:
+            return await _complete_json_with_http(http, payload=payload, headers=headers)
+
+
+async def run_anthropic_extraction(
+    benchmark_repo: Path,
+    judge_model: str,
+    *,
+    tool: str = _TOOL,
+    client: _AnthropicJsonCompleter,
+) -> None:
+    """Extract Martian-compatible candidate issues using direct Anthropic JSON calls."""
+    benchmark_data_file = benchmark_repo / "results" / "benchmark_data.json"
+    if not benchmark_data_file.exists():
+        raise BenchmarkArtifactError(f"{benchmark_data_file} not found; cannot extract benchmark candidates.")
+
+    data = json.loads(benchmark_data_file.read_text())
+    if not isinstance(data, dict):
+        raise BenchmarkStepError(f"{benchmark_data_file} must contain a JSON object.")
+
+    results_dir = model_results_dir(benchmark_repo, judge_model)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    candidates_file = results_dir / "candidates.json"
+    if candidates_file.exists():
+        all_candidates = json.loads(candidates_file.read_text())
+        if not isinstance(all_candidates, dict):
+            raise BenchmarkStepError(f"{candidates_file} must contain a JSON object.")
+    else:
+        all_candidates = {}
+
+    for golden_url, entry in data.items():
+        reviews = entry.get("reviews", []) if isinstance(entry, dict) else []
+        for review in reviews:
+            if not isinstance(review, dict) or review.get("tool") != tool:
+                continue
+            existing_tools = all_candidates.get(golden_url)
+            if isinstance(existing_tools, dict) and tool in existing_tools:
+                continue
+
+            all_text = _get_all_comment_text(review.get("review_comments", []))
+            if not all_text.strip():
+                continue
+
+            response = await client.complete_json(
+                system=_EXTRACTION_SYSTEM,
+                user=_EXTRACTION_PROMPT.format(comment=all_text),
+                max_tokens=_MAX_EXTRACTION_TOKENS,
+            )
+            issues = _extract_issues(response)
+            all_candidates.setdefault(golden_url, {})[tool] = [
+                {"text": issue, "path": None, "line": None, "source": "extracted"} for issue in issues
+            ]
+
+    candidates_file.write_text(json.dumps(all_candidates, indent=2))
+
+
+async def run_anthropic_dedup(
+    benchmark_repo: Path,
+    judge_model: str,
+    *,
+    tool: str = _TOOL,
+    client: _AnthropicJsonCompleter,
+) -> None:
+    """Write Martian-compatible dedup groups using direct Anthropic JSON calls."""
+    results_dir = model_results_dir(benchmark_repo, judge_model)
+    candidates_file = results_dir / "candidates.json"
+    if not candidates_file.exists():
+        raise BenchmarkArtifactError(f"{candidates_file} not found; cannot deduplicate benchmark candidates.")
+
+    all_candidates = json.loads(candidates_file.read_text())
+    if not isinstance(all_candidates, dict):
+        raise BenchmarkStepError(f"{candidates_file} must contain a JSON object.")
+
+    groups_file = results_dir / "dedup_groups.json"
+    if groups_file.exists():
+        all_groups = json.loads(groups_file.read_text())
+        if not isinstance(all_groups, dict):
+            raise BenchmarkStepError(f"{groups_file} must contain a JSON object.")
+    else:
+        all_groups = {}
+
+    for golden_url, tools in all_candidates.items():
+        if not isinstance(tools, dict):
+            continue
+        candidates = tools.get(tool)
+        if not isinstance(candidates, list) or len(candidates) < _MIN_DEDUP_CANDIDATES:
+            continue
+
+        texts = _candidate_texts(candidates)
+        if len(texts) < _MIN_DEDUP_CANDIDATES:
+            continue
+
+        try:
+            response = await client.complete_json(
+                system=_DEDUP_SYSTEM,
+                user=_DEDUP_PROMPT.format(candidates=_numbered_candidates(texts)),
+                max_tokens=_MAX_DEDUP_TOKENS,
+            )
+        except Exception:
+            response = None
+        groups = _extract_dedup_groups(response, len(texts)) if isinstance(response, dict) else None
+        if groups is None:
+            groups = _singleton_groups(len(texts))
+        all_groups.setdefault(golden_url, {})[tool] = groups
+
+    groups_file.write_text(json.dumps(all_groups, indent=2))
+
+
+async def run_anthropic_scoring(
+    benchmark_repo: Path,
+    judge_model: str,
+    *,
+    pr_count: int | None = None,
+    tool: str = _TOOL,
+    client: _AnthropicJsonCompleter | None = None,
+) -> DaydreamScores:
+    """Run direct Anthropic extraction, dedup, and evaluation for benchmark scores."""
+    benchmark_repo = benchmark_repo.resolve()
+    if client is None:
+        api_key = os.environ.get(ANTHROPIC_JUDGE_API_KEY_ENV)
+        if not api_key:
+            raise BenchmarkStepError(
+                f"{ANTHROPIC_JUDGE_API_KEY_ENV} is not set; cannot run Anthropic-direct scoring."
+            )
+        client = AnthropicJsonClient(api_key=api_key, model=judge_model)
+
+    await run_anthropic_extraction(benchmark_repo, judge_model, tool=tool, client=client)
+    await run_anthropic_dedup(benchmark_repo, judge_model, tool=tool, client=client)
+    evals = await run_anthropic_evaluation(
+        benchmark_repo,
+        judge_model,
+        pr_count=pr_count,
+        tool=tool,
+        client=client,
+    )
+    return parse_daydream_scores(evals, tool=tool)
+
+
+async def run_anthropic_evaluation(
+    benchmark_repo: Path,
+    judge_model: str,
+    *,
+    pr_count: int | None = None,
+    tool: str = _TOOL,
+    client: _AnthropicJsonCompleter,
+) -> dict[str, dict[str, Any]]:
+    """Write Martian-compatible evaluations using direct Anthropic JSON calls."""
+    benchmark_data_file = benchmark_repo / "results" / "benchmark_data.json"
+    if not benchmark_data_file.exists():
+        raise BenchmarkArtifactError(f"{benchmark_data_file} not found; cannot evaluate benchmark candidates.")
+
+    data = json.loads(benchmark_data_file.read_text())
+    if not isinstance(data, dict):
+        raise BenchmarkStepError(f"{benchmark_data_file} must contain a JSON object.")
+
+    results_dir = model_results_dir(benchmark_repo, judge_model)
+    candidates_file = results_dir / "candidates.json"
+    if candidates_file.exists():
+        all_candidates = json.loads(candidates_file.read_text())
+        if not isinstance(all_candidates, dict):
+            raise BenchmarkStepError(f"{candidates_file} must contain a JSON object.")
+    else:
+        all_candidates = {}
+
+    groups_file = results_dir / "dedup_groups.json"
+    if groups_file.exists():
+        all_dedup_groups = json.loads(groups_file.read_text())
+        if not isinstance(all_dedup_groups, dict):
+            raise BenchmarkStepError(f"{groups_file} must contain a JSON object.")
+    else:
+        all_dedup_groups = {}
+
+    evaluations_file = results_dir / "evaluations.json"
+    if evaluations_file.exists():
+        evals = json.loads(evaluations_file.read_text())
+        if not isinstance(evals, dict):
+            raise BenchmarkStepError(f"{evaluations_file} must contain a JSON object.")
+    else:
+        evals = {}
+
+    evaluated = 0
+    for golden_url, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        golden_comments = entry.get("golden_comments", [])
+        if not isinstance(golden_comments, list):
+            golden_comments = []
+        reviews = entry.get("reviews", [])
+        if not isinstance(reviews, list):
+            continue
+
+        for review in reviews:
+            if not isinstance(review, dict) or review.get("tool") != tool:
+                continue
+            existing_leaf = evals.get(golden_url, {}).get(tool)
+            if isinstance(existing_leaf, dict) and existing_leaf.get("errors_count", 0) == 0:
+                continue
+            if pr_count is not None and evaluated >= pr_count:
+                evaluations_file.write_text(json.dumps(evals, indent=2))
+                return evals
+
+            candidates = _get_candidates_for_review(review, all_candidates, golden_url)
+            dedup_groups = _get_dedup_groups(all_dedup_groups, golden_url, tool)
+            result = await _evaluate_review(client, golden_comments, candidates, dedup_groups)
+            result["tool"] = tool
+            result["repo_name"] = review.get("repo_name")
+            result["pr_url"] = review.get("pr_url")
+            result["judge_route"] = "anthropic-direct"
+            result["judge_model"] = judge_model
+
+            evals.setdefault(golden_url, {})[tool] = result
+            evaluations_file.write_text(json.dumps(evals, indent=2))
+            evaluated += 1
+
+    evaluations_file.write_text(json.dumps(evals, indent=2))
+    return evals
+
+
+def _get_all_comment_text(review_comments: Any) -> str:
+    if not isinstance(review_comments, list):
+        return ""
+    bodies = [comment["body"] for comment in review_comments if isinstance(comment, dict) and comment.get("body")]
+    return "\n\n---\n\n".join(bodies)
+
+
+def _get_candidates_for_review(review: dict[str, Any], all_candidates: dict[str, Any], golden_url: str) -> list[str]:
+    tool = review["tool"]
+    tools = all_candidates.get(golden_url)
+    if isinstance(tools, dict) and isinstance(tools.get(tool), list):
+        return _candidate_texts(tools[tool])
+
+    review_comments = review.get("review_comments", [])
+    if not isinstance(review_comments, list):
+        return []
+    return [comment["body"] for comment in review_comments if isinstance(comment, dict) and comment.get("body")]
+
+
+def _get_dedup_groups(all_dedup_groups: dict[str, Any], golden_url: str, tool: str) -> list[list[int]] | None:
+    tools = all_dedup_groups.get(golden_url)
+    if not isinstance(tools, dict):
+        return None
+    groups = tools.get(tool)
+    if not isinstance(groups, list):
+        return None
+    parsed: list[list[int]] = []
+    for group in groups:
+        if not isinstance(group, list) or not all(isinstance(index, int) for index in group):
+            return None
+        parsed.append(group)
+    return parsed
+
+
+async def _evaluate_review(
+    client: _AnthropicJsonCompleter,
+    golden_comments: list[Any],
+    candidates: list[str],
+    dedup_groups: list[list[int]] | None,
+) -> dict[str, Any]:
+    golden = [
+        comment
+        for comment in golden_comments
+        if isinstance(comment, dict) and isinstance(comment.get("comment"), str)
+    ]
+
+    if not golden:
+        return {"skipped": True, "reason": "No golden comments"}
+
+    if not candidates:
+        return {
+            "skipped": False,
+            "true_positives": [],
+            "false_positives": [],
+            "false_negatives": [
+                {"golden_comment": comment["comment"], "severity": comment.get("severity")} for comment in golden
+            ],
+            "errors": [],
+            "total_candidates": 0,
+            "total_golden": len(golden),
+            "tp": 0,
+            "fp": 0,
+            "fn": len(golden),
+            "errors_count": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+        }
+
+    semaphore = asyncio.Semaphore(_JUDGE_CONCURRENCY)
+    tasks = []
+    task_meta = []
+    for golden_comment in golden:
+        for candidate in candidates:
+            tasks.append(_match_comment_limited(semaphore, client, golden_comment["comment"], candidate))
+            task_meta.append(
+                {
+                    "golden": golden_comment["comment"],
+                    "golden_severity": golden_comment.get("severity"),
+                    "candidate": candidate,
+                }
+            )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    golden_matched = {
+        comment["comment"]: {
+            "severity": comment.get("severity"),
+            "matched": False,
+            "best_confidence": -1.0,  # sentinel: any valid confidence (including 0.0) beats this
+            "matched_candidate": None,
+        }
+        for comment in golden
+    }
+    candidate_matched = dict.fromkeys(candidates, False)
+    sibling_map = _build_sibling_map(candidates, dedup_groups)
+    errors = []
+
+    for index, result in enumerate(results):
+        meta = task_meta[index]
+        golden_text = meta["golden"]
+        candidate = meta["candidate"]
+        if isinstance(result, BaseException):
+            errors.append({"golden": golden_text, "candidate": candidate, "error": str(result)})
+            continue
+        if result.get("error"):
+            errors.append({"golden": golden_text, "candidate": candidate, "error": result["error"]})
+            continue
+
+        confidence = result.get("confidence", 0)
+        if result.get("match") and confidence >= golden_matched[golden_text]["best_confidence"]:
+            golden_matched[golden_text]["matched"] = True
+            golden_matched[golden_text]["best_confidence"] = confidence
+            golden_matched[golden_text]["matched_candidate"] = candidate
+            golden_matched[golden_text]["reasoning"] = result.get("reasoning")
+            candidate_matched[candidate] = True
+            for sibling in sibling_map.get(candidate, set()):
+                candidate_matched[sibling] = True
+
+    true_positives = []
+    false_negatives = []
+    for golden_text, info in golden_matched.items():
+        if info["matched"]:
+            true_positives.append(
+                {
+                    "golden_comment": golden_text,
+                    "severity": info["severity"],
+                    "matched_candidate": info["matched_candidate"],
+                    "confidence": info["best_confidence"],
+                    "reasoning": info.get("reasoning"),
+                }
+            )
+        else:
+            false_negatives.append({"golden_comment": golden_text, "severity": info["severity"]})
+
+    false_positives = [{"candidate": candidate} for candidate, matched in candidate_matched.items() if not matched]
+    total_candidates = len(candidates)
+    total_golden = len(golden)
+    tp_count = len(true_positives)
+    precision = tp_count / total_candidates if total_candidates > 0 else 0.0
+    recall = tp_count / total_golden if total_golden > 0 else 0.0
+
+    return {
+        "skipped": False,
+        "true_positives": true_positives,
+        "false_positives": false_positives,
+        "false_negatives": false_negatives,
+        "errors": errors,
+        "total_candidates": total_candidates,
+        "total_golden": total_golden,
+        "tp": tp_count,
+        "fp": len(false_positives),
+        "fn": len(false_negatives),
+        "errors_count": len(errors),
+        "precision": precision,
+        "recall": recall,
+    }
+
+
+async def _match_comment_limited(
+    semaphore: asyncio.Semaphore, client: _AnthropicJsonCompleter, golden_comment: str, candidate: str
+) -> dict[str, Any]:
+    async with semaphore:
+        return await _match_comment(client, golden_comment, candidate)
+
+
+async def _match_comment(client: _AnthropicJsonCompleter, golden_comment: str, candidate: str) -> dict[str, Any]:
+    try:
+        response = await client.complete_json(
+            system=_JUDGE_SYSTEM,
+            user=_JUDGE_PROMPT.format(golden_comment=golden_comment, candidate=candidate),
+            max_tokens=_MAX_JUDGE_TOKENS,
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+    return _extract_match_result(response)
+
+
+def _extract_match_result(response: dict[str, Any]) -> dict[str, Any]:
+    if "error" in response:
+        return {"error": str(response["error"])}
+    if not isinstance(response.get("match"), bool):
+        return {"error": "Anthropic judge response 'match' must be a boolean."}
+    confidence = response.get("confidence")
+    if not isinstance(confidence, int | float):
+        return {"error": "Anthropic judge response 'confidence' must be a number."}
+    reasoning = response.get("reasoning", "")
+    if not isinstance(reasoning, str):
+        return {"error": "Anthropic judge response 'reasoning' must be a string."}
+    return {"reasoning": reasoning, "match": response["match"], "confidence": float(confidence)}
+
+
+def _build_sibling_map(candidates: list[str], groups: list[list[int]] | None) -> dict[str, set[str]]:
+    if not groups:
+        return {}
+    sibling_map: dict[str, set[str]] = {}
+    for group in groups:
+        group_texts = {candidates[index] for index in group if index < len(candidates)}
+        for index in group:
+            if index < len(candidates):
+                sibling_map[candidates[index]] = group_texts - {candidates[index]}
+    return sibling_map
+
+
+def _extract_issues(response: dict[str, Any]) -> list[str]:
+    if "issues" not in response:
+        raise BenchmarkStepError("Anthropic extraction response missing required 'issues' key.")
+    issues = response["issues"]
+    if not isinstance(issues, list) or not all(isinstance(issue, str) for issue in issues):
+        raise BenchmarkStepError("Anthropic extraction response 'issues' must be a list of strings.")
+    return issues
+
+
+def _candidate_texts(candidates: list[Any]) -> list[str]:
+    return [
+        candidate["text"]
+        for candidate in candidates
+        if isinstance(candidate, dict) and isinstance(candidate.get("text"), str) and candidate["text"].strip()
+    ]
+
+
+def _numbered_candidates(texts: list[str]) -> str:
+    return "\n".join(f"{index}. {text}" for index, text in enumerate(texts))
+
+
+def _extract_dedup_groups(response: dict[str, Any], n_candidates: int) -> list[list[int]] | None:
+    groups = response.get("groups")
+    if not isinstance(groups, list):
+        return None
+
+    seen: set[int] = set()
+    parsed_groups: list[list[int]] = []
+    for group in groups:
+        if not isinstance(group, list):
+            return None
+        parsed_group: list[int] = []
+        for idx in group:
+            if not isinstance(idx, int) or idx < 0 or idx >= n_candidates or idx in seen:
+                return None
+            seen.add(idx)
+            parsed_group.append(idx)
+        parsed_groups.append(parsed_group)
+
+    if seen != set(range(n_candidates)):
+        return None
+    return parsed_groups
+
+
+def _singleton_groups(n_candidates: int) -> list[list[int]]:
+    return [[index] for index in range(n_candidates)]
+
+
+async def _complete_json_with_http(
+    http: _AsyncHttpClient, *, payload: dict[str, Any], headers: dict[str, str]
+) -> dict[str, Any]:
+    for attempt in range(_MAX_RETRIES):
+        try:
+            try:
+                response = await http.post(
+                    _ANTHROPIC_MESSAGES_URL, headers=headers, json=payload, timeout=_REQUEST_TIMEOUT
+                )
+            except Exception as exc:
+                raise BenchmarkStepError(f"Anthropic Messages request failed: {exc}") from exc
+            return _parse_json_response(response)
+        except _NonRetryableError:
+            raise  # 4xx (non-429) and malformed-JSON are permanent; never retry
+        except BenchmarkStepError:
+            if attempt == _MAX_RETRIES - 1:
+                raise
+            await asyncio.sleep(2**attempt)
+    raise BenchmarkStepError("Anthropic Messages request failed after retries")
+
+
+def _parse_json_response(response: Any) -> dict[str, Any]:
+    status_code = getattr(response, "status_code", None)
+    if status_code is None or not 200 <= int(status_code) < 300:
+        body = getattr(response, "text", "")
+        code = int(status_code) if status_code is not None else -1
+        # 429 is retryable (rate-limit); all other 4xx are permanent client errors.
+        if 400 <= code < 500 and code != 429:
+            raise _NonRetryableError(f"Anthropic Messages request failed with HTTP {status_code}: {body}")
+        raise BenchmarkStepError(f"Anthropic Messages request failed with HTTP {status_code}: {body}")
+
+    try:
+        body = response.json()
+    except Exception as exc:
+        raise _NonRetryableError(f"Anthropic Messages response was not valid JSON: {exc}") from exc
+
+    text = _first_text_block(body)
+    try:
+        parsed = json.loads(_strip_markdown_fences(text))
+    except json.JSONDecodeError as exc:
+        raise _NonRetryableError(f"Anthropic Messages text block was not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise _NonRetryableError("Anthropic Messages text block JSON was not an object")
+    return parsed
+
+
+def _first_text_block(body: Any) -> str:
+    if not isinstance(body, dict):
+        raise BenchmarkStepError("Anthropic Messages response body was not an object")
+    content = body.get("content")
+    if not isinstance(content, list):
+        raise BenchmarkStepError("Anthropic Messages response missing content blocks")
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            text = block["text"].strip()
+            if text:
+                return text
+    raise BenchmarkStepError("Anthropic Messages response contained no text block")
+
+
+def _strip_markdown_fences(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()

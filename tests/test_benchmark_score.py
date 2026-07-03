@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ from daydream.benchmark.score import (
     JUDGE_BASE_URL_ENV,
     JUDGE_MODEL_ENV,
     BenchmarkArtifactError,
+    DaydreamScores,
     JudgeEnvError,
     JudgeFailedError,
     model_results_dir,
@@ -68,6 +70,25 @@ def test_resolve_judge_model(monkeypatch):
     assert resolve_judge_model(None) == "anthropic/claude-opus-4-5-20251101"
 
 
+def test_run_scoring_dispatches_to_anthropic_direct(tmp_path, monkeypatch):
+    called = {}
+
+    async def fake_direct(repo, model, *, pr_count, tool):
+        called.update(repo=repo, model=model, pr_count=pr_count, tool=tool)
+        return DaydreamScores(scored_pr_count=1, total_tp=1, precision=1.0, recall=1.0)
+
+    monkeypatch.setattr("daydream.benchmark.score.run_anthropic_scoring", fake_direct)
+    scores = run_scoring(
+        tmp_path,
+        "claude-opus-4-5-20251101",
+        pr_count=1,
+        tool="daydream",
+        judge_route="anthropic-direct",
+    )
+    assert called == {"repo": tmp_path, "model": "claude-opus-4-5-20251101", "pr_count": 1, "tool": "daydream"}
+    assert scores.scored_pr_count == 1
+
+
 def test_run_scoring_passes_custom_tool_and_judge_env_to_each_step(tmp_path, monkeypatch):
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
     monkeypatch.delenv(JUDGE_MODEL_ENV, raising=False)
@@ -95,6 +116,30 @@ def test_model_results_dir_sanitizes_slashes(tmp_path):
     assert model_results_dir(tmp_path, "anthropic/claude-opus-4.5").name == "anthropic_claude-opus-4.5"
 
 
+def test_scoring_routes_share_model_dir_and_score_parser_contract(tmp_path, monkeypatch):
+    model = "claude-opus-4-5-20251101"
+    direct_dir = model_results_dir(tmp_path, model)
+    direct_dir.mkdir(parents=True)
+    (direct_dir / "evaluations.json").write_text(
+        json.dumps(
+            {
+                URL: {
+                    "daydream": {
+                        "tp": 1,
+                        "fp": 0,
+                        "fn": 0,
+                        "total_candidates": 1,
+                        "total_golden": 1,
+                    }
+                }
+            }
+        )
+    )
+    scores = parse_daydream_scores(json.loads((direct_dir / "evaluations.json").read_text()))
+    assert scores.scored_pr_count == 1
+    assert direct_dir.name == "claude-opus-4-5-20251101"
+
+
 def test_preflight_raises_when_key_unset(monkeypatch):
     monkeypatch.delenv("MARTIAN_API_KEY", raising=False)
     with pytest.raises(JudgeEnvError) as e:
@@ -105,6 +150,28 @@ def test_preflight_raises_when_key_unset(monkeypatch):
 def test_preflight_passes_when_key_present(monkeypatch):
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
     preflight_judge_env()
+
+
+def test_direct_anthropic_preflight_requires_anthropic_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
+    with pytest.raises(JudgeEnvError, match="ANTHROPIC_API_KEY"):
+        preflight_judge_env(judge_route="anthropic-direct")
+
+
+def test_direct_anthropic_preflight_rejects_openrouter_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-or-not-direct")
+    monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
+    with pytest.raises(JudgeEnvError, match="OpenRouter key supplied for Anthropic-direct judge"):
+        preflight_judge_env(judge_route="anthropic-direct")
+
+
+def test_direct_anthropic_preflight_rejects_martian_base_url(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-direct")
+    monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
+    monkeypatch.setenv("MARTIAN_BASE_URL", "https://api.anthropic.com")
+    with pytest.raises(JudgeEnvError, match="MARTIAN_BASE_URL is invalid for direct Anthropic scoring"):
+        preflight_judge_env(judge_route="anthropic-direct")
 
 
 def test_parse_daydream_scores_extracts_per_pr_and_aggregate():
@@ -221,10 +288,9 @@ def test_run_scoring_raises_judge_failed_when_evaluations_all_errored(tmp_path, 
     model = "anthropic/claude-opus-4-5-20251101"
     rdir = tmp_path / "results" / "anthropic_claude-opus-4-5-20251101"
     rdir.mkdir(parents=True)
-    import json as _json
 
     def fake_run(cmd, **k):
-        (rdir / "evaluations.json").write_text(_json.dumps({URL: {"daydream-glm": dict(_ALL_ERRORED_LEAF)}}))
+        (rdir / "evaluations.json").write_text(json.dumps({URL: {"daydream-glm": dict(_ALL_ERRORED_LEAF)}}))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("daydream.benchmark.score.subprocess.run", fake_run)

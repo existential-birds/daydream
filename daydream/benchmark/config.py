@@ -17,8 +17,11 @@ class BenchConfig:
     Attributes:
         benchmark_repo: Path to the external `code-review-benchmark` checkout.
         cache_dir: Directory for per-PR blobless clones and fetched heads.
-        model: Judge model id; None defers to the MARTIAN_MODEL env. Whatever
-            resolves drives both the judge and the per-model results dir.
+        judge_route: Benchmark scoring route; "martian" preserves the existing
+            OpenAI-compatible Martian path.
+        model: Judge model id; None defers to the selected judge route's
+            environment fallback. Whatever resolves drives both the judge and
+            the per-model results dir.
         reviewer_backend: Optional daydream review backend (claude/codex/pi); None uses the default.
         reviewer_model: Optional model id for the reviewer backend; None uses the backend default.
         reviewer_provider: Optional provider for the reviewer backend (forwarded via env); None uses the default.
@@ -38,6 +41,7 @@ class BenchConfig:
     only: str | None
     limit: int | None
     trajectory_dir: Path
+    judge_route: str = "martian"
     model: str | None = None
     reviewer_backend: str | None = None
     reviewer_model: str | None = None

@@ -8,11 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import pytest
 from rich.console import Console
 
 from daydream.benchmark.config import BenchConfig
 from daydream.benchmark.orchestrator import run_bench
 from daydream.benchmark.prs import load_evaluable_prs
+from daydream.benchmark.score import DaydreamScores
 
 
 def _item(file: str, line: int, **kw: Any) -> dict[str, Any]:
@@ -162,6 +164,43 @@ def test_orchestrator_forwards_reviewer_fields(tmp_path, monkeypatch):
     cfg = replace(cfg, reviewer_backend="pi", reviewer_model="glm-5.2", reviewer_provider="openrouter")
     run_bench(cfg)
     assert (captured["backend"], captured["model"], captured["provider"]) == ("pi", "glm-5.2", "openrouter")
+
+
+def test_direct_anthropic_preflight_runs_before_review(tmp_path, monkeypatch):
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    calls = {"review": 0}
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.run_daydream_review",
+        lambda *a, **k: calls.__setitem__("review", 1),
+    )
+    cfg = replace(_config(tmp_path, data_path, score=True, only="grafana"), judge_route="anthropic-direct")
+    with pytest.raises(Exception, match="ANTHROPIC_API_KEY"):
+        run_bench(cfg)
+    assert calls["review"] == 0
+
+
+def test_orchestrator_passes_judge_route_to_scoring(tmp_path, monkeypatch):
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-direct")
+    monkeypatch.delenv("MARTIAN_BASE_URL", raising=False)
+    monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
+    monkeypatch.setattr("daydream.benchmark.orchestrator.acquire_checkout", lambda *a, **k: _fake_checkout(tmp_path))
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.run_daydream_review",
+        lambda checkout, **k: _write_items(checkout, [_item("f.py", 1)]),
+    )
+    captured = {}
+
+    def fake_score(repo, model, *, pr_count, tool, judge_route):
+        captured.update(model=model, pr_count=pr_count, tool=tool, judge_route=judge_route)
+        return DaydreamScores(scored_pr_count=1, total_tp=1, precision=1.0, recall=1.0)
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_scoring", fake_score)
+    cfg = replace(_config(tmp_path, data_path, score=True, only="grafana"), limit=1, judge_route="anthropic-direct")
+    assert run_bench(cfg) == 0
+    assert captured["judge_route"] == "anthropic-direct"
+    assert captured["pr_count"] == 1
 
 
 def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):

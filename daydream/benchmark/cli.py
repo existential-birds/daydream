@@ -19,12 +19,12 @@ if TYPE_CHECKING:
 
 
 def _load_bench_dotenv() -> None:
-    """Load a ``.env`` from the invocation cwd so ``MARTIAN_*`` can live there.
+    """Load a ``.env`` from the invocation cwd so benchmark credentials can live there.
 
     Reads ``.env`` from the operator's current working directory (``usecwd=True``;
-    the library default walks up from this module's file instead). ``override`` is
-    left at its default ``False`` so an inline ``MARTIAN_API_KEY`` still wins over
-    the file. A missing or malformed ``.env`` is a silent no-op.
+    the library default walks up from this module's file instead). ``override``
+    is left at its default ``False`` so inline environment variables still win
+    over the file. A missing or malformed ``.env`` is a silent no-op.
     """
     dotenv.load_dotenv(dotenv.find_dotenv(usecwd=True))
 
@@ -86,9 +86,17 @@ def _build_bench_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         dest="model",
-        help="Judge model id (e.g. anthropic/claude-opus-4-5-20251101). If omitted, "
-        "the MARTIAN_MODEL env is used; one of the two is required for --score. "
+        help="Judge model id (e.g. anthropic/claude-opus-4-5-20251101). If omitted, the route-specific "
+        "environment fallback is used; one of the two is required for --score. "
         "Whatever resolves drives both the judge and the per-model results dir.",
+    )
+    parser.add_argument(
+        "--judge-route",
+        type=str,
+        choices=["martian", "anthropic-direct"],
+        default=None,
+        dest="judge_route",
+        help="Benchmark scoring route (default: martian, or [tool.daydream.bench] judge-route)",
     )
     parser.add_argument(
         "--reviewer",
@@ -229,6 +237,9 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         else None
     )
     model = args.model if args.model is not None else bench.get("model")
+    judge_route = args.judge_route if args.judge_route is not None else bench.get("judge-route", "martian")
+    if judge_route not in {"martian", "anthropic-direct"}:
+        parser.error("--judge-route must be one of: martian, anthropic-direct")
     if benchmark_repo is None:
         parser.error("--benchmark-repo is required (pass the flag or set [tool.daydream.bench] benchmark-repo)")
     bench_root = benchmark_repo / ".daydream-bench"
@@ -256,6 +267,7 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         only=args.only,
         limit=args.limit,
         trajectory_dir=trajectory_dir,
+        judge_route=judge_route,
         model=model,
         reviewer_backend=reviewer_backend,
         reviewer_model=reviewer_model,

@@ -1,16 +1,20 @@
 """Manual end-to-end acceptance test for the ``daydream bench`` pipeline.
 
-This test is SKIPPED BY DEFAULT: a real run spends money (two daydream deep
-reviews driven by local Claude credentials plus OpenRouter judge calls) and
-takes many minutes over the network. It is committed as executable
-documentation of the Task 11 acceptance procedure, so the real-path contract
-is reproducible by hand:
+This test module is SKIPPED BY DEFAULT: real runs spend money (daydream deep
+reviews driven by local reviewer credentials plus real judge calls) and take
+minutes over the network. It is committed as executable documentation of the
+manual benchmark acceptance procedures, so the real-path contracts are
+reproducible by hand:
 
     set -a; source daydream/.env; set +a
     export MARTIAN_BASE_URL=https://openrouter.ai/api/v1
     export MARTIAN_MODEL=anthropic/claude-opus-4.5
     DAYDREAM_BENCH_E2E_REPO=/path/to/code-review-benchmark/offline \\
         pytest tests/test_benchmark_e2e.py -s --no-skip   # (drop the skip mark)
+
+For direct Anthropic judge acceptance, export ``ANTHROPIC_API_KEY`` and run
+``test_bench_acceptance_direct_anthropic_judge_real_run`` after removing the
+module-level skip mark.
 
 See ``docs/benchmark.md`` and
 ``.beagle/concepts/code-review-benchmark-harness/research/smoke-run.md`` for the
@@ -142,6 +146,25 @@ def test_bench_acceptance_2pr_subset_real_run():
     after = data_path.read_text()
     assert json.loads(after) == json.loads(before), "re-run mutated the corpus (not incremental)"
     assert len(_grafana_daydream_reviews(json.loads(after))) == 2
+
+
+def test_bench_acceptance_direct_anthropic_judge_real_run():
+    repo_env = os.environ.get("DAYDREAM_BENCH_E2E_REPO")
+    assert repo_env, "set DAYDREAM_BENCH_E2E_REPO to the code-review-benchmark/offline checkout"
+    assert os.environ.get("ANTHROPIC_API_KEY"), "export ANTHROPIC_API_KEY before running"
+    repo = Path(repo_env)
+    model = os.environ.get("MARTIAN_MODEL", "claude-opus-4-5-20251101")
+    cmd = [
+        "daydream", "bench", "--benchmark-repo", str(repo),
+        "--judge-route", "anthropic-direct",
+        "--model", model,
+        "--only", "grafana", "--limit", "1", "--score",
+    ]
+    first = subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy())
+    assert first.returncode == 0, f"direct Anthropic run failed: {first.stdout}\n{first.stderr}"
+    evals = json.loads((repo / "results" / model.replace("/", "_") / "evaluations.json").read_text())
+    leaves = {url: tools["daydream"] for url, tools in evals.items() if "daydream" in tools}
+    assert leaves and all(leaf.get("judge_route") == "anthropic-direct" for leaf in leaves.values())
 
 
 def test_bench_acceptance_glm_reviewer_real_run():
