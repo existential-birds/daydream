@@ -11,16 +11,19 @@ from daydream.benchmark.mapping import merged_items_to_review_comments
 
 URL = "https://github.com/owner/repo/pull/1"
 
-# A step1-harvested review_comment has EXACTLY these keys (code-review-benchmark
-# step1_download_prs.py:134-138). Our injected comments must match key-for-key.
+# A step1-harvested review_comment has these keys (code-review-benchmark
+# step1_download_prs.py:134-138). Our injected comments carry every harvested
+# key and add the structured ``confidence``/``severity`` fields (issue #231).
 HARVEST_KEYS = {"path", "line", "body", "created_at"}
+INJECTED_KEYS = HARVEST_KEYS | {"confidence", "severity"}
 
 
 def test_injected_comment_keys_match_harvested_schema():
     doc = {"items": [{"file": "a.py", "line": 3, "description": "x", "severity": "high",
                       "confidence": "HIGH", "rationale": "y"}]}
     comments = merged_items_to_review_comments(doc, created_at="2026-06-03T00:00:00Z")
-    assert comments and all(set(c) == HARVEST_KEYS for c in comments)
+    assert comments and all(set(c) == INJECTED_KEYS for c in comments)
+    assert all(HARVEST_KEYS <= set(c) for c in comments)   # superset of the harvested schema
     c = comments[0]
     assert isinstance(c["path"], str) and isinstance(c["body"], str) and isinstance(c["created_at"], str)
     assert c["line"] is None or isinstance(c["line"], int)
