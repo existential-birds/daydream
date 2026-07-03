@@ -26,7 +26,7 @@ from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
 from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME
-from daydream.deep.arbiter import select_arbiter_targets
+from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
 )
@@ -60,6 +60,7 @@ from daydream.phases import (
     phase_fix_parallel,
     phase_parse_feedback,
     phase_per_stack_reviews,
+    phase_suppression_review,
     phase_test_and_heal,
     phase_understand_intent,
     phase_verify_recommendations,
@@ -507,6 +508,84 @@ def _apply_arbiter_verdicts(
     return new_records, new_sources
 
 
+def _apply_suppression_verdicts(
+    records: list[dict[str, Any]],
+    sources: list[str],
+    targets: list[int],
+    verdicts: dict[int, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Fold suppression verdicts back into the per-stack record set -- fail-CLOSED (#232).
+
+    The exact inverse of :func:`_apply_arbiter_verdicts`. Each selected borderline
+    record (``targets[k]`` for 1-based ``sup_id = k + 1``) is DROPPED unless the
+    suppression reviewer returned an explicit ``keep:true`` verdict for it. A
+    missing verdict, a ``sup_id`` mismatch, or ``keep:false`` all drop the record:
+    a borderline (LOW-confidence / low-severity uncontested) finding the reviewer
+    could not confirm must not survive on a precision run. This is safe precisely
+    because these records were neither high-severity nor contested -- the fail-open
+    protection the arbiter needs does not apply here. Kept records carry the
+    reviewer's revised fields; non-selected records pass through untouched.
+    ``file``/``line`` are never changed.
+
+    Returns:
+        New ``(records, sources)`` with unconfirmed selected records removed and
+        surviving selected records carrying the reviewer's fields. Positional
+        alignment between the two lists is preserved.
+    """
+    import warnings
+
+    revised: dict[int, dict[str, Any]] = {}
+    dropped: set[int] = set()
+    for offset, record_index in enumerate(targets):
+        sup_id = offset + 1
+        verdict = verdicts.get(sup_id)
+        if verdict is None:
+            # Fail-CLOSED: no verdict for a borderline target -> drop it. The
+            # inverse of the arbiter, where a missing verdict fails open. A
+            # truncated/lazy suppression response therefore trims rather than
+            # leaks -- acceptable because nothing high-severity or contested
+            # reaches this pass.
+            warnings.warn(
+                f"Suppression returned no verdict for sup_id={sup_id} "
+                f"(record_index={record_index}); dropping the unconfirmed borderline record.",
+                stacklevel=2,
+            )
+            dropped.add(record_index)
+            continue
+        if verdict.get("sup_id") != sup_id:
+            # Secondary key guard: a mismatched sup_id means the verdict cannot be
+            # trusted to bind to this record -> fail closed (drop) rather than
+            # mis-apply a keep from the wrong finding.
+            warnings.warn(
+                f"Suppression verdict sup_id mismatch: expected sup_id={sup_id} "
+                f"but verdict contains sup_id={verdict.get('sup_id')!r} "
+                f"(record_index={record_index}); dropping the unconfirmed borderline record.",
+                stacklevel=2,
+            )
+            dropped.add(record_index)
+            continue
+        if not verdict.get("keep", False):
+            dropped.add(record_index)
+            continue
+        revised[record_index] = {
+            **records[record_index],
+            "severity": verdict.get("severity", records[record_index].get("severity")),
+            "confidence": verdict.get("confidence", records[record_index].get("confidence")),
+            "description": verdict.get("description", records[record_index].get("description")),
+            "rationale": verdict.get("rationale", records[record_index].get("rationale")),
+            "evidence": verdict.get("evidence", records[record_index].get("evidence")),
+        }
+
+    new_records: list[dict[str, Any]] = []
+    new_sources: list[str] = []
+    for i, (record, source) in enumerate(zip(records, sources, strict=True)):
+        if i in dropped:
+            continue
+        new_records.append(revised.get(i, record))
+        new_sources.append(source)
+    return new_records, new_sources
+
+
 def _rewrite_stack_records(
     deep_dir_path: Path,
     stack_record_paths: list[Path],
@@ -891,6 +970,37 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             _rewrite_stack_records(
                 dd, ctx.data["records_paths"], all_records, record_sources
             )
+
+        # Precision-mode suppression pass (#232). OPT-IN: when precision_mode is
+        # off (product default) this block never runs, `select_suppression_targets`
+        # is never called, and arbiter output is byte-identical. When on, it gives
+        # the borderline (LOW-confidence / low-severity uncontested) findings the
+        # arbiter never sees a skeptical second opinion, dropping any it cannot
+        # confirm (fail-CLOSED, the inverse of the arbiter). The arbiter target set
+        # is the exclusion set so nothing high-severity / contested is re-judged
+        # here. One batched agent call, resolved via the cheaper `suppression`
+        # phase key (Sonnet default) -- never per-finding Opus.
+        if config.precision_mode:
+            suppression_targets = select_suppression_targets(
+                all_records, record_sources, arbiter_targets
+            )
+            if suppression_targets:
+                async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):
+                    sup_verdicts = await phase_suppression_review(
+                        ctx.backend_for("suppression"),
+                        ctx.work,
+                        selected_records=[all_records[i] for i in suppression_targets],
+                        diff_path=ctx.data["diff_path"],
+                        intent_path=ctx.data["intent_path"],
+                        alternatives_path=ctx.data["alts_path"],
+                        exploration_dir=ctx.data["exploration_dir"],
+                    )
+                all_records, record_sources = _apply_suppression_verdicts(
+                    all_records, record_sources, suppression_targets, sup_verdicts
+                )
+                _rewrite_stack_records(
+                    dd, ctx.data["records_paths"], all_records, record_sources
+                )
         arbiter_marker.write_text("")
     ctx.data["records"] = all_records
     ctx.data["record_sources"] = record_sources

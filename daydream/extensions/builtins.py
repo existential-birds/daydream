@@ -47,6 +47,7 @@ def _register_builtin_prompts(registry: Registry) -> None:
     registry.override_prompt("structural", deep_prompts.build_structural_prompt)
     registry.override_prompt("generic-fallback", deep_prompts.build_generic_fallback_prompt)
     registry.override_prompt("arbiter", deep_prompts.build_arbiter_prompt)
+    registry.override_prompt("suppression", deep_prompts.build_suppression_prompt)
     registry.override_prompt("merge", deep_prompts.build_merge_prompt)
     registry.override_prompt("verify", deep_prompts.build_verification_prompt)
 

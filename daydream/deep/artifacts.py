@@ -73,6 +73,17 @@ def arbiter_input_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "arbiter-input.json"
 
 
+def suppression_input_path(deep_dir_path: Path) -> Path:
+    """Precision-mode suppression input findings JSON (issue #232).
+
+    The borderline (LOW-confidence / low-severity uncontested) per-stack records
+    selected for the skeptical suppression pass, each tagged with a ``sup_id`` the
+    suppression agent echoes back. Distinct from ``arbiter-input.json`` so a run's
+    arbiter and suppression inputs are separately auditable.
+    """
+    return deep_dir_path / "suppression-input.json"
+
+
 def arbiter_complete_path(deep_dir_path: Path) -> Path:
     """Marker proving the scoped arbiter pass finalised the per-stack records (#175).
 

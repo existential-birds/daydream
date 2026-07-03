@@ -49,8 +49,12 @@ DEFAULT_TOOL_CALL_BUDGET = 50
 #
 # Claude tiering:
 #   - cheap (haiku):   PARSE
-#   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT
+#   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT, SUPPRESSION
 #   - heavy (opus):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER
+#
+# ``suppression`` (issue #232) is the precision-mode skeptical second opinion over
+# borderline uncontested findings; it runs on the cheap mid tier by design (never
+# per-finding Opus) -- one batched Sonnet call over all suppression targets.
 #
 # ``per_stack_review`` and ``arbiter`` split the deep per-stack fan-out off the
 # heavy ``review`` tier (issue #168): the N per-stack reviewers run on Sonnet
@@ -75,6 +79,7 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "per_stack_review": "claude-sonnet-4-6",
         "review": "claude-opus-4-8",
         "arbiter": "claude-opus-4-8",
+        "suppression": "claude-sonnet-4-6",
         "wonder": "claude-opus-4-8",
         "merge": "claude-opus-4-8",
         "intent": "claude-sonnet-4-6",
@@ -89,6 +94,7 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "per_stack_review": "gpt-5.5",
         "review": "gpt-5.5",
         "arbiter": "gpt-5.5",
+        "suppression": "gpt-5.5",
         "wonder": "gpt-5.5",
         "merge": "gpt-5.5",
         "intent": "gpt-5.5",
@@ -103,6 +109,7 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "per_stack_review": "glm-5.2",
         "review": "glm-5.2",
         "arbiter": "glm-5.2",
+        "suppression": "glm-5.2",
         "wonder": "glm-5.2",
         "merge": "glm-5.2",
         "intent": "glm-5.2",

@@ -182,6 +182,11 @@ class RunConfig:
             through to ``file_config.shallow_fanout_threshold`` then
             ``DEFAULT_SHALLOW_FANOUT_THRESHOLD`` (precedence CLI > file > default,
             mirroring ``_resolve_backend``). ``0`` disables the short-circuit.
+        precision_mode: Opt-in precision suppression (issue #232). When True, the
+            deep pipeline runs a skeptical LLM second opinion over borderline
+            (LOW-confidence / low-severity uncontested) findings after the arbiter
+            and drops any it cannot confirm (fail-closed). Default False keeps the
+            arbiter output byte-identical -- the suppression pass never runs.
 
     """
 
@@ -227,6 +232,12 @@ class RunConfig:
     # override; falls through to file-config scalar then the orchestrator
     # default (DEFAULT_SHALLOW_FANOUT_THRESHOLD). ``0`` disables the gate.
     shallow_fanout_threshold: int | None = None
+    # Issue #232: opt-in precision mode. When True, the deep pipeline runs a
+    # skeptical suppression pass over borderline (LOW-confidence / low-severity
+    # uncontested) findings after the arbiter, dropping any the suppression agent
+    # cannot confirm (fail-closed). Default False => byte-identical behavior; the
+    # suppression predicate is never called and arbiter output is unchanged.
+    precision_mode: bool = False
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
