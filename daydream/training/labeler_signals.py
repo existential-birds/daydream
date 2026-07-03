@@ -401,10 +401,88 @@ def fix_applied_signal(
     )
 
 
+@dataclass(frozen=True)
+class PRCommentThreads:
+    """Indexed view of a PR's review comments shared by the resolution signals.
+
+    Centralises the ``/comments`` fetch and daydream-thread indexing so the
+    aggregate (:func:`comment_resolution_signal`) and per-finding
+    (:func:`per_finding_resolution_signal`) signals do not refetch or
+    re-index the same row's comments. Built by
+    :func:`index_pr_review_comments`.
+
+    Attributes:
+        top_level_daydream_ids: IDs of footer-marked daydream comments with
+            no parent (the "issue" comments).
+        replied_ids: Subset of ``top_level_daydream_ids`` that received at
+            least one reply.
+        comment_id_by_fingerprint: First comment ID carrying each finding
+            marker, keyed by 64-hex fingerprint.
+    """
+
+    top_level_daydream_ids: set[int]
+    replied_ids: set[int]
+    comment_id_by_fingerprint: dict[str, int]
+
+
+def index_pr_review_comments(
+    row: dict[str, Any],
+    *,
+    gh_api: Callable[..., Any],
+) -> PRCommentThreads | None:
+    """Fetch and index a PR's review comments for the resolution signals.
+
+    Single source of truth for the ``repos/{repo}/pulls/{n}/comments`` fetch
+    and daydream-thread indexing shared by :func:`comment_resolution_signal`
+    and :func:`per_finding_resolution_signal`, so the two signals invoked
+    back-to-back on the same row hit the endpoint once (the caller computes
+    this and passes it as ``threads=`` to both).
+
+    Args:
+        row: Manifest row carrying ``pr_repo`` and ``pr_number``.
+        gh_api: Callable returning the parsed comment list. Exceptions
+            propagate to the caller.
+
+    Returns:
+        :class:`PRCommentThreads`, or ``None`` when the row has no
+        associated PR (no fetch performed).
+    """
+    repo = row.get("pr_repo")
+    number = row.get("pr_number")
+    if repo is None or number is None:
+        return None
+
+    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
+
+    # Pass 1: top-level daydream comment IDs and the fingerprints they carry.
+    top_level_daydream_ids: set[int] = set()
+    comment_id_by_fingerprint: dict[str, int] = {}
+    for comment in comments:
+        if comment.get("in_reply_to_id") is None and _is_daydream_comment(comment):
+            cid = comment["id"]
+            top_level_daydream_ids.add(cid)
+            for fingerprint in parse_finding_markers(comment.get("body") or ""):
+                comment_id_by_fingerprint.setdefault(fingerprint, cid)
+
+    # Pass 2: which top-level comments received a reply.
+    replied_ids: set[int] = set()
+    for comment in comments:
+        in_reply_to = comment.get("in_reply_to_id")
+        if in_reply_to in top_level_daydream_ids:
+            replied_ids.add(in_reply_to)
+
+    return PRCommentThreads(
+        top_level_daydream_ids=top_level_daydream_ids,
+        replied_ids=replied_ids,
+        comment_id_by_fingerprint=comment_id_by_fingerprint,
+    )
+
+
 def comment_resolution_signal(
     row: dict[str, Any],
     *,
     gh_api: Callable[..., Any],
+    threads: PRCommentThreads | None = None,
 ) -> CommentResolutionSignal:
     """Return a proxy for "review comments addressed".
 
@@ -415,31 +493,24 @@ def comment_resolution_signal(
 
     Args:
         row: Manifest row carrying ``pr_repo`` and ``pr_number``.
-        gh_api: Callable returning the parsed comment list.
+        gh_api: Callable returning the parsed comment list. Ignored when
+            ``threads`` is supplied.
+        threads: Pre-indexed comment threads from
+            :func:`index_pr_review_comments`. When supplied, the
+            ``/comments`` fetch is skipped, letting a caller that needs
+            both this and :func:`per_finding_resolution_signal` on one row
+            fetch the endpoint once.
 
     Returns:
         :class:`CommentResolutionSignal` with ``(0, 0, 0)`` when the row
         has no associated PR.
     """
-    repo = row.get("pr_repo")
-    number = row.get("pr_number")
-    if repo is None or number is None:
+    if threads is None:
+        threads = index_pr_review_comments(row, gh_api=gh_api)
+    if threads is None:
         return CommentResolutionSignal(total=0, replied=0, unresolved=0)
-
-    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
-    top_level_daydream_ids: list[int] = []
-    replies_by_parent: dict[int, int] = {}
-
-    for comment in comments:
-        in_reply_to = comment.get("in_reply_to_id")
-        if in_reply_to is None:
-            if _is_daydream_comment(comment):
-                top_level_daydream_ids.append(comment["id"])
-        else:
-            replies_by_parent[in_reply_to] = replies_by_parent.get(in_reply_to, 0) + 1
-
-    total = len(top_level_daydream_ids)
-    replied = sum(1 for cid in top_level_daydream_ids if replies_by_parent.get(cid, 0) >= 1)
+    total = len(threads.top_level_daydream_ids)
+    replied = len(threads.replied_ids)
     return CommentResolutionSignal(total=total, replied=replied, unresolved=total - replied)
 
 
@@ -448,6 +519,7 @@ def per_finding_resolution_signal(
     *,
     recorded_fingerprints: list[str],
     gh_api: Callable[..., Any],
+    threads: PRCommentThreads | None = None,
 ) -> list[PerFindingResolution]:
     """Resolve each recorded finding to its posted comment and reply state.
 
@@ -462,44 +534,27 @@ def per_finding_resolution_signal(
         row: Manifest row carrying ``pr_repo`` and ``pr_number``.
         recorded_fingerprints: Fingerprints captured at review time. The
             returned list preserves this order, one entry per fingerprint.
-        gh_api: Callable returning the parsed comment list.
+        gh_api: Callable returning the parsed comment list. Ignored when
+            ``threads`` is supplied.
+        threads: Pre-indexed comment threads from
+            :func:`index_pr_review_comments`. When supplied, the
+            ``/comments`` fetch is skipped, letting a caller that needs
+            both this and :func:`comment_resolution_signal` on one row
+            fetch the endpoint once.
 
     Returns:
         One :class:`PerFindingResolution` per recorded fingerprint, or an
         empty list when the row has no associated PR.
     """
-    repo = row.get("pr_repo")
-    number = row.get("pr_number")
-    if repo is None or number is None:
+    if threads is None:
+        threads = index_pr_review_comments(row, gh_api=gh_api)
+    if threads is None:
         return []
-
-    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
-
-    # Pass 1: top-level daydream comment IDs.
-    top_level_daydream_ids: set[int] = set()
-    for comment in comments:
-        if comment.get("in_reply_to_id") is None and _is_daydream_comment(comment):
-            top_level_daydream_ids.add(comment["id"])
-
-    # Pass 2: which top-level comments received a reply.
-    replied_ids: set[int] = set()
-    for comment in comments:
-        in_reply_to = comment.get("in_reply_to_id")
-        if in_reply_to in top_level_daydream_ids:
-            replied_ids.add(in_reply_to)
-
-    # Pass 3: map fingerprint -> the comment ID that carries its marker.
-    comment_id_by_fingerprint: dict[str, int] = {}
-    for comment in comments:
-        if comment["id"] not in top_level_daydream_ids:
-            continue
-        for fingerprint in parse_finding_markers(comment.get("body") or ""):
-            comment_id_by_fingerprint.setdefault(fingerprint, comment["id"])
 
     resolutions: list[PerFindingResolution] = []
     for fingerprint in recorded_fingerprints:
-        comment_id = comment_id_by_fingerprint.get(fingerprint)
-        resolved = comment_id is not None and comment_id in replied_ids
+        comment_id = threads.comment_id_by_fingerprint.get(fingerprint)
+        resolved = comment_id is not None and comment_id in threads.replied_ids
         resolutions.append(
             PerFindingResolution(fingerprint=fingerprint, resolved=resolved, comment_id=comment_id)
         )

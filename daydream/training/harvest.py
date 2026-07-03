@@ -109,6 +109,7 @@ from daydream.training.labeler_signals import (
     PRMergeSignal,
     comment_resolution_signal,
     fix_applied_signal,
+    index_pr_review_comments,
     local_commit_applied_signal,
     per_finding_resolution_signal,
     pr_link_signal,
@@ -456,7 +457,10 @@ def _build_rubric_pr(
     signal_row = {**row, "changed_files": changed_files}
     if pr_merge is None:
         pr_merge = pr_merge_signal(signal_row, gh_api=gh_api)
-    comments = comment_resolution_signal(signal_row, gh_api=gh_api)
+    # Fetch + index the PR's review comments once; both resolution signals
+    # consume this index instead of each hitting the /comments endpoint.
+    comment_threads = index_pr_review_comments(signal_row, gh_api=gh_api)
+    comments = comment_resolution_signal(signal_row, gh_api=gh_api, threads=comment_threads)
     fix = _safe_fix_applied(
         signal_row,
         changed_files=changed_files,
@@ -472,7 +476,10 @@ def _build_rubric_pr(
     recorded_fingerprints = _row_recorded_fingerprints(row)
     if recorded_fingerprints:
         per_finding = per_finding_resolution_signal(
-            signal_row, recorded_fingerprints=recorded_fingerprints, gh_api=gh_api
+            signal_row,
+            recorded_fingerprints=recorded_fingerprints,
+            gh_api=gh_api,
+            threads=comment_threads,
         )
         rubric = replace(rubric, per_finding_labels=list(derive_per_finding_labels(rubric, per_finding)))
     return rubric
