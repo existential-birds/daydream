@@ -270,7 +270,8 @@ name inventories, module shape, bump policy — is `docs/extensions.md`.
 | `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `DAYDREAM_PI_RETRY_BASE_DELAY_S` | Pi backend | Transient retry tuning |
 | `CLAUDE_CONFIG_DIR` | Claude backend | Override `~/.claude` directory |
-| `MARTIAN_API_KEY` / `MARTIAN_BASE_URL` / `MARTIAN_MODEL` | Benchmark | Judge endpoint and model |
+| `MARTIAN_API_KEY` / `MARTIAN_BASE_URL` / `MARTIAN_MODEL` | Benchmark | Judge endpoint and model (`martian` route) |
+| `ANTHROPIC_API_KEY` | Benchmark | Direct Anthropic judge (`anthropic-direct` route) |
 
 ## Platform requirements
 

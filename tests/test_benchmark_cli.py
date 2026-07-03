@@ -229,7 +229,7 @@ def test_benchmark_docs_name_direct_anthropic_judge_route():
     text = Path("docs/benchmark.md").read_text()
     assert "--judge-route anthropic-direct" in text
     assert "ANTHROPIC_API_KEY" in text
-    assert "MARTIAN_BASE_URL is invalid" in text
+    assert "`MARTIAN_BASE_URL` is invalid" in text
     assert "--reviewer-backend" in text and "--model" in text
 
 

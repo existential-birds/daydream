@@ -21,7 +21,7 @@ This runbook takes you from nothing to a scored result.
   `--judge-route anthropic-direct` sends scoring calls directly to the Anthropic Messages API for extraction, deduplication, and final judging. It is not a `MARTIAN_BASE_URL` setting and it is not an OpenAI-compatible proxy route.
   - `ANTHROPIC_API_KEY`: required for `--score` on this route.
   - `--model`: the Anthropic judge model id, for example `claude-opus-4-5-20251101`. If omitted, `MARTIAN_MODEL` is used as the judge model fallback and result-directory label.
-  - `MARTIAN_BASE_URL is invalid` for direct Anthropic scoring. Unset it when selecting `--judge-route anthropic-direct`; `https://api.anthropic.com` is not an OpenAI Chat Completions-compatible endpoint.
+  - `MARTIAN_BASE_URL` is invalid for direct Anthropic scoring. Unset it when selecting `--judge-route anthropic-direct`; `https://api.anthropic.com` is not an OpenAI Chat Completions-compatible endpoint.
 
   These env vars may live in a `.env` file in the directory you run `daydream bench` from; it is auto-loaded at bench entry (`python-dotenv`, searching from the cwd upward). Already-exported shell variables win, so an inline `ANTHROPIC_API_KEY=... daydream bench ...` still overrides the `.env`; a missing or malformed `.env` is a silent no-op.
 

@@ -345,11 +345,12 @@ async def run_anthropic_scoring(
     *,
     pr_count: int | None = None,
     tool: str = _TOOL,
+    client: Any | None = None,
 ) -> DaydreamScores:
     """Lazy bridge to the direct Anthropic scorer, kept patchable for tests."""
     from daydream.benchmark.anthropic_score import run_anthropic_scoring as direct_run_anthropic_scoring
 
-    return await direct_run_anthropic_scoring(benchmark_repo, judge_model, pr_count=pr_count, tool=tool)
+    return await direct_run_anthropic_scoring(benchmark_repo, judge_model, pr_count=pr_count, tool=tool, client=client)
 
 
 def run_scoring(

@@ -20,6 +20,10 @@ from daydream.benchmark.score import (
     parse_daydream_scores,
 )
 
+class _NonRetryableError(BenchmarkStepError):
+    """Raised for HTTP 4xx (non-429) and JSON-parse failures that must not be retried."""
+
+
 _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
 _REQUEST_TIMEOUT = 60.0
@@ -28,6 +32,7 @@ _MAX_EXTRACTION_TOKENS = 4096
 _MAX_DEDUP_TOKENS = 4096
 _MAX_JUDGE_TOKENS = 1024
 _MIN_DEDUP_CANDIDATES = 2
+_JUDGE_CONCURRENCY = 10  # max parallel judge calls; mirrors CapacityLimiter convention in phases.py
 _TOOL = "daydream"
 
 _EXTRACTION_SYSTEM = "You extract code review issues from comments. Always respond with valid JSON."
@@ -436,11 +441,12 @@ async def _evaluate_review(
             "recall": 0.0,
         }
 
+    semaphore = asyncio.Semaphore(_JUDGE_CONCURRENCY)
     tasks = []
     task_meta = []
     for golden_comment in golden:
         for candidate in candidates:
-            tasks.append(_match_comment(client, golden_comment["comment"], candidate))
+            tasks.append(_match_comment_limited(semaphore, client, golden_comment["comment"], candidate))
             task_meta.append(
                 {
                     "golden": golden_comment["comment"],
@@ -454,7 +460,7 @@ async def _evaluate_review(
         comment["comment"]: {
             "severity": comment.get("severity"),
             "matched": False,
-            "best_confidence": 0.0,
+            "best_confidence": -1.0,  # sentinel: any valid confidence (including 0.0) beats this
             "matched_candidate": None,
         }
         for comment in golden
@@ -475,7 +481,7 @@ async def _evaluate_review(
             continue
 
         confidence = result.get("confidence", 0)
-        if result.get("match") and confidence > golden_matched[golden_text]["best_confidence"]:
+        if result.get("match") and confidence >= golden_matched[golden_text]["best_confidence"]:
             golden_matched[golden_text]["matched"] = True
             golden_matched[golden_text]["best_confidence"] = confidence
             golden_matched[golden_text]["matched_candidate"] = candidate
@@ -522,6 +528,13 @@ async def _evaluate_review(
         "precision": precision,
         "recall": recall,
     }
+
+
+async def _match_comment_limited(
+    semaphore: asyncio.Semaphore, client: _AnthropicJsonCompleter, golden_comment: str, candidate: str
+) -> dict[str, Any]:
+    async with semaphore:
+        return await _match_comment(client, golden_comment, candidate)
 
 
 async def _match_comment(client: _AnthropicJsonCompleter, golden_comment: str, candidate: str) -> dict[str, Any]:
@@ -622,6 +635,8 @@ async def _complete_json_with_http(
             except Exception as exc:
                 raise BenchmarkStepError(f"Anthropic Messages request failed: {exc}") from exc
             return _parse_json_response(response)
+        except _NonRetryableError:
+            raise  # 4xx (non-429) and malformed-JSON are permanent; never retry
         except BenchmarkStepError:
             if attempt == _MAX_RETRIES - 1:
                 raise
@@ -633,20 +648,24 @@ def _parse_json_response(response: Any) -> dict[str, Any]:
     status_code = getattr(response, "status_code", None)
     if status_code is None or not 200 <= int(status_code) < 300:
         body = getattr(response, "text", "")
+        code = int(status_code) if status_code is not None else -1
+        # 429 is retryable (rate-limit); all other 4xx are permanent client errors.
+        if 400 <= code < 500 and code != 429:
+            raise _NonRetryableError(f"Anthropic Messages request failed with HTTP {status_code}: {body}")
         raise BenchmarkStepError(f"Anthropic Messages request failed with HTTP {status_code}: {body}")
 
     try:
         body = response.json()
     except Exception as exc:
-        raise BenchmarkStepError(f"Anthropic Messages response was not valid JSON: {exc}") from exc
+        raise _NonRetryableError(f"Anthropic Messages response was not valid JSON: {exc}") from exc
 
     text = _first_text_block(body)
     try:
         parsed = json.loads(_strip_markdown_fences(text))
     except json.JSONDecodeError as exc:
-        raise BenchmarkStepError(f"Anthropic Messages text block was not valid JSON: {exc}") from exc
+        raise _NonRetryableError(f"Anthropic Messages text block was not valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
-        raise BenchmarkStepError("Anthropic Messages text block JSON was not an object")
+        raise _NonRetryableError("Anthropic Messages text block JSON was not an object")
     return parsed
 
 
