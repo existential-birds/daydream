@@ -28,10 +28,7 @@ from daydream.agent import console, get_assume, get_non_interactive, resolve_or_
 from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME
 from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 from daydream.deep.artifacts import (
-    alternatives_path as _alternatives_path,
-)
-from daydream.deep.artifacts import (
-    arbiter_complete_path,
+    adjudication_complete_path,
     check_deep_artifacts,
     dedup_candidates_path,
     deep_dir,
@@ -40,6 +37,9 @@ from daydream.deep.artifacts import (
     merged_items_path,
     per_stack_failures_path,
     per_stack_records_path,
+)
+from daydream.deep.artifacts import (
+    alternatives_path as _alternatives_path,
 )
 from daydream.deep.artifacts import (
     intent_path as _intent_path,
@@ -192,6 +192,35 @@ def _shallow_fanout_threshold(config: RunConfig) -> int:
     if file_config is not None and file_config.shallow_fanout_threshold is not None:
         return file_config.shallow_fanout_threshold
     return DEFAULT_SHALLOW_FANOUT_THRESHOLD
+
+
+def _precision_mode(config: RunConfig) -> bool:
+    """Resolve the precision-mode opt-in (issue #232).
+
+    Precedence (highest first), mirroring ``_shallow_fanout_threshold`` above
+    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
+
+      1. ``RunConfig.precision_mode`` (CLI tier / direct construction).
+      2. ``DaydreamFileConfig.precision_mode`` (file-config scalar).
+      3. Built-in default ``False`` (byte-identical behavior: the suppression
+         predicate is never called and arbiter output is unchanged).
+
+    Uses truthiness rather than ``is not None``: ``False`` is the meaningful
+    "off" value, so a set-to-False file-config entry just falls through to the
+    default rather than acting as a distinct sentinel.
+
+    Args:
+        config: Run configuration carrying the CLI/file-config sources.
+
+    Returns:
+        Whether the precision suppression pass should run.
+    """
+    if config.precision_mode:
+        return True
+    file_config = config.file_config
+    if file_config is not None and file_config.precision_mode:
+        return True
+    return False
 
 
 def _collapse_stacks_for_tiny_diff(
@@ -432,137 +461,96 @@ def _candidate_pair_to_json(pair: Any) -> dict[str, Any]:
     return data
 
 
-def _apply_arbiter_verdicts(
+def _apply_adjudication_verdicts(
     records: list[dict[str, Any]],
     sources: list[str],
     targets: list[int],
     verdicts: dict[int, dict[str, Any]],
+    *,
+    pass_name: str,
+    id_field: str,
+    fail_closed: bool,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Fold arbiter verdicts back into the per-stack record set (#168).
+    """Fold arbiter / suppression verdicts back into the per-stack record set.
 
-    Each selected record (``targets[k]`` for 1-based ``arb_id = k + 1``) is
-    revised in place (severity/confidence/description/rationale updated) when the
-    arbiter keeps it, and dropped only on an explicit ``keep:false`` verdict. A
-    missing verdict or an ``arb_id`` mismatch fails open: the original record is
-    retained unchanged (with a warning), because a record reaches arbitration
-    precisely because it is high-severity or contested, so a truncated/lazy
-    arbiter response must not silently delete it. Non-selected records pass
-    through untouched. ``file``/``line`` are never changed -- the arbiter
-    adjudicates, it does not re-target findings.
+    The scoped arbiter (``#168``) and the precision-mode suppression pass
+    (``#232``) share an identical positional-rebuild shape; they differ ONLY in
+    the fail polarity of two branches -- a missing verdict and an ``id_field``
+    mismatch -- which is why this is one parameterised helper rather than two
+    ~80-line near-clones (that duplication is what let the stale-index bug at the
+    call site hide). Each selected record (``targets[k]`` for 1-based
+    ``id = k + 1``) is either revised in place (severity/confidence/description/
+    rationale/evidence taken from the verdict) or dropped. ``file``/``line`` are
+    never changed -- adjudication revises, it does not re-target findings.
+
+    Fail polarity (the sole axis on which the two passes diverge):
+
+    - ``fail_closed=False`` (arbiter): a record reaches arbitration because it is
+      high-severity or contested, so a missing verdict or an ``id_field`` mismatch
+      must NOT delete it. The original record is retained unchanged with a warning
+      (fail OPEN); only an explicit ``keep:false`` drops it.
+    - ``fail_closed=True`` (suppression): a record reaches suppression precisely
+      because it is borderline (neither high-severity nor contested), so an
+      unconfirmable verdict -- missing, mismatched, or ``keep:false`` -- drops it
+      (fail CLOSED), the inverse polarity, safe because nothing important reaches
+      this pass.
+
+    Non-selected records always pass through untouched.
+
+    Args:
+        records: Per-stack records positionally aligned with ``sources``.
+        sources: Per-record originating stack name.
+        targets: Indices into ``records`` selected for this pass; ``targets[k]``
+            carries 1-based ``id = k + 1`` echoed back in the verdict's
+            ``id_field``.
+        verdicts: ``id -> verdict`` mapping from the adjudication agent.
+        pass_name: Human-readable pass name (``"arbiter"`` / ``"suppression"``)
+            used only in warning text.
+        id_field: Verdict key carrying the echoed positional id (``"arb_id"`` for
+            the arbiter, ``"sup_id"`` for suppression).
+        fail_closed: Fail polarity for the missing-verdict / id-mismatch branches
+            (see above).
 
     Returns:
-        New ``(records, sources)`` with explicitly rejected records removed and
-        surviving selected records carrying the arbiter's fields. Positional
-        alignment between the two lists is preserved.
+        New ``(records, sources)`` with dropped records removed and surviving
+        selected records carrying the verdict's fields. Positional alignment
+        between the two lists is preserved.
     """
     import warnings
 
+    polarity_action = (
+        "dropping the unconfirmed record"
+        if fail_closed
+        else "retaining the original record unchanged"
+    )
     revised: dict[int, dict[str, Any]] = {}
     dropped: set[int] = set()
     for offset, record_index in enumerate(targets):
-        arb_id = offset + 1
-        verdict = verdicts.get(arb_id)
+        verdict_id = offset + 1
+        verdict = verdicts.get(verdict_id)
         if verdict is None:
-            # Arbiter returned no verdict for this arb_id -- fail open: retain the
-            # original record unchanged so a truncated/lazy arbiter response cannot
-            # silently delete a high-severity or contested finding. Only an explicit
-            # keep=False below drops a record.
+            # No verdict returned for this id -- fail per the caller's polarity.
             warnings.warn(
-                f"Arbiter returned no verdict for arb_id={arb_id} "
-                f"(record_index={record_index}); retaining original record unchanged.",
+                f"{pass_name.capitalize()} returned no verdict for {id_field}={verdict_id} "
+                f"(record_index={record_index}); {polarity_action}.",
                 stacklevel=2,
             )
+            if fail_closed:
+                dropped.add(record_index)
             continue
-        if verdict.get("arb_id") != arb_id:
-            # Secondary key guard: the arb_id field in the verdict must match the
-            # key we looked it up by.  A mismatch means the arbiter emitted a
-            # finding with a wrong arb_id, which would silently bind the verdict
-            # to the wrong record.  Warn and fail open (retain the original) rather
-            # than mis-apply or drop.
+        if verdict.get(id_field) != verdict_id:
+            # Secondary key guard: the id field in the verdict must match the key
+            # we looked it up by. A mismatch would silently bind the verdict to the
+            # wrong record -- fail per the caller's polarity rather than mis-apply.
             warnings.warn(
-                f"Arbiter verdict arb_id mismatch: expected arb_id={arb_id} "
-                f"but verdict contains arb_id={verdict.get('arb_id')!r} "
-                f"(record_index={record_index}); retaining original record unchanged.",
+                f"{pass_name.capitalize()} verdict {id_field} mismatch: "
+                f"expected {id_field}={verdict_id} "
+                f"but verdict contains {id_field}={verdict.get(id_field)!r} "
+                f"(record_index={record_index}); {polarity_action}.",
                 stacklevel=2,
             )
-            continue
-        if not verdict.get("keep", False):
-            dropped.add(record_index)
-            continue
-        revised[record_index] = {
-            **records[record_index],
-            "severity": verdict.get("severity", records[record_index].get("severity")),
-            "confidence": verdict.get("confidence", records[record_index].get("confidence")),
-            "description": verdict.get("description", records[record_index].get("description")),
-            "rationale": verdict.get("rationale", records[record_index].get("rationale")),
-            "evidence": verdict.get("evidence", records[record_index].get("evidence")),
-        }
-
-    new_records: list[dict[str, Any]] = []
-    new_sources: list[str] = []
-    for i, (record, source) in enumerate(zip(records, sources, strict=True)):
-        if i in dropped:
-            continue
-        new_records.append(revised.get(i, record))
-        new_sources.append(source)
-    return new_records, new_sources
-
-
-def _apply_suppression_verdicts(
-    records: list[dict[str, Any]],
-    sources: list[str],
-    targets: list[int],
-    verdicts: dict[int, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Fold suppression verdicts back into the per-stack record set -- fail-CLOSED (#232).
-
-    The exact inverse of :func:`_apply_arbiter_verdicts`. Each selected borderline
-    record (``targets[k]`` for 1-based ``sup_id = k + 1``) is DROPPED unless the
-    suppression reviewer returned an explicit ``keep:true`` verdict for it. A
-    missing verdict, a ``sup_id`` mismatch, or ``keep:false`` all drop the record:
-    a borderline (LOW-confidence / low-severity uncontested) finding the reviewer
-    could not confirm must not survive on a precision run. This is safe precisely
-    because these records were neither high-severity nor contested -- the fail-open
-    protection the arbiter needs does not apply here. Kept records carry the
-    reviewer's revised fields; non-selected records pass through untouched.
-    ``file``/``line`` are never changed.
-
-    Returns:
-        New ``(records, sources)`` with unconfirmed selected records removed and
-        surviving selected records carrying the reviewer's fields. Positional
-        alignment between the two lists is preserved.
-    """
-    import warnings
-
-    revised: dict[int, dict[str, Any]] = {}
-    dropped: set[int] = set()
-    for offset, record_index in enumerate(targets):
-        sup_id = offset + 1
-        verdict = verdicts.get(sup_id)
-        if verdict is None:
-            # Fail-CLOSED: no verdict for a borderline target -> drop it. The
-            # inverse of the arbiter, where a missing verdict fails open. A
-            # truncated/lazy suppression response therefore trims rather than
-            # leaks -- acceptable because nothing high-severity or contested
-            # reaches this pass.
-            warnings.warn(
-                f"Suppression returned no verdict for sup_id={sup_id} "
-                f"(record_index={record_index}); dropping the unconfirmed borderline record.",
-                stacklevel=2,
-            )
-            dropped.add(record_index)
-            continue
-        if verdict.get("sup_id") != sup_id:
-            # Secondary key guard: a mismatched sup_id means the verdict cannot be
-            # trusted to bind to this record -> fail closed (drop) rather than
-            # mis-apply a keep from the wrong finding.
-            warnings.warn(
-                f"Suppression verdict sup_id mismatch: expected sup_id={sup_id} "
-                f"but verdict contains sup_id={verdict.get('sup_id')!r} "
-                f"(record_index={record_index}); dropping the unconfirmed borderline record.",
-                stacklevel=2,
-            )
-            dropped.add(record_index)
+            if fail_closed:
+                dropped.add(record_index)
             continue
         if not verdict.get("keep", False):
             dropped.add(record_index)
@@ -950,9 +938,27 @@ async def _step_arbiter(ctx: FlowContext) -> None:
     # completion marker proves a prior run already finalised them
     # (#175): a crash between the parse write and the rewrite would
     # otherwise let unarbitrated high-severity findings reach merge.
-    arbiter_marker = arbiter_complete_path(dd)
-    if config.start_at != "merge" or not arbiter_marker.is_file():
+    #
+    # The marker covers the WHOLE adjudication block (arbiter +, in
+    # precision mode, suppression): it is written once after BOTH passes
+    # have rewritten the per-stack records, so its presence proves the
+    # records are fully adjudicated -- not just arbitrated. Renamed from
+    # `arbiter_complete_path` so resume reasoning cannot under-read it as
+    # arbiter-only (#232 review).
+    adjudication_marker = adjudication_complete_path(dd)
+    if config.start_at != "merge" or not adjudication_marker.is_file():
         arbiter_targets = select_arbiter_targets(all_records, record_sources)
+        # Capture the identities of records the arbiter will see, before
+        # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
+        # are indices into this pre-apply list; once records are dropped the
+        # indices shift, so suppression exclusion must be keyed by record
+        # identity -- not by the stale positional indices -- or a borderline
+        # record shifting into a dropped slot is silently skipped and an
+        # arbiter-kept record revised down to low severity is wrongly re-judged.
+        arbitrated_ids = {
+            (all_records[i].get("file"), all_records[i].get("line"))
+            for i in arbiter_targets
+        }
         if arbiter_targets:
             async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
                 verdicts = await phase_arbiter_review(
@@ -964,8 +970,11 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     alternatives_path=ctx.data["alts_path"],
                     exploration_dir=ctx.data["exploration_dir"],
                 )
-            all_records, record_sources = _apply_arbiter_verdicts(
-                all_records, record_sources, arbiter_targets, verdicts
+            all_records, record_sources = _apply_adjudication_verdicts(
+                all_records, record_sources, arbiter_targets, verdicts,
+                pass_name="arbiter",
+                id_field="arb_id",
+                fail_closed=False,
             )
             _rewrite_stack_records(
                 dd, ctx.data["records_paths"], all_records, record_sources
@@ -980,9 +989,14 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # is the exclusion set so nothing high-severity / contested is re-judged
         # here. One batched agent call, resolved via the cheaper `suppression`
         # phase key (Sonnet default) -- never per-finding Opus.
-        if config.precision_mode:
+        if _precision_mode(config):
+            suppression_exclude = [
+                i
+                for i, r in enumerate(all_records)
+                if (r.get("file"), r.get("line")) in arbitrated_ids
+            ]
             suppression_targets = select_suppression_targets(
-                all_records, record_sources, arbiter_targets
+                all_records, record_sources, suppression_exclude
             )
             if suppression_targets:
                 async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):
@@ -995,13 +1009,16 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         alternatives_path=ctx.data["alts_path"],
                         exploration_dir=ctx.data["exploration_dir"],
                     )
-                all_records, record_sources = _apply_suppression_verdicts(
-                    all_records, record_sources, suppression_targets, sup_verdicts
+                all_records, record_sources = _apply_adjudication_verdicts(
+                    all_records, record_sources, suppression_targets, sup_verdicts,
+                    pass_name="suppression",
+                    id_field="sup_id",
+                    fail_closed=True,
                 )
                 _rewrite_stack_records(
                     dd, ctx.data["records_paths"], all_records, record_sources
                 )
-        arbiter_marker.write_text("")
+        adjudication_marker.write_text("")
     ctx.data["records"] = all_records
     ctx.data["record_sources"] = record_sources
 

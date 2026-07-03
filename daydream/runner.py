@@ -185,8 +185,11 @@ class RunConfig:
         precision_mode: Opt-in precision suppression (issue #232). When True, the
             deep pipeline runs a skeptical LLM second opinion over borderline
             (LOW-confidence / low-severity uncontested) findings after the arbiter
-            and drops any it cannot confirm (fail-closed). Default False keeps the
-            arbiter output byte-identical -- the suppression pass never runs.
+            and drops any it cannot confirm (fail-closed). ``False`` falls through
+            to ``file_config.precision_mode`` then the built-in default ``False``
+            (precedence CLI > file > default, mirroring
+            ``shallow_fanout_threshold``; resolved by ``_precision_mode``), so the
+            suppression pass never runs and arbiter output is byte-identical.
 
     """
 

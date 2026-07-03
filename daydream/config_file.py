@@ -38,6 +38,9 @@ class DaydreamFileConfig:
             tiny-diff short-circuit in deep mode (issue #172). ``None`` falls
             through to the RunConfig field / orchestrator default. ``0``
             explicitly disables the short-circuit.
+        precision_mode: Opt-in precision suppression (issue #232). ``None`` falls
+            through to the RunConfig field / orchestrator default; ``True`` runs
+            the skeptical suppression pass over borderline findings.
     """
 
     model: str | None = None
@@ -45,6 +48,7 @@ class DaydreamFileConfig:
     phases: dict[str, dict[str, str]] = field(default_factory=dict)
     bench: dict[str, Any] = field(default_factory=dict)
     shallow_fanout_threshold: int | None = None
+    precision_mode: bool | None = None
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase.
@@ -218,10 +222,16 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         threshold = raw_threshold
     else:
         threshold = None
+    # precision_mode: bool only. Any non-bool value (str, int, list) degrades to
+    # None rather than crashing the loader; truthy ints are *not* coerced to True
+    # so an accidental ``precision_mode = 1`` is treated as unset, not enabled.
+    raw_precision = merged.get("precision_mode")
+    precision: bool | None = raw_precision if isinstance(raw_precision, bool) else None
     return DaydreamFileConfig(
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,
         phases=_coerce_phases(merged.get("phases")),
         bench=dict(merged["bench"]) if isinstance(merged.get("bench"), dict) else {},
         shallow_fanout_threshold=threshold,
+        precision_mode=precision,
     )
