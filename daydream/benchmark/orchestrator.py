@@ -106,7 +106,12 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
         on_line=on_line,
     )
     doc = json.loads(artifact.read_text(encoding="utf-8"))
-    comments = merged_items_to_review_comments(doc, created_at=_CREATED_AT)
+    comments = merged_items_to_review_comments(
+        doc,
+        created_at=_CREATED_AT,
+        min_confidence=config.min_confidence,
+        min_severity=config.min_severity,
+    )
     return inject_daydream_review(data, pr.golden_url, comments, force=config.force, tool=config.tool_label)
 
 

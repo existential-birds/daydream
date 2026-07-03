@@ -51,3 +51,30 @@ def test_mapping_skips_items_that_would_produce_empty_body():
     out = merged_items_to_review_comments(doc, created_at="T")
     assert [c["path"] for c in out] == ["b.py"]          # empty-body item dropped
     assert all(c["body"].strip() for c in out)           # no harvested comment is ever empty
+
+
+def test_min_confidence_high_excludes_medium_and_unrated():
+    doc = {"items": [
+        _item("high.py", 1, id=1, confidence="HIGH"),
+        _item("med.py", 2, id=2, confidence="MEDIUM"),
+        _item("none.py", 3, id=3, confidence=""),  # normalises to None
+    ]}
+    out = merged_items_to_review_comments(doc, created_at=TS, min_confidence="HIGH")
+    assert [c["path"] for c in out] == ["high.py"]
+
+
+def test_min_severity_high_excludes_medium_and_unrated():
+    doc = {"items": [
+        _item("high.py", 1, id=1, severity="high"),
+        _item("med.py", 2, id=2, severity="medium"),
+        _item("none.py", 3, id=3, severity=""),  # normalises to None
+    ]}
+    out = merged_items_to_review_comments(doc, created_at=TS, min_severity="high")
+    assert [c["path"] for c in out] == ["high.py"]
+
+
+def test_combined_thresholds_item_must_clear_both():
+    # HIGH confidence clears --min-confidence, but medium severity fails --min-severity.
+    doc = {"items": [_item("f.py", 1, confidence="HIGH", severity="medium")]}
+    out = merged_items_to_review_comments(doc, created_at=TS, min_confidence="HIGH", min_severity="high")
+    assert out == []

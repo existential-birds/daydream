@@ -203,6 +203,36 @@ def test_orchestrator_passes_judge_route_to_scoring(tmp_path, monkeypatch):
     assert captured["pr_count"] == 1
 
 
+def test_materiality_gate_filters_submission(tmp_path, monkeypatch):
+    from daydream.benchmark.orchestrator import _injected_comment_count
+
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.acquire_checkout",
+        lambda *a, **k: _fake_checkout(tmp_path),
+    )
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.run_daydream_review",
+        lambda checkout, **k: _write_items(
+            checkout,
+            [
+                _item("high.py", 1, id=1, confidence="HIGH"),
+                _item("med.py", 2, id=2, confidence="MEDIUM"),
+                _item("low.py", 3, id=3, confidence="LOW"),
+            ],
+        ),
+    )
+    cfg = replace(
+        _config(tmp_path, data_path, score=False, only="grafana"),
+        limit=1,
+        min_confidence="HIGH",
+    )
+    assert run_bench(cfg) == 0
+    data = json.loads(data_path.read_text())
+    [golden_url] = [u for u in data if "grafana" in u and any(r["tool"] == "daydream" for r in data[u]["reviews"])]
+    assert _injected_comment_count(data, golden_url, "daydream") == 1  # only the HIGH item survives the gate
+
+
 def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     calls = {"n": 0}

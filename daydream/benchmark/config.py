@@ -32,6 +32,10 @@ class BenchConfig:
         limit: Optional cap on the number of PRs processed.
         trajectory_dir: Directory for per-PR ATIF trajectory files.
         verbose: Stream the review subprocess output live (vs. the quiet spinner).
+        min_confidence: When set, drop findings below this confidence
+            (low/medium/high) before benchmark submission; None submits all.
+        min_severity: When set, drop findings below this severity
+            (low/medium/high) before benchmark submission; None submits all.
     """
 
     benchmark_repo: Path
@@ -48,3 +52,5 @@ class BenchConfig:
     reviewer_provider: str | None = None
     tool_label: str = "daydream"
     verbose: bool = False
+    min_confidence: str | None = None
+    min_severity: str | None = None
