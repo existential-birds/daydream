@@ -75,6 +75,7 @@ class _MockConfig:
     archive: bool = True
     run_eval: bool = False
     file_config: DaydreamFileConfig | None = None
+    findings_out: str | None = None
 
 
 def test_parse_repo_slug_ssh():
@@ -493,7 +494,7 @@ def _setup_bundle(
 
 def test_copy_bundle_trajectory(tmp_path: Path):
     target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder)
+    _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert (run_dir / "trajectory.json").exists()
     assert json.loads((run_dir / "trajectory.json").read_text())["session_id"] == "test"
@@ -509,28 +510,28 @@ def test_copy_bundle_partial_trajectory(tmp_path: Path):
     )
     partial.write_text('{"partial": true}')
 
-    _copy_bundle(target, run_dir, recorder)
+    _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert json.loads((run_dir / "trajectory.json.partial").read_text())["partial"] is True
 
 
 def test_copy_bundle_review_output(tmp_path: Path):
     target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder)
+    _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert (run_dir / "review-output.md").read_text() == "review findings"
 
 
 def test_copy_bundle_deep_directory(tmp_path: Path):
     target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder)
+    _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert (run_dir / "deep" / "intent.md").read_text() == "intent"
 
 
 def test_copy_bundle_diff_patch(tmp_path: Path):
     target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder)
+    _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert (run_dir / "diff.patch").read_text() == "diff content"
 
@@ -538,7 +539,7 @@ def test_copy_bundle_diff_patch(tmp_path: Path):
 def test_copy_bundle_sub_trajectories_copied(tmp_path: Path):
     """Sibling trajectories under the live run dir copy verbatim — no prefix filtering."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder)
+    _copy_bundle(target, run_dir, recorder, RunConfig())
 
     sub = run_dir / "trajectories"
     assert sub.is_dir()
@@ -556,7 +557,7 @@ def test_copy_bundle_explicit_trajectory_path(tmp_path: Path):
     custom_traj.write_text('{"custom": true}')
 
     recorder = _make_recorder_mock(session_id, custom_traj, explicit_path=True)
-    _copy_bundle(target, run_dir, recorder)
+    _copy_bundle(target, run_dir, recorder, RunConfig())
 
     # The custom path is copied on top of the run dir as trajectory.json.
     archived = json.loads((run_dir / "trajectory.json").read_text())
@@ -571,12 +572,36 @@ def test_copy_bundle_skips_missing(tmp_path: Path):
     run_dir.mkdir()
 
     recorder = _make_recorder_mock("no-match-session-id-here", tmp_path / "nonexistent.json")
-    _copy_bundle(target, run_dir, recorder)
+    _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert not (run_dir / "trajectory.json").exists()
     assert not (run_dir / "review-output.md").exists()
     assert not (run_dir / "deep").exists()
     assert not (run_dir / "diff.patch").exists()
+
+
+def test_copy_bundle_archives_findings_artifact(tmp_path: Path):
+    """findings.json from --findings-out is archived so harvest's per-finding join has a source."""
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    # Review-bot workflow writes findings.json under the repo root (CWD at run time).
+    findings_src = target / "findings" / "findings.json"
+    findings_src.parent.mkdir(parents=True)
+    findings_src.write_text('{"findings": [{"fingerprint": "abc"}]}')
+
+    config = RunConfig(findings_out="findings/findings.json")
+    _copy_bundle(target, run_dir, recorder, config)
+
+    archived = run_dir / "findings.json"
+    assert archived.exists()
+    assert json.loads(archived.read_text())["findings"][0]["fingerprint"] == "abc"
+
+
+def test_copy_bundle_findings_artifact_skipped_without_findings_out(tmp_path: Path):
+    """No findings_out means no findings.json is archived (no source to copy)."""
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    _copy_bundle(target, run_dir, recorder, RunConfig())
+
+    assert not (run_dir / "findings.json").exists()
 
 
 def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path):

@@ -110,7 +110,7 @@ def _archive_run_inner(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Copy artifact bundle
-    _copy_bundle(target_dir, run_dir, recorder)
+    _copy_bundle(target_dir, run_dir, recorder, config)
 
     # 2. Capture git context — prefer pre-resolved WorkContext over re-deriving
     #    from disk (HEAD may have moved; base-branch detection fails in worktrees).
@@ -210,14 +210,19 @@ def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
     return [str(p) for p in data]
 
 
-def _copy_bundle(target_dir: Path, run_dir: Path, recorder: TrajectoryRecorder) -> None:
+def _copy_bundle(
+    target_dir: Path,
+    run_dir: Path,
+    recorder: TrajectoryRecorder,
+    config: RunConfig,
+) -> None:
     """Copy ``.daydream/`` artifacts to the archive run directory.
 
     Trajectory subtree (``runs/<session_id>/trajectory.json`` plus
     ``runs/<session_id>/trajectories/``) is copied wholesale via copytree
     so the archive layout mirrors the live layout exactly. Other artifacts
-    (``review-output.md``, ``deep/``, ``diff.patch``) keep their existing
-    copy logic. Missing files are silently skipped.
+    (``review-output.md``, ``deep/``, ``diff.patch``, ``findings.json``)
+    keep their existing copy logic. Missing files are silently skipped.
     """
     daydream_dir = target_dir / ".daydream"
 
@@ -259,6 +264,20 @@ def _copy_bundle(target_dir: Path, run_dir: Path, recorder: TrajectoryRecorder) 
     recommended_patch = daydream_dir / "recommended.patch"
     if recommended_patch.is_file():
         shutil.copy2(recommended_patch, run_dir / "recommended.patch")
+
+    # Findings artifact (``--findings-out`` / Phase A). Archived so the corpus
+    # harvest per-finding join has a fingerprint source for real PR runs —
+    # without it ``_row_recorded_fingerprints`` always returns ``[]`` and the
+    # per-finding supervision never reaches the corpus. The writer resolves
+    # ``config.findings_out`` against CWD (the repo root in the review-bot
+    # workflow), so fall back to target_dir-relative for runs invoked elsewhere.
+    findings_out = config.findings_out
+    if findings_out:
+        findings_src = Path(findings_out)
+        if not findings_src.is_absolute() and not findings_src.is_file():
+            findings_src = target_dir / findings_out
+        if findings_src.is_file():
+            shutil.copy2(findings_src, run_dir / "findings.json")
 
 
 def _run_eval(target_dir: Path, session_id: str, run_dir: Path) -> dict[str, Any] | None:

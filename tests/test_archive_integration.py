@@ -152,6 +152,50 @@ async def test_full_archive_round_trip(tmp_path: Path, archive_dir: Path) -> Non
         conn.close()
 
 
+async def test_archive_persists_findings_artifact_for_pr_run(tmp_path: Path, archive_dir: Path) -> None:
+    """Real-path: findings.json from --findings-out is archived so harvest's per-finding join is non-inert."""
+    from daydream.runner import RunConfig, _make_archive_callback
+
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    daydream_dir = target_dir / ".daydream"
+    daydream_dir.mkdir()
+    (target_dir / ".review-output.md").write_text("# Review\n")
+
+    # The review-bot workflow writes findings.json under the repo root (CWD at run time).
+    findings_src = target_dir / "findings" / "findings.json"
+    findings_src.parent.mkdir(parents=True)
+    findings_src.write_text(
+        '{"schema_version": 1, "findings": [{"fingerprint": "deadbeef"}]}'
+    )
+
+    config = RunConfig(
+        target=str(target_dir),
+        skill="python",
+        backend="claude",
+        archive=True,
+        run_eval=False,
+        findings_out="findings/findings.json",
+    )
+
+    recorder = TrajectoryRecorder(
+        path=daydream_dir / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=target_dir,
+        agent_model_name="opus",
+        session_id="findings-test",
+        on_write=_make_archive_callback(config, target_dir),
+    )
+
+    async with recorder:
+        _add_user_step(recorder)
+
+    run_dir = archive_dir / "runs" / recorder.session_id
+    archived = run_dir / "findings.json"
+    assert archived.is_file()
+    assert json.loads(archived.read_text(encoding="utf-8"))["findings"][0]["fingerprint"] == "deadbeef"
+
+
 async def test_archive_populates_wall_clock_without_eval(tmp_path: Path, archive_dir: Path) -> None:
     """Real-path: manifest.json carries wall_clock_seconds even when --eval did not run."""
     from daydream.runner import RunConfig, _make_archive_callback
