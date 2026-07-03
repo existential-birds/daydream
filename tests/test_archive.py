@@ -1219,57 +1219,20 @@ def test_reviewer_prior_bound_spelling_cannot_misorder(tmp_path: Path):
     assert prior2 == pytest.approx(1.0) and n2 == 1
 
 
-def test_legacy_z_valid_at_rows_are_purged_at_bootstrap(tmp_path: Path):
-    """Legacy 'Z'-spelled rows are deleted (not shimmed) on the next connection,
-    and the denormalized runs cache is refreshed to the surviving winner."""
+def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path):
+    """A pre-convergence 'Z'-spelled row survives reconnection unchanged: the
+    index never deletes or rewrites history at bootstrap (a destructive
+    migration in a library code path would silently eat other users' data)."""
     _seed_one_run(tmp_path, "sess-legacy")
-    append_label_observation(
-        tmp_path, "sess-legacy", labels=["accepted"], pr_state="merged",
-        labeler_version="v1", evidence_sha="e1",
-        valid_at="2026-02-01T00:00:00+00:00",
-    )
-    # Hand-write a legacy row (bypassing the canonicalizing writer) that also
-    # wins the cache, as pre-convergence archives would contain.
     conn = sqlite3.connect(str(tmp_path / "index.db"))
     conn.execute(
         "INSERT INTO label_observations "
         "(session_id, observed_at, labels, labeler_version, valid_at, source) "
-        "VALUES ('sess-legacy', '2027-01-01T00:00:00+00:00', '[\"rejected\"]', 'v0', "
-        "'2026-01-15T00:00:00Z', 'auto')"
-    )
-    conn.execute(
-        "UPDATE runs SET outcome_labels = '[\"rejected\"]' WHERE session_id = 'sess-legacy'"
-    )
-    conn.commit()
-    conn.close()
-
-    with pytest.warns(UserWarning, match="legacy 'Z'-suffixed"):
-        hist = label_observation_history(tmp_path, "sess-legacy")
-
-    # Only the canonical row survives, and the cache points at it again.
-    assert [json.loads(r["labels"]) for r in hist] == [["accepted"]]
-    rows = query_runs(tmp_path, "session_id = ?", ("sess-legacy",))
-    assert json.loads(rows[0]["outcome_labels"]) == ["accepted"]
-
-
-def test_purge_resets_cache_when_no_rows_survive(tmp_path: Path):
-    _seed_one_run(tmp_path, "sess-only-legacy")
-    conn = sqlite3.connect(str(tmp_path / "index.db"))
-    conn.execute(
-        "INSERT INTO label_observations "
-        "(session_id, observed_at, labels, labeler_version, valid_at, source) "
-        "VALUES ('sess-only-legacy', '2026-01-01T00:00:00+00:00', '[\"accepted\"]', 'v0', "
+        "VALUES ('sess-legacy', '2026-01-01T00:00:00+00:00', '[\"accepted\"]', 'v0', "
         "'2026-01-01T00:00:00Z', 'auto')"
     )
-    conn.execute(
-        "UPDATE runs SET outcome_labels = '[\"accepted\"]', labeled_at = '2026-01-01T00:00:00+00:00' "
-        "WHERE session_id = 'sess-only-legacy'"
-    )
     conn.commit()
     conn.close()
 
-    with pytest.warns(UserWarning, match="legacy 'Z'-suffixed"):
-        assert label_observation_history(tmp_path, "sess-only-legacy") == []
-    rows = query_runs(tmp_path, "session_id = ?", ("sess-only-legacy",))
-    assert json.loads(rows[0]["outcome_labels"]) == []
-    assert rows[0]["labeled_at"] is None
+    hist = label_observation_history(tmp_path, "sess-legacy")
+    assert [r["valid_at"] for r in hist] == ["2026-01-01T00:00:00Z"]

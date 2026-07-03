@@ -52,10 +52,16 @@ spelling is ``datetime.isoformat()`` in UTC — ``YYYY-MM-DDTHH:MM:SS[.ffffff]+0
   merge timestamps, harvest fallbacks) arrived ``Z``-suffixed while the
   ``None``→``observed_at`` collapse stored ``+00:00``. All rows are now
   canonicalized at write time (:func:`canonical_utc_iso` in
-  :func:`append_label_observation`), and legacy ``Z``-suffixed rows are deleted
-  at connection bootstrap (``_purge_legacy_z_valid_at`` — repopulate via
-  ``harvest``), so the stored column is uniformly canonical and plain lexical
-  cutoffs (``valid_at < before_valid_at``) compare chronologically.
+  :func:`append_label_observation`), so the column converges on the canonical
+  spelling and the lexical ``valid_at < before_valid_at`` cutoff compares
+  chronologically. Rows written by pre-convergence versions may still carry a
+  ``Z`` suffix; they are deliberately NOT rewritten or deleted (destructive
+  bootstrap migrations are off the table). A stray legacy row sorts after any
+  ``+00:00`` string sharing its second prefix, so the reviewer-prior cutoff
+  can only over-exclude it (a smaller pool, never posterior leakage); the
+  corpus leakage guard parses datetimes and is spelling-immune. A re-harvest
+  appends canonical generations that supersede legacy rows in every winner
+  projection.
 """
 
 from __future__ import annotations
@@ -76,7 +82,6 @@ from daydream.archive._schema import (
     SCHEMA_VERSION,
     _migrate_label_observations_schema,
     _migrate_schema,
-    _purge_legacy_z_valid_at,
     _recreate_label_observations_if_stale,
 )
 from daydream.archive.manifest import Manifest
@@ -185,7 +190,6 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
     _recreate_label_observations_if_stale(conn)
     _migrate_label_observations_schema(conn)
-    _purge_legacy_z_valid_at(conn)
     _migrate_schema(conn)
     for idx_sql in _CREATE_INDEXES:
         conn.execute(idx_sql)
