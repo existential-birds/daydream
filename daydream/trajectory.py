@@ -998,6 +998,37 @@ class TrajectoryRecorder:
             )
         )
 
+    def emit_file_group_budget_exceeded(
+        self, *, file: str, reason: str, items_processed: int, items_skipped: int
+    ) -> None:
+        """Record a ``file_group_budget_exceeded`` event for the FIX phase (#201).
+
+        Emitted by ``phase_fix_parallel`` when a per-file-group aggregate budget
+        fires, so future perf triage of a runaway file group (the #186 pattern)
+        is mechanical: the trajectory names the file, the ceiling that tripped,
+        and how many findings were processed vs. skipped. Serialized into
+        ``Trajectory.extra["phase_events"]`` alongside the phase boundaries.
+
+        Args:
+            file: File-group key whose budget was exceeded (or ``"<no-file>"``).
+            reason: Which ceiling tripped (e.g. ``"group_serial_item_limit"``).
+            items_processed: Findings fixed before the budget fired.
+            items_skipped: Remaining findings in the group left unfixed.
+        """
+        self._phase_events.append(
+            PhaseEvent(
+                phase=DaydreamPhase.FIX,
+                event="file_group_budget_exceeded",
+                timestamp=now_iso(),
+                metadata={
+                    "file": file,
+                    "reason": reason,
+                    "items_processed": items_processed,
+                    "items_skipped": items_skipped,
+                },
+            )
+        )
+
     def _register_subtrajectory(self, inv: Invocation) -> None:
         """Register a per-Invocation timing summary (issue #203).
 

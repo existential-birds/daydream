@@ -4,6 +4,9 @@ import copy
 import json
 import logging
 import re
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,7 +42,14 @@ from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
-from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S, REVIEW_OUTPUT_FILE
+from daydream.config import (
+    DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS,
+    DEFAULT_GROUP_MAX_SERIAL_ITEMS,
+    DEFAULT_GROUP_MAX_WALL_S,
+    DEFAULT_TOOL_CALL_BUDGET,
+    DEFAULT_WALL_BUDGET_S,
+    REVIEW_OUTPUT_FILE,
+)
 from daydream.ui import (
     phase_subtitle,
     print_dim,
@@ -63,6 +73,65 @@ TEST_OUTPUT_TAIL_LINES = 100
 
 # Generous for a real fix yet bounds a flailing agent that's globbing $HOME after a missed Read.
 FIX_MAX_TURNS = 40
+
+
+@dataclass
+class FileGroupBudget:
+    """Aggregate guard over all fix ``run_agent`` calls for one file group (#201).
+
+    The per-invocation guards (``FIX_MAX_TURNS``, ``DEFAULT_TOOL_CALL_BUDGET``,
+    ``DEFAULT_WALL_BUDGET_S``) bound each individual turn. This bounds their
+    *sum* within a single file group so one file with many findings cannot
+    silently dominate a review-fix-test run (root cause of the 62-min pi/GLM run
+    in #186). Enforced between calls in ``phase_fix_parallel`` (Approach B —
+    :meth:`check` is a pure read consulted before each fix call; there is no
+    mid-call abort).
+
+    Wall-clock starts at construction (``time.monotonic``). Token accounting is
+    fed by the ``on_metrics`` callback wired through ``run_agent`` (accumulates
+    ``prompt_tokens + completion_tokens`` per ``MetricsEvent``). The serial-item
+    counter is bumped once per completed fix call via :meth:`record_item`.
+
+    Attributes:
+        max_wall_seconds: Total wall-clock ceiling for the group.
+        max_serial_items: Max number of per-finding fix calls in the group.
+        max_cumulative_tokens: Ceiling on input + output tokens across the group.
+    """
+
+    max_wall_seconds: float
+    max_serial_items: int
+    max_cumulative_tokens: int
+    _wall_start: float = field(default_factory=time.monotonic)
+    _items_processed: int = 0
+    _cumulative_tokens: int = 0
+
+    def check(self) -> str | None:
+        """Return a budget-reason string if any ceiling is reached, else None.
+
+        Pure read (no side effects): safe to call before every fix call. The
+        checks are ordered items → wall → tokens so the reason is deterministic
+        when more than one ceiling is simultaneously breached.
+        """
+        if self._items_processed >= self.max_serial_items:
+            return "group_serial_item_limit"
+        if time.monotonic() - self._wall_start >= self.max_wall_seconds:
+            return "group_wall_budget_exceeded"
+        if self._cumulative_tokens >= self.max_cumulative_tokens:
+            return "group_token_budget_exceeded"
+        return None
+
+    def add_tokens(self, tokens: int) -> None:
+        """Accumulate per-turn tokens. Wired as ``run_agent``'s ``on_metrics``."""
+        self._cumulative_tokens += tokens
+
+    def record_item(self) -> None:
+        """Mark one completed fix call. Bumps the serial-item counter."""
+        self._items_processed += 1
+
+    @property
+    def items_processed(self) -> int:
+        """Number of fix calls completed in this group so far."""
+        return self._items_processed
 # Verify re-reads the fixed files and runs checks; same generous bound as fix.
 VERIFY_MAX_TURNS = 40
 _PR_BODY_MAX_CHARS = 8000
@@ -1777,6 +1846,7 @@ async def phase_fix(
     *,
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
+    on_metrics: Callable[[int], None] | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -1794,6 +1864,9 @@ async def phase_fix(
             with a rule forbidding fixes that undo a deliberate decision. The
             read is best-effort enrichment: a missing or unreadable file is
             skipped silently so an intent-read failure can never block the fix.
+        on_metrics: Optional per-turn token callback forwarded to ``run_agent``
+            so a caller (``phase_fix_parallel``) can feed its per-file-group
+            token budget (#201).
 
     Returns:
         None
@@ -1840,6 +1913,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
             progress_callback=_cb,
+            on_metrics=on_metrics,
         )
     else:
         await run_agent(
@@ -1847,6 +1921,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
             phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            on_metrics=on_metrics,
         )
     async with (console_lock if console_lock is not None else anyio.Lock()):
         print_fix_complete(console, item_num, total)
@@ -1861,6 +1936,7 @@ async def phase_fix_batched(
     *,
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
+    on_metrics: Callable[[int], None] | None = None,
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
@@ -1881,6 +1957,9 @@ async def phase_fix_batched(
             ``None`` for serial callers.
         intent_path: Optional path to the confirmed author-intent file, injected
             verbatim (same best-effort handling as ``phase_fix``).
+        on_metrics: Optional per-turn token callback forwarded to ``run_agent``
+            so the caller's per-file-group token budget accumulates the batched
+            turn's tokens (#201).
 
     Returns:
         None
@@ -1889,6 +1968,7 @@ async def phase_fix_batched(
         await phase_fix(
             backend, work, items[0], item_nums[0], total,
             console_lock=console_lock, intent_path=intent_path,
+            on_metrics=on_metrics,
         )
         return
 
@@ -1900,6 +1980,7 @@ async def phase_fix_batched(
             await phase_fix(
                 backend, work, item, item_num, total,
                 console_lock=console_lock, intent_path=intent_path,
+                on_metrics=on_metrics,
             )
         return
 
@@ -1951,6 +2032,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
             tool_call_budget=scaled_tool_budget,
             wall_budget_s=scaled_wall_budget,
             progress_callback=_cb,
+            on_metrics=on_metrics,
         )
     else:
         _, _, budget_reason = await run_agent(
@@ -1958,6 +2040,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
             phase=DaydreamPhase.FIX, max_turns=scaled_max_turns,
             tool_call_budget=scaled_tool_budget,
             wall_budget_s=scaled_wall_budget,
+            on_metrics=on_metrics,
         )
 
     if budget_reason is not None:
@@ -1977,6 +2060,9 @@ async def phase_fix_parallel(
     *,
     limiter_size: int = 4,
     intent_path: Path | None = None,
+    group_max_wall_s: float = DEFAULT_GROUP_MAX_WALL_S,
+    group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
+    group_max_cumulative_tokens: int = DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
@@ -1989,6 +2075,14 @@ async def phase_fix_parallel(
     it does not guarantee disjoint edits if an agent touches files other than the
     one named in the item's ``file`` key. Commit stays serial and after.
 
+    Each file group is bounded by a :class:`FileGroupBudget` (#201): the budget
+    is consulted before every fix call, and if a group's cumulative wall-clock,
+    serial-item count, or token total is reached, the remaining findings in that
+    group are skipped (recorded in ``failures`` and a ``file_group_budget_exceeded``
+    trajectory event), so one runaway file cannot silently dominate the run. The
+    per-invocation guards inside each fix call are unchanged; this is an aggregate
+    guard layered on top (Approach B — between-calls check, no mid-call abort).
+
     Args:
         backend: The Backend to execute against (shared across tasks).
         work: Workspace context for the fixes; ``work.repo`` is the agent cwd.
@@ -1996,11 +2090,15 @@ async def phase_fix_parallel(
         limiter_size: Max number of file-groups to fix concurrently.
         intent_path: Optional confirmed-intent file forwarded unchanged to each
             fix call so every fix carries the deliberate-intent guard.
+        group_max_wall_s: Per-file-group wall-clock ceiling (#201).
+        group_max_serial_items: Per-file-group serial fix-call ceiling (#201).
+        group_max_cumulative_tokens: Per-file-group token ceiling (#201).
 
     Returns:
         ``failures``: file -> "<ExceptionType>: <message>" for file-groups whose
-        fix raised. Empty dict on full success. Callers MUST surface this to the
-        user so that uncommitted failures are visible instead of silently dropped.
+        fix raised, or "file_group_budget_exceeded: <reason>" for groups stopped
+        by their budget. Empty dict on full success. Callers MUST surface this to
+        the user so that uncommitted failures are visible instead of silently dropped.
 
     """
     raw_groups = group_items_by_file(items)
@@ -2023,6 +2121,54 @@ async def phase_fix_parallel(
     _console_lock = anyio.Lock()
     total = len(items)
 
+    async def _record_budget_stop(
+        fkey: str,
+        reason: str,
+        grp_len: int,
+        budget: FileGroupBudget,
+    ) -> None:
+        """Record a group budget stop: trajectory event, failures entry, warning."""
+        processed = budget.items_processed
+        skipped = grp_len - processed
+        if recorder is not None:
+            recorder.emit_file_group_budget_exceeded(
+                file=fkey, reason=reason,
+                items_processed=processed, items_skipped=skipped,
+            )
+        async with _failures_lock:
+            failures[fkey] = f"file_group_budget_exceeded: {reason}"
+        async with _console_lock:
+            print_warning(
+                console,
+                f"File group '{fkey}' budget exceeded ({reason}) after {processed} "
+                f"item(s); skipping remaining {skipped}.",
+            )
+
+    async def _fix_group_serially(
+        fkey: str,
+        grp: list[tuple[dict[str, Any], int]],
+        budget: FileGroupBudget,
+    ) -> None:
+        """Fix a group's findings one at a time, honoring the group budget.
+
+        Checks ``budget.check()`` before each ``phase_fix`` call; on a budget
+        stop, records it and returns without processing the remainder. Token
+        accumulation is fed live via ``on_metrics``; the serial-item counter is
+        bumped once per completed call.
+        """
+        for item, item_num in grp:
+            budget_reason = budget.check()
+            if budget_reason is not None:
+                await _record_budget_stop(fkey, budget_reason, len(grp), budget)
+                return
+            await phase_fix(
+                backend, work, item, item_num, total,
+                console_lock=_console_lock,
+                intent_path=intent_path,
+                on_metrics=budget.add_tokens,
+            )
+            budget.record_item()
+
     async with anyio.create_task_group() as tg:
         for file_key, numbered_items in groups_numbered:
             # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
@@ -2033,6 +2179,11 @@ async def phase_fix_parallel(
                 _fkey_slug = fkey.replace("/", "-").replace("\\", "-")
                 async with limiter:
                     async with maybe_fork(recorder, f"fix-{_fkey_slug}"):
+                        budget = FileGroupBudget(
+                            max_wall_seconds=group_max_wall_s,
+                            max_serial_items=group_max_serial_items,
+                            max_cumulative_tokens=group_max_cumulative_tokens,
+                        )
                         try:
                             grp_items = [item for item, _ in grp]
                             grp_nums = [num for _, num in grp]
@@ -2041,19 +2192,24 @@ async def phase_fix_parallel(
                                 # Single-item or <no-file> groups: go straight to
                                 # per-finding phase_fix (no batched prompt to build,
                                 # no fallback retry on failure).
-                                for item, item_num in grp:
-                                    await phase_fix(
-                                        backend, work, item, item_num, total,
-                                        console_lock=_console_lock,
-                                        intent_path=intent_path,
-                                    )
+                                await _fix_group_serially(fkey, grp, budget)
                             else:
+                                # A fresh group has spent no wall/tokens/items yet, so
+                                # this check is a no-op on the first batched attempt; it
+                                # keeps the enforcement point uniform with the per-finding
+                                # paths and guards a re-entrant future caller.
+                                budget_reason = budget.check()
+                                if budget_reason is not None:
+                                    await _record_budget_stop(fkey, budget_reason, len(grp), budget)
+                                    return
                                 try:
                                     await phase_fix_batched(
                                         backend, work, grp_items, grp_nums, total,
                                         console_lock=_console_lock,
                                         intent_path=intent_path,
+                                        on_metrics=budget.add_tokens,
                                     )
+                                    budget.record_item()
                                 except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
                                     # Restore the file to HEAD before falling back so
                                     # per-finding fixes don't re-apply partial edits
@@ -2066,12 +2222,7 @@ async def phase_fix_parallel(
                                                 console,
                                                 f"Could not restore {fkey} before fallback: {_restore_err}",
                                             )
-                                    for item, item_num in grp:
-                                        await phase_fix(
-                                            backend, work, item, item_num, total,
-                                            console_lock=_console_lock,
-                                            intent_path=intent_path,
-                                        )
+                                    await _fix_group_serially(fkey, grp, budget)
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                             reason = f"{type(e).__name__}: {e}"
                             async with _failures_lock:

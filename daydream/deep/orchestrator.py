@@ -25,7 +25,13 @@ from typing import TYPE_CHECKING, Any
 from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
-from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME
+from daydream.config import (
+    DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS,
+    DEFAULT_GROUP_MAX_SERIAL_ITEMS,
+    DEFAULT_GROUP_MAX_WALL_S,
+    REVIEW_OUTPUT_FILE,
+    STRUCTURE_STACK_NAME,
+)
 from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 from daydream.deep.artifacts import (
     adjudication_complete_path,
@@ -1258,12 +1264,27 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             pre_fix_head = None
     else:
         pre_fix_head = None
+    # Resolve per-file-group fix budgets (#201): file-config override wins, else
+    # the config.py default. A runaway file group cannot silently dominate a run.
+    fc = config.file_config
+    group_wall_s = fc.group_max_wall_s if fc and fc.group_max_wall_s is not None else DEFAULT_GROUP_MAX_WALL_S
+    group_serial = (
+        fc.group_max_serial_items if fc and fc.group_max_serial_items is not None
+        else DEFAULT_GROUP_MAX_SERIAL_ITEMS
+    )
+    group_tokens = (
+        fc.group_max_cumulative_tokens if fc and fc.group_max_cumulative_tokens is not None
+        else DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS
+    )
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
             work,
             items,
             intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
+            group_max_wall_s=group_wall_s,
+            group_max_serial_items=group_serial,
+            group_max_cumulative_tokens=group_tokens,
         )
     # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
     # NOW, before the fix-failure and test-failure early returns below, so

@@ -398,6 +398,7 @@ async def run_agent(
     read_only: bool = False,
     wall_budget_s: float | None = None,
     tool_call_budget: int | None = None,
+    on_metrics: Callable[[int], None] | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -435,6 +436,11 @@ async def run_agent(
         tool_call_budget: Opt-in ceiling on ToolStartEvents in this turn. When
             exceeded the loop breaks with the same abort/partial-return path.
             ``None`` (the default) means no tool-call ceiling.
+        on_metrics: Optional callback invoked once per ``MetricsEvent`` with
+            ``prompt_tokens + completion_tokens`` for that turn. Used by
+            ``phase_fix_parallel`` to feed the per-file-group token budget
+            (#201). Pure pass-through: no behavioral change when ``None``, and
+            it never aborts the turn (Approach B — between-calls check only).
 
     Returns:
         Tuple of (output, continuation_token, budget_reason). Output is text
@@ -582,6 +588,8 @@ async def run_agent(
                             elif isinstance(event, MetricsEvent):
                                 # EVNT-02 / MAP-06: recorder-only, no UI. Must precede the
                                 # CostEvent branch so isinstance order is correct.
+                                if on_metrics is not None:
+                                    on_metrics(event.prompt_tokens + event.completion_tokens)
                                 if inv is not None:
                                     inv.observe(event)
 

@@ -84,6 +84,11 @@ class _StubBackend:
         # When set, the fix branch raises for the matching file, isolating one
         # file-group's failure so a test can assert the others still applied.
         self.fix_fail_file: str | None = None
+        # When set, ONLY the batched fix turn ("Fix these N issues in <file>")
+        # for the matching file raises, forcing phase_fix_parallel into its
+        # per-finding fallback loop -- the #186 pattern the group budget bounds.
+        # The per-finding retries ("Fix this issue") for that file then succeed.
+        self.fail_batched_fix_file: str | None = None
         # When set, the fix branch WRITES a broken partial edit to the matching
         # file and THEN raises MaxTurnsError -- simulating an agent that mutated
         # the tree before exhausting its turn budget, so a test can assert the
@@ -432,11 +437,20 @@ class _StubBackend:
             # Single-finding prompts carry "File: <path>"; batched prompts name the
             # one target file in their "Fix these N issues in <path>:" header.
             m = re.search(r"^File: (.+)$", prompt, re.M)
+            batched_hdr = re.search(r"^Fix these \d+ issues in (.+):$", prompt, re.M)
             if m is None:
-                m = re.search(r"^Fix these \d+ issues in (.+):$", prompt, re.M)
+                m = batched_hdr
             fixed_file = m.group(1).strip() if m else "unknown"
             # phase_fix emits an absolute path when the file exists on disk; the stub keys fixes by basename.
             fixed_name = Path(fixed_file).name
+            # Fail ONLY the batched turn for the marked file so the group falls
+            # back to per-finding fixes (the #186 pattern under budget test).
+            if (
+                self.fail_batched_fix_file is not None
+                and batched_hdr is not None
+                and fixed_name == self.fail_batched_fix_file
+            ):
+                raise RuntimeError(f"stub: batched fix failure for {fixed_name}")
             if self.fix_partial_then_maxturns is not None and fixed_name == self.fix_partial_then_maxturns:
                 edit_target = Path(fixed_file) if Path(fixed_file).is_absolute() else (cwd / fixed_file)
                 edit_target.write_text(_PARTIAL_FIX_MARKER)
@@ -3372,6 +3386,165 @@ async def test_run_terminates_under_wall_budget(
 
     assert stop_reasons, "no trajectory step recorded extra['stop_reason']; budget did not trip"
     assert "wall_budget_exceeded" in stop_reasons
+
+
+def _scan_phase_events(run_root: Path, traj: Path, event: str) -> list[dict[str, Any]]:
+    """Collect ``extra['phase_events']`` entries of a given ``event`` across all run JSONs.
+
+    The group-budget marker lives in ``Trajectory.extra['phase_events']`` (not
+    step ``extra``), and the fix work runs in a forked sibling trajectory, so scan
+    every ``*.json`` beneath ``run_root`` plus the top-level ``traj``.
+    """
+    found: list[dict[str, Any]] = []
+    for tf in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
+        try:
+            payload = json.loads(tf.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for ev in (payload.get("extra") or {}).get("phase_events", []):
+            if isinstance(ev, dict) and ev.get("event") == event:
+                found.append(ev)
+    return found
+
+
+def _batched_group_size(stub: "_StubBackend", file_basename: str) -> int:
+    """Return N from the failed batched ``Fix these N issues in <file>`` fix turn.
+
+    The deep pipeline may inject an extra structural finding into a file group, so
+    the group size is derived from the batched prompt rather than hard-coded.
+    """
+    import re as _re
+
+    for c in stub.calls:
+        m = _re.search(r"^Fix these (\d+) issues in (.+):$", c["prompt"], _re.M)
+        if m is not None and Path(m.group(2)).name == file_basename:
+            return int(m.group(1))
+    raise AssertionError(f"no batched fix turn found for {file_basename}")
+
+
+async def test_run_caps_runaway_file_group_serial_fixes(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#201 real-path: a runaway file group is capped by the serial-item budget.
+
+    Six findings target api.py; the batched api.py fix turn fails, forcing the
+    per-finding fallback loop -- the exact #186 shape where 9 serial fix calls on
+    one file silently dominated a 62-min run. Driven through the real
+    ``runner.run`` -> deep orchestrator -> ``phase_fix_parallel`` path with the
+    group serial-item ceiling lowered to 3, only 3 of the 6 fallback fixes run;
+    the remaining 3 are skipped, recorded in ``failures`` (surfaced as the
+    fix-failures artifact), and a ``file_group_budget_exceeded`` trajectory event
+    is emitted naming the file, reason, and processed/skipped counts.
+
+    Discriminating: without the group budget, the fallback loop fixes all 6
+    api.py findings (six "fix this issue" turns) and no budget event exists --
+    both assertions fail.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    # Lower the group serial-item ceiling at the binding the orchestrator resolves
+    # (it imported the constant by name, so patching daydream.config alone is inert).
+    monkeypatch.setattr("daydream.deep.orchestrator.DEFAULT_GROUP_MAX_SERIAL_ITEMS", 3)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(i, "api.py", "high") for i in range(1, 7)] + [
+        _merge_item(7, "App.tsx", "high")
+    ]
+    stub.fail_batched_fix_file = "api.py"  # force the per-finding fallback for api.py
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(
+            RunConfig(
+                target=str(multi_stack_target),
+                trajectory_path=traj,
+                assume="yes",
+                output_mode="loop",
+                cleanup=False,
+            )
+        )
+    assert isinstance(exit_code, int)
+
+    # The failed batched turn names the api.py group size (the pipeline may add a
+    # structural finding, so derive N rather than hard-coding it).
+    group_size = _batched_group_size(stub, "api.py")
+    assert group_size >= 6
+
+    # Only 3 fallback fixes ran (the ceiling) before the group budget tripped --
+    # NOT the full group, which is the runaway #186 behaviour the guard bounds.
+    api_singles = [
+        c
+        for c in stub.calls
+        if c["prompt"].lower().startswith("fix this issue") and "api.py" in c["prompt"]
+    ]
+    assert len(api_singles) == 3, f"expected 3 fallback fixes, got {len(api_singles)}"
+
+    # The skipped group is recorded as a budget failure (surfaces to the user).
+    fix_failures_p = multi_stack_target / ".daydream" / "deep" / "fix-failures.json"
+    assert fix_failures_p.is_file(), "budget-skipped group must write the fix-failures artifact"
+    recorded = json.loads(fix_failures_p.read_text())
+    assert "api.py" in recorded
+    assert recorded["api.py"].startswith("file_group_budget_exceeded: group_serial_item_limit")
+
+    # The trajectory carries the budget event with processed/skipped accounting.
+    events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
+    assert events, "no file_group_budget_exceeded event emitted"
+    meta = events[0]["metadata"]
+    assert meta["file"] == "api.py"
+    assert meta["reason"] == "group_serial_item_limit"
+    assert meta["items_processed"] == 3
+    assert meta["items_skipped"] == group_size - 3
+
+
+async def test_run_leaves_small_file_group_unbudgeted(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#201 real-path: under a high ceiling the group budget is purely additive.
+
+    Same six-finding api.py fallback shape, but the serial-item ceiling stays well
+    above the group size: all six fallback fixes run, no budget event is emitted,
+    and no budget failure is recorded. Proves the guard changes nothing when a
+    group stays within budget (spec AC#5).
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    monkeypatch.setattr("daydream.deep.orchestrator.DEFAULT_GROUP_MAX_SERIAL_ITEMS", 20)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(i, "api.py", "high") for i in range(1, 7)] + [
+        _merge_item(7, "App.tsx", "high")
+    ]
+    stub.fail_batched_fix_file = "api.py"
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(
+            RunConfig(
+                target=str(multi_stack_target),
+                trajectory_path=traj,
+                assume="yes",
+                output_mode="loop",
+                cleanup=False,
+            )
+        )
+    assert isinstance(exit_code, int)
+
+    group_size = _batched_group_size(stub, "api.py")
+    api_singles = [
+        c
+        for c in stub.calls
+        if c["prompt"].lower().startswith("fix this issue") and "api.py" in c["prompt"]
+    ]
+    assert len(api_singles) == group_size, f"all {group_size} fallback fixes should run, got {len(api_singles)}"
+
+    events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
+    assert events == [], "no budget event should fire when the group stays within budget"
 
 
 async def test_run_batches_same_file_findings_into_one_fix_turn(
