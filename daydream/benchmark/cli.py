@@ -154,6 +154,15 @@ def _build_bench_parser() -> argparse.ArgumentParser:
         help="Cap the number of PRs processed",
     )
     parser.add_argument(
+        "--trials",
+        type=int,
+        default=None,
+        dest="trials",
+        metavar="N",
+        help="Run each reviewer config N times (default: 1). N>1 isolates each trial "
+        "and enables distribution reporting (mean/median/stddev/bootstrap CI).",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         dest="force",
@@ -232,6 +241,8 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
     args = parser.parse_args(argv)
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be a positive integer")
+    if args.trials is not None and args.trials <= 0:
+        parser.error("--trials must be a positive integer")
     if (
         args.tool_label is None
         and args.reviewer is None
@@ -256,6 +267,9 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         parser.error("--judge-route must be one of: martian, anthropic-direct")
     min_confidence = args.min_confidence if args.min_confidence is not None else bench.get("min-confidence")
     min_severity = args.min_severity if args.min_severity is not None else bench.get("min-severity")
+    trials = args.trials if args.trials is not None else bench.get("trials", 1)
+    if not isinstance(trials, int) or trials <= 0:
+        parser.error("--trials must be a positive integer")
     if min_confidence is not None and min_confidence.lower() not in {"low", "medium", "high"}:
         parser.error("--min-confidence must be one of: LOW, MEDIUM, HIGH")
     if min_severity is not None and min_severity.lower() not in {"low", "medium", "high"}:
@@ -296,6 +310,7 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         verbose=args.verbose,
         min_confidence=min_confidence,
         min_severity=min_severity,
+        trials=trials,
     )
 
 

@@ -233,6 +233,153 @@ def test_materiality_gate_filters_submission(tmp_path, monkeypatch):
     assert _injected_comment_count(data, golden_url, "daydream") == 1  # only the HIGH item survives the gate
 
 
+def _mock_review(tmp_path, monkeypatch):
+    """Wire acquire_checkout + run_daydream_review to a one-finding fake review."""
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.acquire_checkout",
+        lambda *a, **k: _fake_checkout(tmp_path),
+    )
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.run_daydream_review",
+        lambda checkout, **k: _write_items(checkout, [_item("f.py", 1)]),
+    )
+
+
+def _scores_by_trial(tmp_path, monkeypatch):
+    """Mock run_scoring: derive distinct precision/recall/f1 from the trial label.
+
+    The trial-suffixed tool label (``daydream-t00``…) encodes the trial index, so
+    the mock returns a different score per trial — proving the distribution is
+    aggregated over genuinely separate trial runs, not one value repeated.
+    """
+    captured = {"tools": [], "repos": []}
+
+    def fake_score(repo, model, *, pr_count, tool, judge_route):
+        captured["tools"].append(tool)
+        captured["repos"].append(repo)
+        idx = int(tool.rsplit("-t", 1)[1]) if "-t" in tool else 0
+        p = 0.4 + 0.1 * idx
+        r = 0.5 + 0.1 * idx
+        f1 = 2 * p * r / (p + r)
+        return DaydreamScores(scored_pr_count=1, total_tp=1, precision=p, recall=r, f1=f1)
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_scoring", fake_score)
+    return captured
+
+
+def _scored_trials_config(tmp_path, data_path, trials):
+    """Build a scoring-enabled BenchConfig with N trials over the grafana subset."""
+    return replace(_config(tmp_path, data_path, score=True, only="grafana"), limit=1, trials=trials)
+
+
+def test_trials_3_creates_3_isolated_trial_dirs(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
+    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    _mock_review(tmp_path, monkeypatch)
+    captured = _scores_by_trial(tmp_path, monkeypatch)
+
+    rc = run_bench(_scored_trials_config(tmp_path, data_path, 3))
+
+    assert rc == 0
+    trials_dir = tmp_path / ".daydream-bench" / "trials" / "daydream"
+    trial_dirs = sorted(p.name for p in trials_dir.iterdir() if p.name.startswith("trial-"))
+    assert trial_dirs == ["trial-00", "trial-01", "trial-02"]
+    # Each trial owns its own corpus, scored under its own suffixed label + repo.
+    for i in range(3):
+        corpus = trials_dir / f"trial-{i:02d}" / "results" / "benchmark_data.json"
+        assert corpus.exists()
+    assert captured["tools"] == ["daydream-t00", "daydream-t01", "daydream-t02"]
+    assert all(r == trials_dir / f"trial-{i:02d}" for i, r in enumerate(captured["repos"]))
+
+
+def test_trials_injects_into_trial_corpus_not_canonical(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
+    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    canonical_before = data_path.read_bytes()
+    _mock_review(tmp_path, monkeypatch)
+    _scores_by_trial(tmp_path, monkeypatch)
+
+    run_bench(_scored_trials_config(tmp_path, data_path, 2))
+
+    # R3: the canonical corpus is byte-for-byte unchanged (no trial keys leak in).
+    assert data_path.read_bytes() == canonical_before
+    # The trial's own corpus carries the injected trial-labeled review.
+    trial0_corpus = (
+        tmp_path / ".daydream-bench" / "trials" / "daydream" / "trial-00" / "results" / "benchmark_data.json"
+    )
+    trial0 = json.loads(trial0_corpus.read_text())
+    grafana = [u for u in trial0 if "grafana" in u]
+    injected = [u for u in grafana if any(r["tool"] == "daydream-t00" for r in trial0[u]["reviews"])]
+    assert len(injected) == 1
+
+
+def test_trials_writes_summary_with_distribution_and_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
+    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    _mock_review(tmp_path, monkeypatch)
+    _scores_by_trial(tmp_path, monkeypatch)
+
+    run_bench(_scored_trials_config(tmp_path, data_path, 3))
+
+    summary_path = tmp_path / ".daydream-bench" / "trials" / "daydream" / "trials-summary.json"
+    assert summary_path.exists()
+    summary = json.loads(summary_path.read_text())
+    assert summary["tool_label"] == "daydream"
+    assert summary["trials"] == 3
+    assert summary["judge_route"] == "martian"
+    assert summary["judge_model"] == "judge-model"
+    assert isinstance(summary["git_sha"], str) and summary["git_sha"]
+    assert summary["timestamp"]
+    assert len(summary["pr_set"]) == 1
+    assert len(summary["per_trial"]) == 3
+    # per-trial precisions are the three distinct values, in trial order.
+    assert [round(pt["precision"], 3) for pt in summary["per_trial"]] == [0.4, 0.5, 0.6]
+    dist = summary["distribution"]
+    for metric in ("precision", "recall", "f1"):
+        assert set(dist[metric]) == {"mean", "median", "stddev", "min", "max", "ci_low", "ci_high"}
+    assert dist["precision"]["mean"] == pytest.approx(0.5)
+    assert dist["precision"]["min"] == pytest.approx(0.4)
+    assert dist["precision"]["max"] == pytest.approx(0.6)
+
+
+def test_trials_prints_distribution_and_cost_estimate(tmp_path, monkeypatch):
+    rec = Console(record=True, force_terminal=True, width=120)
+    monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
+    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    _mock_review(tmp_path, monkeypatch)
+    _scores_by_trial(tmp_path, monkeypatch)
+
+    run_bench(_scored_trials_config(tmp_path, data_path, 3))
+
+    out = rec.export_text()
+    assert "Estimated judge cost" in out and "3 trials" in out  # cost surfaced before the loop
+    assert "precision" in out and "recall" in out and "f1" in out  # distribution table
+    assert "median" in out and "stddev" in out and "ci95" in out
+
+
+def test_trials_1_is_backcompat_no_trial_dirs(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
+    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    _mock_review(tmp_path, monkeypatch)
+    captured = _scores_by_trial(tmp_path, monkeypatch)
+
+    rc = run_bench(replace(_config(tmp_path, data_path, score=True, only="grafana"), limit=1, trials=1))
+
+    assert rc == 0
+    # trials==1 keeps the legacy path: canonical corpus is written, no sidecar dirs.
+    assert not (tmp_path / ".daydream-bench" / "trials").exists()
+    data = json.loads(data_path.read_text())
+    grafana_injected = [u for u in data if "grafana" in u and any(r["tool"] == "daydream" for r in data[u]["reviews"])]
+    assert len(grafana_injected) == 1
+    assert captured["tools"] == ["daydream"]  # scored under the base label, not a trial suffix
+
+
 def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     calls = {"n": 0}

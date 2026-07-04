@@ -184,6 +184,35 @@ Re-running is resumable and idempotent. `benchmark_data.json` is saved after eac
 
 **Run one sweep per benchmark repo at a time.** Each save acquires an exclusive `benchmark_data.json.lock` file to serialise concurrent writers on the same machine, but two sweeps sharing the same `--benchmark-repo` would still race at the read-inject-write level: the second run reads a stale corpus, overwrites the first run's injections, and you lose results. Start a second sweep only after the first has finished (or been interrupted).
 
+## Repeated trials and variance reporting
+
+Both the reviewer LLM and the LLM judge are stochastic, so a single sweep's precision/recall/F1 is one draw from a distribution with unknown variance. Ranking two reviewer configs by one sweep each compares two draws from possibly-overlapping distributions — the classic way to ship a false "X beats Y." `--trials N` runs each reviewer config `N` times end-to-end (review + score) and reports the spread.
+
+```bash
+daydream bench --benchmark-repo ../code-review-benchmark/offline --trials 10
+```
+
+Each trial is fully isolated. Rather than change the idempotent inject/save logic, a trial materializes its own **standard corpus dir** under `<benchmark-repo>/.daydream-bench/trials/<tool-label>/trial-NN/`, seeded with a fresh copy of the canonical `results/benchmark_data.json`, and runs under a **trial-suffixed tool label** (`daydream-t00`, `daydream-t01`, …). The unmodified withmartian steps therefore write a distinct `evaluations.json` per trial and no trial overwrites another. The canonical `results/benchmark_data.json` — the external leaderboard submission contract — is only read, never written, when `--trials > 1`.
+
+After all trials, the harness computes per-metric statistics over precision, recall, and F1 — mean, median, sample standard deviation, min, max, and a **percentile bootstrap 95% confidence interval** of the mean — and prints a distribution table:
+
+```text
+Distribution over 10 trial(s):
+metric        mean  median  stddev     min     max              ci95
+----------------------------------------------------------------------
+precision    0.214   0.210   0.018   0.190   0.250   [0.203, 0.226]
+recall       0.585   0.590   0.031   0.530   0.630   [0.566, 0.604]
+f1           0.313   0.311   0.021   0.280   0.350   [0.300, 0.327]
+```
+
+The bootstrap resamples the `N` trial values with replacement (10 000 resamples, seeded for reproducibility) and reports the 2.5th/97.5th percentiles of the resampled means — a distribution-free CI that makes no normality assumption. It is a best-effort estimate at small `N`, not a substitute for it.
+
+A `trials-summary.json` is written to `<benchmark-repo>/.daydream-bench/trials/<tool-label>/` carrying full reproducibility metadata: the reviewer backend/model/provider, the judge route + model, the PR set, the daydream git SHA, a UTC timestamp, the aggregate distribution, and each trial's raw precision/recall/F1.
+
+**Choosing N.** The bootstrap CI width shrinks roughly as `1/√N`. Use `N ≥ 10` for a reasonable band and `N ≥ 30` when you need a tight interval to separate two close configs. Trials multiply judge cost linearly, so the harness prints an up-front estimate (`~|candidates| × |golden| × PRs × N` judge calls) before the loop starts.
+
+**Seeds are best-effort.** LLM provider seeds are soft-honored at best and never guaranteed across a fleet; aggregation across trials is the mechanism that quantifies the residual noise, and it is mandatory regardless of any seed the provider accepts. Only the bootstrap resampling itself is deterministically seeded.
+
 ## Comparability caveat
 
 What matters is the reviewer. A different reviewer pipeline (different backend, model config, or tool label) produces different findings — changing the reviewer changes the numbers. The offline HTML report at `bench/benchmark-report/runs/latest/index.html` documents the reviewer configuration for each run.

@@ -183,6 +183,7 @@ class DaydreamScores:
             (Σ candidates × golden) across all scored PRs.
         precision: Aggregate ΣTP / (ΣTP + ΣFP); 0.0 when the denominator is 0.
         recall: Aggregate ΣTP / (ΣTP + ΣFN); 0.0 when the denominator is 0.
+        f1: Harmonic mean 2·P·R / (P + R); 0.0 when P + R is 0.
     """
 
     per_pr: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -194,6 +195,7 @@ class DaydreamScores:
     total_comparisons: int = 0
     precision: float = 0.0
     recall: float = 0.0
+    f1: float = 0.0
 
 
 def _summarize_judge_errors(errors: list[str], *, cap: int = 3) -> str:
@@ -279,6 +281,7 @@ def parse_daydream_scores(evals: dict[str, dict[str, Any]], *, tool: str = _TOOL
 
     precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) else 0.0
     recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
     return DaydreamScores(
         per_pr=per_pr,
         scored_pr_count=len(per_pr),
@@ -289,6 +292,7 @@ def parse_daydream_scores(evals: dict[str, dict[str, Any]], *, tool: str = _TOOL
         total_comparisons=total_comparisons,
         precision=precision,
         recall=recall,
+        f1=f1,
     )
 
 

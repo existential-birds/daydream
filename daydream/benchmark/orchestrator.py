@@ -20,7 +20,10 @@ aggregate precision/recall are printed.
 from __future__ import annotations
 
 import json
+import subprocess
 import time
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,7 +39,9 @@ from daydream.benchmark.cli import _format_elapsed
 from daydream.benchmark.daydream_run import run_daydream_review
 from daydream.benchmark.mapping import merged_items_to_review_comments
 from daydream.benchmark.prs import load_evaluable_prs
-from daydream.benchmark.score import preflight_judge_env, resolve_judge_model, run_scoring
+from daydream.benchmark.score import DaydreamScores, preflight_judge_env, resolve_judge_model, run_scoring
+from daydream.benchmark.stats import compute_distribution, distribution_to_dict, format_distribution_table
+from daydream.benchmark.trial_isolation import init_trial_corpus, trial_corpus_dir, trial_tool_label, trials_root
 from daydream.ui import print_dim, print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
@@ -115,22 +120,24 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
     return inject_daydream_review(data, pr.golden_url, comments, force=config.force, tool=config.tool_label)
 
 
-def run_bench(config: BenchConfig) -> int:
-    """Run the benchmark sweep over the selected PRs.
+def _run_sweep(config: BenchConfig, judge_model: str) -> tuple[bool, DaydreamScores | None]:
+    """Run the per-PR review/inject sweep (and optional scoring) for one config.
+
+    This is the single-config workhorse: a repeated-trial run calls it once per
+    trial with a trial-specific ``config`` (isolated corpus dir + suffixed tool
+    label), and the back-compat single-shot path calls it exactly once with the
+    caller's config. The judge credential is preflighted by ``run_bench`` before
+    this runs, so ``judge_model`` is already resolved (``""`` when not scoring).
 
     Args:
-        config: Immutable run configuration (selection, force, scoring, paths).
+        config: Run configuration for this sweep (paths, tool label, scoring).
+        judge_model: Pre-resolved judge model id (``""`` when ``score`` is off).
 
     Returns:
-        ``0`` when every selected PR was injected (or skipped) and scoring (if
-        requested) succeeded; non-zero if any selected PR failed or scoring
-        failed.
+        ``(ok, scores)`` where ``ok`` is ``False`` if any PR or the scoring step
+        failed, and ``scores`` is the parsed :class:`DaydreamScores` when scoring
+        ran and succeeded, else ``None``.
     """
-    judge_model = ""
-    if config.score:
-        preflight_judge_env(judge_route=config.judge_route)
-        judge_model = resolve_judge_model(config.model)
-
     data_path = _benchmark_data_path(config)
     data = load_benchmark_data(data_path)
     prs = _select_prs(config)
@@ -177,6 +184,7 @@ def run_bench(config: BenchConfig) -> int:
         print_warning(console, f"{failed} of {len(prs)} selected PR(s) failed")
 
     score_failed = False
+    scores: DaydreamScores | None = None
     if config.score:
         try:
             scores = run_scoring(
@@ -188,6 +196,7 @@ def run_bench(config: BenchConfig) -> int:
             )
         except Exception as exc:  # noqa: BLE001 - report scoring failure without raising past the CLI
             score_failed = True
+            scores = None
             print_error(console, "Scoring failed", f"{type(exc).__name__}: {exc}")
             injected = len(prs) - failed
             print_info(
@@ -204,7 +213,163 @@ def run_bench(config: BenchConfig) -> int:
             print_success(
                 console,
                 f"daydream aggregate over {scores.scored_pr_count} PR(s): "
-                f"precision={scores.precision:.3f} recall={scores.recall:.3f}",
+                f"precision={scores.precision:.3f} recall={scores.recall:.3f} f1={scores.f1:.3f}",
             )
 
-    return 0 if failed == 0 and not score_failed else 1
+    return (failed == 0 and not score_failed, scores)
+
+
+def _daydream_git_sha() -> str:
+    """Resolve the daydream source git SHA for reproducibility metadata.
+
+    Runs ``git rev-parse HEAD`` in the daydream package's own repository (not the
+    process cwd, which is the operator's directory) so the recorded SHA pins the
+    reviewer code that produced the trials. Returns ``"unknown"`` if git is
+    unavailable or the source tree is not a checkout.
+    """
+    try:
+        out = subprocess.check_output(  # noqa: S603,S607 - fixed args, trusted command
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return out.strip()
+    except Exception:  # noqa: BLE001 - metadata is best-effort; never abort a run on it
+        return "unknown"
+
+
+def _print_cost_estimate(prs: list[EvaluablePR], trials: int) -> None:
+    """Print the up-front judge-call estimate before a multi-trial run.
+
+    Trials multiply judge cost linearly, so the estimate is surfaced before any
+    expensive review starts (R8). The judge compares every candidate against
+    every golden comment per PR, so the per-PR grid is ``|candidates| × |golden|``
+    — unknown until the review runs — leaving the multipliers we do know.
+    """
+    print_info(
+        console,
+        f"Estimated judge cost: ~|candidates| × |golden| × {len(prs)} PRs × {trials} trials judge calls "
+        f"(scales linearly with --trials).",
+    )
+
+
+def _write_trials_summary(
+    config: BenchConfig,
+    judge_model: str,
+    prs: list[EvaluablePR],
+    scored_trials: list[tuple[int, DaydreamScores]],
+) -> Path:
+    """Write ``trials-summary.json`` with reproducibility metadata + distribution.
+
+    Args:
+        config: The base run configuration (reviewer/judge/PR selection).
+        judge_model: The resolved judge model id (``""`` when scoring was off).
+        prs: The selected PR set for this run.
+        scored_trials: ``(trial_index, scores)`` pairs for each successfully
+            scored trial, so ``per_trial`` labels stay accurate even when some
+            trials failed scoring and are absent from the list.
+
+    Returns:
+        The path to the written ``trials-summary.json``.
+    """
+    root = trials_root(config.benchmark_repo, config.tool_label)
+    root.mkdir(parents=True, exist_ok=True)
+    trial_scores = [s for _, s in scored_trials]
+    summary: dict[str, Any] = {
+        "tool_label": config.tool_label,
+        "trials": config.trials,
+        "git_sha": _daydream_git_sha(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "reviewer_backend": config.reviewer_backend,
+        "reviewer_model": config.reviewer_model,
+        "reviewer_provider": config.reviewer_provider,
+        "judge_route": config.judge_route,
+        "judge_model": judge_model or None,
+        "pr_set": [pr.golden_url for pr in prs],
+        "distribution": (distribution_to_dict(compute_distribution(trial_scores)) if trial_scores else None),
+        "per_trial": [
+            {"trial": t, "precision": s.precision, "recall": s.recall, "f1": s.f1}
+            for t, s in scored_trials
+        ],
+    }
+    dest = root / "trials-summary.json"
+    dest.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return dest
+
+
+def _run_trials(config: BenchConfig, judge_model: str) -> int:
+    """Run ``config.trials`` isolated trials and report the score distribution.
+
+    Each trial materializes its own corpus dir (a fresh copy of the canonical
+    ``benchmark_data.json``) and runs under a trial-suffixed tool label, so the
+    unmodified withmartian steps write a distinct ``evaluations.json`` per trial
+    and no trial ever overwrites another. The canonical corpus is only read, never
+    written.
+
+    Args:
+        config: Base run configuration (``config.trials > 1``).
+        judge_model: Pre-resolved judge model id (``""`` when not scoring).
+
+    Returns:
+        ``0`` if every trial's sweep succeeded, non-zero otherwise.
+    """
+    canonical = _benchmark_data_path(config)
+    prs = _select_prs(config)
+    if config.score:
+        _print_cost_estimate(prs, config.trials)
+
+    scored_trials: list[tuple[int, DaydreamScores]] = []
+    any_failed = False
+    for t in range(config.trials):
+        trial_dir = trial_corpus_dir(config.benchmark_repo, config.tool_label, t)
+        init_trial_corpus(canonical, trial_dir)
+        trial_config = replace(
+            config,
+            benchmark_repo=trial_dir,
+            tool_label=trial_tool_label(config.tool_label, t),
+            trajectory_dir=trial_dir / "trajectories",
+        )
+        print_info(console, f"══ Trial [{t + 1}/{config.trials}] · label {trial_config.tool_label} ══")
+        ok, scores = _run_sweep(trial_config, judge_model)
+        any_failed = any_failed or not ok
+        if scores is not None:
+            scored_trials.append((t, scores))
+
+    if config.score:
+        summary_path = _write_trials_summary(config, judge_model, prs, scored_trials)
+        print_info(console, f"Wrote trial summary to {summary_path}")
+        trial_scores = [s for _, s in scored_trials]
+        if trial_scores:
+            dist = compute_distribution(trial_scores)
+            console.print(format_distribution_table(dist))
+
+    return 0 if not any_failed else 1
+
+
+def run_bench(config: BenchConfig) -> int:
+    """Run the benchmark sweep over the selected PRs.
+
+    With ``config.trials == 1`` (default) this is a single end-to-end sweep
+    (back-compat). With ``config.trials > 1`` it runs N isolated trials and
+    reports a mean/median/stddev/bootstrap-CI distribution over precision,
+    recall, and F1.
+
+    Args:
+        config: Immutable run configuration (selection, force, scoring, paths).
+
+    Returns:
+        ``0`` when every selected PR was injected (or skipped) and scoring (if
+        requested) succeeded; non-zero if any selected PR failed or scoring
+        failed.
+    """
+    judge_model = ""
+    if config.score:
+        preflight_judge_env(judge_route=config.judge_route)
+        judge_model = resolve_judge_model(config.model)
+
+    if config.trials > 1:
+        return _run_trials(config, judge_model)
+
+    ok, _scores = _run_sweep(config, judge_model)
+    return 0 if ok else 1
