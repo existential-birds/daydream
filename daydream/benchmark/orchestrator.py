@@ -20,13 +20,13 @@ aggregate precision/recall are printed.
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from daydream import git_ops
 from daydream.agent import console
 from daydream.benchmark.acquire import acquire_checkout
 from daydream.benchmark.benchmark_data import (
@@ -233,14 +233,8 @@ def _daydream_git_sha() -> str:
     unavailable or the source tree is not a checkout.
     """
     try:
-        out = subprocess.check_output(  # noqa: S603,S607 - fixed args, trusted command
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parent,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return out.strip()
-    except Exception:  # noqa: BLE001 - metadata is best-effort; never abort a run on it
+        return git_ops.head_sha(Path(__file__).resolve().parent)
+    except git_ops.GitError:  # metadata is best-effort; never abort a run on it
         return "unknown"
 
 
