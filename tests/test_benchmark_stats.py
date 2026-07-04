@@ -75,6 +75,17 @@ def test_bootstrap_ci_empty_raises():
         bootstrap_ci([])
 
 
+def test_bootstrap_ci_nonpositive_n_boot_raises():
+    with pytest.raises(ValueError, match="n_boot must be positive"):
+        bootstrap_ci([0.4, 0.6], n_boot=0)
+
+
+def test_bootstrap_ci_out_of_range_confidence_raises():
+    for bad_ci in (0.0, 1.0, 1.5):
+        with pytest.raises(ValueError, match=r"ci must be in \(0, 1\)"):
+            bootstrap_ci([0.4, 0.6], ci=bad_ci)
+
+
 def test_format_distribution_table_contains_metrics_and_stats():
     dist = compute_distribution([_scores(0.4, 0.5, 0.44), _scores(0.6, 0.7, 0.65)])
     out = format_distribution_table(dist)

@@ -205,18 +205,23 @@ def _run_sweep(config: BenchConfig, judge_model: str) -> tuple[bool, DaydreamSco
                 "corpus is saved and can be re-scored separately (re-run with --score)",
             )
         else:
-            for golden_url, leaf in scores.per_pr.items():
-                print_info(
-                    console,
-                    f"{golden_url}: tp={leaf.get('tp', 0)} fp={leaf.get('fp', 0)} fn={leaf.get('fn', 0)}",
-                )
-            print_success(
-                console,
-                f"daydream aggregate over {scores.scored_pr_count} PR(s): "
-                f"precision={scores.precision:.3f} recall={scores.recall:.3f} f1={scores.f1:.3f}",
-            )
+            _print_score_breakdown(scores)
 
     return (failed == 0 and not score_failed, scores)
+
+
+def _print_score_breakdown(scores: DaydreamScores) -> None:
+    """Print each PR's tp/fp/fn leaf and the aggregate precision/recall/F1."""
+    for golden_url, leaf in scores.per_pr.items():
+        print_info(
+            console,
+            f"{golden_url}: tp={leaf.get('tp', 0)} fp={leaf.get('fp', 0)} fn={leaf.get('fn', 0)}",
+        )
+    print_success(
+        console,
+        f"daydream aggregate over {scores.scored_pr_count} PR(s): "
+        f"precision={scores.precision:.3f} recall={scores.recall:.3f} f1={scores.f1:.3f}",
+    )
 
 
 def _daydream_git_sha() -> str:
@@ -289,7 +294,19 @@ def _write_trials_summary(
         "pr_set": [pr.golden_url for pr in prs],
         "distribution": (distribution_to_dict(compute_distribution(trial_scores)) if trial_scores else None),
         "per_trial": [
-            {"trial": t, "precision": s.precision, "recall": s.recall, "f1": s.f1}
+            {
+                "trial": t,
+                "tool_label": trial_tool_label(config.tool_label, t),
+                "scored_pr_count": s.scored_pr_count,
+                "total_tp": s.total_tp,
+                "total_fp": s.total_fp,
+                "total_fn": s.total_fn,
+                "total_errors": s.total_errors,
+                "total_comparisons": s.total_comparisons,
+                "precision": s.precision,
+                "recall": s.recall,
+                "f1": s.f1,
+            }
             for t, s in scored_trials
         ],
     }
@@ -343,6 +360,8 @@ def _run_trials(config: BenchConfig, judge_model: str) -> int:
         if trial_scores:
             dist = compute_distribution(trial_scores)
             console.print(format_distribution_table(dist))
+            total_comparisons = sum(s.total_comparisons for s in trial_scores)
+            print_info(console, f"Actual judge comparisons recorded: {total_comparisons}")
 
     return 0 if not any_failed else 1
 

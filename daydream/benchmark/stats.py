@@ -96,10 +96,15 @@ def bootstrap_ci(
         variance) both endpoints equal that value.
 
     Raises:
-        ValueError: If ``values`` is empty.
+        ValueError: If ``values`` is empty, ``n_boot`` is not positive, or
+            ``ci`` is not strictly inside ``(0, 1)``.
     """
     if not values:
         raise ValueError("bootstrap_ci requires at least one value")
+    if n_boot <= 0:
+        raise ValueError(f"n_boot must be positive, got {n_boot}")
+    if not 0 < ci < 1:
+        raise ValueError(f"ci must be in (0, 1), got {ci}")
     if len(values) == 1:
         return (values[0], values[0])
 

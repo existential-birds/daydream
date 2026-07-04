@@ -261,7 +261,17 @@ def _scores_by_trial(tmp_path, monkeypatch):
         p = 0.4 + 0.1 * idx
         r = 0.5 + 0.1 * idx
         f1 = 2 * p * r / (p + r)
-        return DaydreamScores(scored_pr_count=1, total_tp=1, precision=p, recall=r, f1=f1)
+        return DaydreamScores(
+            scored_pr_count=1,
+            total_tp=1,
+            total_fp=idx,
+            total_fn=idx + 1,
+            total_errors=0,
+            total_comparisons=10 + idx,
+            precision=p,
+            recall=r,
+            f1=f1,
+        )
 
     monkeypatch.setattr("daydream.benchmark.orchestrator.run_scoring", fake_score)
     return captured
@@ -337,6 +347,13 @@ def test_trials_writes_summary_with_distribution_and_metadata(tmp_path, monkeypa
     assert len(summary["per_trial"]) == 3
     # per-trial precisions are the three distinct values, in trial order.
     assert [round(pt["precision"], 3) for pt in summary["per_trial"]] == [0.4, 0.5, 0.6]
+    # Richer per-trial fields carry the tp/fp/fn/comparison counts for post-hoc auditing.
+    assert [pt["tool_label"] for pt in summary["per_trial"]] == ["daydream-t00", "daydream-t01", "daydream-t02"]
+    assert [pt["total_fp"] for pt in summary["per_trial"]] == [0, 1, 2]
+    assert [pt["total_fn"] for pt in summary["per_trial"]] == [1, 2, 3]
+    assert [pt["total_comparisons"] for pt in summary["per_trial"]] == [10, 11, 12]
+    for pt in summary["per_trial"]:
+        assert pt["scored_pr_count"] == 1 and pt["total_tp"] == 1 and pt["total_errors"] == 0
     dist = summary["distribution"]
     for metric in ("precision", "recall", "f1"):
         assert set(dist[metric]) == {"mean", "median", "stddev", "min", "max", "ci_low", "ci_high"}
@@ -360,6 +377,8 @@ def test_trials_prints_distribution_and_cost_estimate(tmp_path, monkeypatch):
     assert "Estimated judge cost" in out and "3 trials" in out  # cost surfaced before the loop
     assert "precision" in out and "recall" in out and "f1" in out  # distribution table
     assert "median" in out and "stddev" in out and "ci95" in out
+    # Post-loop close on the up-front estimate: 10 + 11 + 12 comparisons across the 3 trials.
+    assert "Actual judge comparisons recorded: 33" in out
 
 
 def test_trials_1_is_backcompat_no_trial_dirs(tmp_path, monkeypatch):
