@@ -32,7 +32,7 @@ from daydream.config import (
     DEFAULT_GROUP_MAX_WALL_S,
 )
 from daydream.config_file import load_file_config
-from daydream.phases import FileGroupBudget
+from daydream.file_group_budget import FileGroupBudget
 from daydream.trajectory import DaydreamPhase
 
 # -- FileGroupBudget -------------------------------------------------------

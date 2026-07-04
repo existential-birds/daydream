@@ -229,6 +229,60 @@ def _precision_mode(config: RunConfig) -> bool:
     return False
 
 
+def _resolve_group_max_wall_s(config: RunConfig) -> float:
+    """Resolve the per-file-group fix wall-clock ceiling (issue #201).
+
+    Precedence (highest first), mirroring ``_shallow_fanout_threshold`` above
+    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
+
+      1. ``DaydreamFileConfig.group_max_wall_s`` (file-config scalar).
+      2. ``DEFAULT_GROUP_MAX_WALL_S`` (built-in default).
+
+    Uses ``is not None`` rather than truthiness so a configured value of
+    ``0.0`` is honored rather than falling through to the default.
+    """
+    file_config = config.file_config
+    if file_config is not None and file_config.group_max_wall_s is not None:
+        return file_config.group_max_wall_s
+    return DEFAULT_GROUP_MAX_WALL_S
+
+
+def _resolve_group_max_serial_items(config: RunConfig) -> int:
+    """Resolve the per-file-group serial fix-call ceiling (issue #201).
+
+    Precedence (highest first), mirroring ``_shallow_fanout_threshold`` above
+    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
+
+      1. ``DaydreamFileConfig.group_max_serial_items`` (file-config scalar).
+      2. ``DEFAULT_GROUP_MAX_SERIAL_ITEMS`` (built-in default).
+
+    Uses ``is not None`` rather than truthiness so a configured value of
+    ``0`` is honored rather than falling through to the default.
+    """
+    file_config = config.file_config
+    if file_config is not None and file_config.group_max_serial_items is not None:
+        return file_config.group_max_serial_items
+    return DEFAULT_GROUP_MAX_SERIAL_ITEMS
+
+
+def _resolve_group_max_cumulative_tokens(config: RunConfig) -> int:
+    """Resolve the per-file-group cumulative token ceiling (issue #201).
+
+    Precedence (highest first), mirroring ``_shallow_fanout_threshold`` above
+    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
+
+      1. ``DaydreamFileConfig.group_max_cumulative_tokens`` (file-config scalar).
+      2. ``DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS`` (built-in default).
+
+    Uses ``is not None`` rather than truthiness so a configured value of
+    ``0`` is honored rather than falling through to the default.
+    """
+    file_config = config.file_config
+    if file_config is not None and file_config.group_max_cumulative_tokens is not None:
+        return file_config.group_max_cumulative_tokens
+    return DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS
+
+
 def _collapse_stacks_for_tiny_diff(
     stacks: list[StackAssignment],
     changed_files: list[str],
@@ -1266,16 +1320,9 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         pre_fix_head = None
     # Resolve per-file-group fix budgets (#201): file-config override wins, else
     # the config.py default. A runaway file group cannot silently dominate a run.
-    fc = config.file_config
-    group_wall_s = fc.group_max_wall_s if fc and fc.group_max_wall_s is not None else DEFAULT_GROUP_MAX_WALL_S
-    group_serial = (
-        fc.group_max_serial_items if fc and fc.group_max_serial_items is not None
-        else DEFAULT_GROUP_MAX_SERIAL_ITEMS
-    )
-    group_tokens = (
-        fc.group_max_cumulative_tokens if fc and fc.group_max_cumulative_tokens is not None
-        else DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS
-    )
+    group_wall_s = _resolve_group_max_wall_s(config)
+    group_serial = _resolve_group_max_serial_items(config)
+    group_tokens = _resolve_group_max_cumulative_tokens(config)
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
