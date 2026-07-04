@@ -523,7 +523,6 @@ def _apply_adjudication_verdicts(
         if fail_closed
         else "retaining the original record unchanged"
     )
-    revised: dict[int, dict[str, Any]] = {}
     dropped: set[int] = set()
     for offset, record_index in enumerate(targets):
         verdict_id = offset + 1
@@ -555,21 +554,26 @@ def _apply_adjudication_verdicts(
         if not verdict.get("keep", False):
             dropped.add(record_index)
             continue
-        revised[record_index] = {
-            **records[record_index],
-            "severity": verdict.get("severity", records[record_index].get("severity")),
-            "confidence": verdict.get("confidence", records[record_index].get("confidence")),
-            "description": verdict.get("description", records[record_index].get("description")),
-            "rationale": verdict.get("rationale", records[record_index].get("rationale")),
-            "evidence": verdict.get("evidence", records[record_index].get("evidence")),
-        }
+        # Revise IN PLACE so the record keeps its object identity across this
+        # compaction. The suppression call site keys its arbiter-exclusion set by
+        # ``id(record)`` (#232); a revised record that got a fresh dict here would
+        # escape that set and be wrongly re-judged by the suppression pass.
+        records[record_index].update(
+            {
+                "severity": verdict.get("severity", records[record_index].get("severity")),
+                "confidence": verdict.get("confidence", records[record_index].get("confidence")),
+                "description": verdict.get("description", records[record_index].get("description")),
+                "rationale": verdict.get("rationale", records[record_index].get("rationale")),
+                "evidence": verdict.get("evidence", records[record_index].get("evidence")),
+            }
+        )
 
     new_records: list[dict[str, Any]] = []
     new_sources: list[str] = []
     for i, (record, source) in enumerate(zip(records, sources, strict=True)):
         if i in dropped:
             continue
-        new_records.append(revised.get(i, record))
+        new_records.append(record)
         new_sources.append(source)
     return new_records, new_sources
 
@@ -951,14 +955,15 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # Capture the identities of records the arbiter will see, before
         # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
         # are indices into this pre-apply list; once records are dropped the
-        # indices shift, so suppression exclusion must be keyed by record
-        # identity -- not by the stale positional indices -- or a borderline
-        # record shifting into a dropped slot is silently skipped and an
-        # arbiter-kept record revised down to low severity is wrongly re-judged.
-        arbitrated_ids = {
-            (all_records[i].get("file"), all_records[i].get("line"))
-            for i in arbiter_targets
-        }
+        # indices shift, so suppression exclusion must be keyed by per-record
+        # object identity -- not by the stale positional indices, and not by
+        # `(file, line)`: two findings can share one location while only one is
+        # arbitrated (a HIGH sibling arbitrated, a LOW sibling not), and a
+        # `(file, line)` key would wrongly exclude BOTH, silently skipping the
+        # LOW sibling from suppression. `_apply_adjudication_verdicts` revises
+        # records in place, so kept AND revised arbiter records keep their
+        # identity here; only dropped records fall out.
+        arbitrated_ids = {id(all_records[i]) for i in arbiter_targets}
         if arbiter_targets:
             async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
                 verdicts = await phase_arbiter_review(
@@ -991,9 +996,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # phase key (Sonnet default) -- never per-finding Opus.
         if _precision_mode(config):
             suppression_exclude = [
-                i
-                for i, r in enumerate(all_records)
-                if (r.get("file"), r.get("line")) in arbitrated_ids
+                i for i, r in enumerate(all_records) if id(r) in arbitrated_ids
             ]
             suppression_targets = select_suppression_targets(
                 all_records, record_sources, suppression_exclude

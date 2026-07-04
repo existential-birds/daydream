@@ -254,6 +254,7 @@ class _StubBackend:
             # prompt points at (``stack-<name>-review.md``). Lets one stack emit a
             # HIGH finding and another a borderline LOW one at DISTINCT locations,
             # so they stay uncontested and drive the suppression predicate.
+            issues: list[dict[str, Any]] = [issue]
             if self.parse_by_stack is not None and "severity" in pl:
                 sm = re.search(r"stack-(\S+?)-review\.md", prompt)
                 if sm is not None and sm.group(1) in self.parse_by_stack:
@@ -262,10 +263,33 @@ class _StubBackend:
                     issue["confidence"] = ov["confidence"]
                     issue["file"] = ov.get("file", issue["file"])
                     issue["line"] = ov.get("line", issue["line"])
+                    issue["description"] = ov.get("description", issue["description"])
                     issue["evidence"] = f"{issue['file']}:{issue['line']}"
                     issue["rationale"] = "stub"
+                    # #232: an ``extra`` sibling lets ONE stack emit a second
+                    # finding at the SAME (file, line) as its HIGH finding. Single
+                    # stack -> uncontested, so only the HIGH one is an arbiter
+                    # target; the borderline sibling must still reach suppression,
+                    # which only holds if exclusion is keyed by record identity, not
+                    # by (file, line).
+                    extra = ov.get("extra")
+                    if extra is not None:
+                        ex_file = extra.get("file", issue["file"])
+                        ex_line = extra.get("line", issue["line"])
+                        issues.append(
+                            {
+                                "id": 2,
+                                "description": extra.get("description", "extra finding"),
+                                "file": ex_file,
+                                "line": ex_line,
+                                "severity": extra["severity"],
+                                "confidence": extra["confidence"],
+                                "rationale": "stub",
+                                "evidence": f"{ex_file}:{ex_line}",
+                            }
+                        )
             yield TextEvent(text="")
-            yield ResultEvent(structured_output={"issues": [issue]}, continuation=None)
+            yield ResultEvent(structured_output={"issues": issues}, continuation=None)
             return
 
         # Scoped Opus arbiter (#168). Reads the arbiter-input.json path the prompt
@@ -2990,6 +3014,73 @@ def _merged_item_files(target: Path) -> list[str]:
     items_file = target / ".daydream" / "deep" / "merged-items.json"
     items = json.loads(items_file.read_text())["items"]
     return [it.get("file") for it in items]
+
+
+def _merged_item_descriptions(target: Path) -> list[str]:
+    """Return the ``description`` of every item in the canonical merged-items.json."""
+    items_file = target / ".daydream" / "deep" / "merged-items.json"
+    items = json.loads(items_file.read_text())["items"]
+    return [it.get("description", "") for it in items]
+
+
+# A borderline LOW-severity sibling sharing one (file, line) with a HIGH finding
+# from the SAME stack (py_module.py:7). Single stack -> uncontested, so only the
+# HIGH one is an arbiter target. Other stacks stay on api.py:1 (no severity) so
+# nothing there is high or contested. If suppression exclusion were keyed by
+# (file, line), the HIGH sibling's location would wrongly exclude the LOW sibling
+# too, silently skipping it (#232 review, Comment 2).
+_SUPPRESSION_COLLISION_STACKS: dict[str, dict[str, Any]] = {
+    "python": {
+        "severity": "high",
+        "confidence": "HIGH",
+        "file": "py_module.py",
+        "line": 7,
+        "description": "the HIGH finding",
+        "extra": {
+            "severity": "low",
+            "confidence": "MEDIUM",
+            "file": "py_module.py",
+            "line": 7,
+            "description": "borderline sibling sharing the HIGH location",
+        },
+    },
+}
+
+
+async def test_precision_suppresses_low_sibling_sharing_high_finding_location(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#232 Comment 2: a borderline LOW finding sharing a (file, line) with an
+    arbitrated HIGH finding from the same stack must STILL be suppression-reviewed
+    and dropped. A (file, line)-keyed exclusion excluded both siblings, letting the
+    LOW one survive unreviewed; the per-record-identity key fixes it."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch,
+        multi_stack_target,
+        merge_echo_records=True,
+        parse_by_stack=_SUPPRESSION_COLLISION_STACKS,
+        suppression_keep=False,
+    )
+
+    exit_code = await _run_deep(multi_stack_target, precision_mode=True)
+    assert exit_code == 0
+
+    # The LOW sibling reached suppression despite sharing a location with the
+    # arbitrated HIGH finding -- exactly one batched suppression call. Under the
+    # (file, line)-keyed bug it was excluded, so the pass had zero targets.
+    sup_calls = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
+    assert len(sup_calls) == 1, f"the LOW sibling must reach suppression, got {len(sup_calls)} calls"
+
+    descriptions = _merged_item_descriptions(multi_stack_target)
+    # keep=false -> the reviewed LOW sibling is dropped ...
+    assert not any("borderline sibling" in d for d in descriptions), (
+        f"the LOW sibling sharing the HIGH location must be suppressed:\n{descriptions}"
+    )
+    # ... while the arbitrated HIGH finding at the same location survives.
+    assert any("ARBITRATED" in d and "HIGH finding" in d for d in descriptions), (
+        f"the HIGH finding at the shared location must survive:\n{descriptions}"
+    )
 
 
 async def test_precision_on_drops_unconfirmed_low_finding(

@@ -49,6 +49,20 @@ def test_load_file_config_reads_bench_table(tmp_path: Path) -> None:
     assert cfg.bench["reviewers"]["glm"] == {"backend": "pi", "model": "z-ai/glm-5.2", "provider": "openrouter"}
 
 
+def test_precision_mode_true_parses_as_bool(tmp_path: Path) -> None:
+    (tmp_path / ".daydream.toml").write_text("precision_mode = true\n")
+    cfg = load_file_config(tmp_path)
+    assert cfg.precision_mode is True
+
+
+def test_precision_mode_non_bool_degrades_to_none(tmp_path: Path) -> None:
+    # bool-only coercion (mirrors raw_precision): a truthy int is NOT enabled, it
+    # degrades to None (unset) rather than crashing or coercing to True.
+    (tmp_path / ".daydream.toml").write_text("precision_mode = 1\n")
+    cfg = load_file_config(tmp_path)
+    assert cfg.precision_mode is None
+
+
 def test_empty_config_helper() -> None:
     cfg = DaydreamFileConfig()
     assert cfg.model is None and cfg.backend is None
