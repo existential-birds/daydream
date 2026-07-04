@@ -73,15 +73,34 @@ def arbiter_input_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "arbiter-input.json"
 
 
-def arbiter_complete_path(deep_dir_path: Path) -> Path:
-    """Marker proving the scoped arbiter pass finalised the per-stack records (#175).
+def suppression_input_path(deep_dir_path: Path) -> Path:
+    """Precision-mode suppression input findings JSON (issue #232).
 
-    Written only once the on-disk ``stack-*-records.json`` are known-final for a
-    fresh run -- either after ``_rewrite_stack_records`` persists the arbiter's
-    verdicts, or when nothing qualified for arbitration. Its presence lets a
-    ``--start-at merge`` resume trust the records; its absence forces arbitration
-    to re-run from disk so an interrupted arbiter pass cannot leak unarbitrated
-    high-severity findings into the merge.
+    The borderline (LOW-confidence / low-severity uncontested) per-stack records
+    selected for the skeptical suppression pass, each tagged with a ``sup_id`` the
+    suppression agent echoes back. Distinct from ``arbiter-input.json`` so a run's
+    arbiter and suppression inputs are separately auditable.
+    """
+    return deep_dir_path / "suppression-input.json"
+
+
+def adjudication_complete_path(deep_dir_path: Path) -> Path:
+    """Marker proving the WHOLE adjudication block finalised the per-stack records.
+
+    Covers BOTH adjudication passes that rewrite ``stack-*-records.json`` before
+    the cross-stack merge: the scoped arbiter (#168) AND, when precision mode is
+    on, the suppression pass (#232). Written only once the on-disk records are
+    known-final for a fresh run -- after ``_rewrite_stack_records`` persists the
+    final pass's verdicts, or when nothing qualified for either pass. Its presence
+    lets a ``--start-at merge`` resume trust the records; its absence forces the
+    whole block to re-run from disk so an interrupted arbiter OR suppression pass
+    cannot leak partly-adjudicated findings into the merge.
+
+    The on-disk filename is kept as ``arbiter-complete.marker`` (not renamed when
+    suppression was added) so an in-flight run dir from before that change still
+    satisfies ``--start-at merge`` resume; do not rename the file without a
+    migration. The symbol was renamed from ``arbiter_complete_path`` so the scope
+    it actually proves (both passes) is not silently under-read as arbiter-only.
     """
     return deep_dir_path / "arbiter-complete.marker"
 

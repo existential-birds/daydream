@@ -158,6 +158,12 @@ PHASE_SUBTITLES = {
         "settling the divergence",
         "the deciding voice",
     ],
+    "SUPPRESS": [
+        "cutting the noise",
+        "trusting only the grounded",
+        "silence the unconfirmed",
+        "what survives the skeptic",
+    ],
 }
 
 

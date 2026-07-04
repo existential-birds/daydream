@@ -58,6 +58,12 @@ class _StubBackend:
         # verdict), simulating a truncated/lazy Opus response so a test can assert
         # the selected high-severity record fails open and survives (#175).
         self.arbiter_omit_verdicts: bool = False
+        # #232 knobs: per-stack parse override (drives suppression selection with a
+        # distinct file/severity/confidence per stack, so a HIGH and a borderline
+        # LOW finding coexist at NON-colliding locations -> uncontested), and the
+        # keep verdict the suppression-reviewer stub returns for every sup_id.
+        self.parse_by_stack: dict[str, dict[str, Any]] | None = None
+        self.suppression_keep: bool = True
         self.calls: list[dict[str, Any]] = []
         # Verdict the recommendation-verifier branch emits for issue_id=1; flip to
         # "contradicts" to exercise verdict propagation into the phase_fix prompt.
@@ -244,8 +250,46 @@ class _StubBackend:
                 issue["severity"] = self.parse_severity
                 issue["confidence"] = "MEDIUM"
                 issue["rationale"] = "stub"
+            # #232: per-stack override keyed off the review-file path the parse
+            # prompt points at (``stack-<name>-review.md``). Lets one stack emit a
+            # HIGH finding and another a borderline LOW one at DISTINCT locations,
+            # so they stay uncontested and drive the suppression predicate.
+            issues: list[dict[str, Any]] = [issue]
+            if self.parse_by_stack is not None and "severity" in pl:
+                sm = re.search(r"stack-(\S+?)-review\.md", prompt)
+                if sm is not None and sm.group(1) in self.parse_by_stack:
+                    ov = self.parse_by_stack[sm.group(1)]
+                    issue["severity"] = ov["severity"]
+                    issue["confidence"] = ov["confidence"]
+                    issue["file"] = ov.get("file", issue["file"])
+                    issue["line"] = ov.get("line", issue["line"])
+                    issue["description"] = ov.get("description", issue["description"])
+                    issue["evidence"] = f"{issue['file']}:{issue['line']}"
+                    issue["rationale"] = "stub"
+                    # #232: an ``extra`` sibling lets ONE stack emit a second
+                    # finding at the SAME (file, line) as its HIGH finding. Single
+                    # stack -> uncontested, so only the HIGH one is an arbiter
+                    # target; the borderline sibling must still reach suppression,
+                    # which only holds if exclusion is keyed by record identity, not
+                    # by (file, line).
+                    extra = ov.get("extra")
+                    if extra is not None:
+                        ex_file = extra.get("file", issue["file"])
+                        ex_line = extra.get("line", issue["line"])
+                        issues.append(
+                            {
+                                "id": 2,
+                                "description": extra.get("description", "extra finding"),
+                                "file": ex_file,
+                                "line": ex_line,
+                                "severity": extra["severity"],
+                                "confidence": extra["confidence"],
+                                "rationale": "stub",
+                                "evidence": f"{ex_file}:{ex_line}",
+                            }
+                        )
             yield TextEvent(text="")
-            yield ResultEvent(structured_output={"issues": [issue]}, continuation=None)
+            yield ResultEvent(structured_output={"issues": issues}, continuation=None)
             return
 
         # Scoped Opus arbiter (#168). Reads the arbiter-input.json path the prompt
@@ -269,6 +313,34 @@ class _StubBackend:
                     )
             yield TextEvent(text="")
             yield ResultEvent(structured_output={"findings": findings}, continuation=None)
+            return
+
+        # Precision-mode suppression reviewer (#232). Reads suppression-input.json,
+        # echoes every sup_id back with keep=self.suppression_keep. keep=False drops
+        # the borderline finding (fail-closed apply); keep=True with cited evidence
+        # retains it. Dispatch phrase must not collide with the arbiter or merge
+        # branches above/below.
+        if "you are the suppression reviewer" in pl:
+            in_match = re.search(r"listed in (\S+suppression-input\.json)", prompt)
+            sup_findings: list[dict[str, Any]] = []
+            if in_match is not None:
+                sup_inputs = json.loads(Path(in_match.group(1)).read_text())
+                for entry in sup_inputs:
+                    sup_findings.append(
+                        {
+                            "sup_id": entry["sup_id"],
+                            "keep": self.suppression_keep,
+                            "severity": entry.get("severity") or "low",
+                            "confidence": entry.get("confidence") or "LOW",
+                            "description": entry.get("description") or "finding",
+                            "rationale": (
+                                "confirmed by code" if self.suppression_keep else "no confirming evidence"
+                            ),
+                            "evidence": entry.get("evidence") or "",
+                        }
+                    )
+            yield TextEvent(text="")
+            yield ResultEvent(structured_output={"findings": sup_findings}, continuation=None)
             return
 
         # Cross-stack merge -> schema-validated item list; the host appends
@@ -525,6 +597,8 @@ def _install_model_capturing_stubs(
     parse_severity: str | None = None,
     merge_echo_records: bool = False,
     arbiter_omit_verdicts: bool = False,
+    parse_by_stack: dict[str, dict[str, Any]] | None = None,
+    suppression_keep: bool = True,
 ) -> list[dict[str, Any]]:
     """Patch create_backend with a per-(name, model) stub factory (#168).
 
@@ -543,6 +617,8 @@ def _install_model_capturing_stubs(
         stub.parse_severity = parse_severity
         stub.merge_echo_records = merge_echo_records
         stub.arbiter_omit_verdicts = arbiter_omit_verdicts
+        stub.parse_by_stack = parse_by_stack
+        stub.suppression_keep = suppression_keep
         return stub
 
     monkeypatch.setattr("daydream.runner.create_backend", factory)
@@ -551,11 +627,13 @@ def _install_model_capturing_stubs(
     return shared_calls
 
 
-async def _run_deep(target: Path, *, start_at: str = "review") -> int:
+async def _run_deep(target: Path, *, start_at: str = "review", precision_mode: bool = False) -> int:
     from daydream.runner import RunConfig, run
 
     # cleanup=False suppresses the interactive cleanup prompt; deep is the default.
-    config = RunConfig(target=str(target), start_at=start_at, cleanup=False)
+    config = RunConfig(
+        target=str(target), start_at=start_at, cleanup=False, precision_mode=precision_mode
+    )
     return await run(config)
 
 
@@ -2908,6 +2986,190 @@ async def test_no_arbiter_when_all_findings_low_and_uncontested(
         c["model"] for c in calls if "you are reviewing the" in c["prompt"].lower() and "stack" in c["prompt"].lower()
     }
     assert per_stack_models == {"claude-sonnet-4-6"}
+
+
+# Issue #232: precision-mode suppression pass over borderline uncontested findings.
+#
+# Every test drives runner.run through run_deep with a mock scripting one HIGH
+# finding (python @ api.py:1, an arbiter target) and one borderline low-severity
+# finding (react @ App.tsx:1, a suppression target) at NON-colliding locations so
+# they stay uncontested. App.tsx is the sole discriminator for the borderline
+# finding: its presence/absence in the canonical merged-items.json is the
+# observable outcome.
+#
+# The borderline finding is low-severity but MEDIUM confidence, NOT LOW: the
+# always-on evidence gate (#227) drops every LOW-confidence finding at merge
+# regardless of precision, so a LOW-confidence finding could never observe the
+# suppression pass. Per issue #232, suppression trims by *materiality* (severity),
+# not evidence -- a low-severity MEDIUM-confidence finding survives the gate and
+# is dropped ONLY when suppression declines it.
+_PRECISION_STACKS: dict[str, dict[str, Any]] = {
+    "python": {"severity": "high", "confidence": "HIGH", "file": "api.py", "line": 1},
+    "react": {"severity": "low", "confidence": "MEDIUM", "file": "App.tsx", "line": 1},
+}
+
+
+def _merged_item_files(target: Path) -> list[str]:
+    """Return the ``file`` of every item in the canonical merged-items.json."""
+    items_file = target / ".daydream" / "deep" / "merged-items.json"
+    items = json.loads(items_file.read_text())["items"]
+    return [it.get("file") for it in items]
+
+
+def _merged_item_descriptions(target: Path) -> list[str]:
+    """Return the ``description`` of every item in the canonical merged-items.json."""
+    items_file = target / ".daydream" / "deep" / "merged-items.json"
+    items = json.loads(items_file.read_text())["items"]
+    return [it.get("description", "") for it in items]
+
+
+# A borderline LOW-severity sibling sharing one (file, line) with a HIGH finding
+# from the SAME stack (py_module.py:7). Single stack -> uncontested, so only the
+# HIGH one is an arbiter target. Other stacks stay on api.py:1 (no severity) so
+# nothing there is high or contested. If suppression exclusion were keyed by
+# (file, line), the HIGH sibling's location would wrongly exclude the LOW sibling
+# too, silently skipping it (#232 review, Comment 2).
+_SUPPRESSION_COLLISION_STACKS: dict[str, dict[str, Any]] = {
+    "python": {
+        "severity": "high",
+        "confidence": "HIGH",
+        "file": "py_module.py",
+        "line": 7,
+        "description": "the HIGH finding",
+        "extra": {
+            "severity": "low",
+            "confidence": "MEDIUM",
+            "file": "py_module.py",
+            "line": 7,
+            "description": "borderline sibling sharing the HIGH location",
+        },
+    },
+}
+
+
+async def test_precision_suppresses_low_sibling_sharing_high_finding_location(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#232 Comment 2: a borderline LOW finding sharing a (file, line) with an
+    arbitrated HIGH finding from the same stack must STILL be suppression-reviewed
+    and dropped. A (file, line)-keyed exclusion excluded both siblings, letting the
+    LOW one survive unreviewed; the per-record-identity key fixes it."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch,
+        multi_stack_target,
+        merge_echo_records=True,
+        parse_by_stack=_SUPPRESSION_COLLISION_STACKS,
+        suppression_keep=False,
+    )
+
+    exit_code = await _run_deep(multi_stack_target, precision_mode=True)
+    assert exit_code == 0
+
+    # The LOW sibling reached suppression despite sharing a location with the
+    # arbitrated HIGH finding -- exactly one batched suppression call. Under the
+    # (file, line)-keyed bug it was excluded, so the pass had zero targets.
+    sup_calls = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
+    assert len(sup_calls) == 1, f"the LOW sibling must reach suppression, got {len(sup_calls)} calls"
+
+    descriptions = _merged_item_descriptions(multi_stack_target)
+    # keep=false -> the reviewed LOW sibling is dropped ...
+    assert not any("borderline sibling" in d for d in descriptions), (
+        f"the LOW sibling sharing the HIGH location must be suppressed:\n{descriptions}"
+    )
+    # ... while the arbitrated HIGH finding at the same location survives.
+    assert any("ARBITRATED" in d and "HIGH finding" in d for d in descriptions), (
+        f"the HIGH finding at the shared location must survive:\n{descriptions}"
+    )
+
+
+async def test_precision_on_drops_unconfirmed_low_finding(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#232 Test A (precision ON, no evidence): the borderline LOW finding is
+    dropped when the suppression reviewer returns keep=false; the HIGH finding
+    survives, and the suppression pass makes exactly one batched Sonnet call."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch,
+        multi_stack_target,
+        merge_echo_records=True,
+        parse_by_stack=_PRECISION_STACKS,
+        suppression_keep=False,
+    )
+
+    exit_code = await _run_deep(multi_stack_target, precision_mode=True)
+    assert exit_code == 0
+
+    files = _merged_item_files(multi_stack_target)
+    # The borderline LOW finding (App.tsx) is suppressed; the HIGH one (api.py) stays.
+    assert "App.tsx" not in files, f"unconfirmed LOW finding must be dropped:\n{files}"
+    assert "api.py" in files, f"HIGH finding must survive suppression:\n{files}"
+
+    # Exactly one batched suppression call, resolved via the cheap `suppression`
+    # phase key (Sonnet), NOT per-finding Opus.
+    sup_calls = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
+    assert len(sup_calls) == 1, f"suppression must make exactly one batched call, got {len(sup_calls)}"
+    assert sup_calls[0]["model"] == "claude-sonnet-4-6"
+
+    # The arbiter still ran on the HIGH finding (fail-open, unchanged by #232).
+    arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
+    assert len(arbiter_calls) == 1
+    assert arbiter_calls[0]["model"] == "claude-opus-4-8"
+
+
+async def test_precision_off_keeps_low_finding(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#232 Test B (precision OFF, product default): identical inputs, but the
+    borderline LOW finding survives to merge and NO suppression pass runs.
+
+    Regression guard for the "don't drop possibly-real findings" non-goal."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch,
+        multi_stack_target,
+        merge_echo_records=True,
+        parse_by_stack=_PRECISION_STACKS,
+        suppression_keep=False,  # would drop if it ran -- it must NOT run
+    )
+
+    exit_code = await _run_deep(multi_stack_target, precision_mode=False)
+    assert exit_code == 0
+
+    files = _merged_item_files(multi_stack_target)
+    assert "App.tsx" in files, f"LOW finding must survive when precision is OFF:\n{files}"
+    assert "api.py" in files
+
+    sup_calls = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
+    assert sup_calls == [], "suppression must never run when precision is OFF"
+
+
+async def test_precision_on_keeps_low_finding_with_evidence(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#232 Test C (precision ON, evidence): a borderline LOW finding the
+    suppression reviewer CONFIRMS (keep=true with a rationale) is retained."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch,
+        multi_stack_target,
+        merge_echo_records=True,
+        parse_by_stack=_PRECISION_STACKS,
+        suppression_keep=True,
+    )
+
+    exit_code = await _run_deep(multi_stack_target, precision_mode=True)
+    assert exit_code == 0
+
+    # The suppression pass ran (borderline finding exists) ...
+    sup_calls = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
+    assert len(sup_calls) == 1
+
+    # ... but confirmed the finding, so App.tsx is retained.
+    files = _merged_item_files(multi_stack_target)
+    assert "App.tsx" in files, f"a confirmed borderline finding must be kept:\n{files}"
+    assert "api.py" in files
 
 
 def _prime_merge_resume_records(deep: Path, *, python_severity: str | None) -> None:

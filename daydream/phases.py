@@ -3001,6 +3001,122 @@ async def phase_arbiter_review(
     return verdicts
 
 
+# Suppression schema (issue #232). Mirrors ARBITER_SCHEMA but the confidence enum
+# ALSO admits "LOW": suppression targets are precisely the LOW-confidence findings
+# the arbiter never sees, so a schema that omitted "LOW" (as ARBITER_SCHEMA does)
+# would force the agent to mis-report their confidence on every kept finding.
+SUPPRESSION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "sup_id": {"type": "integer"},
+                    "keep": {"type": "boolean"},
+                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "description": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["sup_id", "keep", "severity", "confidence", "description", "rationale", "evidence"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["findings"],
+    "additionalProperties": False,
+}
+
+
+async def phase_suppression_review(
+    backend: Backend,
+    work: WorkContext,
+    *,
+    selected_records: list[dict[str, Any]],
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    exploration_dir: Path | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Skeptical precision-mode second opinion over borderline findings (#232).
+
+    Runs a single cheaper (Sonnet by default) agent over ONLY the borderline
+    (LOW-confidence / low-severity uncontested) findings the arbiter never
+    scrutinizes. The reviewer's default stance is to DROP each finding unless it
+    can cite confirming evidence -- the inverse of the arbiter. The result re-keys
+    onto the input by ``sup_id`` so the caller can drop (missing verdict or
+    ``keep:false``) or retain (``keep:true``) the originating records before the
+    cross-stack merge. All targets are batched into a single agent call.
+
+    Args:
+        backend: The Backend to execute against (resolved via phase ``suppression``).
+        work: Workspace context; ``work.repo`` is the agent cwd.
+        selected_records: Borderline per-stack records selected for suppression.
+            Each is tagged with a fresh 1-based ``sup_id`` before being written to
+            the suppression input artifact; the originals are left untouched.
+        diff_path: Path to the full diff on disk.
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        exploration_dir: Optional pre-scan exploration directory.
+
+    Returns:
+        Mapping of ``sup_id`` -> adjudicated finding dict with keys ``keep``,
+        ``severity``, ``confidence``, ``description``, ``rationale``, ``evidence``.
+        A missing ``sup_id`` is fail-CLOSED at the caller: the original record is
+        DROPPED (a borderline finding the reviewer never confirmed must not
+        survive on precision runs).
+    """
+    from daydream.deep.artifacts import deep_dir, suppression_input_path
+
+    print_phase_hero(console, "SUPPRESS", phase_subtitle("SUPPRESS"))
+    print_dim(console, f"Model: {backend.model}")
+    print_info(console, f"Suppression-reviewing {len(selected_records)} borderline finding(s)")
+
+    dd = deep_dir(work.repo)
+    input_path = suppression_input_path(dd)
+    suppression_input = [
+        {
+            "sup_id": i,
+            "file": rec.get("file"),
+            "line": rec.get("line"),
+            "severity": rec.get("severity"),
+            "confidence": rec.get("confidence"),
+            "description": rec.get("description"),
+            "rationale": rec.get("rationale"),
+            "evidence": rec.get("evidence"),
+        }
+        for i, rec in enumerate(selected_records, start=1)
+    ]
+    input_path.write_text(json.dumps(suppression_input, indent=2))
+
+    prompt = get_registry().prompt("suppression")(
+        suppression_input_path=input_path,
+        diff_path=diff_path,
+        intent_path=intent_path,
+        alternatives_path=alternatives_path,
+        cwd=work.repo,
+        exploration_dir=exploration_dir,
+    )
+    result, _, _ = await run_agent(
+        backend, work.repo, prompt, output_schema=SUPPRESSION_SCHEMA, phase=DaydreamPhase.DEEP
+    )
+
+    if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
+        raise ValueError(f"Suppression returned no findings list (got {type(result).__name__})")
+
+    verdicts: dict[int, dict[str, Any]] = {}
+    for finding in result["findings"]:
+        sup_id = finding.get("sup_id")
+        if isinstance(sup_id, int):
+            verdicts[sup_id] = finding
+    kept = sum(1 for v in verdicts.values() if v.get("keep"))
+    print_info(console, f"Suppression: kept {kept}, dropped {len(verdicts) - kept}")
+    return verdicts
+
+
 def _append_structural_and_write_merged(
     base_items: list[dict[str, Any]],
     structural_records_path: Path | None,

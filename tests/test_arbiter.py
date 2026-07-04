@@ -13,7 +13,7 @@ severity) that must NOT trip contested selection.
 
 from __future__ import annotations
 
-from daydream.deep.arbiter import select_arbiter_targets
+from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 
 
 def _rec(file: str, line: int, severity: str) -> dict[str, object]:
@@ -26,6 +26,12 @@ def _rec(file: str, line: int, severity: str) -> dict[str, object]:
         "confidence": "MEDIUM",
         "rationale": "because",
     }
+
+
+def _rec_conf(file: str, line: int, severity: str, confidence: str) -> dict[str, object]:
+    rec = _rec(file, line, severity)
+    rec["confidence"] = confidence
+    return rec
 
 
 def test_mixed_severity_multi_stack_collision_selects_high_and_contested() -> None:
@@ -86,3 +92,72 @@ def test_length_mismatch_raises() -> None:
 
     with pytest.raises(ValueError):
         select_arbiter_targets([_rec("a.py", 1, "high")], ["python", "react"])
+
+
+# Issue #232: precision-mode suppression selection predicate.
+#
+# ``select_suppression_targets`` picks the borderline, uncontested findings the
+# arbiter never sees: LOW-confidence and/or low-severity records NOT in the
+# arbiter's exclusion set. High/contested records (the arbiter's job) must never
+# be selected here.
+
+
+def test_suppression_selects_low_confidence_and_low_severity_uncontested() -> None:
+    # Index map (no exclusions):
+    #  0 low-severity MEDIUM-confidence   -> selected (low severity)
+    #  1 medium-severity LOW-confidence   -> selected (LOW confidence)
+    #  2 medium-severity MEDIUM-confidence-> NOT selected (borderline on neither axis)
+    records = [
+        _rec_conf("a.py", 1, "low", "MEDIUM"),
+        _rec_conf("b.py", 2, "medium", "LOW"),
+        _rec_conf("c.py", 3, "medium", "MEDIUM"),
+    ]
+    sources = ["python", "react", "go"]
+    assert select_suppression_targets(records, sources) == [0, 1]
+
+
+def test_suppression_excludes_arbiter_targets() -> None:
+    # A high finding + a LOW-confidence uncontested finding. The arbiter takes the
+    # high one; suppression must take ONLY the borderline one, never the high.
+    records = [
+        _rec_conf("api.py", 10, "high", "HIGH"),
+        _rec_conf("util.py", 5, "low", "LOW"),
+    ]
+    sources = ["python", "react"]
+    arbiter_targets = select_arbiter_targets(records, sources)
+    assert arbiter_targets == [0]
+    assert select_suppression_targets(records, sources, arbiter_targets) == [1]
+
+
+def test_suppression_excludes_contested_low_finding() -> None:
+    # A low-severity finding that is CONTESTED (same loc, 2 stacks, divergent
+    # severity) reaches the arbiter, so it must be excluded from suppression even
+    # though it is low severity.
+    records = [
+        _rec_conf("api.py", 10, "high", "HIGH"),  # 0 contested + high
+        _rec_conf("api.py", 10, "low", "LOW"),    # 1 contested (excluded despite low)
+        _rec_conf("b.py", 2, "low", "LOW"),       # 2 borderline uncontested -> selected
+    ]
+    sources = ["python", "react", "go"]
+    arbiter_targets = select_arbiter_targets(records, sources)
+    assert arbiter_targets == [0, 1]
+    assert select_suppression_targets(records, sources, arbiter_targets) == [2]
+
+
+def test_suppression_selects_nothing_when_all_medium_uncontested() -> None:
+    records = [_rec_conf("a.py", 1, "medium", "MEDIUM"), _rec_conf("b.py", 2, "medium", "HIGH")]
+    sources = ["python", "react"]
+    assert select_suppression_targets(records, sources) == []
+
+
+def test_suppression_default_exclude_is_empty() -> None:
+    # Called without an exclude set, every borderline record is selected.
+    records = [_rec_conf("a.py", 1, "low", "LOW")]
+    assert select_suppression_targets(records, ["python"]) == [0]
+
+
+def test_suppression_length_mismatch_raises() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        select_suppression_targets([_rec("a.py", 1, "low")], ["python", "react"])

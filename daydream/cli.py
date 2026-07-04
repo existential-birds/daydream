@@ -614,6 +614,16 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Single-stack review (skip multi-stack auto-detection).",
     )
     parser.add_argument(
+        "--precision",
+        action="store_true",
+        default=False,
+        dest="precision",
+        help="Enable precision mode: run a skeptical suppression pass over borderline "
+             "findings after the arbiter (issue #232; fail-closed). Also settable "
+             "via [tool.daydream] precision_mode in a config file."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--copy",
         action="append",
         default=[],
@@ -911,6 +921,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         findings_out=args.findings_out,
         force_worktree=args.force_worktree,
         shallow=args.shallow,
+        precision_mode=args.precision,
         extra_copy=list(args.extra_copy),
         non_interactive=args.non_interactive,
         assume=args.assume,

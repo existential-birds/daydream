@@ -23,6 +23,7 @@ arbitrated — an accepted cost trade-off of the high-OR-contested selection sco
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import Any
 
 
@@ -30,6 +31,12 @@ def _severity(record: dict[str, Any]) -> str:
     """Normalize a record's severity to a lowercase string ("" when absent)."""
     value = record.get("severity")
     return value.lower() if isinstance(value, str) else ""
+
+
+def _confidence(record: dict[str, Any]) -> str:
+    """Normalize a record's confidence to an uppercase string ("" when absent)."""
+    value = record.get("confidence")
+    return value.upper() if isinstance(value, str) else ""
 
 
 def select_arbiter_targets(
@@ -79,3 +86,56 @@ def select_arbiter_targets(
             selected.update(indices)
 
     return sorted(selected)
+
+
+def select_suppression_targets(
+    records: list[dict[str, Any]],
+    sources: list[str],
+    exclude: Iterable[int] = (),
+) -> list[int]:
+    """Return indices of borderline, uncontested records for the suppression pass (#232).
+
+    The precision-mode suppression pass gives a skeptical LLM second opinion to
+    *evidenced-but-minor* findings the arbiter never scrutinizes: records that are
+    ``confidence == "LOW"`` and/or ``severity == "low"`` and are neither
+    high-severity nor contested. It mirrors :func:`select_arbiter_targets` as a
+    pure, side-effect-free predicate so it can be unit-tested against adversarial
+    shapes independent of any agent call.
+
+    High-severity and contested records reach the *arbiter* (fail-open); this pass
+    must never touch them, so callers pass the arbiter's target indices as
+    ``exclude``. Because that set already covers every high-severity and contested
+    record, excluding it leaves only low/medium uncontested records -- of which the
+    LOW-confidence / low-severity ones are the borderline findings selected here.
+
+    Args:
+        records: Parsed per-stack records (each ideally carrying ``severity`` and
+            ``confidence``).
+        sources: Per-record originating stack name, positionally aligned with
+            ``records`` (``len(sources) == len(records)``). Accepted for signature
+            symmetry with :func:`select_arbiter_targets`; contestedness is handled
+            entirely through ``exclude``.
+        exclude: Indices to skip (the arbiter target set). A record already routed
+            to the arbiter is never a suppression target.
+
+    Returns:
+        Sorted, de-duplicated list of indices into ``records`` selected for the
+        suppression pass: every ``exclude``-free record that is LOW-confidence
+        or low-severity.
+
+    Raises:
+        ValueError: If ``records`` and ``sources`` differ in length.
+    """
+    if len(records) != len(sources):
+        raise ValueError(
+            f"records/sources length mismatch: {len(records)} != {len(sources)}"
+        )
+
+    excluded = set(exclude)
+    selected: list[int] = []
+    for i, record in enumerate(records):
+        if i in excluded:
+            continue
+        if _confidence(record) == "LOW" or _severity(record) == "low":
+            selected.append(i)
+    return selected

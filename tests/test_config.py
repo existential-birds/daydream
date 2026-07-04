@@ -7,7 +7,7 @@ from daydream.config import (
 )
 
 PHASE_NAMES = {
-    "review", "per_stack_review", "arbiter", "parse", "fix", "test", "verify",
+    "review", "per_stack_review", "arbiter", "suppression", "parse", "fix", "test", "verify",
     "exploration", "intent", "wonder", "merge", "pr_feedback",
 }
 
@@ -43,6 +43,14 @@ def test_per_stack_review_and_arbiter_split():
     codex = PHASE_DEFAULT_MODELS["codex"]
     assert codex["per_stack_review"] == "gpt-5.5"
     assert codex["arbiter"] == "gpt-5.5"
+
+
+def test_suppression_uses_cheap_tier():
+    """#232: the precision-mode suppression pass defaults to the cheap mid tier
+    (never per-finding Opus). Codex/pi keep their single-model default."""
+    assert PHASE_DEFAULT_MODELS["claude"]["suppression"] == "claude-sonnet-4-6"
+    assert PHASE_DEFAULT_MODELS["codex"]["suppression"] == "gpt-5.5"
+    assert PHASE_DEFAULT_MODELS["pi"]["suppression"] == "glm-5.2"
 
 
 def test_phase_default_models_codex_uses_gpt_5_5_for_every_phase():

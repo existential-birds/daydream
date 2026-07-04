@@ -388,6 +388,84 @@ def build_arbiter_prompt(
     return "\n\n".join(parts)
 
 
+def build_suppression_prompt(
+    *,
+    suppression_input_path: Path,
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    cwd: Path,
+    exploration_dir: Path | None = None,
+) -> str:
+    """Assemble the skeptical precision-mode suppression prompt (issue #232).
+
+    The suppression reviewer re-examines ONLY the borderline (LOW-confidence /
+    low-severity uncontested) findings the arbiter never scrutinizes. Its default
+    stance is the inverse of the arbiter's: a finding is DROPPED unless the
+    reviewer can point at confirming evidence in the actual code. This trims
+    evidenced-but-immaterial false positives on precision-sensitive runs without
+    the arbiter's fail-open protection (which exists to guard high-severity /
+    contested findings -- exactly the ones this pass never sees).
+
+    Like the arbiter it is an adjudicator, not a discoverer: it may confirm or
+    reject each input finding, but must not invent new ones.
+
+    Args:
+        suppression_input_path: JSON file of the selected borderline findings.
+            Each entry carries a ``sup_id`` the reviewer must echo back, plus the
+            original ``file``/``line``/``severity``/``confidence``/``description``.
+        diff_path: Path to the full diff on disk.
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
+        exploration_dir: Pre-scan exploration directory (if available).
+
+    Returns:
+        Assembled prompt string.
+    """
+    parts: list[str] = []
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
+    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
+    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts.append(
+        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
+        f"do NOT run `git diff` without a base ref -- on a clean branch that "
+        f"returns empty and hides committed changes."
+    )
+    parts.append(
+        "You are the suppression reviewer. The cheaper per-stack reviewers "
+        "flagged the borderline, low-confidence / low-severity findings listed "
+        f"in {suppression_input_path}. These were NOT contested and NOT "
+        "high-severity, so no heavyweight arbiter looked at them. Your job is to "
+        "cut false positives: re-examine each one against the actual code "
+        "(Read/Grep/Bash) and the diff. You are adjudicating their work, NOT "
+        "starting a fresh review: do not introduce findings that are not in the "
+        "input list."
+    )
+    parts.append(
+        "Default to DROPPING each finding. Keep one ONLY when you can point at "
+        "confirming evidence in the code that it is a real, actionable problem. "
+        "Absence of evidence is a drop, not a keep -- a merely plausible or "
+        "stylistic nit with no concrete grounding must be dropped."
+    )
+    parts.append(
+        "Return a single JSON object matching the structured-output schema: "
+        '{"findings": [ ... ]}. Emit exactly one entry per input finding, echoing '
+        "its `sup_id` unchanged. For each:\n"
+        "  - keep: true ONLY if you cite confirming evidence that the finding is "
+        "real and actionable; false to drop an unconfirmed / immaterial finding.\n"
+        "  - severity: your adjudicated high | medium | low.\n"
+        "  - confidence: your adjudicated HIGH | MEDIUM | LOW.\n"
+        "  - description: a sharpened one-line summary of the SAME finding.\n"
+        "  - rationale: for a keep, the concrete evidence you found; for a drop, "
+        "why it is not confirmable.\n"
+        "  - evidence: the grounded `file:line` citation backing a kept finding."
+    )
+    return "\n\n".join(parts)
+
+
 def build_merge_prompt(
     *,
     per_stack_records_paths: list[Path],
