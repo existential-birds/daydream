@@ -171,6 +171,64 @@ def test_reviewer_override_without_label_fails_through_compiled_entrypoint(tmp_p
     assert r.returncode != 0 and "--tool-label" in (r.stdout + r.stderr)
 
 
+def test_trials_flag_parsed(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--no-score", "--trials", "3"])
+    assert cfg.trials == 3
+
+
+def test_trials_defaults_to_one(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--no-score"])
+    assert cfg.trials == 1
+
+
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_trials_rejects_non_positive(tmp_path, monkeypatch, bad):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        _bench_config_from_argv(["--benchmark-repo", "/b", "--no-score", "--trials", bad])
+
+
+def test_trials_config_file_fallback(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text('[tool.daydream.bench]\nbenchmark-repo="/b"\ntrials=5\n')
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv(["--no-score"])  # no --trials flag
+    assert cfg.trials == 5
+
+
+def test_trials_flag_overrides_config_file(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text('[tool.daydream.bench]\nbenchmark-repo="/b"\ntrials=5\n')
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv(["--no-score", "--trials", "2"])
+    assert cfg.trials == 2
+
+
+@pytest.mark.parametrize("toml_value", ["2.5", '"3"'])
+def test_trials_config_file_rejects_non_int(tmp_path, monkeypatch, toml_value):
+    # The config-file fallback reaches the isinstance(trials, int) branch at
+    # cli.py: load_file_config stores TOML values verbatim (no coercion), so a
+    # float or string trials value must be rejected there.
+    (tmp_path / "pyproject.toml").write_text(
+        f'[tool.daydream.bench]\nbenchmark-repo="/b"\ntrials={toml_value}\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        _bench_config_from_argv(["--no-score"])
+
+
+@pytest.mark.parametrize("toml_value", ["0", "-1"])
+def test_trials_config_file_rejects_non_positive(tmp_path, monkeypatch, toml_value):
+    # Non-positive trials via config-file fallback reaches the trials <= 0
+    # branch at cli.py (the CLI-flag path is caught earlier by argparse).
+    (tmp_path / "pyproject.toml").write_text(
+        f'[tool.daydream.bench]\nbenchmark-repo="/b"\ntrials={toml_value}\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        _bench_config_from_argv(["--no-score"])
+
+
 def test_bench_parser_accepts_positive_limit():
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--limit", "3"])
     assert cfg.limit == 3

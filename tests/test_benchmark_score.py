@@ -174,6 +174,36 @@ def test_direct_anthropic_preflight_rejects_martian_base_url(monkeypatch):
         preflight_judge_env(judge_route="anthropic-direct")
 
 
+def test_f1_computation():
+    """F1 is the harmonic mean of the aggregate precision and recall.
+
+    url1 contributes tp=2 fp=1 fn=1, url2 tp=0 fp=2 fn=3, so aggregate
+    precision = 2/5 = 0.4 and recall = 2/6 ≈ 0.3333, giving
+    f1 = 2·0.4·0.3333 / (0.4 + 0.3333) ≈ 0.3636.
+    """
+    evals = {
+        "url1": {"daydream": {"tp": 2, "fp": 1, "fn": 1, "total_candidates": 3, "total_golden": 3}},
+        "url2": {"daydream": {"tp": 0, "fp": 2, "fn": 3, "total_candidates": 2, "total_golden": 3}},
+    }
+    s = parse_daydream_scores(evals)
+    p, r = 2 / 5, 2 / 6
+    assert s.f1 == pytest.approx(2 * p * r / (p + r))
+
+
+def test_f1_perfect_scores():
+    """Perfect precision and recall → f1 == 1.0."""
+    evals = {"url1": {"daydream": {"tp": 3, "fp": 0, "fn": 0, "total_candidates": 3, "total_golden": 3}}}
+    s = parse_daydream_scores(evals)
+    assert s.precision == 1.0 and s.recall == 1.0 and s.f1 == 1.0
+
+
+def test_f1_zero_when_precision_and_recall_zero():
+    """P + R == 0 → f1 == 0.0 (no division by zero)."""
+    evals = {"url1": {"daydream": {"tp": 0, "fp": 4, "fn": 5, "total_candidates": 4, "total_golden": 5}}}
+    s = parse_daydream_scores(evals)
+    assert s.precision == 0.0 and s.recall == 0.0 and s.f1 == 0.0
+
+
 def test_parse_daydream_scores_extracts_per_pr_and_aggregate():
     evals = {
       "url1": {"daydream": {"tp": 2, "fp": 1, "fn": 1, "precision": 0.667, "recall": 0.667,

@@ -36,6 +36,9 @@ class BenchConfig:
             (low/medium/high) before benchmark submission; None submits all.
         min_severity: When set, drop findings below this severity
             (low/medium/high) before benchmark submission; None submits all.
+        trials: Number of full end-to-end trials to run per reviewer config
+            (default 1 = single-shot, back-compat). N>1 isolates each trial in
+            its own corpus dir and enables distribution reporting.
     """
 
     benchmark_repo: Path
@@ -54,3 +57,4 @@ class BenchConfig:
     verbose: bool = False
     min_confidence: str | None = None
     min_severity: str | None = None
+    trials: int = 1
