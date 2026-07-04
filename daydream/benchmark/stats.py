@@ -33,17 +33,7 @@ _DEFAULT_SEED = 42
 
 @dataclass(frozen=True)
 class MetricStats:
-    """Summary statistics for one metric across N trials.
-
-    Attributes:
-        mean: Arithmetic mean of the trial values.
-        median: Median of the trial values.
-        stddev: Sample standard deviation (0.0 when fewer than 2 values).
-        min: Smallest trial value.
-        max: Largest trial value.
-        ci_low: Lower endpoint of the percentile bootstrap CI of the mean.
-        ci_high: Upper endpoint of the percentile bootstrap CI of the mean.
-    """
+    """Per-metric summary statistics across N trials."""
 
     mean: float
     median: float
@@ -56,14 +46,7 @@ class MetricStats:
 
 @dataclass(frozen=True)
 class TrialDistribution:
-    """Aggregated per-metric statistics over N benchmark trials.
-
-    Attributes:
-        n: Number of trials aggregated.
-        precision: Statistics for aggregate precision across trials.
-        recall: Statistics for aggregate recall across trials.
-        f1: Statistics for aggregate F1 across trials.
-    """
+    """Aggregated precision/recall/F1 statistics over N benchmark trials."""
 
     n: int
     precision: MetricStats

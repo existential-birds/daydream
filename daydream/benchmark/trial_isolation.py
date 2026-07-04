@@ -26,16 +26,7 @@ def trials_root(benchmark_repo: Path, tool_label: str) -> Path:
 
 
 def trial_corpus_dir(benchmark_repo: Path, tool_label: str, trial_index: int) -> Path:
-    """Resolve the isolated corpus dir for a single trial.
-
-    Args:
-        benchmark_repo: Path to the external benchmark checkout.
-        tool_label: Base reviewer results label (e.g. ``daydream``).
-        trial_index: Zero-based trial number.
-
-    Returns:
-        ``<benchmark_repo>/.daydream-bench/trials/<tool_label>/trial-<NN>``.
-    """
+    """Resolve ``<benchmark_repo>/.daydream-bench/trials/<tool_label>/trial-<NN>``."""
     return trials_root(benchmark_repo, tool_label) / f"trial-{trial_index:02d}"
 
 
@@ -61,16 +52,9 @@ def init_trial_corpus(canonical_data_path: Path, trial_dir: Path) -> Path:
 
 
 def trial_tool_label(base_label: str, trial_index: int) -> str:
-    """Suffix a base results label with a zero-padded trial index.
+    """Suffix a base label with a zero-padded trial index (``daydream`` -> ``daydream-t00``).
 
-    The suffix makes each trial write a distinct ``evaluations.json`` under the
+    The suffix lets each trial write a distinct ``evaluations.json`` under the
     unmodified withmartian steps, so trials never overwrite one another.
-
-    Args:
-        base_label: The base reviewer label (e.g. ``daydream``).
-        trial_index: Zero-based trial number.
-
-    Returns:
-        ``<base_label>-t<NN>`` (e.g. ``daydream-t00``).
     """
     return f"{base_label}-t{trial_index:02d}"
