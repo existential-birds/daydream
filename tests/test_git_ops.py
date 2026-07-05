@@ -120,27 +120,27 @@ def test_default_branch_falls_back_to_main(tmp_path: Path) -> None:
     assert git_ops.default_branch(repo) == "main"
 
 
-def test_default_branch_falls_back_to_master(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("init_branch", "expected"),
+    [
+        ("master", "master"),  # falls back to local master when no main/origin
+        ("trunk", BranchNotFoundError),  # neither main nor master present -> raises
+    ],
+    ids=["falls_back_to_master", "raises_when_none_present"],
+)
+def test_default_branch_fallback(tmp_path: Path, init_branch: str, expected: object) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _git(repo, "init", "-b", "master")
+    _git(repo, "init", "-b", init_branch)
     _configure_identity(repo)
     (repo / "f.txt").write_text("hi\n")
     _git(repo, "add", "f.txt")
     _commit(repo, "first")
-    assert git_ops.default_branch(repo) == "master"
-
-
-def test_default_branch_raises_when_none_present(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-b", "trunk")
-    _configure_identity(repo)
-    (repo / "f.txt").write_text("hi\n")
-    _git(repo, "add", "f.txt")
-    _commit(repo, "first")
-    with pytest.raises(BranchNotFoundError):
-        git_ops.default_branch(repo)
+    if isinstance(expected, type) and issubclass(expected, Exception):
+        with pytest.raises(expected):
+            git_ops.default_branch(repo)
+    else:
+        assert git_ops.default_branch(repo) == expected
 
 
 def test_remote_url_returns_url_when_remote_configured(tmp_path: Path) -> None:
@@ -191,36 +191,39 @@ def test_branch_exists_missing(tmp_path: Path) -> None:
 # --- ref_exists -------------------------------------------------------------
 
 
-def test_ref_exists_raw_sha(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    sha = _git(repo, "rev-parse", "HEAD")
-    assert git_ops.ref_exists(repo, sha) is True
+def _ref_raw_sha(repo: Path) -> str:
+    return _git(repo, "rev-parse", "HEAD")
 
 
-def test_ref_exists_abbreviated_sha(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    short = _git(repo, "rev-parse", "--short", "HEAD")
-    assert git_ops.ref_exists(repo, short) is True
+def _ref_abbreviated_sha(repo: Path) -> str:
+    return _git(repo, "rev-parse", "--short", "HEAD")
 
 
-def test_ref_exists_tag(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def _ref_tag(repo: Path) -> str:
     _git(repo, "tag", "v1.0")
-    assert git_ops.ref_exists(repo, "v1.0") is True
+    return "v1.0"
 
 
-def test_ref_exists_relative_commit_ish(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def _ref_relative_commit_ish(repo: Path) -> str:
     (repo / "two.txt").write_text("two\n")
     _git(repo, "add", "two.txt")
     _commit(repo, "second")
-    assert git_ops.ref_exists(repo, "HEAD~1") is True
+    return "HEAD~1"
 
 
-def test_ref_exists_named_branch_still_resolves(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def _ref_named_branch(repo: Path) -> str:
     _git(repo, "checkout", "-b", "feat-local")
-    assert git_ops.ref_exists(repo, "feat-local") is True
+    return "feat-local"
+
+
+@pytest.mark.parametrize(
+    "build_ref",
+    [_ref_raw_sha, _ref_abbreviated_sha, _ref_tag, _ref_relative_commit_ish, _ref_named_branch],
+    ids=["raw_sha", "abbreviated_sha", "tag", "relative_commit_ish", "named_branch"],
+)
+def test_ref_exists_true(tmp_path: Path, build_ref: Any) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.ref_exists(repo, build_ref(repo)) is True
 
 
 def test_ref_exists_missing(tmp_path: Path) -> None:
@@ -954,8 +957,13 @@ def test_gh_api_input_data_preserves_tempfile_on_failure(
     preserved.unlink(missing_ok=True)
 
 
-def test_gh_pr_view_omits_pr_arg_when_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("pr", "number"),
+    [(None, 7), (42, 42)],
+    ids=["omits_pr_arg_when_none", "includes_pr_arg_when_given"],
+)
+def test_gh_pr_view_pr_arg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pr: int | None, number: int
 ) -> None:
     repo = _make_repo_with_main(tmp_path)
     captured: dict[str, list[str]] = {}
@@ -963,17 +971,20 @@ def test_gh_pr_view_omits_pr_arg_when_none(
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured["cmd"] = cmd
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout='{"number": 7}', stderr=""
+            args=cmd, returncode=0, stdout=f'{{"number": {number}}}', stderr=""
         )
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
 
-    result = git_ops.gh_pr_view(repo)
-    assert result == {"number": 7}
+    result = git_ops.gh_pr_view(repo) if pr is None else git_ops.gh_pr_view(repo, pr)
+    assert result == {"number": number}
     cmd = captured["cmd"]
-    assert cmd[:3] == ["gh", "pr", "view"]
-    # No PR number anywhere in the argv.
-    assert all(not part.isdigit() for part in cmd)
+    if pr is None:
+        assert cmd[:3] == ["gh", "pr", "view"]
+        # No PR number anywhere in the argv.
+        assert all(not part.isdigit() for part in cmd)
+    else:
+        assert cmd[:4] == ["gh", "pr", "view", str(pr)]
 
 
 # --- daydream_commits ---------------------------------------------------------
@@ -1007,26 +1018,6 @@ def test_daydream_commits_none_when_no_commits(tmp_path: Path) -> None:
     assert result is None
 
 
-def test_gh_pr_view_includes_pr_arg_when_given(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    captured: dict[str, list[str]] = {}
-
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout='{"number": 42}', stderr=""
-        )
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
-
-    result = git_ops.gh_pr_view(repo, 42)
-    assert result == {"number": 42}
-    cmd = captured["cmd"]
-    assert cmd[:4] == ["gh", "pr", "view", "42"]
-
-
 # --- clone -------------------------------------------------------------------
 
 
@@ -1054,8 +1045,15 @@ def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:
         git_ops.clone("file:///nonexistent/repo.git", target)
 
 
-def test_clone_blobless_passes_filter_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """clone(blobless=True) includes --filter=blob:none in the git invocation."""
+@pytest.mark.parametrize(
+    ("blobless", "filter_present"),
+    [(True, True), (False, False)],
+    ids=["blobless_passes_filter_flag", "default_no_filter_flag"],
+)
+def test_clone_filter_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blobless: bool, filter_present: bool
+) -> None:
+    """clone(blobless=True) includes --filter=blob:none; the default omits it."""
     captured: dict[str, list[str]] = {}
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -1064,22 +1062,8 @@ def test_clone_blobless_passes_filter_flag(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
 
-    git_ops.clone("https://example.com/repo.git", tmp_path / "out", blobless=True)
-    assert "--filter=blob:none" in captured["cmd"]
-
-
-def test_clone_default_no_filter_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """clone() without blobless does not pass --filter."""
-    captured: dict[str, list[str]] = {}
-
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
-
-    git_ops.clone("https://example.com/repo.git", tmp_path / "out")
-    assert "--filter=blob:none" not in captured["cmd"]
+    git_ops.clone("https://example.com/repo.git", tmp_path / "out", blobless=blobless)
+    assert ("--filter=blob:none" in captured["cmd"]) is filter_present
 
 
 def test_gh_api_raises_rate_limit_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

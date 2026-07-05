@@ -31,15 +31,17 @@ from tests.harness.codex_replay import make_mock_process, make_mock_process_from
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
 
+async def _run_fixture(backend, prompt, fixture, **kwargs):
+    """Drive ``execute`` over a canned fixture and collect the event list."""
+    mock_proc = make_mock_process_from_fixture(fixture)
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        return [event async for event in backend.execute(Path("/tmp"), prompt, **kwargs)]
+
+
 @pytest.mark.asyncio
 async def test_simple_text_events():
     backend = CodexBackend(model="gpt-5.3-codex")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Say hello"):
-            events.append(event)
+    events = await _run_fixture(backend, "Say hello", "simple_text.jsonl")
 
     text_events = [e for e in events if isinstance(e, TextEvent)]
     cost_events = [e for e in events if isinstance(e, CostEvent)]
@@ -70,12 +72,7 @@ async def test_simple_text_events():
 @pytest.mark.asyncio
 async def test_tool_use_events():
     backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
-
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Run ls"):
-            events.append(event)
+    events = await _run_fixture(backend, "Run ls", "tool_use.jsonl")
 
     thinking = [e for e in events if isinstance(e, ThinkingEvent)]
     tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
@@ -95,22 +92,47 @@ async def test_tool_use_events():
     assert any(t.text == "Done!" for t in texts)
 
 
+@pytest.mark.parametrize(
+    ("fixture", "expected_output", "expected_text_count"),
+    [
+        (
+            "structured_output.jsonl",
+            {"issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]},
+            None,
+        ),
+        (
+            # Text delivered via item.updated deltas (item.completed has empty content).
+            "streamed_structured_output.jsonl",
+            {"issues": [{"id": 1, "description": "Missing type hint", "file": "app.py", "line": 10}]},
+            1,
+        ),
+        (
+            # agent_message with output_text content blocks (schema-constrained).
+            "output_text_blocks.jsonl",
+            {"issues": [{"id": 1, "description": "Bad import", "file": "main.py", "line": 3}]},
+            None,
+        ),
+        (
+            # Structured output returned in turn.completed result field.
+            "turn_completed_result.jsonl",
+            {"issues": [{"id": 1, "description": "Unused variable", "file": "utils.py", "line": 22}]},
+            None,
+        ),
+    ],
+    ids=["item-completed", "streamed-item-updated", "output-text-blocks", "turn-completed-result"],
+)
 @pytest.mark.asyncio
-async def test_structured_output():
+async def test_structured_output(fixture, expected_output, expected_text_count):
+    """Structured output is extracted across the Codex delivery shapes."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
-            events.append(event)
+    events = await _run_fixture(backend, "Parse", fixture, output_schema=schema)
 
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1
-    assert result_events[0].structured_output == {
-        "issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]
-    }
+    assert result_events[0].structured_output == expected_output
+    if expected_text_count is not None:
+        assert len([e for e in events if isinstance(e, TextEvent)]) == expected_text_count
 
 
 @pytest.mark.asyncio
@@ -226,57 +248,11 @@ async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streamed_structured_output_via_item_updated():
-    """Text delivered via item.updated deltas (item.completed has empty content)."""
-    backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("streamed_structured_output.jsonl")
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
-            events.append(event)
-
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(result_events) == 1
-    assert result_events[0].structured_output == {
-        "issues": [{"id": 1, "description": "Missing type hint", "file": "app.py", "line": 10}]
-    }
-
-    text_events = [e for e in events if isinstance(e, TextEvent)]
-    assert len(text_events) == 1
-
-
-@pytest.mark.asyncio
-async def test_output_text_content_blocks():
-    """agent_message with output_text content blocks (schema-constrained)."""
-    backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("output_text_blocks.jsonl")
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
-            events.append(event)
-
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(result_events) == 1
-    assert result_events[0].structured_output == {
-        "issues": [{"id": 1, "description": "Bad import", "file": "main.py", "line": 3}]
-    }
-
-
-@pytest.mark.asyncio
 async def test_toplevel_text_field():
     """Real Codex format: text directly on item, not in content blocks."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("toplevel_text.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
-            events.append(event)
+    events = await _run_fixture(backend, "Parse", "toplevel_text.jsonl", output_schema=schema)
 
     thinking = [e for e in events if isinstance(e, ThinkingEvent)]
     assert len(thinking) == 1
@@ -300,36 +276,12 @@ async def test_toplevel_text_field():
 
 
 @pytest.mark.asyncio
-async def test_turn_completed_result_field():
-    """Structured output returned in turn.completed result field."""
-    backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("turn_completed_result.jsonl")
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
-            events.append(event)
-
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(result_events) == 1
-    assert result_events[0].structured_output == {
-        "issues": [{"id": 1, "description": "Unused variable", "file": "utils.py", "line": 22}]
-    }
-
-
-@pytest.mark.asyncio
 async def test_turn_completed_cached_input_tokens():
     """Codex emits cached_input_tokens on turn.completed.usage; surface it on
     MetricsEvent and CostEvent so cache-hit ratios work for the Codex backend
     (refs #65, K4 — fix for the historical hardcoded cached_tokens=None)."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("turn_completed_cached_tokens.jsonl")
-
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Cached"):
-            events.append(event)
+    events = await _run_fixture(backend, "Cached", "turn_completed_cached_tokens.jsonl")
 
     metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
     cost_events = [e for e in events if isinstance(e, CostEvent)]
@@ -434,12 +386,7 @@ async def test_codex_cost_none_for_unknown_model() -> None:
 async def test_codex_backend_emits_turn_end_after_each_agent_message() -> None:
     """One TurnEndEvent per item.completed of type agent_message."""
     backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("two_agent_turns.jsonl")
-
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Two turns"):
-            events.append(event)
+    events = await _run_fixture(backend, "Two turns", "two_agent_turns.jsonl")
 
     texts = [e for e in events if isinstance(e, TextEvent)]
     turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
@@ -528,22 +475,19 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
             await second_task
 
 
-def test_format_skill_invocation():
+@pytest.mark.parametrize(
+    ("skill_key", "args", "expected"),
+    [
+        ("beagle-python:review-python", "", "$review-python"),
+        ("beagle-core:fetch-pr-feedback", "--pr 42 --bot mybot", "$fetch-pr-feedback --pr 42 --bot mybot"),
+        ("commit-push", "", "$commit-push"),
+    ],
+    ids=["namespaced", "with-args", "no-namespace"],
+)
+def test_format_skill_invocation(skill_key, args, expected):
     backend = CodexBackend(model="fixture-model")
-    result = backend.format_skill_invocation("beagle-python:review-python")
-    assert result == "$review-python"
-
-
-def test_format_skill_invocation_with_args():
-    backend = CodexBackend(model="fixture-model")
-    result = backend.format_skill_invocation("beagle-core:fetch-pr-feedback", "--pr 42 --bot mybot")
-    assert result == "$fetch-pr-feedback --pr 42 --bot mybot"
-
-
-def test_format_skill_invocation_no_namespace():
-    backend = CodexBackend(model="fixture-model")
-    result = backend.format_skill_invocation("commit-push")
-    assert result == "$commit-push"
+    result = backend.format_skill_invocation(skill_key, args) if args else backend.format_skill_invocation(skill_key)
+    assert result == expected
 
 
 class TestUnwrapShellCommand:
@@ -617,15 +561,8 @@ async def test_well_formed_multi_tool_no_orphans(caplog: pytest.LogCaptureFixtur
     no parser warning may fire.
     """
     backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("item_started_no_id.jsonl")
-
-    with (
-        patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc),
-        caplog.at_level(logging.WARNING, logger="daydream.backends.codex"),
-    ):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Run tools"):
-            events.append(event)
+    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+        events = await _run_fixture(backend, "Run tools", "item_started_no_id.jsonl")
 
     tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
     tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
@@ -653,15 +590,8 @@ async def test_orphaned_tool_result_is_observable(caplog: pytest.LogCaptureFixtu
     trajectory recorder still buckets it without a silent drop.
     """
     backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("orphaned_tool_result.jsonl")
-
-    with (
-        patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc),
-        caplog.at_level(logging.WARNING, logger="daydream.backends.codex"),
-    ):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Orphan"):
-            events.append(event)
+    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+        events = await _run_fixture(backend, "Orphan", "orphaned_tool_result.jsonl")
 
     tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(tool_results) == 1
@@ -687,16 +617,10 @@ async def test_malformed_structured_output_warns(caplog: pytest.LogCaptureFixtur
     ``structured_output=None`` (the schema parse genuinely failed).
     """
     backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("malformed_structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
-    with (
-        patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc),
-        caplog.at_level(logging.WARNING, logger="daydream.backends.codex"),
-    ):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
-            events.append(event)
+    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+        events = await _run_fixture(backend, "Parse", "malformed_structured_output.jsonl", output_schema=schema)
 
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1

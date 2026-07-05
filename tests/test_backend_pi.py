@@ -46,6 +46,20 @@ from daydream.backends.pi import (
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
 
 
+async def _run_and_capture_args(backend, prompt="p", *, fixture="simple_text.jsonl", **kwargs):
+    """Drive ``execute`` over a canned fixture and return the subprocess argv.
+
+    Consolidates the recurring pattern of patching ``create_subprocess_exec``,
+    draining the event stream, and reading ``mock_exec.call_args``. Returns the
+    ``(flat_args, mock_exec)`` pair so callers can also assert on kwargs.
+    """
+    mock_proc = make_mock_process_from_fixture(fixture)
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), prompt, **kwargs):
+            pass
+    return list(mock_exec.call_args.args), mock_exec
+
+
 @pytest.mark.asyncio
 async def test_simple_text_events():
     backend = PiBackend(model="glm-5.2")
@@ -185,17 +199,12 @@ async def test_error_turn_raises_pi_error():
 async def test_continuation_token_uses_session_id_flag():
     """A pi continuation token maps to --session-id <id> (not --no-session)."""
     backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="pi", data={"session_id": "pi_resume_me"})
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "Continue", continuation=token):
-            pass
-
-        flat_args = list(mock_exec.call_args.args)
-        assert "--session-id" in flat_args
-        assert flat_args[flat_args.index("--session-id") + 1] == "pi_resume_me"
-        assert "--no-session" not in flat_args
+    flat_args, _ = await _run_and_capture_args(backend, "Continue", continuation=token)
+    assert "--session-id" in flat_args
+    assert flat_args[flat_args.index("--session-id") + 1] == "pi_resume_me"
+    assert "--no-session" not in flat_args
 
 
 @pytest.mark.asyncio
@@ -210,38 +219,25 @@ async def test_fresh_run_uses_session_id_not_no_session():
     phase_test_and_heal feeds the token back into its retry loop.
     """
     backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "Fresh"):
-            pass
-
-        flat_args = list(mock_exec.call_args.args)
-        assert "--no-session" not in flat_args
-        assert "--session-id" in flat_args
-        passed_id = flat_args[flat_args.index("--session-id") + 1]
-        # A genuine UUID: the token must name a resumable persistent session.
-        uuid.UUID(passed_id)
+    flat_args, _ = await _run_and_capture_args(backend, "Fresh")
+    assert "--no-session" not in flat_args
+    assert "--session-id" in flat_args
+    passed_id = flat_args[flat_args.index("--session-id") + 1]
+    # A genuine UUID: the token must name a resumable persistent session.
+    uuid.UUID(passed_id)
 
 
 @pytest.mark.asyncio
 async def test_read_only_restricts_tools():
     """read_only=True adds --tools read,find,ls,grep (excludes mutating tools)."""
     backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p", read_only=True):
-            pass
-
-        flat_args = list(mock_exec.call_args.args)
-        assert flat_args[flat_args.index("--tools") + 1] == "read,find,ls,grep"
+    flat_args, _ = await _run_and_capture_args(backend, read_only=True)
+    assert flat_args[flat_args.index("--tools") + 1] == "read,find,ls,grep"
     # read_only=False by default → no --tools flag.
-    mock_proc2 = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc2) as mock_exec2:
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-        assert "--tools" not in list(mock_exec2.call_args.args)
+    flat_args_default, _ = await _run_and_capture_args(backend)
+    assert "--tools" not in flat_args_default
 
 
 @pytest.mark.asyncio
@@ -252,16 +248,11 @@ async def test_env_overrides_forwarded_as_flags(monkeypatch):
     monkeypatch.setenv("PI_THINKING", "medium")
 
     backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-
-        flat_args = list(mock_exec.call_args.args)
-        assert flat_args[flat_args.index("--provider") + 1] == "zai"
-        assert flat_args[flat_args.index("--api-key") + 1] == "secret-key"
-        assert flat_args[flat_args.index("--thinking") + 1] == "medium"
+    flat_args, _ = await _run_and_capture_args(backend)
+    assert flat_args[flat_args.index("--provider") + 1] == "zai"
+    assert flat_args[flat_args.index("--api-key") + 1] == "secret-key"
+    assert flat_args[flat_args.index("--thinking") + 1] == "medium"
 
 
 @pytest.mark.asyncio
@@ -553,22 +544,19 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader():
             await second_task
 
 
-def test_render_tool_result_text_blocks():
-    result = {"content": [{"type": "text", "text": "line1"}, {"type": "text", "text": "line2"}]}
-    assert _render_tool_result(result) == "line1line2"
-
-
-def test_render_tool_result_string_content():
-    assert _render_tool_result({"content": "raw"}) == "raw"
-
-
-def test_render_tool_result_falls_back_to_details():
-    assert _render_tool_result({"details": {"note": "x"}}) == "{'note': 'x'}"
-
-
-def test_render_tool_result_non_dict():
-    assert _render_tool_result("plain") == "plain"
-    assert _render_tool_result(None) == ""
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"content": [{"type": "text", "text": "line1"}, {"type": "text", "text": "line2"}]}, "line1line2"),
+        ({"content": "raw"}, "raw"),
+        ({"details": {"note": "x"}}, "{'note': 'x'}"),
+        ("plain", "plain"),
+        (None, ""),
+    ],
+    ids=["text-blocks", "string-content", "details-fallback", "non-dict-str", "non-dict-none"],
+)
+def test_render_tool_result(result, expected):
+    assert _render_tool_result(result) == expected
 
 
 def test_schema_instruction_contains_schema_json():
@@ -629,22 +617,20 @@ def test_resolve_skill_dir_env_override_wins(tmp_path, monkeypatch):
     assert _resolve_skill_dir("beagle-python:review-python") == override_dir
 
 
-def test_format_skill_invocation_emits_native_command():
+@pytest.mark.parametrize(
+    ("skill_key", "args", "expected"),
+    [
+        ("beagle-python:review-python", "", "/skill:review-python"),
+        ("beagle-core:review-structure", "--pr 7", "/skill:review-structure --pr 7"),
+        ("review-go", "", "/skill:review-go"),
+    ],
+    ids=["namespaced-strips-prefix", "preserves-args", "bare-slug-unchanged"],
+)
+def test_format_skill_invocation(skill_key, args, expected):
     backend = PiBackend(model="glm-5.2")
-    result = backend.format_skill_invocation("beagle-python:review-python")
-    assert result == "/skill:review-python"
-    assert "beagle-python" not in result
-
-
-def test_format_skill_invocation_preserves_args():
-    backend = PiBackend(model="glm-5.2")
-    result = backend.format_skill_invocation("beagle-core:review-structure", "--pr 7")
-    assert result == "/skill:review-structure --pr 7"
-
-
-def test_format_skill_invocation_bare_slug_unchanged():
-    backend = PiBackend(model="glm-5.2")
-    assert backend.format_skill_invocation("review-go") == "/skill:review-go"
+    result = backend.format_skill_invocation(skill_key, args) if args else backend.format_skill_invocation(skill_key)
+    assert result == expected
+    assert "beagle-" not in result
 
 
 def test_skill_token_re_grammar_matches_pi_name_rules():
@@ -745,13 +731,9 @@ def test_create_backend_pi_returns_pi_backend_with_default_model():
     assert isinstance(backend, PiBackend)
     assert backend.model == DEFAULT_PI_MODEL
 
-
-def test_create_backend_pi_custom_model():
-    from daydream.backends import create_backend
-
-    backend = create_backend("pi", model="glm-4.5-air")
-    assert isinstance(backend, PiBackend)
-    assert backend.model == "glm-4.5-air"
+    custom = create_backend("pi", model="glm-4.5-air")
+    assert isinstance(custom, PiBackend)
+    assert custom.model == "glm-4.5-air"
 
 
 def test_create_backend_invalid_includes_pi_in_message():
@@ -857,41 +839,27 @@ async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("env_provider", "expected"),
+    [(None, "zai"), ("my-proxy", "my-proxy")],
+    ids=["default-zai", "PI_PROVIDER-override"],
+)
 @pytest.mark.asyncio
-async def test_default_provider_is_zai(monkeypatch):
-    """Without PI_PROVIDER, --provider defaults to ``zai`` (matches DEFAULT_PI_MODEL).
+async def test_provider_flag(monkeypatch, env_provider, expected):
+    """--provider defaults to ``zai`` (matches DEFAULT_PI_MODEL) unless PI_PROVIDER overrides it.
 
     The z.ai provider is registered by the ``~/.pi/extensions/zai-provider``
     pi extension; daydream must always point pi at it so the default GLM model
     resolves without relying on a user-configured models.json entry.
     """
-    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    if env_provider is None:
+        monkeypatch.delenv("PI_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("PI_PROVIDER", env_provider)
 
     backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-
-        flat_args = list(mock_exec.call_args.args)
-        assert flat_args[flat_args.index("--provider") + 1] == "zai"
-
-
-@pytest.mark.asyncio
-async def test_pi_provider_override(monkeypatch):
-    """PI_PROVIDER overrides the z.ai default."""
-    monkeypatch.setenv("PI_PROVIDER", "my-proxy")
-
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-
-        flat_args = list(mock_exec.call_args.args)
-        assert flat_args[flat_args.index("--provider") + 1] == "my-proxy"
+    flat_args, _ = await _run_and_capture_args(backend)
+    assert flat_args[flat_args.index("--provider") + 1] == expected
 
 
 # ---------------------------------------------------------------------------
@@ -911,20 +879,14 @@ async def test_append_system_prompt_preamble_in_args():
     from daydream.backends.pi import _PI_SYSTEM_PREAMBLE
 
     backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-
-        flat_args = list(mock_exec.call_args.args)
-        assert "--append-system-prompt" in flat_args
-        preamble = flat_args[flat_args.index("--append-system-prompt") + 1]
-        assert preamble == _PI_SYSTEM_PREAMBLE
-        # Preamble must actually carry the budget-awareness guidance, not be
-        # an empty stub a future refactor could silently collapse to.
-        assert "tool-call budget" in preamble
-        assert "grep" in preamble.lower()
+    flat_args, _ = await _run_and_capture_args(backend)
+    assert "--append-system-prompt" in flat_args
+    preamble = flat_args[flat_args.index("--append-system-prompt") + 1]
+    assert preamble == _PI_SYSTEM_PREAMBLE
+    # Preamble must actually carry the budget-awareness guidance, not be
+    # an empty stub a future refactor could silently collapse to.
+    assert "tool-call budget" in preamble
+    assert "grep" in preamble.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -932,19 +894,10 @@ async def test_append_system_prompt_preamble_in_args():
 # ---------------------------------------------------------------------------
 
 
-def test_pierror_retryable_default():
-    err = PiError("something went wrong")
-    assert err.retryable is False
-
-
-def test_pierror_retryable_kwarg():
-    err = PiError("429 rate limit", retryable=True)
-    assert err.retryable is True
-
-
-def test_pierror_message_preserved():
-    err = PiError("auth failed", retryable=False)
-    assert str(err) == "auth failed"
+def test_pierror_retryable_default_and_kwarg_and_message():
+    assert PiError("something went wrong").retryable is False
+    assert PiError("429 rate limit", retryable=True).retryable is True
+    assert str(PiError("auth failed", retryable=False)) == "auth failed"
 
 
 # ---------------------------------------------------------------------------
@@ -952,73 +905,56 @@ def test_pierror_message_preserved():
 # ---------------------------------------------------------------------------
 
 
-def test_is_retryable_error_message_429():
-    assert _is_retryable_error_message("429 Too Many Requests") is True
-
-
-def test_is_retryable_error_message_overload():
-    assert _is_retryable_error_message("Service is currently overloaded") is True
-
-
-def test_is_retryable_error_message_rate_limit_space():
-    assert _is_retryable_error_message("rate limit exceeded") is True
-
-
-def test_is_retryable_error_message_rate_limit_underscore():
-    assert _is_retryable_error_message("rate_limit hit") is True
-
-
-def test_is_retryable_error_message_capacity():
-    assert _is_retryable_error_message("Capacity unavailable") is True
-
-
-def test_is_retryable_error_message_too_many_requests():
-    assert _is_retryable_error_message("too many requests from this IP") is True
-
-
-def test_is_retryable_error_message_throttle():
-    assert _is_retryable_error_message("Request throttled") is True
-
-
-def test_is_retryable_error_message_throttling():
-    assert _is_retryable_error_message("throttling in effect") is True
-
-
-def test_is_retryable_error_message_case_insensitive():
-    assert _is_retryable_error_message("OVERLOAD detected") is True
-
-
-def test_is_retryable_error_message_non_retryable():
-    assert _is_retryable_error_message("auth failed") is False
-
-
-def test_is_retryable_error_message_not_overloaded_is_non_retryable():
-    assert _is_retryable_error_message("service is not overloaded") is False
-
-
-def test_is_retryable_error_message_capacity_planning_is_non_retryable():
-    assert _is_retryable_error_message("capacity planning required") is False
-
-
-def test_is_retryable_error_message_empty():
-    assert _is_retryable_error_message("") is False
-
-
-def test_is_retryable_error_message_unknown_pi_error():
-    assert _is_retryable_error_message("Unknown Pi error") is False
-
-
-def test_is_retryable_error_message_stream_drop_signatures():
-    """Stream-drop signatures are classified as retryable (z.ai/GLM connection drops)."""
-    for sig in (
-        "terminated",
-        "ECONNRESET",
-        "connection reset",
-        "socket hang up",
-        "premature close",
-        "EPIPE",
-    ):
-        assert _is_retryable_error_message(sig) is True, f"Expected {sig!r} to be retryable"
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("429 Too Many Requests", True),
+        ("Service is currently overloaded", True),
+        ("rate limit exceeded", True),
+        ("rate_limit hit", True),
+        ("Capacity unavailable", True),
+        ("too many requests from this IP", True),
+        ("Request throttled", True),
+        ("throttling in effect", True),
+        ("OVERLOAD detected", True),  # case-insensitive
+        # Stream-drop signatures (z.ai/GLM connection drops).
+        ("terminated", True),
+        ("ECONNRESET", True),
+        ("connection reset", True),
+        ("socket hang up", True),
+        ("premature close", True),
+        ("EPIPE", True),
+        ("auth failed", False),
+        ("service is not overloaded", False),
+        ("capacity planning required", False),
+        ("", False),
+        ("Unknown Pi error", False),
+    ],
+    ids=[
+        "429",
+        "overload",
+        "rate-limit-space",
+        "rate_limit-underscore",
+        "capacity",
+        "too-many-requests",
+        "throttle",
+        "throttling",
+        "case-insensitive",
+        "stream-drop-terminated",
+        "stream-drop-econnreset",
+        "stream-drop-connection-reset",
+        "stream-drop-socket-hang-up",
+        "stream-drop-premature-close",
+        "stream-drop-epipe",
+        "auth-failed",
+        "not-overloaded",
+        "capacity-planning",
+        "empty",
+        "unknown",
+    ],
+)
+def test_is_retryable_error_message(message, expected):
+    assert _is_retryable_error_message(message) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -1026,24 +962,13 @@ def test_is_retryable_error_message_stream_drop_signatures():
 # ---------------------------------------------------------------------------
 
 
-def test_is_retryable_exit_code_sigkill():
-    assert _is_retryable_exit_code(-9) is True
-
-
-def test_is_retryable_exit_code_oom_137():
-    assert _is_retryable_exit_code(137) is True
-
-
-def test_is_retryable_exit_code_normal_exit_1():
-    assert _is_retryable_exit_code(1) is False
-
-
-def test_is_retryable_exit_code_normal_exit_2():
-    assert _is_retryable_exit_code(2) is False
-
-
-def test_is_retryable_exit_code_zero():
-    assert _is_retryable_exit_code(0) is False
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [(-9, True), (137, True), (1, False), (2, False), (0, False)],
+    ids=["sigkill", "oom-137", "exit-1", "exit-2", "zero"],
+)
+def test_is_retryable_exit_code(code, expected):
+    assert _is_retryable_exit_code(code) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -1051,16 +976,24 @@ def test_is_retryable_exit_code_zero():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("error_message", "expected_retryable"),
+    [
+        ("429 Too Many Requests - rate limit exceeded", True),
+        ("authentication required", False),
+    ],
+    ids=["429-retryable", "auth-non-retryable"],
+)
 @pytest.mark.asyncio
-async def test_error_turn_sets_retryable_on_429():
-    """A 429 errorMessage in turn_end sets retryable=True on PiError."""
+async def test_error_turn_sets_retryable_via_classifier(error_message, expected_retryable):
+    """The turn_end errorMessage is run through the retryable classifier."""
     backend = PiBackend(model="glm-5.2")
     lines = [
-        '{"type":"session","sessionId":"pi_ses_429"}',
+        '{"type":"session","sessionId":"pi_ses_err"}',
         '{"type":"agent_start"}',
         '{"type":"turn_start"}',
         '{"type":"turn_end","message":{"role":"assistant","content":[],'
-        '"stopReason":"error","errorMessage":"429 Too Many Requests - rate limit exceeded"}}',
+        f'"stopReason":"error","errorMessage":{json.dumps(error_message)}}}}}',
     ]
     mock_proc = make_mock_process(lines)
 
@@ -1069,58 +1002,30 @@ async def test_error_turn_sets_retryable_on_429():
             async for _ in backend.execute(Path("/tmp"), "p"):
                 pass
 
-    assert exc_info.value.retryable is True
+    assert exc_info.value.retryable is expected_retryable
 
 
+@pytest.mark.parametrize(
+    ("returncode", "output_lines", "expected_retryable"),
+    [
+        (-9, [], True),  # SIGKILL/OOM
+        (1, ["Error: not authenticated"], False),  # auth/config error
+    ],
+    ids=["oom-sigkill-retryable", "exit-1-non-retryable"],
+)
 @pytest.mark.asyncio
-async def test_error_turn_non_retryable_for_auth_failure():
-    """A non-transient errorMessage in turn_end sets retryable=False."""
+async def test_nonzero_exit_sets_retryable_via_exit_code(returncode, output_lines, expected_retryable):
+    """The subprocess return code is run through the exit-code retryable classifier."""
     backend = PiBackend(model="glm-5.2")
-    lines = [
-        '{"type":"session","sessionId":"pi_ses_auth"}',
-        '{"type":"agent_start"}',
-        '{"type":"turn_start"}',
-        '{"type":"turn_end","message":{"role":"assistant","content":[],'
-        '"stopReason":"error","errorMessage":"authentication required"}}',
-    ]
-    mock_proc = make_mock_process(lines)
+    mock_proc = make_mock_process(output_lines)
+    mock_proc.returncode = returncode
 
     with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(PiError) as exc_info:
             async for _ in backend.execute(Path("/tmp"), "p"):
                 pass
 
-    assert exc_info.value.retryable is False
-
-
-@pytest.mark.asyncio
-async def test_oom_exit_sets_retryable():
-    """Exit code -9 (SIGKILL/OOM) sets retryable=True on the PiError."""
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process([])
-    mock_proc.returncode = -9
-
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(PiError) as exc_info:
-            async for _ in backend.execute(Path("/tmp"), "p"):
-                pass
-
-    assert exc_info.value.retryable is True
-
-
-@pytest.mark.asyncio
-async def test_normal_exit_1_not_retryable():
-    """Exit code 1 (auth error, config error) is NOT retryable."""
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process(["Error: not authenticated"])
-    mock_proc.returncode = 1
-
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(PiError) as exc_info:
-            async for _ in backend.execute(Path("/tmp"), "p"):
-                pass
-
-    assert exc_info.value.retryable is False
+    assert exc_info.value.retryable is expected_retryable
 
 
 # ---------------------------------------------------------------------------
@@ -1128,32 +1033,31 @@ async def test_normal_exit_1_not_retryable():
 # ---------------------------------------------------------------------------
 
 
-def test_pi_retry_attempts_default():
-    assert _pi_retry_attempts() == _PI_DEFAULT_RETRY_ATTEMPTS
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [(None, _PI_DEFAULT_RETRY_ATTEMPTS), ("5", 5)],
+    ids=["default", "env-override"],
+)
+def test_pi_retry_attempts(monkeypatch, env_value, expected):
+    if env_value is not None:
+        monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", env_value)
+    assert _pi_retry_attempts() == expected
 
 
-def test_pi_retry_attempts_env_override(monkeypatch):
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "5")
-    assert _pi_retry_attempts() == 5
-
-
-def test_pi_retry_base_delay_default():
-    assert _pi_retry_base_delay() == _PI_DEFAULT_RETRY_BASE_DELAY
-
-
-def test_pi_retry_base_delay_env_override(monkeypatch):
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.5")
-    assert _pi_retry_base_delay() == pytest.approx(0.5)
-
-
-def test_pi_retry_base_delay_nan_falls_back(monkeypatch):
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "nan")
-    assert _pi_retry_base_delay() == _PI_DEFAULT_RETRY_BASE_DELAY
-
-
-def test_pi_retry_base_delay_inf_falls_back(monkeypatch):
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "inf")
-    assert _pi_retry_base_delay() == _PI_DEFAULT_RETRY_BASE_DELAY
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, _PI_DEFAULT_RETRY_BASE_DELAY),
+        ("0.5", 0.5),
+        ("nan", _PI_DEFAULT_RETRY_BASE_DELAY),
+        ("inf", _PI_DEFAULT_RETRY_BASE_DELAY),
+    ],
+    ids=["default", "env-override", "nan-falls-back", "inf-falls-back"],
+)
+def test_pi_retry_base_delay(monkeypatch, env_value, expected):
+    if env_value is not None:
+        monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", env_value)
+    assert _pi_retry_base_delay() == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------------

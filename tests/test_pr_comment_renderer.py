@@ -72,6 +72,17 @@ def _agent_step(
     return step
 
 
+def _user_step(phase: str = "review") -> dict[str, Any]:
+    """Build the leading user step (step_id 1) the Trajectory validator expects."""
+    return {
+        "step_id": 1,
+        "timestamp": "2026-05-02T00:00:00.000000Z",
+        "source": "user",
+        "message": "go",
+        "extra": {"daydream_phase": phase, "daydream_run_flow": "ttt"},
+    }
+
+
 def _write_trajectory(
     tmp_path: Path,
     *,
@@ -140,13 +151,7 @@ def test_m5_cost_source_per_backend(tmp_path: Path) -> None:
     p = _write_trajectory(
         tmp_path,
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             _agent_step(
                 step_id=2,
                 phase="review",
@@ -179,13 +184,7 @@ def test_m6_unknown_model_renders_dash_and_footnote(tmp_path: Path) -> None:
         tmp_path,
         model="mystery-model",
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             _agent_step(
                 step_id=2,
                 phase="review",
@@ -225,13 +224,7 @@ def test_m6b_user_override_synthesizes_cost_for_unknown_model(
         tmp_path,
         model="custom-codex-op",
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             _agent_step(
                 step_id=2,
                 phase="review",
@@ -256,13 +249,7 @@ def test_m7_mixed_models_render_breakdown_pointer(tmp_path: Path) -> None:
     p = _write_trajectory(
         tmp_path,
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             _agent_step(step_id=2, phase="review", model="gpt-5.5", cost_usd=0.10),
             _agent_step(step_id=3, phase="fix", model="claude-sonnet-4-5", cost_usd=0.20),
         ],
@@ -277,13 +264,7 @@ def test_m8_cache_hit_ratio_rendered_when_input_nonzero(tmp_path: Path) -> None:
     p = _write_trajectory(
         tmp_path,
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             _agent_step(
                 step_id=2,
                 phase="review",
@@ -330,13 +311,7 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
         tmp_path,
         name="subcent.json",
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             _agent_step(
                 step_id=2,
                 phase="review",
@@ -361,13 +336,7 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
         tmp_path,
         name="big.json",
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             _agent_step(
                 step_id=2,
                 phase="review",
@@ -389,13 +358,7 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
         tmp_path,
         name="zero_input.json",
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             _agent_step(
                 step_id=2,
                 phase="review",
@@ -664,13 +627,7 @@ def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
     p = _write_trajectory(
         tmp_path,
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             _agent_step(
                 step_id=2,
                 phase="review",
@@ -703,13 +660,7 @@ def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
     p = _write_trajectory(
         tmp_path,
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             _agent_step(
                 step_id=2,
                 phase="review",
@@ -750,13 +701,7 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
         # Use a model that's in MODEL_PRICES so cost synthesis lands.
         model="gpt-5.5",
         steps=[
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
+            _user_step(),
             # All agent steps omit model_name -> renderer must fall back to
             # agent.model_name from the root config.
             _agent_step(
@@ -787,34 +732,35 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
 
 
 # Duration formatting
-def test_format_duration_none_renders_dash() -> None:
-    assert _format_duration(None) == "—"
-
-
-def test_format_duration_sub_second() -> None:
-    assert _format_duration(0.0) == "<1s"
-    assert _format_duration(0.5) == "<1s"
-    assert _format_duration(0.999) == "<1s"
-
-
-def test_format_duration_seconds() -> None:
-    assert _format_duration(1.0) == "1s"
-    assert _format_duration(30.0) == "30s"
-    assert _format_duration(59.9) == "59s"
-
-
-def test_format_duration_minutes() -> None:
-    assert _format_duration(60.0) == "1m"
-    assert _format_duration(61.0) == "1m 1s"
-    assert _format_duration(150.0) == "2m 30s"
-    assert _format_duration(3599.0) == "59m 59s"
-
-
-def test_format_duration_hours() -> None:
-    assert _format_duration(3600.0) == "1h"
-    assert _format_duration(3660.0) == "1h 1m"
-    assert _format_duration(7200.0) == "2h"
-    assert _format_duration(7380.0) == "2h 3m"
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (None, "—"),
+        (0.0, "<1s"),
+        (0.5, "<1s"),
+        (0.999, "<1s"),
+        (1.0, "1s"),
+        (30.0, "30s"),
+        (59.9, "59s"),
+        (60.0, "1m"),
+        (61.0, "1m 1s"),
+        (150.0, "2m 30s"),
+        (3599.0, "59m 59s"),
+        (3600.0, "1h"),
+        (3660.0, "1h 1m"),
+        (7200.0, "2h"),
+        (7380.0, "2h 3m"),
+    ],
+    ids=[
+        "none", "zero", "half", "sub-second",
+        "1s", "30s", "59s",
+        "1m", "1m1s", "2m30s", "59m59s",
+        "1h", "1h1m", "2h", "2h3m",
+    ],
+)
+def test_format_duration(seconds: float | None, expected: str) -> None:
+    """_format_duration covers None, sub-second, seconds, minutes, and hours."""
+    assert _format_duration(seconds) == expected
 
 
 # Duration in rollup and phase table

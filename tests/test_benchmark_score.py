@@ -7,7 +7,6 @@ import pytest
 from daydream.benchmark.score import (
     JUDGE_BASE_URL_ENV,
     JUDGE_MODEL_ENV,
-    BenchmarkArtifactError,
     DaydreamScores,
     JudgeEnvError,
     JudgeFailedError,
@@ -152,56 +151,72 @@ def test_preflight_passes_when_key_present(monkeypatch):
     preflight_judge_env()
 
 
-def test_direct_anthropic_preflight_requires_anthropic_key(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+@pytest.mark.parametrize(
+    ("anthropic_key", "martian_base_url", "match"),
+    [
+        # Missing Anthropic key.
+        (None, None, "ANTHROPIC_API_KEY"),
+        # An OpenRouter key is not a direct-Anthropic credential.
+        ("sk-or-not-direct", None, "OpenRouter key supplied for Anthropic-direct judge"),
+        # A Martian base URL is invalid for direct scoring.
+        ("sk-ant-direct", "https://api.anthropic.com", "MARTIAN_BASE_URL is invalid for direct Anthropic scoring"),
+    ],
+    ids=["missing-key", "openrouter-key", "martian-base-url"],
+)
+def test_direct_anthropic_preflight_rejects(monkeypatch, anthropic_key, martian_base_url, match):
+    """Direct-Anthropic preflight rejects a missing key, an OpenRouter key, and a
+    Martian base URL, each with its own diagnostic message."""
     monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
-    with pytest.raises(JudgeEnvError, match="ANTHROPIC_API_KEY"):
+    if anthropic_key is None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", anthropic_key)
+    if martian_base_url is not None:
+        monkeypatch.setenv("MARTIAN_BASE_URL", martian_base_url)
+    with pytest.raises(JudgeEnvError, match=match):
         preflight_judge_env(judge_route="anthropic-direct")
 
 
-def test_direct_anthropic_preflight_rejects_openrouter_key(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-or-not-direct")
-    monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
-    with pytest.raises(JudgeEnvError, match="OpenRouter key supplied for Anthropic-direct judge"):
-        preflight_judge_env(judge_route="anthropic-direct")
+_P_MIXED, _R_MIXED = 2 / 5, 2 / 6
 
 
-def test_direct_anthropic_preflight_rejects_martian_base_url(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-direct")
-    monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
-    monkeypatch.setenv("MARTIAN_BASE_URL", "https://api.anthropic.com")
-    with pytest.raises(JudgeEnvError, match="MARTIAN_BASE_URL is invalid for direct Anthropic scoring"):
-        preflight_judge_env(judge_route="anthropic-direct")
-
-
-def test_f1_computation():
-    """F1 is the harmonic mean of the aggregate precision and recall.
-
-    url1 contributes tp=2 fp=1 fn=1, url2 tp=0 fp=2 fn=3, so aggregate
-    precision = 2/5 = 0.4 and recall = 2/6 ≈ 0.3333, giving
-    f1 = 2·0.4·0.3333 / (0.4 + 0.3333) ≈ 0.3636.
-    """
-    evals = {
-        "url1": {"daydream": {"tp": 2, "fp": 1, "fn": 1, "total_candidates": 3, "total_golden": 3}},
-        "url2": {"daydream": {"tp": 0, "fp": 2, "fn": 3, "total_candidates": 2, "total_golden": 3}},
-    }
+@pytest.mark.parametrize(
+    ("evals", "expected_precision", "expected_recall", "expected_f1"),
+    [
+        # Harmonic mean of aggregate precision/recall across two PRs.
+        (
+            {
+                "url1": {"daydream": {"tp": 2, "fp": 1, "fn": 1, "total_candidates": 3, "total_golden": 3}},
+                "url2": {"daydream": {"tp": 0, "fp": 2, "fn": 3, "total_candidates": 2, "total_golden": 3}},
+            },
+            _P_MIXED,
+            _R_MIXED,
+            2 * _P_MIXED * _R_MIXED / (_P_MIXED + _R_MIXED),
+        ),
+        # Perfect precision and recall → f1 == 1.0.
+        (
+            {"url1": {"daydream": {"tp": 3, "fp": 0, "fn": 0, "total_candidates": 3, "total_golden": 3}}},
+            1.0,
+            1.0,
+            1.0,
+        ),
+        # P + R == 0 → f1 == 0.0 (no division by zero).
+        (
+            {"url1": {"daydream": {"tp": 0, "fp": 4, "fn": 5, "total_candidates": 4, "total_golden": 5}}},
+            0.0,
+            0.0,
+            0.0,
+        ),
+    ],
+    ids=["mixed", "perfect", "zero"],
+)
+def test_f1_computation(evals, expected_precision, expected_recall, expected_f1):
+    """F1 is the harmonic mean of the aggregate precision and recall, with the
+    degenerate perfect (1.0) and zero (0.0, no division-by-zero) cases pinned."""
     s = parse_daydream_scores(evals)
-    p, r = 2 / 5, 2 / 6
-    assert s.f1 == pytest.approx(2 * p * r / (p + r))
-
-
-def test_f1_perfect_scores():
-    """Perfect precision and recall → f1 == 1.0."""
-    evals = {"url1": {"daydream": {"tp": 3, "fp": 0, "fn": 0, "total_candidates": 3, "total_golden": 3}}}
-    s = parse_daydream_scores(evals)
-    assert s.precision == 1.0 and s.recall == 1.0 and s.f1 == 1.0
-
-
-def test_f1_zero_when_precision_and_recall_zero():
-    """P + R == 0 → f1 == 0.0 (no division by zero)."""
-    evals = {"url1": {"daydream": {"tp": 0, "fp": 4, "fn": 5, "total_candidates": 4, "total_golden": 5}}}
-    s = parse_daydream_scores(evals)
-    assert s.precision == 0.0 and s.recall == 0.0 and s.f1 == 0.0
+    assert s.precision == pytest.approx(expected_precision)
+    assert s.recall == pytest.approx(expected_recall)
+    assert s.f1 == pytest.approx(expected_f1)
 
 
 def test_parse_daydream_scores_extracts_per_pr_and_aggregate():
@@ -328,15 +343,32 @@ def test_run_scoring_raises_judge_failed_when_evaluations_all_errored(tmp_path, 
         run_scoring(tmp_path, model, pr_count=1, tool="daydream-glm")
 
 
-def test_run_scoring_invokes_three_steps_in_order(tmp_path, monkeypatch):
+def _record_run_scoring_calls(tmp_path, monkeypatch, *, pr_count=None):
+    """Run run_scoring with faked subprocess capture, returning the captured cmds.
+
+    Sets MARTIAN_API_KEY, stubs subprocess.run to record each argv and drop an
+    empty evaluations.json, then drives the real run_scoring path.
+    """
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
-    calls = []
-    monkeypatch.setattr("daydream.benchmark.score.subprocess.run",
-        lambda cmd, **k: calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "daydream.benchmark.score.subprocess.run",
+        lambda cmd, **k: calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
     rdir = tmp_path / "results" / "anthropic_claude-opus-4.5"
     rdir.mkdir(parents=True)
     (rdir / "evaluations.json").write_text("{}")
-    run_scoring(tmp_path, "anthropic/claude-opus-4.5")
+    kwargs = {} if pr_count is None else {"pr_count": pr_count}
+    run_scoring(tmp_path, "anthropic/claude-opus-4.5", **kwargs)
+    return calls
+
+
+def _step3_cmd(calls):
+    return next(c for c in calls if c[c.index("-m") + 1] == "code_review_benchmark.step3_judge_comments")
+
+
+def test_run_scoring_invokes_three_steps_in_order(tmp_path, monkeypatch):
+    calls = _record_run_scoring_calls(tmp_path, monkeypatch)
     mods = [c[c.index("-m") + 1] for c in calls]
     assert mods == ["code_review_benchmark.step2_extract_comments",
                     "code_review_benchmark.step2_5_dedup_candidates",
@@ -344,31 +376,19 @@ def test_run_scoring_invokes_three_steps_in_order(tmp_path, monkeypatch):
     assert all(c[c.index("--tool") + 1] == "daydream" for c in calls)
 
 
-def test_run_scoring_passes_limit_to_step3_when_pr_count_given(tmp_path, monkeypatch):
-    monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
-    calls = []
-    monkeypatch.setattr("daydream.benchmark.score.subprocess.run",
-        lambda cmd, **k: calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""))
-    rdir = tmp_path / "results" / "anthropic_claude-opus-4.5"
-    rdir.mkdir(parents=True)
-    (rdir / "evaluations.json").write_text("{}")
-    run_scoring(tmp_path, "anthropic/claude-opus-4.5", pr_count=3)
-    step3_cmd = next(c for c in calls if c[c.index("-m") + 1] == "code_review_benchmark.step3_judge_comments")
-    assert "--limit" in step3_cmd
-    assert step3_cmd[step3_cmd.index("--limit") + 1] == "3"
-
-
-def test_run_scoring_omits_limit_from_step3_when_pr_count_not_given(tmp_path, monkeypatch):
-    monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
-    calls = []
-    monkeypatch.setattr("daydream.benchmark.score.subprocess.run",
-        lambda cmd, **k: calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""))
-    rdir = tmp_path / "results" / "anthropic_claude-opus-4.5"
-    rdir.mkdir(parents=True)
-    (rdir / "evaluations.json").write_text("{}")
-    run_scoring(tmp_path, "anthropic/claude-opus-4.5")
-    step3_cmd = next(c for c in calls if c[c.index("-m") + 1] == "code_review_benchmark.step3_judge_comments")
-    assert "--limit" not in step3_cmd
+@pytest.mark.parametrize(
+    ("pr_count", "expect_limit"),
+    [(3, "3"), (None, None)],
+    ids=["pr-count-given", "pr-count-omitted"],
+)
+def test_run_scoring_limit_passthrough_to_step3(tmp_path, monkeypatch, pr_count, expect_limit):
+    """step3 gets --limit exactly when pr_count is supplied, with the given value."""
+    step3_cmd = _step3_cmd(_record_run_scoring_calls(tmp_path, monkeypatch, pr_count=pr_count))
+    if expect_limit is None:
+        assert "--limit" not in step3_cmd
+    else:
+        assert "--limit" in step3_cmd
+        assert step3_cmd[step3_cmd.index("--limit") + 1] == expect_limit
 
 
 def _emulating_fake_run(model_dir_name: str):
@@ -432,22 +452,8 @@ def test_run_scoring_with_relative_benchmark_repo_resolves_dedup_path(tmp_path, 
 
     assert scores.scored_pr_count == 1
     assert scores.total_tp == 1
-    # The dedup file step3 was pointed at actually exists on disk.
+    # The dedup file step3 was pointed at actually exists on disk. That the
+    # call did not raise BenchmarkArtifactError also pins the absolute-path
+    # resolution: a relative benchmark_repo would double up step3's --dedup-groups
+    # path, write no evaluations.json, and raise.
     assert (tmp_path / "bench" / "results" / model_dir_name / "evaluations.json").exists()
-
-
-def test_run_scoring_relative_repo_regression_fails_without_absolute_resolution(tmp_path, monkeypatch):
-    """Guard the fix directly: if benchmark_repo were left relative, step3's
-    dedup path would miss and run_scoring would raise. We assert the post-fix
-    behavior (no raise) here; the companion test above asserts the parsed
-    scores. Together they pin the absolute-path resolution in place."""
-    monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
-    model = "anthropic/claude-opus-4.5"
-    model_dir_name = "anthropic_claude-opus-4.5"
-    (tmp_path / "bench" / "results" / model_dir_name).mkdir(parents=True)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("daydream.benchmark.score.subprocess.run", _emulating_fake_run(model_dir_name))
-    try:
-        run_scoring(Path("bench"), model, pr_count=2)
-    except BenchmarkArtifactError as exc:  # pragma: no cover - only on regression
-        pytest.fail(f"relative benchmark_repo broke step3 dedup resolution: {exc}")
