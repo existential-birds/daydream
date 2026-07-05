@@ -389,7 +389,7 @@ async def test_trajectory_agent_identity_is_daydream(tmp_path: Path) -> None:
 
 
 async def test_schema_version_and_session_id_present(tmp_path: Path) -> None:
-    """schema_version pinned to ATIF-v1.6 (D-09); session_id is non-empty UUID."""
+    """schema_version pinned to ATIF-v1.7; session_id and trajectory_id present."""
     recorder = _make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -397,9 +397,83 @@ async def test_schema_version_and_session_id_present(tmp_path: Path) -> None:
             inv.observe(ResultEvent(structured_output=None, continuation=None))
 
     traj = _read_trajectory(recorder.path)
-    assert traj["schema_version"] == "ATIF-v1.6"
+    assert atif_validate(traj, validate_images=False) is True
+    assert traj["schema_version"] == "ATIF-v1.7"
     assert isinstance(traj["session_id"], str)
     assert len(traj["session_id"]) > 0
+    # v1.7: root trajectory carries a per-document trajectory_id. With no fork
+    # descriptor it equals the run-scoped session_id.
+    assert traj["trajectory_id"] == traj["session_id"]
+
+
+async def test_agent_step_carries_llm_call_count_one(tmp_path: Path) -> None:
+    """v1.7: a real assistant turn records llm_call_count == 1."""
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="Hello world"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+    traj = _read_trajectory(recorder.path)
+    assert atif_validate(traj, validate_images=False) is True
+    agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 1
+    assert agent_steps[0]["llm_call_count"] == 1
+
+
+async def test_dispatch_step_is_deterministic_zero_llm_calls(tmp_path: Path) -> None:
+    """v1.7 no-LLM-orchestration rule: the fan-out dispatch step is a
+    deterministic (non-LLM) step — llm_call_count == 0 and no metrics /
+    reasoning_content. The vendored validator enforces this, so a passing
+    ``atif_validate`` plus the field assertions prove the constraint holds.
+    """
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.fork("fix-0") as child:
+            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                _observe_text_and_result(inv)
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv)
+
+    traj = _read_trajectory(recorder.path)
+    assert atif_validate(traj, validate_images=False) is True
+    dispatch_steps = [
+        s for s in traj["steps"]
+        if s["source"] == "agent" and "Dispatching" in s.get("message", "")
+    ]
+    assert len(dispatch_steps) == 1
+    dispatch = dispatch_steps[0]
+    assert dispatch["llm_call_count"] == 0
+    assert "metrics" not in dispatch
+    assert "reasoning_content" not in dispatch
+
+
+async def test_fork_child_trajectory_id_distinct_from_root(tmp_path: Path) -> None:
+    """v1.7: a fork's per-document trajectory_id is descriptor-qualified so it
+    is distinct from the shared run-scoped session_id, while the sibling ref on
+    the parent stays resolvable via trajectory_path.
+    """
+    recorder = _make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.fork("fix-0") as child:
+            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                _observe_text_and_result(inv)
+            child_path = child.path
+        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            _observe_text_and_result(inv)
+
+    child_traj = _read_trajectory(child_path)
+    assert atif_validate(child_traj, validate_images=False) is True
+    assert child_traj["session_id"] == recorder.session_id
+    assert child_traj["trajectory_id"] == f"{recorder.session_id}:fix-0"
+
+    parent_traj = _read_trajectory(recorder.path)
+    ref = parent_traj["steps"][
+        next(i for i, s in enumerate(parent_traj["steps"]) if "Dispatching" in s.get("message", ""))
+    ]["observation"]["results"][0]["subagent_trajectory_ref"][0]
+    assert ref["trajectory_path"].startswith("runs/")
 
 
 # Sanity: now_iso, Redactor, Invocation public surface

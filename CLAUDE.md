@@ -4,7 +4,7 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## Project overview
 
-Daydream is an automated code review and fix loop. It reviews diffs using stack-specific [Beagle](https://github.com/existential-birds/beagle) skills, applies fixes, validates via test suite, and records every agent interaction as an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus pipeline scores, labels, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
+Daydream is an automated code review and fix loop. It reviews diffs using stack-specific [Beagle](https://github.com/existential-birds/beagle) skills, applies fixes, validates via test suite, and records every agent interaction as an [ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus pipeline scores, labels, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
 
 The default flow is a deep multi-stack pipeline. `--shallow` opts into a single-skill loop. `--comment` and `--review` produce review-only output (PR comments or markdown report). The `daydream feedback <pr#>` subcommand ingests bot review comments.
 
@@ -134,7 +134,7 @@ cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
 | Deep orchestrator | Deep-flow step functions (exploration, intent, alternatives, per-stack, arbiter, merge, verify, fix) | `deep/orchestrator.py` |
 | Phases | Stateless async `phase_*()` workflow steps and prompt builders | `phases.py` |
 | Agent | Backend wrapper, event stream to UI, global state, budget enforcement | `agent.py` |
-| Trajectory | ATIF v1.6 recorder, redaction, ContextVar propagation | `trajectory.py` |
+| Trajectory | ATIF v1.7 recorder, redaction, ContextVar propagation | `trajectory.py` |
 | Backends | `Backend` protocol, `ClaudeBackend`, `CodexBackend`, `PiBackend`, `AgentEvent` union, `create_backend()` | `backends/` |
 | UI | Rich terminal output (Dracula theme): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` | `ui/` |
 | Config | Skill mappings, per-phase model defaults, constants | `config.py` |
@@ -222,8 +222,8 @@ name inventories, module shape, bump policy — is `docs/extensions.md`.
 
 - **SDK**: `claude-agent-sdk==0.2.108`. Agent capabilities go through the `Backend` /
   `AgentEvent` abstraction; Claude is one of three backends.
-- **ATIF**: Vendored from Harbor v0.5.0 under `daydream/atif/` (Apache-2.0). Pinned to
-  ATIF v1.6 emission. `pydantic>=2.11.7` required.
+- **ATIF**: Vendored from Harbor v0.17.1-9 under `daydream/atif/` (Apache-2.0). Pinned to
+  ATIF v1.7 emission. `pydantic>=2.11.7` required.
 - **No `harbor` runtime dep.** ATIF models live in `daydream/trajectory.py` only.
 - **Module-bloat ban**: No ATIF model construction inside `phases.py` or `ui/`.
 
