@@ -1320,14 +1320,28 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
     )
     fix_failures_p = fix_failures_path(dd)
-    if fix_failures:
+    # Partition failures: budget-exceeded groups have their already-applied fixes
+    # intact (only remaining findings were skipped) and must NOT be reverted.
+    # Exception-failed groups may hold broken partial edits and must be reverted.
+    _BUDGET_PREFIX = "file_group_budget_exceeded:"
+    exception_failures = {k: v for k, v in fix_failures.items() if not v.startswith(_BUDGET_PREFIX)}
+    budget_skips = {k: v for k, v in fix_failures.items() if v.startswith(_BUDGET_PREFIX)}
+
+    all_non_success = {**exception_failures, **budget_skips}
+    if all_non_success:
         # Persist so the archive marks the run "partial" instead of
-        # "complete" -- the tree is no longer a clean success.
-        fix_failures_p.write_text(json.dumps(fix_failures, indent=2, sort_keys=True))
+        # "complete" -- the tree holds skipped or reverted groups.
+        fix_failures_p.write_text(json.dumps(all_non_success, indent=2, sort_keys=True))
+    elif fix_failures_p.exists():
+        fix_failures_p.unlink()
+
+    if exception_failures:
+        # Only revert and abort for exception-failed groups; budget-exceeded
+        # groups' applied fixes are preserved and the run continues.
         _protect_tree_after_fix_failures(
             work,
             target_dir,
-            fix_failures,
+            exception_failures,
             snapshot=pre_fix_snapshot,
             pre_untracked=pre_fix_untracked,
         )
@@ -1347,13 +1361,13 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             leftover_p.unlink()
         print_warning(
             console,
-            f"{len(fix_failures)} fix group(s) failed: {sorted(fix_failures)}; "
+            f"{len(exception_failures)} fix group(s) failed: {sorted(exception_failures)}; "
             "partial edits reverted (patches saved under .daydream/partial-fixes/).",
         )
         return Stop(1)
-    # Fresh successful fix supersedes any stale failures record.
-    if fix_failures_p.exists():
-        fix_failures_p.unlink()
+
+    # No exception failures: budget-skipped groups (if any) already warned via
+    # _record_budget_stop; proceed to test/commit with the applied fixes intact.
     stale_leftover_p = fix_leftover_untracked_path(dd)
     if stale_leftover_p.exists():
         stale_leftover_p.unlink()

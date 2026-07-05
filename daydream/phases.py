@@ -2003,8 +2003,12 @@ async def phase_fix_parallel(
     Each file group is bounded by a :class:`FileGroupBudget` (#201): the budget
     is consulted before every fix call (including the batched call), and if a
     group's cumulative wall-clock or serial-item count is reached, the remaining
-    findings in that group are skipped (recorded in ``failures`` and a ``file_group_budget_exceeded``
-    trajectory event), so one runaway file cannot silently dominate the run. The
+    findings in that group are skipped while already-applied fixes in that group
+    are preserved.  The skipped group is recorded in ``failures`` with a
+    ``"file_group_budget_exceeded:"`` reason prefix (distinguishable from
+    exception-based entries) and a ``file_group_budget_exceeded`` trajectory
+    event is emitted.  Callers MUST NOT revert budget-exceeded entries; only
+    remaining findings are unprocessed, not the ones already applied.  The
     per-invocation guards inside each fix call are unchanged; this is an aggregate
     guard layered on top (Approach B — between-calls check, no mid-call abort).
 
@@ -2019,10 +2023,13 @@ async def phase_fix_parallel(
         group_max_serial_items: Per-file-group serial fix-call ceiling (#201).
 
     Returns:
-        ``failures``: file -> "<ExceptionType>: <message>" for file-groups whose
-        fix raised, or "file_group_budget_exceeded: <reason>" for groups stopped
-        by their budget. Empty dict on full success. Callers MUST surface this to
-        the user so that uncommitted failures are visible instead of silently dropped.
+        ``failures``: file -> reason string.  Exception-failed groups carry
+        ``"<ExceptionType>: <message>"``; their partial edits may be broken and
+        callers MUST revert them.  Budget-exceeded groups carry
+        ``"file_group_budget_exceeded: <reason>"``; their already-applied fixes
+        are intact and callers MUST NOT revert them — only the remaining findings
+        were skipped.  Callers distinguish the two by the prefix.  Empty dict on
+        full success.
 
     """
     raw_groups = group_items_by_file(items)
