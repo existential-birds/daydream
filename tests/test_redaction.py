@@ -45,51 +45,29 @@ def _agent_step(
     )
 
 
-# ---- API key patterns (REDA-01) ----
+# ---- Single-token secret patterns in free text (REDA-01) ----
+
+_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.aBcDeF12345"
 
 
-def test_redactor_scrubs_openai_api_key() -> None:
-    """REDA-01: sk-* tokens replaced with [REDACTED_API_KEY]."""
-    out = Redactor().redact_step(_user_step("token=sk-test-12345abcdef done"))
+@pytest.mark.parametrize(
+    ("text", "raw_secret", "marker"),
+    [
+        ("token=sk-test-12345abcdef done", "sk-test-12345abcdef", "[REDACTED_API_KEY]"),
+        ("auth=ghp_test123abcdef bearer", "ghp_test123abcdef", "[REDACTED_API_KEY]"),
+        ("slack=xoxb-test456abcdef", "xoxb-test456abcdef", "[REDACTED_API_KEY]"),
+        ("aws=AKIA0000TESTKEY00000", "AKIA0000TESTKEY00000", "[REDACTED_API_KEY]"),
+        ("token=ghs_abc123DEF456ghi789jkl012 done", "ghs_abc123DEF456ghi789jkl012", "[REDACTED_API_KEY]"),
+        (f"bearer {_JWT}", _JWT, "[REDACTED_JWT]"),
+    ],
+    ids=["openai", "github", "slack", "aws", "github_installation", "jwt"],
+)
+def test_redactor_scrubs_single_token_secret(text: str, raw_secret: str, marker: str) -> None:
+    """REDA-01: sk-/ghp_/xoxb-/AKIA/ghs_ tokens → [REDACTED_API_KEY], JWTs → [REDACTED_JWT]."""
+    out = Redactor().redact_step(_user_step(text))
     assert isinstance(out.message, str)
-    assert "sk-test-12345abcdef" not in out.message
-    assert "[REDACTED_API_KEY]" in out.message
-
-
-def test_redactor_scrubs_github_token() -> None:
-    """REDA-01: ghp_* tokens replaced with [REDACTED_API_KEY]."""
-    out = Redactor().redact_step(_user_step("auth=ghp_test123abcdef bearer"))
-    assert isinstance(out.message, str)
-    assert "ghp_test123abcdef" not in out.message
-    assert "[REDACTED_API_KEY]" in out.message
-
-
-def test_redactor_scrubs_slack_bot_token() -> None:
-    """REDA-01: xoxb-* tokens replaced with [REDACTED_API_KEY]."""
-    out = Redactor().redact_step(_user_step("slack=xoxb-test456abcdef"))
-    assert isinstance(out.message, str)
-    assert "xoxb-test456abcdef" not in out.message
-    assert "[REDACTED_API_KEY]" in out.message
-
-
-def test_redactor_scrubs_aws_access_key() -> None:
-    """REDA-01: AKIA-prefixed AWS keys replaced with [REDACTED_API_KEY]."""
-    out = Redactor().redact_step(_user_step("aws=AKIA0000TESTKEY00000"))
-    assert isinstance(out.message, str)
-    assert "AKIA0000TESTKEY00000" not in out.message
-    assert "[REDACTED_API_KEY]" in out.message
-
-
-# ---- JWT pattern (REDA-01) ----
-
-
-def test_redactor_scrubs_jwt_token() -> None:
-    """REDA-01: eyJ JWT tokens replaced with [REDACTED_JWT]."""
-    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.aBcDeF12345"
-    out = Redactor().redact_step(_user_step(f"bearer {jwt}"))
-    assert isinstance(out.message, str)
-    assert jwt not in out.message
-    assert "[REDACTED_JWT]" in out.message
+    assert raw_secret not in out.message
+    assert marker in out.message
 
 
 # ---- JWT negative case (TEST-03 gap fill) ----
@@ -135,49 +113,42 @@ def test_redactor_scrubs_git_url_credentials() -> None:
 # ---- Username path patterns (REDA-02) ----
 
 
-def test_redactor_scrubs_macos_username_path() -> None:
-    """REDA-02: /Users/<name>/ → /Users/[REDACTED_USER]/ (project-relative tail preserved)."""
-    out = Redactor().redact_step(_user_step("path=/Users/ka/github/proj/app.py"))
+@pytest.mark.parametrize(
+    ("text", "absent", "present", "preserved_tail"),
+    [
+        ("path=/Users/ka/github/proj/app.py", "/Users/ka", "/Users/[REDACTED_USER]", "github/proj/app.py"),
+        ("path=/home/alice/foo/bar", "/home/alice", "/home/[REDACTED_USER]", "foo/bar"),
+        ("path=C:\\Users\\bob\\repo", "Users\\bob", "[REDACTED_USER]", None),
+    ],
+    ids=["macos", "linux", "windows"],
+)
+def test_redactor_scrubs_username_path(text: str, absent: str, present: str, preserved_tail: str | None) -> None:
+    """REDA-02: /Users//home//C:\\Users\\ <name> → [REDACTED_USER], project-relative tail preserved."""
+    out = Redactor().redact_step(_user_step(text))
     assert isinstance(out.message, str)
-    assert "/Users/ka" not in out.message
-    assert "/Users/[REDACTED_USER]" in out.message
-    assert "github/proj/app.py" in out.message
-
-
-def test_redactor_scrubs_linux_username_path() -> None:
-    """REDA-02: /home/<name>/ → /home/[REDACTED_USER]/."""
-    out = Redactor().redact_step(_user_step("path=/home/alice/foo/bar"))
-    assert isinstance(out.message, str)
-    assert "/home/alice" not in out.message
-    assert "/home/[REDACTED_USER]" in out.message
-    assert "foo/bar" in out.message
-
-
-def test_redactor_scrubs_windows_username_path() -> None:
-    """REDA-02: C:\\Users\\<name>\\ → C:\\Users\\[REDACTED_USER]\\."""
-    out = Redactor().redact_step(_user_step("path=C:\\Users\\bob\\repo"))
-    assert isinstance(out.message, str)
-    assert "Users\\bob" not in out.message
-    assert "[REDACTED_USER]" in out.message
+    assert absent not in out.message
+    assert present in out.message
+    if preserved_tail is not None:
+        assert preserved_tail in out.message
 
 
 # ---- Env-var pattern (REDA-03) ----
 
 
-def test_redactor_scrubs_env_var_secret() -> None:
-    """REDA-03: KEY=value secret-keyname env vars get value redacted, key preserved."""
-    out = Redactor().redact_step(_user_step("OPENAI_API_KEY=sk-realvalue123"))
+@pytest.mark.parametrize(
+    ("text", "raw_value", "expected_fragment"),
+    [
+        ("OPENAI_API_KEY=sk-realvalue123", "sk-realvalue123", "OPENAI_API_KEY=[REDACTED_ENV_VAR]"),
+        ("DB_PASSWORD=hunter2", "hunter2", "DB_PASSWORD=[REDACTED_ENV_VAR]"),
+    ],
+    ids=["key", "password"],
+)
+def test_redactor_scrubs_env_var(text: str, raw_value: str, expected_fragment: str) -> None:
+    """REDA-03: secret-keyname env vars get value redacted, key preserved."""
+    out = Redactor().redact_step(_user_step(text))
     assert isinstance(out.message, str)
-    assert "sk-realvalue123" not in out.message
-    assert "OPENAI_API_KEY=[REDACTED_ENV_VAR]" in out.message
-
-
-def test_redactor_scrubs_env_var_password() -> None:
-    """REDA-03: PASSWORD= env vars get value redacted, key preserved."""
-    out = Redactor().redact_step(_user_step("DB_PASSWORD=hunter2"))
-    assert isinstance(out.message, str)
-    assert "hunter2" not in out.message
-    assert "DB_PASSWORD=[REDACTED_ENV_VAR]" in out.message
+    assert raw_value not in out.message
+    assert expected_fragment in out.message
 
 
 # ---- Negative cases ----
@@ -470,63 +441,41 @@ def test_redactor_scrubs_text_content_parts() -> None:
     assert out.message[2].text == "clean text"
 
 
-def test_redactor_scrubs_github_installation_token() -> None:
-    """ghs_* installation tokens replaced with [REDACTED_API_KEY]."""
-    out = Redactor().redact_step(_user_step("token=ghs_abc123DEF456ghi789jkl012 done"))
-    assert isinstance(out.message, str)
-    assert "ghs_abc123DEF456ghi789jkl012" not in out.message
-    assert "[REDACTED_API_KEY]" in out.message
+_PKCS1_PEM = (
+    "-----BEGIN RSA PRIVATE KEY-----\n"
+    "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGPgjF\n"
+    "-----END RSA PRIVATE KEY-----"
+)
+_PKCS8_PEM = (
+    "-----BEGIN PRIVATE KEY-----\n"
+    "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC\n"
+    "-----END PRIVATE KEY-----"
+)
 
 
-def test_redactor_scrubs_pkcs1_private_key_block() -> None:
-    """-----BEGIN RSA PRIVATE KEY----- blocks replaced with [REDACTED_PEM_KEY]."""
-    pem = (
-        "-----BEGIN RSA PRIVATE KEY-----\n"
-        "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGPgjF\n"
-        "-----END RSA PRIVATE KEY-----"
-    )
+@pytest.mark.parametrize(
+    ("pem", "body"),
+    [(_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"), (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC")],
+    ids=["pkcs1", "pkcs8"],
+)
+def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
+    """-----BEGIN (RSA )PRIVATE KEY----- blocks replaced with [REDACTED_PEM_KEY]."""
     out = Redactor().redact_step(_user_step(f"key is {pem} ok"))
     assert isinstance(out.message, str)
-    assert "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn" not in out.message
+    assert body not in out.message
     assert "[REDACTED_PEM_KEY]" in out.message
 
 
-def test_redactor_scrubs_pkcs8_private_key_block() -> None:
-    """-----BEGIN PRIVATE KEY----- (PKCS8) blocks also redacted."""
-    pem = (
-        "-----BEGIN PRIVATE KEY-----\n"
-        "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC\n"
-        "-----END PRIVATE KEY-----"
-    )
-    out = Redactor().redact_step(_user_step(f"key: {pem}"))
-    assert isinstance(out.message, str)
-    assert "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC" not in out.message
-    assert "[REDACTED_PEM_KEY]" in out.message
-
-
-def test_redactor_scrubs_pkcs1_private_key_in_env_assignment() -> None:
-    """VAR=<PKCS1 PEM> redacts fully — PEM rule must run before the env-var rule."""
-    pem = (
-        "-----BEGIN RSA PRIVATE KEY-----\n"
-        "MIIEpAIBAAKCAQEA0Z3VSecretBody1234567890abcdef\n"
-        "-----END RSA PRIVATE KEY-----"
-    )
+@pytest.mark.parametrize(
+    ("pem", "body"),
+    [(_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"), (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC")],
+    ids=["pkcs1", "pkcs8"],
+)
+def test_redactor_scrubs_private_key_in_env_assignment(pem: str, body: str) -> None:
+    """VAR=<PEM> redacts fully — PEM rule must run before the env-var rule, no base64 body survives."""
     out = Redactor().redact_step(_user_step(f"DAYDREAM_APP_PRIVATE_KEY={pem}"))
     assert isinstance(out.message, str)
-    assert "MIIEpAIBAAKCAQEA0Z3VSecretBody" not in out.message
-    assert out.message == "DAYDREAM_APP_PRIVATE_KEY=[REDACTED_ENV_VAR]"
-
-
-def test_redactor_scrubs_pkcs8_private_key_in_env_assignment() -> None:
-    """VAR=<PKCS8 PEM> redacts fully — no base64 body survives the assignment form."""
-    pem = (
-        "-----BEGIN PRIVATE KEY-----\n"
-        "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC\n"
-        "-----END PRIVATE KEY-----"
-    )
-    out = Redactor().redact_step(_user_step(f"DAYDREAM_APP_PRIVATE_KEY={pem}"))
-    assert isinstance(out.message, str)
-    assert "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC" not in out.message
+    assert body not in out.message
     assert out.message == "DAYDREAM_APP_PRIVATE_KEY=[REDACTED_ENV_VAR]"
 
 
