@@ -1,4 +1,4 @@
-"""ATIF v1.6 trajectory models and validator (vendored from Harbor v0.5.0).
+"""ATIF v1.7 trajectory models and validator (vendored from Harbor).
 
 Re-exports the vendored Harbor surface so callers import a single namespace::
 
@@ -30,7 +30,7 @@ def validate(trajectory: dict[str, Any] | str | Path, *, validate_images: bool =
     """Validate an ATIF trajectory (dict, JSON string, or path).
 
     Pure passthrough to a freshly-constructed TrajectoryValidator (CONTEXT.md D-08).
-    Returns True iff the trajectory matches the ATIF v1.0–v1.6 schema accepted by
+    Returns True iff the trajectory matches the ATIF v1.0–v1.7 schema accepted by
     the vendored validator. Returns False on any validation failure.
 
     For detailed error messages, instantiate TrajectoryValidator() directly and

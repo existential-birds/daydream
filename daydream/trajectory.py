@@ -1,4 +1,4 @@
-"""ATIF v1.6 trajectory recorder for daydream runs.
+"""ATIF v1.7 trajectory recorder for daydream runs.
 
 This module is the SOLE home for ATIF Pydantic model construction (D-19
 module-bloat ban). Other modules (agent.py, phases.py, ui.py, runner.py,
@@ -717,6 +717,7 @@ class Invocation:
             tool_calls=tool_calls,
             observation=observation,
             metrics=d["_metrics"],
+            llm_call_count=1,
             extra=extra,
         )
         self.steps.append(self.recorder.redactor.redact_step(agent_step))
@@ -783,6 +784,7 @@ class Invocation:
             tool_calls=tool_calls,
             observation=observation,
             metrics=d["_metrics"],
+            llm_call_count=1,
             extra=extra,
         )
         return [*self.steps, self.recorder.redactor.redact_step(partial_step)]
@@ -1192,11 +1194,20 @@ class TrajectoryRecorder:
                 rel = str(sibling_path.relative_to(self.target_dir / ".daydream"))
             except ValueError:
                 rel = sibling_path.name
+            # trajectory_id is the sibling's canonical per-document id (mirrors
+            # the fork's build_trajectory: session_id qualified by descriptor).
+            # v1.7 makes it the resolution key for the ref; session_id stays as
+            # informational run identity only (shared across siblings, not a
+            # matching key), and trajectory_path remains the external file ref.
             results.append(
                 ObservationResult(
                     content=f"Dispatched to {desc}",
                     subagent_trajectory_ref=[
-                        SubagentTrajectoryRef(session_id=self.session_id, trajectory_path=rel),
+                        SubagentTrajectoryRef(
+                            trajectory_id=f"{self.session_id}:{desc}",
+                            session_id=self.session_id,
+                            trajectory_path=rel,
+                        ),
                     ],
                 )
             )
@@ -1208,6 +1219,10 @@ class TrajectoryRecorder:
             model_name=self.agent_model_name,
             message=f"Dispatching {count} parallel {phase.value} tasks",
             observation=Observation(results=results),
+            # Deterministic (non-LLM) fan-out dispatch: no inference is made
+            # here, so per the ATIF v1.7 no-LLM-orchestration rule this step
+            # carries llm_call_count=0 and omits metrics / reasoning_content.
+            llm_call_count=0,
             extra={
                 "daydream_phase": phase.value,
                 "daydream_run_flow": self.run_flow.value,
@@ -1239,9 +1254,15 @@ class TrajectoryRecorder:
             extra["phase_events"] = [e.to_dict() for e in self._phase_events]
         if self._subtrajectories:
             extra["subtrajectories"] = [dict(s) for s in self._subtrajectories]
+        # trajectory_id is the per-document identifier (distinct from the
+        # run-scoped session_id): the root uses session_id directly; a fork
+        # qualifies it with its descriptor so sibling documents stay unique
+        # within the run (ATIF v1.7).
+        trajectory_id = self.session_id if not self.descriptor else f"{self.session_id}:{self.descriptor}"
         return Trajectory(
-            schema_version="ATIF-v1.6",
+            schema_version="ATIF-v1.7",
             session_id=self.session_id,
+            trajectory_id=trajectory_id,
             agent=Agent(name="daydream", version=version, model_name=self.agent_model_name),
             steps=list(steps),
             final_metrics=final_metrics,
