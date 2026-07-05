@@ -69,7 +69,6 @@ class AgentState:
     quiet_mode: bool = False
     non_interactive: bool = False
     assume: str | None = None
-    shutdown_requested: bool = False
     current_backends: list[Backend] = field(default_factory=list)
 
 
@@ -183,11 +182,6 @@ def resolve_or_prompt(
         response = prompt_user(console, question, default)
         decision = response.strip().lower() in ("y", "yes")
     return decision
-
-
-def set_shutdown_requested(requested: bool) -> None:
-    """Set shutdown requested flag."""
-    _state.shutdown_requested = requested
 
 
 def get_current_backends() -> list[Backend]:

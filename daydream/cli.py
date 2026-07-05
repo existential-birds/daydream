@@ -40,7 +40,6 @@ from daydream import git_ops
 from daydream.agent import (
     console,
     get_current_backends,
-    set_shutdown_requested,
 )
 from daydream.benchmark.cli import _handle_bench_command
 from daydream.config_file import load_file_config
@@ -88,7 +87,6 @@ def _signal_handler(signum: int, frame: object) -> None:
     set, so ContextVar reads from here are non-deterministic.
     """
     signal_name = signal.Signals(signum).name
-    set_shutdown_requested(True)
 
     # Flush partial trajectory before tearing down (D-07); write_partial is sync
     # and exception-safe, so it can't crash the shutdown path.
