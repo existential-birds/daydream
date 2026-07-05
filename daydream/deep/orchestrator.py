@@ -25,7 +25,12 @@ from typing import TYPE_CHECKING, Any
 from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
-from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME
+from daydream.config import (
+    DEFAULT_GROUP_MAX_SERIAL_ITEMS,
+    DEFAULT_GROUP_MAX_WALL_S,
+    REVIEW_OUTPUT_FILE,
+    STRUCTURE_STACK_NAME,
+)
 from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 from daydream.deep.artifacts import (
     adjudication_complete_path,
@@ -206,6 +211,42 @@ def _precision_mode(config: RunConfig) -> bool:
     if file_config is not None and file_config.precision_mode:
         return True
     return False
+
+
+def _resolve_group_max_wall_s(config: RunConfig) -> float:
+    """Resolve the per-file-group fix wall-clock ceiling (issue #201).
+
+    Precedence (highest first), mirroring ``_shallow_fanout_threshold`` above
+    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
+
+      1. ``DaydreamFileConfig.group_max_wall_s`` (file-config scalar).
+      2. ``DEFAULT_GROUP_MAX_WALL_S`` (built-in default).
+
+    Uses ``is not None`` rather than truthiness so a configured value of
+    ``0.0`` is honored rather than falling through to the default.
+    """
+    file_config = config.file_config
+    if file_config is not None and file_config.group_max_wall_s is not None:
+        return file_config.group_max_wall_s
+    return DEFAULT_GROUP_MAX_WALL_S
+
+
+def _resolve_group_max_serial_items(config: RunConfig) -> int:
+    """Resolve the per-file-group serial fix-call ceiling (issue #201).
+
+    Precedence (highest first), mirroring ``_shallow_fanout_threshold`` above
+    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
+
+      1. ``DaydreamFileConfig.group_max_serial_items`` (file-config scalar).
+      2. ``DEFAULT_GROUP_MAX_SERIAL_ITEMS`` (built-in default).
+
+    Uses ``is not None`` rather than truthiness so a configured value of
+    ``0`` is honored rather than falling through to the default.
+    """
+    file_config = config.file_config
+    if file_config is not None and file_config.group_max_serial_items is not None:
+        return file_config.group_max_serial_items
+    return DEFAULT_GROUP_MAX_SERIAL_ITEMS
 
 
 def _collapse_stacks_for_tiny_diff(
@@ -1231,12 +1272,18 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             pre_fix_head = None
     else:
         pre_fix_head = None
+    # Resolve per-file-group fix budgets (#201): file-config override wins, else
+    # the config.py default. A runaway file group cannot silently dominate a run.
+    group_wall_s = _resolve_group_max_wall_s(config)
+    group_serial = _resolve_group_max_serial_items(config)
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
             work,
             items,
             intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
+            group_max_wall_s=group_wall_s,
+            group_max_serial_items=group_serial,
         )
     # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
     # NOW, before the fix-failure and test-failure early returns below, so
@@ -1246,14 +1293,28 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
     )
     fix_failures_p = fix_failures_path(dd)
-    if fix_failures:
+    # Partition failures: budget-exceeded groups have their already-applied fixes
+    # intact (only remaining findings were skipped) and must NOT be reverted.
+    # Exception-failed groups may hold broken partial edits and must be reverted.
+    _BUDGET_PREFIX = "file_group_budget_exceeded:"
+    exception_failures = {k: v for k, v in fix_failures.items() if not v.startswith(_BUDGET_PREFIX)}
+    budget_skips = {k: v for k, v in fix_failures.items() if v.startswith(_BUDGET_PREFIX)}
+
+    all_non_success = {**exception_failures, **budget_skips}
+    if all_non_success:
         # Persist so the archive marks the run "partial" instead of
-        # "complete" -- the tree is no longer a clean success.
-        fix_failures_p.write_text(json.dumps(fix_failures, indent=2, sort_keys=True))
+        # "complete" -- the tree holds skipped or reverted groups.
+        fix_failures_p.write_text(json.dumps(all_non_success, indent=2, sort_keys=True))
+    elif fix_failures_p.exists():
+        fix_failures_p.unlink()
+
+    if exception_failures:
+        # Only revert and abort for exception-failed groups; budget-exceeded
+        # groups' applied fixes are preserved and the run continues.
         _protect_tree_after_fix_failures(
             work,
             target_dir,
-            fix_failures,
+            exception_failures,
             snapshot=pre_fix_snapshot,
             pre_untracked=pre_fix_untracked,
         )
@@ -1273,13 +1334,13 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             leftover_p.unlink()
         print_warning(
             console,
-            f"{len(fix_failures)} fix group(s) failed: {sorted(fix_failures)}; "
+            f"{len(exception_failures)} fix group(s) failed: {sorted(exception_failures)}; "
             "partial edits reverted (patches saved under .daydream/partial-fixes/).",
         )
         return Stop(1)
-    # Fresh successful fix supersedes any stale failures record.
-    if fix_failures_p.exists():
-        fix_failures_p.unlink()
+
+    # No exception failures: budget-skipped groups (if any) already warned via
+    # _record_budget_stop; proceed to test/commit with the applied fixes intact.
     stale_leftover_p = fix_leftover_untracked_path(dd)
     if stale_leftover_p.exists():
         stale_leftover_p.unlink()

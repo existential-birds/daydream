@@ -28,6 +28,7 @@ from daydream.backends import Backend, ContinuationToken
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.extensions import get_registry
+from daydream.file_group_budget import FileGroupBudget
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.trajectory import (
     DaydreamPhase,
@@ -39,7 +40,13 @@ from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
-from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S, REVIEW_OUTPUT_FILE
+from daydream.config import (
+    DEFAULT_GROUP_MAX_SERIAL_ITEMS,
+    DEFAULT_GROUP_MAX_WALL_S,
+    DEFAULT_TOOL_CALL_BUDGET,
+    DEFAULT_WALL_BUDGET_S,
+    REVIEW_OUTPUT_FILE,
+)
 from daydream.ui import (
     phase_subtitle,
     print_dim,
@@ -63,6 +70,8 @@ TEST_OUTPUT_TAIL_LINES = 100
 
 # Generous for a real fix yet bounds a flailing agent that's globbing $HOME after a missed Read.
 FIX_MAX_TURNS = 40
+
+
 # Verify re-reads the fixed files and runs checks; same generous bound as fix.
 VERIFY_MAX_TURNS = 40
 _PR_BODY_MAX_CHARS = 8000
@@ -1905,6 +1914,8 @@ async def phase_fix_parallel(
     *,
     limiter_size: int = 4,
     intent_path: Path | None = None,
+    group_max_wall_s: float = DEFAULT_GROUP_MAX_WALL_S,
+    group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
@@ -1917,6 +1928,18 @@ async def phase_fix_parallel(
     it does not guarantee disjoint edits if an agent touches files other than the
     one named in the item's ``file`` key. Commit stays serial and after.
 
+    Each file group is bounded by a :class:`FileGroupBudget` (#201): the budget
+    is consulted before every fix call (including the batched call), and if a
+    group's cumulative wall-clock or serial-item count is reached, the remaining
+    findings in that group are skipped while already-applied fixes in that group
+    are preserved.  The skipped group is recorded in ``failures`` with a
+    ``"file_group_budget_exceeded:"`` reason prefix (distinguishable from
+    exception-based entries) and a ``file_group_budget_exceeded`` trajectory
+    event is emitted.  Callers MUST NOT revert budget-exceeded entries; only
+    remaining findings are unprocessed, not the ones already applied.  The
+    per-invocation guards inside each fix call are unchanged; this is an aggregate
+    guard layered on top (Approach B — between-calls check, no mid-call abort).
+
     Args:
         backend: The Backend to execute against (shared across tasks).
         work: Workspace context for the fixes; ``work.repo`` is the agent cwd.
@@ -1924,11 +1947,17 @@ async def phase_fix_parallel(
         limiter_size: Max number of file-groups to fix concurrently.
         intent_path: Optional confirmed-intent file forwarded unchanged to each
             fix call so every fix carries the deliberate-intent guard.
+        group_max_wall_s: Per-file-group wall-clock ceiling (#201).
+        group_max_serial_items: Per-file-group serial fix-call ceiling (#201).
 
     Returns:
-        ``failures``: file -> "<ExceptionType>: <message>" for file-groups whose
-        fix raised. Empty dict on full success. Callers MUST surface this to the
-        user so that uncommitted failures are visible instead of silently dropped.
+        ``failures``: file -> reason string.  Exception-failed groups carry
+        ``"<ExceptionType>: <message>"``; their partial edits may be broken and
+        callers MUST revert them.  Budget-exceeded groups carry
+        ``"file_group_budget_exceeded: <reason>"``; their already-applied fixes
+        are intact and callers MUST NOT revert them — only the remaining findings
+        were skipped.  Callers distinguish the two by the prefix.  Empty dict on
+        full success.
 
     """
     raw_groups = group_items_by_file(items)
@@ -1951,6 +1980,52 @@ async def phase_fix_parallel(
     _console_lock = anyio.Lock()
     total = len(items)
 
+    async def _record_budget_stop(
+        fkey: str,
+        reason: str,
+        grp_len: int,
+        budget: FileGroupBudget,
+    ) -> None:
+        """Record a group budget stop: trajectory event, failures entry, warning."""
+        processed = budget.items_processed
+        skipped = grp_len - processed
+        if recorder is not None:
+            recorder.emit_file_group_budget_exceeded(
+                file=fkey, reason=reason,
+                items_processed=processed, items_skipped=skipped,
+            )
+        async with _failures_lock:
+            failures[fkey] = f"file_group_budget_exceeded: {reason}"
+        async with _console_lock:
+            print_warning(
+                console,
+                f"File group '{fkey}' budget exceeded ({reason}) after {processed} "
+                f"item(s); skipping remaining {skipped}.",
+            )
+
+    async def _fix_group_serially(
+        fkey: str,
+        grp: list[tuple[dict[str, Any], int]],
+        budget: FileGroupBudget,
+    ) -> None:
+        """Fix a group's findings one at a time, honoring the group budget.
+
+        Checks ``budget.check()`` before each ``phase_fix`` call; on a budget
+        stop, records it and returns without processing the remainder. The
+        serial-item counter is bumped once per completed call.
+        """
+        for item, item_num in grp:
+            budget_reason = budget.check()
+            if budget_reason is not None:
+                await _record_budget_stop(fkey, budget_reason, len(grp), budget)
+                return
+            await phase_fix(
+                backend, work, item, item_num, total,
+                console_lock=_console_lock,
+                intent_path=intent_path,
+            )
+            budget.record_item()
+
     async with anyio.create_task_group() as tg:
         for file_key, numbered_items in groups_numbered:
             # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
@@ -1961,6 +2036,10 @@ async def phase_fix_parallel(
                 _fkey_slug = fkey.replace("/", "-").replace("\\", "-")
                 async with limiter:
                     async with maybe_fork(recorder, f"fix-{_fkey_slug}"):
+                        budget = FileGroupBudget(
+                            max_wall_seconds=group_max_wall_s,
+                            max_serial_items=group_max_serial_items,
+                        )
                         try:
                             grp_items = [item for item, _ in grp]
                             grp_nums = [num for _, num in grp]
@@ -1969,19 +2048,24 @@ async def phase_fix_parallel(
                                 # Single-item or <no-file> groups: go straight to
                                 # per-finding phase_fix (no batched prompt to build,
                                 # no fallback retry on failure).
-                                for item, item_num in grp:
-                                    await phase_fix(
-                                        backend, work, item, item_num, total,
-                                        console_lock=_console_lock,
-                                        intent_path=intent_path,
-                                    )
+                                await _fix_group_serially(fkey, grp, budget)
                             else:
+                                # Design-checkpoint #1: consult the group budget
+                                # BEFORE the batched call too, mirroring the serial
+                                # path, so a ceiling configured to 0/tiny skips the
+                                # file entirely instead of always burning one batched
+                                # turn first (keeps batched + fallback consistent).
+                                pre_batch_reason = budget.check()
+                                if pre_batch_reason is not None:
+                                    await _record_budget_stop(fkey, pre_batch_reason, len(grp), budget)
+                                    return
                                 try:
                                     await phase_fix_batched(
                                         backend, work, grp_items, grp_nums, total,
                                         console_lock=_console_lock,
                                         intent_path=intent_path,
                                     )
+                                    budget.record_item()
                                 except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
                                     # Restore the file to HEAD before falling back so
                                     # per-finding fixes don't re-apply partial edits
@@ -1994,12 +2078,7 @@ async def phase_fix_parallel(
                                                 console,
                                                 f"Could not restore {fkey} before fallback: {_restore_err}",
                                             )
-                                    for item, item_num in grp:
-                                        await phase_fix(
-                                            backend, work, item, item_num, total,
-                                            console_lock=_console_lock,
-                                            intent_path=intent_path,
-                                        )
+                                    await _fix_group_serially(fkey, grp, budget)
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                             reason = f"{type(e).__name__}: {e}"
                             async with _failures_lock:

@@ -41,6 +41,17 @@ class DaydreamFileConfig:
         precision_mode: Opt-in precision suppression (issue #232). ``None`` falls
             through to the RunConfig field / orchestrator default; ``True`` runs
             the skeptical suppression pass over borderline findings.
+        group_max_wall_s: Per-file-group fix wall-clock ceiling in seconds
+            (issue #201), a global ``[tool.daydream]`` key. Bounds the cumulative
+            wall-clock of all fix ``run_agent`` turns targeting one file group so
+            a runaway file cannot dominate a run. ``None`` (the default when the
+            key is absent or junk) falls through to
+            ``config.DEFAULT_GROUP_MAX_WALL_S`` (600.0).
+        group_max_serial_items: Per-file-group serial fix-call ceiling (#201), a
+            global ``[tool.daydream]`` key. Caps the number of per-finding fix
+            calls in one file group (the group is severity-sorted, so the dropped
+            tail is lowest-severity). ``None`` (the default when the key is absent
+            or junk) falls through to ``config.DEFAULT_GROUP_MAX_SERIAL_ITEMS`` (6).
     """
 
     model: str | None = None
@@ -49,6 +60,8 @@ class DaydreamFileConfig:
     bench: dict[str, Any] = field(default_factory=dict)
     shallow_fanout_threshold: int | None = None
     precision_mode: bool | None = None
+    group_max_wall_s: float | None = None
+    group_max_serial_items: int | None = None
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase."""
@@ -155,6 +168,26 @@ def _coerce_phases(raw: Any) -> dict[str, dict[str, str]]:
     return result
 
 
+def _coerce_int(raw: Any) -> int | None:
+    """Return ``raw`` as an int, or None for bool/non-int (degrade to default)."""
+    if isinstance(raw, bool):
+        return None
+    return raw if isinstance(raw, int) else None
+
+
+def _coerce_float(raw: Any) -> float | None:
+    """Return ``raw`` as a float, or None for bool/non-number (degrade to default).
+
+    Accepts TOML ints and floats (an int budget like ``group_max_wall_s = 600``
+    round-trips to ``600.0``); rejects bool and everything else.
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    return None
+
+
 def load_file_config(root: Path) -> DaydreamFileConfig:
     """Load and merge daydream file configuration from a repo root.
 
@@ -195,6 +228,9 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     # so an accidental ``precision_mode = 1`` is treated as unset, not enabled.
     raw_precision = merged.get("precision_mode")
     precision: bool | None = raw_precision if isinstance(raw_precision, bool) else None
+    # Per-file-group fix budgets (#201): tolerate junk by degrading to None (the
+    # config.py default then applies). bool is excluded even though it subclasses
+    # int/float — ``group_max_serial_items = true`` is never a meaningful count.
     return DaydreamFileConfig(
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,
@@ -202,4 +238,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         bench=dict(merged["bench"]) if isinstance(merged.get("bench"), dict) else {},
         shallow_fanout_threshold=threshold,
         precision_mode=precision,
+        group_max_wall_s=_coerce_float(merged.get("group_max_wall_s")),
+        group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
     )
