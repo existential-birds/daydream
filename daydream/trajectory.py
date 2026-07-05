@@ -1194,11 +1194,20 @@ class TrajectoryRecorder:
                 rel = str(sibling_path.relative_to(self.target_dir / ".daydream"))
             except ValueError:
                 rel = sibling_path.name
+            # trajectory_id is the sibling's canonical per-document id (mirrors
+            # the fork's build_trajectory: session_id qualified by descriptor).
+            # v1.7 makes it the resolution key for the ref; session_id stays as
+            # informational run identity only (shared across siblings, not a
+            # matching key), and trajectory_path remains the external file ref.
             results.append(
                 ObservationResult(
                     content=f"Dispatched to {desc}",
                     subagent_trajectory_ref=[
-                        SubagentTrajectoryRef(session_id=self.session_id, trajectory_path=rel),
+                        SubagentTrajectoryRef(
+                            trajectory_id=f"{self.session_id}:{desc}",
+                            session_id=self.session_id,
+                            trajectory_path=rel,
+                        ),
                     ],
                 )
             )

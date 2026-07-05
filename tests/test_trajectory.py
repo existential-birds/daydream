@@ -451,8 +451,9 @@ async def test_dispatch_step_is_deterministic_zero_llm_calls(tmp_path: Path) -> 
 
 async def test_fork_child_trajectory_id_distinct_from_root(tmp_path: Path) -> None:
     """v1.7: a fork's per-document trajectory_id is descriptor-qualified so it
-    is distinct from the shared run-scoped session_id, while the sibling ref on
-    the parent stays resolvable via trajectory_path.
+    is distinct from the shared run-scoped session_id, and the sibling ref on
+    the parent carries that canonical trajectory_id as its resolution key (not
+    just the run-scoped session_id) alongside the external trajectory_path.
     """
     recorder = _make_recorder(tmp_path)
     async with recorder:
@@ -474,6 +475,11 @@ async def test_fork_child_trajectory_id_distinct_from_root(tmp_path: Path) -> No
         next(i for i, s in enumerate(parent_traj["steps"]) if "Dispatching" in s.get("message", ""))
     ]["observation"]["results"][0]["subagent_trajectory_ref"][0]
     assert ref["trajectory_path"].startswith("runs/")
+    # v1.7 resolution key: the ref points at the sibling's canonical
+    # per-document trajectory_id, and session_id stays as informational run
+    # identity only (shared with the parent, not a matching key).
+    assert ref["trajectory_id"] == child_traj["trajectory_id"]
+    assert ref["session_id"] == recorder.session_id
 
 
 # Sanity: now_iso, Redactor, Invocation public surface
