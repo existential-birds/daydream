@@ -72,13 +72,6 @@ def _coerce_price(model: str, table: Any) -> ModelPrice | None:
     Requires ``input`` and ``output`` (numeric, >= 0). ``cached_input`` is
     optional and defaults to ``input``. Any missing, non-numeric, or negative
     required field is logged and yields None so the caller skips the model.
-
-    Args:
-        model: Model identifier the table belongs to (for log messages).
-        table: Raw parsed value for the model's sub-table.
-
-    Returns:
-        A ``ModelPrice`` on success, or None when the entry is invalid.
     """
     if not isinstance(table, dict):
         logger.warning("daydream prices: entry %r is not a table — skipping", model)
@@ -127,12 +120,6 @@ def load_user_prices(path: Path | None = None) -> dict[str, ModelPrice]:
     ``cached_input`` is optional and defaults to ``input``. Invalid entries are
     logged and skipped; an absent file or malformed TOML yields ``{}``.
 
-    Args:
-        path: Explicit path to a prices TOML file. Overrides env/default.
-
-    Returns:
-        A mapping of model name to ``ModelPrice`` for every valid entry.
-
     Raises:
         Never. All error conditions are logged and yield ``{}`` or skip the
         offending entry.
@@ -166,9 +153,6 @@ def load_user_prices(path: Path | None = None) -> dict[str, ModelPrice]:
 def resolve_prices(overrides: dict[str, ModelPrice] | None = None) -> dict[str, ModelPrice]:
     """Merge user overrides over the built-in price table.
 
-    Args:
-        overrides: Per-model overrides; each key replaces the built-in entry.
-
     Returns:
         A new dict of built-in prices with ``overrides`` applied per-model.
     """
@@ -188,14 +172,9 @@ def compute_cost(
     Args:
         model: Model identifier (e.g. "gpt-5.5"). Must match a key in the
             active price table.
-        input_tokens: Count of uncached input tokens.
         cached_input_tokens: Count of cached input tokens (priced separately).
-        output_tokens: Count of output tokens.
         prices: Optional price table to look up in. When None, the built-in
             ``MODEL_PRICES`` is used (back-compatible with existing callers).
-
-    Returns:
-        Total USD cost, or None when model is not in the active price table.
     """
     table = MODEL_PRICES if prices is None else prices
     price = table.get(model)

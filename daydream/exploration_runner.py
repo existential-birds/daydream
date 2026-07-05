@@ -69,9 +69,6 @@ EXPLORATION_ENVELOPE_SCHEMA: dict[str, Any] = {
 def count_changed_files(diff_text: str) -> int:
     """Count unique file paths in a unified-diff string.
 
-    Args:
-        diff_text: Raw ``git diff`` output.
-
     Returns:
         Number of unique ``a/<path>`` entries in ``diff --git`` headers.
     """
@@ -211,16 +208,12 @@ async def pre_scan(
            merge with the static context.
 
     Args:
-        backend: Backend to invoke.
         repo_root: Repository root used by ``detect_affected_files``.
         diff_text: Raw git diff string (used locally for file detection only;
             never embedded in specialist prompts).
         depth: Static-resolution depth (forwarded to ``detect_affected_files``).
         diff_ref: Git ref or range (e.g. ``"main...HEAD"``) passed to specialist
             prompts so they can run ``git diff <ref> -- <file>`` per file.
-
-    Returns:
-        Merged ``ExplorationContext``.
     """
     import anyio
 

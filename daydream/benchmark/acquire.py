@@ -45,16 +45,6 @@ def acquire_checkout(
     the base SHA is fetched if still unresolvable, and HEAD is detached onto
     *head_sha*.
 
-    Args:
-        clone_url: Remote URL or local path to clone from.
-        pr_number: Pull request number whose head to acquire.
-        base_sha: Base commit SHA; must end up resolvable in the checkout.
-        head_sha: Head commit SHA to detach HEAD onto.
-        cache_dir: Directory under which the per-PR checkout lives.
-
-    Returns:
-        Path to the checkout directory (HEAD detached at *head_sha*).
-
     Raises:
         GitError: If any git step fails, or HEAD does not land on *head_sha*.
     """

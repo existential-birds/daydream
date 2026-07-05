@@ -32,9 +32,6 @@ def _load_bench_dotenv() -> None:
 def _format_elapsed(seconds: float) -> str:
     """Render an elapsed duration as a compact human string.
 
-    Args:
-        seconds: Elapsed wall-clock seconds.
-
     Returns:
         ``"{n}s"`` for durations under a minute, else ``"{m}m{s}s"`` with the
         seconds component not zero-padded (e.g. ``252`` -> ``"4m12s"``).
@@ -205,7 +202,6 @@ def _resolve_reviewer_preset(
     """Look up a named reviewer preset in the bench config table.
 
     Args:
-        name: The preset name passed via ``--reviewer``.
         bench_cfg: The ``[tool.daydream.bench]`` table from ``load_file_config``.
         parser: The bench parser, used to emit a usage error (``SystemExit``)
             when the preset is unknown.
@@ -227,12 +223,6 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
 
     Optional path flags fall back to a ``.daydream-bench`` cache derived from
     ``--benchmark-repo``. No directories are created at parse time.
-
-    Args:
-        argv: The argument vector after the ``bench`` verb.
-
-    Returns:
-        An immutable :class:`BenchConfig` for the requested run.
     """
     from daydream.benchmark import BenchConfig
     from daydream.config_file import load_file_config
@@ -323,12 +313,6 @@ def _handle_bench_command(argv: list[str]) -> int:
     exit. When ``--score`` is set, ``run_bench`` verifies the judge credential
     up front and raises :class:`~daydream.benchmark.score.JudgeEnvError` if it is missing; that error
     is allowed to surface to the top-level CLI boundary as a non-zero exit.
-
-    Args:
-        argv: The argument vector after the ``bench`` verb.
-
-    Returns:
-        The exit code from :func:`run_bench`.
     """
     from daydream.benchmark import run_bench
 

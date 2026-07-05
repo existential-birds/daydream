@@ -134,9 +134,6 @@ def total_agent_count(stack_count: int) -> int:
     Args:
         stack_count: Number of detected stack assignments (including the
             generic-fallback bucket when present).
-
-    Returns:
-        Total agent invocation count surfaced in the pre-flight notice.
     """
     return 2 + stack_count + stack_count + 1 + 1
 
@@ -160,9 +157,6 @@ def _single_stack_agent_count(stack_count: int) -> int:
 
     Args:
         stack_count: Number of stack assignments AFTER the tiny-diff collapse.
-
-    Returns:
-        Total agent invocation count for the single-stack-mode run.
     """
     return 2 + stack_count + stack_count
 
@@ -179,9 +173,6 @@ def _shallow_fanout_threshold(config: RunConfig) -> int:
 
     Uses ``is not None`` checks rather than truthiness so a configured value
     of ``0`` (explicitly disable the short-circuit) is honored.
-
-    Args:
-        config: Run configuration carrying the CLI/file-config sources.
 
     Returns:
         The resolved integer threshold. ``0`` disables the short-circuit.
@@ -208,12 +199,6 @@ def _precision_mode(config: RunConfig) -> bool:
     Uses truthiness rather than ``is not None``: ``False`` is the meaningful
     "off" value, so a set-to-False file-config entry just falls through to the
     default rather than acting as a distinct sentinel.
-
-    Args:
-        config: Run configuration carrying the CLI/file-config sources.
-
-    Returns:
-        Whether the precision suppression pass should run.
     """
     if config.precision_mode:
         return True
@@ -363,9 +348,6 @@ def _diff_changed_files(diff: str) -> list[str]:
     unified-diff parsing contract is shared with ``_diff_blocks_for_files``
     rather than duplicated here.
 
-    Args:
-        diff: Unified diff text.
-
     Returns:
         Unique, insertion-ordered list of changed file paths (excluding
         ``/dev/null`` sentinels).
@@ -388,16 +370,7 @@ def _stack_preflight_line(stack: StackAssignment) -> str:
 def _write_ttt_artifacts(
     deep_dir_path: Path, *, intent_summary: str, alt_issues: list[dict[str, Any]]
 ) -> tuple[Path, Path]:
-    """Persist TTT intent + alternatives to the deep artifact directory.
-
-    Args:
-        deep_dir_path: Path to ``.daydream/deep/``.
-        intent_summary: Confirmed intent summary from phase_understand_intent.
-        alt_issues: Issues returned by phase_alternative_review.
-
-    Returns:
-        Tuple of (intent_path, alternatives_path).
-    """
+    """Persist TTT intent + alternatives to the deep artifact directory."""
     intent_p = _intent_path(deep_dir_path)
     alts_p = _alternatives_path(deep_dir_path)
     intent_p.write_text(intent_summary)

@@ -26,9 +26,6 @@ DAYDREAM_TOOL = "daydream"
 def load_benchmark_data(path: str | Path) -> dict[str, Any]:
     """Load the benchmark corpus from ``path``.
 
-    Args:
-        path: Filesystem path to ``benchmark_data.json``.
-
     Returns:
         The parsed top-level dict, keyed by golden PR URL.
     """
@@ -49,10 +46,6 @@ def save_benchmark_data(path: str | Path, data: dict[str, Any]) -> None:
     and the second ``os.replace`` wins. The lock does not protect across
     machines or network filesystems — run one bench sweep per benchmark repo
     at a time (see ``docs/benchmark.md``).
-
-    Args:
-        path: Destination path for ``benchmark_data.json``.
-        data: The corpus dict to serialize.
     """
     dest = Path(path)
     lock_path = dest.parent / f"{dest.name}.lock"
@@ -73,15 +66,7 @@ def save_benchmark_data(path: str | Path, data: dict[str, Any]) -> None:
 
 
 def has_daydream_review(entry: dict[str, Any], *, tool: str = DAYDREAM_TOOL) -> bool:
-    """Report whether a corpus entry already carries a synthetic daydream review.
-
-    Args:
-        entry: A single golden-PR corpus entry (the value of one ``golden_url`` key).
-        tool: The reviewer tool label to match (defaults to ``DAYDREAM_TOOL``).
-
-    Returns:
-        ``True`` if any review in ``entry["reviews"]`` has ``tool == tool``.
-    """
+    """Report whether a corpus entry already carries a synthetic daydream review."""
     return any(review.get("tool") == tool for review in entry.get("reviews", []))
 
 
@@ -97,12 +82,8 @@ def inject_daydream_review(
 
     Args:
         data: The benchmark corpus dict (mutated in place).
-        golden_url: The golden upstream PR URL key.
-        comments: ``review_comments`` payload for the daydream review.
         force: When a daydream review already exists, replace its
             ``review_comments`` instead of leaving it untouched.
-        tool: The reviewer tool label to inject and match on (defaults to
-            ``DAYDREAM_TOOL``).
 
     Returns:
         ``True`` if the corpus was modified, ``False`` if an existing daydream

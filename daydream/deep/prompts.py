@@ -239,9 +239,6 @@ def build_per_stack_prompt(
         inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
             to inline (skips the ``Read it directly`` instruction). ``None``
             falls back to the diff_path pointer.
-
-    Returns:
-        Assembled prompt string.
     """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
@@ -295,9 +292,6 @@ def build_structural_prompt(
             body because the structural reviewer discovers context via tool
             calls, not pre-injected pointers.
         prior_commits: Oneline log of prior daydream commits on this branch.
-
-    Returns:
-        Assembled prompt string.
     """
     del exploration_dir  # accepted for signature symmetry; intentionally unused.
     joined = ", ".join(files)
@@ -351,9 +345,6 @@ def build_arbiter_prompt(
         alternatives_path: Path to TTT alternatives.json.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Pre-scan exploration directory (if available).
-
-    Returns:
-        Assembled prompt string.
     """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
@@ -419,9 +410,6 @@ def build_suppression_prompt(
         alternatives_path: Path to TTT alternatives.json.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Pre-scan exploration directory (if available).
-
-    Returns:
-        Assembled prompt string.
     """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
@@ -511,9 +499,6 @@ def build_merge_prompt(
             records JSON. Retained for call-site compatibility; structural
             findings are appended by ``phase_cross_stack_merge`` in Python (not
             via this prompt), so the agent is never pointed at this file.
-
-    Returns:
-        Assembled prompt string.
     """
     del output_path, structural_records_path  # appended/rendered by the host, not the prompt
     records_block = "\n".join(f"  - {p}" for p in per_stack_records_paths)
@@ -620,9 +605,6 @@ def build_verification_prompt(
             item's canonical ``id`` (the verdict ``issue_id``).
         cwd: Absolute working directory the verifier runs in (grounds path resolution).
         output_path: Where the verifier must write its JSON verdicts file.
-
-    Returns:
-        Assembled prompt string.
     """
     from daydream.deep.render import render_report
 
@@ -728,9 +710,6 @@ def build_generic_fallback_prompt(
         inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
             to inline (skips the ``Read it directly`` instruction). ``None``
             falls back to the diff_path pointer.
-
-    Returns:
-        Assembled prompt string.
     """
     parts: list[str] = []
     if is_docs_only:

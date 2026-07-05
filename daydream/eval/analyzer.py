@@ -538,9 +538,6 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
         daydream_dir: Path to the ``.daydream`` directory from a completed run.
         session_id: Optional session ID (or prefix) to analyze. Defaults to the
             most recent session.
-
-    Returns:
-        Complete analysis as a JSON-serializable dict.
     """
     daydream_dir = Path(daydream_dir)
     trajectories = load_trajectories(daydream_dir, session_id=session_id)

@@ -313,7 +313,6 @@ def create_backend(name: str, model: str | None = None) -> Backend:
 
     Raises:
         ValueError: If the backend name is unknown.
-
     """
     from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_PI_MODEL
 

@@ -185,9 +185,6 @@ def _weights_fingerprint(weights: RewardWeights) -> str:
     SHA-256 digest. ``is_default`` is excluded — it is identity metadata, not
     a scoring parameter. Pure; no I/O.
 
-    Args:
-        weights: The weights to fingerprint.
-
     Returns:
         The first 8 hex characters of the SHA-256 digest of the canonical
         JSON serialization of the scoring parameters.

@@ -22,12 +22,6 @@ def _load_repo_slugs(path: Path) -> frozenset[str]:
     """Read a one-slug-per-line file into a frozenset.
 
     Blank lines and lines whose stripped form starts with ``#`` are skipped.
-
-    Args:
-        path: Filesystem path to the slug file.
-
-    Returns:
-        Frozen set of stripped ``owner/repo`` strings.
     """
     slugs: set[str] = set()
     with path.open("r", encoding="utf-8") as fh:
@@ -63,9 +57,6 @@ def load_copyleft_list() -> frozenset[str]:
 
 def is_excluded(repo_slug: str | None) -> bool:
     """Check whether a repo slug is on the C5 exclusion list.
-
-    Args:
-        repo_slug: ``owner/repo`` to check, or ``None``.
 
     Returns:
         ``True`` if the slug is on the always-enforced exclusion list;

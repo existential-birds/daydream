@@ -162,10 +162,7 @@ def build_findings_artifact(
     checkout, so the privileged poster never needs PR git objects.
 
     Args:
-        target_dir: Repo root containing the PR checkout.
-        pr: The target PR (declares repo / pr_number / head_sha identity).
         issues: Parsed issues, fingerprinted for cross-run dedup.
-        run_info: Phase A's rendered run-info markdown, or None.
 
     Returns:
         The artifact dict, matching ``FINDINGS_SCHEMA``: inline findings
@@ -189,12 +186,7 @@ def build_findings_artifact(
 
 
 def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:
-    """Write the artifact as pretty-printed UTF-8 JSON, creating parent dirs.
-
-    Args:
-        path: Destination file path.
-        artifact: Artifact dict from :func:`build_findings_artifact`.
-    """
+    """Write the artifact as pretty-printed UTF-8 JSON, creating parent dirs."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(artifact, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -214,15 +206,6 @@ def load_findings_artifact(
     parse, strict schema validation, then equality of the declared
     ``repo``/``pr_number``/``head_sha`` against the expected (event-derived)
     values. Artifact content is never executed or interpolated.
-
-    Args:
-        path: Artifact file path.
-        expected_repo: Event-derived "owner/repo" slug.
-        expected_pr_number: Event-derived PR number.
-        expected_head_sha: Event-derived PR head SHA.
-
-    Returns:
-        The validated artifact as a typed :class:`FindingsArtifact`.
 
     Raises:
         FindingsValidationError: On any failed check, naming the check.

@@ -130,7 +130,6 @@ def _run_sweep(config: BenchConfig, judge_model: str) -> tuple[bool, DaydreamSco
     this runs, so ``judge_model`` is already resolved (``""`` when not scoring).
 
     Args:
-        config: Run configuration for this sweep (paths, tool label, scoring).
         judge_model: Pre-resolved judge model id (``""`` when ``score`` is off).
 
     Returns:
@@ -262,15 +261,9 @@ def _write_trials_summary(
     """Write ``trials-summary.json`` with reproducibility metadata + distribution.
 
     Args:
-        config: The base run configuration (reviewer/judge/PR selection).
-        judge_model: The resolved judge model id (``""`` when scoring was off).
-        prs: The selected PR set for this run.
         scored_trials: ``(trial_index, scores)`` pairs for each successfully
             scored trial, so ``per_trial`` labels stay accurate even when some
             trials failed scoring and are absent from the list.
-
-    Returns:
-        The path to the written ``trials-summary.json``.
     """
     root = trials_root(config.benchmark_repo, config.tool_label)
     root.mkdir(parents=True, exist_ok=True)
@@ -367,9 +360,6 @@ def run_bench(config: BenchConfig) -> int:
     (back-compat). With ``config.trials > 1`` it runs N isolated trials and
     reports a mean/median/stddev/bootstrap-CI distribution over precision,
     recall, and F1.
-
-    Args:
-        config: Immutable run configuration (selection, force, scoring, paths).
 
     Returns:
         ``0`` when every selected PR was injected (or skipped) and scoring (if

@@ -51,25 +51,11 @@ class DaydreamFileConfig:
     precision_mode: bool | None = None
 
     def phase_model(self, phase: str) -> str | None:
-        """Return the configured model for a phase.
-
-        Args:
-            phase: Phase name to look up (e.g. ``"fix"``).
-
-        Returns:
-            The configured model, or None if the phase has no ``model`` key.
-        """
+        """Return the configured model for a phase."""
         return self.phases.get(phase, {}).get("model")
 
     def phase_backend(self, phase: str) -> str | None:
-        """Return the configured backend for a phase.
-
-        Args:
-            phase: Phase name to look up (e.g. ``"fix"``).
-
-        Returns:
-            The configured backend, or None if the phase has no ``backend`` key.
-        """
+        """Return the configured backend for a phase."""
         return self.phases.get(phase, {}).get("backend")
 
 
@@ -79,12 +65,6 @@ def load_toml_or_empty(path: Path) -> dict[str, Any]:
     Never raises: callers that must not break on a bad user file (e.g. price
     overrides, workspace copy config) use this instead of the error-raising
     :func:`_load_toml`.
-
-    Args:
-        path: Path to the TOML file.
-
-    Returns:
-        The parsed table, or an empty dict if the file is absent or malformed.
 
     Raises:
         Never. Malformed TOML is logged as a warning and yields ``{}``.
@@ -103,13 +83,7 @@ def load_toml_or_empty(path: Path) -> dict[str, Any]:
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
-    """Parse a TOML file into a dict.
-
-    Args:
-        path: Path to the TOML file.
-
-    Returns:
-        The parsed table, or an empty dict if the file is absent.
+    """Parse a TOML file into a dict, returning ``{}`` when the file is absent.
 
     Raises:
         ValueError: If the file exists but is malformed; the message names
@@ -187,13 +161,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     Reads ``root/pyproject.toml`` ``[tool.daydream]`` (low precedence) and
     ``root/.daydream.toml`` (high precedence), merging the two per-key. The
     dotfile wins on conflicting scalar keys; phase sub-tables merge so each
-    source contributes its own phases.
-
-    Args:
-        root: Repository root directory to search for config files.
-
-    Returns:
-        A ``DaydreamFileConfig``. Absent files yield an empty config.
+    source contributes its own phases. Absent files yield an empty config.
 
     Raises:
         ValueError: If a present config file is malformed TOML; the message

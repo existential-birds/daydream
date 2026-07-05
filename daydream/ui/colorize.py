@@ -69,13 +69,6 @@ def _detect_shell_syntax(content: str) -> bool:
     - Lines starting with $ or # (shell prompts)
     - Shebang lines (#!/bin/bash, etc.)
     - Multiple lines with common shell command patterns
-
-    Args:
-        content: The content to analyze.
-
-    Returns:
-        True if the content appears to be shell script or output.
-
     """
     if _SHEBANG_PATTERN.search(content):
         return True
@@ -93,9 +86,6 @@ def _detect_shell_syntax(content: str) -> bool:
 
 def _colorize_git_line(line: str) -> Text | None:
     """Check if a line matches git output patterns and return styled Text.
-
-    Args:
-        line: The line to check.
 
     Returns:
         Rich Text with git-specific styling, or None if not git output.
@@ -125,16 +115,7 @@ def _colorize_git_line(line: str) -> Text | None:
 
 
 def _colorize_line(line: str, is_error: bool = False) -> Text:
-    """Apply neon syntax highlighting to a single line of output.
-
-    Args:
-        line: The line to colorize.
-        is_error: Whether this is error output.
-
-    Returns:
-        Rich Text with neon styling applied.
-
-    """
+    """Apply neon syntax highlighting to a single line of output."""
     git_result = _colorize_git_line(line)
     if git_result is not None:
         return git_result

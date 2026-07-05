@@ -167,12 +167,6 @@ def build_pattern_scanner_prompt(affected_files: list[str], diff_ref: str, *, cw
         affected_files: Paths of files touched by the diff under review.
         diff_ref: Git ref (e.g. base branch or SHA) the specialist can diff against.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
-
-    Returns:
-        The fully-rendered prompt string, including the JSON schema block.
-
-    Raises:
-        None.
     """
     files_block = "\n".join(f"- {p}" for p in affected_files) or "- (none yet)"
     return f"""You are the **pattern-scanner** specialist. Detect codebase conventions
@@ -208,12 +202,6 @@ def build_dependency_tracer_prompt(affected_files: list[FileInfo], diff_ref: str
         affected_files: FileInfo entries for files reachable from the diff, each carrying a `path` and `role`.
         diff_ref: Git ref the specialist can diff against when probing call sites.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
-
-    Returns:
-        The fully-rendered prompt string, including the JSON schema block.
-
-    Raises:
-        None.
     """
     files_block = "\n".join(f"- {f.path} ({f.role})" for f in affected_files) or "- (none yet)"
     return f"""You are the **dependency-tracer** specialist. Extend the affected-files
@@ -246,12 +234,6 @@ def build_test_mapper_prompt(affected_files: list[str], diff_ref: str, *, cwd: P
         affected_files: Paths of files touched by the diff under review.
         diff_ref: Git ref the specialist can diff against when locating test files.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
-
-    Returns:
-        The fully-rendered prompt string, including the JSON schema block.
-
-    Raises:
-        None.
     """
     files_block = "\n".join(f"- {p}" for p in affected_files) or "- (none yet)"
     return f"""You are the **test-mapper** specialist. Locate test files for each modified

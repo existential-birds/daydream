@@ -153,12 +153,8 @@ def _build_setup_investigator_prompt(test_output: str) -> str:
     (wrong command, missing setup step, missing env var) — NOT whether the
     code under test is broken. It is strictly read-only.
 
-    Args:
-        test_output: Raw failing test output to include verbatim.
-
     Returns:
         Prompt string demanding a JSON verdict.
-
     """
     lines = test_output.splitlines()
     if len(lines) > TEST_OUTPUT_TAIL_LINES:
@@ -237,15 +233,9 @@ async def _run_setup_investigator(
     ``run_agent`` or unparseable JSON) so the caller can fall back to the
     original retry command.
 
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context; ``work.repo`` is the agent cwd.
-        test_output: Raw failing test output to embed in the prompt.
-
     Returns:
         Parsed verdict dict with keys ``verdict``, ``suggested_command``,
         ``reason`` on success, or ``None`` on any failure.
-
     """
     recorder = get_current_recorder()
     prompt = _build_setup_investigator_prompt(test_output)
@@ -648,11 +638,6 @@ async def _run_failure_summarizer(
     ``recorder.fork("failure-summarizer")`` when a recorder is present so
     the diagnostic call is captured as its own sub-trajectory.
 
-    Args:
-        backend: Backend used to invoke the summarizer subagent.
-        work: Workspace context; ``work.repo`` is the agent cwd.
-        test_output: Raw failing test output to ground the summary.
-
     Returns:
         Tuple ``(handoff_body, handoff_path, written)``. ``written`` is
         ``False`` when the filesystem write failed; callers must surface
@@ -859,12 +844,6 @@ def normalize_items(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     collide on their original ids end up uniquely keyed. Order and the ``lens``
     field are preserved.
 
-    Args:
-        raw: The incoming list of item dicts.
-
-    Returns:
-        A new list of item dicts with reassigned ``id`` values.
-
     Raises:
         ValueError: If ``raw`` is not a list.
     """
@@ -900,9 +879,6 @@ def _is_evidenced(item: dict[str, Any]) -> bool:
     requirement: they are host-tagged, inherently whole-file findings (file-size
     budgets, layering) that may legitimately carry ``line: 0`` with colon-free
     evidence, so non-blank evidence is sufficient grounding for them.
-
-    Args:
-        item: A finding dict (per-stack, cross-stack, or structural).
 
     Returns:
         True when the finding is grounded and may reach ``merged-items.json``;
@@ -969,10 +945,6 @@ def group_items_by_file(items: list[dict[str, Any]]) -> list[tuple[str, list[dic
     missing/None file bucket into a single ``"<no-file>"`` group (cannot prove
     disjoint -> serialize for safety). Pure: no I/O, no mutation of inputs.
 
-    Args:
-        items: Canonical fix items (each a dict with at least an optional
-            ``"file"`` key).
-
     Returns:
         Ordered list of ``(file_key, items_for_file)`` tuples, where
         *file_key* is the file path string or ``"<no-file>"`` for items
@@ -1017,10 +989,6 @@ def _confidence_and_convention_instructions() -> str:
     Called by all four phase prompt builders to keep them in lockstep on these
     rules. Returns a markdown section that should be appended after the
     Exploration Context section.
-
-    Returns:
-        Markdown-formatted instruction block as a single string.
-
     """
     return (
         "## Confidence and Convention Rules\n\n"
@@ -1069,12 +1037,7 @@ def _confidence_and_convention_instructions() -> str:
 
 
 def _dependency_impact_instructions() -> str:
-    """Prompt language for QUAL-01 cross-file dependency surfacing in review output.
-
-    Returns:
-        Markdown-formatted instruction block as a single string.
-
-    """
+    """Prompt language for QUAL-01 cross-file dependency surfacing in review output."""
     return (
         "## Dependency Impact\n\n"
         "Begin your review output with a 'Dependency Impact' section that summarizes the "
@@ -1102,10 +1065,6 @@ def _settled_decisions_block(prior_commits: str | None) -> str:
     Args:
         prior_commits: Oneline log of prior daydream commits on this branch.
             When None or empty, returns empty string.
-
-    Returns:
-        Prompt block instructing the agent to treat prior commits as settled decisions.
-
     """
     if not prior_commits:
         return ""
@@ -1133,10 +1092,6 @@ def build_review_prompt(
         exploration_dir: Optional path to exploration output directory.
         prior_commits: Oneline log of prior daydream commits on this branch.
             When present, injected as settled-decisions context.
-
-    Returns:
-        Fully assembled prompt string.
-
     """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
@@ -1175,10 +1130,6 @@ def build_intent_prompt(
             present (non-empty after strip), an authoritative-intent section is
             prepended ahead of the diff-reading instructions. When ``None`` or
             empty, the prompt is byte-identical to the no-PR-body case.
-
-    Returns:
-        Fully assembled prompt string.
-
     """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
@@ -1227,12 +1178,7 @@ def build_alternative_review_prompt(
     diff_path: str = "",
     exploration_dir: Path | None = None,
 ) -> str:
-    """Assemble the prompt for `phase_alternative_review`.
-
-    Returns:
-        Fully assembled prompt string.
-
-    """
+    """Assemble the prompt for `phase_alternative_review`."""
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
@@ -1351,12 +1297,8 @@ def _git_branch(cwd: Path) -> str:
 def check_review_file_exists(target_dir: Path) -> None:
     """Check that the review output file exists.
 
-    Args:
-        target_dir: Target directory containing the review output.
-
     Raises:
         FileNotFoundError: If the review output file doesn't exist.
-
     """
     review_output_path = target_dir / REVIEW_OUTPUT_FILE
     if not review_output_path.exists():
@@ -1392,12 +1334,8 @@ async def phase_review(
         exclude: Optional list of paths the agent should exclude when it runs
             `git diff` itself. Applied via git's `:(exclude)` magic pathspec.
 
-    Returns:
-        None
-
     Raises:
         Exception: If the agent fails to execute the review skill.
-
     """
     print_phase_hero(console, "BREATHE", "\"Be guided by beauty\" —Jim Simons")
     print_dim(console, f"Model: {backend.model}")
@@ -1705,9 +1643,6 @@ def _build_intent_suffix(intent_path: Path | None) -> str:
     string so an intent-read failure can never block a fix. A read failure is
     never coerced into a fake intent string.
 
-    Args:
-        intent_path: Optional path to the confirmed author-intent file.
-
     Returns:
         The intent block (with leading newline) when present and readable;
         otherwise an empty string.
@@ -1794,10 +1729,6 @@ async def phase_fix(
             with a rule forbidding fixes that undo a deliberate decision. The
             read is best-effort enrichment: a missing or unreadable file is
             skipped silently so an intent-read failure can never block the fix.
-
-    Returns:
-        None
-
     """
     description = item.get("description", "No description")
     file_path = item.get("file", "Unknown file")
@@ -1881,9 +1812,6 @@ async def phase_fix_batched(
             ``None`` for serial callers.
         intent_path: Optional path to the confirmed author-intent file, injected
             verbatim (same best-effort handling as ``phase_fix``).
-
-    Returns:
-        None
     """
     if len(items) == 1:
         await phase_fix(
@@ -2460,13 +2388,7 @@ async def _do_commit(
 
 
 async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
-    """Prompt user to commit and push changes.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context for the commit.
-
-    """
+    """Prompt user to commit and push changes."""
     console.print()
     print_info(console, "Committing and pushing changes...")
     committed = await _do_commit(backend, work, push=True, interactive=True)
@@ -2479,18 +2401,8 @@ async def phase_fetch_pr_feedback(
 ) -> None:
     """Fetch PR feedback by invoking the fetch-pr-feedback skill.
 
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context; ``work.repo`` is the agent cwd.
-        pr_number: Pull request number to fetch feedback from
-        bot: Bot username whose comments to fetch
-
-    Returns:
-        None
-
     Raises:
         Exception: If the agent fails to fetch PR feedback.
-
     """
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
     print_dim(console, f"Model: {backend.model}")
@@ -2513,12 +2425,6 @@ async def phase_commit_iteration(backend: Backend, work: WorkContext, iteration:
 
     Ensures a clean working tree before the next review iteration starts.
     Does NOT push — the final push happens at the end of the loop.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context for the commit; ``work.repo`` is the cwd.
-        iteration: Current iteration number (used in commit message)
-
     """
     print_info(console, f"Committing iteration {iteration} changes...")
     await _do_commit(backend, work, iteration=iteration)
@@ -2531,11 +2437,8 @@ async def phase_commit_push_auto(
     """Automatically commit and push changes without user prompt.
 
     Args:
-        backend: The Backend to execute against.
-        work: Workspace context for the commit.
         items: Optional fix items applied this run; forwarded to the commit
             agent so it can craft an accurate commit message.
-
     """
     console.print()
     print_info(console, "Committing and pushing changes...")
@@ -2557,10 +2460,6 @@ async def phase_respond_pr_feedback(
         pr_number: Pull request number to respond to
         bot: Bot username to respond as
         results: List of (item, success, error) tuples, one per applied fix
-
-    Returns:
-        None
-
     """
     successful = [(item, ok, err) for item, ok, err in results if ok]
 
@@ -2698,16 +2597,9 @@ async def phase_alternative_review(
     codebase to identify concrete, evidence-backed problems — correctness bugs,
     design decisions that cause real failures, and convention violations.
 
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context; ``work.repo`` is the agent cwd.
-        diff_path: Path to the diff file on disk.
-        intent_summary: Confirmed intent summary from phase_understand_intent.
-
     Returns:
         List of issue dicts, each with id, title, description, recommendation,
         severity, and files keys.
-
     """
     print_phase_hero(console, "WONDER", phase_subtitle("WONDER"))
     print_dim(console, f"Model: {backend.model}")

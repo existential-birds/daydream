@@ -51,7 +51,6 @@ from daydream.ui.summary import (
     print_summary,
     print_verification_summary,
     render_exploration_summary,
-    render_ttt_plan,
 )
 from daydream.ui.theme import (
     ASCII_GRADIENT_COLORS,

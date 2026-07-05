@@ -71,10 +71,6 @@ def set_gh_token_env(env: dict[str, str] | None) -> None:
         env: Mapping of env-var overrides (e.g. ``{"GH_TOKEN": token}``) merged
             with the live ``os.environ`` at subprocess call time, or ``None`` to
             inherit the parent process environment without any overrides.
-
-    Returns:
-        None
-
     """
     global _gh_token_env
     _gh_token_env = env
@@ -86,18 +82,12 @@ def get_gh_token_env() -> dict[str, str] | None:
     Returns:
         The environment mapping, or ``None`` when ``gh`` inherits the parent
         process environment.
-
     """
     return _gh_token_env
 
 
 def reset_gh_token_env() -> None:
-    """Reset the ``gh`` subprocess environment to parent-process inheritance.
-
-    Returns:
-        None
-
-    """
+    """Reset the ``gh`` subprocess environment to parent-process inheritance."""
     global _gh_token_env
     _gh_token_env = None
 
@@ -114,9 +104,6 @@ def _redact_args(args: list[str]) -> list[str]:
     The token is passed as a plain ``gh``/``git`` argument, so joining raw args
     into a warning or :class:`GitError` message would leak it into logs. The
     header name is kept for debuggability; only the value is replaced.
-
-    Args:
-        args: The argument list passed after ``gh``/``git``.
 
     Returns:
         A copy with sensitive header values replaced by ``***``.
@@ -223,9 +210,6 @@ def _run_git(
     """Run ``git`` in *repo* with hardened defaults.
 
     Args:
-        repo: Repository working directory.
-        args: Arguments after ``git``.
-        timeout: Subprocess timeout in seconds.
         capture_bytes: When True, capture stdout/stderr as bytes (no decoding).
         retries: How many additional attempts to make after a
             :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
@@ -285,8 +269,6 @@ def _run_gh(
     """Run ``gh`` in *repo* with hardened defaults.
 
     Args:
-        repo: Repository working directory.
-        args: Arguments after ``gh``.
         timeout: Subprocess timeout in seconds. ``None`` (the default) uses the
             env-overridable :func:`_gh_timeout`.
         input_text: Optional text piped to the subprocess on **stdin** (used to
@@ -357,9 +339,6 @@ def _run_gh(
 def assert_is_worktree(repo: Path) -> None:
     """Verify *repo* is the root of a git worktree.
 
-    Args:
-        repo: Path that should resolve to a worktree top level.
-
     Raises:
         NotAWorktreeError: If *repo* is not inside a git worktree, or if it is
             inside one but is not itself the worktree's top-level directory
@@ -384,14 +363,7 @@ def assert_is_worktree(repo: Path) -> None:
 
 
 def is_inside_worktree(repo: Path) -> bool:
-    """Return True iff :func:`assert_is_worktree` would succeed for *repo*.
-
-    Args:
-        repo: Candidate worktree path.
-
-    Returns:
-        True when *repo* is the top-level of a git worktree, otherwise False.
-    """
+    """Return True iff :func:`assert_is_worktree` would succeed for *repo*."""
     try:
         assert_is_worktree(repo)
     except NotAWorktreeError:
@@ -405,12 +377,6 @@ def is_inside_worktree(repo: Path) -> bool:
 def head_sha(repo: Path) -> str:
     """Return the full SHA of ``HEAD`` in *repo*.
 
-    Args:
-        repo: Repository working directory.
-
-    Returns:
-        The 40-character SHA of the current ``HEAD`` commit.
-
     Raises:
         GitError: If ``git rev-parse HEAD`` fails (e.g. empty repository).
     """
@@ -422,12 +388,6 @@ def head_sha(repo: Path) -> str:
 
 def head_commit_message(repo: Path) -> str:
     """Return the full commit message of ``HEAD``.
-
-    Args:
-        repo: Repository working directory.
-
-    Returns:
-        The commit message body of the current ``HEAD`` commit.
 
     Raises:
         GitError: If ``git log`` fails (e.g. empty repository).
@@ -445,7 +405,6 @@ def amend_trailers(repo: Path, trailers: dict[str, str], *, message: str | None 
     commit with the updated message.  This is a no-op if *trailers* is empty.
 
     Args:
-        repo: Repository working directory.
         trailers: Mapping of trailer keys to values (e.g.
             ``{"Daydream-Run": "abc123"}``).
         message: When provided, use this as the current ``HEAD`` commit message
@@ -503,13 +462,6 @@ def remote_url(repo: Path, remote: str = "origin") -> str | None:
     (mirrors :func:`default_branch` / :func:`merge_base` / :func:`current_branch`
     behavior for "the data isn't there" cases) and on subprocess machinery
     failures (timeout, missing binary).
-
-    Args:
-        repo: Repository working directory.
-        remote: Remote name. Defaults to ``"origin"``.
-
-    Returns:
-        The configured URL, or ``None`` when the remote is not set.
     """
     try:
         proc = _run_git(repo, ["config", "--get", f"remote.{remote}.url"], timeout=5)
@@ -522,12 +474,6 @@ def remote_url(repo: Path, remote: str = "origin") -> str | None:
 
 def current_branch(repo: Path) -> str | None:
     """Return the current branch name, or ``None`` when ``HEAD`` is detached.
-
-    Args:
-        repo: Repository working directory.
-
-    Returns:
-        The branch name (e.g. ``"main"``) or ``None`` for detached ``HEAD``.
 
     Raises:
         GitError: If the underlying subprocess fails to execute.
@@ -545,12 +491,6 @@ def default_branch(repo: Path) -> str:
     Resolution order: ``origin/HEAD`` symbolic ref → local ``main`` → local
     ``master``. Raises if none of those exist.
 
-    Args:
-        repo: Repository working directory.
-
-    Returns:
-        The default branch name (e.g. ``"main"``).
-
     Raises:
         BranchNotFoundError: If no default branch can be detected.
     """
@@ -567,15 +507,7 @@ def default_branch(repo: Path) -> str:
 
 
 def branch_exists(repo: Path, ref: str) -> bool:
-    """Check whether *ref* exists locally or as ``origin/<ref>``.
-
-    Args:
-        repo: Repository working directory.
-        ref: Branch name to look up.
-
-    Returns:
-        True when ``refs/heads/<ref>`` or ``refs/remotes/origin/<ref>`` exists.
-    """
+    """Check whether *ref* exists locally or as ``origin/<ref>``."""
     local = _run_git(repo, ["rev-parse", "--verify", f"refs/heads/{ref}"], timeout=5)
     if local.returncode == 0:
         return True
@@ -589,13 +521,6 @@ def ref_exists(repo: Path, ref: str) -> bool:
     Accepts a named branch (local or ``origin/<ref>``) plus any commit-ish:
     a full or abbreviated SHA, a tag, or a relative expression such as
     ``HEAD~3``.
-
-    Args:
-        repo: Repository working directory.
-        ref: Branch name, SHA, tag, or any commit-ish expression.
-
-    Returns:
-        True when *ref* names a branch or resolves to a commit object.
 
     Raises:
         GitError: Only for unexpected subprocess failures (timeout, missing
@@ -625,14 +550,6 @@ def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
     Returns ``None`` (rather than raising) on the codex-documented "soft"
     failure modes — empty repo, missing ``HEAD``, missing branch — so callers
     can treat them as "no merge-base available" without try/except plumbing.
-
-    Args:
-        repo: Repository working directory.
-        base: Base branch name (e.g. ``"main"``).
-        head: Ref whose merge-base to find. Defaults to ``"HEAD"``.
-
-    Returns:
-        The merge-base SHA, or ``None`` when one cannot be resolved.
 
     Raises:
         GitError: Only for unexpected subprocess failures (timeout, missing
@@ -717,9 +634,6 @@ def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None
     (or identical-to-HEAD) local copy.
 
     Args:
-        repo: Repository working directory.
-        base: Base ref (e.g. ``"main"``).
-        head: Comparison ref. Defaults to ``"HEAD"``.
         exclude: Optional pathspec excludes (each becomes ``:(exclude)<p>``).
 
     Returns:
@@ -749,11 +663,6 @@ def diff_name_only(repo: Path, base: str, head: str = "HEAD") -> list[str]:
     Soft-failure semantics mirror :func:`merge_base`: returns an empty list
     when either ref cannot be resolved or the subprocess fails. Callers in
     archive paths should not propagate git transients into manifest failure.
-
-    Args:
-        repo: Repository working directory.
-        base: Base ref or SHA.
-        head: Comparison ref or SHA. Defaults to ``"HEAD"``.
 
     Returns:
         Repo-relative path strings in git output order. Empty list on any
@@ -788,11 +697,6 @@ def diff_paths(
       * Restricts output to *paths*.
 
     Args:
-        repo: Repository root.
-        base: Base ref.
-        head: Head ref.
-        paths: Pathspec list (relative to repo root).
-        unified: Lines of context.
         merge_base_diff: When False (default), use ``base..head`` (direct diff);
             when True, use ``base...head`` (diff since merge-base).
 
@@ -818,11 +722,6 @@ def diff_worktree_against(repo: Path, ref: str, paths: list[str]) -> str:
     the *current working tree* against *ref*, restricted to *paths*. Used to
     snapshot a path's uncommitted partial-edit content before it is reverted, so
     the patch is recoverable even after the working file is restored.
-
-    Args:
-        repo: Repository working directory.
-        ref: Ref to diff against (e.g. ``"HEAD"`` or a ``git stash create`` SHA).
-        paths: Repo-relative pathspec list.
 
     Returns:
         The diff text. Empty string when *paths* match *ref* exactly (or when a
@@ -863,11 +762,8 @@ def capture_recommended_patch(repo: Path, base_ref: str | None, out_path: Path) 
     Never raises.
 
     Args:
-        repo: Repository working directory.
         base_ref: Pre-fix base ref (a ``stash create`` SHA or a ``HEAD`` SHA),
             or ``None`` when no pre-fix snapshot could be taken.
-        out_path: Destination path for the patch (e.g.
-            ``.daydream/recommended.patch``).
 
     Returns:
         ``True`` when a non-empty patch was written, else ``False``.
@@ -923,12 +819,10 @@ def capture_recommended_patch_with_base(
     Best-effort: never raises (see :func:`capture_recommended_patch`).
 
     Args:
-        repo: Repository working directory.
         pre_fix_snapshot: ``stash create`` SHA, or ``None`` when the tree was
             clean or the snapshot failed.
         pre_fix_head: Pre-fix ``HEAD`` SHA, or ``None``. Used only when
             *pre_fix_snapshot* is ``None``.
-        out_path: Destination path for the patch.
 
     Returns:
         ``True`` when a non-empty patch was written, else ``False``.
@@ -939,11 +833,6 @@ def capture_recommended_patch_with_base(
 
 def log(repo: Path, base: str, head: str = "HEAD") -> str:
     """Return the one-line commit log for ``base..head``.
-
-    Args:
-        repo: Repository working directory.
-        base: Base ref.
-        head: Comparison ref. Defaults to ``"HEAD"``.
 
     Returns:
         Stripped ``--oneline`` log output. Empty string when no commits.
@@ -964,8 +853,6 @@ def log_shas(repo: Path, ref: str, *, since: str) -> list[str]:
     so callers can treat "no commits available" without try/except plumbing.
 
     Args:
-        repo: Repository working directory.
-        ref: Head ref or branch name (e.g. ``"main"``).
         since: Base ref or SHA; commits reachable from *ref* but not from
             *since* are returned (``git log since..ref``).
 
@@ -1015,7 +902,6 @@ def log_shas_since(repo: Path, head: str, base: str) -> list[str]:
     warning so a degraded fix-applied verdict is not silent.
 
     Args:
-        repo: Repository working directory.
         head: The divergence point; commits reachable from *head* are excluded.
         base: The tip ref; only commits reachable from *base* are included.
 
@@ -1061,11 +947,6 @@ def log_shas_since(repo: Path, head: str, base: str) -> list[str]:
 def daydream_commits(repo: Path, base: str, head: str = "HEAD") -> str | None:
     """Return oneline log of prior daydream commits in ``base..head``.
 
-    Args:
-        repo: Repository working directory.
-        base: Base ref (e.g. ``"main"``).
-        head: Comparison ref. Defaults to ``"HEAD"``.
-
     Returns:
         Stripped log output, or ``None`` if no daydream commits found.
     """
@@ -1090,14 +971,6 @@ def daydream_commits(repo: Path, base: str, head: str = "HEAD") -> str | None:
 def show(repo: Path, ref: str, path: str) -> bytes:
     """Return the raw bytes of *path* at *ref* via ``git show``.
 
-    Args:
-        repo: Repository working directory.
-        ref: Commit / branch / tag.
-        path: Path within the repository.
-
-    Returns:
-        Raw bytes of the file at the given revision.
-
     Raises:
         GitError: If ``git show`` fails (e.g. path missing at that revision).
     """
@@ -1110,13 +983,6 @@ def show(repo: Path, ref: str, path: str) -> bytes:
 
 def grep(repo: Path, pattern: str) -> list[str]:
     """Return file paths matching *pattern* via ``git grep -l``.
-
-    Args:
-        repo: Repository working directory.
-        pattern: Pattern passed to ``git grep -l``.
-
-    Returns:
-        List of matching file paths (one per line of stdout).
 
     Raises:
         GitError: If ``git grep`` exits with an unexpected status.  Exit code
@@ -1131,9 +997,6 @@ def grep(repo: Path, pattern: str) -> list[str]:
 
 def status_porcelain(repo: Path) -> str:
     """Return ``git status --porcelain`` output.
-
-    Args:
-        repo: Repository working directory.
 
     Returns:
         Porcelain-formatted status text. Empty when the tree is clean.
@@ -1160,9 +1023,6 @@ def changed_files(repo: Path) -> list[str]:
     repo has no commits yet, or either subcommand fails.  Individual
     subcommand failures are logged and skipped — the other subcommand's
     results are still returned.
-
-    Args:
-        repo: Repository working directory.
 
     Returns:
         De-duplicated list of repo-relative path strings.  Empty on error.
@@ -1193,12 +1053,6 @@ def list_untracked(repo: Path) -> list[str]:
     Soft-failure semantics mirror :func:`changed_files`: returns ``[]`` on any
     git error or non-zero exit. Used to snapshot the untracked set before a fix
     pass so newly-orphaned files created by a failed group can be detected.
-
-    Args:
-        repo: Repository working directory.
-
-    Returns:
-        Untracked file paths (``git ls-files --others --exclude-standard``).
     """
     try:
         proc = _run_git(repo, ["ls-files", "--others", "--exclude-standard"], timeout=10)
@@ -1219,9 +1073,6 @@ def stash_create(repo: Path) -> str | None:
     pre-mutation content. Untracked files are NOT included (``git stash create``
     ignores them), so callers track those separately via :func:`list_untracked`.
 
-    Args:
-        repo: Repository working directory.
-
     Returns:
         The 40-character snapshot SHA, or ``None`` when the tree has no tracked
         changes (``git stash create`` prints nothing). A ``None`` result means
@@ -1238,10 +1089,6 @@ def stash_create(repo: Path) -> str | None:
 
 def upstream_ahead_count(repo: Path, branch: str) -> int:
     """Return the number of commits ``<branch>@{upstream}`` is ahead of *branch*.
-
-    Args:
-        repo: Repository working directory.
-        branch: Branch name to compare against its tracked upstream.
 
     Returns:
         The right-side count from ``rev-list --left-right --count``. Returns
@@ -1277,13 +1124,6 @@ def check_ignore(repo: Path, path: str) -> bool:
     Soft-failure semantics: returns ``False`` on any subprocess error (timeout,
     missing binary, OS-level failure) to avoid blocking callers that use this
     for optional file-copy filtering.
-
-    Args:
-        repo: Repository working directory.
-        path: Path (relative to *repo*) to check.
-
-    Returns:
-        True when *path* is gitignored, False otherwise or on error.
     """
     try:
         proc = _run_git(repo, ["check-ignore", "--quiet", path], timeout=5)
@@ -1297,10 +1137,6 @@ def check_ignore(repo: Path, path: str) -> bool:
 
 def fetch(repo: Path, remote: str = "origin") -> None:
     """Run ``git fetch`` against *remote*.
-
-    Args:
-        repo: Repository working directory.
-        remote: Remote name. Defaults to ``"origin"``.
 
     Raises:
         GitError: If the fetch fails.
@@ -1317,9 +1153,6 @@ def fetch_ref(repo: Path, refspec: str, remote: str = "origin", *, timeout: int 
     configuration, such as ``refs/pull/<N>/head`` on GitHub.
 
     Args:
-        repo: Repository working directory.
-        refspec: Refspec to fetch (e.g. ``"pull/42/head"``).
-        remote: Remote name. Defaults to ``"origin"``.
         timeout: Subprocess timeout in seconds. Defaults to 300 s to
             accommodate first-run blobless fetches of large repositories.
 
@@ -1335,8 +1168,6 @@ def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
     """Detach HEAD onto *sha* in *repo*.
 
     Args:
-        repo: Repository working directory.
-        sha: Commit SHA or any commit-ish to detach onto.
         timeout: Subprocess timeout in seconds.  Defaults to 300 s because
             detaching HEAD in a blobless clone triggers lazy blob fetches that
             can take several minutes on large repositories.
@@ -1354,7 +1185,6 @@ def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int
 
     Args:
         remote_url: Remote URL or local path to clone from.
-        target: Destination directory for the new working tree.
         blobless: When ``True``, pass ``--filter=blob:none`` to perform a
             partial clone that omits blobs until they are accessed.  Reduces
             initial transfer and storage at the cost of lazy blob fetches on
@@ -1386,7 +1216,6 @@ def checkout_paths(repo: Path, paths: list[Path]) -> None:
     """Run ``git checkout -- <paths>`` to discard local changes for *paths*.
 
     Args:
-        repo: Repository working directory.
         paths: Paths (relative to *repo*) to restore from the index. Pass
             ``[Path(".")]`` to restore the entire working tree.
 
@@ -1411,8 +1240,6 @@ def restore_paths_from_ref(repo: Path, ref: str, paths: list[str]) -> None:
     failed mid-edit, leaving the rest of the tree untouched.
 
     Args:
-        repo: Repository working directory.
-        ref: Ref to restore from (e.g. ``"HEAD"`` or a ``git stash create`` SHA).
         paths: Repo-relative paths to restore. No-op when empty.
 
     Raises:
@@ -1430,9 +1257,6 @@ def restore_paths_from_ref(repo: Path, ref: str, paths: list[str]) -> None:
 def clean_untracked(repo: Path) -> None:
     """Run ``git clean -fd`` to remove untracked files and directories.
 
-    Args:
-        repo: Repository working directory.
-
     Raises:
         GitError: If the clean fails.
     """
@@ -1445,9 +1269,7 @@ def worktree_add(repo: Path, path: Path, ref: str, *, detach: bool = True) -> No
     """Create a new worktree at *path* pointing at *ref*.
 
     Args:
-        repo: The source repository.
         path: Filesystem path for the new worktree (must not already exist).
-        ref: Commit / branch / tag to check out.
         detach: When True, pass ``--detach`` so the new worktree is detached.
 
     Raises:
@@ -1467,7 +1289,6 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
 
     Args:
         repo: The source repository (or any worktree linked to the same repo).
-        path: Path of the worktree to remove.
         force: When True, pass ``--force`` to remove dirty worktrees.
 
     Raises:
@@ -1485,10 +1306,6 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
 def create_branch(repo: Path, name: str) -> None:
     """Create and check out a new branch *name* via ``git checkout -b``.
 
-    Args:
-        repo: Repository working directory.
-        name: The branch name to create and switch to.
-
     Raises:
         GitError: If the branch already exists (``git checkout -b`` refuses to
             overwrite it) or the checkout otherwise fails. The caller decides
@@ -1504,10 +1321,6 @@ def checkout_branch(repo: Path, name: str) -> None:
 
     Uses ``git checkout <name>`` when the branch exists locally (``refs/heads/<name>``),
     or ``git checkout -b <name> origin/<name>`` when it exists only on the remote.
-
-    Args:
-        repo: Repository working directory.
-        name: An existing branch name (local or ``origin/<name>``).
 
     Raises:
         GitError: If the checkout fails, or the branch does not exist either
@@ -1530,9 +1343,7 @@ def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
     ``git commit -m <message>``.
 
     Args:
-        repo: Repository working directory.
         paths: Repo-relative paths to stage and commit. Must be non-empty.
-        message: The commit message.
 
     Raises:
         GitError: If *paths* is empty, or the ``git add`` / ``git commit`` call
@@ -1566,11 +1377,6 @@ def push_branch(repo: Path, branch: str, *, remote: str = "origin") -> None:
 
     Runs ``git push -u <remote> <branch>``.
 
-    Args:
-        repo: Repository working directory.
-        branch: The branch to push.
-        remote: Remote name. Defaults to ``"origin"``.
-
     Raises:
         GitError: If the push fails (propagates stderr).
     """
@@ -1588,11 +1394,6 @@ def gh_pr_view(repo: Path, pr: int | None = None) -> dict | None:
     When *pr* is ``None``, ``gh pr view`` infers the PR from the currently
     checked-out branch. This mirrors the auto-detection flow used by the CLI
     when the user does not pass an explicit PR number.
-
-    Args:
-        repo: Repository working directory.
-        pr: Pull request number, or ``None`` to let ``gh`` infer from the
-            current branch.
 
     Returns:
         Parsed JSON dict, or ``None`` when no PR is found / the call fails.
@@ -1623,10 +1424,6 @@ def gh_pr_view(repo: Path, pr: int | None = None) -> dict | None:
 def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict]:
     """List open PRs whose head ref is *branch*.
 
-    Args:
-        repo: Repository working directory.
-        branch: Head branch name.
-
     Returns:
         List of PR dicts (empty when no PRs match or the call fails).
     """
@@ -1656,13 +1453,6 @@ def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict]:
 def gh_pr_diff(repo: Path, pr: int) -> str:
     """Return the unified diff for *pr* as text.
 
-    Args:
-        repo: Repository working directory.
-        pr: Pull request number.
-
-    Returns:
-        The diff text.
-
     Raises:
         GitError: If ``gh pr diff`` fails.
     """
@@ -1674,9 +1464,6 @@ def gh_pr_diff(repo: Path, pr: int) -> str:
 
 def split_owner_repo(slug: str) -> tuple[str, str] | None:
     """Split an ``"owner/repo"`` slug into its components.
-
-    Args:
-        slug: A GitHub ``"owner/repo"`` string.
 
     Returns:
         A ``(owner, repo)`` tuple when *slug* contains exactly one ``"/"``
@@ -1692,9 +1479,6 @@ def split_owner_repo(slug: str) -> tuple[str, str] | None:
 
 def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     """Return the ``(owner, name)`` slug for the current repository.
-
-    Args:
-        repo: Repository working directory.
 
     Returns:
         Tuple of ``(owner, name)``, or ``None`` when the call fails or the
@@ -1749,9 +1533,6 @@ def gh_api(
     """Call ``gh api <endpoint>`` and return parsed JSON.
 
     Args:
-        repo: Repository working directory.
-        endpoint: API path (e.g. ``"repos/owner/repo/pulls/1/comments"``).
-        method: HTTP method. Defaults to ``"GET"``.
         paginate: When True, pass ``--paginate`` to walk all result pages.
         input_data: Optional JSON-serialisable payload. When provided, it is
             written to a temporary file and passed via ``--input <path>`` and
@@ -1870,9 +1651,6 @@ def gh_secret_set(
     material such as a PEM private key cannot leak into process listings.
 
     Args:
-        repo: Repository working directory (ambient ``gh`` auth context).
-        name: The secret name.
-        value: The secret value; piped on stdin via ``--body-file -``.
         org: Set at the organization scope (``--org``).
         repo_slug: Set at the repository scope (``--repo <owner/repo>``).
 
@@ -1898,9 +1676,6 @@ def gh_variable_set(
     Variables are non-secret handles, so the value is passed via ``--body``.
 
     Args:
-        repo: Repository working directory.
-        name: The variable name.
-        value: The variable value.
         org: Set at the organization scope (``--org``).
         repo_slug: Set at the repository scope (``--repo <owner/repo>``).
 
@@ -1930,7 +1705,6 @@ def gh_secret_list(repo: Path, *, org: str | None = None, repo_slug: str | None 
     """Return the names of Actions secrets at the given scope.
 
     Args:
-        repo: Repository working directory.
         org: List at the organization scope (``--org``).
         repo_slug: List at the repository scope (``--repo <owner/repo>``).
 
@@ -1947,12 +1721,8 @@ def gh_variable_list(repo: Path, *, org: str | None = None, repo_slug: str | Non
     """Return the names of Actions variables at the given scope.
 
     Args:
-        repo: Repository working directory.
         org: List at the organization scope (``--org``).
         repo_slug: List at the repository scope (``--repo <owner/repo>``).
-
-    Returns:
-        The variable names.
 
     Raises:
         GitError: If neither/both scopes are given, or the ``gh`` call fails.
@@ -1966,16 +1736,8 @@ def gh_pr_create(
     """Open a pull request via ``gh pr create`` and return its URL.
 
     Args:
-        repo: Repository working directory.
-        head: The head branch to open the PR from.
-        base: The base branch to merge into.
-        title: The PR title.
-        body: The PR body.
         repo_slug: Explicit ``owner/repo`` target (``--repo``).  When *None*
             the ambient ``gh`` context (cwd) is used.
-
-    Returns:
-        The PR URL ``gh`` prints on success.
 
     Raises:
         GitError: If the ``gh pr create`` call fails (stderr included).

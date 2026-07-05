@@ -130,9 +130,6 @@ def resolve_judge_model(model: str | None) -> str:
     with an unnamed judge would silently grade against whatever model the
     harness defaults to, in a directory we did not name.
 
-    Args:
-        model: Explicit judge model id from ``--model`` (or ``None``).
-
     Returns:
         The resolved judge model id (``model`` if given, else ``MARTIAN_MODEL``).
 
@@ -158,11 +155,7 @@ def model_results_dir(benchmark_repo: Path, model: str) -> Path:
     the harness actually wrote.
 
     Args:
-        benchmark_repo: Path to the external benchmark checkout.
         model: Resolved judge model id (see `resolve_judge_model`).
-
-    Returns:
-        The `results/<sanitized-model>` directory path.
     """
     return benchmark_repo / "results" / model.strip().replace("/", "_")
 
@@ -202,7 +195,6 @@ def _summarize_judge_errors(errors: list[str], *, cap: int = 3) -> str:
     """Render distinct judge error strings with occurrence counts, most-common first.
 
     Args:
-        errors: The verbatim per-comparison error strings collected from the leaves.
         cap: Maximum number of distinct messages to spell out before summarizing
             the remainder as a count.
 
@@ -229,10 +221,6 @@ def parse_daydream_scores(evals: dict[str, dict[str, Any]], *, tool: str = _TOOL
 
     Args:
         evals: The parsed `evaluations.json` object — golden PR URL → tool → leaf.
-        tool: Results label to extract (defaults to ``_TOOL``).
-
-    Returns:
-        A `DaydreamScores` capturing per-PR tool leaves and the aggregate.
 
     Raises:
         JudgeFailedError: If the judge errored on at least
@@ -308,8 +296,6 @@ def _run_step(module: str, extra_args: list[str], *, cwd: Path, tool: str = _TOO
     Args:
         module: Dotted module path (e.g. `code_review_benchmark.step3_judge_comments`).
         extra_args: Module-specific CLI arguments appended after `--tool <tool>`.
-        cwd: The benchmark repo directory.
-        tool: Results label passed as `--tool` (defaults to ``_TOOL``).
         judge_model: Resolved judge model exported as `MARTIAN_MODEL` for the step.
 
     Raises:
@@ -378,15 +364,9 @@ def run_scoring(
     caller (``run_bench``) before any expensive reviews run.
 
     Args:
-        benchmark_repo: Path to the external benchmark checkout.
         judge_model: Resolved judge model id (see `resolve_judge_model`).
         pr_count: When provided, bounds how many PR reviews the judge evaluates
             (passed as ``--limit`` to Martian step3).
-        tool: Results label under evaluation (defaults to ``_TOOL``).
-        judge_route: ``"martian"`` or ``"anthropic-direct"``.
-
-    Returns:
-        The parsed `DaydreamScores`.
 
     Raises:
         BenchmarkStepError: If scoring fails.

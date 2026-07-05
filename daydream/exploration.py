@@ -86,9 +86,6 @@ class ExplorationContext:
 
         Returns empty string when all fields are empty/default, so it adds
         nothing to the review prompt for unexplored contexts.
-
-        Returns:
-            Markdown-formatted exploration context, or empty string.
         """
         sections: list[str] = []
 
@@ -220,14 +217,6 @@ async def safe_explore(
 
     Catches any exception from explore_fn and returns an empty
     ExplorationContext instead. Displays a warning banner via Rich UI.
-
-    Args:
-        explore_fn: Async callable that performs exploration.
-        *args: Positional args forwarded to explore_fn.
-        **kwargs: Keyword args forwarded to explore_fn.
-
-    Returns:
-        ExplorationContext from explore_fn, or empty ExplorationContext on failure.
     """
     try:
         return await explore_fn(*args, **kwargs)
@@ -248,9 +237,6 @@ def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
     - Dependency: keyed on (source, target, relationship).
     - guidelines: keyed on string identity.
     - raw_notes: non-empty values joined with a double newline.
-
-    Args:
-        *contexts: Any number of ExplorationContext instances.
 
     Returns:
         A new merged ExplorationContext (always a fresh instance with fresh

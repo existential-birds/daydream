@@ -48,12 +48,6 @@ def _is_daydream_comment(comment: dict[str, Any]) -> bool:
     :data:`DAYDREAM_FOOTER` constant, so that comments posted by any release
     of daydream are correctly identified even when their embedded version
     string differs from the currently-installed package.
-
-    Args:
-        comment: A parsed PR review comment dict (``body`` field read).
-
-    Returns:
-        True iff the comment body contains the daydream footer badge.
     """
     return _DAYDREAM_FOOTER_PREFIX in (comment.get("body") or "")
 

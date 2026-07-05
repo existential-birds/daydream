@@ -48,12 +48,7 @@ from daydream.ui import (
 
 
 class MissingSkillError(Exception):
-    """Raised when a required skill is not available.
-
-    Args:
-        skill_name: The name of the skill that was not found.
-
-    """
+    """Raised when a required skill is not available."""
 
     def __init__(self, skill_name: str):
         self.skill_name = skill_name
@@ -65,15 +60,10 @@ class AgentState:
     """Consolidated state for agent module.
 
     Attributes:
-        quiet_mode: True to hide tool calls and results, False to show them.
-        non_interactive: True to take each prompt's safe default without reading stdin.
         assume: A forced yes/no answer for interactive gates — ``"yes"`` (``--yes``),
             ``"no"`` (a future ``--no``), or ``None`` (no assumption). Orthogonal to
             ``non_interactive``: ``non_interactive`` controls *whether* we may block on
             stdin; ``assume`` supplies a *pre-decided answer* regardless of TTY.
-        shutdown_requested: True if shutdown has been requested.
-        current_backends: List of active backend instances.
-
     """
 
     quiet_mode: bool = False
@@ -90,72 +80,29 @@ _state = AgentState()
 console = create_console()
 
 
-def get_state() -> AgentState:
-    """Get the global agent state singleton.
-
-    Returns:
-        The global AgentState instance.
-
-    """
-    return _state
-
-
 def reset_state() -> None:
-    """Reset the global agent state to defaults.
-
-    Creates a new AgentState instance with default values.
-
-    Returns:
-        None
-
-    """
+    """Reset the global agent state to defaults (restores between test runs)."""
     global _state
     _state = AgentState()
 
 
 def set_quiet_mode(quiet: bool) -> None:
-    """Set quiet mode for agent output.
-
-    Args:
-        quiet: True to hide tool calls and results, False to show them.
-
-    Returns:
-        None
-
-    """
+    """Set quiet mode for agent output."""
     _state.quiet_mode = quiet
 
 
 def get_quiet_mode() -> bool:
-    """Get current quiet mode setting.
-
-    Returns:
-        True if quiet mode is enabled, False otherwise.
-
-    """
+    """Get current quiet mode setting."""
     return _state.quiet_mode
 
 
 def set_non_interactive(value: bool) -> None:
-    """Set non-interactive mode for prompts.
-
-    Args:
-        value: True to take each prompt's safe default without reading stdin.
-
-    Returns:
-        None
-
-    """
+    """Set non-interactive mode for prompts."""
     _state.non_interactive = value
 
 
 def get_non_interactive() -> bool:
-    """Get current non-interactive mode setting.
-
-    Returns:
-        True if non-interactive mode is enabled, False otherwise.
-
-    """
+    """Get current non-interactive mode setting."""
     return _state.non_interactive
 
 
@@ -166,10 +113,6 @@ def set_assume(value: str | None) -> None:
         value: ``"yes"`` to auto-approve gates (``--yes``), ``"no"`` to auto-decline,
             or ``None`` for no assumption (gates fall back to prompting or their
             unattended safe default).
-
-    Returns:
-        None
-
     """
     _state.assume = value
 
@@ -179,7 +122,6 @@ def get_assume() -> str | None:
 
     Returns:
         ``"yes"``, ``"no"``, or ``None`` when no assumption is set.
-
     """
     return _state.assume
 
@@ -200,7 +142,6 @@ def resolve_gate(*, assume: str | None, interactive: bool, safe_default: bool) -
     Returns:
         ``True``/``False`` to use the resolved answer directly, or ``None`` when
         the caller should fall back to an interactive prompt.
-
     """
     if assume is not None:
         return assume == "yes"
@@ -236,7 +177,6 @@ def resolve_or_prompt(
 
     Returns:
         ``True`` if the gate is approved, ``False`` if declined.
-
     """
     decision = resolve_gate(assume=assume, interactive=interactive, safe_default=safe_default)
     if decision is None:
@@ -246,35 +186,12 @@ def resolve_or_prompt(
 
 
 def set_shutdown_requested(requested: bool) -> None:
-    """Set shutdown requested flag.
-
-    Args:
-        requested: True to indicate shutdown has been requested, False otherwise.
-
-    Returns:
-        None
-
-    """
+    """Set shutdown requested flag."""
     _state.shutdown_requested = requested
 
 
-def get_shutdown_requested() -> bool:
-    """Get shutdown requested flag.
-
-    Returns:
-        True if shutdown has been requested, False otherwise.
-
-    """
-    return _state.shutdown_requested
-
-
 def get_current_backends() -> list[Backend]:
-    """Get all currently running backends.
-
-    Returns:
-        List of active backend instances.
-
-    """
+    """Get all currently running backends."""
     return list(_state.current_backends)
 
 
@@ -284,13 +201,6 @@ def detect_test_success(output: str) -> bool:
     Extracts structured pass/fail counts first (tolerating "N tests failed"
     wording and any separator between counts), then falls through to sentinel
     pass-phrases emitted by tooling or agents.
-
-    Args:
-        output: Agent output containing test results
-
-    Returns:
-        True if tests clearly passed, False otherwise
-
     """
     if not output:
         return False
@@ -360,13 +270,6 @@ def is_environmental_failure(test_output: str) -> bool:
     reachable). Used to short-circuit the heal loop: re-running an agent fix turn
     cannot bring up a Postgres/Redis container, so an environmental failure must
     abort rather than burn turns on a non-code problem.
-
-    Args:
-        test_output: Test/agent output to inspect.
-
-    Returns:
-        True if the output carries an infrastructure-unavailable signature.
-
     """
     if not test_output:
         return False
@@ -446,7 +349,6 @@ async def run_agent(
         MissingSkillError: If a required skill is not available.
         TypeError: If the keyword-only ``phase`` argument is not provided
             (raised by the Python interpreter at call time).
-
     """
     output_parts: list[str] = []
     structured_result: Any = None

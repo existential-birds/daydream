@@ -378,8 +378,6 @@ class PiBackend:
         """Execute a prompt via the Pi CLI and yield unified events.
 
         Args:
-            cwd: Working directory for the agent (passed as the process ``cwd``).
-            prompt: The prompt to send (Pi's positional argument).
             output_schema: Optional JSON schema for structured output. Pi has no
                 native schema flag, so the schema is appended to the prompt and
                 the final assistant text is parsed as JSON at ``agent_end``.
@@ -396,14 +394,10 @@ class PiBackend:
             read_only: When True, restricts Pi's tools to the read-only subset
                 (``read,find,ls,grep``) so the agent cannot write/edit/bash.
 
-        Yields:
-            AgentEvent instances.
-
         Raises:
             PiError: If a Pi turn ends with ``stopReason == "error"``.
             NotImplementedError: If ``agents`` is non-empty (Pi backend does not
                 support exploration subagents).
-
         """
         if agents:
             raise NotImplementedError(
@@ -697,14 +691,6 @@ class PiBackend:
         directory is registered with the subprocess in :meth:`execute` via a
         ``--skill`` flag so the command resolves even without an ambient
         mirror. This method never raises.
-
-        Args:
-            skill_key: Full skill key (e.g. "beagle-python:review-python").
-            args: Optional arguments string.
-
-        Returns:
-            Formatted skill invocation string (``/skill:<slug>`` plus args).
-
         """
         base = f"/skill:{_skill_slug(skill_key)}"
         if args:
