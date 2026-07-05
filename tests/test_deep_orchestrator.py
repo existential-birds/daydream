@@ -89,6 +89,16 @@ class _StubBackend:
         # per-finding fallback loop -- the #186 pattern the group budget bounds.
         # The per-finding retries ("Fix this issue") for that file then succeed.
         self.fail_batched_fix_file: str | None = None
+        # When set, ONLY the batched fix turn for the matching file emits a slow
+        # runaway burst (real per-event sleep, never a ResultEvent) so run_agent's
+        # OWN per-invocation WALL budget trips and returns a budget_reason -- the
+        # batched call then raises and phase_fix_parallel falls back to per-finding
+        # fixes. Unlike fail_batched_fix_file (a synchronous stub raise), this
+        # exercises the real budget_reason -> raise path AND burns real wall-time
+        # that carries into the fallback via the shared FileGroupBudget (#201).
+        # Per-finding fallback turns for that file are NOT runaway.
+        self.runaway_batched_fix_file: str | None = None
+        self.runaway_batched_sleep_s: float = 0.05
         # When set, the fix branch WRITES a broken partial edit to the matching
         # file and THEN raises MaxTurnsError -- simulating an agent that mutated
         # the tree before exhausting its turn budget, so a test can assert the
@@ -443,6 +453,18 @@ class _StubBackend:
             fixed_file = m.group(1).strip() if m else "unknown"
             # phase_fix emits an absolute path when the file exists on disk; the stub keys fixes by basename.
             fixed_name = Path(fixed_file).name
+            # Runaway ONLY the batched turn for the marked file: burn real wall so
+            # run_agent's per-invocation wall budget trips, returns a budget_reason,
+            # and phase_fix_batched raises into the per-finding fallback (#201).
+            if (
+                self.runaway_batched_fix_file is not None
+                and batched_hdr is not None
+                and fixed_name == self.runaway_batched_fix_file
+            ):
+                for n in range(500):
+                    yield ToolStartEvent(id=f"btc-{n}", name="Bash", input={"command": "find /"})
+                    await anyio.sleep(self.runaway_batched_sleep_s)
+                return
             # Fail ONLY the batched turn for the marked file so the group falls
             # back to per-finding fixes (the #186 pattern under budget test).
             if (
@@ -3545,6 +3567,100 @@ async def test_run_leaves_small_file_group_unbudgeted(
 
     events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
     assert events == [], "no budget event should fire when the group stays within budget"
+
+
+async def test_run_batched_wall_trip_carries_into_group_fallback(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#201 real-path: a batched turn's OWN wall trip carries into the fallback.
+
+    The batched api.py turn burns real wall until run_agent's per-invocation wall
+    scope cancels it and returns a ``budget_reason`` -- so ``phase_fix_batched``
+    raises through the *real* budget path (NOT a synchronous stub raise like
+    ``fail_batched_fix_file``) and ``phase_fix_parallel`` falls back to per-finding
+    fixes. Because the SAME ``FileGroupBudget`` is reused across the batched and
+    fallback stages (a spec invariant), the ~1.8s the batched turn already spent
+    is on the group's wall clock when the fallback's first ``budget.check()`` runs.
+    With the group wall ceiling at 1.0s -- below the batched turn's scaled 1.8s
+    per-invocation budget -- that first check trips immediately, so ZERO fallback
+    fixes run, the whole group is recorded as a wall budget failure, and the
+    trajectory event reports 0 processed / all skipped.
+
+    Discriminating: if the batched turn's wall did NOT carry into the fallback
+    (e.g. a fresh per-call budget), the fallback would see a ~0s clock and fix all
+    six api.py findings. Asserting zero ``fix this issue`` api.py turns + a
+    ``group_wall_budget_exceeded`` reason proves the carryover. The batched turn's
+    own ``wall_budget_exceeded`` stop_reason proves it failed via the real budget
+    path rather than a stub raise.
+    """
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    # Tiny per-invocation wall so the batched turn (scaled to N * 0.3s) trips after
+    # ~1.8s of real wall; patch the binding read at the fix call site.
+    monkeypatch.setattr("daydream.phases.DEFAULT_WALL_BUDGET_S", 0.3)
+    # Group wall ceiling below the batched turn's scaled per-invocation budget, so
+    # the wall the batched turn already burned guarantees the fallback's first
+    # check trips (deterministic: 1.0 < 0.3 * 6).
+    monkeypatch.setattr("daydream.deep.orchestrator.DEFAULT_GROUP_MAX_WALL_S", 1.0)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(i, "api.py", "high") for i in range(1, 7)] + [
+        _merge_item(7, "App.tsx", "high")
+    ]
+    stub.runaway_batched_fix_file = "api.py"  # batched api.py turn trips its own wall budget
+    stub.runaway_batched_sleep_s = 0.05
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(
+            RunConfig(
+                target=str(multi_stack_target),
+                trajectory_path=traj,
+                assume="yes",
+                output_mode="loop",
+                cleanup=False,
+            )
+        )
+    assert isinstance(exit_code, int)
+
+    # The batched api.py turn actually ran (and is where the wall was burned).
+    group_size = _batched_group_size(stub, "api.py")
+    assert group_size >= 6
+
+    # ZERO fallback fixes ran: the batched turn's carried-over wall tripped the
+    # group budget on the fallback's very first check -- the #186 runaway is fully
+    # bounded, not merely trimmed.
+    api_singles = [
+        c
+        for c in stub.calls
+        if c["prompt"].lower().startswith("fix this issue") and "api.py" in c["prompt"]
+    ]
+    assert len(api_singles) == 0, f"expected 0 fallback fixes (wall carried over), got {len(api_singles)}"
+
+    # The skipped group is recorded as a WALL budget failure (surfaces to the user).
+    fix_failures_p = multi_stack_target / ".daydream" / "deep" / "fix-failures.json"
+    assert fix_failures_p.is_file(), "budget-skipped group must write the fix-failures artifact"
+    recorded = json.loads(fix_failures_p.read_text())
+    assert "api.py" in recorded
+    assert recorded["api.py"].startswith("file_group_budget_exceeded: group_wall_budget_exceeded")
+
+    # The trajectory carries the budget event: 0 processed, the whole group skipped.
+    events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
+    assert events, "no file_group_budget_exceeded event emitted"
+    meta = events[0]["metadata"]
+    assert meta["file"] == "api.py"
+    assert meta["reason"] == "group_wall_budget_exceeded"
+    assert meta["items_processed"] == 0
+    assert meta["items_skipped"] == group_size
+
+    # Discriminator: the batched turn failed via run_agent's REAL per-invocation
+    # wall budget (a budget_reason), not a synchronous stub raise -- its aborted
+    # ATIF step carries stop_reason == wall_budget_exceeded.
+    run_root = multi_stack_target / ".daydream"
+    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
+    assert "wall_budget_exceeded" in stop_reasons, "batched turn did not trip its own per-invocation wall budget"
 
 
 async def test_run_batches_same_file_findings_into_one_fix_turn(

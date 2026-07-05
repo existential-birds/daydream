@@ -26,7 +26,6 @@ from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
 from daydream.config import (
-    DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS,
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
     REVIEW_OUTPUT_FILE,
@@ -263,24 +262,6 @@ def _resolve_group_max_serial_items(config: RunConfig) -> int:
     if file_config is not None and file_config.group_max_serial_items is not None:
         return file_config.group_max_serial_items
     return DEFAULT_GROUP_MAX_SERIAL_ITEMS
-
-
-def _resolve_group_max_cumulative_tokens(config: RunConfig) -> int:
-    """Resolve the per-file-group cumulative token ceiling (issue #201).
-
-    Precedence (highest first), mirroring ``_shallow_fanout_threshold`` above
-    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
-
-      1. ``DaydreamFileConfig.group_max_cumulative_tokens`` (file-config scalar).
-      2. ``DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS`` (built-in default).
-
-    Uses ``is not None`` rather than truthiness so a configured value of
-    ``0`` is honored rather than falling through to the default.
-    """
-    file_config = config.file_config
-    if file_config is not None and file_config.group_max_cumulative_tokens is not None:
-        return file_config.group_max_cumulative_tokens
-    return DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS
 
 
 def _collapse_stacks_for_tiny_diff(
@@ -1322,7 +1303,6 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # the config.py default. A runaway file group cannot silently dominate a run.
     group_wall_s = _resolve_group_max_wall_s(config)
     group_serial = _resolve_group_max_serial_items(config)
-    group_tokens = _resolve_group_max_cumulative_tokens(config)
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
@@ -1331,7 +1311,6 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
             group_max_wall_s=group_wall_s,
             group_max_serial_items=group_serial,
-            group_max_cumulative_tokens=group_tokens,
         )
     # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
     # NOW, before the fix-failure and test-failure early returns below, so

@@ -41,12 +41,17 @@ class DaydreamFileConfig:
         precision_mode: Opt-in precision suppression (issue #232). ``None`` falls
             through to the RunConfig field / orchestrator default; ``True`` runs
             the skeptical suppression pass over borderline findings.
-        group_max_wall_s: Per-file-group fix wall-clock ceiling (issue #201).
-            ``None`` falls through to ``config.DEFAULT_GROUP_MAX_WALL_S``.
-        group_max_serial_items: Per-file-group serial fix-call ceiling (#201).
-            ``None`` falls through to ``config.DEFAULT_GROUP_MAX_SERIAL_ITEMS``.
-        group_max_cumulative_tokens: Per-file-group token ceiling (#201). ``None``
-            falls through to ``config.DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS``.
+        group_max_wall_s: Per-file-group fix wall-clock ceiling in seconds
+            (issue #201), a global ``[tool.daydream]`` key. Bounds the cumulative
+            wall-clock of all fix ``run_agent`` turns targeting one file group so
+            a runaway file cannot dominate a run. ``None`` (the default when the
+            key is absent or junk) falls through to
+            ``config.DEFAULT_GROUP_MAX_WALL_S`` (600.0).
+        group_max_serial_items: Per-file-group serial fix-call ceiling (#201), a
+            global ``[tool.daydream]`` key. Caps the number of per-finding fix
+            calls in one file group (the group is severity-sorted, so the dropped
+            tail is lowest-severity). ``None`` (the default when the key is absent
+            or junk) falls through to ``config.DEFAULT_GROUP_MAX_SERIAL_ITEMS`` (6).
     """
 
     model: str | None = None
@@ -57,7 +62,6 @@ class DaydreamFileConfig:
     precision_mode: bool | None = None
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
-    group_max_cumulative_tokens: int | None = None
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase.
@@ -268,5 +272,4 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         precision_mode=precision,
         group_max_wall_s=_coerce_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
-        group_max_cumulative_tokens=_coerce_int(merged.get("group_max_cumulative_tokens")),
     )

@@ -45,9 +45,15 @@ DEFAULT_TOOL_CALL_BUDGET = 50
 # runaway file (the #186 pattern: 9 serial fix calls on one file) cannot
 # silently dominate a run. Enforced between calls in ``phase_fix_parallel``
 # (Approach B — no mid-call abort). Overridable via ``[tool.daydream]``.
+#
+# Values validated against 139–484 archived runs in ~/.daydream/archive/runs:
+#   600s: pi fix calls run p90=623s / max=1731s, so 600s caps the 1837s/5-call
+#   pi runaway to 2 fixes and the #186 9-call group to 2, while a legit slow
+#   single-call group still rides its own 1800s per-call wall budget.
+#   6 items: >6 findings on one file is 3.5% of files, and the dropped tail is
+#   the lowest-severity findings (the group is severity-sorted).
 DEFAULT_GROUP_MAX_WALL_S = 600.0  # 10 min of wall-clock across one file group
 DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
-DEFAULT_GROUP_MAX_CUMULATIVE_TOKENS = 200_000  # input + output tokens per group
 
 # Per-backend per-phase default model table. The phase resolver in
 # ``daydream.runner._resolve_backend`` looks up
