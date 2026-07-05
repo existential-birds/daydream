@@ -99,12 +99,6 @@ def to_canonical_shallow(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     item's ``confidence`` (HIGH→high, MEDIUM→medium, LOW→low), defaulting to
     ``"medium"`` when ``confidence`` is absent. Items are mutated in place and
     returned for convenience.
-
-    Args:
-        items: Raw feedback items from ``phase_parse_feedback``.
-
-    Returns:
-        The same list, each item carrying ``lens`` and ``severity``.
     """
     for item in items:
         item["lens"] = "per-stack"
@@ -365,10 +359,6 @@ def _resolve_backend(
             When provided, backends are reused only when both the backend kind
             and the resolved model match — so the same backend kind with two
             different models yields two distinct instances.
-
-    Returns:
-        Backend instance for the phase.
-
     """
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
@@ -384,9 +374,6 @@ def _resolve_backend(
 
 def _truthy(value: str | None) -> bool:
     """Interpret an environment-variable string as a boolean.
-
-    Args:
-        value: The raw environment value, or None when unset.
 
     Returns:
         False for None and for ``""``/``"0"``/``"false"`` (case-insensitive);
@@ -416,9 +403,6 @@ def _resolve_interactive(config: "RunConfig") -> bool:
     Precedence: an explicit ``--non-interactive`` flag forces False; otherwise
     the run is interactive only when stdin is a TTY and ``CI`` is not truthy.
 
-    Args:
-        config: The run configuration carrying the explicit flag.
-
     Returns:
         True if prompts may read stdin; False for unattended/harness runs.
     """
@@ -444,7 +428,6 @@ def _get_head_sha(cwd: Path) -> str | None:
 
     Returns:
         The full SHA string, or None if the command fails.
-
     """
     try:
         return git_ops.head_sha(cwd)
@@ -467,9 +450,6 @@ async def run(config: RunConfig | None = None) -> int:
     Args:
         config: Optional configuration. Defaults to a fresh :class:`RunConfig`
             (interactive prompts for target dir, skill, cleanup).
-
-    Returns:
-        Exit code (0 for success, 1 for failure).
     """
     if config is None:
         config = RunConfig()
@@ -559,13 +539,6 @@ async def run_feedback(config: RunConfig, pr: int) -> int:
     Sets ``config.pr_number`` and re-enters :func:`run` so the dispatch
     routes to :func:`_run_pr_feedback`. Kept as a thin wrapper so cli.py
     has a single named entry point per invocation shape.
-
-    Args:
-        config: Run configuration populated by the feedback subparser.
-        pr: PR number to ingest.
-
-    Returns:
-        Exit code (0 for success, 1 for failure).
     """
     config.pr_number = pr
     return await run(config)
@@ -586,7 +559,6 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     for metadata (trajectory/archive) without implying feedback mode.
 
     Args:
-        work: Resolved working environment for the run.
         config: Run configuration (``config.identity`` carries the resolved
             GitHub identity set by :func:`run`).
     """

@@ -31,14 +31,7 @@ _EARLIER_STAGE: dict[str, str] = {
 
 
 def deep_dir(target: Path) -> Path:
-    """Return the `.daydream/deep/` directory for `target`, creating it if absent.
-
-    Args:
-        target: Resolved target directory path.
-
-    Returns:
-        Path to `target / ".daydream" / "deep"`.
-    """
+    """Return the `.daydream/deep/` directory for `target`, creating it if absent."""
     d = target / ".daydream" / "deep"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -174,10 +167,6 @@ def verdicts_path(deep_dir_path: Path) -> Path:
 
 def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
     """Validate predecessor artifacts exist for the given resume stage.
-
-    Args:
-        stage: One of "ttt", "per-stack", "merge", "fix".
-        deep_dir_path: Path to the `.daydream/deep/` directory.
 
     Raises:
         ValueError: If stage is not a known deep-mode stage.

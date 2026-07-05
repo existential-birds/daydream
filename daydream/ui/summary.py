@@ -1,8 +1,8 @@
 """Summary, table, and deep-review status components.
 
 Fix-progress indicators, the iteration divider, the run summary table, the
-issues table, the verdict-join table, the exploration-context summary, the TTT
-plan renderer, and the deep-mode stage/verification/preflight notices.
+issues table, the verdict-join table, the exploration-context summary, and the
+deep-mode stage/verification/preflight notices.
 """
 
 import json
@@ -45,13 +45,7 @@ def print_fix_progress(
     """Print fix progress indicator.
 
     Args:
-        console: Rich Console instance for output.
         item_num: Current item number (1-indexed).
-        total: Total number of items.
-        description: Description of the fix.
-
-    Returns:
-        None
 
     """
     text = Text()
@@ -67,12 +61,7 @@ def print_fix_complete(console: Console, item_num: int, total: int) -> None:
     """Print fix completion indicator.
 
     Args:
-        console: Rich Console instance for output.
         item_num: Current item number (1-indexed).
-        total: Total number of items.
-
-    Returns:
-        None
 
     """
     text = Text()
@@ -121,11 +110,6 @@ def print_summary(console: Console, data: SummaryData) -> None:
 
     Displays a comprehensive summary of the review/fix session
     with status badges for pass/fail.
-
-    Args:
-        console: Rich Console instance for output.
-        data: SummaryData containing all summary fields.
-
     """
     table = Table(
         title="✨ Review Summary",
@@ -161,7 +145,6 @@ def print_issues_table(console: Console, issues: list[dict]) -> None:
     """Display issues as a numbered Rich table.
 
     Args:
-        console: Rich Console instance.
         issues: List of issue dicts with id, title, severity, description,
                 recommendation, files keys.
 
@@ -223,9 +206,6 @@ def format_verdict_join(
         structural: Ids of structural (verdict-exempt) items.
         other: Leftover ids that fit no other bucket.
         total: Total number of items to fix (len(items)).
-
-    Returns:
-        A rich Table ready to pass to console.print.
 
     """
     table = Table(
@@ -340,57 +320,12 @@ def render_exploration_summary(ctx: "ExplorationContext") -> "Group | Text":
     return Group(Text(""), table)
 
 
-def render_ttt_plan(console: Console, plan: dict) -> None:
-    """Render a TTT plan, visually distinguishing ungrounded steps.
-
-    Plan steps with a non-empty ``references`` list render with default style
-    and their references inline beneath the change line. Steps with an empty
-    ``references`` list render dimmed with an ``(ungrounded)`` marker so the
-    user can spot LOW-grounded recommendations at a glance (D-08).
-
-    Args:
-        console: Rich console to render into.
-        plan: Plan dict. May be the flat shape ``{"changes": [...]}`` or the
-            nested shape ``{"plan": {"issues": [{"changes": [...]}, ...]}}``.
-
-    """
-    changes: list[dict] = []
-    if isinstance(plan.get("changes"), list):
-        changes = list(plan["changes"])
-    else:
-        nested = plan.get("plan", {}) if isinstance(plan.get("plan"), dict) else {}
-        for issue in nested.get("issues", []) or []:
-            if isinstance(issue, dict):
-                changes.extend(issue.get("changes", []) or [])
-
-    for change in changes:
-        if not isinstance(change, dict):
-            continue
-        file_path = change.get("file", "")
-        description = change.get("description", "")
-        references = change.get("references") or []
-        line = f"{file_path}: {description}" if file_path else description
-
-        if references:
-            console.print(Text(line))
-            for ref in references:
-                if not isinstance(ref, dict):
-                    continue
-                ref_file = ref.get("file", "")
-                ref_symbol = ref.get("symbol", "")
-                console.print(Text.assemble(("    → ", STYLE_DIM), (f"{ref_file}::{ref_symbol}", STYLE_DIM)))
-        else:
-            console.print(Text.assemble((line, STYLE_DIM), (" (ungrounded)", "yellow")))
-
-
 def print_stage_progress(console: Console, current: int, total: int, name: str) -> None:
     """Print a ``[stage N/M: name]`` banner at deep-mode stage boundaries (D-44).
 
     Args:
-        console: Rich Console instance for output.
         current: Current stage number (1-indexed).
-        total: Total number of stages.
-        name: Human-readable stage name.
+
     """
     console.print(f"[neon.cyan]▶[/] [neon.fg][stage {current}/{total}: {name}][/]")
 
@@ -405,8 +340,8 @@ def print_verification_summary(console: Console, verdicts_path: Path) -> None:
     never blocked by verifier output.
 
     Args:
-        console: Rich Console instance for output.
         verdicts_path: Path to the ``recommendation-verdicts.json`` file.
+
     """
     try:
         data = json.loads(verdicts_path.read_text())
@@ -442,12 +377,10 @@ def print_preflight_notice(
     (#156) at render time instead.
 
     Args:
-        console: Rich Console instance for output.
-        stages: Ordered list of stage display names.
-        stack_lines: Per-stack human-readable summary lines.
         agent_count: Total agent invocation count (D-30 formula).
         exploration_available: True when the exploration infrastructure
             (Phases 1-4) is installed and the pre-scan is wired in.
+
     """
     console.print("[neon.cyan]▶[/] [neon.fg]Deep-review pipeline pre-flight[/]")
     if exploration_available:

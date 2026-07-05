@@ -40,7 +40,6 @@ from daydream import git_ops
 from daydream.agent import (
     console,
     get_current_backends,
-    set_shutdown_requested,
 )
 from daydream.benchmark.cli import _handle_bench_command
 from daydream.config_file import load_file_config
@@ -70,14 +69,6 @@ def _first_verb(argv: list[str]) -> str:
     argv, a leading flag, and a bare target path — so a plain
     ``daydream /path`` routes through the same parser as ``daydream review
     /path``.
-
-    Args:
-        argv: The raw argument list (``sys.argv[1:]``).
-
-    Returns:
-        str: The dispatched verb name (a member of :data:`KNOWN_VERBS` or
-        ``"review"``).
-
     """
     if argv and argv[0] in KNOWN_VERBS:
         return argv[0]
@@ -96,7 +87,6 @@ def _signal_handler(signum: int, frame: object) -> None:
     set, so ContextVar reads from here are non-deterministic.
     """
     signal_name = signal.Signals(signum).name
-    set_shutdown_requested(True)
 
     # Flush partial trajectory before tearing down (D-07); write_partial is sync
     # and exception-safe, so it can't crash the shutdown path.
@@ -127,10 +117,6 @@ def _auto_detect_pr_number(repo: Path) -> int | None:
         repo: Repository working directory to inspect — the target checkout
             being reviewed, not necessarily the cwd where ``daydream`` was
             launched.
-
-    Returns:
-        The PR number if found, or None if detection fails.
-
     """
     try:
         data = git_ops.gh_pr_view(repo, None)
@@ -151,9 +137,6 @@ def _detect_repo_slug(repo: Path) -> str | None:
             launched. Attributing the slug to the target keeps trajectory and
             archive provenance correct when daydream is run from one repo
             against a checkout of another (the benchmark-harness pattern).
-
-    Returns:
-        String like ``"owner/repo"``, or None if detection fails.
     """
     try:
         slug = git_ops.gh_repo_view(repo)
@@ -415,9 +398,6 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
     lineage-manifest write). Returns an exit code rather than calling
     :func:`sys.exit`; ``main()`` is responsible for translating the code into a
     process exit. This keeps the handler easy to drive from tests.
-
-    Args:
-        argv: The argument vector after the ``corpus build`` sub-verb.
 
     Returns:
         ``0`` on success; ``1`` on a validation error.
@@ -798,13 +778,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     selection flags (``--branch`` / ``--base``), and modifiers (``--worktree`` /
     ``--shallow`` / ``--copy``). Deep is the default; ``--shallow`` opts into
     single-stack mode.
-
-    Args:
-        argv: Optional list of arguments. Defaults to ``sys.argv[1:]`` when None.
-
-    Returns:
-        RunConfig: Configuration object populated from command line arguments.
-
     """
     raw_argv = sys.argv[1:] if argv is None else list(argv)
 
@@ -1053,9 +1026,6 @@ def _handle_harvest_command(argv: list[str]) -> int:
     harvest errors do not escalate to a non-zero exit — the summary's
     ``errors`` counter surfaces them.
 
-    Args:
-        argv: The argument vector after the ``corpus harvest`` sub-verb.
-
     Returns:
         ``0`` on success; ``1`` on a validation error.
     """
@@ -1145,9 +1115,6 @@ def _handle_label_command(argv: list[str]) -> int:
     observation via :func:`daydream.archive.index.update_labels`. The runs
     cache and every precedence projection settle on the human value.
 
-    Args:
-        argv: The argument vector after the ``corpus label`` sub-verb.
-
     Returns:
         ``0`` on success; ``1`` when no session matches the prefix or the
         prefix is ambiguous.
@@ -1222,9 +1189,6 @@ def _handle_corpus_command(argv: list[str]) -> int:
     corpus`` (no sub-verb) prints help to stdout and exits 2. An unknown
     sub-verb prints help to stderr and exits 2. Exit codes propagate
     unchanged from the handlers.
-
-    Args:
-        argv: The argument vector after the ``corpus`` verb.
 
     Returns:
         int: The sub-handler's exit code; ``2`` for a bare (no-arg)
@@ -1345,9 +1309,6 @@ def _handle_ext_command(argv: list[str]) -> int:
     sub-verb (or trailing arguments — ``validate`` takes none) prints help to
     stderr and exits 2.
 
-    Args:
-        argv: The argument vector after the ``ext`` verb.
-
     Returns:
         int: The sub-handler's exit code; ``2`` for a bare (no-arg)
         invocation or an unknown sub-verb.
@@ -1415,9 +1376,6 @@ def _handle_post_findings_command(argv: list[str]) -> int:
     validate (confused-deputy gate, before any GitHub write), reconcile
     against prior comments, minimize stale findings, post new ones. Sync: no
     agent work, no ATIF trajectory.
-
-    Args:
-        argv: The argument vector after the ``post-findings`` verb.
 
     Returns:
         ``0`` on success (including "no new findings"); ``1`` on validation,
@@ -1499,9 +1457,6 @@ def _handle_setup_command(argv: list[str]) -> int:
     ``GitHubAppError``/``GitError`` are caught here and surfaced via
     :func:`print_error` — never a traceback to the user.
 
-    Args:
-        argv: The argument vector after the ``setup`` verb.
-
     Returns:
         ``0`` on success; ``1`` on a verify failure or any setup error.
     """
@@ -1549,9 +1504,6 @@ def main() -> None:
           and land the workflows via a PR (``--verify`` for the doctor)
         - ``ext`` — extension namespace (``validate`` loads the
           ``daydream_ext`` extension and resolve-checks the registry)
-
-    Returns:
-        None: This function does not return; it exits via sys.exit().
 
     Raises:
         SystemExit: Always raised with exit code 0 on success, 130 on keyboard

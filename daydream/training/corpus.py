@@ -91,9 +91,6 @@ def _build_spans(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
     - Within a single step REASON is appended before ACT, preserving the
       natural reason-then-act ordering required by the schema consumers.
 
-    Args:
-        trajectory: ATIF v1.6 trajectory dict (e.g. ``json.loads(open(p))``).
-
     Returns:
         Spans in insertion order. Empty list when ``trajectory`` has no
         agent-authored steps or when no agent step carries reason/action data.
@@ -169,13 +166,6 @@ def _annotation_labels(annotation: dict[str, Any] | None, session_id: Any) -> li
     (no in-time observation) yields ``[]`` — the run is unlabeled. Malformed
     JSON is warned about and treated as no labels rather than crashing the
     projection.
-
-    Args:
-        annotation: The ``latest_label_observation`` row dict, or ``None``.
-        session_id: Session identifier for warning context.
-
-    Returns:
-        The decoded label list, or ``[]`` when absent/unparseable.
     """
     if annotation is None:
         return []
@@ -200,13 +190,6 @@ def _annotation_reward(
     ``reward_json`` column; ``None`` when the column is missing/empty/non-object
     or unparseable (warned). ``composite_reward`` is the cached scalar on the
     row (already ``float | None``). A ``None`` annotation yields ``(None, None)``.
-
-    Args:
-        annotation: The ``latest_label_observation`` row dict, or ``None``.
-        session_id: Session identifier for warning context.
-
-    Returns:
-        ``(reward_dict_or_none, composite_reward_or_none)``.
     """
     if annotation is None:
         return None, None
@@ -522,9 +505,6 @@ def _build_query(
     4. ``repo_slug IN (...)`` — when ``filters.repos`` is non-empty.
     5. ``grounding_rate >= ?`` — when ``filters.min_grounding`` is set.
 
-    Args:
-        filters: Resolved filter knobs.
-
     Returns:
         ``(where_clause, params)`` where ``where_clause`` has no leading
         ``WHERE`` keyword (per ``query_runs``'s contract) and ``params`` is
@@ -578,11 +558,6 @@ def _query_index(archive_dir: Path, filters: CorpusFilters) -> list[dict[str, An
     Each surviving row is augmented with a derived ``"stack"`` key so
     downstream stratification and record building can route on stack
     without re-deriving from the skill string.
-
-    Args:
-        archive_dir: Path to the daydream archive root (e.g.
-            ``~/.daydream/archive``).
-        filters: Resolved filter knobs.
 
     Returns:
         Rows in lexicographic ``session_id`` order so emission is
@@ -793,14 +768,6 @@ def _is_admitted(label: str | None, composite_reward: float | None, filters: Cor
     on its intrinsic score alone — there is no deduction to remove here. This
     invariant is pinned by
     ``test_is_admitted_min_reward_compares_intrinsic_only``.
-
-    Args:
-        label: The pinned annotation's outcome label, or ``None`` (unlabeled).
-        composite_reward: The pinned annotation's composite reward scalar.
-        filters: Resolved filter knobs.
-
-    Returns:
-        ``True`` when the run should be emitted.
     """
     if filters.include_all_labels:
         return True
@@ -819,12 +786,6 @@ def _trajectory_set_hash(session_ids: list[str]) -> str:
     (order-independent). A single-session corpus collapses to
     ``sha256(b"<session_id>")`` — there is no trailing newline or separator for
     one id.
-
-    Args:
-        session_ids: The ``session_id`` of every record actually emitted.
-
-    Returns:
-        The hex SHA-256 digest of the sorted, newline-joined ids.
     """
     joined = "\n".join(sorted(session_ids)).encode("utf-8")
     return hashlib.sha256(joined).hexdigest()
@@ -837,13 +798,6 @@ def _collapse_versions(versions: list[str | None]) -> str | list[str] | None:
     scalar; a corpus mixing versions records the sorted distinct set so the
     lineage manifest is honest about heterogeneity. An empty corpus yields
     ``None``.
-
-    Args:
-        versions: The version tag observed on each included annotation.
-
-    Returns:
-        The single version string when uniform, the sorted distinct list when
-        mixed, or ``None`` when no annotations were included.
     """
     distinct = sorted({v for v in versions if v is not None})
     if not distinct:
@@ -859,10 +813,6 @@ def _atomic_write_json(out_path: Path, payload: dict[str, Any]) -> None:
     Mirrors the snapshot writer's pattern: a temp file in the destination
     directory, an ``os.replace`` rename, and best-effort cleanup of the temp
     file if writing fails. JSON is sorted and indented for stable diffs.
-
-    Args:
-        out_path: Destination path for the lineage manifest.
-        payload: The lineage dict to serialize.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -907,9 +857,6 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     9. Write ``lineage.json`` beside the JSONL pinning the snapshot's
        provenance (``trajectory_set_hash``, labeler/reward versions, ``as_of``,
        ``created_at``) so the snapshot is reproducible from immutable inputs.
-
-    Args:
-        config: Resolved build-corpus config.
 
     Returns:
         Summary dict with keys ``total_runs_in_index``, ``after_filters``,

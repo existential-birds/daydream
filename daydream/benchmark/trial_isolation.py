@@ -38,7 +38,6 @@ def init_trial_corpus(canonical_data_path: Path, trial_dir: Path) -> Path:
     The trial's reviews are injected there, keeping the canonical corpus pristine.
 
     Args:
-        canonical_data_path: Path to the canonical ``results/benchmark_data.json``.
         trial_dir: The per-trial dir (see :func:`trial_corpus_dir`).
 
     Returns:

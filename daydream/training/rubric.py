@@ -101,9 +101,6 @@ def derive_outcome_label(rubric: Rubric) -> str:
       :attr:`Rubric.local_commit_applied`.
     * ``"none"`` — always ``"unknown"``.
 
-    Args:
-        rubric: The rubric to reduce.
-
     Returns:
         One of ``"accepted"``, ``"contested"``, ``"rejected"``, or
         ``"unknown"``.

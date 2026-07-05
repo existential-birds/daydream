@@ -117,12 +117,6 @@ def canonical_utc_iso(ts: str) -> str:
     instant, so conversion is always chronologically correct. Idempotent for
     already-canonical input.
 
-    Args:
-        ts: ISO-8601 timestamp string with an explicit UTC offset.
-
-    Returns:
-        The canonical UTC spelling of the same instant.
-
     Raises:
         ValueError: When *ts* is not parseable ISO-8601, or is naive (no
             offset) — a naive timestamp names no single instant, so it cannot
@@ -149,12 +143,6 @@ def normalize_as_of(value: str) -> str:
     hours invites irreproducible corpora, so the input must already be UTC
     (``Z`` or ``+00:00``, any sub-second precision).
 
-    Args:
-        value: User-supplied ISO-8601 timestamp string.
-
-    Returns:
-        The canonical UTC spelling (``+00:00`` suffix).
-
     Raises:
         ValueError: When *value* is not parseable ISO-8601, is naive, or
             carries a non-UTC offset.
@@ -173,9 +161,6 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
 
     Enables WAL mode for concurrent read access and sets a busy timeout
     to handle contention from parallel daydream runs.
-
-    Args:
-        archive_dir: Path to the archive root (e.g. ``~/.daydream/archive``).
 
     Returns:
         An open sqlite3.Connection with row_factory set to sqlite3.Row.
@@ -203,10 +188,6 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
 
     Bool fields (review_only, deep, loop) are mapped to integers (0/1)
     for SQLite storage.
-
-    Args:
-        archive_dir: Path to the archive root.
-        manifest: The Manifest to index.
     """
     conn = _get_connection(archive_dir)
     try:
@@ -451,14 +432,9 @@ def latest_label_observation(
     reproducible corpus pinning.
 
     Args:
-        archive_dir: Path to the archive root.
-        session_id: Full session UUID.
         as_of: Optional ISO 8601 cutoff timestamp in the canonical UTC
             spelling (see :func:`normalize_as_of` — the entry boundary
             normalizes once; this lexical cutoff assumes canonical input).
-
-    Returns:
-        The row as a dict, or ``None`` when no matching observation exists.
     """
     conn = _get_connection(archive_dir)
     try:
@@ -498,8 +474,6 @@ def bulk_latest_label_observations(
     :func:`latest_label_observation`.
 
     Args:
-        archive_dir: Path to the archive root.
-        session_ids: Collection of session UUIDs to look up.
         as_of: Optional ISO 8601 cutoff timestamp in the canonical UTC
             spelling (see :func:`normalize_as_of` — the entry boundary
             normalizes once; this lexical cutoff assumes canonical input).
@@ -581,7 +555,6 @@ def reviewer_set_penalty_prior(
     bad row never crashes the aggregate.
 
     Args:
-        archive_dir: Path to the archive root.
         logins: The current run's reviewer set. Empty → no pool.
         before_valid_at: ISO 8601 strict upper bound on ``valid_at``.
             Canonicalized via :func:`canonical_utc_iso` so the lexical ``<``
@@ -698,10 +671,6 @@ def reviewer_set_penalty_prior(
 def label_observation_history(archive_dir: Path, session_id: str) -> list[dict]:
     """Return the full label history for ``session_id`` in chronological order.
 
-    Args:
-        archive_dir: Path to the archive root.
-        session_id: Full session UUID.
-
     Returns:
         List of row dicts ordered by ``observed_at`` ascending.
     """
@@ -726,11 +695,6 @@ def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool
     ``daydream label``. The session_id can be a prefix (e.g. first 8 chars of
     the UUID). If the prefix matches exactly one row, that row is updated. If it
     matches multiple rows, a ValueError is raised asking for a longer prefix.
-
-    Args:
-        archive_dir: Path to the archive root.
-        session_id: Full or prefix session ID to match.
-        labels: List of label strings to set.
 
     Returns:
         True if a row was updated, False if no matching session was found.
@@ -781,12 +745,6 @@ def set_run_pr_link(archive_dir: Path, session_id: str, pr_number: int, pr_repo:
     ``pr_repo`` columns on the ``runs`` table and never writes to
     ``label_observations`` or any cache column. A zero-row match (no such
     ``session_id``) is a silent no-op; the caller guarantees the row exists.
-
-    Args:
-        archive_dir: Path to the archive root.
-        session_id: Full session ID of the run to link.
-        pr_number: Resolved PR number to record.
-        pr_repo: Resolved PR repository slug (``owner/name``) to record.
     """
     conn = _get_connection(archive_dir)
     try:
@@ -803,13 +761,9 @@ def query_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> list[d
     """Query the runs index with an optional WHERE clause.
 
     Args:
-        archive_dir: Path to the archive root.
         where: Optional SQL WHERE clause (without the ``WHERE`` keyword).
             Example: ``"repo_slug = ? AND status = ?"``.
         params: Parameter tuple to bind to the WHERE clause placeholders.
-
-    Returns:
-        List of row dicts, one per matching run.
     """
     conn = _get_connection(archive_dir)
     try:
@@ -841,7 +795,6 @@ def pr_attached_label_coverage(
     yields ``coverage`` ``0.0`` rather than raising ``ZeroDivisionError``.
 
     Args:
-        archive_dir: Path to the archive root.
         as_of: Optional ISO 8601 cutoff; threaded through to
             :func:`bulk_latest_label_observations` so only observations whose
             ``observed_at <= as_of`` are considered (reproducible pinning).
@@ -900,7 +853,6 @@ def label_count_summary(
     :func:`latest_label_observation` once per run.
 
     Args:
-        archive_dir: Path to the archive root.
         as_of: Optional ISO 8601 cutoff timestamp. When ``None``, the
             most recent observation for each session is used regardless of
             ``observed_at``.
@@ -968,12 +920,8 @@ def count_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> int:
     Uses ``SELECT COUNT(*)`` so no rows are materialised.
 
     Args:
-        archive_dir: Path to the archive root.
         where: Optional SQL WHERE clause (without the ``WHERE`` keyword).
         params: Parameter tuple to bind to the WHERE clause placeholders.
-
-    Returns:
-        Integer count of matching rows.
     """
     conn = _get_connection(archive_dir)
     try:

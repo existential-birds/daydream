@@ -268,9 +268,6 @@ class Redactor:
         degrade to ``"[REDACTION_FAILED]"`` for the offending field — never
         raw pass-through.
 
-        Args:
-            step: ATIF Step about to be appended to the Trajectory.
-
         Returns:
             A new Step instance whose text-bearing fields have been run
             through the redaction rules.
@@ -969,7 +966,6 @@ class TrajectoryRecorder:
         """Record a ``phase_start`` boundary event (issue #203).
 
         Args:
-            phase: The phase entering execution.
             **metadata: Optional structured metadata (e.g. ``stage="review"``
                 for the deep orchestrator's DEEP sub-stages).
         """
@@ -986,7 +982,6 @@ class TrajectoryRecorder:
         """Record a ``phase_end`` boundary event (issue #203).
 
         Args:
-            phase: The phase leaving execution.
             **metadata: Optional structured metadata (mirrors emit_phase_start.
         """
         self._phase_events.append(
@@ -1177,9 +1172,6 @@ class TrajectoryRecorder:
 
         Args:
             descriptor: Semantic label for the sibling (e.g. ``"fix-0"``).
-
-        Returns:
-            An async context manager yielding a child ``TrajectoryRecorder``.
         """
         return _ForkCM(parent=self, descriptor=descriptor)
 

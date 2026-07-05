@@ -22,9 +22,6 @@ from daydream.ui import NEON_THEME, print_error
 def summarize(path: Path) -> int:
     """Print the run-info markdown for *path* to stdout.
 
-    Args:
-        path: Either a trajectory JSON file or a run directory.
-
     Returns:
         0 on success, non-zero when the path could not be resolved or no
         parseable trajectory could be produced.

@@ -87,9 +87,6 @@ def mint_jwt(app_id: int, private_key: str) -> str:
     Args:
         app_id: Numeric GitHub App ID, used as the ``iss`` claim.
         private_key: PEM-encoded RSA private key for RS256 signing.
-
-    Returns:
-        The encoded JWT string.
     """
     iat = int(time.time()) - 60
     payload = {
@@ -116,11 +113,7 @@ def build_gh_env(token: str) -> dict[str, str]:
 
 @contextmanager
 def _scoped_gh_token(token: str) -> Generator[None, None, None]:
-    """Temporarily set the git_ops GH token singleton, restoring it on exit.
-
-    Args:
-        token: Token to inject as ``GH_TOKEN`` for the duration of the block.
-    """
+    """Temporarily set the git_ops GH token singleton, restoring it on exit."""
     prior = git_ops.get_gh_token_env()
     git_ops.set_gh_token_env(build_gh_env(token))
     try:
@@ -286,9 +279,6 @@ def get_app_metadata(repo_dir: Path, app_id: int, private_key: str) -> dict:
 
 def resolve_user_identity(repo_dir: Path) -> str:
     """Resolve the ambient ``gh``-authenticated user login via ``GET /user``.
-
-    Args:
-        repo_dir: Working directory for the ``gh`` subprocess.
 
     Returns:
         The login string, or the literal ``"unknown"`` if the lookup fails

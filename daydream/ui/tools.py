@@ -81,10 +81,6 @@ def _primary_tool_value(name: str, args: dict[str, object]) -> tuple[str, str | 
     still shows something meaningful rather than a stray flag — the old blind
     ``next(iter(args.values()))`` surfaced ``replace_all=False`` as ``"False"``.
 
-    Args:
-        name: The tool's name.
-        args: The tool's input args.
-
     Returns:
         ``(value, key)`` — the primary value as a string and the arg key it came
         from (``None`` when no key matched). ``("", None)`` when nothing
@@ -123,10 +119,6 @@ def _parse_assigned_task_id(name: str, output: str) -> str | None:
     ``Command running in background with ID: <id>. …`` prose string; TaskCreate
     reports it as ``Task #<N> created successfully: …``.
 
-    Args:
-        name: The originating tool's name.
-        output: The tool's result string.
-
     Returns:
         The captured id, or None if the input does not match the expected shape.
     """
@@ -148,10 +140,6 @@ def _task_label_ns_key(name: str, task_id: str) -> str:
     ``1``).  This function prefixes each id with a short namespace tag so the
     two id spaces never share keys.
 
-    Args:
-        name: The originating tool's name.
-        task_id: The raw assigned id string.
-
     Returns:
         ``"bg:<task_id>"`` for launch tools, ``"tc:<task_id>"`` for TaskCreate.
     """
@@ -168,7 +156,6 @@ def _derive_task_label(args: dict[str, object], task_id: str) -> str:
     falling back to the bare id.
 
     Args:
-        args: The originating tool call's input args.
         task_id: The assigned id, used as the fallback when no label key is set.
 
     Returns:
@@ -207,9 +194,6 @@ def _label_source_name(name: str) -> str:
     this mapping here means ``resolve_call_label`` does not have to re-derive it
     with an inline ternary that runs parallel to ``_task_label_ns_key``.
 
-    Args:
-        name: A Task-family consumer tool name (e.g. ``"TaskOutput"``).
-
     Returns:
         The originating-tool name to pass to ``resolve_label`` / ``_task_label_ns_key``.
     """
@@ -236,12 +220,6 @@ def format_callback_progress(
     (when known) and otherwise fall back to a non-opaque derivation
     (``subject``/``description``/first command line), demoting the bare id to a
     parenthesized suffix.
-
-    Args:
-        name: The tool's name.
-        args: The tool's input args.
-        label: The resolved label for the call's id, or None when unknown.
-        max_len: Maximum length of the primary-argument value.
 
     Returns:
         A styled, indented Rich Text line that nests under the fix-progress header.
@@ -275,13 +253,6 @@ def format_callback_text(text: str) -> Text:
     Narration interleaves across concurrent fix agents, so it renders dim and
     indented — secondary to the colored ``[N/total] Fixing:`` headers, but still
     visible as a liveness signal during long parallel fixes.
-
-    Args:
-        text: A single line of agent narration.
-
-    Returns:
-        A dim, indented Rich Text line.
-
     """
     return Text(f"    {text}", style=STYLE_DIM)
 
@@ -294,13 +265,6 @@ def _colorize_tool_args(args: dict[str, object]) -> Text:
     - Strings in orange (paths in cyan)
     - Numbers in yellow
     - Booleans in purple
-
-    Args:
-        args: Dictionary of argument key-value pairs.
-
-    Returns:
-        Rich Text with neon styling applied.
-
     """
     result = Text()
 
@@ -339,8 +303,6 @@ def _format_label_and_id_str(label: str | None, task_id: str, *, id_prefix: str 
     logic is never duplicated.
 
     Args:
-        label: Resolved human-readable label, or None when unresolved.
-        task_id: The opaque/numeric id to demote to a parenthesized suffix.
         id_prefix: Optional prefix for the id (e.g. ``"#"`` for todo ids).
 
     Returns:
@@ -366,8 +328,6 @@ def _append_label_and_id(header_line: Text, label: str | None, task_id: str, *, 
 
     Args:
         header_line: The header Text to append to (mutated in place).
-        label: Resolved human-readable label, or None when unresolved.
-        task_id: The opaque/numeric id to demote to a dim suffix.
         id_prefix: Optional prefix for the id (e.g. ``"#"`` for todo ids).
 
     """
@@ -391,15 +351,9 @@ def _build_tool_header(
     Used by LiveToolPanel._build_tool_header().
 
     Args:
-        name: Name of the tool being called.
-        args: Dictionary of arguments passed to the tool.
-        quiet_mode: If True, hide command details for Bash tools.
         label: Resolved human-readable label for background-task tools
             (``TaskOutput``/``TaskStop``); when provided it leads the header
             and the opaque ``task_id`` is demoted to a dim suffix.
-
-    Returns:
-        Rich Text containing the styled tool header.
 
     """
     content = Text()
@@ -712,11 +666,6 @@ def _build_result_content(
     """Build styled result content with syntax highlighting.
 
     Used by LiveToolPanel._build_result_content().
-
-    Args:
-        content: The result content to display.
-        is_error: Whether this is an error result.
-        max_lines: Maximum number of lines to display.
 
     Returns:
         Tuple of (renderable content, was_truncated).

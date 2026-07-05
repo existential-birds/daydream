@@ -58,34 +58,16 @@ class LiveThinkingPanel:
 
     Displays the AI's thought process in a purple-styled panel
     with animated spinners alongside the thought bubble icon.
-
-    Args:
-        console: Rich Console instance for output.
-        content: The thinking content to display.
-        max_length: Maximum content length before truncation.
-
     """
 
     def __init__(self, console: Console, content: str, max_length: int = 300) -> None:
-        """Initialize the panel.
-
-        Args:
-            console: Rich Console instance for output.
-            content: The thinking content to display.
-            max_length: Maximum content length before truncation.
-
-        """
+        """Initialize the panel."""
         self._console = console
         self._content = content if len(content) <= max_length else content[:max_length] + "..."
         self._spinner = CrazySpinner(num_spinners=3)
 
     def __rich__(self) -> Panel:
-        """Render panel with animated title.
-
-        Returns:
-            Rich Panel with animated spinners in title.
-
-        """
+        """Render panel with animated title."""
         title = Text()
         title.append("💭 Thinking")
         title.append_text(self._spinner.render())
@@ -101,12 +83,7 @@ class LiveThinkingPanel:
         )
 
     def show(self, duration: float = 1.0) -> None:
-        """Show animated panel for duration, then persist final state.
-
-        Args:
-            duration: How long to show animation before settling.
-
-        """
+        """Show animated panel for duration, then persist final state."""
         self._console.print()
         with Live(self, console=self._console, refresh_per_second=10, transient=True):
             time.sleep(duration)
@@ -128,12 +105,6 @@ def print_thinking(console: Console, content: str, max_length: int = 300) -> Non
 
     Displays the AI's thought process in a purple-styled panel
     with animated spinners in the title that settle after a brief duration.
-
-    Args:
-        console: Rich Console instance for output.
-        content: The thinking content to display.
-        max_length: Maximum content length before truncation.
-
     """
     panel = LiveThinkingPanel(console, content, max_length)
     panel.show(duration=0.5)
@@ -145,7 +116,6 @@ class CrazySpinner:
     Displays multiple spinner characters simultaneously, each with its own
     animation pattern and gradient color cycling. Creates a chaotic but
     visually striking loading indicator.
-
     """
 
     SPINNERS = [
@@ -168,24 +138,14 @@ class CrazySpinner:
     ]
 
     def __init__(self, num_spinners: int = 3) -> None:
-        """Initialize with multiple independent spinner states.
-
-        Args:
-            num_spinners: Number of spinner characters to display.
-
-        """
+        """Initialize with multiple independent spinner states."""
         self._num_spinners = num_spinners
         self._frame = 0
         self._spinner_indices = [i % len(self.SPINNERS) for i in range(num_spinners)]
         self._offsets = [i * 2 for i in range(num_spinners)]
 
     def render(self) -> Text:
-        """Render the current frame of all spinners with gradient colors.
-
-        Returns:
-            Rich Text with multiple animated spinner characters.
-
-        """
+        """Render the current frame of all spinners with gradient colors."""
         result = Text()
         result.append(" ")
 
@@ -221,13 +181,6 @@ class LiveToolPanel:
 
     In quiet mode, renders the tool header only and skips result display.
 
-    Args:
-        console: Rich Console instance for output.
-        tool_use_id: Unique identifier for the tool use.
-        name: Name of the tool being called.
-        args: Dictionary of arguments passed to the tool.
-        quiet_mode: If True, use static display instead of Live updates.
-
     Usage:
         panel = LiveToolPanel(console, "tool-123", "Bash", {"command": "ls"})
         panel.start()
@@ -249,11 +202,6 @@ class LiveToolPanel:
         """Initialize the LiveToolPanel.
 
         Args:
-            console: Rich Console instance for output.
-            tool_use_id: Unique identifier for the tool use.
-            name: Name of the tool being called.
-            args: Dictionary of arguments passed to the tool.
-            quiet_mode: If True, use static display instead of Live updates.
             label: Resolved human label for background-task tools, threaded
                 through to the header by the registry.
 
@@ -279,10 +227,6 @@ class LiveToolPanel:
         """Build the tool call header content.
 
         Delegates to shared _build_tool_header() helper for consistent styling.
-
-        Returns:
-            Rich Text containing the styled tool header.
-
         """
         return _build_tool_header(self._name, self._args, self._quiet_mode, label=self._label)
 
@@ -291,13 +235,6 @@ class LiveToolPanel:
 
         Delegates to shared _build_result_content() helper for consistent styling.
         Special handling for Glob and Grep tools to show file counts and formatted lists.
-
-        Args:
-            max_lines: Maximum number of lines to display.
-
-        Returns:
-            Rich renderable containing the styled result.
-
         """
         if self._result is None:
             return Text()
@@ -325,15 +262,7 @@ class LiveToolPanel:
         return result
 
     def _build_glob_result(self, max_lines: int = _GLOB_MAX_LINES) -> Text:
-        """Build formatted Glob result showing file count and paths.
-
-        Args:
-            max_lines: Maximum number of files to display.
-
-        Returns:
-            Rich Text with formatted file list.
-
-        """
+        """Build formatted Glob result showing file count and paths."""
         assert self._result is not None  # Caller ensures this
         lines = [line for line in self._result.strip().split("\n") if line.strip()]
         total_files = len(lines)
@@ -368,15 +297,7 @@ class LiveToolPanel:
         return result
 
     def _build_grep_result(self, max_lines: int = _RESULT_MAX_LINES) -> Text | Syntax | Group:
-        """Build formatted Grep result showing match count.
-
-        Args:
-            max_lines: Maximum number of lines to display.
-
-        Returns:
-            Rich renderable with formatted grep output.
-
-        """
+        """Build formatted Grep result showing match count."""
         assert self._result is not None  # Caller ensures this
         lines = [line for line in self._result.strip().split("\n") if line.strip()]
         total_matches = len(lines)
@@ -392,12 +313,7 @@ class LiveToolPanel:
         return Group(result, content)
 
     def _build_edit_result(self) -> Text:
-        """Build formatted Edit result with surgery completion message.
-
-        Returns:
-            Rich Text with harmony restored visualization.
-
-        """
+        """Build formatted Edit result with surgery completion message."""
         result = Text()
 
         result.append("  ")
@@ -421,12 +337,7 @@ class LiveToolPanel:
         return result
 
     def _build_surgery_phase_indicator(self) -> Text:
-        """Build animated surgery phase indicator for Edit tool.
-
-        Returns:
-            Rich Text with animated energy flow and phase status.
-
-        """
+        """Build animated surgery phase indicator for Edit tool."""
         self._frame += 1
 
         result = Text()
@@ -458,10 +369,6 @@ class LiveToolPanel:
         """Render the current state as a Panel.
 
         Shows tool call header + either throbber (if waiting) or result.
-
-        Returns:
-            Rich Panel containing the consolidated tool call display.
-
         """
         header = self._build_tool_header_content()
 
@@ -542,13 +449,7 @@ class LiveToolPanel:
         self._live.start()
 
     def set_result(self, content: str, is_error: bool = False) -> None:
-        """Store result and update the display.
-
-        Args:
-            content: The result content from the tool.
-            is_error: Whether this is an error result.
-
-        """
+        """Store result and update the display."""
         self._result = content
         self._is_error = is_error
 
@@ -590,10 +491,6 @@ class LiveToolPanelRegistry:
     stopped, the finished panel is printed statically, and the ``Live``
     is restarted for any remaining active panels.
 
-    Args:
-        console: Rich Console instance for creating panels.
-        quiet_mode: If True, panels use static display instead of Live updates.
-
     Usage:
         registry = LiveToolPanelRegistry(console, quiet_mode=False)
         panel = registry.create("tool-123", "Bash", {"command": "ls"})
@@ -605,13 +502,7 @@ class LiveToolPanelRegistry:
     """
 
     def __init__(self, console: Console, quiet_mode: bool = False) -> None:
-        """Initialize the registry.
-
-        Args:
-            console: Rich Console instance for creating panels.
-            quiet_mode: If True, panels use static display instead of Live updates.
-
-        """
+        """Initialize the registry."""
         self._console = console
         self._quiet_mode = quiet_mode
         self._panels: dict[str, LiveToolPanel] = {}
@@ -636,12 +527,6 @@ class LiveToolPanelRegistry:
         Called on **every** ``ToolStartEvent`` (both the Live-panel and the
         callback render paths) so that ``observe_result`` can resolve a
         background ``task_id``'s label without a panel having been created.
-
-        Args:
-            tool_use_id: The id of the tool call.
-            name: The tool's name.
-            args: The tool's input args.
-
         """
         self._call_args[tool_use_id] = (name, args)
 
@@ -654,11 +539,6 @@ class LiveToolPanelRegistry:
         originating call's input args. Reads the originating call from the
         ``note_call`` store, so it works in both render modes (panel creation
         is not a prerequisite).
-
-        Args:
-            tool_use_id: The id of the originating tool call.
-            output: The originating tool's result string.
-
         """
         call = self._call_args.pop(tool_use_id, None)
         if call is None or call[0] not in self._LABEL_SOURCE_TOOL_NAMES:
@@ -677,9 +557,6 @@ class LiveToolPanelRegistry:
                 namespace prefix — launch tools vs. TaskCreate).
             task_id: The assigned task id to look up.
 
-        Returns:
-            The mapped label, or None if no mapping was recorded.
-
         """
         return self._task_labels.get(_task_label_ns_key(name, task_id))
 
@@ -690,10 +567,6 @@ class LiveToolPanelRegistry:
         todo-list tools (``TaskGet``/``TaskUpdate``/…) key off ``taskId``. Returns
         the harvested label for that id, or None when no mapping was recorded (the
         caller falls back to a non-opaque rendering).
-
-        Args:
-            name: The tool's name.
-            args: The tool's input args.
 
         Returns:
             The resolved label, or None if the tool is not Task-family or the id
@@ -716,15 +589,6 @@ class LiveToolPanelRegistry:
         The panel is added to the shared ``Live`` context which renders
         all active panels together.  Individual panels do **not** own
         their own ``Live`` instance.
-
-        Args:
-            tool_use_id: Unique identifier for the tool use.
-            name: Name of the tool being called.
-            args: Dictionary of arguments passed to the tool.
-
-        Returns:
-            The created LiveToolPanel.
-
         """
         if tool_use_id in self._panels:
             self._finalize_panel(tool_use_id)
@@ -764,24 +628,11 @@ class LiveToolPanelRegistry:
         return panel
 
     def get(self, tool_use_id: str) -> LiveToolPanel | None:
-        """Get a panel by its tool_use_id.
-
-        Args:
-            tool_use_id: The unique identifier of the tool use.
-
-        Returns:
-            The LiveToolPanel if found, None otherwise.
-
-        """
+        """Get a panel by its tool_use_id."""
         return self._panels.get(tool_use_id)
 
     def iter_active_panels(self) -> Iterator[LiveToolPanel]:
-        """Iterate over active panels in order.
-
-        Yields:
-            LiveToolPanel instances in the order they were created.
-
-        """
+        """Iterate over active panels in order."""
         for tid in self._active_order:
             panel = self._panels.get(tid)
             if panel:
@@ -792,13 +643,6 @@ class LiveToolPanelRegistry:
 
         Stops the shared ``Live``, prints the finalized panel statically,
         then restarts ``Live`` for any remaining active panels.
-
-        Args:
-            tool_use_id: The unique identifier of the tool use to remove.
-
-        Returns:
-            None
-
         """
         self._finalize_panel(tool_use_id)
 
@@ -808,10 +652,6 @@ class LiveToolPanelRegistry:
         Stops the shared ``Live`` and prints each panel's current state
         statically.  Use this for cleanup when a response ends
         unexpectedly.
-
-        Returns:
-            None
-
         """
         self._stop_live()
         for tid in list(self._active_order):
@@ -887,7 +727,6 @@ class ShutdownStep:
     """A step in the shutdown process.
 
     Attributes:
-        message: Description of the shutdown step.
         status: Current status of the step ("pending", "in_progress", or "completed").
 
     """
@@ -902,9 +741,6 @@ class ShutdownPanel:
     Consolidates all shutdown messages into a single panel that
     updates in place, showing the progression of shutdown steps.
 
-    Args:
-        console: Rich Console instance for output.
-
     Usage:
         panel = ShutdownPanel(console)
         panel.start("Received SIGINT, shutting down")
@@ -915,23 +751,13 @@ class ShutdownPanel:
     """
 
     def __init__(self, console: Console) -> None:
-        """Initialize the ShutdownPanel.
-
-        Args:
-            console: Rich Console instance for output.
-
-        """
+        """Initialize the ShutdownPanel."""
         self._console = console
         self._steps: list[ShutdownStep] = []
         self._live: Live | None = None
 
     def _render_panel(self) -> Panel:
-        """Render the current state as a Panel.
-
-        Returns:
-            Rich Panel containing all shutdown steps with status icons.
-
-        """
+        """Render the current state as a Panel."""
         content = Text()
 
         for i, step in enumerate(self._steps):
@@ -958,9 +784,6 @@ class ShutdownPanel:
         Args:
             initial_message: The first message to display (e.g., "Received SIGINT").
 
-        Returns:
-            None
-
         """
         self._steps.append(ShutdownStep(message=initial_message, status="completed"))
 
@@ -977,7 +800,6 @@ class ShutdownPanel:
         """Add a new step to the shutdown sequence.
 
         Args:
-            message: The step message to display.
             status: Initial status ("pending", "in_progress", "completed").
 
         Returns:
@@ -990,27 +812,14 @@ class ShutdownPanel:
         return len(self._steps) - 1
 
     def complete_step(self, index: int) -> None:
-        """Mark a step as completed.
-
-        Args:
-            index: Index of the step to mark as completed.
-
-        Returns:
-            None
-
-        """
+        """Mark a step as completed."""
         if 0 <= index < len(self._steps):
             self._steps[index].status = "completed"
             if self._live is not None:
                 self._live.update(self._render_panel())
 
     def complete_last_step(self) -> None:
-        """Mark the last step as completed.
-
-        Returns:
-            None
-
-        """
+        """Mark the last step as completed."""
         if self._steps:
             self.complete_step(len(self._steps) - 1)
 
@@ -1018,10 +827,6 @@ class ShutdownPanel:
         """Stop the live context and print the final panel.
 
         Call this when all shutdown steps are complete.
-
-        Returns:
-            None
-
         """
         if self._live is not None:
             self._live.stop()
@@ -1036,12 +841,7 @@ _shutdown_panel: ShutdownPanel | None = None
 
 
 def get_shutdown_panel() -> ShutdownPanel | None:
-    """Get the current shutdown panel instance.
-
-    Returns:
-        ShutdownPanel | None: The current shutdown panel, or None if not set.
-
-    """
+    """Get the current shutdown panel instance."""
     return _shutdown_panel
 
 
@@ -1050,9 +850,6 @@ def set_shutdown_panel(panel: ShutdownPanel | None) -> None:
 
     Args:
         panel: The ShutdownPanel instance to set, or None to clear.
-
-    Returns:
-        None
 
     """
     global _shutdown_panel

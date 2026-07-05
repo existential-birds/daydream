@@ -285,9 +285,6 @@ class ClaudeBackend:
         """Execute a prompt and yield unified events.
 
         Args:
-            cwd: Working directory for the agent.
-            prompt: The prompt to send.
-            output_schema: Optional JSON schema for structured output.
             continuation: Ignored by Claude backend.
             agents: Optional mapping of specialist name -> AgentDefinition for
                 subagent support. Keys are the specialist names the lead agent
@@ -298,13 +295,9 @@ class ClaudeBackend:
                 — under ``bypassPermissions`` ``allowed_tools`` does not restrict
                 the toolset — so the tool list is left unchanged.
 
-        Yields:
-            AgentEvent instances.
-
         Raises:
             ClaudeAgentError: If the agent run ends with an error result
                 (``ResultMessage.is_error``), e.g. an invalid API key.
-
         """
         output_format = (
             {"type": "json_schema", "schema": output_schema}
@@ -455,14 +448,6 @@ class ClaudeBackend:
         """Format a skill invocation for Claude.
 
         Claude uses /{namespace:skill} syntax.
-
-        Args:
-            skill_key: Full skill key (e.g. "beagle-python:review-python").
-            args: Optional arguments string.
-
-        Returns:
-            Formatted skill invocation string.
-
         """
         result = f"/{skill_key}"
         if args:

@@ -69,10 +69,7 @@ def bootstrap_ci(
     reruns get identical endpoints).
 
     Args:
-        values: The per-trial metric values (at least one).
-        n_boot: Number of bootstrap resamples.
         ci: Central probability mass to bracket (e.g. 0.95 → 2.5%/97.5%).
-        seed: RNG seed for reproducibility.
 
     Returns:
         ``(ci_low, ci_high)``. When ``values`` has a single element (or zero
@@ -122,13 +119,6 @@ def _metric_stats(values: list[float], *, seed: int = _DEFAULT_SEED) -> MetricSt
 def compute_distribution(scores: list[DaydreamScores], *, seed: int = _DEFAULT_SEED) -> TrialDistribution:
     """Aggregate N trials' scores into per-metric summary statistics.
 
-    Args:
-        scores: One :class:`DaydreamScores` per trial (at least one).
-        seed: RNG seed forwarded to the bootstrap CI.
-
-    Returns:
-        A :class:`TrialDistribution` with precision/recall/F1 statistics.
-
     Raises:
         ValueError: If ``scores`` is empty.
     """
@@ -144,9 +134,6 @@ def compute_distribution(scores: list[DaydreamScores], *, seed: int = _DEFAULT_S
 
 def format_distribution_table(dist: TrialDistribution) -> str:
     """Render a :class:`TrialDistribution` as a fixed-width text table.
-
-    Args:
-        dist: The aggregated distribution.
 
     Returns:
         A multi-line string with a header row and one row per metric carrying

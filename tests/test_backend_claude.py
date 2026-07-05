@@ -63,115 +63,6 @@ class MockResultMessage:
     subtype: str = "success"
 
 
-class MockClaudeSDKClient:
-    """Mock client that yields a configurable message sequence."""
-
-    def __init__(self, options: Any = None):
-        self.options = options
-        self._prompt: str = ""
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
-
-    async def query(self, prompt: str):
-        self._prompt = prompt
-
-    async def receive_response(self):
-        yield MockAssistantMessage(content=[MockTextBlock(text="Hello world")])
-        yield MockResultMessage(total_cost_usd=0.05, structured_output=None)
-
-
-class MockClaudeSDKClientWithTools:
-    """Mock client that yields tool use messages."""
-
-    def __init__(self, options: Any = None):
-        self.options = options
-        self._prompt: str = ""
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
-
-    async def query(self, prompt: str):
-        self._prompt = prompt
-
-    async def receive_response(self):
-        yield MockAssistantMessage(content=[
-            MockThinkingBlock(thinking="Let me think..."),
-        ])
-        yield MockAssistantMessage(content=[
-            MockTextBlock(text="I'll run a command."),
-        ])
-        yield MockAssistantMessage(content=[
-            MockToolUseBlock(id="tool-1", name="Bash", input={"command": "ls"}),
-        ])
-        yield MockUserMessage(content=[
-            MockToolResultBlock(tool_use_id="tool-1", content="file.py", is_error=False),
-        ])
-        yield MockResultMessage(total_cost_usd=0.10)
-
-
-class MockClaudeSDKClientErrorResult:
-    """Mock client whose run fails fatally (e.g. invalid API key).
-
-    Mirrors the real SDK shape: the failure arrives as a ResultMessage with
-    ``is_error=True`` and the error text in ``result`` — never as an
-    exception from the SDK itself.
-    """
-
-    def __init__(self, options: Any = None):
-        self.options = options
-        self._prompt: str = ""
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
-
-    async def query(self, prompt: str):
-        self._prompt = prompt
-
-    async def receive_response(self):
-        yield MockAssistantMessage(
-            content=[MockTextBlock(text="Invalid API key · Fix external API key")]
-        )
-        yield MockResultMessage(
-            total_cost_usd=None,
-            is_error=True,
-            result="Invalid API key · Fix external API key",
-        )
-
-
-class MockClaudeSDKClientStructured:
-    """Mock client that returns structured output."""
-
-    def __init__(self, options: Any = None):
-        self.options = options
-        self._prompt: str = ""
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
-
-    async def query(self, prompt: str):
-        self._prompt = prompt
-
-    async def receive_response(self):
-        yield MockAssistantMessage(content=[MockTextBlock(text="Parsed.")])
-        yield MockResultMessage(
-            total_cost_usd=0.02,
-            structured_output={"issues": [{"id": 1, "description": "Fix X", "file": "a.py", "line": 10}]},
-        )
-
-
 @pytest.fixture
 def patch_sdk(monkeypatch):
     """Return a function that patches the SDK imports in claude.py."""
@@ -187,13 +78,56 @@ def patch_sdk(monkeypatch):
     return _patch
 
 
+def _scripted_client(messages: list[Any]) -> type:
+    """Build a one-off ClaudeSDKClient stand-in yielding *messages* verbatim."""
+
+    class _ScriptedClient:
+        def __init__(self, options: Any = None) -> None:
+            self.options = options
+            self._prompt: str = ""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def query(self, prompt: str) -> None:
+            self._prompt = prompt
+
+        async def receive_response(self):
+            for m in messages:
+                yield m
+
+    return _ScriptedClient
+
+
+async def _drive_claude_backend_to_list(
+    *,
+    messages: list[Any],
+    patch_sdk_fn: Any,
+    output_schema: Any = None,
+    prompt: str = "go",
+) -> list[Any]:
+    """Drive ClaudeBackend.execute with a scripted SDK message sequence."""
+    patch_sdk_fn(_scripted_client(messages))
+    backend = ClaudeBackend(model="opus")
+    events: list[Any] = []
+    async for event in backend.execute(Path("/tmp"), prompt, output_schema=output_schema):
+        events.append(event)
+    return events
+
+
 @pytest.mark.asyncio
 async def test_execute_yields_text_and_result(patch_sdk):
-    patch_sdk(MockClaudeSDKClient)
-    backend = ClaudeBackend(model="opus")
-    events = []
-    async for event in backend.execute(Path("/tmp"), "Say hello"):
-        events.append(event)
+    events = await _drive_claude_backend_to_list(
+        messages=[
+            MockAssistantMessage(content=[MockTextBlock(text="Hello world")]),
+            MockResultMessage(total_cost_usd=0.05, structured_output=None),
+        ],
+        patch_sdk_fn=patch_sdk,
+        prompt="Say hello",
+    )
 
     text_events = [e for e in events if isinstance(e, TextEvent)]
     cost_events = [e for e in events if isinstance(e, CostEvent)]
@@ -210,11 +144,17 @@ async def test_execute_yields_text_and_result(patch_sdk):
 
 @pytest.mark.asyncio
 async def test_execute_yields_tool_events(patch_sdk):
-    patch_sdk(MockClaudeSDKClientWithTools)
-    backend = ClaudeBackend(model="opus")
-    events = []
-    async for event in backend.execute(Path("/tmp"), "Run ls"):
-        events.append(event)
+    events = await _drive_claude_backend_to_list(
+        messages=[
+            MockAssistantMessage(content=[MockThinkingBlock(thinking="Let me think...")]),
+            MockAssistantMessage(content=[MockTextBlock(text="I'll run a command.")]),
+            MockAssistantMessage(content=[MockToolUseBlock(id="tool-1", name="Bash", input={"command": "ls"})]),
+            MockUserMessage(content=[MockToolResultBlock(tool_use_id="tool-1", content="file.py", is_error=False)]),
+            MockResultMessage(total_cost_usd=0.10),
+        ],
+        patch_sdk_fn=patch_sdk,
+        prompt="Run ls",
+    )
 
     thinking_events = [e for e in events if isinstance(e, ThinkingEvent)]
     tool_start_events = [e for e in events if isinstance(e, ToolStartEvent)]
@@ -233,12 +173,18 @@ async def test_execute_yields_tool_events(patch_sdk):
 
 @pytest.mark.asyncio
 async def test_execute_structured_output(patch_sdk):
-    patch_sdk(MockClaudeSDKClientStructured)
-    backend = ClaudeBackend(model="opus")
-    events = []
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-    async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
-        events.append(event)
+    events = await _drive_claude_backend_to_list(
+        messages=[
+            MockAssistantMessage(content=[MockTextBlock(text="Parsed.")]),
+            MockResultMessage(
+                total_cost_usd=0.02,
+                structured_output={"issues": [{"id": 1, "description": "Fix X", "file": "a.py", "line": 10}]},
+            ),
+        ],
+        patch_sdk_fn=patch_sdk,
+        prompt="Parse",
+        output_schema={"type": "object", "properties": {"issues": {"type": "array"}}},
+    )
 
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1
@@ -256,7 +202,18 @@ async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk):
     backend yielded a clean ResultEvent — the review then exited 0 with
     "no issues found" despite the agent never running.
     """
-    patch_sdk(MockClaudeSDKClientErrorResult)
+    patch_sdk(
+        _scripted_client(
+            [
+                MockAssistantMessage(content=[MockTextBlock(text="Invalid API key · Fix external API key")]),
+                MockResultMessage(
+                    total_cost_usd=None,
+                    is_error=True,
+                    result="Invalid API key · Fix external API key",
+                ),
+            ]
+        )
+    )
     backend = ClaudeBackend(model="opus")
     events = []
     with pytest.raises(ClaudeAgentError, match="Invalid API key"):
@@ -266,47 +223,31 @@ async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk):
     assert not [e for e in events if isinstance(e, ResultEvent)]
 
 
-class MockClaudeSDKClientMaxTurns:
-    """Mock client whose run ends by hitting the turn cap.
-
-    Mirrors the real SDK shape for the turn-cap case: a ResultMessage with
-    ``is_error=True`` and ``subtype="error_max_turns"`` (``result`` is None,
-    so the detail falls back to the subtype).
-    """
-
-    def __init__(self, options: Any = None):
-        self.options = options
-        self._prompt: str = ""
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
-
-    async def query(self, prompt: str):
-        self._prompt = prompt
-
-    async def receive_response(self):
-        yield MockAssistantMessage(content=[MockTextBlock(text="working on it")])
-        yield MockResultMessage(
-            total_cost_usd=None,
-            is_error=True,
-            result=None,
-            subtype="error_max_turns",
-        )
-
-
 @pytest.mark.asyncio
 async def test_max_turns_result_raises_typed_error(patch_sdk):
     """error_max_turns must raise the typed MaxTurnsError carrying the subtype.
 
     A generic ClaudeAgentError left callers (and the trajectory) unable to
-    distinguish a turn-cap failure from a real backend error.
+    distinguish a turn-cap failure from a real backend error. Mirrors the real
+    SDK shape: a ResultMessage with ``is_error=True`` and
+    ``subtype="error_max_turns"`` (``result`` is None, so the detail falls back
+    to the subtype).
     """
     from daydream.backends.claude import MaxTurnsError
 
-    patch_sdk(MockClaudeSDKClientMaxTurns)
+    patch_sdk(
+        _scripted_client(
+            [
+                MockAssistantMessage(content=[MockTextBlock(text="working on it")]),
+                MockResultMessage(
+                    total_cost_usd=None,
+                    is_error=True,
+                    result=None,
+                    subtype="error_max_turns",
+                ),
+            ]
+        )
+    )
     backend = ClaudeBackend(model="opus")
     with pytest.raises(MaxTurnsError) as excinfo:
         async for _ in backend.execute(Path("/tmp"), "Review this"):
@@ -316,16 +257,18 @@ async def test_max_turns_result_raises_typed_error(patch_sdk):
     assert isinstance(excinfo.value, ClaudeAgentError)
 
 
-def test_format_skill_invocation_full_key():
+@pytest.mark.parametrize(
+    ("skill_key", "args", "expected"),
+    [
+        ("beagle-python:review-python", "", "/beagle-python:review-python"),
+        ("beagle-core:fetch-pr-feedback", "--pr 42 --bot mybot", "/beagle-core:fetch-pr-feedback --pr 42 --bot mybot"),
+    ],
+    ids=["full-key", "with-args"],
+)
+def test_format_skill_invocation(skill_key, args, expected):
     backend = ClaudeBackend(model="fixture-model")
-    result = backend.format_skill_invocation("beagle-python:review-python")
-    assert result == "/beagle-python:review-python"
-
-
-def test_format_skill_invocation_with_args():
-    backend = ClaudeBackend(model="fixture-model")
-    result = backend.format_skill_invocation("beagle-core:fetch-pr-feedback", "--pr 42 --bot mybot")
-    assert result == "/beagle-core:fetch-pr-feedback --pr 42 --bot mybot"
+    result = backend.format_skill_invocation(skill_key, args) if args else backend.format_skill_invocation(skill_key)
+    assert result == expected
 
 
 @pytest.mark.parametrize("cmd,allowed", [
@@ -612,38 +555,6 @@ def _assistant_message(*, text: str, message_id: str) -> MockAssistantMessage:
 
 def _result_message(*, cost: float | None = 0.0) -> MockResultMessage:
     return MockResultMessage(total_cost_usd=cost, structured_output=None)
-
-
-async def _drive_claude_backend_to_list(
-    *,
-    messages: list[Any],
-    patch_sdk_fn: Any,
-) -> list[Any]:
-    """Drive ClaudeBackend.execute with a scripted SDK message sequence."""
-
-    class _ScriptedClient:
-        def __init__(self, options: Any = None) -> None:
-            self.options = options
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args: Any) -> None:
-            return None
-
-        async def query(self, prompt: str) -> None:
-            return None
-
-        async def receive_response(self):
-            for m in messages:
-                yield m
-
-    patch_sdk_fn(_ScriptedClient)
-    backend = ClaudeBackend(model="opus")
-    events: list[Any] = []
-    async for event in backend.execute(Path("/tmp"), "go"):
-        events.append(event)
-    return events
 
 
 @pytest.mark.asyncio

@@ -20,12 +20,7 @@ from daydream.ui.theme import (
 
 
 def create_console() -> Console:
-    """Create a Rich Console with neon theme applied.
-
-    Returns:
-        Console: A new Rich Console instance configured with the neon theme.
-
-    """
+    """Create a Rich Console with neon theme applied."""
     return Console(theme=NEON_THEME)
 
 
@@ -36,9 +31,6 @@ def _interpolate_color(color1: str, color2: str, t: float) -> str:
         color1: Starting hex color (e.g., "#8BE9FD").
         color2: Ending hex color (e.g., "#FF79C6").
         t: Interpolation factor (0.0 = color1, 1.0 = color2).
-
-    Returns:
-        Interpolated hex color string.
 
     """
     r1, g1, b1 = int(color1[1:3], 16), int(color1[3:5], 16), int(color1[5:7], 16)
@@ -56,9 +48,6 @@ def _get_gradient_color(position: float) -> str:
 
     Args:
         position: Position in gradient (0.0 = start, 1.0 = end).
-
-    Returns:
-        Hex color string at the given position.
 
     """
     position = max(0.0, min(1.0, position))
@@ -87,9 +76,7 @@ def print_phase_hero(
     Includes a decorative subtitle below the ASCII art.
 
     Args:
-        console: Rich Console instance for output.
         title: The ASCII art text (e.g., "DAYDREAM", "BREATHE", "HEAL").
-        description: Subtitle text displayed below the ASCII art.
 
     """
     try:

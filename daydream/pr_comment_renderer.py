@@ -253,7 +253,6 @@ def _aggregate(trajectories: list[Trajectory], prices: dict[str, ModelPrice]) ->
     (and fall through to ``cost_unknown`` when the label is generic).
 
     Args:
-        trajectories: Parsed ATIF trajectories to roll up.
         prices: Effective model price table (built-ins merged with user
             overrides) threaded into :func:`_accumulate_metrics` for cost
             synthesis.
@@ -328,8 +327,6 @@ def _accumulate_metrics(
     Args:
         agg: Whole-run rollup; ``unknown_models`` is updated when a model
             cannot be priced.
-        phase: Per-phase aggregate to accumulate this step's tokens/cost into.
-        step: The ATIF step whose metrics are being folded in.
         fallback_model: Model id to use when ``step.model_name`` is omitted
             (the root-level :attr:`Agent.model_name`).
         prices: Effective model price table (built-ins merged with user

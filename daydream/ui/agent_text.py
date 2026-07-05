@@ -34,11 +34,7 @@ def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
     - Bold (**text**) and italic (*text*)
 
     Args:
-        text: Raw agent text to highlight.
         base_style: Style for non-highlighted text. Defaults to STYLE_GREEN.
-
-    Returns:
-        Rich Text with neon styling applied.
 
     """
     if base_style is None:
@@ -127,15 +123,7 @@ _MARKDOWN_HEADER_PATTERN = re.compile(r"#{1,6}\s+\S")
 
 
 def _has_markdown_headers(text: str) -> bool:
-    """Check if text contains markdown headers.
-
-    Args:
-        text: Text to check for markdown headers.
-
-    Returns:
-        True if text contains markdown headers (e.g., ## Summary).
-
-    """
+    """Check if text contains markdown headers."""
     return bool(_MARKDOWN_HEADER_PATTERN.search(text))
 
 
@@ -146,11 +134,7 @@ def _render_agent_lines_with_gradient(
     """Render agent text lines with vertical cyan-to-green gradient.
 
     Args:
-        lines: List of text lines to render.
         use_italic: Whether to apply italic styling (False for markdown content).
-
-    Returns:
-        Rich Text with vertical gradient styling applied.
 
     """
     highlighted = Text()
@@ -179,9 +163,6 @@ class AgentTextRenderer:
     Live-updating Panel that provides proper word wrapping. This solves
     the issue of broken line wrapping when streaming text character-by-character.
 
-    Args:
-        console: Rich Console instance for output.
-
     Usage:
         renderer = AgentTextRenderer(console)
         renderer.start()
@@ -192,12 +173,7 @@ class AgentTextRenderer:
     """
 
     def __init__(self, console: Console) -> None:
-        """Initialize the renderer.
-
-        Args:
-            console: Rich Console instance for output.
-
-        """
+        """Initialize the renderer."""
         self._console = console
         self._buffer: list[str] = []
         self._live: Live | None = None
@@ -212,9 +188,6 @@ class AgentTextRenderer:
 
         Args:
             show_spinner: If True, append animated spinner at end (cursor effect).
-
-        Returns:
-            Rich Panel with gradient styling applied.
 
         """
         full_text = "".join(self._buffer)
@@ -243,10 +216,6 @@ class AgentTextRenderer:
         """Start the Live context for real-time updates.
 
         Call this before appending any text chunks.
-
-        Returns:
-            None
-
         """
         if self._started:
             return
@@ -264,15 +233,7 @@ class AgentTextRenderer:
         self._started = True
 
     def append(self, text: str) -> None:
-        """Append text to the buffer and update the display.
-
-        Args:
-            text: Text chunk to append.
-
-        Returns:
-            None
-
-        """
+        """Append text to the buffer and update the display."""
         if not text:
             return
 
@@ -285,10 +246,6 @@ class AgentTextRenderer:
         """Stop the Live context and print the final Panel.
 
         Call this when all text has been received.
-
-        Returns:
-            None
-
         """
         if self._live is not None:
             self._live.update(self._render_panel(show_spinner=False), refresh=True)
@@ -300,10 +257,5 @@ class AgentTextRenderer:
 
     @property
     def has_content(self) -> bool:
-        """Check if the buffer has any content.
-
-        Returns:
-            bool: True if the buffer contains text, False otherwise.
-
-        """
+        """Check if the buffer has any content."""
         return bool(self._buffer)

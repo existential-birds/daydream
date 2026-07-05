@@ -137,7 +137,6 @@ def extract_imports(parser: Parser, source: bytes, query_string: str) -> list[st
 
     Args:
         parser: A tree-sitter ``Parser`` already configured for the language.
-        source: Raw file bytes to parse.
         query_string: A tree-sitter Query S-expression with ``@import`` captures.
 
     Returns:

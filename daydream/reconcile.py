@@ -136,11 +136,6 @@ def fetch_prior_findings(target_dir: Path, repo_slug: str, pr_number: int) -> di
     reads as resolved when its thread is resolved (human action) or its
     comment was minimized (a prior daydream run marked it stale).
 
-    Args:
-        target_dir: Repository working directory (for ``gh`` invocation).
-        repo_slug: ``owner/repo`` slug of the PR's base repository.
-        pr_number: PR number to inventory.
-
     Returns:
         Mapping of fingerprint to `PriorFinding`, in discovery order.
 
@@ -197,13 +192,6 @@ def partition(current: Sequence[str], prior: dict[str, PriorFinding]) -> Reconci
         - stale: prior inline findings (``thread_id`` set) absent from
           ``current`` and not yet resolved — to be minimized. Body-only
           findings have no thread and simply stop appearing.
-
-    Args:
-        current: Fingerprints produced by the current run, in post order.
-        prior: Prior-finding inventory from `fetch_prior_findings`.
-
-    Returns:
-        The `ReconcilePlan` for this run.
     """
     current_set = set(current)
     return ReconcilePlan(
@@ -224,10 +212,6 @@ def resolve_threads(target_dir: Path, stale: list[PriorFinding]) -> tuple[int, i
     node id (``resolveReviewThread`` is forbidden for the least-privilege
     installation token — Task 0 spike). Best-effort: a failure on one
     finding warns and continues, matching the `daydream.pr_review` posture.
-
-    Args:
-        target_dir: Repository working directory (for ``gh`` invocation).
-        stale: Stale findings from `partition`.
 
     Returns:
         ``(resolved_count, failed_count)``.

@@ -151,11 +151,6 @@ def _alter_add_missing(
     Missing columns are added idempotently; a ``duplicate column name`` error
     (raised by a race between concurrent openers) is silently swallowed, which
     preserves the warn-and-continue semantics of the callers it replaces.
-
-    Args:
-        conn: An open SQLite connection.
-        table: Name of the table to inspect and alter.
-        migrations: Ordered list of ``(col, col_type)`` pairs to apply.
     """
     existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608 - table is a module-local constant at every call site
     for col, col_type in migrations:
@@ -197,9 +192,6 @@ def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
     label rows are discarded (spec-sanctioned — repopulate via ``harvest``). The
     ``runs`` table is never touched. Idempotent: after a recreate both columns
     exist, so subsequent calls are a no-op.
-
-    Args:
-        conn: An open connection whose ``label_observations`` table exists.
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
     if existing and ("valid_at" not in existing or "has_posterior" not in existing):
@@ -220,9 +212,6 @@ def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
     ``source`` precedence marker is additive, so pre-existing rows are preserved
     and default to ``'auto'``. Delegates to ``_alter_add_missing`` (the shared
     helper that also backs ``_migrate_schema`` for the runs table).
-
-    Args:
-        conn: An open connection whose ``label_observations`` table exists.
     """
     _alter_add_missing(
         conn,

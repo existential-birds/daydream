@@ -90,10 +90,6 @@ class CodexBackend:
         """Execute a prompt via Codex CLI and yield unified events.
 
         Args:
-            cwd: Working directory for the agent.
-            prompt: The prompt to send.
-            output_schema: Optional JSON schema for structured output.
-            continuation: Optional token for thread resumption.
             agents: Optional subagent mapping. Codex does not support non-empty
                 subagent maps and will raise if provided.
             read_only: When True, run under ``--sandbox read-only`` so the agent
@@ -103,14 +99,10 @@ class CodexBackend:
                 the working tree — the failure-handoff incident's danger — is
                 fully protected. Default False keeps ``danger-full-access``.
 
-        Yields:
-            AgentEvent instances.
-
         Raises:
             CodexError: If the Codex turn fails.
             NotImplementedError: If ``agents`` is non-empty (Codex backend
                 does not support exploration subagents).
-
         """
         if agents:
             raise NotImplementedError(
@@ -488,14 +480,6 @@ class CodexBackend:
         """Format a skill invocation for Codex.
 
         Codex uses $skill-name syntax. Strips namespace prefix if present.
-
-        Args:
-            skill_key: Full skill key (e.g. "beagle-python:review-python").
-            args: Optional arguments string.
-
-        Returns:
-            Formatted skill invocation string.
-
         """
         if ":" in skill_key:
             skill_name = skill_key.split(":")[-1]

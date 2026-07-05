@@ -84,10 +84,6 @@ def _manifest_payload(*, redirect_url: str, org: str | None) -> dict[str, object
 def _manifest_form_html(*, action_url: str, manifest: dict[str, object]) -> str:
     """Render an auto-submitting HTML form POSTing the manifest to GitHub.
 
-    Args:
-        action_url: GitHub's app-creation URL (org variant when org-scoped).
-        manifest: The manifest payload to POST as the ``manifest`` field.
-
     Returns:
         A self-contained HTML page that submits on load.
     """
@@ -152,9 +148,6 @@ class _ManifestListener:
 
     def serve(self) -> tuple[AppCredentials, str]:
         """Bind a localhost port, open the browser, and block on the callback.
-
-        Returns:
-            The exchanged ``(credentials, slug)`` tuple.
 
         Raises:
             GitHubAppError: If the operator declined or the exchange failed.
@@ -647,13 +640,6 @@ def run_verify(repo_dir: Path, *, scope: Scope) -> VerifyResult:
     This is strictly read-only: it never sets a secret, variable, or file. Each
     failed required check's ``detail`` names the exact missing element and the
     remediation; :attr:`VerifyResult.ok` is True iff every required check passed.
-
-    Args:
-        repo_dir: Repository working directory (ambient ``gh``/``git`` context).
-        scope: Repo- or org-scoped target (exactly one).
-
-    Returns:
-        The aggregated :class:`VerifyResult`.
     """
     creds = resolve_credentials()
     checks = (
@@ -697,11 +683,6 @@ def _confirm_installation(repo_dir: Path, scope: Scope, creds: AppCredentials) -
     happened (e.g. an org-wide App) is auto-satisfied without prompting — this
     is what lets the real-path test drive the full-auto flow without blocking
     on stdin.
-
-    Args:
-        repo_dir: Working directory (``gh`` subprocess context).
-        scope: Repo- or org-scoped target (the owner is derived from it).
-        creds: The freshly registered App credentials (App-JWT auth).
 
     Returns:
         True if the owner appears in the installations after at most one wait.

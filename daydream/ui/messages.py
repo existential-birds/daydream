@@ -35,7 +35,6 @@ def print_feedback_table(console: Console, items: list[dict[str, object]]) -> No
     description, file, and line number.
 
     Args:
-        console: Rich Console instance for output.
         items: List of dicts with keys: status, description, file, line.
 
     """
@@ -80,12 +79,6 @@ def print_error(console: Console, title: str, message: str) -> None:
 
     Creates a prominent error display with a warning icon
     and double-edge border.
-
-    Args:
-        console: Rich Console instance for output.
-        title: Error title text.
-        message: Detailed error message.
-
     """
     panel = Panel(
         Text(message, style=STYLE_RED),
@@ -99,13 +92,7 @@ def print_error(console: Console, title: str, message: str) -> None:
 
 
 def print_warning(console: Console, message: str) -> None:
-    """Print a warning panel with yellow styling.
-
-    Args:
-        console: Rich Console instance for output.
-        message: Warning message to display.
-
-    """
+    """Print a warning panel with yellow styling."""
     panel = Panel(
         Text(message, style=STYLE_YELLOW),
         box=box.ROUNDED,
@@ -116,35 +103,17 @@ def print_warning(console: Console, message: str) -> None:
 
 
 def print_success(console: Console, message: str) -> None:
-    """Print a success message with green styling.
-
-    Args:
-        console: Rich Console instance for output.
-        message: Success message to display.
-
-    """
+    """Print a success message with green styling."""
     console.print(f"[neon.success]✔[/] [neon.green]{message}[/]")
 
 
 def print_cost(console: Console, cost_usd: float) -> None:
-    """Print a cost indicator with cyan styling.
-
-    Args:
-        console: Rich Console instance for output.
-        cost_usd: The cost in USD.
-
-    """
+    """Print a cost indicator with cyan styling."""
     console.print(f"[neon.cyan]💰[/] [neon.dim]${cost_usd:.4f}[/]")
 
 
 def print_info(console: Console, message: str) -> None:
-    """Print an info message with cyan styling.
-
-    Args:
-        console: Rich Console instance for output.
-        message: Info message to display.
-
-    """
+    """Print an info message with cyan styling."""
     console.print(f"[neon.cyan]ℹ[/] [neon.fg]{message}[/]")
 
 
@@ -152,7 +121,6 @@ def print_skipped_phases(console: Console, start_at: str) -> None:
     """Print message about skipped phases when starting at a non-default phase.
 
     Args:
-        console: Rich Console instance for output.
         start_at: The phase to start at ("parse", "fix", or "test").
 
     """
@@ -169,13 +137,7 @@ def print_skipped_phases(console: Console, start_at: str) -> None:
 
 
 def print_dim(console: Console, message: str) -> None:
-    """Print a dimmed message for secondary information.
-
-    Args:
-        console: Rich Console instance for output.
-        message: Message to display in dimmed style.
-
-    """
+    """Print a dimmed message for secondary information."""
     console.print(f"[neon.dim]{message}[/]")
 
 
@@ -185,8 +147,6 @@ def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> 
     Displays numbered options with descriptions in a neon-styled panel.
 
     Args:
-        console: Rich Console instance for output.
-        title: Menu title.
         options: List of (key, description) tuples.
 
     """
@@ -214,7 +174,6 @@ def print_intent_summary(console: Console, text: str) -> None:
     of the live agent transcript.
 
     Args:
-        console: Rich Console instance for output.
         text: The intent summary (markdown-ish agent prose). An empty summary
             renders a placeholder rather than a blank panel.
 
@@ -239,8 +198,6 @@ def prompt_user(console: Console, message: str, default: str = "") -> str:
     """Display a styled input prompt and get user input.
 
     Args:
-        console: Rich Console instance for output.
-        message: Prompt message to display.
         default: Default value if user enters nothing.
 
     Returns:

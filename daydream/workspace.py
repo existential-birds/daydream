@@ -60,7 +60,6 @@ class WorkContext:
         is_ephemeral: True when :attr:`repo` is an ephemeral worktree.
         run_id: ``<UTC YYYYMMDDHHMMSS>-<hex8>`` identifier used for the
             ephemeral path and intent files.
-
     """
 
     repo: Path
@@ -129,7 +128,6 @@ async def open_workspace(
         :func:`daydream.runner._dispatch` instead because it must fire only for
         ``output_mode="loop"`` (not ``--comment`` or ``--review``), and this
         function is deliberately mode-agnostic.
-
     """
     git_ops.assert_is_worktree(source)
 
@@ -226,15 +224,12 @@ def copy_files_into_ephemeral(
     skipped silently.
 
     Args:
-        source: The original worktree.
-        dest: The ephemeral worktree path.
         extra: Optional additional relative paths from CLI flags.
         skip: When True, return ``[]`` immediately (no-op for read-only
             review flows that do not need test fixtures).
 
     Returns:
         The list of paths actually copied (relative to *source*).
-
     """
     if skip:
         return []

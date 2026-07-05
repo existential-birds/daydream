@@ -143,9 +143,6 @@ def _read_review_output(run_dir: Path) -> str | None:
     then ``deep/review-output.md`` (deep-mode layout), mirroring the former
     exporter's back-compat fallback order.
 
-    Args:
-        run_dir: The archived run directory.
-
     Returns:
         The text of the first review-output file found, or ``None`` when
         neither location exists. Non-``FileNotFoundError`` ``OSError``\s
@@ -164,13 +161,6 @@ def _read_review_output_length(run_dir: Path) -> int | None:
 
     Delegates to :func:`_read_review_output`; see that function for the
     fallback order and error semantics.
-
-    Args:
-        run_dir: The archived run directory.
-
-    Returns:
-        The character count of the first review-output file found, or
-        ``None`` when neither location exists.
     """
     text = _read_review_output(run_dir)
     return len(text) if text is not None else None
@@ -777,9 +767,6 @@ def _resolve_repo_for_row(
     Args:
         row: An indexed manifest row (supplies ``source_path``, ``remote_url``, ``repo_slug``).
         clone_cache: Root directory for cached clones, or ``None`` to skip cloning.
-
-    Returns:
-        Path to a usable working tree, or ``None``.
     """
     source_path = row.get("source_path")
     if source_path and (Path(source_path) / ".git").exists():
@@ -821,11 +808,6 @@ def _materialize_base_sha_if_missing(
 
     Only acts when ``manifest.json`` exists AND ``repo_clone`` is available.
     Any failure is swallowed (opportunistic), leaving ``base_sha`` as ``None``.
-
-    Args:
-        row: The indexed manifest row.
-        run_dir: The archived run directory (holds ``manifest.json``).
-        repo_clone: Resolved repo working tree, or ``None``.
     """
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.exists():
@@ -899,9 +881,6 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
     Per-row error isolation: an exception on one row counts in ``errors`` and
     does not derail subsequent rows. Configuration errors (missing
     ``archive_dir``) raise before the loop begins.
-
-    Args:
-        config: A :class:`HarvestConfig` instance.
 
     Returns:
         Summary dict with keys ``considered``, ``annotated``,

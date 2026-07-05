@@ -125,11 +125,6 @@ async def post_review_to_pr_from_report(
     structural) via :func:`parsed_issues_from_items` rather than re-parsing
     the rendered markdown — the regex parser silently dropped structural
     findings, which live under ``## Structural Review``.
-
-    Args:
-        target_dir: Repo root.
-        merged_items_path: Path to the canonical ``merged-items.json``.
-        console: Rich console for user-facing output.
     """
     if not merged_items_path.exists():
         return
@@ -147,13 +142,7 @@ async def post_review_to_pr_from_alt_issues(
     *,
     console: Console,
 ) -> None:
-    """Convert alt-review issues (from `--comment`) and offer to post to the PR.
-
-    Args:
-        target_dir: Repo root.
-        alt_issues: Issue dicts from `phase_alternative_review`.
-        console: Rich console for user-facing output.
-    """
+    """Convert alt-review issues (from `--comment`) and offer to post to the PR."""
     issues = alt_issues_to_parsed(alt_issues)
     if not issues:
         return
@@ -352,10 +341,6 @@ def find_pr_by_number(target_dir: Path, pr_number: int) -> PRInfo | None:
     Used when the caller pins the target PR (``--pr-number``) instead of
     deriving it from the current branch like :func:`find_open_pr`.
 
-    Args:
-        target_dir: Repo root.
-        pr_number: The PR number to look up.
-
     Returns:
         The resolved :class:`PRInfo`, or ``None`` when the PR or the
         owner/repo slug cannot be resolved.
@@ -480,10 +465,7 @@ def file_hunks(
     before parsing hunks to avoid attributing other files' hunks to this one.
 
     Args:
-        target_dir: Repo root.
         base_sha: Base commit SHA (may be unreachable locally after a rebase).
-        head_sha: Head commit SHA.
-        path: Repo-relative file path.
         pr_number: Optional PR number; enables the ``gh pr diff`` fallback.
     """
     git_failed = False
@@ -543,14 +525,6 @@ def snap_to_hunk(
     ``tolerance`` lines of a hunk boundary, snap to the nearest boundary
     so the GitHub API receives a line that actually appears in the diff.
     Returns ``None`` when the line is beyond tolerance of every hunk.
-
-    Args:
-        line: Candidate line number on the head side.
-        hunks: (start, end) inclusive ranges from ``_parse_hunks``.
-        tolerance: Max distance from a hunk boundary to still snap.
-
-    Returns:
-        A line number guaranteed to be inside a hunk, or None.
     """
     best: int | None = None
     best_dist = tolerance + 1
@@ -857,8 +831,6 @@ def build_payload(
         Footer (🧙 Posted by daydream vX.Y.Z)
 
     Args:
-        pr: Target PR.
-        classified: Inline/body-only split from :func:`classify`.
         run_info_override: Pre-rendered run-info markdown to use in place of
             the live recorder block (``post-findings`` posts from artifact
             data; there is no recorder in that process). ``None`` renders the
@@ -1018,7 +990,6 @@ def post_findings_from_artifact(
         pr_number: Event-derived target PR number.
         head_sha: Event-derived PR head SHA.
         repo: Event-derived ``owner/repo`` slug.
-        console: Rich console for user-facing output.
 
     Returns:
         ``0`` on success (including "no new findings"); ``1`` when the
