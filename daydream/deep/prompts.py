@@ -36,14 +36,31 @@ DOC_REVIEW_NOTICE = (
 )
 
 # Shared verification-protocol instruction for structural and generic-fallback
-# builders (issue #229). Embedded as instruction text, not routed through
-# ``Backend.format_skill_invocation``.
+# builders (issue #229). The gates are embedded inline as instruction text, not
+# routed through ``Backend.format_skill_invocation`` and NOT loaded from a skill
+# file: these two reviewers run with cwd set to the reviewed repo, so a bare
+# ``read review-verification-protocol/SKILL.md`` resolves against that repo and
+# fails ("skill doesn't exist as a file"), silently dropping the gates. Both
+# reviewers are language-agnostic (repo-wide structural / non-stack fallback), so
+# the protocol's language-specific valid-pattern tables add little here — the
+# gate discipline is what matters, and it is self-contained below. Mirrors the
+# inline gate-0 embedding in ``build_verification_prompt``.
 VERIFICATION_PROTOCOL_INSTRUCTION = (
-    "Before writing findings, load the review-verification-protocol skill "
-    "(read review-verification-protocol/SKILL.md) and apply its "
-    "anchor-evidence-severity gates (gate 1: anchor file:line, gate 2: produce "
-    "evidence artifacts, gate 3: calibrate severity). Do NOT report a finding "
-    "that fails any gate."
+    "Before writing findings, apply the review-verification-protocol gates "
+    "(stated inline here — no skill file read is required):\n"
+    "  Gate-0 anti-confabulation (before ANY finding): echo the exact artifact "
+    "you are judging — file:line plus the cited code, read freshly in THIS turn, "
+    "not recalled. The source is the only truth; never infer a finding from the "
+    "branch name, cwd, or memory. A finding without a same-turn echo of its "
+    "target is INVALID.\n"
+    "  Gate 1 (anchor): read the full enclosing symbol/module, not just the diff "
+    "hunk; state the file path and line range you are judging.\n"
+    "  Gate 2 (evidence): produce an artifact for the finding's type — pasted "
+    'tool output, a file:line citation, or an explicit "none" / "N matches" '
+    'after a repo search. Never claim you "looked" without an artifact.\n'
+    "  Gate 3 (severity): calibrate severity to impact; a request for net-new "
+    "code that did not exist in scope is Informational only.\n"
+    "Do NOT report a finding that fails any gate."
 )
 
 

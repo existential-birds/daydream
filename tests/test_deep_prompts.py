@@ -614,15 +614,15 @@ def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> No
 
 
 def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) -> None:
-    """The protocol is user-invocable:false — embedded as instruction text, never
-    routed through ``backend.format_skill_invocation``.
+    """The protocol gates are embedded inline as instruction text — never routed
+    through ``backend.format_skill_invocation`` AND never loaded from a skill file.
 
-    Observed at the production prompt-builder seam: the structural and
-    generic-fallback prompts are the only builders that embed the protocol
-    directly (the per-stack reviewers bundle it inside their Beagle skill).
-    Build them with a real backend formatter and assert the embedded
-    instruction is present while the protocol's invocation token — as each
-    real backend would emit it — never leaks into the prompt.
+    The structural and generic-fallback reviewers run with cwd set to the
+    reviewed repo, so a bare ``read review-verification-protocol/SKILL.md`` would
+    resolve against that repo and fail. The gates are therefore stated inline
+    (see ``VERIFICATION_PROTOCOL_INSTRUCTION``). Build the prompts with a real
+    backend formatter and assert the gate discipline is present while neither a
+    skill-file read nor the protocol's invocation token leaks into the prompt.
     """
     from daydream.backends import create_backend
     from daydream.deep.prompts import build_structural_prompt
@@ -641,9 +641,11 @@ def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) ->
         backend = create_backend(backend_name)
         token = backend.format_skill_invocation("review-verification-protocol")
         for prompt in prompts:
-            # Embedded as methodology prose (the constant carries the
-            # protocol name and gate descriptions), never as an invocation.
-            assert "review-verification-protocol/SKILL.md" in prompt
+            # Gates are embedded as methodology prose (the constant names the
+            # protocol and states gates 0-3 inline), never as an invocation and
+            # never as an unresolvable skill-file read.
+            assert "review-verification-protocol" in prompt
+            assert "SKILL.md" not in prompt
             assert token not in prompt, (
                 f"{backend_name} protocol invocation token {token!r} leaked into prompt"
             )
