@@ -200,6 +200,16 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--dump-artifacts",
+        default=None,
+        metavar="DIR",
+        dest="dump_artifacts",
+        help="Copy the full run bundle (ATIF trajectory, review output, deep artifacts, "
+             "diffs, findings, manifest, evaluation) into DIR for CI upload. Opt-in "
+             "because the logs may contain sensitive data. Works on every flow."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--backend", "-b",
         choices=["claude", "codex", "pi"],
         default=None,
@@ -892,6 +902,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         base=args.base,
         output_mode=output_mode,  # type: ignore[arg-type]
         findings_out=args.findings_out,
+        dump_artifacts=args.dump_artifacts,
         force_worktree=args.force_worktree,
         shallow=args.shallow,
         precision_mode=args.precision,
@@ -947,6 +958,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         output_mode="loop",
         non_interactive=args.non_interactive,
         assume=args.assume,
+        dump_artifacts=args.dump_artifacts,
     )
 
 

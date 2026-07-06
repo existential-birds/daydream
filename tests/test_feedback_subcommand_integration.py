@@ -78,7 +78,7 @@ async def test_feedback_subcommand_argv_to_body(
 
 
 async def test_feedback_subcommand_non_interactive_argv_to_body(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Real-path: ``daydream feedback ... --non-interactive`` parses AND runs.
 
@@ -86,6 +86,11 @@ async def test_feedback_subcommand_non_interactive_argv_to_body(
     main parser: the feedback subparser rejected it (``unrecognized arguments``)
     and ``_build_feedback_config`` never set ``non_interactive``. This drives raw
     argv WITH the flag through the real feedback subparser into the real body.
+
+    Also carries ``--dump-artifacts`` (a shared arg wired into every flow via
+    ``_open_recorder``) to prove the flag is accepted on the feedback subparser
+    AND that this non-deep flow dumps its full bundle — the guarantee that any
+    flow, including a future custom one, keeps dumping.
 
     Crucially it does NOT silence prompts — instead ``builtins.input`` is patched
     to raise on ANY call, so a stray stdin read anywhere in the unattended
@@ -95,14 +100,18 @@ async def test_feedback_subcommand_non_interactive_argv_to_body(
     from daydream.agent import get_non_interactive, reset_state
     from daydream.runner import run_feedback
 
+    dump_dir = tmp_path / "dump-artifacts"
+
     # Pre-fix this raised SystemExit (unrecognized argument).
     config = cli._parse_args(
-        ["feedback", str(PR_NUMBER), "--bot", BOT, "--non-interactive", str(multi_stack_target)]
+        ["feedback", str(PR_NUMBER), "--bot", BOT, "--non-interactive",
+         "--dump-artifacts", str(dump_dir), str(multi_stack_target)]
     )
 
     assert config.non_interactive is True
     assert config.bot == BOT
     assert config.pr_number == PR_NUMBER
+    assert config.dump_artifacts == str(dump_dir)
 
     # No _silence — stdin must never be touched.
     stub = _PRFeedbackStubBackend()
@@ -131,3 +140,8 @@ async def test_feedback_subcommand_non_interactive_argv_to_body(
     assert head_after != head_before
     commit_msg = _git(multi_stack_target, "log", "-1", "--format=%B")
     assert "Daydream-Run:" in commit_msg
+
+    # --dump-artifacts copied the full bundle out of the feedback (pr-feedback)
+    # flow, proving the centralized recorder wires the dump on non-deep paths.
+    assert (dump_dir / "trajectory.json").is_file()
+    assert (dump_dir / "manifest.json").is_file()

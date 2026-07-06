@@ -163,6 +163,10 @@ class RunConfig:
             (review + post inline PR comments), or ``"review"`` (review report only).
         findings_out: Path to write the Phase A findings artifact
             (``--findings-out``; review mode only). Default None.
+        dump_artifacts: Directory to copy the full assembled run bundle into
+            (trajectory, review-output, deep artifacts, diffs, findings, manifest,
+            evaluation) so CI can upload it. Opt-in via ``--dump-artifacts`` because
+            the logs may contain sensitive data. Default None.
         force_worktree: Force ephemeral worktree even when ``branch`` is None.
         shallow: Single-stack review (skip multi-stack auto-detection).
         extra_copy: Extra paths to copy into ephemeral worktrees.
@@ -219,6 +223,7 @@ class RunConfig:
     base: str | None = None
     output_mode: OutputMode = "loop"
     findings_out: str | None = None
+    dump_artifacts: str | None = None
     force_worktree: bool = False
     shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)
@@ -263,8 +268,13 @@ def _print_missing_skill_error(skill_name: str) -> None:
 def _make_archive_callback(
     config: RunConfig, target_dir: Path, work: WorkContext | None = None,
 ) -> Callable[[TrajectoryRecorder, str], None] | None:
-    """Build the on_write archive callback, or None if archiving is disabled."""
-    if not config.archive:
+    """Build the on_write archive callback, or None if archiving is disabled.
+
+    ``--dump-artifacts`` reuses the same bundle assembly, so the callback also
+    fires (to build and copy out the bundle) when a dump target is set even if
+    the centralized archive is disabled.
+    """
+    if not config.archive and not config.dump_artifacts:
         return None
 
     def _cb(recorder: TrajectoryRecorder, status: str) -> None:
@@ -280,6 +290,38 @@ def _make_archive_callback(
         )
 
     return _cb
+
+
+def _open_recorder(
+    *,
+    config: RunConfig,
+    target_dir: Path,
+    work: WorkContext | None,
+    flow_kind: DaydreamRunFlow,
+) -> TrajectoryRecorder:
+    """Construct the run's ``TrajectoryRecorder`` with archival + dump wired in.
+
+    The single construction site for every flow's recorder. Centralizing it here
+    guarantees that centralized archival AND ``--dump-artifacts`` apply to every
+    flow — the four built-ins today and any future custom/extension flow tomorrow.
+    New flows MUST open their recorder through this factory rather than
+    constructing ``TrajectoryRecorder`` directly, so the dump/archive callback can
+    never be silently dropped. Session id and trajectory path are resolved here
+    identically for all flows.
+    """
+    session_id = str(uuid.uuid4())
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
+    return TrajectoryRecorder(
+        path=trajectory_path,
+        run_flow=flow_kind,
+        target_dir=target_dir,
+        agent_model_name="",
+        session_id=session_id,
+        explicit_path=config.trajectory_path is not None,
+        pr_number=config.pr_number,
+        pr_repo=config.pr_repo,
+        on_write=_make_archive_callback(config, target_dir, work),
+    )
 
 
 def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
@@ -617,18 +659,8 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
     bot = config.bot
     target_dir = work.repo
 
-    session_id = str(uuid.uuid4())
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
-    async with TrajectoryRecorder(
-        path=trajectory_path,
-        run_flow=DaydreamRunFlow.PR,
-        target_dir=target_dir,
-        agent_model_name="",
-        session_id=session_id,
-        explicit_path=config.trajectory_path is not None,
-        pr_number=config.pr_number,
-        pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir, work),
+    async with _open_recorder(
+        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.PR,
     ):
         ctx = FlowContext(config=config, work=work, registry=get_registry())
         ctx.data["pr_number"] = pr_number
@@ -818,19 +850,8 @@ async def _run_review_or_comment(
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
 
-    flow = DaydreamRunFlow.TTT
-    session_id = str(uuid.uuid4())
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
-    async with TrajectoryRecorder(
-        path=trajectory_path,
-        run_flow=flow,
-        target_dir=target_dir,
-        agent_model_name="",
-        session_id=session_id,
-        explicit_path=config.trajectory_path is not None,
-        pr_number=config.pr_number,
-        pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir, work),
+    async with _open_recorder(
+        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.TTT,
     ):
         ctx = FlowContext(config=config, work=work, registry=get_registry())
         ctx.data["post_to_pr"] = post_to_pr
@@ -932,18 +953,8 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             default="n",
         )
 
-    session_id = str(uuid.uuid4())
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
-    async with TrajectoryRecorder(
-        path=trajectory_path,
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=target_dir,
-        agent_model_name="",
-        session_id=session_id,
-        explicit_path=config.trajectory_path is not None,
-        pr_number=config.pr_number,
-        pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir, work),
+    async with _open_recorder(
+        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.NORMAL,
     ):
         ctx = FlowContext(config=config, work=work, registry=get_registry())
         ctx.data["skill"] = skill

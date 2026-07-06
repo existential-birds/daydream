@@ -164,6 +164,14 @@ def _archive_run_inner(
     # 5. Index in SQLite
     upsert_run(archive_dir, manifest)
 
+    # 6. Optionally copy the fully-assembled bundle to a user-specified directory
+    #    (``--dump-artifacts``) so CI can upload it. Copied wholesale from run_dir
+    #    so it includes the manifest and evaluation written above.
+    if config.dump_artifacts:
+        dest = Path(config.dump_artifacts)
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(run_dir, dest, dirs_exist_ok=True)
+
 
 def _read_fix_failures(target_dir: Path) -> dict[str, str] | None:
     """Read ``deep/fix-failures.json`` from the source tree, if present.
