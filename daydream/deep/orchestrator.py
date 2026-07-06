@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import uuid
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -74,8 +73,6 @@ from daydream.phases import (
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
-    TrajectoryRecorder,
-    default_trajectory_path,
     phase_scope,
 )
 from daydream.ui import (
@@ -1453,7 +1450,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     from daydream.git_ops import GitError, GitTimeoutError
     from daydream.phases import _git_branch, _git_log
     from daydream.runner import (
-        _make_archive_callback,
+        _open_recorder,
         _resolved_backend_name,
     )
 
@@ -1493,18 +1490,8 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     tier = select_tier(count_changed_files(diff))
     dd = deep_dir(target_dir)
 
-    session_id = str(uuid.uuid4())
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
-    async with TrajectoryRecorder(
-        path=trajectory_path,
-        run_flow=DaydreamRunFlow.DEEP,
-        target_dir=target_dir,
-        agent_model_name="",
-        session_id=session_id,
-        explicit_path=config.trajectory_path is not None,
-        pr_number=config.pr_number,
-        pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir, work),
+    async with _open_recorder(
+        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.DEEP,
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")

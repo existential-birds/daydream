@@ -292,6 +292,38 @@ def _make_archive_callback(
     return _cb
 
 
+def _open_recorder(
+    *,
+    config: RunConfig,
+    target_dir: Path,
+    work: WorkContext | None,
+    flow_kind: DaydreamRunFlow,
+) -> TrajectoryRecorder:
+    """Construct the run's ``TrajectoryRecorder`` with archival + dump wired in.
+
+    The single construction site for every flow's recorder. Centralizing it here
+    guarantees that centralized archival AND ``--dump-artifacts`` apply to every
+    flow — the four built-ins today and any future custom/extension flow tomorrow.
+    New flows MUST open their recorder through this factory rather than
+    constructing ``TrajectoryRecorder`` directly, so the dump/archive callback can
+    never be silently dropped. Session id and trajectory path are resolved here
+    identically for all flows.
+    """
+    session_id = str(uuid.uuid4())
+    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
+    return TrajectoryRecorder(
+        path=trajectory_path,
+        run_flow=flow_kind,
+        target_dir=target_dir,
+        agent_model_name="",
+        session_id=session_id,
+        explicit_path=config.trajectory_path is not None,
+        pr_number=config.pr_number,
+        pr_repo=config.pr_repo,
+        on_write=_make_archive_callback(config, target_dir, work),
+    )
+
+
 def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
     """Return ``config.file_config``, or an empty config when it is None.
 
@@ -627,18 +659,8 @@ async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
     bot = config.bot
     target_dir = work.repo
 
-    session_id = str(uuid.uuid4())
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
-    async with TrajectoryRecorder(
-        path=trajectory_path,
-        run_flow=DaydreamRunFlow.PR,
-        target_dir=target_dir,
-        agent_model_name="",
-        session_id=session_id,
-        explicit_path=config.trajectory_path is not None,
-        pr_number=config.pr_number,
-        pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir, work),
+    async with _open_recorder(
+        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.PR,
     ):
         ctx = FlowContext(config=config, work=work, registry=get_registry())
         ctx.data["pr_number"] = pr_number
@@ -828,19 +850,8 @@ async def _run_review_or_comment(
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
 
-    flow = DaydreamRunFlow.TTT
-    session_id = str(uuid.uuid4())
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
-    async with TrajectoryRecorder(
-        path=trajectory_path,
-        run_flow=flow,
-        target_dir=target_dir,
-        agent_model_name="",
-        session_id=session_id,
-        explicit_path=config.trajectory_path is not None,
-        pr_number=config.pr_number,
-        pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir, work),
+    async with _open_recorder(
+        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.TTT,
     ):
         ctx = FlowContext(config=config, work=work, registry=get_registry())
         ctx.data["post_to_pr"] = post_to_pr
@@ -942,18 +953,8 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
             default="n",
         )
 
-    session_id = str(uuid.uuid4())
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
-    async with TrajectoryRecorder(
-        path=trajectory_path,
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=target_dir,
-        agent_model_name="",
-        session_id=session_id,
-        explicit_path=config.trajectory_path is not None,
-        pr_number=config.pr_number,
-        pr_repo=config.pr_repo,
-        on_write=_make_archive_callback(config, target_dir, work),
+    async with _open_recorder(
+        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.NORMAL,
     ):
         ctx = FlowContext(config=config, work=work, registry=get_registry())
         ctx.data["skill"] = skill
