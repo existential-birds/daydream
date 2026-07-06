@@ -163,6 +163,10 @@ class RunConfig:
             (review + post inline PR comments), or ``"review"`` (review report only).
         findings_out: Path to write the Phase A findings artifact
             (``--findings-out``; review mode only). Default None.
+        dump_artifacts: Directory to copy the full assembled run bundle into
+            (trajectory, review-output, deep artifacts, diffs, findings, manifest,
+            evaluation) so CI can upload it. Opt-in via ``--dump-artifacts`` because
+            the logs may contain sensitive data. Default None.
         force_worktree: Force ephemeral worktree even when ``branch`` is None.
         shallow: Single-stack review (skip multi-stack auto-detection).
         extra_copy: Extra paths to copy into ephemeral worktrees.
@@ -219,6 +223,7 @@ class RunConfig:
     base: str | None = None
     output_mode: OutputMode = "loop"
     findings_out: str | None = None
+    dump_artifacts: str | None = None
     force_worktree: bool = False
     shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)
@@ -263,8 +268,13 @@ def _print_missing_skill_error(skill_name: str) -> None:
 def _make_archive_callback(
     config: RunConfig, target_dir: Path, work: WorkContext | None = None,
 ) -> Callable[[TrajectoryRecorder, str], None] | None:
-    """Build the on_write archive callback, or None if archiving is disabled."""
-    if not config.archive:
+    """Build the on_write archive callback, or None if archiving is disabled.
+
+    ``--dump-artifacts`` reuses the same bundle assembly, so the callback also
+    fires (to build and copy out the bundle) when a dump target is set even if
+    the centralized archive is disabled.
+    """
+    if not config.archive and not config.dump_artifacts:
         return None
 
     def _cb(recorder: TrajectoryRecorder, status: str) -> None:

@@ -622,6 +622,16 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--dump-artifacts",
+        default=None,
+        metavar="DIR",
+        dest="dump_artifacts",
+        help="Copy the full run bundle (ATIF trajectory, review output, deep artifacts, "
+             "diffs, findings, manifest, evaluation) into DIR for CI upload. Opt-in "
+             "because the logs may contain sensitive data."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--pr-number",
         default=None,
         type=int,
@@ -892,6 +902,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         base=args.base,
         output_mode=output_mode,  # type: ignore[arg-type]
         findings_out=args.findings_out,
+        dump_artifacts=args.dump_artifacts,
         force_worktree=args.force_worktree,
         shallow=args.shallow,
         precision_mode=args.precision,

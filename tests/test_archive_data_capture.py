@@ -95,6 +95,62 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     assert "# daydream recommended change" not in diff_text
 
 
+async def test_dump_artifacts_copies_full_bundle_to_target_dir(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path
+) -> None:
+    """``--dump-artifacts DIR`` copies the fully-assembled run bundle into DIR so CI
+    can upload it — trajectory, deep artifacts, diffs, manifest, and evaluation all
+    land in the user-specified directory, mirroring the archived run."""
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    stub.fix_edit_line = "# daydream recommended change\n"
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    dump_dir = tmp_path / "uploaded-artifacts"
+
+    exit_code = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+            dump_artifacts=str(dump_dir),
+        )
+    )
+    assert exit_code == 0
+
+    # The dump directory mirrors the archived run bundle.
+    run_dir = _only_archived_run(archive_dir)
+    assert (dump_dir / "manifest.json").is_file()
+    assert (dump_dir / "trajectory.json").is_file()
+    assert (dump_dir / "diff.patch").is_file()
+    assert (dump_dir / "evaluation.json").is_file()
+    assert (dump_dir / "manifest.json").read_text() == (run_dir / "manifest.json").read_text()
+
+
+async def test_no_dump_artifacts_leaves_no_extra_copy(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path
+) -> None:
+    """Without ``--dump-artifacts`` no bundle copy is made outside the archive."""
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    dump_dir = tmp_path / "uploaded-artifacts"
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+    assert not dump_dir.exists()
+
+
 async def test_no_eval_leaves_manifest_eval_fields_null(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
 ) -> None:
