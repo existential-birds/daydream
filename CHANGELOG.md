@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **review:** Embed verification-protocol gates inline instead of a skill-file read in the structural and generic-fallback reviewers
+
+  These two reviewers run with cwd set to the reviewed repo, so the previous `read review-verification-protocol/SKILL.md` instruction resolved against that repo, failed ("skill doesn't exist as a file"), and silently dropped the anchor/evidence/severity gates. The gates (0–3) are now stated inline in `VERIFICATION_PROTOCOL_INSTRUCTION`, mirroring the inline gate-0 embedding already used by `build_verification_prompt`. Both reviewers are language-agnostic, so the protocol's language-specific valid-pattern tables were of little use to them; the gate discipline is what mattered and is now self-contained.
+
 ## [0.22.0] - 2026-07-02
 
 ### Added
