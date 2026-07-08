@@ -339,7 +339,7 @@ def _accumulate_metrics(
     prompt = max(metrics.prompt_tokens or 0, 0)
     completion = max(metrics.completion_tokens or 0, 0)
     cached_raw = max(metrics.cached_tokens or 0, 0)
-    cached = min(cached_raw, prompt)  # ATIF: cached is a SUBSET of prompt
+    cached = min(cached_raw, prompt)  # defensive guard: backends emit cached ≤ prompt (cache reads folded into the total); clamp protects against malformed/legacy metrics
     phase.input_tokens += prompt
     phase.cached_tokens += cached
     phase.output_tokens += completion
