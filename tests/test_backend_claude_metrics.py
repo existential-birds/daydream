@@ -138,7 +138,7 @@ async def test_dropped_token_bug_fixed(monkeypatch):
         ],
     )
     cost = next(e for e in events if isinstance(e, CostEvent))
-    assert cost.input_tokens == 100
+    assert cost.input_tokens == 130  # 100 uncached + 30 read folded into the total
     assert cost.output_tokens == 50
     assert cost.cached_tokens == 30
     assert cost.cost_usd == 0.001
@@ -162,15 +162,88 @@ async def test_metrics_event_emitted_per_assistant_message(monkeypatch):
     assert len(metrics) == 1
     m = metrics[0]
     assert m.message_id == "msg_01"
-    assert m.prompt_tokens == 100  # EVNT-02 verbatim name (NOT input_tokens)
+    assert m.prompt_tokens == 130  # EVNT-02 verbatim name; 100 uncached + 30 read folded in
     assert m.completion_tokens == 50  # EVNT-02 verbatim name (NOT output_tokens)
     assert m.cached_tokens == 30
     assert m.cost_usd is None  # AssistantMessage carries no per-message cost
 
 
 @pytest.mark.asyncio
-async def test_cached_tokens_is_subset_not_additive(monkeypatch):
-    """D-15: cached_tokens is reported alongside, NOT added to prompt_tokens."""
+async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch):
+    """prompt_tokens folds input + cache_read + cache_creation into the true total input."""
+    # Fully-cached turn: raw input_tokens is the uncached remainder (22); the total
+    # input the model actually processed is 22 + 20000 read = 20022.
+    events = await _collect_events(
+        monkeypatch,
+        [
+            MockAssistantMessageWithUsage(
+                content=[MockTextBlock(text="cached")],
+                message_id="msg_cached",
+                usage={
+                    "input_tokens": 22,
+                    "output_tokens": 100,
+                    "cache_read_input_tokens": 20000,
+                    "cache_creation_input_tokens": 0,
+                },
+            ),
+            MockResultMessageWithUsage(
+                total_cost_usd=0.002,
+                structured_output=None,
+                usage={
+                    "input_tokens": 22,
+                    "output_tokens": 100,
+                    "cache_read_input_tokens": 20000,
+                    "cache_creation_input_tokens": 0,
+                },
+            ),
+        ],
+    )
+    metrics = [e for e in events if isinstance(e, MetricsEvent)][0]
+    cost = [e for e in events if isinstance(e, CostEvent)][0]
+    assert metrics.prompt_tokens == 20022
+    assert metrics.cached_tokens == 20000
+    assert metrics.completion_tokens == 100
+    assert cost.input_tokens == 20022
+    assert cost.cached_tokens == 20000
+
+    # Cache-write turn: creation tokens fold in too; a write is not a read hit, so
+    # cached_tokens stays 0.
+    events = await _collect_events(
+        monkeypatch,
+        [
+            MockAssistantMessageWithUsage(
+                content=[MockTextBlock(text="write")],
+                message_id="msg_write",
+                usage={
+                    "input_tokens": 50,
+                    "output_tokens": 100,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 15000,
+                },
+            ),
+            MockResultMessageWithUsage(
+                total_cost_usd=0.003,
+                structured_output=None,
+                usage={
+                    "input_tokens": 50,
+                    "output_tokens": 100,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 15000,
+                },
+            ),
+        ],
+    )
+    metrics = [e for e in events if isinstance(e, MetricsEvent)][0]
+    cost = [e for e in events if isinstance(e, CostEvent)][0]
+    assert metrics.prompt_tokens == 15050
+    assert metrics.cached_tokens == 0
+    assert cost.input_tokens == 15050
+    assert cost.cached_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_prompt_tokens_is_total_of_all_input_buckets(monkeypatch):
+    """prompt_tokens is the total (uncached + read + creation); cached_tokens is the read subset."""
     events = await _collect_events(
         monkeypatch,
         [
@@ -188,9 +261,9 @@ async def test_cached_tokens_is_subset_not_additive(monkeypatch):
     )
     metrics = [e for e in events if isinstance(e, MetricsEvent)][0]
     cost = [e for e in events if isinstance(e, CostEvent)][0]
-    assert metrics.prompt_tokens == 500  # NOT 800 (D-15: cached is a subset)
+    assert metrics.prompt_tokens == 800  # 500 uncached + 300 read
     assert metrics.cached_tokens == 300
-    assert cost.input_tokens == 500  # CostEvent boundary keeps SDK names
+    assert cost.input_tokens == 800
     assert cost.cached_tokens == 300
 
 
