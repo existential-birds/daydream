@@ -424,14 +424,15 @@ async def test_per_phase_rollup_distinguishes_phases(
     review_row = _phase_row(markdown, "Review")
     parse_row = _phase_row(markdown, "Parse Feedback")
 
-    # Review used 4,000 input tokens → row should display "4,000".
-    # Parse Feedback used 1,000 input tokens → row should display "1,000".
-    assert "4,000" in review_row, (
-        f"Bug B/C: Review row missing real input tokens (expected 4,000).\n"
+    # prompt_tokens is the total input (uncached remainder + cache read folded in).
+    # Review: 4,000 + 1,500 read = 5,500 → row should display "5,500".
+    # Parse Feedback: 1,000 + 500 read = 1,500 → row should display "1,500".
+    assert "5,500" in review_row, (
+        f"Bug B/C: Review row missing real input tokens (expected 5,500 total).\n"
         f"  row: {review_row!r}\n  per-step metrics: {per_step_metrics}"
     )
-    assert "1,000" in parse_row, (
-        f"Bug B/C: Parse Feedback row missing real input tokens (expected 1,000).\n"
+    assert "1,500" in parse_row, (
+        f"Bug B/C: Parse Feedback row missing real input tokens (expected 1,500 total).\n"
         f"  row: {parse_row!r}\n  per-step metrics: {per_step_metrics}"
     )
     # And costs should differ — Review $0.20 vs Parse $0.05.

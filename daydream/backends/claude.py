@@ -82,6 +82,24 @@ _READ_ONLY_ALLOWED_TOOLS: frozenset[str] = frozenset(
 )
 
 
+def _total_input_tokens(usage: dict[str, Any]) -> int | None:
+    """Fold Anthropic's three input buckets into the true total input.
+
+    Anthropic reports `input_tokens` as the *uncached remainder* only, with
+    cache hits and writes split into `cache_read_input_tokens` and
+    `cache_creation_input_tokens`. These two cache buckets are not mutually
+    exclusive: a single response can both read one cache breakpoint and write
+    another, so both may be non-zero at once. ATIF's `Metrics.prompt_tokens`
+    is the total input, so sum `input_tokens`, `cache_read_input_tokens`, and
+    `cache_creation_input_tokens` whenever present. Returns None when
+    `input_tokens` is absent (preserves the no-token-count gate).
+    """
+    input_tokens = usage.get("input_tokens")
+    if input_tokens is None:
+        return None
+    return input_tokens + (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
+
+
 class ClaudeAgentError(Exception):
     """Raised when the Claude agent run reports an error result.
 
@@ -380,9 +398,11 @@ class ClaudeBackend:
                             and msg_usage.get("input_tokens") is not None
                             and msg_usage.get("output_tokens") is not None
                         ):
+                            total_input = _total_input_tokens(msg_usage)
+                            assert total_input is not None  # guarded by input_tokens check above
                             yield MetricsEvent(
                                 message_id=getattr(msg, "message_id", "") or "",
-                                prompt_tokens=msg_usage["input_tokens"],
+                                prompt_tokens=total_input,
                                 completion_tokens=msg_usage["output_tokens"],
                                 cached_tokens=msg_usage.get("cache_read_input_tokens"),
                                 cost_usd=None,
@@ -415,14 +435,17 @@ class ClaudeBackend:
                         if msg.structured_output is not None:
                             structured_result = msg.structured_output
                         # EVNT-04/05: emit CostEvent when cost OR usage is available.
-                        # Per-call semantics trusted for SDK 0.1.52 (D-14). cached_tokens
-                        # is a SUBSET of input_tokens, not additive (D-15).
+                        # Per-call semantics trusted for SDK 0.1.52 (D-14). Anthropic's raw
+                        # `input_tokens` is the *uncached remainder* only; we fold in the
+                        # cache-read and cache-creation buckets so the emitted value is the
+                        # true total input, matching ATIF Metrics.prompt_tokens. cached_tokens
+                        # stays the cache-read hit subset of that total.
                         result_usage = getattr(msg, "usage", None)
                         if msg.total_cost_usd is not None or result_usage is not None:
                             usage = result_usage or {}
                             yield CostEvent(
                                 cost_usd=msg.total_cost_usd,
-                                input_tokens=usage.get("input_tokens"),
+                                input_tokens=_total_input_tokens(usage),
                                 output_tokens=usage.get("output_tokens"),
                                 cached_tokens=usage.get("cache_read_input_tokens"),
                                 model_name=last_assistant_model,

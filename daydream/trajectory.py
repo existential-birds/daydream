@@ -557,8 +557,10 @@ class Invocation:
                     result=ObservationResult(source_call_id=event.id, content=event.output),
                 )
         elif isinstance(event, MetricsEvent):
-            # EVNT-02 attribute names verbatim (D-15: cached_tokens is a
-            # SUBSET of prompt_tokens, not added).
+            # EVNT-02 attribute names verbatim. prompt_tokens is the total
+            # input (backends fold cache read+creation into it); cached_tokens
+            # is the cache-read hit subset (a subset of prompt_tokens, not
+            # added).
             #
             # D-04 correlation fallback (Codex): Codex emits no per-message
             # id, so MetricsEvent.message_id is always '' on the Codex path.
