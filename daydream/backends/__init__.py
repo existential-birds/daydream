@@ -105,11 +105,12 @@ class CostEvent:
             model is unknown to the table.
         input_tokens: Prompt tokens (None when unavailable).
         output_tokens: Completion tokens (None when unavailable).
-        cached_tokens: Cached portion of input_tokens (subset, NOT added
-            to input_tokens per D-15). None when unavailable. Default
-            ``None`` keeps existing 3-positional-arg call sites in
-            ``backends/claude.py`` and ``backends/codex.py`` valid until
-            Plans 03/04 update them.
+        cached_tokens: Cache-read hit subset of input_tokens. input_tokens
+            is the total input (backends fold cache read+creation into it);
+            cached_tokens is the read subset, NOT added to input_tokens.
+            None when unavailable. Default ``None`` keeps existing
+            3-positional-arg call sites in ``backends/claude.py`` and
+            ``backends/codex.py`` valid until Plans 03/04 update them.
         reasoning_tokens: Reasoning portion of output_tokens (subset, NOT
             additive — Codex's ``accounting.rs`` already counts these
             inside ``output_tokens``). Surfaces Codex's
@@ -156,9 +157,10 @@ class MetricsEvent:
             EVNT-02 (int, not Optional). Backends read the SDK key
             (Claude ``usage["output_tokens"]``, Codex
             ``usage["output_tokens"]``) and rename at the boundary.
-        cached_tokens: Subset of ``prompt_tokens`` served from cache
-            (None when unavailable). NOT additive to ``prompt_tokens``
-            (D-15).
+        cached_tokens: Cache-read hit subset of ``prompt_tokens``
+            (None when unavailable). ``prompt_tokens`` is the total input
+            (backends fold cache read+creation into it); cached_tokens is
+            the read subset, NOT additive to ``prompt_tokens``.
         cost_usd: Per-turn cost in USD (None when unavailable). Codex
             synthesizes via the #61 price table (#194 reverses D-16); None
             only when the model is unknown to the table.
