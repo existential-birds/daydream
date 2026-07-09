@@ -240,6 +240,41 @@ async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch):
     assert cost.input_tokens == 15050
     assert cost.cached_tokens == 0
 
+    # Read-and-write turn: the buckets are not mutually exclusive. One breakpoint
+    # is read (18000) while another is written (12000); both fold into the total
+    # (40 + 18000 + 12000 = 30040), but cached_tokens reflects only the read hit.
+    events = await _collect_events(
+        monkeypatch,
+        [
+            MockAssistantMessageWithUsage(
+                content=[MockTextBlock(text="both")],
+                message_id="msg_both",
+                usage={
+                    "input_tokens": 40,
+                    "output_tokens": 100,
+                    "cache_read_input_tokens": 18000,
+                    "cache_creation_input_tokens": 12000,
+                },
+            ),
+            MockResultMessageWithUsage(
+                total_cost_usd=0.004,
+                structured_output=None,
+                usage={
+                    "input_tokens": 40,
+                    "output_tokens": 100,
+                    "cache_read_input_tokens": 18000,
+                    "cache_creation_input_tokens": 12000,
+                },
+            ),
+        ],
+    )
+    metrics = [e for e in events if isinstance(e, MetricsEvent)][0]
+    cost = [e for e in events if isinstance(e, CostEvent)][0]
+    assert metrics.prompt_tokens == 30040
+    assert metrics.cached_tokens == 18000
+    assert cost.input_tokens == 30040
+    assert cost.cached_tokens == 18000
+
 
 @pytest.mark.asyncio
 async def test_prompt_tokens_is_total_of_all_input_buckets(monkeypatch):

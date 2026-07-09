@@ -87,9 +87,12 @@ def _total_input_tokens(usage: dict[str, Any]) -> int | None:
 
     Anthropic reports `input_tokens` as the *uncached remainder* only, with
     cache hits and writes split into `cache_read_input_tokens` and
-    `cache_creation_input_tokens` (mutually exclusive buckets). ATIF's
-    `Metrics.prompt_tokens` is the total input, so fold all three. Returns
-    None when `input_tokens` is absent (preserves the no-token-count gate).
+    `cache_creation_input_tokens`. These two cache buckets are not mutually
+    exclusive: a single response can both read one cache breakpoint and write
+    another, so both may be non-zero at once. ATIF's `Metrics.prompt_tokens`
+    is the total input, so sum `input_tokens`, `cache_read_input_tokens`, and
+    `cache_creation_input_tokens` whenever present. Returns None when
+    `input_tokens` is absent (preserves the no-token-count gate).
     """
     input_tokens = usage.get("input_tokens")
     if input_tokens is None:
