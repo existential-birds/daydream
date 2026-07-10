@@ -302,6 +302,96 @@ FULL_RO_EXT = (
 )
 
 
+# A minimal fork flow: one custom step that sends a marker prompt, registered
+# as a brand-new flow name (NOT one of the four built-ins).
+CUSTOM_FLOW_EXT = (
+    "from daydream.extensions import FlowStep\n"
+    "DAYDREAM_EXT_API = 1\n"
+    "async def _audit(ctx):\n"
+    "    from daydream.agent import run_agent\n"
+    "    from daydream.trajectory import DaydreamPhase\n"
+    "    await run_agent(ctx.backend_for('ro_audit'), ctx.work.repo, 'CUSTOM-FLOW-PROMPT',\n"
+    "                    phase=DaydreamPhase.REVIEW)\n"
+    "def register(r):\n"
+    "    r.register_phase(FlowStep(name='ro_audit', run=_audit))\n"
+    "    r.set_flow('ro-audit', ['ro_audit'])\n"
+)
+
+
+async def test_custom_flow_dispatches_and_dumps_artifacts(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path, tmp_path: Path,
+) -> None:
+    """A fork-registered custom flow selected via flow_name runs end-to-end and
+    --dump-artifacts writes the bundle (must-haves 1 + 2)."""
+    ext_dir.write_module(CUSTOM_FLOW_EXT)
+    backend = RecordingBackend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    dump_dir = tmp_path / "uploaded-artifacts"
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            flow_name="ro-audit",
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+            dump_artifacts=str(dump_dir),
+        )
+    )
+
+    assert rc == 0
+    assert "CUSTOM-FLOW-PROMPT" in backend.prompts  # custom flow actually ran
+    assert (dump_dir / "manifest.json").is_file()    # dump fired on the custom path
+    assert (dump_dir / "trajectory.json").is_file()
+
+
+async def test_unknown_flow_name_errors(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unregistered flow name fails with exit 1 (Extension Error panel; must-have 3)."""
+    backend = RecordingBackend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            flow_name="does-not-exist",
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+        )
+    )
+
+    assert rc == 1
+    assert not any("CUSTOM-FLOW-PROMPT" in p for p in backend.prompts)
+
+
+async def test_pr_feedback_not_selectable_via_flow(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--flow pr-feedback errors (needs PR number + bot; must-have 5)."""
+    backend = RecordingBackend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            flow_name="pr-feedback",
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+        )
+    )
+    assert rc == 1
+
+
 async def test_custom_phase_full_stack(
     ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

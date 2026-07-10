@@ -617,13 +617,52 @@ def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
         )
 
 
+async def _dispatch_selected_flow(work: WorkContext, config: RunConfig) -> int:
+    """Route an explicit ``--flow <name>`` selection.
+
+    Validates registration first (unknown names raise
+    ``UnresolvedExtensionError``, which propagates to :func:`run`'s Extension
+    Error panel). Built-in names route to their existing dedicated helper so
+    behavior matches the default / ``--shallow`` / ``--review`` paths;
+    ``pr-feedback`` is not selectable this way (it needs a PR number + bot);
+    any other registered name runs the generic :func:`_run_custom_flow`.
+    """
+    name = config.flow_name
+    assert name is not None
+
+    # Resolve-check first; unknown names raise UnresolvedExtensionError, caught
+    # by run()'s Extension Error panel (exit 1). Do not swallow it here.
+    get_registry().flow(name)
+
+    if name == "pr-feedback":
+        print_error(
+            console,
+            "Flow not selectable",
+            "The pr-feedback flow needs a PR number and bot identity; "
+            "use: daydream feedback <pr#> --bot <name>.",
+        )
+        return 1
+    if name == "review":
+        return await _run_review(work, config)
+    if name == "shallow":
+        _require_reviewable_branch(work, config)
+        return await _run_loop_shallow(work, config)
+    if name == "deep":
+        _require_reviewable_branch(work, config)
+        return await _run_loop_deep(work, config)
+
+    return await _run_custom_flow(work, config)
+
+
 async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     """Pick the flow helper for the resolved workspace + config.
 
     Order matters: ``bot`` signals PR feedback mode (set only by the
-    ``daydream feedback <pr#>`` subcommand). Then output_mode picks comment vs
-    review vs loop. Inside loop, ``config.shallow`` selects the single-stack
-    pipeline; otherwise the deep multi-stack pipeline runs (default).
+    ``daydream feedback <pr#>`` subcommand). Then an explicit ``flow_name``
+    (``--flow``) routes via :func:`_dispatch_selected_flow`. Then output_mode
+    picks comment vs review vs loop. Inside loop, ``config.shallow`` selects
+    the single-stack pipeline; otherwise the deep multi-stack pipeline runs
+    (default).
 
     Note: ``config.pr_number`` can be auto-detected from the current branch
     for metadata (trajectory/archive) without implying feedback mode.
@@ -634,6 +673,9 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     """
     if config.bot is not None:
         return await _run_pr_feedback(work, config)
+
+    if config.flow_name is not None:
+        return await _dispatch_selected_flow(work, config)
 
     if config.output_mode == "comment":
         return await _run_comment(work, config)
@@ -883,6 +925,58 @@ async def _run_review_or_comment(
         console.print()
 
         return await run_flow(ctx.registry, "review", ctx)
+
+
+# Helper: generic custom flow (--flow <name>)
+
+
+async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
+    """Generic preamble for a fork-registered flow selected via ``--flow``.
+
+    Mirrors :func:`_run_review_or_comment`'s diff seed so custom flows composed
+    of built-in review steps work, but an empty/unavailable diff is a dim note
+    rather than an early return (a custom flow may not need a diff). Opens the
+    recorder through the shared factory so ``--dump-artifacts``/archival apply.
+    """
+    flow_name = config.flow_name
+    assert flow_name is not None
+    target_dir = work.repo
+
+    try:
+        diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
+    except GitError:
+        diff = None
+    log = _git_log(target_dir)
+    branch = work.head_branch or _git_branch(target_dir)
+
+    if not diff:
+        print_dim(console, "No diff found — custom flow will run without a diff seed.")
+        diff = ""
+
+    daydream_dir = target_dir / ".daydream"
+    daydream_dir.mkdir(exist_ok=True)
+    diff_path = daydream_dir / "diff.patch"
+    diff_path.write_text(diff)
+
+    async with _open_recorder(
+        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.CUSTOM,
+    ):
+        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx.data["diff"] = diff
+        ctx.data["log"] = log
+        ctx.data["branch"] = branch
+        ctx.data["daydream_dir"] = daydream_dir
+        ctx.data["diff_path"] = diff_path
+
+        console.print()
+        print_info(console, f"Target directory: {target_dir}")
+        print_info(console, f"Flow: {flow_name}")
+        print_info(console, f"Branch: {branch}")
+        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
+        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
+        console.print()
+
+        return await run_flow(ctx.registry, flow_name, ctx)
 
 
 # Helper: shallow loop (single-stack review-fix-test)
