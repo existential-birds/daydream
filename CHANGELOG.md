@@ -23,11 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Updates the vendored ATIF schema to v1.7, bringing the trajectory format in line with the latest harbor specification. All new trajectories are stamped with `atif_version: "1.7"`; the recorder's v1.6-to-v1.7 delta is limited to the added `metrics` block on `TurnEndEvent` and a `session_id` field on the root.
 
-- **phases:** Per-file-group budgeting to fix phase ([#201](https://github.com/existential-birds/daydream/pull/251))
+- **phases:** Per-file-group budgeting to fix phase ([#251](https://github.com/existential-birds/daydream/pull/251))
 
   The fix phase now allocates per-file-group wall-clock and tool-call budgets instead of a single global budget, preventing a single slow file group from consuming the entire fix allocation. Budgets scale with the number of findings in each group and fall back to a safe default when unspecified.
 
-- **bench:** Repeated-trial benchmarking with variance reporting ([#249](https://github.com/existential-birds/daydream/pull/250))
+- **bench:** Repeated-trial benchmarking with variance reporting ([#250](https://github.com/existential-birds/daydream/pull/250))
 
   `daydream bench` now supports `--trials N` to run the benchmark N times against the same PR set and report mean plus standard deviation for precision, recall, and F1. Surfaces variance so a single noisy run doesn't mask regressions or false improvements.
 
@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The arbiter now drops findings that are evidence-backed but below a severity/confidence threshold, reducing noise from technically-correct-but-trivial comments. Suppressed findings are logged to a sidecar audit file. Activated via `--precision` or automatically when the diff exceeds 500 lines.
 
-- **training:** Stable per-finding join key for accept/reject labels ([#123](https://github.com/existential-birds/daydream/pull/246))
+- **training:** Stable per-finding join key for accept/reject labels ([#246](https://github.com/existential-birds/daydream/pull/246))
 
   Findings now carry a stable `fingerprint` (hash of file, line range, and finding text) so accept/reject labels can be joined back to the finding across archive, harvest, and projection stages. Eliminates the positional matching that broke when findings were reordered or deduplicated.
 
