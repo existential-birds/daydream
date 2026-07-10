@@ -446,3 +446,32 @@ async def test_custom_phase_full_stack(
     assert rc == 0
     assert ro_prompts and "ro-core:gate-skill" in ro_prompts[0]  # own prompt + bound skill
     assert ("claude", "test-model-x") in created  # [tool.daydream.phases.ro_gate] honored
+
+
+async def test_flow_deep_routes_to_deep_helper(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--flow deep runs the real deep pipeline (must-have 4): the intent prompt
+    reaches the backend via the deep flow, exit 0."""
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
+
+    backend = _install_stub_backend(monkeypatch, multi_stack_target)
+    _silence(monkeypatch)
+
+    async def _no_post(target_dir: Path, report_path: Path, *, console) -> None:
+        return None
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            flow_name="deep",
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+        )
+    )
+
+    prompts = [call["prompt"] for call in backend.calls]
+    assert rc == 0
+    assert any("intent" in p.lower() for p in prompts)  # deep pipeline ran
