@@ -475,3 +475,54 @@ async def test_flow_deep_routes_to_deep_helper(
     prompts = [call["prompt"] for call in backend.calls]
     assert rc == 0
     assert any("intent" in p.lower() for p in prompts)  # deep pipeline ran
+
+
+async def test_flow_review_routes_to_review_helper(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--flow review runs the real review pipeline: the alternatives prompt
+    reaches the backend via the review flow, exit 0."""
+    backend = RecordingBackend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            flow_name="review",
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+        )
+    )
+
+    assert rc == 0
+    assert any(ALTERNATIVES_MARKER in p for p in backend.prompts)  # review pipeline ran
+
+
+async def test_flow_shallow_routes_to_shallow_helper(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--flow shallow runs the real shallow pipeline: the parse phase fires,
+    exit 0."""
+    backend = ShallowRecordingBackend(
+        parse_results=[[{"id": 1, "description": "Align return", "file": "api.py", "line": 1}]]
+    )
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            flow_name="shallow",
+            skill="python",
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+        )
+    )
+
+    assert rc == 0
+    assert backend.parse_calls >= 1  # shallow pipeline ran

@@ -2,10 +2,15 @@
 
 The runner is unified around a single :func:`run` entry point. ``run`` opens
 the workspace via :func:`daydream.workspace.open_workspace` and then dispatches
-to a private helper based on ``config.bot`` / ``config.output_mode`` /
-``config.shallow``::
+to a private helper based on ``config.bot`` / ``config.flow_name`` /
+``config.output_mode`` / ``config.shallow``::
 
     bot set (feedback mode)  -> _run_pr_feedback (registered "pr-feedback" flow)
+    flow_name set (--flow)   -> _dispatch_selected_flow:
+        "review"             -> _run_review     (registered "review" flow, report only, no posting)
+        "shallow"            -> _run_loop_shallow (registered "shallow" flow)
+        "deep"               -> _run_loop_deep  (deep multi-stack pipeline)
+        other registered     -> _run_custom_flow (fork-registered custom flow)
     output_mode == "comment" -> _run_comment    (registered "review" flow, posts inline PR comments)
     output_mode == "review"  -> _run_review     (registered "review" flow, report only, no posting)
     output_mode == "loop":
@@ -541,7 +546,10 @@ async def run(config: RunConfig | None = None) -> int:
     # Resolve the active GitHub identity once onto config.identity. Under App
     # credentials this also mints + injects the installation token into every ``gh``
     # subprocess; every hard-abort case surfaces as GitHubAppError.
-    is_posting = config.bot is not None or config.output_mode in ("comment", "review")
+    # ``--flow review`` is equivalent to ``--review``: treat it as posting so the
+    # GitHub App token is minted and injected the same way.
+    _flow_is_review = config.flow_name == "review"
+    is_posting = config.bot is not None or config.output_mode in ("comment", "review") or _flow_is_review
     try:
         identity = github_app.resolve_run_identity(target_dir, config.pr_repo, is_posting=is_posting)
     except github_app.GitHubAppError as exc:
@@ -550,7 +558,8 @@ async def run(config: RunConfig | None = None) -> int:
     config.identity = identity
 
     # ``--comment``/``--review`` skip the test phase, hence the .env copy too.
-    skip_tests = config.output_mode != "loop"
+    # ``--flow review`` matches this behaviour for parity.
+    skip_tests = config.output_mode != "loop" or _flow_is_review
 
     # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
     # ``NotAWorktreeError`` (a ``GitError``) caught below — a loud error instead of
@@ -962,6 +971,7 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
         config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.CUSTOM,
     ):
         ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx.data["post_to_pr"] = False  # custom flows do not post to PR by default
         ctx.data["diff"] = diff
         ctx.data["log"] = log
         ctx.data["branch"] = branch
