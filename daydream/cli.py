@@ -604,6 +604,15 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Single-stack review (skip multi-stack auto-detection).",
     )
     parser.add_argument(
+        "--flow",
+        default=None,
+        metavar="NAME",
+        dest="flow_name",
+        help="Dispatch a registered flow by name (built-in: deep/shallow/review; "
+             "or a daydream_ext custom flow). Built-in names behave like their "
+             "dedicated flag." if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--precision",
         action="store_true",
         default=False,
@@ -860,6 +869,14 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if loop and args.start_at != "review":
         parser.error("--loop requires starting at review phase (incompatible with --start-at)")
 
+    if args.flow_name is not None:
+        if args.comment or args.review:
+            parser.error("--flow cannot be combined with --review/--comment")
+        if args.shallow:
+            parser.error("--flow cannot be combined with --shallow")
+        if loop:
+            parser.error("--flow cannot be combined with --loop")
+
     # Attribute provenance to the target checkout, not the invoking cwd —
     # daydream may run from one repo against a checkout of another.
     target_repo = Path(args.target) if args.target else Path.cwd()
@@ -905,6 +922,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         dump_artifacts=args.dump_artifacts,
         force_worktree=args.force_worktree,
         shallow=args.shallow,
+        flow_name=args.flow_name,
         precision_mode=args.precision,
         extra_copy=list(args.extra_copy),
         non_interactive=args.non_interactive,
