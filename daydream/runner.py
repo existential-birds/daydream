@@ -188,6 +188,9 @@ class RunConfig:
             (precedence CLI > file > default, mirroring
             ``shallow_fanout_threshold``; resolved by ``_precision_mode``), so the
             suppression pass never runs and arbiter output is byte-identical.
+        flow_name: Name of a registered flow to dispatch (``--flow``); built-in
+            names route to their dedicated helper, other registered names to the
+            generic custom-flow runner.
 
     """
 
@@ -240,6 +243,7 @@ class RunConfig:
     # cannot confirm (fail-closed). Default False => byte-identical behavior; the
     # suppression predicate is never called and arbiter output is unchanged.
     precision_mode: bool = False
+    flow_name: str | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:

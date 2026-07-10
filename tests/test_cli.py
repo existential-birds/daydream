@@ -67,6 +67,14 @@ def _cfg(monkeypatch, args: list[str]) -> RunConfig:
     return _parse_args()
 
 
+def test_run_config_flow_name_defaults_none():
+    assert RunConfig(target="/tmp/p").flow_name is None
+
+
+def test_run_config_flow_name_settable():
+    assert RunConfig(target="/tmp/p", flow_name="ro-audit").flow_name == "ro-audit"
+
+
 def test_loop_flag_default_off(monkeypatch):
     config = _cfg(monkeypatch, ["/tmp/project"])
     assert config.loop is False
