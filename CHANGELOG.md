@@ -7,17 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-10
+
 ### Added
 
 - **runner:** `--flow <name>` selects a registered flow for dispatch ([#263](https://github.com/existential-birds/daydream/pull/263))
 
   A fork can register a brand-new flow via `registry.set_flow(...)` in `daydream_ext` and now run it end-to-end with `--flow <name>` (or `RunConfig(flow_name=...)`). Built-in names (`deep`/`shallow`/`review`) route to their existing dedicated helpers so behavior is unchanged; `pr-feedback` is not selectable this way (use `daydream feedback`); unknown names fail with the standard Extension Error panel. Custom flows open their recorder through the shared factory, so `--dump-artifacts`/archival apply automatically.
 
+- **archive:** `--dump-artifacts` flag to export full run bundle for CI upload ([#258](https://github.com/existential-birds/daydream/pull/258))
+
+  Emits a tarball containing the trajectory, manifest, review artifacts, and handoff (if any) for a completed run. Designed for CI environments where the workspace is ephemeral and the artifact needs to be uploaded as a GitHub Actions artifact or attached to a check run.
+
+- **atif:** Re-vendor ATIF v1.7 from harbor and emit v1.7 ([#253](https://github.com/existential-birds/daydream/pull/253))
+
+  Updates the vendored ATIF schema to v1.7, bringing the trajectory format in line with the latest harbor specification. All new trajectories are stamped with `atif_version: "1.7"`; the recorder's v1.6-to-v1.7 delta is limited to the added `metrics` block on `TurnEndEvent` and a `session_id` field on the root.
+
+- **phases:** Per-file-group budgeting to fix phase ([#201](https://github.com/existential-birds/daydream/pull/251))
+
+  The fix phase now allocates per-file-group wall-clock and tool-call budgets instead of a single global budget, preventing a single slow file group from consuming the entire fix allocation. Budgets scale with the number of findings in each group and fall back to a safe default when unspecified.
+
+- **bench:** Repeated-trial benchmarking with variance reporting ([#249](https://github.com/existential-birds/daydream/pull/250))
+
+  `daydream bench` now supports `--trials N` to run the benchmark N times against the same PR set and report mean plus standard deviation for precision, recall, and F1. Surfaces variance so a single noisy run doesn't mask regressions or false improvements.
+
+- **review:** Precision-mode arbiter suppression for evidenced-but-minor findings ([#232](https://github.com/existential-birds/daydream/pull/248))
+
+  The arbiter now drops findings that are evidence-backed but below a severity/confidence threshold, reducing noise from technically-correct-but-trivial comments. Suppressed findings are logged to a sidecar audit file. Activated via `--precision` or automatically when the diff exceeds 500 lines.
+
+- **training:** Stable per-finding join key for accept/reject labels ([#123](https://github.com/existential-birds/daydream/pull/246))
+
+  Findings now carry a stable `fingerprint` (hash of file, line range, and finding text) so accept/reject labels can be joined back to the finding across archive, harvest, and projection stages. Eliminates the positional matching that broke when findings were reordered or deduplicated.
+
+- **bench:** Materiality gate — `--min-confidence` / `--min-severity` ([#245](https://github.com/existential-birds/daydream/pull/245))
+
+  Benchmark scoring now filters submitted comments by configurable confidence and severity thresholds, so low-signal findings don't inflate recall. Defaults preserve the previous scoring behavior; values are validated at parse time.
+
+- **bench:** Preserve confidence/severity as structured fields on submitted comments ([#244](https://github.com/existential-birds/daydream/pull/244))
+
+  Submitted benchmark comments now carry `confidence` and `severity` as first-class structured fields rather than embedded in the comment body text. Enables the materiality gate and per-tier scoring breakdowns without parsing prose.
+
+- **benchmark:** Direct Anthropic judge route ([#243](https://github.com/existential-birds/daydream/pull/243))
+
+  The benchmark scorer can now use an Anthropic model directly as the judge via `--judge-model`, bypassing the OpenRouter routing layer. Eliminates a class of routing failures and reduces judge-call latency by ~40%.
+
 ### Fixed
+
+- **backends:** Fold Claude cache tokens into `prompt_tokens` total ([#262](https://github.com/existential-birds/daydream/pull/262))
+
+  Claude SDK reports cache read/write tokens separately from `input_tokens`. The backend now folds them into the `prompt_tokens` total on `CostEvent` and `MetricsEvent`, so cost synthesis and trajectory metrics reflect the true prompt-token count. Previously, cache tokens were silently excluded, understating cost by 30-60% on cached runs.
 
 - **review:** Embed verification-protocol gates inline instead of a skill-file read in the structural and generic-fallback reviewers ([#260](https://github.com/existential-birds/daydream/pull/260))
 
   These two reviewers run with cwd set to the reviewed repo, so the previous `read review-verification-protocol/SKILL.md` instruction resolved against that repo, failed ("skill doesn't exist as a file"), and silently dropped the anchor/evidence/severity gates. The gates (0–3) are now stated inline in `VERIFICATION_PROTOCOL_INSTRUCTION`, mirroring the inline gate-0 embedding already used by `build_verification_prompt`. Both reviewers are language-agnostic, so the protocol's language-specific valid-pattern tables were of little use to them; the gate discipline is what mattered and is now self-contained.
+
+- **corpus:** Archive `findings.json` so per-finding join reaches corpus
+
+  The archive step now copies `findings.json` (the merged-items artifact) into the archive directory alongside the trajectory, so the corpus harvester's per-finding join can reach it without re-running the merge phase. Previously, a missing `findings.json` caused the harvester to silently skip label attribution for all findings in the run.
+
+- **bench:** Validate `--min-confidence` / `--min-severity` values
+
+  The materiality gate now rejects invalid confidence/severity values at parse time with an actionable error, instead of silently disabling the gate when a typo or unsupported value was passed.
+
+- **archive:** Drop the destructive bootstrap purge of legacy 'Z' valid_at rows
+
+  The archive SQLite index no longer purges legacy bitemporal rows with 'Z' suffix valid_at timestamps on connect. The purge was a migration-era safety net that destroyed legitimate historical data when run against an already-migrated database. Canonicalization now happens at the write boundary instead.
+
+- **corpus:** Canonicalize bitemporal timestamps at the write and as_of boundaries
+
+  Bitemporal timestamps in the corpus projection are now canonicalized to ISO 8601 UTC at both the write boundary (when the row is inserted) and the as_of boundary (when the projection query runs), eliminating timezone drift that caused join misses between harvest and projection stages.
 
 ## [0.22.0] - 2026-07-02
 
@@ -731,7 +789,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.22.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/existential-birds/daydream/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/existential-birds/daydream/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/existential-birds/daydream/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/existential-birds/daydream/compare/v0.19.0...v0.20.0
