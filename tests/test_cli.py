@@ -67,6 +67,30 @@ def _cfg(monkeypatch, args: list[str]) -> RunConfig:
     return _parse_args()
 
 
+def test_run_config_flow_name_defaults_none():
+    assert RunConfig(target="/tmp/p").flow_name is None
+
+
+def test_run_config_flow_name_settable():
+    assert RunConfig(target="/tmp/p", flow_name="ro-audit").flow_name == "ro-audit"
+
+
+def test_flow_flag_sets_flow_name(monkeypatch):
+    cfg = _cfg(monkeypatch, ["--flow", "ro-audit", "/tmp/project"])
+    assert cfg.flow_name == "ro-audit"
+
+
+def test_flow_default_none(monkeypatch):
+    assert _cfg(monkeypatch, ["/tmp/project"]).flow_name is None
+
+
+@pytest.mark.parametrize("conflict", [["--review"], ["--comment"], ["--shallow"], ["--loop"]])
+def test_flow_conflicts_rejected(monkeypatch, conflict):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--flow", "x", *conflict, "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
 def test_loop_flag_default_off(monkeypatch):
     config = _cfg(monkeypatch, ["/tmp/project"])
     assert config.loop is False

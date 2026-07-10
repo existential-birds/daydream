@@ -185,6 +185,7 @@ class DaydreamRunFlow(str, Enum):
     TTT = "ttt"
     PR = "pr"
     DEEP = "deep"
+    CUSTOM = "custom"
 
 
 class Redactor:

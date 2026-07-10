@@ -112,10 +112,11 @@ cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
 ```
 
 - `runner.run()` is the async entry. It builds the per-run extension `Registry`
-  (`build_registry()`), sets it on a `ContextVar`, and dispatches one of four
+  (`build_registry()`), sets it on a `ContextVar`, and dispatches one of five
   registered flows — `deep` (default), `shallow`, `review` (`--review`/`--comment`),
-  or `pr-feedback` (`daydream feedback <pr#>`) — each a preamble plus
-  `flows.run_flow()` over the flow's ordered `FlowStep` list.
+  `pr-feedback` (`daydream feedback <pr#>`), or a custom extension flow
+  (`--flow NAME`) — each a preamble plus `flows.run_flow()` over the flow's
+  ordered `FlowStep` list.
 - `agent.run_agent()` is the only agent call site. Never call a backend/SDK directly
   from phases. It wraps `Backend.execute()` and drives the Rich UI + trajectory recorder.
 - Subagent fan-out (exploration, per-stack review, parallel fix) is N parallel

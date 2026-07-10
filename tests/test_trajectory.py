@@ -1237,3 +1237,9 @@ async def test_recorder_does_not_mark_partial_on_clean_exit(tmp_path: Path) -> N
     assert recorder.path.exists()
     traj = _read_trajectory(recorder.path)
     assert "partial" not in traj.get("extra", {})
+
+
+def test_custom_run_flow_member_exists() -> None:
+    assert DaydreamRunFlow.CUSTOM.value == "custom"
+    # str-Enum: the value round-trips as a plain string for metadata serialization
+    assert DaydreamRunFlow("custom") is DaydreamRunFlow.CUSTOM

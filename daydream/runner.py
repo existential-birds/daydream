@@ -2,10 +2,15 @@
 
 The runner is unified around a single :func:`run` entry point. ``run`` opens
 the workspace via :func:`daydream.workspace.open_workspace` and then dispatches
-to a private helper based on ``config.bot`` / ``config.output_mode`` /
-``config.shallow``::
+to a private helper based on ``config.bot`` / ``config.flow_name`` /
+``config.output_mode`` / ``config.shallow``::
 
     bot set (feedback mode)  -> _run_pr_feedback (registered "pr-feedback" flow)
+    flow_name set (--flow)   -> _dispatch_selected_flow:
+        "review"             -> _run_review     (registered "review" flow, report only, no posting)
+        "shallow"            -> _run_loop_shallow (registered "shallow" flow)
+        "deep"               -> _run_loop_deep  (deep multi-stack pipeline)
+        other registered     -> _run_custom_flow (fork-registered custom flow)
     output_mode == "comment" -> _run_comment    (registered "review" flow, posts inline PR comments)
     output_mode == "review"  -> _run_review     (registered "review" flow, report only, no posting)
     output_mode == "loop":
@@ -188,6 +193,9 @@ class RunConfig:
             (precedence CLI > file > default, mirroring
             ``shallow_fanout_threshold``; resolved by ``_precision_mode``), so the
             suppression pass never runs and arbiter output is byte-identical.
+        flow_name: Name of a registered flow to dispatch (``--flow``); built-in
+            names route to their dedicated helper, other registered names to the
+            generic custom-flow runner.
 
     """
 
@@ -240,6 +248,7 @@ class RunConfig:
     # cannot confirm (fail-closed). Default False => byte-identical behavior; the
     # suppression predicate is never called and arbiter output is unchanged.
     precision_mode: bool = False
+    flow_name: str | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -537,7 +546,10 @@ async def run(config: RunConfig | None = None) -> int:
     # Resolve the active GitHub identity once onto config.identity. Under App
     # credentials this also mints + injects the installation token into every ``gh``
     # subprocess; every hard-abort case surfaces as GitHubAppError.
-    is_posting = config.bot is not None or config.output_mode in ("comment", "review")
+    # ``--flow review`` is equivalent to ``--review``: treat it as posting so the
+    # GitHub App token is minted and injected the same way.
+    _flow_is_review = config.flow_name == "review"
+    is_posting = config.bot is not None or config.output_mode in ("comment", "review") or _flow_is_review
     try:
         identity = github_app.resolve_run_identity(target_dir, config.pr_repo, is_posting=is_posting)
     except github_app.GitHubAppError as exc:
@@ -546,7 +558,8 @@ async def run(config: RunConfig | None = None) -> int:
     config.identity = identity
 
     # ``--comment``/``--review`` skip the test phase, hence the .env copy too.
-    skip_tests = config.output_mode != "loop"
+    # ``--flow review`` matches this behaviour for parity.
+    skip_tests = config.output_mode != "loop" or _flow_is_review
 
     # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
     # ``NotAWorktreeError`` (a ``GitError``) caught below — a loud error instead of
@@ -589,33 +602,14 @@ async def run_feedback(config: RunConfig, pr: int) -> int:
 # Dispatch
 
 
-async def _dispatch(work: WorkContext, config: RunConfig) -> int:
-    """Pick the flow helper for the resolved workspace + config.
+def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
+    """Raise WrongBranchError when a loop run has nothing to review against.
 
-    Order matters: ``bot`` signals PR feedback mode (set only by the
-    ``daydream feedback <pr#>`` subcommand). Then output_mode picks comment vs
-    review vs loop. Inside loop, ``config.shallow`` selects the single-stack
-    pipeline; otherwise the deep multi-stack pipeline runs (default).
-
-    Note: ``config.pr_number`` can be auto-detected from the current branch
-    for metadata (trajectory/archive) without implying feedback mode.
-
-    Args:
-        config: Run configuration (``config.identity`` carries the resolved
-            GitHub identity set by :func:`run`).
+    A worktree on the base branch with no --branch/--worktree would review
+    itself. Raised for cli.main() to render the actionable panel. Extracted
+    from _dispatch so both the default loop path and --flow deep/shallow reuse
+    the identical guard.
     """
-    if config.bot is not None:
-        return await _run_pr_feedback(work, config)
-
-    if config.output_mode == "comment":
-        return await _run_comment(work, config)
-
-    if config.output_mode == "review":
-        return await _run_review(work, config)
-
-    # output_mode == "loop". Guard the silent-failure case: a worktree on the
-    # base branch with no --branch/--worktree has nothing to review against
-    # itself, so raise loudly for cli.main() to render.
     if (
         config.branch is None
         and not config.force_worktree
@@ -630,6 +624,76 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
             f"  - run with --branch <feature-branch> to review the server's version, or\n"
             f"  - run with --worktree to force ephemeral isolation."
         )
+
+
+async def _dispatch_selected_flow(work: WorkContext, config: RunConfig) -> int:
+    """Route an explicit ``--flow <name>`` selection.
+
+    Validates registration first (unknown names raise
+    ``UnresolvedExtensionError``, which propagates to :func:`run`'s Extension
+    Error panel). Built-in names route to their existing dedicated helper so
+    behavior matches the default / ``--shallow`` / ``--review`` paths;
+    ``pr-feedback`` is not selectable this way (it needs a PR number + bot);
+    any other registered name runs the generic :func:`_run_custom_flow`.
+    """
+    name = config.flow_name
+    assert name is not None
+
+    # Resolve-check first; unknown names raise UnresolvedExtensionError, caught
+    # by run()'s Extension Error panel (exit 1). Do not swallow it here.
+    get_registry().flow(name)
+
+    if name == "pr-feedback":
+        print_error(
+            console,
+            "Flow not selectable",
+            "The pr-feedback flow needs a PR number and bot identity; "
+            "use: daydream feedback <pr#> --bot <name>.",
+        )
+        return 1
+    if name == "review":
+        return await _run_review(work, config)
+    if name == "shallow":
+        _require_reviewable_branch(work, config)
+        return await _run_loop_shallow(work, config)
+    if name == "deep":
+        _require_reviewable_branch(work, config)
+        return await _run_loop_deep(work, config)
+
+    return await _run_custom_flow(work, config)
+
+
+async def _dispatch(work: WorkContext, config: RunConfig) -> int:
+    """Pick the flow helper for the resolved workspace + config.
+
+    Order matters: ``bot`` signals PR feedback mode (set only by the
+    ``daydream feedback <pr#>`` subcommand). Then an explicit ``flow_name``
+    (``--flow``) routes via :func:`_dispatch_selected_flow`. Then output_mode
+    picks comment vs review vs loop. Inside loop, ``config.shallow`` selects
+    the single-stack pipeline; otherwise the deep multi-stack pipeline runs
+    (default).
+
+    Note: ``config.pr_number`` can be auto-detected from the current branch
+    for metadata (trajectory/archive) without implying feedback mode.
+
+    Args:
+        config: Run configuration (``config.identity`` carries the resolved
+            GitHub identity set by :func:`run`).
+    """
+    if config.bot is not None:
+        return await _run_pr_feedback(work, config)
+
+    if config.flow_name is not None:
+        return await _dispatch_selected_flow(work, config)
+
+    if config.output_mode == "comment":
+        return await _run_comment(work, config)
+
+    if config.output_mode == "review":
+        return await _run_review(work, config)
+
+    # output_mode == "loop".
+    _require_reviewable_branch(work, config)
 
     if config.shallow:
         return await _run_loop_shallow(work, config)
@@ -870,6 +934,59 @@ async def _run_review_or_comment(
         console.print()
 
         return await run_flow(ctx.registry, "review", ctx)
+
+
+# Helper: generic custom flow (--flow <name>)
+
+
+async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
+    """Generic preamble for a fork-registered flow selected via ``--flow``.
+
+    Mirrors :func:`_run_review_or_comment`'s diff seed so custom flows composed
+    of built-in review steps work, but an empty/unavailable diff is a dim note
+    rather than an early return (a custom flow may not need a diff). Opens the
+    recorder through the shared factory so ``--dump-artifacts``/archival apply.
+    """
+    flow_name = config.flow_name
+    assert flow_name is not None
+    target_dir = work.repo
+
+    try:
+        diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
+    except GitError:
+        diff = None
+    log = _git_log(target_dir)
+    branch = work.head_branch or _git_branch(target_dir)
+
+    if not diff:
+        print_dim(console, "No diff found — custom flow will run without a diff seed.")
+        diff = ""
+
+    daydream_dir = target_dir / ".daydream"
+    daydream_dir.mkdir(exist_ok=True)
+    diff_path = daydream_dir / "diff.patch"
+    diff_path.write_text(diff)
+
+    async with _open_recorder(
+        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.CUSTOM,
+    ):
+        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx.data["post_to_pr"] = False  # custom flows do not post to PR by default
+        ctx.data["diff"] = diff
+        ctx.data["log"] = log
+        ctx.data["branch"] = branch
+        ctx.data["daydream_dir"] = daydream_dir
+        ctx.data["diff_path"] = diff_path
+
+        console.print()
+        print_info(console, f"Target directory: {target_dir}")
+        print_info(console, f"Flow: {flow_name}")
+        print_info(console, f"Branch: {branch}")
+        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
+        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
+        console.print()
+
+        return await run_flow(ctx.registry, flow_name, ctx)
 
 
 # Helper: shallow loop (single-stack review-fix-test)

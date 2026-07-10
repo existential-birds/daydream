@@ -255,6 +255,26 @@ pass (and `daydream ext validate`), not at `set_flow` time, so registration
 order does not matter. `insert_before` / `insert_after` / `remove` validate
 their anchors eagerly.
 
+### Selecting a flow
+
+The built-in flows dispatch through their existing flags and defaults: the
+default run selects `deep`, `--shallow` selects `shallow`, `--review`/`--comment`
+select `review`, and `daydream feedback <pr#>` selects `pr-feedback`.
+
+A newly registered flow is dispatched by name with `--flow <name>` (or
+`RunConfig(flow_name=...)`):
+
+```python
+r.set_flow("ro-audit", ["ro_audit"])
+# daydream --flow ro-audit /path/to/project
+```
+
+A built-in name passed to `--flow` (`deep`/`shallow`/`review`) routes to its
+dedicated helper, so behavior matches the corresponding flag. `pr-feedback` is
+not selectable via `--flow` (it needs a PR number and bot identity — use
+`daydream feedback`). An unregistered name errors with the same resolve check
+`daydream ext validate` runs.
+
 ### Remap a built-in stack's skill
 
 ```python

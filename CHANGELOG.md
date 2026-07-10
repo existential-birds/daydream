@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **runner:** `--flow <name>` selects a registered flow for dispatch ([#263](https://github.com/existential-birds/daydream/pull/263))
+
+  A fork can register a brand-new flow via `registry.set_flow(...)` in `daydream_ext` and now run it end-to-end with `--flow <name>` (or `RunConfig(flow_name=...)`). Built-in names (`deep`/`shallow`/`review`) route to their existing dedicated helpers so behavior is unchanged; `pr-feedback` is not selectable this way (use `daydream feedback`); unknown names fail with the standard Extension Error panel. Custom flows open their recorder through the shared factory, so `--dump-artifacts`/archival apply automatically.
+
 ### Fixed
 
 - **review:** Embed verification-protocol gates inline instead of a skill-file read in the structural and generic-fallback reviewers ([#260](https://github.com/existential-birds/daydream/pull/260))
