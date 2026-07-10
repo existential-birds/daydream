@@ -593,6 +593,30 @@ async def run_feedback(config: RunConfig, pr: int) -> int:
 # Dispatch
 
 
+def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
+    """Raise WrongBranchError when a loop run has nothing to review against.
+
+    A worktree on the base branch with no --branch/--worktree would review
+    itself. Raised for cli.main() to render the actionable panel. Extracted
+    from _dispatch so both the default loop path and --flow deep/shallow reuse
+    the identical guard.
+    """
+    if (
+        config.branch is None
+        and not config.force_worktree
+        and work.head_branch is not None
+        and work.head_branch == work.base_branch
+    ):
+        raise git_ops.WrongBranchError(
+            f"cwd is on the base branch {work.base_branch!r} -- "
+            "there's nothing to review against itself.\n"
+            "Either:\n"
+            f"  - check out a feature branch in this worktree and re-run, or\n"
+            f"  - run with --branch <feature-branch> to review the server's version, or\n"
+            f"  - run with --worktree to force ephemeral isolation."
+        )
+
+
 async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     """Pick the flow helper for the resolved workspace + config.
 
@@ -617,23 +641,8 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     if config.output_mode == "review":
         return await _run_review(work, config)
 
-    # output_mode == "loop". Guard the silent-failure case: a worktree on the
-    # base branch with no --branch/--worktree has nothing to review against
-    # itself, so raise loudly for cli.main() to render.
-    if (
-        config.branch is None
-        and not config.force_worktree
-        and work.head_branch is not None
-        and work.head_branch == work.base_branch
-    ):
-        raise git_ops.WrongBranchError(
-            f"cwd is on the base branch {work.base_branch!r} -- "
-            "there's nothing to review against itself.\n"
-            "Either:\n"
-            f"  - check out a feature branch in this worktree and re-run, or\n"
-            f"  - run with --branch <feature-branch> to review the server's version, or\n"
-            f"  - run with --worktree to force ephemeral isolation."
-        )
+    # output_mode == "loop".
+    _require_reviewable_branch(work, config)
 
     if config.shallow:
         return await _run_loop_shallow(work, config)
