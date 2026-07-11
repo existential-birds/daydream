@@ -11,13 +11,14 @@ extension-seam plan, one flow migration at a time.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream import runner
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import ResultEvent, TextEvent, ToolStartEvent
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.phase_backend import PhaseDispatchBackend
@@ -94,6 +95,41 @@ class RecordingBackend:
         if args:
             result = f"{result} {args}"
         return result
+
+
+class DeferredWriteBackend:
+    """Yield a write start before performing the write on generator resumption."""
+
+    model = "mock-model"
+    fanout_concurrency = 4
+
+    def __init__(self, target: Path) -> None:
+        self.target = target
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        yield ToolStartEvent(
+            id="write-1",
+            name="Write",
+            input={"path": str(self.target), "content": "backend resumed"},
+        )
+        self.target.write_text("backend resumed")
+        yield TextEvent(text="")
+        yield ResultEvent(structured_output=None, continuation=None)
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
 
 
 async def test_fork_disables_respond_step(
@@ -316,6 +352,95 @@ CUSTOM_FLOW_EXT = (
     "    r.register_phase(FlowStep(name='ro_audit', run=_audit))\n"
     "    r.set_flow('ro-audit', ['ro_audit'])\n"
 )
+
+
+def _step_for_tool(trajectory: dict[str, Any], tool_name: str) -> dict[str, Any]:
+    """Return the recorded agent step containing a call to *tool_name*."""
+    for step in trajectory["steps"]:
+        if any(
+            call.get("function_name") == tool_name
+            for call in step.get("tool_calls", [])
+        ):
+            return step
+    raise AssertionError(f"no trajectory step recorded tool {tool_name!r}")
+
+
+async def _run_tool_case(
+    ext_dir: ExtDir,
+    target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    register_supervisor: bool,
+) -> tuple[Path, Path, int]:
+    """Run the extension-defined custom flow against the deferred-write backend."""
+    supervisor_registration = ""
+    if register_supervisor:
+        supervisor_registration = (
+            "    def _supervise(name, tool_input, *, phase):\n"
+            "        return ToolDecision(veto=name == 'Write', reason='protected path')\n"
+            "    r.register_tool_supervisor(_supervise)\n"
+        )
+
+    ext_dir.write_module(
+        "from daydream.extensions import FlowStep, ToolDecision\n"
+        "DAYDREAM_EXT_API = 1\n"
+        "async def _audit(ctx):\n"
+        "    from daydream.agent import run_agent\n"
+        "    from daydream.trajectory import DaydreamPhase\n"
+        "    await run_agent(ctx.backend_for('ro_audit'), ctx.work.repo, 'CUSTOM-TOOL-PROMPT',\n"
+        "                    phase=DaydreamPhase.REVIEW)\n"
+        "def register(r):\n"
+        "    r.register_phase(FlowStep(name='ro_audit', run=_audit))\n"
+        "    r.set_flow('ro-audit', ['ro_audit'])\n"
+        + supervisor_registration
+    )
+
+    written = target / "deferred-write.txt"
+    trajectory = target / ".daydream" / "tool-supervisor-trajectory.json"
+    backend = DeferredWriteBackend(written)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(target),
+            flow_name="ro-audit",
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+            trajectory_path=trajectory,
+        )
+    )
+    return written, trajectory, rc
+
+
+async def test_fork_tool_supervisor_vetoes_write(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registered supervisor veto closes the deferred backend before its write."""
+    denied, traj, rc = await _run_tool_case(
+        ext_dir, multi_stack_target, monkeypatch, register_supervisor=True
+    )
+
+    assert rc == 0
+    assert not denied.exists()
+    step = _step_for_tool(json.loads(traj.read_text()), "Write")
+    assert step["tool_calls"][0]["function_name"] == "Write"
+    assert step["extra"]["stop_reason"] == "tool_vetoed:Write"
+
+
+async def test_no_tool_supervisor_allows_write(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without registration, the same deferred backend resumes and writes."""
+    written, traj, rc = await _run_tool_case(
+        ext_dir, multi_stack_target, monkeypatch, register_supervisor=False
+    )
+
+    assert rc == 0
+    assert written.read_text() == "backend resumed"
+    assert "tool_vetoed:Write" not in traj.read_text()
 
 
 async def test_custom_flow_dispatches_and_dumps_artifacts(
