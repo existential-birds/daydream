@@ -28,7 +28,6 @@ from tests.conftest import ExtDir
 from tests.harness.fake_gh import FakeGh
 from tests.harness.phase_backend import PhaseDispatchBackend
 
-
 KEEP_ME = "KEEP_ME"
 DROP_ME = "DROP_ME"
 
