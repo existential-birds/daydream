@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-07-11
+
+### Fixed
+
+- **backends/claude:** Upgrade `claude-agent-sdk` to 0.2.116 for shielded subprocess teardown ([#266](https://github.com/existential-birds/daydream/pull/266))
+
+  Pins the Claude SDK to 0.2.116, whose cancellation path shields the CLI subprocess teardown. Earlier versions tore the subprocess down unshielded, so a budget/fan-out cancellation mid-stream corrupted anyio's cancel-scope stack ("Attempted to exit a cancel scope that isn't the current task's current cancel scope").
+
+- **backends/pi:** Respect configured model defaults ([#265](https://github.com/existential-birds/daydream/pull/265))
+
+  The Pi backend now resolves its own configured default model before falling back to `DEFAULT_PI_MODEL`, so per-phase and config-file model settings are honored instead of being overridden by the built-in default.
+
 ## [0.23.0] - 2026-07-10
 
 ### Added
@@ -789,7 +801,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.23.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/existential-birds/daydream/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/existential-birds/daydream/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/existential-birds/daydream/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/existential-birds/daydream/compare/v0.20.0...v0.21.0
