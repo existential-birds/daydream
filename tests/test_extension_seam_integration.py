@@ -17,11 +17,232 @@ from typing import Any
 
 import pytest
 
-from daydream import runner
+from daydream import git_ops, runner
 from daydream.backends import ResultEvent, TextEvent, ToolStartEvent
+from daydream.deep.orchestrator import _step_post_review
+from daydream.extensions.registry import Registry
+from daydream.flows.engine import FlowContext
 from daydream.runner import RunConfig
+from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
+from tests.harness.fake_gh import FakeGh
 from tests.harness.phase_backend import PhaseDispatchBackend
+
+
+KEEP_ME = "KEEP_ME"
+DROP_ME = "DROP_ME"
+
+
+FILTER_ITEMS_EXT = """
+import json
+
+from daydream.extensions import FlowStep
+
+DAYDREAM_EXT_API = 1
+
+
+async def _filter_items(ctx):
+    items_file = ctx.data["items_file"]
+    payload = json.loads(items_file.read_text())
+    payload["items"] = [
+        item for item in payload["items"] if item["description"] != "DROP_ME"
+    ]
+    items_file.write_text(json.dumps(payload))
+
+
+def register(r):
+    r.register_phase(FlowStep(name="filter-items", run=_filter_items))
+    r.insert_after("deep", anchor="load-items", step="filter-items")
+"""
+
+
+def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
+    """Build the smallest context needed by the post-review step."""
+    return FlowContext(
+        config=RunConfig(),
+        work=WorkContext(
+            repo=dd.parent,
+            source=dd.parent,
+            base_branch="main",
+            base_sha="base",
+            head_branch="feature",
+            head_sha="head",
+            is_ephemeral=False,
+            run_id="test-run",
+        ),
+        registry=Registry(),
+        data={"dd": dd, "items_file": items_file},
+    )
+
+
+async def _record_path(paths: list[Path], path: Path) -> None:
+    paths.append(path)
+
+
+def _filtered_items() -> list[dict[str, Any]]:
+    """Return valid canonical items with distinctive post-filter markers."""
+    return [
+        {
+            "id": 1,
+            "lens": "per-stack",
+            "file": "api.py",
+            "line": 1,
+            "severity": "high",
+            "description": KEEP_ME,
+            "confidence": "HIGH",
+            "rationale": "keep this finding",
+            "evidence": "api.py:1",
+        },
+        {
+            "id": 2,
+            "lens": "per-stack",
+            "file": "api.py",
+            "line": 1,
+            "severity": "medium",
+            "description": DROP_ME,
+            "confidence": "MEDIUM",
+            "rationale": "drop this finding",
+            "evidence": "api.py:1",
+        },
+    ]
+
+
+def _install_filtered_surface(
+    ext_dir: ExtDir,
+    target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Any:
+    """Install the one extension fork and a real-path deep backend."""
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
+
+    ext_dir.write_module(FILTER_ITEMS_EXT)
+    backend = _install_stub_backend(monkeypatch, target)
+    backend.merge_items = _filtered_items()
+    _silence(monkeypatch)
+    return backend
+
+
+def _serve_pr_view(fake_gh: FakeGh, target: Path) -> None:
+    """Configure a PR whose SHAs match the real fixture repository."""
+    fake_gh.serve_pr_view(
+        {
+            "number": 7,
+            "state": "OPEN",
+            "headRefName": "feature",
+            "baseRefName": "main",
+            "headRefOid": git_ops.head_sha(target),
+            "baseRefOid": git_ops.merge_base(target, "main"),
+            "url": "https://github.com/acme/widgets/pull/7",
+            "body": "",
+        }
+    )
+
+
+async def test_post_review_uses_published_items_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post step passes through the canonical path published by load-items."""
+    private_dir = tmp_path / "private-deep"
+    stable_items = tmp_path / "stable-merged-items.json"
+    ctx = _post_context(dd=private_dir, items_file=stable_items)
+    posted_paths: list[Path] = []
+    monkeypatch.setattr(
+        "daydream.pr_review.post_review_to_pr_from_report",
+        lambda repo, path, *, console: _record_path(posted_paths, path),
+    )
+
+    await _step_post_review(ctx)
+
+    assert posted_paths == [stable_items]
+
+
+async def test_fork_filter_controls_findings_artifact(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_gh: Any,
+    tmp_path: Path,
+) -> None:
+    """A load-items fork controls the canonical findings export surface."""
+    _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
+    _serve_pr_view(fake_gh, multi_stack_target)
+    findings_out = tmp_path / "findings.json"
+    merged_items = multi_stack_target / ".daydream" / "deep" / "merged-items.json"
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            pr_number=7,
+            findings_out=str(findings_out),
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+        )
+    )
+    artifact = findings_out.read_text()
+    canonical = merged_items.read_text()
+
+    assert rc == 0
+    assert KEEP_ME in artifact and KEEP_ME in canonical
+    assert DROP_ME not in artifact and DROP_ME not in canonical
+
+
+async def test_fork_filter_controls_pr_post_payload(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_gh: Any,
+) -> None:
+    """A load-items fork controls the canonical PR review payload."""
+    _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
+    _serve_pr_view(fake_gh, multi_stack_target)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            pr_number=7,
+            assume="yes",
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+        )
+    )
+    post = fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")[0]
+    payload = json.dumps(post.payload)
+
+    assert rc == 0
+    assert fake_gh.pr_view_calls()
+    assert KEEP_ME in payload
+    assert DROP_ME not in payload
+
+
+async def test_fork_filter_controls_fix_prompts(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_gh: Any,
+) -> None:
+    """A load-items fork controls the findings that reach the fix phase."""
+    from tests.test_deep_orchestrator import _fix_prompts
+
+    backend = _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
+    _serve_pr_view(fake_gh, multi_stack_target)
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(multi_stack_target),
+            pr_number=7,
+            assume="yes",
+            non_interactive=True,
+            cleanup=False,
+            archive=False,
+        )
+    )
+    fix_prompts = "\n".join(_fix_prompts(backend))
+
+    assert rc == 0
+    assert KEEP_ME in fix_prompts
+    assert DROP_ME not in fix_prompts
 
 
 class RecordingBackend:
