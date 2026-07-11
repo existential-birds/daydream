@@ -387,6 +387,8 @@ def _resolve_backend(
     config: RunConfig,
     phase: str,
     cache: dict[tuple[str, str | None], Backend] | None = None,
+    *,
+    cwd: Path | None = None,
 ) -> Backend:
     """Get or create the backend for a given phase, respecting all precedence tiers.
 
@@ -410,6 +412,7 @@ def _resolve_backend(
             When provided, backends are reused only when both the backend kind
             and the resolved model match — so the same backend kind with two
             different models yields two distinct instances.
+        cwd: Target workspace used for backend-specific configuration.
     """
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
@@ -417,9 +420,16 @@ def _resolve_backend(
     cache_key = (backend_name, resolved_model)
     if cache is not None:
         if cache_key not in cache:
-            cache[cache_key] = create_backend(backend_name, model=resolved_model)
+            if backend_name == "pi":
+                cache[cache_key] = create_backend(
+                    backend_name, model=resolved_model, cwd=cwd
+                )
+            else:
+                cache[cache_key] = create_backend(backend_name, model=resolved_model)
         return cache[cache_key]
 
+    if backend_name == "pi":
+        return create_backend(backend_name, model=resolved_model, cwd=cwd)
     return create_backend(backend_name, model=resolved_model)
 
 

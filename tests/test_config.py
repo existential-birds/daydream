@@ -62,6 +62,7 @@ def test_phase_default_models_codex_uses_gpt_5_5_for_every_phase():
 
 
 def test_pi_model_is_a_backend_fallback_not_a_phase_override():
+    """Pi uses one backend fallback instead of phase-specific defaults."""
     assert "pi" not in PHASE_DEFAULT_MODELS
     assert DEFAULT_PI_MODEL == "glm-5.2"
 

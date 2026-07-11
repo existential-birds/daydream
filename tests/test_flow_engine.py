@@ -61,6 +61,25 @@ def _ctx(reg: Registry) -> FlowContext:
     return FlowContext(config=RunConfig(), work=work, registry=reg)
 
 
+def test_backend_for_resolves_pi_model_from_workspace(tmp_path: Path) -> None:
+    settings = tmp_path / ".pi" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"defaultModel": "gpt-5.6-luna"}')
+    work = WorkContext(
+        repo=tmp_path,
+        source=tmp_path,
+        base_branch="main",
+        base_sha="0" * 40,
+        head_branch="feature",
+        head_sha="1" * 40,
+        is_ephemeral=False,
+        run_id="test-run",
+    )
+    ctx = FlowContext(config=RunConfig(backend="pi"), work=work, registry=Registry())
+
+    assert ctx.backend_for("review").model == "gpt-5.6-luna"
+
+
 async def test_order_gating_stop_and_loop() -> None:
     reg = Registry()
     reg.register_phase(FlowStep("a", run=_trace("a")))

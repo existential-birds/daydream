@@ -35,6 +35,15 @@ for _git_env_var in (
 ):
     os.environ.pop(_git_env_var, None)
 
+# Test-created repositories commit non-interactively and must not inherit a
+# developer's global signing requirement. Append an environment-scoped Git
+# override so every descendant git process is deterministic, including helpers
+# defined outside this file.
+_git_config_count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+os.environ[f"GIT_CONFIG_KEY_{_git_config_count}"] = "commit.gpgsign"
+os.environ[f"GIT_CONFIG_VALUE_{_git_config_count}"] = "false"
+os.environ["GIT_CONFIG_COUNT"] = str(_git_config_count + 1)
+
 # --- Real-git fixtures ------------------------------------------------------
 #
 # Mirrors the helpers that previously lived only in tests/test_git_ops.py.

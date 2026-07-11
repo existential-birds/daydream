@@ -885,6 +885,17 @@ async def test_default_model_does_not_override_pi_settings(tmp_path, monkeypatch
     assert "--provider" not in flat_args
 
 
+def test_public_model_reflects_pi_settings_before_execute(tmp_path):
+    """The public model is resolved from the target workspace at construction."""
+    settings = tmp_path / ".pi" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"defaultProvider": "openai", "defaultModel": "gpt-5.6-luna"}')
+
+    backend = PiBackend(cwd=tmp_path)
+
+    assert backend.model == "gpt-5.6-luna"
+
+
 @pytest.mark.asyncio
 async def test_explicit_model_overrides_pi_settings(tmp_path, monkeypatch):
     """An explicit daydream model still wins over Pi's configured default."""

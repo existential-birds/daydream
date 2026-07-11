@@ -279,7 +279,7 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
     # (late import) and passes ``cache=`` by keyword.
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, cache=None: _StubBackend(chosen_model),
+        lambda _config, _phase, cache=None, **_kwargs: _StubBackend(chosen_model),
     )
 
     async def _no_op_fetch(*_args, **_kwargs):
@@ -397,7 +397,7 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, phase, cache=None: backends_by_phase[phase],
+        lambda _config, phase, cache=None, **_kwargs: backends_by_phase[phase],
     )
 
     async def _stub_phase_parse_feedback(_backend, _work):
@@ -488,7 +488,7 @@ async def test_shallow_items_canonicalized_and_severity_ordered(monkeypatch, tmp
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, cache=None: _StubBackend("stub-model"),
+        lambda _config, _phase, cache=None, **_kwargs: _StubBackend("stub-model"),
     )
 
     async def _stub_phase_parse_feedback(_backend, _work):
@@ -610,7 +610,7 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch,
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, cache=None: _StubBackend(),
+        lambda _config, _phase, cache=None, **_kwargs: _StubBackend(),
     )
 
     async def _stub_phase_parse_feedback(_backend, _work):
@@ -706,7 +706,7 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkey
         model = "stub-model"
         fanout_concurrency = 4
 
-    def _resolve(_config, phase, cache=None):
+    def _resolve(_config, phase, cache=None, **_kwargs):
         return test_backend if phase == "test" else _StubBackend()
 
     monkeypatch.setattr("daydream.runner._resolve_backend", _resolve)
@@ -824,7 +824,7 @@ async def test_yes_shallow_failing_tests_bounded_fix_and_abort(monkeypatch, tmp_
         model = "stub-model"
         fanout_concurrency = 4
 
-    def _resolve(_config, phase, cache=None):
+    def _resolve(_config, phase, cache=None, **_kwargs):
         return test_backend if phase == "test" else _StubBackend()
 
     monkeypatch.setattr("daydream.runner._resolve_backend", _resolve)

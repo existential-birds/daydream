@@ -387,12 +387,13 @@ class PiBackend:
 
     concise_fix_prompts = True  # GLM produces verbose reasoning in fix prompts
 
-    def __init__(self, model: str | None = None):
-        # Keep the public model attribute useful for banners and trajectory
-        # fallback attribution, while retaining whether the caller supplied an
-        # actual override. A missing model is resolved against Pi settings at
-        # execute time and falls back to GLM only when Pi has no default.
-        self.model = model or DEFAULT_PI_MODEL
+    def __init__(self, model: str | None = None, *, cwd: Path | None = None):
+        """Initialize the backend with an optional explicit model override."""
+        self.model = (
+            model
+            or (_configured_pi_model(cwd) if cwd is not None else None)
+            or DEFAULT_PI_MODEL
+        )
         self._model_override = model
         self.fanout_concurrency = 2
         self.retry_attempts = _pi_retry_attempts()
