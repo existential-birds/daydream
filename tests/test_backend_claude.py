@@ -734,3 +734,34 @@ async def test_execute_registers_skill_guard(patch_sdk):
     assert "hookSpecificOutput" not in allow_beagle
 
 
+
+
+def test_claude_agent_sdk_has_shielded_teardown() -> None:
+    """SDK teardown must run shielded, or cancelled runs corrupt the cancel scope.
+
+    ``claude-agent-sdk`` 0.2.108 tore down the CLI subprocess UNSHIELDED on the
+    cancellation path (``Query.close`` / ``transport.close``). When a run_agent
+    wall/tool budget (``anyio.move_on_after``) or a fan-out sibling cancellation
+    fired mid-stream, that teardown's own ``fail_after`` cancel scopes ran on the
+    driving task while the outer cancellation was in flight, violating anyio's
+    LIFO cancel-scope stack and raising::
+
+        RuntimeError: Attempted to exit a cancel scope that isn't the current
+        tasks's current cancel scope
+
+    intermittently, and ONLY on the Claude backend (Codex/Pi are subprocess CLIs
+    with no in-process anyio scopes to corrupt). Anthropic fixed it in 0.2.111 by
+    wrapping the teardown in ``anyio.CancelScope(shield=True)`` (``Query.close`` ->
+    ``_close_impl``). This guard fails closed if the pin is ever moved below the
+    fix, since a downgrade silently re-introduces the corruption with no test of
+    its own (the race needs a real subprocess + real cancellation timing).
+    """
+    from importlib.metadata import version
+
+    installed = tuple(int(p) for p in version("claude-agent-sdk").split(".")[:3])
+    assert installed >= (0, 2, 111), (
+        f"claude-agent-sdk {'.'.join(map(str, installed))} predates the shielded "
+        "teardown fix (0.2.111); cancelled Claude runs will intermittently raise "
+        "'Attempted to exit a cancel scope that isn't the current tasks's current "
+        "cancel scope'. Do not pin below 0.2.111."
+    )
