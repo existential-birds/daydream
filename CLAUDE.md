@@ -183,13 +183,14 @@ The default wall budget is 1800s; the default tool-call budget varies by phase.
 
 `config.py` holds:
 - `DEFAULT_CLAUDE_MODEL`, `DEFAULT_CODEX_MODEL`, `DEFAULT_PI_MODEL` constants.
-- `PHASE_DEFAULT_MODELS[backend][phase]` per-backend per-phase model tiering.
+- `PHASE_DEFAULT_MODELS[backend][phase]` Claude/Codex per-phase model tiering;
+  Pi resolves its own configured default before falling back to `DEFAULT_PI_MODEL`.
 - Skill mappings (`REVIEW_SKILLS`, `SKILL_MAP`).
 
 Per-phase overrides are config-file-only (`[tool.daydream]` /
 `[tool.daydream.phases.<phase>]` in `pyproject.toml` or `.daydream.toml`). There are
 no per-phase CLI flags. Precedence (highest first): CLI `--model`/`--backend` >
-config-file phase override > config-file global > per-backend default. Resolved in
+config-file phase override > config-file global > backend default. Resolved in
 `runner._resolve_backend()`. `[tool.daydream.phases.<phase>]` accepts any registered
 step's config key, including fork-defined phases (per-flow key tables in
 `docs/extensions.md`).

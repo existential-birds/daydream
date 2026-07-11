@@ -161,6 +161,10 @@ per-backend table in `daydream/config.py`. The same order applies to backend
 selection via `--backend` / config / the `claude` fallback. (There is no
 environment-variable tier. `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
 
+For the `pi` backend, an unset daydream model leaves Pi's own configured
+`defaultModel` intact. The built-in `glm-5.2` value is used only when neither
+daydream nor Pi has selected a model.
+
 ### Cost Pricing
 
 When a backend does not report a USD cost directly (notably Codex), daydream

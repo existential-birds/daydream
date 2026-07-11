@@ -13,11 +13,11 @@ PHASE_NAMES = {
 
 
 def test_phase_default_models_covers_all_backends():
-    assert set(PHASE_DEFAULT_MODELS.keys()) == {"claude", "codex", "pi"}
+    assert set(PHASE_DEFAULT_MODELS.keys()) == {"claude", "codex"}
 
 
 def test_phase_default_models_covers_every_phase_for_each_backend():
-    for backend_name in ("claude", "codex", "pi"):
+    for backend_name in ("claude", "codex"):
         assert set(PHASE_DEFAULT_MODELS[backend_name].keys()) == PHASE_NAMES, (
             f"{backend_name} default table missing phase entries"
         )
@@ -47,10 +47,10 @@ def test_per_stack_review_and_arbiter_split():
 
 def test_suppression_uses_cheap_tier():
     """#232: the precision-mode suppression pass defaults to the cheap mid tier
-    (never per-finding Opus). Codex/pi keep their single-model default."""
+    (never per-finding Opus). Pi keeps its single backend fallback."""
     assert PHASE_DEFAULT_MODELS["claude"]["suppression"] == "claude-sonnet-4-6"
     assert PHASE_DEFAULT_MODELS["codex"]["suppression"] == "gpt-5.5"
-    assert PHASE_DEFAULT_MODELS["pi"]["suppression"] == "glm-5.2"
+    assert DEFAULT_PI_MODEL == "glm-5.2"
 
 
 def test_phase_default_models_codex_uses_gpt_5_5_for_every_phase():
@@ -61,12 +61,9 @@ def test_phase_default_models_codex_uses_gpt_5_5_for_every_phase():
         )
 
 
-def test_phase_default_models_pi_uses_glm_5_2_for_every_phase():
-    pi = PHASE_DEFAULT_MODELS["pi"]
-    for phase in PHASE_NAMES:
-        assert pi[phase] == "glm-5.2", (
-            f"pi phase {phase} should default to glm-5.2 (z.ai coding plan)"
-        )
+def test_pi_model_is_a_backend_fallback_not_a_phase_override():
+    assert "pi" not in PHASE_DEFAULT_MODELS
+    assert DEFAULT_PI_MODEL == "glm-5.2"
 
 
 def test_default_pi_model_is_glm_5_2():
