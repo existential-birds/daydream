@@ -300,15 +300,17 @@ class Backend(Protocol):
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str: ...
 
 
-def create_backend(name: str, model: str | None = None) -> Backend:
+def create_backend(
+    name: str, model: str | None = None, *, cwd: Path | None = None
+) -> Backend:
     """Create a backend by name.
 
     Args:
         name: Backend name ("claude", "codex", or "pi").
-        model: Optional CLI override. When ``None``, the per-backend default
-            from :mod:`daydream.config` is used. This is the *only* place
-            those defaults are read; downstream layers take ``model: str``
-            as required.
+        model: Optional model override. Claude and Codex apply their built-in
+            defaults here. Pi receives ``None`` unchanged so its own configured
+            default can win before Pi's GLM fallback is selected.
+        cwd: Target workspace used to resolve Pi's configured default model.
 
     Returns:
         A Backend instance whose ``.model`` attribute is a non-empty string.
@@ -316,7 +318,7 @@ def create_backend(name: str, model: str | None = None) -> Backend:
     Raises:
         ValueError: If the backend name is unknown.
     """
-    from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_PI_MODEL
+    from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 
     if name == "claude":
         from daydream.backends.claude import ClaudeBackend
@@ -326,7 +328,7 @@ def create_backend(name: str, model: str | None = None) -> Backend:
         return CodexBackend(model=model or DEFAULT_CODEX_MODEL)
     if name == "pi":
         from daydream.backends.pi import PiBackend
-        return PiBackend(model=model or DEFAULT_PI_MODEL)
+        return PiBackend(model=model, cwd=cwd)
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', or 'pi'.")
 
 

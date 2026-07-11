@@ -87,3 +87,12 @@ def test_env_vars_are_not_a_precedence_tier(monkeypatch, tmp_path: Path) -> None
     cfg2 = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
     assert _resolved_model(cfg2, "parse") == "claude-haiku-4-5"
     assert _resolved_backend_name(cfg2, "parse") == "claude"
+
+
+def test_pi_native_model_is_not_replaced_by_glm_fallback(tmp_path: Path) -> None:
+    """Pi's own default remains available when daydream has no model setting."""
+    cfg = RunConfig(target=str(tmp_path), backend="pi", model=None)
+    assert _resolved_model(cfg, "review") is None
+
+    cfg.model = "custom-model"
+    assert _resolved_model(cfg, "review") == "custom-model"

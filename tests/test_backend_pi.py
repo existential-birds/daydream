@@ -862,6 +862,73 @@ async def test_provider_flag(monkeypatch, env_provider, expected):
     assert flat_args[flat_args.index("--provider") + 1] == expected
 
 
+@pytest.mark.asyncio
+async def test_default_model_does_not_override_pi_settings(tmp_path, monkeypatch):
+    """A Pi-configured default wins when daydream did not select a model."""
+    settings = tmp_path / ".pi" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(
+        '{"defaultProvider": "openai", "defaultModel": "gpt-5.6-luna"}'
+    )
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+
+    backend = PiBackend()
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    with patch(
+        "daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc
+    ) as mock_exec:
+        async for _ in backend.execute(tmp_path, "Reply"):
+            pass
+
+    flat_args = list(mock_exec.call_args.args)
+    assert "--model" not in flat_args
+    assert "--provider" not in flat_args
+
+
+def test_public_model_reflects_pi_settings_before_execute(tmp_path):
+    """The public model is resolved from the target workspace at construction."""
+    settings = tmp_path / ".pi" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"defaultProvider": "openai", "defaultModel": "gpt-5.6-luna"}')
+
+    backend = PiBackend(cwd=tmp_path)
+
+    assert backend.model == "gpt-5.6-luna"
+
+
+@pytest.mark.asyncio
+async def test_explicit_model_overrides_pi_settings(tmp_path, monkeypatch):
+    """An explicit daydream model still wins over Pi's configured default."""
+    settings = tmp_path / ".pi" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"defaultProvider": "openai", "defaultModel": "gpt-5.6-luna"}')
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+
+    backend = PiBackend(model="custom-model")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    with patch(
+        "daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc
+    ) as mock_exec:
+        async for _ in backend.execute(tmp_path, "Reply"):
+            pass
+
+    flat_args = list(mock_exec.call_args.args)
+    assert flat_args[flat_args.index("--model") + 1] == "custom-model"
+
+
+@pytest.mark.asyncio
+async def test_glm_is_pi_fallback_when_no_model_is_configured(tmp_path, monkeypatch):
+    """GLM remains the fallback when neither daydream nor Pi selects a model."""
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+
+    backend = PiBackend()
+    flat_args, _ = await _run_and_capture_args(backend)
+
+    assert flat_args[flat_args.index("--model") + 1] == "glm-5.2"
+    assert flat_args[flat_args.index("--provider") + 1] == "zai"
+
+
 # ---------------------------------------------------------------------------
 # System prompt preamble (--append-system-prompt)
 # ---------------------------------------------------------------------------
@@ -1068,4 +1135,3 @@ def test_pi_retry_base_delay(monkeypatch, env_value, expected):
 def test_pi_backend_fanout_concurrency():
     backend = PiBackend(model="glm-5.2")
     assert backend.fanout_concurrency == 2
-

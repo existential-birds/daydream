@@ -15,7 +15,7 @@ Exports:
         coding plan GLM default).
     DEFAULT_EXPLORATION_MODEL: str - Default model for the EXPLORE phase.
     PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] - Per-backend per-phase default
-        model mapping. Outer key is backend name ("claude", "codex", or "pi"),
+        model mapping. Outer key is backend name ("claude" or "codex"),
         inner key is the phase name (lowercase, e.g. "review", "parse", "fix"),
         value is the concrete model id.
     STRUCTURE_SKILL: str - Beagle skill name for the structural-maintainability
@@ -82,9 +82,9 @@ DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 # for codex is deferred until concrete model picks across the codex lineup are
 # settled.
 #
-# Pi side defaults to ``glm-5.2`` (z.ai coding plan) across the board; per-phase
-# tiering is deferred until the GLM lineup (glm-5.2 / glm-4.5-air / etc.) is
-# mapped to tiers.
+# Pi's ``DEFAULT_PI_MODEL`` is resolved by ``PiBackend`` after Pi's own settings
+# have had a chance to select a model. It is a backend fallback, not a
+# per-phase override, so it intentionally does not appear in this table.
 PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
     "claude": {
         "parse": "claude-haiku-4-5",
@@ -115,21 +115,6 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "merge": "gpt-5.5",
         "intent": "gpt-5.5",
         "pr_feedback": "gpt-5.5",
-    },
-    "pi": {
-        "parse": "glm-5.2",
-        "fix": "glm-5.2",
-        "test": "glm-5.2",
-        "verify": "glm-5.2",
-        "exploration": "glm-5.2",
-        "per_stack_review": "glm-5.2",
-        "review": "glm-5.2",
-        "arbiter": "glm-5.2",
-        "suppression": "glm-5.2",
-        "wonder": "glm-5.2",
-        "merge": "glm-5.2",
-        "intent": "glm-5.2",
-        "pr_feedback": "glm-5.2",
     },
 }
 

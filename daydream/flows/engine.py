@@ -55,7 +55,9 @@ class FlowContext:
         """
         from daydream.runner import _resolve_backend
 
-        return _resolve_backend(self.config, phase, cache=self._backend_cache)
+        return _resolve_backend(
+            self.config, phase, cache=self._backend_cache, cwd=self.work.repo
+        )
 
 
 def _resolve_steps(registry: Registry, flow_name: str, entries: list[FlowEntry]) -> dict[str, FlowStep]:

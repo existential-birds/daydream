@@ -14,12 +14,13 @@ trajectories indistinguishable in shape from the other two backends.
 z.ai coding plan wiring (GLM models) is registered via a pi extension at
 ``~/.pi/extensions/zai-provider/`` that calls ``pi.registerProvider()`` with
 ``baseUrl``, ``apiKey``, ``api: "openai-completions"``, and the six GLM
-models (see https://pi.dev/docs/latest/custom-provider). daydream defaults
-``--provider`` to ``zai`` (matching ``DEFAULT_PI_MODEL = "glm-5.2"``) and
-forwards optional ``PI_PROVIDER`` / ``PI_API_KEY`` / ``PI_THINKING`` env
-overrides as CLI flags. The provider extension is installed once via
-``pi install ~/.pi/extensions/zai-provider``; daydream never fabricates a
-base URL or writes a models.json override.
+models (see https://pi.dev/docs/latest/custom-provider). When no model is
+selected by daydream, Pi's configured ``defaultModel`` is respected; only when
+Pi has no configured model does daydream pass ``glm-5.2`` with provider
+``zai`` as its fallback. Explicit model and ``PI_PROVIDER`` / ``PI_API_KEY`` /
+``PI_THINKING`` values remain CLI overrides. The provider extension is
+installed once via ``pi install ~/.pi/extensions/zai-provider``; daydream never
+fabricates a base URL or writes a models.json override.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.config import DEFAULT_PI_MODEL
 from daydream.json_utils import extract_json
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
@@ -72,6 +74,34 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
 
 # Read-only tool subset (plan §3). Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
+
+
+def _read_pi_default_model(path: Path) -> str | None:
+    """Read Pi's configured default model, ignoring malformed settings."""
+    try:
+        with path.open(encoding="utf-8") as settings_file:
+            settings = json.load(settings_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    model = settings.get("defaultModel") if isinstance(settings, dict) else None
+    return model.strip() if isinstance(model, str) and model.strip() else None
+
+
+def _configured_pi_model(cwd: Path) -> str | None:
+    """Return the effective Pi settings default, if one is configured.
+
+    Pi merges project settings over global settings. We mirror only the
+    ``defaultModel`` field because that is the setting daydream must not replace
+    with its GLM fallback.
+    """
+    agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi" / "agent"))
+    settings_paths = (cwd / ".pi" / "settings.json", agent_dir / "settings.json")
+    for settings_path in settings_paths:
+        model = _read_pi_default_model(settings_path)
+        if model:
+            return model
+    return None
 
 # Matches Pi's native ``/skill:<slug>`` command embedded in a prompt (emitted by
 # ``format_skill_invocation``). Used in ``execute`` to register the referenced
@@ -357,8 +387,14 @@ class PiBackend:
 
     concise_fix_prompts = True  # GLM produces verbose reasoning in fix prompts
 
-    def __init__(self, model: str):
-        self.model = model
+    def __init__(self, model: str | None = None, *, cwd: Path | None = None):
+        """Initialize the backend with an optional explicit model override."""
+        self.model = (
+            model
+            or (_configured_pi_model(cwd) if cwd is not None else None)
+            or DEFAULT_PI_MODEL
+        )
+        self._model_override = model
         self.fanout_concurrency = 2
         self.retry_attempts = _pi_retry_attempts()
         self.retry_base_delay_s = _pi_retry_base_delay()
@@ -404,18 +440,27 @@ class PiBackend:
                 "Pi backend does not support exploration subagents; use --backend claude for exploration."
             )
 
-        args: list[str] = [
-            "pi",
-            "--mode",
-            "json",
-            "--model",
-            self.model,
-        ]
+        args: list[str] = ["pi", "--mode", "json"]
 
-        provider = os.environ.get("PI_PROVIDER", "zai")
+        configured_model = None
+        provider: str | None = None
+        if self._model_override is not None:
+            self.model = self._model_override
+            args.extend(["--model", self.model])
+            provider = os.environ.get("PI_PROVIDER", "zai")
+        else:
+            configured_model = _configured_pi_model(cwd)
+            self.model = configured_model or DEFAULT_PI_MODEL
+            if configured_model is None:
+                args.extend(["--model", self.model])
+            provider = os.environ.get("PI_PROVIDER")
+            if provider is None and configured_model is None:
+                provider = "zai"
+
         api_key = os.environ.get("PI_API_KEY")
         thinking = os.environ.get("PI_THINKING")
-        args.extend(["--provider", provider])
+        if provider:
+            args.extend(["--provider", provider])
         if api_key:
             args.extend(["--api-key", api_key])
         if thinking:
