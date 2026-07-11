@@ -56,6 +56,14 @@ class MissingSkillError(Exception):
         super().__init__(f"Skill '{skill_name}' is not available")
 
 
+class _ToolSupervisorFailure(Exception):
+    """Internal marker that keeps supervisor failures out of backend retries."""
+
+    def __init__(self, original: Exception) -> None:
+        self.original = original
+        super().__init__(str(original))
+
+
 @dataclass
 class AgentState:
     """Consolidated state for agent module.
@@ -461,7 +469,10 @@ async def run_agent(
                                     inv.observe(event)
 
                                 if tool_supervisor is not None:
-                                    decision = tool_supervisor(event.name, event.input, phase=phase)
+                                    try:
+                                        decision = tool_supervisor(event.name, event.input, phase=phase)
+                                    except Exception as exc:  # noqa: BLE001 - policy failures must propagate
+                                        raise _ToolSupervisorFailure(exc) from exc
                                     if decision.veto:
                                         budget_reason = f"tool_vetoed:{event.name}"
                                         break
@@ -564,6 +575,8 @@ async def run_agent(
 
                 break  # success — exit the retry loop
 
+            except _ToolSupervisorFailure as exc:
+                raise exc.original from None
             except Exception as exc:
                 if attempt < max_attempts and getattr(exc, "retryable", False):
                     delay = base_delay * (2 ** attempt) + random.uniform(0, 1)

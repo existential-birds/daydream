@@ -102,9 +102,12 @@ class DeferredWriteBackend:
 
     model = "mock-model"
     fanout_concurrency = 4
+    retry_attempts = 1
+    retry_base_delay_s = 0.0
 
     def __init__(self, target: Path) -> None:
         self.target = target
+        self.execute_calls = 0
 
     async def execute(
         self,
@@ -116,6 +119,7 @@ class DeferredWriteBackend:
         max_turns: Any = None,
         read_only: bool = False,
     ):
+        self.execute_calls += 1
         yield ToolStartEvent(
             id="write-1",
             name="Write",
@@ -371,15 +375,26 @@ async def _run_tool_case(
     monkeypatch: pytest.MonkeyPatch,
     *,
     register_supervisor: bool,
+    supervisor_raises: bool = False,
+    backend_capture: list[DeferredWriteBackend] | None = None,
 ) -> tuple[Path, Path, int]:
     """Run the extension-defined custom flow against the deferred-write backend."""
     supervisor_registration = ""
     if register_supervisor:
-        supervisor_registration = (
-            "    def _supervise(name, tool_input, *, phase):\n"
-            "        return ToolDecision(veto=name == 'Write', reason='protected path')\n"
-            "    r.register_tool_supervisor(_supervise)\n"
-        )
+        if supervisor_raises:
+            supervisor_registration = (
+                "    class RetryableSupervisorError(RuntimeError):\n"
+                "        retryable = True\n"
+                "    def _supervise(name, tool_input, *, phase):\n"
+                "        raise RetryableSupervisorError('supervisor failed')\n"
+                "    r.register_tool_supervisor(_supervise)\n"
+            )
+        else:
+            supervisor_registration = (
+                "    def _supervise(name, tool_input, *, phase):\n"
+                "        return ToolDecision(veto=name == 'Write', reason='protected path')\n"
+                "    r.register_tool_supervisor(_supervise)\n"
+            )
 
     ext_dir.write_module(
         "from daydream.extensions import FlowStep, ToolDecision\n"
@@ -398,6 +413,8 @@ async def _run_tool_case(
     written = target / "deferred-write.txt"
     trajectory = target / ".daydream" / "tool-supervisor-trajectory.json"
     backend = DeferredWriteBackend(written)
+    if backend_capture is not None:
+        backend_capture.append(backend)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
@@ -441,6 +458,27 @@ async def test_no_tool_supervisor_allows_write(
     assert rc == 0
     assert written.read_text() == "backend resumed"
     assert "tool_vetoed:Write" not in traj.read_text()
+
+
+async def test_retryable_tool_supervisor_failure_propagates_without_retry(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retryable supervisor error propagates without entering backend retry."""
+    backends: list[DeferredWriteBackend] = []
+
+    with pytest.raises(RuntimeError, match="supervisor failed") as exc_info:
+        await _run_tool_case(
+            ext_dir,
+            multi_stack_target,
+            monkeypatch,
+            register_supervisor=True,
+            supervisor_raises=True,
+            backend_capture=backends,
+        )
+
+    assert getattr(exc_info.value, "retryable", False) is True
+    assert len(backends) == 1
+    assert backends[0].execute_calls == 1
 
 
 async def test_custom_flow_dispatches_and_dumps_artifacts(
