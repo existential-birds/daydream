@@ -222,7 +222,10 @@ name inventories, module shape, bump policy — is `docs/extensions.md`.
 
 ## Constraints
 
-- **SDK**: `claude-agent-sdk==0.2.108`. Agent capabilities go through the `Backend` /
+- **SDK**: `claude-agent-sdk==0.2.116`. Must stay ≥ 0.2.111: earlier versions tear
+  down the CLI subprocess unshielded on the cancellation path, so a budget/fan-out
+  cancellation mid-stream corrupts anyio's cancel-scope stack ("Attempted to exit a
+  cancel scope that isn't the current tasks's current cancel scope"). Agent capabilities go through the `Backend` /
   `AgentEvent` abstraction; Claude is one of three backends.
 - **ATIF**: Vendored from Harbor v0.17.1-9 under `daydream/atif/` (Apache-2.0). Pinned to
   ATIF v1.7 emission. `pydantic>=2.11.7` required.
@@ -245,7 +248,7 @@ name inventories, module shape, bump policy — is `docs/extensions.md`.
 
 | Package | Version | Role |
 |---------|---------|------|
-| `claude-agent-sdk` | 0.2.108 | Claude backend (in-process SDK) |
+| `claude-agent-sdk` | 0.2.116 | Claude backend (in-process SDK) |
 | `anyio` | >=4.0 | Async runtime, parallel task groups |
 | `rich` | >=13.0 | Terminal UI |
 | `pyfiglet` | >=1.0 | ASCII art banners |
