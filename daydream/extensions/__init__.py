@@ -13,6 +13,8 @@ from daydream.extensions.api import (
     LoopGroup,
     StackRule,
     Stop,
+    ToolDecision,
+    ToolSupervisor,
     UnresolvedExtensionError,
 )
 from daydream.extensions.loader import build_registry, get_registry, set_registry
@@ -28,6 +30,8 @@ __all__ = [
     "Registry",
     "StackRule",
     "Stop",
+    "ToolDecision",
+    "ToolSupervisor",
     "UnresolvedExtensionError",
     "build_registry",
     "get_registry",

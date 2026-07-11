@@ -1,7 +1,7 @@
 """Per-run extension registry.
 
-``Registry`` holds three namespaces — phases + flows, skill slots, and named
-prompts — plus fork stack rules. ``register_builtins()`` seeds it with
+``Registry`` holds phases + flows, skill slots, named prompts, a tool
+supervisor, and fork stack rules. ``register_builtins()`` seeds it with
 everything daydream does today; an optional ``daydream_ext`` package mutates
 it through the same API.
 
@@ -18,6 +18,7 @@ from daydream.extensions.api import (
     FlowStep,
     LoopGroup,
     StackRule,
+    ToolSupervisor,
     UnresolvedExtensionError,
 )
 
@@ -27,7 +28,7 @@ _VALIDATE_HINT = "run 'daydream ext validate' to check the extension registry"
 
 
 class Registry:
-    """Mutable per-run store for phases, flows, skill slots, prompts, and stack rules."""
+    """Mutable per-run store for phases, flows, skills, prompts, supervision, and stack rules."""
 
     def __init__(self) -> None:
         self._phases: dict[str, FlowStep] = {}
@@ -35,6 +36,7 @@ class Registry:
         self._skills: dict[str, str] = {}
         self._prompts: dict[str, Callable[..., str]] = {}
         self._stack_rules: dict[str, StackRule] = {}
+        self._tool_supervisor: ToolSupervisor | None = None
 
     # -- phases -----------------------------------------------------------
 
@@ -156,6 +158,20 @@ class Registry:
     def prompt_names(self) -> tuple[str, ...]:
         """Return every registered prompt name in registration order."""
         return tuple(self._prompts)
+
+    # -- tool supervision -------------------------------------------------
+
+    def register_tool_supervisor(self, fn: ToolSupervisor) -> None:
+        """Register the single per-run tool supervisor."""
+        if not callable(fn):
+            raise ExtensionError("tool supervisor must be callable")
+        if self._tool_supervisor is not None:
+            raise ExtensionError("tool supervisor is already registered")
+        self._tool_supervisor = fn
+
+    def tool_supervisor_if_registered(self) -> ToolSupervisor | None:
+        """Return the registered tool supervisor, or None when absent."""
+        return self._tool_supervisor
 
     # -- stack rules ------------------------------------------------------
 

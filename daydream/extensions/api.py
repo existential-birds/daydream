@@ -13,10 +13,11 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
+    from daydream.trajectory import DaydreamPhase
 
 EXTENSION_API_VERSION: int = 1
 
@@ -31,6 +32,31 @@ class ExtensionVersionError(ExtensionError):
 
 class UnresolvedExtensionError(ExtensionError):
     """A registry lookup or flow entry names a piece that is not registered."""
+
+
+@dataclass(frozen=True)
+class ToolDecision:
+    """Decision returned by a tool supervisor."""
+
+    veto: bool
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.veto and not self.reason.strip():
+            raise ValueError("veto decisions require a non-blank reason")
+
+
+class ToolSupervisor(Protocol):
+    """Synchronous callable that can veto a tool invocation."""
+
+    def __call__(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        *,
+        phase: DaydreamPhase,
+    ) -> ToolDecision:
+        ...
 
 
 @dataclass(frozen=True)
