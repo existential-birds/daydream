@@ -162,7 +162,7 @@ backend = "codex"
 
 Phase names are the flow-step config keys (`exploration`, `intent`, `wonder`,
 `per_stack_review`, `arbiter`, `merge`, `review`, `parse`, `fix`, `test`, `verify`,
-`pr_feedback`, …); any name is accepted, including phases a fork defines through the
+`pr_feedback`, `supervise`, …); any name is accepted, including phases a fork defines through the
 [extension seam](docs/extensions.md), which lists the per-flow key tables.
 Resolution precedence, highest first:
 

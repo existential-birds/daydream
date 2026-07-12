@@ -362,6 +362,16 @@ def register(r):
 The inserted step runs before `findings-out`, `post-review`, and the fix
 consumers, so their reads observe the rewritten canonical JSON.
 
+> **Note — preserve `payload` when inserting after `supervise`.**  The
+> recipe above anchors at `load-items`, where `items_file` contains only
+> `{"items": [...]}`.  If you move the anchor to after `supervise`, the
+> file will already contain a top-level `held` key (items withheld by the
+> supervisor).  Rewriting the file as a fresh `{"items": filtered}` dict at
+> that point silently drops the held list.  Always round-trip through the
+> full payload dict as shown — `payload = json.loads(...); payload["items"]
+> = ...; write_text(json.dumps(payload))` — so any keys the runtime wrote
+> are preserved.
+
 ### Disable a phase
 
 ```python

@@ -1156,7 +1156,8 @@ async def _step_supervise(ctx: FlowContext) -> None:
     items_file: Path = ctx.data["items_file"]
     items = json.loads(items_file.read_text())["items"]
     if mode == "rules":
-        deny_globs = file_config.supervisor_deny_globs if file_config is not None else []
+        assert file_config is not None, "rules mode requires file_config (guaranteed by _supervisor_mode)"
+        deny_globs = file_config.supervisor_deny_globs
         verdicts = RuleBasedSupervisor(deny_globs=deny_globs).review_findings(items)
     else:
         async with phase_scope(DaydreamPhase.DEEP, stage="supervise"):
@@ -1178,7 +1179,7 @@ async def _step_supervise(ctx: FlowContext) -> None:
         report = report.rstrip() + "\n\n" + held_section + "\n"
     deep_report = merged_report_path(ctx.data["dd"])
     deep_report.write_text(report)
-    Path(ctx.data["merged_report"]).write_text(report)
+    ctx.data["merged_report"].write_text(report)
 
     recorder = get_current_recorder()
     if recorder is not None:

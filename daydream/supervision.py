@@ -68,8 +68,8 @@ def apply_findings_verdicts(
 def _matched_glob(path: str, deny_globs: tuple[str, ...]) -> str | None:
     normalized = path.replace("\\", "/").lstrip("/")
     parts = normalized.split("/")
-    candidates = ("/".join(parts[index:]) for index in range(len(parts)))
     for pattern in deny_globs:
+        candidates = ("/".join(parts[index:]) for index in range(len(parts)))
         if any(fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates):
             return pattern
     return None
