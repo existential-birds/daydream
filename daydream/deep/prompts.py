@@ -396,6 +396,43 @@ def build_arbiter_prompt(
     return "\n\n".join(parts)
 
 
+def build_supervise_prompt(
+    *,
+    supervise_input_path: Path,
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    cwd: Path,
+    exploration_dir: Path | None = None,
+) -> str:
+    """Assemble the batched canonical findings supervisor prompt."""
+    parts: list[str] = []
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
+    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
+    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts.append(
+        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
+        "do NOT run `git diff` without a base ref -- on a clean branch that "
+        "returns empty and hides committed changes."
+    )
+    parts.append(
+        "Supervisor adjudication: review the canonical findings listed in "
+        f"{supervise_input_path}. This is an adjudication pass, not a fresh "
+        "review: do not invent findings or change their file, line, or id."
+    )
+    parts.append(
+        "Return one JSON object matching the structured-output schema with one "
+        "verdict per finding when possible. Each verdict must echo the canonical "
+        "id and choose exactly one action: allow, drop, edit, or hold. Explain "
+        "the decision in reason. For edit, revise only severity, confidence, "
+        "description, rationale, or evidence; never file, line, or id. Missing "
+        "verdicts are treated as allow by the host."
+    )
+    return "\n\n".join(parts)
+
+
 def build_suppression_prompt(
     *,
     suppression_input_path: Path,

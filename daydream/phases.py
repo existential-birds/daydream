@@ -2887,6 +2887,97 @@ ARBITER_SCHEMA: dict[str, Any] = {
 }
 
 
+SUPERVISE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "action": {"type": "string", "enum": ["allow", "drop", "edit", "hold"]},
+                    "reason": {"type": "string"},
+                    "severity": {
+                        "anyOf": [
+                            {"type": "string", "enum": ["high", "medium", "low"]},
+                            {"type": "null"},
+                        ]
+                    },
+                    "confidence": {
+                        "anyOf": [
+                            {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                            {"type": "null"},
+                        ]
+                    },
+                    "description": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "rationale": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "evidence": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                },
+                "required": [
+                    "id", "action", "reason", "severity", "confidence", "description",
+                    "rationale", "evidence",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["verdicts"],
+    "additionalProperties": False,
+}
+
+
+async def phase_supervise_review(
+    backend: Backend,
+    work: WorkContext,
+    *,
+    items: list[dict[str, Any]],
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    exploration_dir: Path | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Adjudicate canonical merged findings in one batched LLM call."""
+    from daydream.deep.artifacts import deep_dir
+
+    print_phase_hero(console, "SUPERVISE", phase_subtitle("SUPERVISE"))
+    print_dim(console, f"Model: {backend.model}")
+    print_info(console, f"Supervising {len(items)} merged finding(s)")
+
+    dd = deep_dir(work.repo)
+    input_path = dd / "supervise-input.json"
+    input_path.write_text(json.dumps(items, indent=2))
+    prompt = get_registry().prompt("supervise")(
+        supervise_input_path=input_path,
+        diff_path=diff_path,
+        intent_path=intent_path,
+        alternatives_path=alternatives_path,
+        cwd=work.repo,
+        exploration_dir=exploration_dir,
+    )
+    result, _, _ = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=SUPERVISE_SCHEMA,
+        phase=DaydreamPhase.DEEP,
+    )
+    if not isinstance(result, dict) or not isinstance(result.get("verdicts"), list):
+        raise ValueError(f"Supervisor returned no verdicts list (got {type(result).__name__})")
+
+    item_ids = {item.get("id") for item in items if isinstance(item.get("id"), int)}
+    verdicts: dict[int, dict[str, Any]] = {}
+    for verdict in result["verdicts"]:
+        item_id = verdict.get("id")
+        if isinstance(item_id, int) and item_id in item_ids:
+            cleaned = dict(verdict)
+            for field in ("severity", "confidence", "description", "rationale", "evidence"):
+                if cleaned.get(field) is None:
+                    cleaned.pop(field, None)
+            verdicts[item_id] = cleaned
+    return verdicts
+
+
 async def phase_arbiter_review(
     backend: Backend,
     work: WorkContext,

@@ -7,7 +7,7 @@ from daydream.config import (
 )
 
 PHASE_NAMES = {
-    "review", "per_stack_review", "arbiter", "suppression", "parse", "fix", "test", "verify",
+    "review", "per_stack_review", "arbiter", "suppression", "supervise", "parse", "fix", "test", "verify",
     "exploration", "intent", "wonder", "merge", "pr_feedback",
 }
 

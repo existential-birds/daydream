@@ -479,6 +479,10 @@ async def run_agent(
                                     except Exception as exc:  # noqa: BLE001 - policy failures must propagate
                                         raise _ToolSupervisorFailure(exc) from exc
                                     if decision.veto:
+                                        if recorder is not None:
+                                            recorder.emit_tool_veto(
+                                                event.name, decision.reason, phase=phase
+                                            )
                                         budget_reason = f"tool_vetoed:{event.name}"
                                         break
 

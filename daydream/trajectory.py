@@ -1029,6 +1029,34 @@ class TrajectoryRecorder:
             )
         )
 
+    def emit_supervisor_verdict(self, finding_id: int, action: str, reason: str) -> None:
+        """Record a findings supervisor verdict in the deep phase."""
+        self._phase_events.append(
+            PhaseEvent(
+                phase=DaydreamPhase.DEEP,
+                event="supervisor_verdict",
+                timestamp=now_iso(),
+                metadata={
+                    "finding_id": finding_id,
+                    "action": action,
+                    "reason": reason,
+                },
+            )
+        )
+
+    def emit_tool_veto(
+        self, tool_name: str, reason: str, *, phase: DaydreamPhase = DaydreamPhase.FIX
+    ) -> None:
+        """Record a tool-supervisor veto in the firing phase."""
+        self._phase_events.append(
+            PhaseEvent(
+                phase=phase,
+                event="tool_veto",
+                timestamp=now_iso(),
+                metadata={"tool_name": tool_name, "reason": reason},
+            )
+        )
+
     def _register_subtrajectory(self, inv: Invocation) -> None:
         """Register a per-Invocation timing summary (issue #203).
 

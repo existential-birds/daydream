@@ -142,7 +142,44 @@ being treated as a backend retry.
 registration or a non-callable value raises `ExtensionError`. If an extension
 does not register a supervisor, tool supervision is a no-op. Supervision runs
 when `run_agent` receives the backend's `ToolStartEvent`; it does not change
-backend-specific dispatch timing or add an earlier backend hook.
+backend-specific dispatch timing or add an earlier backend hook. The built-in
+rule supervisor uses this same turn-level enforcement point; it cannot intercept
+a tool before the backend emits its start event.
+
+### Built-in supervisor configuration
+
+The built-in findings supervisor is disabled by default. Set
+`supervisor = "rules"` to drop findings whose repository-relative `file` matches
+one of `supervisor_deny_globs`, or set `supervisor = "llm"` for one batched
+adjudication call. The LLM call uses the model configured at
+`[tool.daydream.phases.supervise]` (or `[phases.supervise]` in `.daydream.toml`)
+and defaults to the Sonnet tier for supported backends.
+
+```toml
+supervisor = "rules"
+supervisor_deny_globs = ["vendor/**", "generated/**"]
+tool_supervisor = "rules"
+tool_bash_deny = ["rm -rf", "git push --force"]
+
+[phases.supervise]
+model = "claude-sonnet-4-6"
+```
+
+The built-in tool supervisor applies the shared file globs to `Write` and
+`Edit`, and applies `tool_bash_deny` as regular expressions to `Bash` commands.
+Claude's always-on dangerous-command guard remains active; this configuration
+adds rules and does not replace it.
+
+Supervisor actions are `allow`, `drop`, `edit`, and `hold`. A held finding is
+removed from the actionable `items` list and stored under the top-level `held`
+key in `merged-items.json`; the rendered report keeps it under **Held Findings**.
+All downstream readers continue to consume `items`, so held findings do not
+reach findings artifacts, PR posts, or fix prompts.
+
+Only one tool supervisor may be registered per run. If an extension registers a
+tool supervisor while `tool_supervisor = "rules"` enables the built-in one, the
+run fails at registry construction with a conflict error. Choose the extension
+policy or the built-in policy.
 
 ## Inventories
 
@@ -174,13 +211,14 @@ an existing config key.
 | 7 | `cross-stack-merge` | `merge` |
 | 8 | `single-stack-merge` | `single-stack-merge` |
 | 9 | `load-items` | `load-items` |
-| 10 | `findings-out` | `findings-out` |
-| 11 | `post-review` | `post-review` |
-| 12 | `fix-gate` | `fix-gate` |
-| 13 | `verify` | `verify` |
-| 14 | `fix` | `fix` |
-| 15 | `test` | `test` |
-| 16 | `commit` | `fix` |
+| 10 | `supervise` | `supervise` |
+| 11 | `findings-out` | `findings-out` |
+| 12 | `post-review` | `post-review` |
+| 13 | `fix-gate` | `fix-gate` |
+| 14 | `verify` | `verify` |
+| 15 | `fix` | `fix` |
+| 16 | `test` | `test` |
+| 17 | `commit` | `fix` |
 
 #### `shallow` (`--shallow` single-skill loop)
 
@@ -239,7 +277,7 @@ reads its own `phase:<name>` slot).
 
 ### Prompts
 
-The 11 registered prompt names and the exact kwargs their builders receive
+The 12 registered prompt names and the exact kwargs their builders receive
 (an override gets the same kwargs). All kwargs are keyword-only except where
 noted.
 
@@ -253,6 +291,7 @@ noted.
 | `structural` | `skill_invocation`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits` |
 | `generic-fallback` | `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `is_docs_only`, `prior_commits`, `inline_diff` |
 | `arbiter` | `arbiter_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
+| `supervise` | `supervise_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `suppression` | `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path` |
 | `verify` | `items`, `cwd`, `output_path` |
@@ -270,7 +309,7 @@ every other key is internal and may change without a version bump:
 | `exploration_dir` | Exploration pre-scan output directory (or None) |
 | `intent_path` | Path to the intent-analysis output |
 | `alts_path` | Path to the alternatives-review output |
-| `items_file` | `Path` published after `load-items`; it contains canonical `{"items": [...]}` JSON. An extension may read this file and rewrite its `items` before downstream consumers run. |
+| `items_file` | `Path` published after `load-items`; it contains canonical `{"items": [...]}` JSON and may include top-level `held`. An extension may read this file and rewrite its `items` before downstream consumers run. |
 | `items` | Parsed finding items, populated by `fix-gate` from the (potentially rewritten) `items_file`. Not present before `fix-gate` runs; rewriting `items_file` before that step is sufficient to affect all consumers. |
 
 ## Recipes
@@ -322,6 +361,16 @@ def register(r):
 
 The inserted step runs before `findings-out`, `post-review`, and the fix
 consumers, so their reads observe the rewritten canonical JSON.
+
+> **Note — preserve `payload` when inserting after `supervise`.**  The
+> recipe above anchors at `load-items`, where `items_file` contains only
+> `{"items": [...]}`.  If you move the anchor to after `supervise`, the
+> file will already contain a top-level `held` key (items withheld by the
+> supervisor).  Rewriting the file as a fresh `{"items": filtered}` dict at
+> that point silently drops the held list.  Always round-trip through the
+> full payload dict as shown — `payload = json.loads(...); payload["items"]
+> = ...; write_text(json.dumps(payload))` — so any keys the runtime wrote
+> are preserved.
 
 ### Disable a phase
 

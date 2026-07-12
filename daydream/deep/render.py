@@ -62,3 +62,11 @@ def render_report(items: list[dict[str, Any]]) -> str:
         sections.append(f"## Cross-Stack Issues\n{body}")
 
     return "\n\n".join(sections) + "\n"
+
+
+def render_held_section(held: list[dict[str, Any]]) -> str:
+    """Render findings withheld from the actionable report."""
+    if not held:
+        return ""
+    body = "\n".join(_finding_line(item) for item in held)
+    return f"## Held Findings\n{body}"

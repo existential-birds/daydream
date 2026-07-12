@@ -140,6 +140,18 @@ model = "gpt-5.5"
 model = "claude-opus-4-8"
 ```
 
+Supervisor settings are config-file-only:
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `supervisor` | `"off"` | Findings supervisor mode: `"off"`, `"rules"`, or `"llm"`. |
+| `supervisor_deny_globs` | `[]` | Repository-relative globs shared by findings and tool rules. |
+| `tool_supervisor` | `"off"` | Built-in tool policy mode: `"off"` or `"rules"`. |
+| `tool_bash_deny` | `[]` | Regular expressions for Bash commands the built-in policy vetoes. |
+
+The LLM supervisor uses one batched call. Configure its model under
+`[tool.daydream.phases.supervise]` (or `[phases.supervise]` in `.daydream.toml`).
+
 ```toml
 # .daydream.toml  (top-level keys; no [tool.daydream] prefix)
 model = "claude-opus-4-8"
@@ -150,7 +162,7 @@ backend = "codex"
 
 Phase names are the flow-step config keys (`exploration`, `intent`, `wonder`,
 `per_stack_review`, `arbiter`, `merge`, `review`, `parse`, `fix`, `test`, `verify`,
-`pr_feedback`, …); any name is accepted, including phases a fork defines through the
+`pr_feedback`, `supervise`, …); any name is accepted, including phases a fork defines through the
 [extension seam](docs/extensions.md), which lists the per-flow key tables.
 Resolution precedence, highest first:
 

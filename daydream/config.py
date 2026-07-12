@@ -71,6 +71,8 @@ DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 # ``suppression`` (issue #232) is the precision-mode skeptical second opinion over
 # borderline uncontested findings; it runs on the cheap mid tier by design (never
 # per-finding Opus) -- one batched Sonnet call over all suppression targets.
+# ``supervise`` is the batched findings supervisor over canonical merged items;
+# it uses the same Sonnet tier by default.
 #
 # ``per_stack_review`` and ``arbiter`` split the deep per-stack fan-out off the
 # heavy ``review`` tier (issue #168): the N per-stack reviewers run on Sonnet
@@ -96,6 +98,7 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "review": "claude-opus-4-8",
         "arbiter": "claude-opus-4-8",
         "suppression": "claude-sonnet-4-6",
+        "supervise": "claude-sonnet-4-6",
         "wonder": "claude-opus-4-8",
         "merge": "claude-opus-4-8",
         "intent": "claude-sonnet-4-6",
@@ -111,6 +114,7 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "review": "gpt-5.5",
         "arbiter": "gpt-5.5",
         "suppression": "gpt-5.5",
+        "supervise": "gpt-5.5",
         "wonder": "gpt-5.5",
         "merge": "gpt-5.5",
         "intent": "gpt-5.5",

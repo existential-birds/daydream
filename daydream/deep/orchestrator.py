@@ -39,6 +39,7 @@ from daydream.deep.artifacts import (
     fix_failures_path,
     fix_leftover_untracked_path,
     merged_items_path,
+    merged_report_path,
     per_stack_failures_path,
     per_stack_records_path,
 )
@@ -50,6 +51,7 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
+from daydream.deep.render import render_held_section, render_report
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep, Stop
 from daydream.flows.engine import FlowContext, run_flow
@@ -64,15 +66,22 @@ from daydream.phases import (
     phase_fix_parallel,
     phase_parse_feedback,
     phase_per_stack_reviews,
+    phase_supervise_review,
     phase_suppression_review,
     phase_test_and_heal,
     phase_understand_intent,
     phase_verify_recommendations,
     severity_sorted,
 )
+from daydream.supervision import (
+    RuleBasedSupervisor,
+    apply_findings_verdicts,
+    revise_finding_fields,
+)
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
+    get_current_recorder,
     phase_scope,
 )
 from daydream.ui import (
@@ -208,6 +217,18 @@ def _precision_mode(config: RunConfig) -> bool:
     if file_config is not None and file_config.precision_mode:
         return True
     return False
+
+
+def _supervisor_mode(config: RunConfig) -> str:
+    """Resolve the file-config-only findings supervisor mode."""
+    file_config = config.file_config
+    mode = file_config.supervisor if file_config is not None else None
+    return mode if mode in {"off", "rules", "llm"} else "off"
+
+
+def _supervise_enabled(ctx: FlowContext) -> bool:
+    """Run supervision on fresh flows, not on a fix-only resume."""
+    return _supervisor_mode(ctx.config) in {"rules", "llm"} and ctx.config.start_at != "fix"
 
 
 def _resolve_group_max_wall_s(config: RunConfig) -> float:
@@ -569,15 +590,7 @@ def _apply_adjudication_verdicts(
         # compaction. The suppression call site keys its arbiter-exclusion set by
         # ``id(record)`` (#232); a revised record that got a fresh dict here would
         # escape that set and be wrongly re-judged by the suppression pass.
-        records[record_index].update(
-            {
-                "severity": verdict.get("severity", records[record_index].get("severity")),
-                "confidence": verdict.get("confidence", records[record_index].get("confidence")),
-                "description": verdict.get("description", records[record_index].get("description")),
-                "rationale": verdict.get("rationale", records[record_index].get("rationale")),
-                "evidence": verdict.get("evidence", records[record_index].get("evidence")),
-            }
-        )
+        revise_finding_fields(records[record_index], verdict)
 
     new_records: list[dict[str, Any]] = []
     new_sources: list[str] = []
@@ -1136,6 +1149,45 @@ async def _step_findings_out(ctx: FlowContext) -> Stop:
     return Stop(_emit_findings_from_items(ctx.work.repo, ctx.config, findings_items))
 
 
+async def _step_supervise(ctx: FlowContext) -> None:
+    """Apply the configured findings supervisor to canonical merged items."""
+    mode = _supervisor_mode(ctx.config)
+    file_config = ctx.config.file_config
+    items_file: Path = ctx.data["items_file"]
+    items = json.loads(items_file.read_text())["items"]
+    if mode == "rules":
+        assert file_config is not None, "rules mode requires file_config (guaranteed by _supervisor_mode)"
+        deny_globs = file_config.supervisor_deny_globs
+        verdicts = RuleBasedSupervisor(deny_globs=deny_globs).review_findings(items)
+    else:
+        async with phase_scope(DaydreamPhase.DEEP, stage="supervise"):
+            verdicts = await phase_supervise_review(
+                ctx.backend_for("supervise"),
+                ctx.work,
+                items=items,
+                diff_path=ctx.data["diff_path"],
+                intent_path=ctx.data["intent_path"],
+                alternatives_path=ctx.data["alts_path"],
+                exploration_dir=ctx.data["exploration_dir"],
+            )
+    kept, held, events = apply_findings_verdicts(items, verdicts)
+    items_file.write_text(json.dumps({"items": kept, "held": held}, indent=2))
+
+    report = render_report(kept)
+    held_section = render_held_section(held)
+    if held_section:
+        report = report.rstrip() + "\n\n" + held_section + "\n"
+    deep_report = merged_report_path(ctx.data["dd"])
+    deep_report.write_text(report)
+    ctx.data["merged_report"].write_text(report)
+
+    recorder = get_current_recorder()
+    if recorder is not None:
+        for finding_id, action, reason in events:
+            recorder.emit_supervisor_verdict(finding_id, action, reason)
+    return None
+
+
 async def _step_post_review(ctx: FlowContext) -> None:
     """Offer to post findings as inline PR review comments."""
     from daydream.pr_review import post_review_to_pr_from_report
@@ -1395,7 +1447,7 @@ def _findings_out_enabled(ctx: FlowContext) -> bool:
 #     exploration pre-scan -> TTT intent -> TTT alternative-review ->
 #     per-stack reviews -> per-stack parse + dedup -> arbiter ->
 #     cross-stack merge (or the tiny-diff single-stack bypass) ->
-#     findings-out stop / post-review -> fix gate -> verify -> fix ->
+#     supervise -> findings-out stop / post-review -> fix gate -> verify -> fix ->
 #     test -> commit.
 #
 # ``register_builtins`` registers :data:`STEPS` and the ``deep`` flow
@@ -1415,6 +1467,7 @@ STEPS: tuple[FlowStep, ...] = (
     ),
     FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_single_stack_merge_enabled),
     FlowStep(name="load-items", run=_step_load_items),
+    FlowStep(name="supervise", run=_step_supervise, config_phase="supervise", enabled=_supervise_enabled),
     FlowStep(name="findings-out", run=_step_findings_out, enabled=_findings_out_enabled),
     FlowStep(name="post-review", run=_step_post_review, enabled=_before_fix_resume),
     FlowStep(name="fix-gate", run=_step_fix_gate),
