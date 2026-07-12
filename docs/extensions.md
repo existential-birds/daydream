@@ -142,7 +142,44 @@ being treated as a backend retry.
 registration or a non-callable value raises `ExtensionError`. If an extension
 does not register a supervisor, tool supervision is a no-op. Supervision runs
 when `run_agent` receives the backend's `ToolStartEvent`; it does not change
-backend-specific dispatch timing or add an earlier backend hook.
+backend-specific dispatch timing or add an earlier backend hook. The built-in
+rule supervisor uses this same turn-level enforcement point; it cannot intercept
+a tool before the backend emits its start event.
+
+### Built-in supervisor configuration
+
+The built-in findings supervisor is disabled by default. Set
+`supervisor = "rules"` to drop findings whose repository-relative `file` matches
+one of `supervisor_deny_globs`, or set `supervisor = "llm"` for one batched
+adjudication call. The LLM call uses the model configured at
+`[tool.daydream.phases.supervise]` (or `[phases.supervise]` in `.daydream.toml`)
+and defaults to the Sonnet tier for supported backends.
+
+```toml
+supervisor = "rules"
+supervisor_deny_globs = ["vendor/**", "generated/**"]
+tool_supervisor = "rules"
+tool_bash_deny = ["rm -rf", "git push --force"]
+
+[phases.supervise]
+model = "claude-sonnet-4-6"
+```
+
+The built-in tool supervisor applies the shared file globs to `Write` and
+`Edit`, and applies `tool_bash_deny` as regular expressions to `Bash` commands.
+Claude's always-on dangerous-command guard remains active; this configuration
+adds rules and does not replace it.
+
+Supervisor actions are `allow`, `drop`, `edit`, and `hold`. A held finding is
+removed from the actionable `items` list and stored under the top-level `held`
+key in `merged-items.json`; the rendered report keeps it under **Held Findings**.
+All downstream readers continue to consume `items`, so held findings do not
+reach findings artifacts, PR posts, or fix prompts.
+
+Only one tool supervisor may be registered per run. If an extension registers a
+tool supervisor while `tool_supervisor = "rules"` enables the built-in one, the
+run fails at registry construction with a conflict error. Choose the extension
+policy or the built-in policy.
 
 ## Inventories
 
@@ -272,7 +309,7 @@ every other key is internal and may change without a version bump:
 | `exploration_dir` | Exploration pre-scan output directory (or None) |
 | `intent_path` | Path to the intent-analysis output |
 | `alts_path` | Path to the alternatives-review output |
-| `items_file` | `Path` published after `load-items`; it contains canonical `{"items": [...]}` JSON. An extension may read this file and rewrite its `items` before downstream consumers run. |
+| `items_file` | `Path` published after `load-items`; it contains canonical `{"items": [...]}` JSON and may include top-level `held`. An extension may read this file and rewrite its `items` before downstream consumers run. |
 | `items` | Parsed finding items, populated by `fix-gate` from the (potentially rewritten) `items_file`. Not present before `fix-gate` runs; rewriting `items_file` before that step is sufficient to affect all consumers. |
 
 ## Recipes

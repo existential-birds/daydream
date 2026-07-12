@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lets a step after `load-items` rewrite canonical findings before downstream
   consumers read them.
 
+- **deep:** Add config-driven findings supervision with rule and batched LLM
+  modes, including drop, edit, hold, and trajectory verdict events ([#256](https://github.com/existential-birds/daydream/issues/256))
+
+- **agent:** Add the built-in rule tool supervisor for denied file paths and
+  Bash commands, with turn-level veto events and conflict detection against
+  extension registrations ([#257](https://github.com/existential-birds/daydream/issues/257))
+
 ## [0.23.1] - 2026-07-11
 
 ### Fixed

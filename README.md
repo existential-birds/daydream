@@ -140,6 +140,18 @@ model = "gpt-5.5"
 model = "claude-opus-4-8"
 ```
 
+Supervisor settings are config-file-only:
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `supervisor` | `"off"` | Findings supervisor mode: `"off"`, `"rules"`, or `"llm"`. |
+| `supervisor_deny_globs` | `[]` | Repository-relative globs shared by findings and tool rules. |
+| `tool_supervisor` | `"off"` | Built-in tool policy mode: `"off"` or `"rules"`. |
+| `tool_bash_deny` | `[]` | Regular expressions for Bash commands the built-in policy vetoes. |
+
+The LLM supervisor uses one batched call. Configure its model under
+`[tool.daydream.phases.supervise]` (or `[phases.supervise]` in `.daydream.toml`).
+
 ```toml
 # .daydream.toml  (top-level keys; no [tool.daydream] prefix)
 model = "claude-opus-4-8"
