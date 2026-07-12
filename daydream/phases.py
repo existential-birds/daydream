@@ -2851,7 +2851,7 @@ async def phase_per_stack_reviews(
         lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))
         print_warning(
             console,
-            f"Per-stack reviews failed for {len(failures)} stack(s).\n"
+            f"Per-stack reviews failed for {len(failures)} stack(s); "
             "failures will be passed to the merge step.\n" + lines,
         )
 
