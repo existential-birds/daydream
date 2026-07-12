@@ -2851,7 +2851,7 @@ async def phase_per_stack_reviews(
         lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))
         print_warning(
             console,
-            f"Per-stack reviews failed for {len(failures)} stack(s); "
+            f"Per-stack reviews failed for {len(failures)} stack(s).\n"
             "failures will be passed to the merge step.\n" + lines,
         )
 
@@ -2898,13 +2898,26 @@ SUPERVISE_SCHEMA: dict[str, Any] = {
                     "id": {"type": "integer"},
                     "action": {"type": "string", "enum": ["allow", "drop", "edit", "hold"]},
                     "reason": {"type": "string"},
-                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
-                    "description": {"type": "string"},
-                    "rationale": {"type": "string"},
-                    "evidence": {"type": "string"},
+                    "severity": {
+                        "anyOf": [
+                            {"type": "string", "enum": ["high", "medium", "low"]},
+                            {"type": "null"},
+                        ]
+                    },
+                    "confidence": {
+                        "anyOf": [
+                            {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                            {"type": "null"},
+                        ]
+                    },
+                    "description": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "rationale": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "evidence": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 },
-                "required": ["id", "action", "reason"],
+                "required": [
+                    "id", "action", "reason", "severity", "confidence", "description",
+                    "rationale", "evidence",
+                ],
                 "additionalProperties": False,
             },
         },
@@ -2957,7 +2970,11 @@ async def phase_supervise_review(
     for verdict in result["verdicts"]:
         item_id = verdict.get("id")
         if isinstance(item_id, int) and item_id in item_ids:
-            verdicts[item_id] = verdict
+            cleaned = dict(verdict)
+            for field in ("severity", "confidence", "description", "rationale", "evidence"):
+                if cleaned.get(field) is None:
+                    cleaned.pop(field, None)
+            verdicts[item_id] = cleaned
     return verdicts
 
 

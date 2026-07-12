@@ -38,12 +38,18 @@ def apply_findings_verdicts(
 
     for item in items:
         item_id = item.get("id")
-        verdict = verdicts.get(item_id) if isinstance(item_id, int) else None
+        if not isinstance(item_id, int):
+            kept.append(item)
+            continue
+        verdict = verdicts.get(item_id)
         if verdict is None or verdict.get("id") != item_id:
             kept.append(item)
             continue
 
         action = verdict.get("action")
+        if not isinstance(action, str):
+            kept.append(item)
+            continue
         if action == "drop":
             events.append((item_id, action, str(verdict.get("reason", ""))))
         elif action == "edit":

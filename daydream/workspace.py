@@ -291,7 +291,7 @@ def _resolve_ref(source: Path, branch: str | None) -> str:
         print_warning(
             console,
             f"{branch} is checked out in cwd and is {ahead} commits behind "
-            f"origin/{branch} — reviewing origin/{branch}.",
+            f"origin/{branch}.\nreviewing origin/{branch}.",
         )
 
     return f"origin/{branch}"

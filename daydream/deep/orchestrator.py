@@ -51,6 +51,7 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
+from daydream.deep.render import render_held_section, render_report
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep, Stop
 from daydream.flows.engine import FlowContext, run_flow
@@ -65,8 +66,8 @@ from daydream.phases import (
     phase_fix_parallel,
     phase_parse_feedback,
     phase_per_stack_reviews,
-    phase_suppression_review,
     phase_supervise_review,
+    phase_suppression_review,
     phase_test_and_heal,
     phase_understand_intent,
     phase_verify_recommendations,
@@ -83,7 +84,6 @@ from daydream.trajectory import (
     get_current_recorder,
     phase_scope,
 )
-from daydream.deep.render import render_held_section, render_report
 from daydream.ui import (
     format_verdict_join,
     phase_subtitle,
