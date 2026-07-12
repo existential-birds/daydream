@@ -78,6 +78,8 @@ class _StubBackend:
         self.merge_items: list[dict[str, Any]] | None = None
         # Optional LLM supervisor verdicts keyed by canonical item id.
         self.supervise_verdicts: dict[int, dict[str, Any]] | None = None
+        # Optional deferred Write tool pairs for the built-in tool-supervisor tests.
+        self.deferred_write_pairs: list[str] | None = None
         # When set, the fix branch appends the prompt's marker token to this file
         # via read-modify-write with an anyio.sleep(0) interleave point -- a
         # per-ITEM fan-out would lose/reorder appends; correct per-file
@@ -497,6 +499,18 @@ class _StubBackend:
                 raise MaxTurnsError(f"stub: max turns exhausted mid-fix for {fixed_name}")
             if self.fix_fail_file is not None and fixed_name == self.fix_fail_file:
                 raise RuntimeError(f"stub fix failure for {fixed_name}")
+            if self.deferred_write_pairs is not None:
+                for index, path in enumerate(self.deferred_write_pairs, start=1):
+                    edit_target = Path(path) if Path(path).is_absolute() else cwd / path
+                    yield ToolStartEvent(
+                        id=f"deferred-write-{index}",
+                        name="Write",
+                        input={"file_path": str(edit_target), "content": "backend resumed"},
+                    )
+                    edit_target.write_text("backend resumed")
+                yield TextEvent(text="Applied the deferred writes.")
+                yield ResultEvent(structured_output=None, continuation=None)
+                return
             (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
             (cwd / f".fixed-{fixed_name.replace('.', '_')}").write_text("applied\n")
             if self.fix_edit_line is not None:
@@ -1336,6 +1350,147 @@ def _fix_prompts(stub: _StubBackend) -> list[str]:
     # Same-file findings are batched into one "Fix these N issues" turn; a lone
     # finding still uses the single-finding "Fix this issue" prompt. Match both.
     return [c["prompt"] for c in stub.calls if c["prompt"].startswith(("Fix this issue", "Fix these"))]
+
+
+async def test_fix_tool_veto_blocks_denied_write(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Built-in rules veto a deferred denied Write and record the abort/event."""
+    from daydream.config_file import load_file_config
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high", desc="protected write")]
+    stub.deferred_write_pairs = ["api.py"]
+    (multi_stack_target / ".daydream.toml").write_text(
+        'tool_supervisor = "rules"\nsupervisor_deny_globs = ["api.py"]\n'
+    )
+    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    source_before = (multi_stack_target / "api.py").read_bytes()
+    traj = tmp_path / "trajectory.json"
+
+    rc = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+            file_config=load_file_config(multi_stack_target),
+            trajectory_path=traj,
+        )
+    )
+
+    assert isinstance(rc, int)
+    assert (multi_stack_target / "api.py").read_bytes() == source_before
+    stop_reasons = _scan_trajectory_extra(multi_stack_target / ".daydream", traj, "stop_reason")
+    assert "tool_vetoed:Write" in stop_reasons
+    events = _scan_phase_events(multi_stack_target / ".daydream", traj, "tool_veto")
+    assert any(event.get("metadata", {}).get("tool_name") == "Write" for event in events)
+
+
+async def test_fix_tool_veto_allows_unmatched_write(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Built-in rules allow a Write whose path does not match the deny glob."""
+    from daydream.config_file import load_file_config
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "App.tsx", "high", desc="allowed write")]
+    stub.deferred_write_pairs = ["App.tsx"]
+    (multi_stack_target / ".daydream.toml").write_text(
+        'tool_supervisor = "rules"\nsupervisor_deny_globs = ["api.py"]\n'
+    )
+    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    rc = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+            file_config=load_file_config(multi_stack_target),
+        )
+    )
+
+    assert isinstance(rc, int)
+    assert (multi_stack_target / "App.tsx").read_text() == "backend resumed"
+    assert not _scan_trajectory_extra(multi_stack_target / ".daydream", Path("/missing"), "stop_reason")
+
+
+async def test_fix_tool_veto_stops_subsequent_calls(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vetoed first deferred Write prevents the generator's later Write."""
+    from daydream.config_file import load_file_config
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high", desc="first"), _merge_item(2, "App.tsx", "low", desc="second")]
+    stub.deferred_write_pairs = ["api.py", "App.tsx"]
+    (multi_stack_target / ".daydream.toml").write_text(
+        'tool_supervisor = "rules"\nsupervisor_deny_globs = ["api.py"]\n'
+    )
+    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    api_before = (multi_stack_target / "api.py").read_bytes()
+    app_before = (multi_stack_target / "App.tsx").read_bytes()
+
+    rc = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+            file_config=load_file_config(multi_stack_target),
+        )
+    )
+
+    assert isinstance(rc, int)
+    assert (multi_stack_target / "api.py").read_bytes() == api_before
+    assert (multi_stack_target / "App.tsx").read_bytes() == app_before
+
+
+async def test_fix_tool_supervisor_off_writes(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With tool supervision off, the deferred Write resumes and writes."""
+    from daydream.config_file import load_file_config
+    from daydream.runner import RunConfig, run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high", desc="unprotected write")]
+    stub.deferred_write_pairs = ["api.py"]
+    (multi_stack_target / ".daydream.toml").write_text('tool_supervisor = "off"\n')
+    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+
+    rc = await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+            file_config=load_file_config(multi_stack_target),
+        )
+    )
+
+    assert isinstance(rc, int)
+    assert (multi_stack_target / "api.py").read_text() == "backend resumed"
 
 
 async def test_confirmed_intent_reaches_fix_prompt(

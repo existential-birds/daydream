@@ -536,7 +536,25 @@ async def run(config: RunConfig | None = None) -> int:
     # Build the per-run registry (builtins + optional daydream_ext) and set it
     # on the ContextVar so every downstream phase resolves through it.
     try:
-        set_registry(build_registry())
+        registry = build_registry()
+        file_config = _file_config_or_empty(config)
+        if file_config.tool_supervisor == "rules":
+            from daydream.supervision import RuleBasedToolSupervisor
+
+            try:
+                registry.register_tool_supervisor(
+                    RuleBasedToolSupervisor(
+                        deny_globs=file_config.supervisor_deny_globs,
+                        bash_deny=file_config.tool_bash_deny,
+                    )
+                )
+            except ExtensionError as exc:
+                raise ExtensionError(
+                    "tool supervisor conflict: config-enabled built-in "
+                    "RuleBasedToolSupervisor cannot coexist with an "
+                    f"extension-registered tool supervisor ({exc})"
+                ) from exc
+        set_registry(registry)
     except ExtensionError as exc:
         print_error(console, "Extension Error", str(exc))
         return 1

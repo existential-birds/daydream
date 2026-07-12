@@ -652,6 +652,43 @@ async def _run_tool_case(
     return written, trajectory, rc
 
 
+async def test_builtin_and_fork_tool_supervisor_conflict_fails_loud(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Config-enabled built-in and fork supervisors cannot silently compose."""
+    from daydream.config_file import load_file_config
+
+    ext_dir.write_module(
+        "from daydream.extensions import ToolDecision\n"
+        "DAYDREAM_EXT_API = 2\n"
+        "def _fork_supervisor(name, tool_input, *, phase):\n"
+        "    return ToolDecision(veto=False)\n"
+        "def register(r):\n"
+        "    r.register_tool_supervisor(_fork_supervisor)\n"
+    )
+    (multi_stack_target / ".daydream.toml").write_text('tool_supervisor = "rules"\n')
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+    rc = await runner.run(
+        runner.RunConfig(
+            target=str(multi_stack_target),
+            non_interactive=True,
+            cleanup=False,
+            file_config=load_file_config(multi_stack_target),
+        )
+    )
+
+    assert rc == 1
+    output = capsys.readouterr().out.lower()
+    assert "tool supervisor conflict" in output
+    assert "config-enabled built-in" in output
+    assert "extension-registered" in output
+
+
 async def test_fork_tool_supervisor_vetoes_write(
     ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
