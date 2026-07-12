@@ -197,6 +197,34 @@ async def test_codex_default_uses_full_access_sandbox():
 
 
 @pytest.mark.asyncio
+async def test_codex_reasoning_effort_appends_config_override():
+    """reasoning_effort forwards as -c model_reasoning_effort=<value>."""
+    backend = CodexBackend(model="fixture-model", reasoning_effort="high")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), "p"):
+            pass
+
+        flat_args = list(mock_exec.call_args.args)
+        assert flat_args[flat_args.index("-c") + 1] == 'model_reasoning_effort="high"'
+
+
+@pytest.mark.asyncio
+async def test_codex_no_reasoning_effort_omits_config_override():
+    """reasoning_effort=None (default) never adds a -c flag."""
+    backend = CodexBackend(model="fixture-model")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        async for _ in backend.execute(Path("/tmp"), "p"):
+            pass
+
+        flat_args = list(mock_exec.call_args.args)
+        assert "-c" not in flat_args
+
+
+@pytest.mark.asyncio
 async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
     backend = CodexBackend(model="fixture-model")
     large_text = "x" * (70 * 1024)

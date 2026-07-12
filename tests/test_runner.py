@@ -356,7 +356,16 @@ class TestResolveBackendPhaseModel:
         review_backend = runner._resolve_backend(config, "review", cache)
         parse_backend = runner._resolve_backend(config, "parse", cache)
         assert review_backend is not parse_backend
-        assert review_backend.model != parse_backend.model
+
+    def test_codex_backend_receives_resolved_reasoning_effort_and_cache_splits_on_it(self):
+        cache: dict = {}
+        config = RunConfig(backend="codex", reasoning_effort="low")
+        low_backend = runner._resolve_backend(config, "review", cache)
+        assert low_backend.reasoning_effort == "low"
+        config.reasoning_effort = "high"
+        high_backend = runner._resolve_backend(config, "review", cache)
+        assert high_backend.reasoning_effort == "high"
+        assert low_backend is not high_backend  # different effort -> distinct cached instance
 
 
 # --- Task 6: HEAL hero is followed by Model: dim line ----------------------

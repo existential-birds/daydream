@@ -227,6 +227,17 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
              "This global --model takes precedence over any per-phase config-file override.",
     )
     parser.add_argument(
+        "--reasoning-effort",
+        default=None,
+        type=str,
+        dest="reasoning_effort",
+        metavar="EFFORT",
+        help="Global reasoning-effort override (e.g. low, medium, high). "
+             "Only applied by the Codex backend, forwarded as "
+             "-c model_reasoning_effort=<EFFORT>. Ignored for claude/pi. "
+             "Takes precedence over any per-phase config-file override.",
+    )
+    parser.add_argument(
         "--non-interactive",
         action="store_true",
         dest="non_interactive",
@@ -891,6 +902,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         target=args.target,
         skill=args.skill,
         model=args.model,
+        reasoning_effort=args.reasoning_effort,
         file_config=file_config,
         # Per-phase overrides are config-file-only; left None so config is the
         # sole low-precedence source.
@@ -950,6 +962,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         target=args.target,
         skill=None,
         model=args.model,
+        reasoning_effort=args.reasoning_effort,
         file_config=file_config,
         # Per-phase model/backend overrides are config-file-only (no CLI flags).
         exploration_model=None,
