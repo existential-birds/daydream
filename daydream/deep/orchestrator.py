@@ -1191,7 +1191,7 @@ async def _step_verify(ctx: FlowContext) -> None:
         verdicts_file, verdicts_payload = await phase_verify_recommendations(
             ctx.backend_for("verify"),
             ctx.work,
-            merged_items_path=merged_items_path(dd),
+            merged_items_path=ctx.data["items_file"],
             deep_dir=dd,
         )
     print_verification_summary(console, verdicts_file)

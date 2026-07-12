@@ -63,6 +63,11 @@ class _ToolSupervisorFailure(Exception):
         self.original = original
         super().__init__(str(original))
 
+    @property
+    def subtype(self) -> str:
+        """Expose the original error's type name for trajectory recording."""
+        return type(self.original).__name__
+
 
 @dataclass
 class AgentState:
@@ -575,8 +580,8 @@ async def run_agent(
 
                 break  # success — exit the retry loop
 
-            except _ToolSupervisorFailure as exc:
-                raise exc.original from None
+            except _ToolSupervisorFailure:
+                raise
             except Exception as exc:
                 if attempt < max_attempts and getattr(exc, "retryable", False):
                     delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
@@ -607,6 +612,9 @@ async def run_agent(
                     continue
                 raise
 
+    except _ToolSupervisorFailure as exc:
+        print_error(console, "Extension Failure", f"{type(exc.original).__name__}: {exc.original}")
+        raise exc.original from None
     except Exception as exc:
         print_error(console, "Backend Execution Error", f"{type(exc).__name__}: {exc}")
         raise

@@ -271,7 +271,7 @@ every other key is internal and may change without a version bump:
 | `intent_path` | Path to the intent-analysis output |
 | `alts_path` | Path to the alternatives-review output |
 | `items_file` | `Path` published after `load-items`; it contains canonical `{"items": [...]}` JSON. An extension may read this file and rewrite its `items` before downstream consumers run. |
-| `items` | Parsed, merged actionable finding items |
+| `items` | Parsed finding items, populated by `fix-gate` from the (potentially rewritten) `items_file`. Not present before `fix-gate` runs; rewriting `items_file` before that step is sufficient to affect all consumers. |
 
 ## Recipes
 
