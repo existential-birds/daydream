@@ -88,7 +88,7 @@ async def test_fork_overrides_pr_feedback_fetch_skill(
     prompt the backend received, and the built-in literal appears in none.
     """
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "def register(r):\n"
         "    r.override_skill('pr-feedback-fetch', 'ro-core:fetch-pr-feedback')\n"
     )
@@ -114,7 +114,7 @@ async def test_stack_slot_override_reaches_shallow_skill_flag(
     ``beagle-python:review-python`` literal.
     """
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "def register(r):\n"
         "    r.override_skill('stack:python', 'ro-python:review-python')\n"
     )
@@ -150,7 +150,7 @@ async def test_fork_stack_rule_routes_deep_per_stack_review(
 
     ext_dir.write_module(
         "from daydream.extensions import StackRule\n"
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "def register(r):\n"
         "    r.add_stack(StackRule('proto', ('*.proto',), 'ro-proto:review-proto'))\n"
     )
@@ -195,7 +195,7 @@ async def test_phase_review_slot_supplies_shallow_skill(
     bound skill invocation.
     """
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "def register(r):\n"
         "    r.override_skill('phase:review', 'ro-python:review-python')\n"
     )

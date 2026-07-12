@@ -1289,7 +1289,8 @@ def _handle_ext_validate_command() -> int:
 
     Builds the per-run registry for real (builtins seeded, extension module
     discovered, version-gated, and applied), reports the extension source and
-    API version, then resolve-checks every namespace. Runs anywhere —
+    API version, reports tool-supervisor registration, then resolve-checks the
+    registry. Runs anywhere —
     validation is registry-shaped, not repo-shaped, so no target directory is
     required.
 
@@ -1317,6 +1318,8 @@ def _handle_ext_validate_command() -> int:
         source = "extension source: no extension found (builtins only)"
     console.print(source, soft_wrap=True)
     console.print(f"extension API version {EXTENSION_API_VERSION}")
+    supervisor_status = "registered" if registry.tool_supervisor_if_registered() is not None else "none"
+    console.print(f"tool supervisor: {supervisor_status}")
 
     failure = _ext_resolve_failure(registry)
     if failure is not None:

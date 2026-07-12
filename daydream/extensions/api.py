@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
     from daydream.trajectory import DaydreamPhase
 
-EXTENSION_API_VERSION: int = 1
+EXTENSION_API_VERSION: int = 2
 
 
 class ExtensionError(Exception):

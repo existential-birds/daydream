@@ -37,7 +37,7 @@ import json
 
 from daydream.extensions import FlowStep
 
-DAYDREAM_EXT_API = 1
+DAYDREAM_EXT_API = 2
 
 
 async def _filter_items(ctx):
@@ -365,7 +365,7 @@ async def test_fork_disables_respond_step(
     backend), and the removed respond step never invoked its skill.
     """
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "def register(r):\n"
         "    r.remove('pr-feedback', 'respond-feedback')\n"
     )
@@ -391,7 +391,7 @@ async def test_fork_inserts_custom_phase_into_review_flow(
     """
     ext_dir.write_module(
         "from daydream.extensions import FlowStep\n"
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "async def _ro(ctx):\n"
         "    from daydream.agent import run_agent\n"
         "    from daydream.trajectory import DaydreamPhase\n"
@@ -460,7 +460,7 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
     """
     ext_dir.write_module(
         "from daydream.extensions import FlowStep\n"
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "async def _ro(ctx):\n"
         "    from daydream.agent import run_agent\n"
         "    from daydream.trajectory import DaydreamPhase\n"
@@ -510,7 +510,7 @@ async def test_fork_disables_alternatives_in_deep(
     from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "def register(r):\n"
         "    r.remove('deep', 'alternatives')\n"
     )
@@ -544,7 +544,7 @@ async def test_fork_disables_alternatives_in_deep(
 # (``skill('phase:ro_gate')``), then inserts it into the deep flow after ``intent``.
 FULL_RO_EXT = (
     "from daydream.extensions import FlowStep, get_registry\n"
-    "DAYDREAM_EXT_API = 1\n"
+    "DAYDREAM_EXT_API = 2\n"
     "def _ro_prompt(skill):\n"
     "    return f'RO-GATE {skill}'\n"
     "async def _ro(ctx):\n"
@@ -566,7 +566,7 @@ FULL_RO_EXT = (
 # as a brand-new flow name (NOT one of the four built-ins).
 CUSTOM_FLOW_EXT = (
     "from daydream.extensions import FlowStep\n"
-    "DAYDREAM_EXT_API = 1\n"
+    "DAYDREAM_EXT_API = 2\n"
     "async def _audit(ctx):\n"
     "    from daydream.agent import run_agent\n"
     "    from daydream.trajectory import DaydreamPhase\n"
@@ -618,7 +618,7 @@ async def _run_tool_case(
 
     ext_dir.write_module(
         "from daydream.extensions import FlowStep, ToolDecision\n"
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "async def _audit(ctx):\n"
         "    from daydream.agent import run_agent\n"
         "    from daydream.trajectory import DaydreamPhase\n"
