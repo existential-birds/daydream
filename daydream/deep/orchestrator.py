@@ -70,6 +70,7 @@ from daydream.phases import (
     phase_verify_recommendations,
     severity_sorted,
 )
+from daydream.supervision import revise_finding_fields
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
@@ -569,15 +570,7 @@ def _apply_adjudication_verdicts(
         # compaction. The suppression call site keys its arbiter-exclusion set by
         # ``id(record)`` (#232); a revised record that got a fresh dict here would
         # escape that set and be wrongly re-judged by the suppression pass.
-        records[record_index].update(
-            {
-                "severity": verdict.get("severity", records[record_index].get("severity")),
-                "confidence": verdict.get("confidence", records[record_index].get("confidence")),
-                "description": verdict.get("description", records[record_index].get("description")),
-                "rationale": verdict.get("rationale", records[record_index].get("rationale")),
-                "evidence": verdict.get("evidence", records[record_index].get("evidence")),
-            }
-        )
+        revise_finding_fields(records[record_index], verdict)
 
     new_records: list[dict[str, Any]] = []
     new_sources: list[str] = []
