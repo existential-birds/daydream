@@ -52,6 +52,13 @@ class DaydreamFileConfig:
             calls in one file group (the group is severity-sorted, so the dropped
             tail is lowest-severity). ``None`` (the default when the key is absent
             or junk) falls through to ``config.DEFAULT_GROUP_MAX_SERIAL_ITEMS`` (6).
+        supervisor: Findings supervisor mode (``"off"``, ``"rules"``, or
+            ``"llm"``), or None when unset/invalid.
+        supervisor_deny_globs: Repository-relative deny globs shared by findings
+            and tool supervision.
+        tool_supervisor: Built-in tool supervisor mode (``"off"`` or ``"rules"``),
+            or None when unset/invalid.
+        tool_bash_deny: Regular expressions for denied Bash commands.
     """
 
     model: str | None = None
@@ -62,6 +69,10 @@ class DaydreamFileConfig:
     precision_mode: bool | None = None
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
+    supervisor: str | None = None
+    supervisor_deny_globs: list[str] = field(default_factory=list)
+    tool_supervisor: str | None = None
+    tool_bash_deny: list[str] = field(default_factory=list)
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase."""
@@ -188,6 +199,18 @@ def _coerce_float(raw: Any) -> float | None:
     return None
 
 
+def _coerce_string_list(raw: Any) -> list[str]:
+    """Return a list of strings, or an empty list for malformed values."""
+    if not isinstance(raw, list) or not all(isinstance(value, str) for value in raw):
+        return []
+    return list(raw)
+
+
+def _coerce_choice(raw: Any, choices: set[str]) -> str | None:
+    """Return a configured choice, or None for an invalid value."""
+    return raw if isinstance(raw, str) and raw in choices else None
+
+
 def load_file_config(root: Path) -> DaydreamFileConfig:
     """Load and merge daydream file configuration from a repo root.
 
@@ -240,4 +263,8 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         precision_mode=precision,
         group_max_wall_s=_coerce_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
+        supervisor=_coerce_choice(merged.get("supervisor"), {"off", "rules", "llm"}),
+        supervisor_deny_globs=_coerce_string_list(merged.get("supervisor_deny_globs")),
+        tool_supervisor=_coerce_choice(merged.get("tool_supervisor"), {"off", "rules"}),
+        tool_bash_deny=_coerce_string_list(merged.get("tool_bash_deny")),
     )

@@ -63,6 +63,38 @@ def test_precision_mode_non_bool_degrades_to_none(tmp_path: Path) -> None:
     assert cfg.precision_mode is None
 
 
+def test_supervision_config_parses_all_keys(tmp_path: Path) -> None:
+    (tmp_path / ".daydream.toml").write_text(
+        'supervisor = "rules"\n'
+        'supervisor_deny_globs = ["vendor/**"]\n'
+        'tool_supervisor = "rules"\n'
+        'tool_bash_deny = ["rm -rf"]\n'
+    )
+
+    cfg = load_file_config(tmp_path)
+
+    assert cfg.supervisor == "rules"
+    assert cfg.supervisor_deny_globs == ["vendor/**"]
+    assert cfg.tool_supervisor == "rules"
+    assert cfg.tool_bash_deny == ["rm -rf"]
+
+
+def test_supervision_config_bad_values_degrade_to_unset(tmp_path: Path) -> None:
+    (tmp_path / ".daydream.toml").write_text(
+        'supervisor = "unknown"\n'
+        "supervisor_deny_globs = [1]\n"
+        'tool_supervisor = "unknown"\n'
+        "tool_bash_deny = [1]\n"
+    )
+
+    cfg = load_file_config(tmp_path)
+
+    assert cfg.supervisor is None
+    assert cfg.supervisor_deny_globs == []
+    assert cfg.tool_supervisor is None
+    assert cfg.tool_bash_deny == []
+
+
 def test_empty_config_helper() -> None:
     cfg = DaydreamFileConfig()
     assert cfg.model is None and cfg.backend is None

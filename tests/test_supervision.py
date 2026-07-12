@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from daydream.supervision import apply_findings_verdicts, revise_finding_fields
+from daydream.extensions import ToolDecision
+from daydream.supervision import (
+    RuleBasedSupervisor,
+    RuleBasedToolSupervisor,
+    apply_findings_verdicts,
+    revise_finding_fields,
+)
+from daydream.trajectory import DaydreamPhase
 
 
 def test_revise_finding_fields_updates_whitelist_only() -> None:
@@ -58,3 +65,52 @@ def test_apply_findings_verdicts_handles_actions_and_fails_open() -> None:
         (3, "edit", "more precise"),
         (4, "hold", "needs review"),
     ]
+
+
+def test_rule_based_supervisor_drops_matching_repo_relative_files() -> None:
+    items = [
+        {"id": 1, "file": "vendor/x.py", "description": "vendored"},
+        {"id": 2, "file": "src/app.py", "description": "application"},
+    ]
+
+    verdicts = RuleBasedSupervisor(deny_globs=["vendor/**"]).review_findings(items)
+
+    assert verdicts == {
+        1: {"id": 1, "action": "drop", "reason": "denied by glob 'vendor/**'"}
+    }
+
+
+def test_rule_based_tool_supervisor_vetoes_paths_and_bash() -> None:
+    supervisor = RuleBasedToolSupervisor(
+        deny_globs=["vendor/**"],
+        bash_deny=[r"rm -rf"],
+    )
+
+    write_decision = supervisor(
+        "Write",
+        {"file_path": "/repo/vendor/x.py"},
+        phase=DaydreamPhase.FIX,
+    )
+    edit_decision = supervisor(
+        "Edit",
+        {"path": "/repo/vendor/y.py"},
+        phase=DaydreamPhase.FIX,
+    )
+    allowed_decision = supervisor(
+        "Write",
+        {"file_path": "/repo/src/app.py"},
+        phase=DaydreamPhase.FIX,
+    )
+    bash_decision = supervisor(
+        "Bash",
+        {"command": "rm -rf /"},
+        phase=DaydreamPhase.FIX,
+    )
+    unknown_decision = supervisor("Read", {}, phase=DaydreamPhase.FIX)
+
+    assert isinstance(write_decision, ToolDecision) and write_decision.veto
+    assert "vendor/**" in write_decision.reason
+    assert edit_decision.veto
+    assert not allowed_decision.veto
+    assert bash_decision.veto and "rm -rf" in bash_decision.reason
+    assert not unknown_decision.veto
