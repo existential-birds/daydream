@@ -102,6 +102,28 @@ async def test_emit_phase_carries_metadata(tmp_path: Path) -> None:
     assert rec._phase_events[0].metadata == {"stage": "arbiter"}
 
 
+async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
+    """Supervisor decisions and tool vetoes are recorded as phase events."""
+    rec = _make_recorder(tmp_path)
+
+    rec.emit_supervisor_verdict(7, "drop", "duplicate")
+    rec.emit_tool_veto("Write", "protected path", phase=DaydreamPhase.FIX)
+
+    assert rec._phase_events[0].event == "supervisor_verdict"
+    assert rec._phase_events[0].phase is DaydreamPhase.DEEP
+    assert rec._phase_events[0].metadata == {
+        "finding_id": 7,
+        "action": "drop",
+        "reason": "duplicate",
+    }
+    assert rec._phase_events[1].event == "tool_veto"
+    assert rec._phase_events[1].phase is DaydreamPhase.FIX
+    assert rec._phase_events[1].metadata == {
+        "tool_name": "Write",
+        "reason": "protected path",
+    }
+
+
 async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> None:
     """Phase events appear in Trajectory.extra["phase_events"] when present."""
     rec = _make_recorder(tmp_path)
