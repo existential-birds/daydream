@@ -65,6 +65,21 @@ def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir, capsys) -
     assert "tool supervisor" in strip_ansi(capsys.readouterr().out).lower()
 
 
+def test_ext_validate_rejects_async_supervisor_registration(ext_dir, capsys) -> None:
+    ext_dir.write_module(
+        "from daydream.extensions import ToolDecision\n"
+        "DAYDREAM_EXT_API = 2\n"
+        "async def supervise(name, tool_input, *, phase):\n"
+        "    return ToolDecision(veto=False)\n"
+        "def register(r): r.register_tool_supervisor(supervise)\n"
+    )
+    rc = _run_main(["ext", "validate"])
+    assert rc == 1
+    out = strip_ansi(capsys.readouterr().out).lower()
+    assert "tool supervisor" in out
+    assert "synchronous" in out
+
+
 def test_ext_validate_broken_ref(ext_dir, capsys) -> None:
     ext_dir.write_module(
         "DAYDREAM_EXT_API = 2\n"

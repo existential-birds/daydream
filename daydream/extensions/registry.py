@@ -11,6 +11,7 @@ This module must not import from ``daydream.runner`` or ``daydream.phases``
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Sequence
 
 from daydream.extensions.api import (
@@ -167,6 +168,8 @@ class Registry:
             raise ExtensionError("tool supervisor must be callable")
         if self._tool_supervisor is not None:
             raise ExtensionError("tool supervisor is already registered")
+        if inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(getattr(fn, "__call__", None)):
+            raise ExtensionError("tool supervisor must be synchronous")
         self._tool_supervisor = fn
 
     def tool_supervisor_if_registered(self) -> ToolSupervisor | None:

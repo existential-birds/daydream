@@ -93,3 +93,25 @@ def test_tool_supervisor_registration_is_exclusive() -> None:
         reg.register_tool_supervisor(supervisor)
     with pytest.raises(ValueError, match="veto.*reason"):
         ToolDecision(veto=True, reason="")
+
+
+def test_tool_supervisor_registration_rejects_async_function() -> None:
+    reg = Registry()
+
+    async def supervisor(name, tool_input, *, phase):
+        return ToolDecision(veto=False)
+
+    with pytest.raises(ExtensionError, match="tool supervisor.*synchronous"):
+        reg.register_tool_supervisor(supervisor)
+    assert reg.tool_supervisor_if_registered() is None
+
+
+def test_tool_supervisor_registration_rejects_async_callable_object() -> None:
+    class AsyncSupervisor:
+        async def __call__(self, name, tool_input, *, phase):
+            return ToolDecision(veto=False)
+
+    reg = Registry()
+    with pytest.raises(ExtensionError, match="tool supervisor.*synchronous"):
+        reg.register_tool_supervisor(AsyncSupervisor())
+    assert reg.tool_supervisor_if_registered() is None
