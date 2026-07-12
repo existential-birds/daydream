@@ -67,7 +67,7 @@ async def test_broken_flow_ref_fails_before_any_agent(
     outcome through ``runner.run``: exit 1, zero agents, named broken piece.
     """
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "def register(r):\n"
         "    r.insert_after('deep', anchor='intent', step='ghost_phase')\n"
     )
@@ -90,6 +90,7 @@ async def test_version_mismatch_exits_1_naming_versions(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A DAYDREAM_EXT_API mismatch exits 1 naming both versions, before any git work."""
+    # Intentional incompatibility fixture: 99 must remain rejected by the v2 gate.
     ext_dir.write_module("DAYDREAM_EXT_API = 99\ndef register(r): ...\n")
     backend = RecordingBackend()
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
@@ -100,4 +101,4 @@ async def test_version_mismatch_exits_1_naming_versions(
 
     assert rc == 1
     out = capsys.readouterr().out
-    assert "99" in out and "1" in out
+    assert "99" in out and "2" in out

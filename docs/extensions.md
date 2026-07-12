@@ -1,14 +1,15 @@
 # Extension contract (`daydream_ext`)
 
 Daydream's extension seam lets a fork customize which phases run, which skills
-those phases use, and the prompts — entirely from a top-level `daydream_ext`
-package, without editing any file under `daydream/`. This document is the
-versioned contract: the module shape daydream loads, the exact name
-inventories a fork programs against, and the policy for when those names may
-change. A drift-guard test (`tests/test_extension_contract_doc.py`) pins this
-document to the registered inventories in the code.
+those phases use, the prompts, stack routing, tool supervision, and the
+canonical findings surface — entirely from a top-level `daydream_ext` package,
+without editing any file under `daydream/`. This document is the versioned
+contract: the module shape daydream loads, the exact name inventories a fork
+programs against, and the policy for when those names may change. A drift-guard
+test (`tests/test_extension_contract_doc.py`) pins this document to the
+registered inventories in the code.
 
-Current contract version: **`EXTENSION_API_VERSION = 1`**.
+Current contract version: **`EXTENSION_API_VERSION = 2`**.
 
 ## Extension module contract
 
@@ -22,7 +23,7 @@ daydream_ext/
 `__init__.py` must export exactly two things:
 
 ```python
-DAYDREAM_EXT_API = 1          # must equal daydream's EXTENSION_API_VERSION
+DAYDREAM_EXT_API = 2          # must equal daydream's EXTENSION_API_VERSION
 
 def register(registry):       # receives a daydream.extensions.Registry
     ...                       # mutate flows / skills / prompts / stacks here
@@ -32,6 +33,28 @@ def register(registry):       # receives a daydream.extensions.Registry
 has seeded the registry with everything daydream does today, so the extension
 sees (and may mutate) the full built-in state through the same API the
 built-ins used.
+
+### Public API symbols
+
+The `daydream.extensions` package exports these contract symbols:
+
+| Symbol | Purpose |
+|--------|---------|
+| `EXTENSION_API_VERSION` | Running extension contract version |
+| `BreakLoop` | End the current loop group and continue the flow |
+| `ExtensionError` | Base error for extension failures |
+| `ExtensionVersionError` | Error for an absent or incompatible extension version |
+| `FlowStep` | Named async flow step |
+| `LoopGroup` | Repeated ordered group of flow steps |
+| `Registry` | Per-run extension registry |
+| `StackRule` | Fork-defined changed-file-to-skill routing rule |
+| `Stop` | End a flow with an exit code |
+| `ToolDecision` | Continue or veto a tool invocation |
+| `ToolSupervisor` | Callable protocol for tool supervision |
+| `UnresolvedExtensionError` | Error for a missing registered name |
+| `build_registry` | Seed and load a per-run registry |
+| `get_registry` | Read the current async context's registry |
+| `set_registry` | Set the current async context's registry |
 
 ### Discovery order
 
@@ -70,7 +93,8 @@ It bumps on **any** breaking change to:
 - flow names or step names,
 - prompt names or their kwargs,
 - skill slot names,
-- the documented stable `ctx.data` keys below.
+- the documented stable `ctx.data` keys below,
+- the tool-supervisor decision and findings-file semantics below.
 
 The loader hard-rejects an extension whose `DAYDREAM_EXT_API` does not equal
 the running daydream's `EXTENSION_API_VERSION` — there is no compatibility
@@ -79,9 +103,46 @@ kwargs) do not bump the version.
 
 ### Changelog
 
-- **Version 1** — initial contract: the four flows below as registered step
-  lists; skill slots; the 10 named prompts; `$DAYDREAM_EXT_DIR` /
-  `daydream_ext` discovery; `daydream ext validate`.
+- **Version 2** — adds the synchronous tool-supervisor seam, the
+  `ToolDecision` result, and the public `items_file` findings surface. The
+  extension module literal is now `DAYDREAM_EXT_API = 2`.
+- **Version 1** — initial flow, skill, prompt, stack, loader, and validation
+  contract.
+
+## Tool supervision
+
+An extension may register one synchronous callable for the lifetime of the
+per-run `Registry`. Daydream calls it for each `ToolStartEvent` emitted by a
+backend:
+
+```python
+from daydream.extensions import ToolDecision
+
+def supervise(name, tool_input, *, phase):
+    return ToolDecision(veto=False)
+
+def register(r):
+    r.register_tool_supervisor(supervise)
+```
+
+The callable has the signature
+`(name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase) -> ToolDecision`.
+`name` is the tool name, `tool_input` is the backend-provided input mapping,
+and `phase` identifies the current `DaydreamPhase`. The callable is
+synchronous; it must not be declared with `async def`.
+
+Return `ToolDecision(veto=False)` to let the invocation continue. Return
+`ToolDecision(veto=True, reason="...")` to abort the current agent turn; a veto
+requires a non-blank reason. Daydream cancels the backend, records the partial
+turn, and returns a `tool_vetoed:<name>` budget reason to the caller. If the
+supervisor raises, the failure propagates as an extension failure rather than
+being treated as a backend retry.
+
+`register_tool_supervisor` accepts only one callable per registry. A second
+registration or a non-callable value raises `ExtensionError`. If an extension
+does not register a supervisor, tool supervision is a no-op. Supervision runs
+when `run_agent` receives the backend's `ToolStartEvent`; it does not change
+backend-specific dispatch timing or add an earlier backend hook.
 
 ## Inventories
 
@@ -209,7 +270,8 @@ every other key is internal and may change without a version bump:
 | `exploration_dir` | Exploration pre-scan output directory (or None) |
 | `intent_path` | Path to the intent-analysis output |
 | `alts_path` | Path to the alternatives-review output |
-| `items` | Parsed, merged actionable finding items |
+| `items_file` | `Path` published after `load-items`; it contains canonical `{"items": [...]}` JSON. An extension may read this file and rewrite its `items` before downstream consumers run. |
+| `items` | Parsed finding items, populated by `fix-gate` from the (potentially rewritten) `items_file`. Not present before `fix-gate` runs; rewriting `items_file` before that step is sufficient to affect all consumers. |
 
 ## Recipes
 
@@ -228,6 +290,38 @@ def register(r):
     r.insert_after("deep", anchor="intent", step="my_gate")
     # or: r.insert_before("deep", anchor="fix-gate", step="my_gate")
 ```
+
+### Filter findings and supervise tools
+
+This v2 recipe inserts a step after `load-items` to rewrite the canonical
+findings file, and registers a singleton supervisor for tool invocations:
+
+```python
+import json
+
+from daydream.extensions import FlowStep, ToolDecision
+
+DAYDREAM_EXT_API = 2
+
+async def _filter_items(ctx):
+    items_file = ctx.data["items_file"]
+    payload = json.loads(items_file.read_text())
+    payload["items"] = [item for item in payload["items"] if item["severity"] != "low"]
+    items_file.write_text(json.dumps(payload))
+
+def _supervise(name, tool_input, *, phase):
+    if name == "Write":
+        return ToolDecision(veto=True, reason="writes require a separate approval policy")
+    return ToolDecision(veto=False)
+
+def register(r):
+    r.register_phase(FlowStep(name="filter-items", run=_filter_items))
+    r.insert_after("deep", anchor="load-items", step="filter-items")
+    r.register_tool_supervisor(_supervise)
+```
+
+The inserted step runs before `findings-out`, `post-review`, and the fix
+consumers, so their reads observe the rewritten canonical JSON.
 
 ### Disable a phase
 
@@ -327,7 +421,7 @@ builders' outputs and are replaced along with them).
 ```python
 from daydream.extensions import FlowStep, get_registry
 
-DAYDREAM_EXT_API = 1
+DAYDREAM_EXT_API = 2
 
 def _ro_prompt(skill):
     return f"RO-GATE {skill}"
@@ -361,15 +455,18 @@ model = "claude-sonnet-4-5"
 daydream ext validate
 ```
 
-Loads the extension, reports its source and API version, resolve-checks every
-flow entry, skill slot, and stack rule, and prints a per-namespace summary.
-Broken references exit 1 naming the broken piece. Runs anywhere — no target
-repo needed.
+Loads the extension, reports its source and API version, reports whether a tool
+supervisor is `registered` or `none`, resolve-checks every flow entry, skill
+slot, and stack rule, and prints a registry summary. Broken references exit 1
+naming the broken piece. Runs anywhere — no target repo needed.
 
-## Exclusions (v1 limits)
+## Exclusions (Version 2)
 
-- **No backend discovery.** Backends are the built-in `Backend`
+- **No backend registration.** Backends are the built-in `Backend`
   implementations (claude, codex, pi); forks cannot register new ones.
+- **Backend dispatch timing is host-controlled.** A tool supervisor runs after
+  `run_agent` receives a backend `ToolStartEvent`; extensions cannot move that
+  check earlier or later in a backend's internal dispatch pipeline.
 - **No prompt append.** Prompt override is wholesale only.
 - **Parse/test/commit/setup-investigator/failure-summarizer prompts are not
   registered** — they are schema- and control-loop-coupled.

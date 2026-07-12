@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import daydream.extensions as extension_api
 from daydream.extensions import EXTENSION_API_VERSION, Registry
 from daydream.extensions.builtins import register_builtins
 
@@ -13,6 +14,17 @@ def test_contract_doc_names_every_registered_surface() -> None:
     reg = Registry()
     register_builtins(reg)
     assert f"DAYDREAM_EXT_API = {EXTENSION_API_VERSION}" in doc
+    for fragment in (
+        "register_tool_supervisor",
+        "ToolDecision",
+        "items_file",
+        "read",
+        "rewrite",
+        "DAYDREAM_EXT_API = 2",
+    ):
+        assert fragment in doc, f"contract detail {fragment!r} undocumented"
+    for symbol in extension_api.__all__:
+        assert symbol in doc, f"public symbol {symbol!r} undocumented"
     for flow in ("deep", "shallow", "review", "pr-feedback"):
         assert flow in doc, f"flow {flow!r} undocumented"
         for entry in reg.flow(flow):

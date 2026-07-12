@@ -89,7 +89,7 @@ async def test_fork_prompt_override_reaches_backend(
     the exact built-in kwargs — the wholesale-override contract.
     """
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 1\n"
+        "DAYDREAM_EXT_API = 2\n"
         "def register(r):\n"
         "    r.override_prompt('review', lambda **kw: f\"RO-REVIEW {kw['skill_invocation']}\")\n"
     )

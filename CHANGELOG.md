@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **extensions:** Publish the tool-supervision seam as extension API v2 ([#268](https://github.com/existential-birds/daydream/issues/268))
+
+  Extensions can register one synchronous tool supervisor that returns a
+  `ToolDecision` for each tool invocation. `daydream ext validate` reports
+  whether the supervisor is registered, and the stable `items_file` surface
+  lets a step after `load-items` rewrite canonical findings before downstream
+  consumers read them.
+
 ## [0.23.1] - 2026-07-11
 
 ### Fixed

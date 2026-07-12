@@ -31,6 +31,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.config import UNKNOWN_SKILL_PATTERN
+from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.trajectory import DaydreamPhase, get_current_recorder
 from daydream.ui import (
@@ -53,6 +54,19 @@ class MissingSkillError(Exception):
     def __init__(self, skill_name: str):
         self.skill_name = skill_name
         super().__init__(f"Skill '{skill_name}' is not available")
+
+
+class _ToolSupervisorFailure(Exception):
+    """Internal marker that keeps supervisor failures out of backend retries."""
+
+    def __init__(self, original: Exception) -> None:
+        self.original = original
+        super().__init__(str(original))
+
+    @property
+    def subtype(self) -> str:
+        """Expose the original error's type name for trajectory recording."""
+        return type(self.original).__name__
 
 
 @dataclass
@@ -337,7 +351,8 @@ async def run_agent(
         Tuple of (output, continuation_token, budget_reason). Output is text
         or structured data. ``budget_reason`` is ``None`` on a normal
         completion, or a string such as ``"wall_budget_exceeded"`` /
-        ``"tool_call_budget_exceeded"`` when the turn was cut short.
+        ``"tool_call_budget_exceeded"`` / ``"tool_vetoed:Write"`` when the
+        turn was cut short.
 
     Raises:
         MissingSkillError: If a required skill is not available.
@@ -349,6 +364,7 @@ async def run_agent(
     result_continuation: ContinuationToken | None = None
     aborted_reason: str | None = None
     use_callback = progress_callback is not None
+    tool_supervisor = get_registry().tool_supervisor_if_registered()
 
     _state.current_backends.append(backend)
     event_iter: AsyncGenerator[Any, None] | None = None
@@ -397,9 +413,10 @@ async def run_agent(
                     if inv is not None:
                         inv.observe_user_step(prompt=prompt)
 
-                    # Per-invocation budgets live here so both backends are covered
-                    # without a backend-signature change. The wall budget cancels the
-                    # async-for via move_on_after; the tool-call ceiling breaks in-loop.
+                    # Per-invocation abort controls live here so both backends are
+                    # covered without a backend-signature change. The wall budget
+                    # cancels the async-for via move_on_after; the tool-call ceiling
+                    # and supervisor veto break in-loop.
                     wall_scope: Any = (
                         anyio.move_on_after(wall_budget_s) if wall_budget_s is not None else nullcontext()
                     )
@@ -455,6 +472,15 @@ async def run_agent(
 
                                 if inv is not None:
                                     inv.observe(event)
+
+                                if tool_supervisor is not None:
+                                    try:
+                                        decision = tool_supervisor(event.name, event.input, phase=phase)
+                                    except Exception as exc:  # noqa: BLE001 - policy failures must propagate
+                                        raise _ToolSupervisorFailure(exc) from exc
+                                    if decision.veto:
+                                        budget_reason = f"tool_vetoed:{event.name}"
+                                        break
 
                                 tool_calls += 1
                                 if tool_call_budget is not None and tool_calls > tool_call_budget:
@@ -519,10 +545,11 @@ async def run_agent(
                                 if inv is not None:
                                     inv.observe(event)
 
-                    # Budget abort: the wall scope cancelled the loop, or the tool-call
-                    # ceiling broke out. Cancel the backend (swallow any error — an abort
-                    # must NEVER raise into the CLI), mark the ATIF turn aborted, surface
-                    # a marker, then fall through to the partial-output return.
+                    # Abort handling: the wall scope cancelled the loop, a quantitative
+                    # tool ceiling fired, or a supervisor veto broke out. Cancel the
+                    # backend (swallow any error — an abort must NEVER raise into the
+                    # CLI), mark the ATIF turn aborted, surface a marker, then fall
+                    # through to the partial-output return.
                     wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
                     if budget_reason is None and wall_cancelled:
                         budget_reason = "wall_budget_exceeded"
@@ -553,6 +580,8 @@ async def run_agent(
 
                 break  # success — exit the retry loop
 
+            except _ToolSupervisorFailure:
+                raise
             except Exception as exc:
                 if attempt < max_attempts and getattr(exc, "retryable", False):
                     delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
@@ -583,6 +612,9 @@ async def run_agent(
                     continue
                 raise
 
+    except _ToolSupervisorFailure as exc:
+        print_error(console, "Extension Failure", f"{type(exc.original).__name__}: {exc.original}")
+        raise exc.original from None
     except Exception as exc:
         print_error(console, "Backend Execution Error", f"{type(exc).__name__}: {exc}")
         raise

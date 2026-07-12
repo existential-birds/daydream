@@ -1140,8 +1140,9 @@ async def _step_post_review(ctx: FlowContext) -> None:
     """Offer to post findings as inline PR review comments."""
     from daydream.pr_review import post_review_to_pr_from_report
 
+    items_file: Path = ctx.data["items_file"]
     await post_review_to_pr_from_report(
-        ctx.work.repo, merged_items_path(ctx.data["dd"]), console=console
+        ctx.work.repo, items_file, console=console
     )
 
 
@@ -1190,7 +1191,7 @@ async def _step_verify(ctx: FlowContext) -> None:
         verdicts_file, verdicts_payload = await phase_verify_recommendations(
             ctx.backend_for("verify"),
             ctx.work,
-            merged_items_path=merged_items_path(dd),
+            merged_items_path=ctx.data["items_file"],
             deep_dir=dd,
         )
     print_verification_summary(console, verdicts_file)

@@ -16,6 +16,11 @@ response map (``responses.json``) plus built-in behaviors:
 - ``GET repos/<o>/<r>/pulls/<n>/reviews`` returns the configured review list
   (``[]`` by default);
 - ``POST repos/<o>/<r>/pulls/<n>/reviews`` returns a fake ``html_url``.
+- ``gh pr view [<number>] --json ...`` emits the configured ``pr-view`` JSON
+  and records the invocation; ``gh pr list`` projects that same response into
+  the one-row list used by ``find_open_pr``;
+- ``gh repo view --json nameWithOwner -q .nameWithOwner`` emits the configured
+  ``repo-view`` slug (or ``acme/widgets`` when ``pr-view`` is configured).
 
 Any other invocation exits non-zero so unexpected calls surface as failures.
 """
@@ -138,14 +143,63 @@ def _handle_pr_create(argv):
     return 0
 
 
+def _handle_pr_view(argv):
+    _record("pr view", argv, "")
+    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
+    value = responses.get("pr-view")
+    if value is None:
+        sys.stderr.write("fake gh: no pr-view response configured\\n")
+        return 1
+    print(json.dumps(value))
+    return 0
+
+
+def _handle_pr_list(argv):
+    _record("pr list", argv, "")
+    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
+    value = responses.get("pr-list")
+    if value is None:
+        pr_view = responses.get("pr-view")
+        if pr_view is None:
+            sys.stderr.write("fake gh: no pr-list or pr-view response configured\\n")
+            return 1
+        value = [pr_view]
+    print(json.dumps(value))
+    return 0
+
+
+def _handle_repo_view(argv):
+    _record("repo view", argv, "")
+    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
+    value = responses.get("repo-view")
+    if value is None:
+        if "pr-view" not in responses:
+            sys.stderr.write("fake gh: no repo-view response configured\\n")
+            return 1
+        value = "acme/widgets"
+    if isinstance(value, dict):
+        value = value.get("nameWithOwner")
+    if not isinstance(value, str):
+        sys.stderr.write("fake gh: invalid repo-view response configured\\n")
+        return 1
+    print(value)
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     if argv[:2] in (["secret", "set"], ["variable", "set"]):
         return _handle_set(argv[0], argv)
     if argv[:2] in (["secret", "list"], ["variable", "list"]):
         return _handle_list(argv[0], argv)
+    if argv[:2] == ["pr", "view"]:
+        return _handle_pr_view(argv)
+    if argv[:2] == ["pr", "list"]:
+        return _handle_pr_list(argv)
     if argv[:2] == ["pr", "create"]:
         return _handle_pr_create(argv)
+    if argv[:2] == ["repo", "view"]:
+        return _handle_repo_view(argv)
     if not argv or argv[0] != "api":
         sys.stderr.write("fake gh: unsupported invocation: %r\\n" % (argv,))
         return 1
@@ -200,6 +254,14 @@ class GhCall:
 
 
 @dataclass
+class GhCommandCall:
+    """One recorded non-API ``gh`` invocation."""
+
+    kind: str
+    argv: list[str]
+
+
+@dataclass
 class GhSetCall:
     """One recorded ``gh secret set`` / ``gh variable set`` invocation.
 
@@ -245,6 +307,21 @@ class FakeGh:
             out.append(GhCall(endpoint=record["endpoint"], payload=record["payload"]))
         return out
 
+    def command_calls(self, kind: str) -> list[GhCommandCall]:
+        """Return recorded non-API calls matching *kind* (for example ``pr view``)."""
+        out: list[GhCommandCall] = []
+        if not self._calls_path.exists():
+            return out
+        for line in self._calls_path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record.get("kind") == kind:
+                out.append(GhCommandCall(kind=kind, argv=record["argv"]))
+        return out
+
+    def pr_view_calls(self) -> list[GhCommandCall]:
+        """Return recorded ``gh pr view`` invocations in order."""
+        return self.command_calls("pr view")
+
     def _set_calls(self, kind: str) -> list[GhSetCall]:
         out: list[GhSetCall] = []
         if not self._calls_path.exists():
@@ -282,8 +359,8 @@ class FakeGh:
         Two call shapes are supported:
         - ``set_response(method, endpoint, value)`` — keys the ``gh api``
           response under ``"<METHOD> <endpoint>"`` (existing behavior).
-        - ``set_response("pr-create", value=...)`` — keys a non-api response
-          (e.g. the PR URL the ``gh pr create`` shim prints) under the bare
+        - ``set_response("pr-create", value=...)`` (or ``"pr-view"`` /
+          ``"repo-view"``) — keys a non-api response under the bare
           ``method`` token.
         """
         responses = self._read_responses()
@@ -292,6 +369,14 @@ class FakeGh:
         else:
             responses[f"{method.upper()} {endpoint.lstrip('/')}"] = value
         self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
+
+    def serve_pr_view(self, response: dict[str, Any]) -> None:
+        """Make ``gh pr view`` emit *response* and feed ``gh pr list``."""
+        self.set_response("pr-view", value=response)
+
+    def serve_repo_view(self, name_with_owner: str) -> None:
+        """Make ``gh repo view`` emit *name_with_owner*."""
+        self.set_response("repo-view", value=name_with_owner)
 
     def serve_secret_list(self, names: list[str]) -> None:
         """Make ``gh secret list --json name`` return *names*."""

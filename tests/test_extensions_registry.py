@@ -9,6 +9,7 @@ from daydream.extensions import (
     FlowStep,
     LoopGroup,
     Registry,
+    ToolDecision,
     UnresolvedExtensionError,
 )
 
@@ -77,3 +78,40 @@ def test_stack_keys_returns_stack_slot_keys_only() -> None:
     reg.override_skill("structural", "ro:review-structure")
     reg.override_skill("pr-feedback-fetch", "ro:fetch-pr-feedback")
     assert reg.stack_keys() == {"python", "proto"}
+
+
+def test_tool_supervisor_registration_is_exclusive() -> None:
+    reg = Registry()
+
+    def supervisor(name, tool_input, *, phase):
+        return ToolDecision(veto=name == "Write", reason="protected path")
+
+    reg.register_tool_supervisor(supervisor)
+    assert reg.tool_supervisor_if_registered() is supervisor
+    assert supervisor("Write", {}, phase="fix").veto is True
+    with pytest.raises(ExtensionError, match="tool supervisor.*already registered"):
+        reg.register_tool_supervisor(supervisor)
+    with pytest.raises(ValueError, match="veto.*reason"):
+        ToolDecision(veto=True, reason="")
+
+
+def test_tool_supervisor_registration_rejects_async_function() -> None:
+    reg = Registry()
+
+    async def supervisor(name, tool_input, *, phase):
+        return ToolDecision(veto=False)
+
+    with pytest.raises(ExtensionError, match="tool supervisor.*synchronous"):
+        reg.register_tool_supervisor(supervisor)
+    assert reg.tool_supervisor_if_registered() is None
+
+
+def test_tool_supervisor_registration_rejects_async_callable_object() -> None:
+    class AsyncSupervisor:
+        async def __call__(self, name, tool_input, *, phase):
+            return ToolDecision(veto=False)
+
+    reg = Registry()
+    with pytest.raises(ExtensionError, match="tool supervisor.*synchronous"):
+        reg.register_tool_supervisor(AsyncSupervisor())
+    assert reg.tool_supervisor_if_registered() is None
