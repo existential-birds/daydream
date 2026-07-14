@@ -505,6 +505,13 @@ def _build_feedback_parser() -> argparse.ArgumentParser:
         metavar="TARGET",
         help="Target directory (default: current directory)",
     )
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        default=False,
+        dest="log_mode",
+        help=argparse.SUPPRESS,  # Suppressed in feedback parser unless modified
+    )
     _add_shared_arguments(parser)
     return parser
 
@@ -583,6 +590,14 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         default=False,
         dest="review",
         help="Review and write a report to terminal/markdown, then exit.",
+    )
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        default=False,
+        dest="log_mode",
+        help="Bypass Rich UI and emit raw agent events as plain text to stdout (for CI log capture)."
+        if full_help else argparse.SUPPRESS,
     )
 
     # Selection
@@ -939,6 +954,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         extra_copy=list(args.extra_copy),
         non_interactive=args.non_interactive,
         assume=args.assume,
+        log_mode=args.log_mode,
     )
 
 
@@ -989,6 +1005,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         output_mode="loop",
         non_interactive=args.non_interactive,
         assume=args.assume,
+        log_mode=args.log_mode,
         dump_artifacts=args.dump_artifacts,
     )
 

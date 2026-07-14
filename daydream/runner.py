@@ -45,6 +45,7 @@ from daydream.agent import (
     get_non_interactive,
     resolve_or_prompt,
     set_assume,
+    set_log_mode,
     set_non_interactive,
     set_quiet_mode,
 )
@@ -243,6 +244,7 @@ class RunConfig:
     extra_copy: list[Path] = field(default_factory=list)
     non_interactive: bool = False
     assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
+    log_mode: bool = False  # bypass Rich UI and emit plain text to stdout
     identity: str = "unknown"  # resolved GitHub identity; set once by run()
     # Issue #172: tiny-diff short-circuit gate (max changed files). CLI-tier
     # override; falls through to file-config scalar then the orchestrator
@@ -572,6 +574,7 @@ async def run(config: RunConfig | None = None) -> int:
     # orthogonal ``assume`` axis (--yes) both feed ``resolve_gate`` at each gate.
     set_non_interactive(not _resolve_interactive(config))
     set_assume(config.assume)
+    set_log_mode(config.log_mode)
 
     # Build the per-run registry (builtins + optional daydream_ext) and set it
     # on the ContextVar so every downstream phase resolves through it.
