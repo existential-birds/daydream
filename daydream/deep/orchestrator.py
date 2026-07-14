@@ -1508,9 +1508,10 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         _resolved_backend_name,
     )
 
-    # Cache one Backend instance per (backend_name, resolved_model) so phases that
-    # resolve to the same model share an instance and differing models stay isolated.
-    backend_cache: dict[tuple[str, str | None], Backend] = {}
+    # Cache one Backend instance per (backend_name, resolved_model, resolved_effort)
+    # so phases that resolve to the same model/effort share an instance and
+    # differing ones stay isolated.
+    backend_cache: dict[tuple[str, str | None, str | None], Backend] = {}
 
     target_dir = work.repo
 

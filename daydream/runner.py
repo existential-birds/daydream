@@ -132,6 +132,11 @@ class RunConfig:
             per-phase model is set. Resolved by ``_resolved_model`` below the
             per-phase field but above the config-file (phase then global) and
             table sources. Default None.
+        reasoning_effort: Global default reasoning-effort override (e.g. "low",
+            "medium", "high"), resolved by ``_resolved_reasoning_effort``
+            (CLI > config-file phase > config-file global). Only the Codex
+            backend applies it (forwarded as ``-c model_reasoning_effort=...``);
+            ignored for claude/pi. Default None.
         file_config: File-sourced configuration (``[tool.daydream]`` /
             ``.daydream.toml``) feeding ``_resolved_model`` / ``_resolve_backend``
             as a low-precedence source. None is treated as an empty config.
@@ -208,6 +213,7 @@ class RunConfig:
     bot: str | None = None
     backend: str | None = None
     model: str | None = None
+    reasoning_effort: str | None = None
     file_config: DaydreamFileConfig | None = None
     review_backend: str | None = None
     fix_backend: str | None = None
@@ -383,17 +389,37 @@ def _resolved_model(config: RunConfig, phase: str) -> str | None:
     )
 
 
+def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
+    """Resolve the reasoning effort for ``phase`` across all precedence tiers.
+
+    Order (highest first): global ``config.reasoning_effort``
+    (``--reasoning-effort``), file-config phase override, file-config global.
+    There is no per-phase RunConfig field and no built-in default table (unlike
+    :func:`_resolved_model`) — ``None`` means the backend applies its own
+    ambient default (e.g. Codex reads ``model_reasoning_effort`` from
+    ``~/.codex/config.toml`` when daydream passes nothing).
+
+    Only the Codex backend consumes the resolved value today.
+    """
+    file_config = _file_config_or_empty(config)
+    return (
+        config.reasoning_effort
+        or file_config.phase_reasoning_effort(phase)
+        or file_config.reasoning_effort
+    )
+
+
 def _resolve_backend(
     config: RunConfig,
     phase: str,
-    cache: dict[tuple[str, str | None], Backend] | None = None,
+    cache: dict[tuple[str, str | None, str | None], Backend] | None = None,
     *,
     cwd: Path | None = None,
 ) -> Backend:
     """Get or create the backend for a given phase, respecting all precedence tiers.
 
-    Both the backend kind and the model are resolved through the source-tiered
-    precedence ``CLI > config-file > default``:
+    The backend kind, model, and reasoning effort are each resolved through the
+    source-tiered precedence ``CLI > config-file > default``:
 
     - Backend kind via :func:`_resolved_backend_name`
       (per-phase flag → ``config.backend`` → file-config phase →
@@ -402,27 +428,39 @@ def _resolve_backend(
       (per-phase field → ``config.model`` → file-config phase →
       file-config global → ``PHASE_DEFAULT_MODELS`` →
       ``None``, where ``None`` falls through to the backend's own default).
+    - Reasoning effort via :func:`_resolved_reasoning_effort`
+      (``config.reasoning_effort`` → file-config phase → file-config global →
+      ``None``, where ``None`` falls through to the backend's own default).
+      Only Codex applies the resolved value.
 
     Args:
-        config: Run configuration with backend/model and file-config sources.
+        config: Run configuration with backend/model/reasoning-effort and
+            file-config sources.
         phase: Phase name (e.g. ``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
             ``"intent"``, ``"wonder"``, ``"merge"``,
             ``"exploration"``, ``"pr_feedback"``).
-        cache: Optional dict to cache backends by ``(backend_name, model)``.
-            When provided, backends are reused only when both the backend kind
-            and the resolved model match — so the same backend kind with two
-            different models yields two distinct instances.
+        cache: Optional dict to cache backends by
+            ``(backend_name, model, reasoning_effort)``. When provided,
+            backends are reused only when the backend kind, resolved model,
+            and resolved reasoning effort all match — so the same backend kind
+            with two different models or effort levels yields two distinct
+            instances.
         cwd: Target workspace used for backend-specific configuration.
     """
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
+    resolved_effort = _resolved_reasoning_effort(config, phase)
 
-    cache_key = (backend_name, resolved_model)
+    cache_key = (backend_name, resolved_model, resolved_effort)
     if cache is not None:
         if cache_key not in cache:
             if backend_name == "pi":
                 cache[cache_key] = create_backend(
                     backend_name, model=resolved_model, cwd=cwd
+                )
+            elif backend_name == "codex":
+                cache[cache_key] = create_backend(
+                    backend_name, model=resolved_model, reasoning_effort=resolved_effort
                 )
             else:
                 cache[cache_key] = create_backend(backend_name, model=resolved_model)
@@ -430,6 +468,8 @@ def _resolve_backend(
 
     if backend_name == "pi":
         return create_backend(backend_name, model=resolved_model, cwd=cwd)
+    if backend_name == "codex":
+        return create_backend(backend_name, model=resolved_model, reasoning_effort=resolved_effort)
     return create_backend(backend_name, model=resolved_model)
 
 

@@ -44,14 +44,17 @@ class FlowContext:
     work: WorkContext
     registry: Registry
     data: dict[str, Any] = field(default_factory=dict)
-    _backend_cache: dict[tuple[str, str | None], Backend] = field(default_factory=dict, repr=False)
+    _backend_cache: dict[tuple[str, str | None, str | None], Backend] = field(
+        default_factory=dict, repr=False
+    )
 
     def backend_for(self, phase: str) -> Backend:
         """Get or create the backend for ``phase``, reusing per-context instances.
 
         Instance-sharing semantics are identical to the flow helpers'
         ``backend_cache`` dicts today: backends are cached per resolved
-        ``(backend_name, model)`` pair for the lifetime of this context.
+        ``(backend_name, model, reasoning_effort)`` triple for the lifetime of
+        this context.
         """
         from daydream.runner import _resolve_backend
 

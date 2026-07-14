@@ -71,8 +71,9 @@ class CodexBackend:
 
     concise_fix_prompts = False
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, reasoning_effort: str | None = None):
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.fanout_concurrency = 4
         self._process: asyncio.subprocess.Process | None = None
         self._processes: list[asyncio.subprocess.Process] = []
@@ -123,6 +124,8 @@ class CodexBackend:
             "--cd",
             str(cwd),
         ]
+        if self.reasoning_effort:
+            args.extend(["-c", f'model_reasoning_effort="{self.reasoning_effort}"'])
 
         schema_path: str | None = None
         if output_schema:

@@ -32,6 +32,9 @@ class DaydreamFileConfig:
     Attributes:
         model: Global default model, or None if unset.
         backend: Global default backend name, or None if unset.
+        reasoning_effort: Global default reasoning-effort override, or None if
+            unset. Only consumed by the Codex backend today (forwarded as
+            ``-c model_reasoning_effort=...``); ignored for claude/pi.
         phases: Per-phase sub-tables mapping phase name to a dict of keys
             (e.g. ``{"fix": {"backend": "codex", "model": "..."}}``).
         shallow_fanout_threshold: Max changed-file count that triggers the
@@ -63,6 +66,7 @@ class DaydreamFileConfig:
 
     model: str | None = None
     backend: str | None = None
+    reasoning_effort: str | None = None
     phases: dict[str, dict[str, str]] = field(default_factory=dict)
     bench: dict[str, Any] = field(default_factory=dict)
     shallow_fanout_threshold: int | None = None
@@ -81,6 +85,10 @@ class DaydreamFileConfig:
     def phase_backend(self, phase: str) -> str | None:
         """Return the configured backend for a phase."""
         return self.phases.get(phase, {}).get("backend")
+
+    def phase_reasoning_effort(self, phase: str) -> str | None:
+        """Return the configured reasoning effort for a phase."""
+        return self.phases.get(phase, {}).get("reasoning_effort")
 
 
 def load_toml_or_empty(path: Path) -> dict[str, Any]:
@@ -234,6 +242,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
 
     model = merged.get("model")
     backend = merged.get("backend")
+    reasoning_effort = merged.get("reasoning_effort")
     # shallow_fanout_threshold: tolerate non-int (stray string, list, etc.) by
     # degrading to None rather than crashing the loader. ``0`` is a meaningful
     # value (disable the short-circuit) so it must round-trip unchanged.
@@ -257,6 +266,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     return DaydreamFileConfig(
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,
+        reasoning_effort=str(reasoning_effort) if reasoning_effort is not None else None,
         phases=_coerce_phases(merged.get("phases")),
         bench=dict(merged["bench"]) if isinstance(merged.get("bench"), dict) else {},
         shallow_fanout_threshold=threshold,

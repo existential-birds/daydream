@@ -301,7 +301,7 @@ class Backend(Protocol):
 
 
 def create_backend(
-    name: str, model: str | None = None, *, cwd: Path | None = None
+    name: str, model: str | None = None, *, cwd: Path | None = None, reasoning_effort: str | None = None
 ) -> Backend:
     """Create a backend by name.
 
@@ -311,6 +311,9 @@ def create_backend(
             defaults here. Pi receives ``None`` unchanged so its own configured
             default can win before Pi's GLM fallback is selected.
         cwd: Target workspace used to resolve Pi's configured default model.
+        reasoning_effort: Optional reasoning-effort override (e.g. "low",
+            "medium", "high"). Only Codex applies this today (forwarded as
+            ``-c model_reasoning_effort=...``); ignored for claude/pi.
 
     Returns:
         A Backend instance whose ``.model`` attribute is a non-empty string.
@@ -325,7 +328,7 @@ def create_backend(
         return ClaudeBackend(model=model or DEFAULT_CLAUDE_MODEL)
     if name == "codex":
         from daydream.backends.codex import CodexBackend
-        return CodexBackend(model=model or DEFAULT_CODEX_MODEL)
+        return CodexBackend(model=model or DEFAULT_CODEX_MODEL, reasoning_effort=reasoning_effort)
     if name == "pi":
         from daydream.backends.pi import PiBackend
         return PiBackend(model=model, cwd=cwd)

@@ -19,6 +19,17 @@ def test_dotfile_wins_over_pyproject(tmp_path: Path) -> None:
 def test_absent_config_is_empty(tmp_path: Path) -> None:
     cfg = load_file_config(tmp_path)
     assert cfg.model is None and cfg.backend is None and cfg.phase_model("fix") is None
+    assert cfg.reasoning_effort is None and cfg.phase_reasoning_effort("fix") is None
+
+
+def test_reasoning_effort_global_and_phase_override(tmp_path: Path) -> None:
+    (tmp_path / ".daydream.toml").write_text(
+        'reasoning_effort = "medium"\n[phases.fix]\nreasoning_effort = "high"\n'
+    )
+    cfg = load_file_config(tmp_path)
+    assert cfg.reasoning_effort == "medium"
+    assert cfg.phase_reasoning_effort("fix") == "high"
+    assert cfg.phase_reasoning_effort("review") is None
 
 
 def test_malformed_toml_raises_valueerror(tmp_path: Path) -> None:

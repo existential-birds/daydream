@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from daydream.config_file import DaydreamFileConfig
-from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
+from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model, _resolved_reasoning_effort
 
 
 def test_model_precedence_cli_over_file_over_table(monkeypatch, tmp_path: Path) -> None:
@@ -87,6 +87,23 @@ def test_env_vars_are_not_a_precedence_tier(monkeypatch, tmp_path: Path) -> None
     cfg2 = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
     assert _resolved_model(cfg2, "parse") == "claude-haiku-4-5"
     assert _resolved_backend_name(cfg2, "parse") == "claude"
+
+
+def test_reasoning_effort_precedence_cli_over_file(tmp_path: Path) -> None:
+    """reasoning_effort mirrors model precedence: CLI global > file phase > file global > None."""
+    fc = DaydreamFileConfig(
+        model=None, backend=None, reasoning_effort="file-global",
+        phases={"fix": {"reasoning_effort": "file-fix"}},
+    )
+    cfg = RunConfig(target=str(tmp_path), reasoning_effort=None, file_config=fc)
+    assert _resolved_reasoning_effort(cfg, "fix") == "file-fix"       # file phase override, nothing higher
+    cfg.reasoning_effort = "cli-global"
+    assert _resolved_reasoning_effort(cfg, "fix") == "cli-global"     # global --reasoning-effort wins
+    assert _resolved_reasoning_effort(cfg, "review") == "cli-global"  # applies to every phase
+    cfg.reasoning_effort = None
+    assert _resolved_reasoning_effort(cfg, "review") == "file-global"  # no phase override -> file global
+    cfg2 = RunConfig(target=str(tmp_path), reasoning_effort=None, file_config=DaydreamFileConfig())
+    assert _resolved_reasoning_effort(cfg2, "review") is None  # no source -> backend applies its own default
 
 
 def test_pi_native_model_is_not_replaced_by_glm_fallback(tmp_path: Path) -> None:
