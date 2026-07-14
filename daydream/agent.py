@@ -574,7 +574,7 @@ async def run_agent(
 
                             elif isinstance(event, CostEvent):
                                 if _state.log_mode:
-                                    cost_str = f"${event.cost_usd:.4f}" if event.cost_usd else "unknown"
+                                    cost_str = f"${event.cost_usd:.4f}" if event.cost_usd is not None else "unknown"
                                     print(f"[cost] {cost_str}", flush=True)
                                 elif event.cost_usd and not use_callback:
                                     if agent_renderer.has_content:
