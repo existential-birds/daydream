@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import math
 import os
 import random
@@ -78,11 +79,14 @@ class AgentState:
             ``"no"`` (a future ``--no``), or ``None`` (no assumption). Orthogonal to
             ``non_interactive``: ``non_interactive`` controls *whether* we may block on
             stdin; ``assume`` supplies a *pre-decided answer* regardless of TTY.
+        log_mode: When True, bypass Rich UI and emit raw agent events as plain text
+            to stdout (for CI log capture). Default False.
     """
 
     quiet_mode: bool = False
     non_interactive: bool = False
     assume: str | None = None
+    log_mode: bool = False
     current_backends: list[Backend] = field(default_factory=list)
 
 
@@ -137,6 +141,16 @@ def get_assume() -> str | None:
         ``"yes"``, ``"no"``, or ``None`` when no assumption is set.
     """
     return _state.assume
+
+
+def set_log_mode(log_mode: bool) -> None:
+    """Set log mode for agent output."""
+    _state.log_mode = log_mode
+
+
+def get_log_mode() -> bool:
+    """Get current log mode setting."""
+    return _state.log_mode
 
 
 def resolve_gate(*, assume: str | None, interactive: bool, safe_default: bool) -> bool | None:
@@ -295,6 +309,31 @@ def is_environmental_failure(test_output: str) -> bool:
     return any(signature in output_lower for signature in infra_signatures)
 
 
+def _summarize_input(input_data: dict[str, Any]) -> str:
+    """One-line summary of tool input for log output."""
+    if not input_data:
+        return ""
+    # For known tools, pick the most informative key
+    if "command" in input_data:
+        return input_data["command"][:200]
+    if "path" in input_data:
+        return f"{input_data['path']}" + (f" -> {input_data.get('new_path', '')}" if "new_path" in input_data else "")
+    # Generic: first value that's a string
+    for v in input_data.values():
+        if isinstance(v, str):
+            return v[:200]
+    return str(input_data)[:200]
+
+
+def _summarize_output(output: str) -> str:
+    """One-line summary of tool output for log output."""
+    if not output:
+        return "(empty)"
+    # Take first non-empty line or first 200 chars
+    first_line = output.strip().split("\n")[0]
+    return first_line[:200]
+
+
 async def run_agent(
     backend: Backend,
     cwd: Path,
@@ -392,6 +431,8 @@ async def run_agent(
             result_continuation = None
             tool_calls = 0
             budget_reason: str | None = None
+            # Track tool names by id for log mode output
+            tool_names: dict[str, str] = {}
             # Created per attempt so a failed retry's UI panels and task-label
             # mappings cannot be flushed or reused by a later successful attempt.
             tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
@@ -428,12 +469,14 @@ async def run_agent(
 
                                 skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
                                 if skill_match:
-                                    if not use_callback:
+                                    if not use_callback and not _state.log_mode:
                                         agent_renderer.finish()
                                         tool_registry.finish_all()
                                     raise MissingSkillError(skill_match.group(1))
 
-                                if use_callback and progress_callback is not None:
+                                if _state.log_mode:
+                                    print(event.text, flush=True)
+                                elif use_callback and progress_callback is not None:
                                     last_line = event.text.strip().split("\n")[-1]
                                     if last_line:
                                         result = progress_callback(format_callback_text(last_line))
@@ -448,7 +491,9 @@ async def run_agent(
                                     inv.observe(event)
 
                             elif isinstance(event, ThinkingEvent):
-                                if not use_callback:
+                                if _state.log_mode:
+                                    print(f"[thinking] {event.text}", flush=True)
+                                elif not use_callback:
                                     if agent_renderer.has_content:
                                         agent_renderer.finish()
                                     print_thinking(console, event.text)
@@ -457,7 +502,10 @@ async def run_agent(
                                     inv.observe(event)
 
                             elif isinstance(event, ToolStartEvent):
-                                if progress_callback is not None:
+                                if _state.log_mode:
+                                    tool_names[event.id] = event.name
+                                    print(f"[tool:{event.name}] {_summarize_input(event.input)}", flush=True)
+                                elif progress_callback is not None:
                                     # Record the originating call so a backgrounded launch's result
                                     # can later resolve a Task-family label for the progress line.
                                     tool_registry.note_call(event.id, event.name, event.input)
@@ -492,38 +540,55 @@ async def run_agent(
                                     break
 
                             elif isinstance(event, ToolResultEvent):
-                                # Populate the task_id→label map in both modes, so a later
-                                # TaskOutput/TaskStop resolves its originating label.
-                                tool_registry.observe_result(event.id, event.output)
-                                if not use_callback:
-                                    panel = tool_registry.get(event.id)
-                                    if panel:
-                                        panel.set_result(event.output, event.is_error)
-                                        panel.finish()
-                                        tool_registry.remove(event.id)
+                                if _state.log_mode:
+                                    tool_name = tool_names.get(event.id, "unknown")
+                                    prefix = (
+                                        f"[tool:{tool_name} ERROR]" if event.is_error
+                                        else f"[tool:{tool_name} result]"
+                                    )
+                                    print(f"{prefix} {_summarize_output(event.output)}", flush=True)
+                                else:
+                                    # Populate the task_id→label map in both modes, so a later
+                                    # TaskOutput/TaskStop resolves its originating label.
+                                    tool_registry.observe_result(event.id, event.output)
+                                    if not use_callback:
+                                        panel = tool_registry.get(event.id)
+                                        if panel:
+                                            panel.set_result(event.output, event.is_error)
+                                            panel.finish()
+                                            tool_registry.remove(event.id)
 
                                 if inv is not None:
                                     inv.observe(event)
 
                             elif isinstance(event, MetricsEvent):
-                                # EVNT-02 / MAP-06: recorder-only, no UI. Must precede the
+                                if _state.log_mode:
+                                    print(
+                                        f"[metrics] prompt={event.prompt_tokens} completion={event.completion_tokens}",
+                                        flush=True
+                                    )
+                                # EVNT-02 / MAP-06: recorder-only, no UI in normal mode. Must precede the
                                 # CostEvent branch so isinstance order is correct.
                                 if inv is not None:
                                     inv.observe(event)
 
                             elif isinstance(event, CostEvent):
-                                if event.cost_usd:
-                                    if not use_callback:
-                                        if agent_renderer.has_content:
-                                            agent_renderer.finish()
-                                        console.print()
-                                        print_cost(console, event.cost_usd)
+                                if _state.log_mode:
+                                    cost_str = f"${event.cost_usd:.4f}" if event.cost_usd else "unknown"
+                                    print(f"[cost] {cost_str}", flush=True)
+                                elif event.cost_usd and not use_callback:
+                                    if agent_renderer.has_content:
+                                        agent_renderer.finish()
+                                    console.print()
+                                    print_cost(console, event.cost_usd)
 
                                 if inv is not None:
                                     inv.observe(event)
 
                             elif isinstance(event, ResultEvent):
-                                if event.structured_output is not None:
+                                if _state.log_mode and event.structured_output is not None:
+                                    print(f"[result] {json.dumps(event.structured_output)[:500]}", flush=True)
+                                elif event.structured_output is not None:
                                     structured_result = event.structured_output
                                     if not use_callback:
                                         issues = (
@@ -544,6 +609,8 @@ async def run_agent(
                                                     label = i.get("title", i.get("description", ""))
                                                     formatted.append(f"[{i.get('id', '?')}] {label}")
                                             agent_renderer.append("\n".join(formatted))
+                                else:
+                                    structured_result = event.structured_output
                                 result_continuation = event.continuation
 
                                 if inv is not None:
@@ -569,14 +636,16 @@ async def run_agent(
                             pass
                         if inv is not None:
                             inv.mark_aborted(budget_reason)
-                        if use_callback and progress_callback is not None:
+                        if _state.log_mode:
+                            print(f"[aborted] {budget_reason}", flush=True)
+                        elif use_callback and progress_callback is not None:
                             result = progress_callback(format_callback_text(f"[budget] aborted: {budget_reason}"))
                             if inspect.isawaitable(result):
                                 await result
                         elif not use_callback:
                             print_warning(console, f"Turn aborted: {budget_reason}")
 
-                    if not use_callback:
+                    if not use_callback and not _state.log_mode:
                         if agent_renderer.has_content:
                             agent_renderer.finish()
                         tool_registry.finish_all()
@@ -593,7 +662,9 @@ async def run_agent(
                         f"Backend error ({type(exc).__name__}), retrying "
                         f"attempt {attempt + 2}/{max_attempts + 1} after {delay:.1f}s..."
                     )
-                    if use_callback and progress_callback is not None:
+                    if _state.log_mode:
+                        print(f"[retry] {retry_msg}", flush=True)
+                    elif use_callback and progress_callback is not None:
                         result = progress_callback(format_callback_text(f"[retry] {retry_msg}"))
                         if inspect.isawaitable(result):
                             await result
