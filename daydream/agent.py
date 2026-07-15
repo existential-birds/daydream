@@ -586,11 +586,18 @@ async def run_agent(
                                     inv.observe(event)
 
                             elif isinstance(event, ResultEvent):
-                                if _state.log_mode and event.structured_output is not None:
-                                    print(f"[result] {json.dumps(event.structured_output)[:500]}", flush=True)
-                                elif event.structured_output is not None:
-                                    structured_result = event.structured_output
-                                    if not use_callback:
+                                # Capture the structured result unconditionally: the log-mode
+                                # print is an additive side effect, never a substitute for
+                                # capture (otherwise --log silently drops every structured
+                                # result — exploration conventions, review findings, etc.).
+                                structured_result = event.structured_output
+                                if event.structured_output is not None:
+                                    if _state.log_mode:
+                                        print(
+                                            f"[result] {json.dumps(event.structured_output)[:500]}",
+                                            flush=True,
+                                        )
+                                    elif not use_callback:
                                         issues = (
                                             structured_result.get("issues", [])
                                             if isinstance(structured_result, dict)
@@ -609,8 +616,6 @@ async def run_agent(
                                                     label = i.get("title", i.get("description", ""))
                                                     formatted.append(f"[{i.get('id', '?')}] {label}")
                                             agent_renderer.append("\n".join(formatted))
-                                else:
-                                    structured_result = event.structured_output
                                 result_continuation = event.continuation
 
                                 if inv is not None:

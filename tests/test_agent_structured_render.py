@@ -48,3 +48,20 @@ async def test_plain_text_still_renders(monkeypatch, tmp_path):
     )
     result, _, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)  # no output_schema
     assert "narration here" in rec.export_text()
+
+
+async def test_log_mode_captures_structured_output(monkeypatch, tmp_path, capsys):
+    """Under --log, the structured result must still be captured, not just printed.
+
+    Regression: the log-mode print and the structured-result capture were an
+    if/elif, so --log dropped every structured result (run_agent returned "").
+    Downstream this emptied exploration conventions/dependencies and review
+    findings across the deep pipeline.
+    """
+    monkeypatch.setattr("daydream.agent._state.log_mode", True)
+    backend = MockBackend([ResultEvent(structured_output=PAYLOAD, continuation=None)])
+    result, _, _ = await run_agent(
+        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"}
+    )
+    assert result == PAYLOAD  # captured, not discarded
+    assert "[result]" in capsys.readouterr().out  # log-mode print is additive, still happens
