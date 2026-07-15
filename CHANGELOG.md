@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-15
+
 ### Added
+
+- **extensions:** Support an extension API version range instead of strict equality ([#275](https://github.com/existential-birds/daydream/pull/275))
+
+  Introduces `MIN_SUPPORTED_EXTENSION_API_VERSION` as an explicit floor
+  alongside `EXTENSION_API_VERSION` (the ceiling). The strict-equality
+  `DAYDREAM_EXT_API` check is replaced with an inclusive range so a newer
+  daydream can run an older extension during a rolling upgrade. Absent,
+  non-integer, or out-of-range declarations raise `ExtensionVersionError`
+  naming the declared version and the supported range, and `daydream ext
+  validate` reports the range.
+
+- **cli:** Add `--log` flag for CI-friendly raw output ([#272](https://github.com/existential-birds/daydream/pull/272))
+
+  Bypasses the Rich terminal UI and emits raw agent events as plain text to
+  stdout (`[tool:name]`, `[thinking]`, `[cost]`, `[metrics]`, `[result]`
+  prefixes), suitable for CI log capture. Orthogonal to `--non-interactive`
+  and `--yes`; trajectory recording and benchmark scoring are unaffected.
+
+- **backends/codex:** Expose reasoning-effort control ([#271](https://github.com/existential-birds/daydream/pull/271))
+
+  Adds `--reasoning-effort` (and `[tool.daydream]` `reasoning_effort` /
+  per-phase config override), resolved with the same CLI > file-phase >
+  file-global precedence as `--model`, forwarded by `CodexBackend` as
+  `-c model_reasoning_effort=<value>`. No-op for the Claude and Pi backends.
 
 - **extensions:** Publish the tool-supervision seam as extension API v2 ([#268](https://github.com/existential-birds/daydream/issues/268))
 
@@ -23,6 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **agent:** Add the built-in rule tool supervisor for denied file paths and
   Bash commands, with turn-level veto events and conflict detection against
   extension registrations ([#257](https://github.com/existential-birds/daydream/issues/257))
+
+### Fixed
+
+- **github_app:** Refresh installation tokens before expiry ([#273](https://github.com/existential-birds/daydream/pull/273))
+
+  Long reviews could outlive the one-hour installation token and fail their
+  final GitHub write with a misleading 401. The server-provided expiry is now
+  retained and the token refreshed before launching `gh`, so non-idempotent
+  posts are never replayed after failure.
 
 ## [0.23.1] - 2026-07-11
 
@@ -818,7 +853,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.23.1...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/existential-birds/daydream/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/existential-birds/daydream/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/existential-birds/daydream/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/existential-birds/daydream/compare/v0.21.0...v0.22.0

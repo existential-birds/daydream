@@ -144,7 +144,7 @@ jobs:
         # Pinned to a release tag (not `main`) so the bot runs a known daydream
         # version: reproducible and immune to main-drift / uv-cache staleness.
         # Bump in lockstep with the package version on release (a test enforces this).
-        run: uv tool install git+https://github.com/existential-birds/daydream@v0.23.1
+        run: uv tool install git+https://github.com/existential-birds/daydream@v0.24.0
 
       # Runs the DEFAULT deep-review pipeline (not --review). In --non-interactive
       # the deep run auto-declines the post/fix gates, so it still only produces a
@@ -191,7 +191,7 @@ jobs:
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
-        run: uv tool install git+https://github.com/existential-birds/daydream@v0.23.1
+        run: uv tool install git+https://github.com/existential-birds/daydream@v0.24.0
 
       - name: Download findings artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

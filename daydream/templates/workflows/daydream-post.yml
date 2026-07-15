@@ -51,7 +51,7 @@ jobs:
         # Pinned to a release tag (not `main`) so the bot runs a known daydream
         # version: reproducible and immune to main-drift / uv-cache staleness.
         # Bump in lockstep with the package version on release (a test enforces this).
-        run: uv tool install git+https://github.com/existential-birds/daydream@v0.23.1
+        run: uv tool install git+https://github.com/existential-birds/daydream@v0.24.0
 
       - name: Mint posting token
         id: token
