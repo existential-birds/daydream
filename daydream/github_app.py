@@ -18,6 +18,7 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Generator
 
@@ -49,6 +50,15 @@ class AppCredentials:
 
     app_id: int
     private_key: str
+
+
+@dataclass(frozen=True)
+class _InstallationToken:
+    """A minted installation credential and its GitHub-provided expiry."""
+
+    token: str
+    identity: str
+    expires_at: float
 
 
 def resolve_credentials() -> AppCredentials | None:
@@ -151,6 +161,18 @@ def mint_installation_token(repo_dir: Path, app_id: int, private_key: str, owner
             installation for *owner*, or the token exchange fails or omits the
             ``token`` field.
     """
+    minted = _mint_installation_token(repo_dir, app_id, private_key, owner, repo)
+    return minted.token, minted.identity
+
+
+def _mint_installation_token(
+    repo_dir: Path,
+    app_id: int,
+    private_key: str,
+    owner: str,
+    repo: str,
+) -> _InstallationToken:
+    """Mint an installation token while retaining its expiry metadata."""
     jwt_token = mint_jwt(app_id, private_key)
     # GitHub only accepts App JWTs as Bearer (gh sends GH_TOKEN as token scheme),
     # so the explicit Bearer header authenticates; GH_TOKEN is set only so gh
@@ -158,7 +180,8 @@ def mint_installation_token(repo_dir: Path, app_id: int, private_key: str, owner
     bearer = {"Authorization": f"Bearer {jwt_token}"}
     with _scoped_gh_token(jwt_token):
         installation_id, identity = _find_installation(repo_dir, owner, repo, bearer)
-        return _exchange_for_token(repo_dir, installation_id, owner, repo, bearer), identity
+        token, expires_at = _exchange_for_token(repo_dir, installation_id, owner, repo, bearer)
+    return _InstallationToken(token=token, identity=identity, expires_at=expires_at)
 
 
 def _find_installation(repo_dir: Path, owner: str, repo: str, headers: dict[str, str]) -> tuple[int, str]:
@@ -183,7 +206,13 @@ def _find_installation(repo_dir: Path, owner: str, repo: str, headers: dict[str,
     raise ValueError(f"no App installation found for owner {owner!r} (repo {owner}/{repo})")
 
 
-def _exchange_for_token(repo_dir: Path, installation_id: int, owner: str, repo: str, headers: dict[str, str]) -> str:
+def _exchange_for_token(
+    repo_dir: Path,
+    installation_id: int,
+    owner: str,
+    repo: str,
+    headers: dict[str, str],
+) -> tuple[str, float]:
     """Exchange an installation id for an access token scoped to *repo*."""
     try:
         payload = git_ops.gh_api(
@@ -199,7 +228,14 @@ def _exchange_for_token(repo_dir: Path, installation_id: int, owner: str, repo: 
     token = payload.get("token") if isinstance(payload, dict) else None
     if not isinstance(token, str) or not token:
         raise ValueError(f"installation token response for {owner}/{repo} is missing the 'token' field")
-    return token
+    expires_at_raw = payload.get("expires_at") if isinstance(payload, dict) else None
+    if not isinstance(expires_at_raw, str) or not expires_at_raw:
+        raise ValueError(f"installation token response for {owner}/{repo} is missing the 'expires_at' field")
+    try:
+        expires_at = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00")).timestamp()
+    except ValueError as exc:
+        raise ValueError(f"installation token response for {owner}/{repo} has invalid 'expires_at'") from exc
+    return token, expires_at
 
 
 def exchange_manifest_code(repo_dir: Path, code: str) -> tuple[AppCredentials, str]:
@@ -336,14 +372,21 @@ def resolve_run_identity(target_dir: Path, pr_repo: str | None, *, is_posting: b
 
     owner, repo = owner_repo
     try:
-        token, identity = mint_installation_token(
-            target_dir, credentials.app_id, credentials.private_key, owner, repo
+        minted = _mint_installation_token(target_dir, credentials.app_id, credentials.private_key, owner, repo)
+
+        def refresh() -> tuple[dict[str, str], float]:
+            fresh = _mint_installation_token(target_dir, credentials.app_id, credentials.private_key, owner, repo)
+            return build_gh_env(fresh.token), fresh.expires_at
+
+        git_ops.set_gh_token_env(
+            build_gh_env(minted.token),
+            expires_at=minted.expires_at,
+            refresh=refresh,
         )
-        git_ops.set_gh_token_env(build_gh_env(token))
     except Exception as exc:
         raise GitHubAppError(f"App token resolution failed: {exc}") from exc
 
-    return identity
+    return minted.identity
 
 
 def _owner_repo_for(pr_repo: str | None, target_dir: Path) -> tuple[str, str] | None:

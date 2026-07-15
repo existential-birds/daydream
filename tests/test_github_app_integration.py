@@ -6,13 +6,29 @@ loop. Mocks only the Backend (no real AI) and the github_app network helpers
 """
 from __future__ import annotations
 
+import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from rich.console import Console
 
 from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
+
+
+@pytest.fixture(autouse=True)
+def _block_real_gh(monkeypatch):
+    """Fail instead of contacting GitHub if an integration seam is missed."""
+    real_run = subprocess.run
+
+    def guarded_run(args, *pargs, **kwargs):
+        if args and args[0] == "gh":
+            raise AssertionError("test attempted to execute the real gh CLI")
+        return real_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded_run)
 
 
 class _MinimalBackend:
@@ -45,11 +61,13 @@ async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkey
 
     # Pin a wide recording console so the identity line is captured at the
     # rendered content level, independent of terminal width / TTY / Live state.
-    rec = Console(record=True, force_terminal=True, width=200)
+    rec = Console(record=True, force_terminal=True, width=200, height=25)
     monkeypatch.setattr("daydream.runner.console", rec)
 
-    with patch("daydream.github_app.mint_installation_token",
-               return_value=("ghs_injected", "my-app[bot]")) as mock_mint, \
+    with patch("daydream.github_app._mint_installation_token",
+               return_value=SimpleNamespace(
+                   token="ghs_injected", identity="my-app[bot]", expires_at=float("inf")
+               )) as mock_mint, \
          patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
         exit_code = await run(config)
 
@@ -68,7 +86,7 @@ async def test_fallback_identity_without_app_creds(feature_branch_repo, monkeypa
                        output_mode="review", shallow=True, skill="python", quiet=False)
 
     with patch("daydream.github_app.resolve_user_identity", return_value="personal-user"), \
-         patch("daydream.github_app.mint_installation_token") as mock_mint, \
+         patch("daydream.github_app._mint_installation_token") as mock_mint, \
          patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
         exit_code = await run(config)
 
@@ -109,7 +127,7 @@ async def test_posting_aborts_when_owner_repo_undeterminable(feature_branch_repo
                        output_mode="comment", shallow=True, skill="python", quiet=False)
 
     with patch("daydream.git_ops.gh_repo_view", return_value=None), \
-         patch("daydream.github_app.mint_installation_token") as mock_mint, \
+         patch("daydream.github_app._mint_installation_token") as mock_mint, \
          patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
         exit_code = await run(config)
 
@@ -128,7 +146,7 @@ async def test_minting_failure_aborts_run(feature_branch_repo, monkeypatch, caps
                        output_mode="review", shallow=True, skill="python", quiet=False,
                        pr_repo="myorg/myrepo")
 
-    with patch("daydream.github_app.mint_installation_token",
+    with patch("daydream.github_app._mint_installation_token",
                side_effect=ValueError("no App installation found for owner 'myorg'")), \
          patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
         exit_code = await run(config)

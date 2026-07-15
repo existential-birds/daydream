@@ -43,8 +43,9 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _logger = logging.getLogger(__name__)
 
@@ -57,23 +58,39 @@ _RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "secondary rate limit",
 )
 
-# Module-level singleton for the ``gh`` subprocess environment. Set once at run
-# entry from GitHub App credentials; read by ``_run_gh`` so every ``gh`` call
-# authenticates under the minted token. ``None`` means inherit the parent env.
-# Access only through the getter/setter/reset functions below.
+# Module-level state for the ``gh`` subprocess environment. Configured at run
+# entry from GitHub App credentials and refreshed before expiry; read by
+# ``_run_gh`` so every ``gh`` call authenticates under a current installation
+# token. ``None`` means inherit the parent env. Access only through the helpers
+# below.
 _gh_token_env: dict[str, str] | None = None
+_gh_token_expires_at: float | None = None
+_gh_token_refresh: Callable[[], tuple[dict[str, str], float]] | None = None
+
+# Refresh before the credential's actual deadline so a request cannot start
+# with a token that expires while GitHub is processing it.
+_GH_TOKEN_REFRESH_SKEW_SECONDS = 300
 
 
-def set_gh_token_env(env: dict[str, str] | None) -> None:
+def set_gh_token_env(
+    env: dict[str, str] | None,
+    *,
+    expires_at: float | None = None,
+    refresh: Callable[[], tuple[dict[str, str], float]] | None = None,
+) -> None:
     """Set the environment overrides passed to ``gh`` subprocesses.
 
     Args:
         env: Mapping of env-var overrides (e.g. ``{"GH_TOKEN": token}``) merged
             with the live ``os.environ`` at subprocess call time, or ``None`` to
             inherit the parent process environment without any overrides.
+        expires_at: Unix timestamp at which the injected token expires.
+        refresh: Callback that returns a replacement environment and expiry.
     """
-    global _gh_token_env
+    global _gh_token_env, _gh_token_expires_at, _gh_token_refresh
     _gh_token_env = env
+    _gh_token_expires_at = expires_at
+    _gh_token_refresh = refresh
 
 
 def get_gh_token_env() -> dict[str, str] | None:
@@ -88,8 +105,34 @@ def get_gh_token_env() -> dict[str, str] | None:
 
 def reset_gh_token_env() -> None:
     """Reset the ``gh`` subprocess environment to parent-process inheritance."""
-    global _gh_token_env
+    global _gh_token_env, _gh_token_expires_at, _gh_token_refresh
     _gh_token_env = None
+    _gh_token_expires_at = None
+    _gh_token_refresh = None
+
+
+def _gh_token_env_for_request() -> dict[str, str] | None:
+    """Return the injected token environment, refreshing it before expiry."""
+    global _gh_token_env, _gh_token_expires_at, _gh_token_refresh
+    if (
+        _gh_token_env is None
+        or _gh_token_expires_at is None
+        or _gh_token_refresh is None
+        or time.time() < _gh_token_expires_at - _GH_TOKEN_REFRESH_SKEW_SECONDS
+    ):
+        return _gh_token_env
+
+    prior = (_gh_token_env, _gh_token_expires_at, _gh_token_refresh)
+    try:
+        env, expires_at = _gh_token_refresh()
+    except Exception as exc:
+        _gh_token_env, _gh_token_expires_at, _gh_token_refresh = prior
+        raise GitError(f"failed to refresh GitHub App installation token: {exc}") from exc
+
+    _gh_token_env = env
+    _gh_token_expires_at = expires_at
+    _gh_token_refresh = prior[2]
+    return _gh_token_env
 
 
 # Header names whose values are secrets. ``gh api -H "Authorization: Bearer
@@ -282,10 +325,11 @@ def _run_gh(
             Read-only callers pass :func:`_gh_retries` to ride out host CPU
             starvation.
 
-    The subprocess environment is sourced from the module ``_gh_token_env``
-    singleton when set (via :func:`set_gh_token_env`), so ``gh`` authenticates
-    under the minted installation token. When the singleton is ``None``, ``env``
-    is ``None`` and ``gh`` inherits the parent process environment.
+    The subprocess environment is sourced from the module token state when set
+    (via :func:`set_gh_token_env`), so ``gh`` authenticates under the minted
+    installation token. Expiring tokens are refreshed before the subprocess is
+    launched. When no token state is configured, ``env`` is ``None`` and ``gh``
+    inherits the parent process environment.
 
     Returns:
         The completed process with text-decoded stdout/stderr.
@@ -298,7 +342,7 @@ def _run_gh(
     """
     if timeout is None:
         timeout = _gh_timeout()
-    token_env = get_gh_token_env()
+    token_env = _gh_token_env_for_request()
     env = {**os.environ, **token_env} if token_env is not None else None
     last_timeout: subprocess.TimeoutExpired | None = None
     for attempt in range(retries + 1):

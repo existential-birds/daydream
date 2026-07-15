@@ -468,7 +468,7 @@ async def test_stale_local_warning_fires(
     # Pin a wide recording console so the warning text is captured intact,
     # independent of terminal width (the warning renders through the lazily
     # imported ``daydream.agent.console``).
-    rec = Console(record=True, force_terminal=True, width=200)
+    rec = Console(record=True, force_terminal=True, width=200, height=25)
     monkeypatch.setattr("daydream.agent.console", rec)
 
     async with open_workspace(

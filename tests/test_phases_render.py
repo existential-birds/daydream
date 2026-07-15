@@ -36,7 +36,7 @@ from daydream.phases import (
 
 
 def _rec(monkeypatch: Any) -> Console:
-    rec = Console(record=True, force_terminal=True, width=100)
+    rec = Console(record=True, force_terminal=True, width=100, height=25)
     monkeypatch.setattr("daydream.phases.console", rec)
     return rec
 
