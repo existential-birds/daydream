@@ -21,8 +21,22 @@ from daydream.github_app import (
     mint_installation_token,
     mint_jwt,
     resolve_credentials,
+    resolve_run_identity,
     resolve_user_identity,
 )
+
+
+@pytest.fixture(autouse=True)
+def _block_real_gh(monkeypatch):
+    """Keep this suite hermetic even when the developer is authenticated."""
+    real_run = subprocess.run
+
+    def guarded_run(args, *pargs, **kwargs):
+        if args and args[0] == "gh":
+            raise AssertionError("test attempted to execute the real gh CLI")
+        return real_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded_run)
 
 
 def test_run_gh_injects_token_env_when_set():
@@ -41,6 +55,35 @@ def test_run_gh_injects_token_env_when_set():
         git_ops.reset_gh_token_env()
 
     assert captured["env"]["GH_TOKEN"] == "ghs_test123"
+
+
+def test_run_gh_refreshes_expired_token_before_request():
+    """An expired App token is replaced before the gh subprocess starts."""
+    captured = {}
+    refresh_calls = 0
+
+    def refresh():
+        nonlocal refresh_calls
+        refresh_calls += 1
+        return {"GH_TOKEN": "ghs_fresh"}, float("inf")
+
+    def spy_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    git_ops.set_gh_token_env(
+        {"GH_TOKEN": "ghs_expired"},
+        expires_at=0,
+        refresh=refresh,
+    )
+    try:
+        with patch("subprocess.run", side_effect=spy_run):
+            git_ops._run_gh(Path("/tmp"), ["api", "/user"])
+    finally:
+        git_ops.reset_gh_token_env()
+
+    assert refresh_calls == 1
+    assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
 
 
 def test_run_gh_passes_none_env_when_unset():
@@ -157,7 +200,7 @@ def test_mint_installation_token_happy_path():
     def fake_gh_api(repo, endpoint, **kwargs):
         calls.append((endpoint, kwargs))
         if "access_tokens" in endpoint:
-            return {"token": "ghs_minted"}
+            return {"token": "ghs_minted", "expires_at": "2099-01-01T00:00:00Z"}
         return [{"id": 999, "account": {"login": "MyOrg"}, "app_slug": "daydream-bot"}]
 
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
@@ -183,7 +226,7 @@ def test_mint_installation_token_missing_app_slug_yields_unknown_identity():
 
     def fake_gh_api(repo, endpoint, **kwargs):
         if "access_tokens" in endpoint:
-            return {"token": "ghs_minted"}
+            return {"token": "ghs_minted", "expires_at": "2099-01-01T00:00:00Z"}
         return [{"id": 999, "account": {"login": "myorg"}}]
 
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
@@ -218,7 +261,7 @@ def test_mint_installation_token_sets_and_clears_jwt_env():
     def fake_gh_api(repo, endpoint, **kwargs):
         seen_during["env"] = git_ops.get_gh_token_env()
         if "access_tokens" in endpoint:
-            return {"token": "ghs_x"}
+            return {"token": "ghs_x", "expires_at": "2099-01-01T00:00:00Z"}
         return [{"id": 7, "account": {"login": "myorg"}, "app_slug": "daydream-bot"}]
 
     git_ops.reset_gh_token_env()
@@ -228,6 +271,38 @@ def test_mint_installation_token_sets_and_clears_jwt_env():
     assert seen_during["env"] is not None
     assert "ghs_x" not in (seen_during["env"].get("GH_TOKEN") or "")  # JWT, not installation token
     assert git_ops.get_gh_token_env() is None  # restored after minting
+
+
+def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypatch):
+    """A long-running review remints before its next GitHub request."""
+    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", _TEST_PEM)
+    minted = 0
+    captured = {}
+
+    def fake_gh_api(repo, endpoint, **kwargs):
+        nonlocal minted
+        if endpoint == "/app/installations":
+            return [{"id": 999, "account": {"login": "myorg"}, "app_slug": "daydream-bot"}]
+        assert endpoint == "/app/installations/999/access_tokens"
+        minted += 1
+        if minted == 1:
+            return {"token": "ghs_expired", "expires_at": "1970-01-01T00:00:00Z"}
+        return {"token": "ghs_fresh", "expires_at": "9999-01-01T00:00:00Z"}
+
+    def spy_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, stdout="{}", stderr="")
+
+    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
+        identity = resolve_run_identity(Path("/tmp"), "myorg/myrepo", is_posting=True)
+
+        with patch("subprocess.run", side_effect=spy_run):
+            git_ops._run_gh(Path("/tmp"), ["api", "/user"])
+
+    assert identity == "daydream-bot[bot]"
+    assert minted == 2
+    assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
 
 
 def test_resolve_user_identity_returns_login():
@@ -313,6 +388,33 @@ def test_get_app_metadata_uses_bearer_jwt_and_clears_env():
     assert seen["headers"]["Authorization"].startswith("Bearer ey")
     assert seen["env"] is not None  # JWT scoped during the call
     assert git_ops.get_gh_token_env() is None  # restored after
+
+
+def test_get_app_metadata_restores_refreshable_token_state():
+    """A scoped App JWT preserves the installation token's refresh behavior."""
+    captured = {}
+    refresh_calls = 0
+
+    def refresh():
+        nonlocal refresh_calls
+        refresh_calls += 1
+        return {"GH_TOKEN": "ghs_fresh"}, float("inf")
+
+    def spy_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    git_ops.set_gh_token_env({"GH_TOKEN": "ghs_expired"}, expires_at=0, refresh=refresh)
+    try:
+        with patch("daydream.git_ops.gh_api", return_value={"permissions": {}, "slug": "acme-bot"}):
+            get_app_metadata(Path("."), 42, _TEST_PEM)
+        with patch("subprocess.run", side_effect=spy_run):
+            git_ops._run_gh(Path("/tmp"), ["api", "/user"])
+    finally:
+        git_ops.reset_gh_token_env()
+
+    assert refresh_calls == 1
+    assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
 
 
 def test_get_app_metadata_wraps_gh_api_failure():
