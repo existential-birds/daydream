@@ -64,7 +64,9 @@ async def test_log_mode_captures_structured_output(monkeypatch, tmp_path, capsys
         backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"}
     )
     assert result == PAYLOAD  # captured, not discarded
-    assert "[result]" in capsys.readouterr().out  # log-mode print is additive, still happens
+    out = capsys.readouterr().out
+    assert "[result]" in out  # log-mode print is additive, still happens
+    assert "OpenAPI First" in out  # the serialized payload, not just the marker
 
 
 async def test_log_mode_structured_result_wins_over_prose_stray_json(monkeypatch, tmp_path):
