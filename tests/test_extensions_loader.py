@@ -30,3 +30,12 @@ def test_register_exception_is_wrapped_and_named(ext_dir: ExtDir) -> None:
     ext_dir.write_module("DAYDREAM_EXT_API = 2\ndef register(registry):\n    raise RuntimeError('boom')\n")
     with pytest.raises(ExtensionError, match=r"daydream_ext.*boom"):
         build_registry()
+
+
+def test_supported_range_invariant() -> None:
+    from daydream.extensions import (
+        EXTENSION_API_VERSION,
+        MIN_SUPPORTED_EXTENSION_API_VERSION,
+    )
+
+    assert 1 <= MIN_SUPPORTED_EXTENSION_API_VERSION <= EXTENSION_API_VERSION

@@ -9,7 +9,7 @@ programs against, and the policy for when those names may change. A drift-guard
 test (`tests/test_extension_contract_doc.py`) pins this document to the
 registered inventories in the code.
 
-Current contract version: **`EXTENSION_API_VERSION = 2`**.
+Current contract version: **`EXTENSION_API_VERSION = 2`** (supported: `1..2`).
 
 ## Extension module contract
 
@@ -41,6 +41,7 @@ The `daydream.extensions` package exports these contract symbols:
 | Symbol | Purpose |
 |--------|---------|
 | `EXTENSION_API_VERSION` | Running extension contract version |
+| `MIN_SUPPORTED_EXTENSION_API_VERSION` | Oldest extension contract version still accepted (range floor) |
 | `BreakLoop` | End the current loop group and continue the flow |
 | `ExtensionError` | Base error for extension failures |
 | `ExtensionVersionError` | Error for an absent or incompatible extension version |
@@ -67,8 +68,8 @@ The `daydream.extensions` package exports these contract symbols:
 
 A *present-but-broken* extension is a loud, named error before any workspace,
 recorder, or agent work happens: a missing or mismatched `DAYDREAM_EXT_API`
-raises `ExtensionVersionError` naming the module source path and both
-versions; a missing `register`, an import failure, or an exception inside
+raises `ExtensionVersionError` naming the module source path, the declared
+version, and the supported range; a missing `register`, an import failure, or an exception inside
 `register()` raises `ExtensionError` with the original message. All of them
 exit the run with code 1.
 
@@ -96,10 +97,26 @@ It bumps on **any** breaking change to:
 - the documented stable `ctx.data` keys below,
 - the tool-supervisor decision and findings-file semantics below.
 
-The loader hard-rejects an extension whose `DAYDREAM_EXT_API` does not equal
-the running daydream's `EXTENSION_API_VERSION` — there is no compatibility
-range. Additive changes (new steps, new slots, new prompts, new optional
-kwargs) do not bump the version.
+The loader accepts any `DAYDREAM_EXT_API` within the inclusive range
+`[MIN_SUPPORTED_EXTENSION_API_VERSION, EXTENSION_API_VERSION]` — the floor is
+the oldest contract the tool still understands and `EXTENSION_API_VERSION` is
+the ceiling. A declared version above the ceiling (newer than the tool
+understands), below the floor (a contract the tool has dropped), or absent is a
+loud `ExtensionVersionError` that exits the run with code 1.
+
+On a bump, advance `EXTENSION_API_VERSION`. An **additive** bump leaves the
+floor where it is, widening the supported window so a not-yet-upgraded
+extension keeps loading — that window is the deprecation window. A
+**hard-breaking** bump raises the floor to the new version in the same release,
+since no older extension can run against the changed contract. Deprecating an
+aged-out version later is one edit: raise the floor.
+
+Upgrade ordering: upgrade the tool before the extension. A newer tool runs an
+older in-range extension (the rolling-upgrade window), but an older tool cannot
+run a newer contract — forward compatibility is unachievable by any gate.
+
+Additive changes (new steps, new slots, new prompts, new optional kwargs) do
+not bump the version.
 
 ### Changelog
 
@@ -107,7 +124,8 @@ kwargs) do not bump the version.
   `ToolDecision` result, and the public `items_file` findings surface. The
   extension module literal is now `DAYDREAM_EXT_API = 2`.
 - **Version 1** — initial flow, skill, prompt, stack, loader, and validation
-  contract.
+  contract. Remains within the supported range (`1..2`) as the current
+  deprecation window: a v1 extension still loads under v2 tooling.
 
 ## Tool supervision
 
