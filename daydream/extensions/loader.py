@@ -23,6 +23,7 @@ from types import ModuleType
 
 from daydream.extensions.api import (
     EXTENSION_API_VERSION,
+    MIN_SUPPORTED_EXTENSION_API_VERSION,
     ExtensionError,
     ExtensionVersionError,
 )
@@ -71,12 +72,14 @@ def _require_version(module: ModuleType, source: str) -> None:
     if version is None:
         raise ExtensionVersionError(
             f"extension module at {source} does not export DAYDREAM_EXT_API; "
-            f"this daydream expects {EXTENSION_API_VERSION} (see {_CONTRACT_DOC})"
+            f"this daydream supports {MIN_SUPPORTED_EXTENSION_API_VERSION}..{EXTENSION_API_VERSION} "
+            f"(see {_CONTRACT_DOC})"
         )
-    if version != EXTENSION_API_VERSION:
+    if not (MIN_SUPPORTED_EXTENSION_API_VERSION <= version <= EXTENSION_API_VERSION):
         raise ExtensionVersionError(
             f"extension module at {source} declares DAYDREAM_EXT_API = {version!r}; "
-            f"this daydream expects {EXTENSION_API_VERSION} (see {_CONTRACT_DOC})"
+            f"this daydream supports {MIN_SUPPORTED_EXTENSION_API_VERSION}..{EXTENSION_API_VERSION} "
+            f"(see {_CONTRACT_DOC})"
         )
 
 

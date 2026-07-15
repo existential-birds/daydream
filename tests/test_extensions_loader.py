@@ -19,10 +19,28 @@ def test_loader_applies_extension(ext_dir: ExtDir) -> None:
     assert build_registry().skill("structural") == "ro-core:review-structure"
 
 
-def test_version_mismatch_names_both_versions(ext_dir: ExtDir) -> None:
-    # Intentional incompatibility fixture: 99 must remain rejected by the v2 gate.
+def test_supported_nonpreferred_version_is_accepted(ext_dir: ExtDir) -> None:
+    # DAYDREAM_EXT_API = 1 is within the supported range but below the preferred
+    # version: the rolling-upgrade window (issue #274). Strict equality rejected it.
+    ext_dir.write_module(
+        "DAYDREAM_EXT_API = 1\n"
+        "def register(registry):\n"
+        "    registry.override_skill('structural', 'ro-core:review-structure')\n"
+    )
+    assert build_registry().skill("structural") == "ro-core:review-structure"
+
+
+def test_version_above_ceiling_is_rejected(ext_dir: ExtDir) -> None:
+    # 99 is above the ceiling.
     ext_dir.write_module("DAYDREAM_EXT_API = 99\ndef register(registry): ...\n")
-    with pytest.raises(ExtensionVersionError, match=r"99.*expects 2|expects 2.*99"):
+    with pytest.raises(ExtensionVersionError, match=r"99.*supports 1\.\.2"):
+        build_registry()
+
+
+def test_version_below_floor_is_rejected(ext_dir: ExtDir) -> None:
+    # Below the supported floor: a contract the tool has dropped.
+    ext_dir.write_module("DAYDREAM_EXT_API = 0\ndef register(registry): ...\n")
+    with pytest.raises(ExtensionVersionError, match=r"= 0;.*supports 1\.\.2"):
         build_registry()
 
 
