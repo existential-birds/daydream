@@ -6,6 +6,7 @@ against: the versioned contract types from ``api`` and the ``Registry``.
 
 from daydream.extensions.api import (
     EXTENSION_API_VERSION,
+    MIN_SUPPORTED_EXTENSION_API_VERSION,
     BreakLoop,
     ExtensionError,
     ExtensionVersionError,
@@ -22,6 +23,7 @@ from daydream.extensions.registry import Registry
 
 __all__ = [
     "EXTENSION_API_VERSION",
+    "MIN_SUPPORTED_EXTENSION_API_VERSION",
     "BreakLoop",
     "ExtensionError",
     "ExtensionVersionError",

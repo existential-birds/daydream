@@ -90,7 +90,7 @@ async def test_version_mismatch_exits_1_naming_versions(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A DAYDREAM_EXT_API mismatch exits 1 naming both versions, before any git work."""
-    # Intentional incompatibility fixture: 99 must remain rejected by the v2 gate.
+    # 99 is above the ceiling.
     ext_dir.write_module("DAYDREAM_EXT_API = 99\ndef register(r): ...\n")
     backend = RecordingBackend()
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
