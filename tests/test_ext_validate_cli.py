@@ -91,6 +91,13 @@ def test_ext_validate_broken_ref(ext_dir, capsys) -> None:
     assert "ghost" in strip_ansi(capsys.readouterr().out)
 
 
+def test_ext_validate_reports_supported_range(ext_dir, capsys) -> None:
+    ext_dir.write_module("DAYDREAM_EXT_API = 2\ndef register(r): ...\n")
+    rc = _run_main(["ext", "validate"])
+    assert rc == 0
+    assert "supported: 1..2" in strip_ansi(capsys.readouterr().out).lower()
+
+
 def test_bare_ext_prints_help_exits_2(capsys) -> None:
     rc = _run_main(["ext"])
     assert rc == 2
