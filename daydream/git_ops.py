@@ -44,8 +44,9 @@ import re
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Generator
 
 _logger = logging.getLogger(__name__)
 
@@ -101,6 +102,17 @@ def get_gh_token_env() -> dict[str, str] | None:
         process environment.
     """
     return _gh_token_env
+
+
+@contextmanager
+def scoped_gh_token_env(env: dict[str, str] | None) -> Generator[None, None, None]:
+    """Temporarily replace the complete ``gh`` token state."""
+    prior = (_gh_token_env, _gh_token_expires_at, _gh_token_refresh)
+    set_gh_token_env(env)
+    try:
+        yield
+    finally:
+        set_gh_token_env(prior[0], expires_at=prior[1], refresh=prior[2])
 
 
 def reset_gh_token_env() -> None:

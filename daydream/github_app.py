@@ -124,12 +124,8 @@ def build_gh_env(token: str) -> dict[str, str]:
 @contextmanager
 def _scoped_gh_token(token: str) -> Generator[None, None, None]:
     """Temporarily set the git_ops GH token singleton, restoring it on exit."""
-    prior = git_ops.get_gh_token_env()
-    git_ops.set_gh_token_env(build_gh_env(token))
-    try:
+    with git_ops.scoped_gh_token_env(build_gh_env(token)):
         yield
-    finally:
-        git_ops.set_gh_token_env(prior)
 
 
 def mint_installation_token(repo_dir: Path, app_id: int, private_key: str, owner: str, repo: str) -> tuple[str, str]:
@@ -213,7 +209,12 @@ def _exchange_for_token(
     repo: str,
     headers: dict[str, str],
 ) -> tuple[str, float]:
-    """Exchange an installation id for an access token scoped to *repo*."""
+    """Exchange an installation id for an access token scoped to *repo*.
+
+    Raises:
+        ValueError: If the API call fails, the response has missing or invalid
+            token data, or its expiry is missing or invalid.
+    """
     try:
         payload = git_ops.gh_api(
             repo_dir,

@@ -390,6 +390,33 @@ def test_get_app_metadata_uses_bearer_jwt_and_clears_env():
     assert git_ops.get_gh_token_env() is None  # restored after
 
 
+def test_get_app_metadata_restores_refreshable_token_state():
+    """A scoped App JWT preserves the installation token's refresh behavior."""
+    captured = {}
+    refresh_calls = 0
+
+    def refresh():
+        nonlocal refresh_calls
+        refresh_calls += 1
+        return {"GH_TOKEN": "ghs_fresh"}, float("inf")
+
+    def spy_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    git_ops.set_gh_token_env({"GH_TOKEN": "ghs_expired"}, expires_at=0, refresh=refresh)
+    try:
+        with patch("daydream.git_ops.gh_api", return_value={"permissions": {}, "slug": "acme-bot"}):
+            get_app_metadata(Path("."), 42, _TEST_PEM)
+        with patch("subprocess.run", side_effect=spy_run):
+            git_ops._run_gh(Path("/tmp"), ["api", "/user"])
+    finally:
+        git_ops.reset_gh_token_env()
+
+    assert refresh_calls == 1
+    assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
+
+
 def test_get_app_metadata_wraps_gh_api_failure():
     """A gh api failure (GitError) surfaces as GitHubAppError, never silent."""
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 401")):
