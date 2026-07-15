@@ -23,7 +23,7 @@ daydream_ext/
 `__init__.py` must export exactly two things:
 
 ```python
-DAYDREAM_EXT_API = 2          # must equal daydream's EXTENSION_API_VERSION
+DAYDREAM_EXT_API = 2          # must be within daydream's supported range
 
 def register(registry):       # receives a daydream.extensions.Registry
     ...                       # mutate flows / skills / prompts / stacks here
