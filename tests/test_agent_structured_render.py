@@ -48,3 +48,52 @@ async def test_plain_text_still_renders(monkeypatch, tmp_path):
     )
     result, _, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)  # no output_schema
     assert "narration here" in rec.export_text()
+
+
+async def test_log_mode_captures_structured_output(monkeypatch, tmp_path, capsys):
+    """Under --log, the structured result must still be captured, not just printed.
+
+    Regression: the log-mode print and the structured-result capture were an
+    if/elif, so --log dropped every structured result (run_agent returned "").
+    Downstream this emptied exploration conventions/dependencies and review
+    findings across the deep pipeline.
+    """
+    monkeypatch.setattr("daydream.agent._state.log_mode", True)
+    backend = MockBackend([ResultEvent(structured_output=PAYLOAD, continuation=None)])
+    result, _, _ = await run_agent(
+        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"}
+    )
+    assert result == PAYLOAD  # captured, not discarded
+    out = capsys.readouterr().out
+    assert "[result]" in out  # log-mode print is additive, still happens
+    assert "OpenAPI First" in out  # the serialized payload, not just the marker
+
+
+async def test_log_mode_structured_result_wins_over_prose_stray_json(monkeypatch, tmp_path):
+    """Under --log, prose containing stray JSON must not be scraped over the real result.
+
+    Regression for the deep cross-stack merge crash ("Cross-stack merge returned
+    no item list (got list)"): the merge agent narrates in prose while emitting a
+    ``{"items": [...]}`` structured result. When --log dropped the captured
+    structured result (the if/elif bug), run_agent fell through to the JSON
+    fallback, which scraped the stray ``[]`` out of prose like
+    "all source artifacts are empty: `[]`" and returned a bare list. The merge
+    phase's ``isinstance(result, dict)`` check then failed with "got list".
+
+    With the fix the captured structured result wins, so the payload survives as a
+    dict and the fallback never runs.
+    """
+    monkeypatch.setattr("daydream.agent._state.log_mode", True)
+    merge_prose = "All source artifacts are empty: `stack-python-records.json` is `[]`. Nothing to merge."
+    payload = {"items": []}
+    backend = MockBackend(
+        [
+            TextEvent(text=merge_prose),
+            ResultEvent(structured_output=payload, continuation=None),
+        ]
+    )
+    result, _, _ = await run_agent(
+        backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema={"type": "object"}
+    )
+    assert result == payload  # the captured dict, NOT the stray [] scraped from prose
+    assert isinstance(result, dict)  # the exact type the merge phase gate requires
