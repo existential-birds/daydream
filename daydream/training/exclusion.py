@@ -55,18 +55,6 @@ def load_copyleft_list() -> frozenset[str]:
     return _load_repo_slugs(COPYLEFT_PATH)
 
 
-def is_excluded(repo_slug: str | None) -> bool:
-    """Check whether a repo slug is on the C5 exclusion list.
-
-    Returns:
-        ``True`` if the slug is on the always-enforced exclusion list;
-        ``False`` when the slug is ``None`` or absent from the list.
-    """
-    if repo_slug is None:
-        return False
-    return repo_slug in load_exclusion_list()
-
-
 def is_copyleft(
     repo_slug: str | None,
     allow_list: frozenset[str],

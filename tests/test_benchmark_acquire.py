@@ -7,24 +7,12 @@ is a valid git remote, so there is NO network access.
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from daydream import git_ops
 from daydream.benchmark.acquire import acquire_checkout
-
-
-def _git(repo: Path, *args: str) -> str:
-    """Run a git command in *repo* and return stripped stdout (test helper)."""
-    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", *args],  # noqa: S607 - git is a trusted command
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return proc.stdout.strip()
+from tests.harness.git_helpers import git as _git
 
 
 @dataclass

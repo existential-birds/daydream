@@ -62,6 +62,40 @@ _SHELL_DETECT_COMMAND_PATTERN = re.compile(
 )
 
 
+def render_segments(source: str, segments: list[tuple[int, int, str, Style]], base_style: Style) -> Text:
+    """Resolve styled segments over ``source`` into Text, skipping overlaps.
+
+    Segments are applied sorted by start (longest-first on ties, so wider
+    matches win overlaps); gaps between them are filled with ``base_style``.
+    """
+    result = Text()
+
+    segments = sorted(segments, key=lambda x: (x[0], -(x[1] - x[0])))
+
+    pos = 0
+    used_ranges: list[tuple[int, int]] = []
+
+    for start, end, text, style in segments:
+        overlaps = any(
+            not (end <= used_start or start >= used_end)
+            for used_start, used_end in used_ranges
+        )
+        if overlaps:
+            continue
+
+        if start > pos:
+            result.append(source[pos:start], style=base_style)
+
+        result.append(text, style=style)
+        used_ranges.append((start, end))
+        pos = end
+
+    if pos < len(source):
+        result.append(source[pos:], style=base_style)
+
+    return result
+
+
 def _detect_shell_syntax(content: str) -> bool:
     """Detect if content looks like shell script or command output.
 
@@ -189,27 +223,5 @@ def _colorize_line(line: str, is_error: bool = False) -> Text:
         segments.append((match.start(), match.end(), match.group(1),
                         Style(color=NEON_COLORS["orange"], bold=True)))
 
-    # Sort by start, then longest-first, so wider matches win overlaps.
-    segments.sort(key=lambda x: (x[0], -(x[1] - x[0])))
-
-    last_end = 0
-    used_ranges: list[tuple[int, int]] = []
-
-    for start, end, text, style in segments:
-        overlaps = any(not (end <= used_start or start >= used_end)
-                      for used_start, used_end in used_ranges)
-        if overlaps:
-            continue
-
-        if start > last_end:
-            result.append(line[last_end:start],
-                         style=STYLE_FG)
-        result.append(text, style=style)
-        used_ranges.append((start, end))
-        last_end = end
-
-    if last_end < len(line):
-        result.append(line[last_end:],
-                     style=STYLE_FG)
-
+    result.append_text(render_segments(line, segments, STYLE_FG))
     return result

@@ -438,6 +438,28 @@ def test_grep_returns_empty_when_no_matches(tmp_path: Path) -> None:
     assert git_ops.grep(repo, "doesnotexistanywhere") == []
 
 
+def test_grep_word_matches_whole_words_only(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "whole.txt").write_text("the app runs\n")
+    (repo / "part.txt").write_text("the application runs\n")
+    _git(repo, "add", "whole.txt", "part.txt")
+    _commit(repo, "add files")
+    matches = git_ops.grep(repo, "app", word=True)
+    assert "whole.txt" in matches
+    assert "part.txt" not in matches
+
+
+def test_grep_pathspecs_restrict_search(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "code.py").write_text("widget = 1\n")
+    (repo / "notes.md").write_text("widget docs\n")
+    _git(repo, "add", "code.py", "notes.md")
+    _commit(repo, "add files")
+    matches = git_ops.grep(repo, "widget", pathspecs=("*.py",))
+    assert "code.py" in matches
+    assert "notes.md" not in matches
+
+
 def test_status_porcelain_clean_and_dirty(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     assert git_ops.status_porcelain(repo) == ""
@@ -1108,7 +1130,26 @@ def test_gh_api_jq_parses_ndjson_into_list(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setattr(git_ops, "_run_gh", fake_run_gh)
     result = git_ops.gh_api(tmp_path, "/app/installations", paginate=True, jq=".[]")
     assert result == [{"id": 1}, {"id": 2}]
-    assert captured["args"] == ["api", "--paginate", "--jq", ".[]", "/app/installations"]
+    assert captured["args"] == ["api", "--paginate", "--jq", "(.[]) | @json", "/app/installations"]
+
+
+def test_gh_api_jq_parses_raw_scalar_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """jq scalar output is returned as a one-item list."""
+    class _Proc:
+        returncode = 0
+        stdout = '"anderskev"\n'
+        stderr = ""
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run_gh(repo: Path, args: list[str], **kwargs: Any) -> _Proc:
+        captured["args"] = args
+        return _Proc()
+
+    monkeypatch.setattr(git_ops, "_run_gh", fake_run_gh)
+
+    assert git_ops.gh_api(tmp_path, "user", jq=".login") == ["anderskev"]
+    assert captured["args"] == ["api", "--jq", "(.login) | @json", "user"]
 
 
 def test_gh_api_headers_pass_dash_h_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

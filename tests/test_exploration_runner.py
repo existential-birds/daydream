@@ -11,16 +11,13 @@ import anyio
 from daydream.backends import AgentEvent, ResultEvent
 from daydream.exploration import FileInfo
 from daydream.exploration_runner import (
-    EXPLORATION_ENVELOPE_SCHEMA,
     count_changed_files,
     pre_scan,
     select_tier,
 )
 from daydream.prompts.exploration_subagents import (
     DEPENDENCY_TRACER_SCHEMA,
-    EXPLORATION_AGENTS,
     PATTERN_SCANNER_SCHEMA,
-    PATTERN_SCANNER_SYSTEM_PROMPT,
     TEST_MAPPER_SCHEMA,
     build_dependency_tracer_prompt,
     build_pattern_scanner_prompt,
@@ -33,20 +30,13 @@ FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
 # Subagent prompt sanity checks (Plan 03)
 def test_pattern_scanner_prompt_includes_guideline_files():
-    assert "CLAUDE.md" in PATTERN_SCANNER_SYSTEM_PROMPT
-
-    dynamic = build_pattern_scanner_prompt(["daydream/foo.py"], "main...HEAD", cwd=Path("/repo"))
+    files = [FileInfo("daydream/foo.py", "modified")]
+    dynamic = build_pattern_scanner_prompt(files, "main...HEAD", cwd=Path("/repo"))
     assert "CLAUDE.md" in dynamic
     assert "main...HEAD" in dynamic
     assert "daydream/foo.py" in dynamic
     # Regression guard: raw diff text must never be embedded.
     assert "<diff>" not in dynamic
-
-    assert set(EXPLORATION_AGENTS.keys()) == {"pattern-scanner", "dependency-tracer", "test-mapper"}
-    assert EXPLORATION_AGENTS["pattern-scanner"].model == "inherit"
-    assert "Read" in EXPLORATION_AGENTS["pattern-scanner"].tools
-    assert "Glob" in EXPLORATION_AGENTS["pattern-scanner"].tools
-    assert "Grep" in EXPLORATION_AGENTS["pattern-scanner"].tools
 
 
 def test_dependency_tracer_prompt_mentions_affected_files():
@@ -60,7 +50,8 @@ def test_dependency_tracer_prompt_mentions_affected_files():
 
 
 def test_test_mapper_prompt_instructs_mapping():
-    prompt = build_test_mapper_prompt(["daydream/x.py"], "main...HEAD", cwd=Path("/repo"))
+    files = [FileInfo("daydream/x.py", "modified")]
+    prompt = build_test_mapper_prompt(files, "main...HEAD", cwd=Path("/repo"))
     assert "test" in prompt.lower()
     assert "daydream/x.py" in prompt
     assert "main...HEAD" in prompt
@@ -70,7 +61,8 @@ def test_test_mapper_prompt_instructs_mapping():
 
 def test_pattern_scanner_prompt_contains_cwd_grounding():
     cwd = Path("/tmp/linked/worktree")
-    prompt = build_pattern_scanner_prompt(["daydream/foo.py"], "main...HEAD", cwd=cwd)
+    files = [FileInfo("daydream/foo.py", "modified")]
+    prompt = build_pattern_scanner_prompt(files, "main...HEAD", cwd=cwd)
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert str(cwd) in prompt
 
@@ -85,7 +77,8 @@ def test_dependency_tracer_prompt_contains_cwd_grounding():
 
 def test_test_mapper_prompt_contains_cwd_grounding():
     cwd = Path("/tmp/linked/worktree")
-    prompt = build_test_mapper_prompt(["daydream/x.py"], "main...HEAD", cwd=cwd)
+    files = [FileInfo("daydream/x.py", "modified")]
+    prompt = build_test_mapper_prompt(files, "main...HEAD", cwd=cwd)
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert str(cwd) in prompt
 
@@ -183,12 +176,6 @@ def test_select_tier_thresholds():
     assert select_tier(99) == "parallel"
 
 
-def test_envelope_schema_includes_three_subagent_keys():
-    props = EXPLORATION_ENVELOPE_SCHEMA["properties"]
-    assert set(props.keys()) == {"pattern_scanner", "dependency_tracer", "test_mapper"}
-    assert EXPLORATION_ENVELOPE_SCHEMA["type"] == "object"
-
-
 # Orchestrator tier dispatch
 def test_skip_tier_no_subagents(tmp_path):
     diff_text = (FIXTURES / "trivial_single.diff").read_text()
@@ -232,7 +219,7 @@ def test_parallel_tier_launches_three_agents(tmp_path):
     assert "use type hints" in ctx.guidelines
 
 
-def test_parallel_tier_routes_correct_file_lists(tmp_path):
+def test_parallel_tier_gives_every_specialist_the_same_list(tmp_path):
     py = (FIXTURES / "python_multifile.diff").read_text()
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts
@@ -240,7 +227,7 @@ def test_parallel_tier_routes_correct_file_lists(tmp_path):
     backend = _SpecialistMockBackend()
     anyio.run(pre_scan, backend, tmp_path, diff_text)
 
-    # Paths are now cwd-absolute (issue #221): rooted at repo_root (tmp_path).
+    # Paths are cwd-absolute (issue #221): rooted at repo_root (tmp_path).
     diff_changed = {
         str(tmp_path / p)
         for p in ("daydream_demo/api.py", "daydream_demo/models.py", "src/api.ts", "src/models.ts")
@@ -257,15 +244,19 @@ def test_parallel_tier_routes_correct_file_lists(tmp_path):
 
     assert set(calls_by_schema.keys()) == {"pattern_scanner", "dependency_tracer", "test_mapper"}
 
-    for name in ("pattern_scanner", "test_mapper"):
-        prompt = calls_by_schema[name]["prompt"]
-        for path in diff_changed:
-            assert f"- {path}" in prompt
-        assert "(modified)" not in prompt
+    def _affected_block(prompt: str) -> str:
+        start = prompt.index("<affected_files>")
+        end = prompt.index("</affected_files>", start) + len("</affected_files>")
+        return prompt[start:end]
 
-    dep_prompt = calls_by_schema["dependency_tracer"]["prompt"]
+    # Consolidation: every specialist receives a byte-identical affected-files
+    # block -- no per-specialist input split.
+    blocks = [_affected_block(calls_by_schema[name]["prompt"]) for name in calls_by_schema]
+    assert blocks[0] == blocks[1] == blocks[2]
+
+    # And the shared block lists every changed file, role-annotated and cwd-absolute.
     for path in diff_changed:
-        assert f"- {path} (modified)" in dep_prompt
+        assert f"- {path} (modified)" in blocks[0]
 
 
 def test_parse_envelope_handles_missing_keys(tmp_path):
@@ -328,8 +319,8 @@ def _multifile_diff(paths: list[str]) -> str:
     )
 
 
-def test_pre_scan_passes_cwd_absolute_changed_paths(tmp_path):
-    # 4 files => parallel tier => pattern_scanner & test_mapper receive changed_paths.
+def test_pre_scan_passes_cwd_absolute_paths(tmp_path):
+    # 4 files => parallel tier => all specialists receive the affected-files list.
     paths = [f"services/taste/file{i}.py" for i in range(4)]
     diff_text = _multifile_diff(paths)
     backend = _SpecialistMockBackend()
@@ -338,8 +329,9 @@ def test_pre_scan_passes_cwd_absolute_changed_paths(tmp_path):
 
     joined = "\n".join(c["prompt"] for c in backend.execute_calls)
     # Specialists receive cwd-absolute paths, never bare relatives.
-    assert str(tmp_path / "services/taste/file0.py") in joined
-    assert "- services/taste/file0.py\n" not in joined
+    for p in paths:
+        assert str(tmp_path / p) in joined
+        assert f"- {p} (" not in joined
 
 
 def test_pre_scan_passes_cwd_absolute_static_files(tmp_path, monkeypatch):
@@ -359,3 +351,29 @@ def test_pre_scan_passes_cwd_absolute_static_files(tmp_path, monkeypatch):
     dep_prompt = backend.execute_calls[0]["prompt"]
     assert str(tmp_path / "services/taste/dep.py") in dep_prompt
     assert "- services/taste/dep.py (" not in dep_prompt
+
+
+def test_pre_scan_fallback_uses_rename_new_path(tmp_path, monkeypatch):
+    """Fallback seeding is rename-aware: a renamed file seeds its new path, not the old one."""
+    import daydream.exploration_runner as er
+
+    # Force the fallback path: static resolution yields nothing.
+    monkeypatch.setattr(er, "detect_affected_files", lambda diff_text, repo_root, depth: [])
+    # A rename plus a second file => 2 files => single tier => dependency_tracer runs.
+    rename_diff = (
+        "diff --git a/services/taste/old_name.py b/services/taste/new_name.py\n"
+        "similarity index 95%\n"
+        "rename from services/taste/old_name.py\n"
+        "rename to services/taste/new_name.py\n"
+        "--- a/services/taste/old_name.py\n"
+        "+++ b/services/taste/new_name.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+    diff_text = rename_diff + _multifile_diff(["services/taste/other.py"])
+    backend = _SpecialistMockBackend()
+
+    anyio.run(pre_scan, backend, tmp_path, diff_text)
+
+    dep_prompt = backend.execute_calls[0]["prompt"]
+    assert str(tmp_path / "services/taste/new_name.py") in dep_prompt
+    assert "old_name.py" not in dep_prompt

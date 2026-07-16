@@ -15,10 +15,10 @@ from daydream import git_ops
 from daydream.github_app import (
     AppCredentials,
     GitHubAppError,
+    _mint_installation_token,
     build_gh_env,
     exchange_manifest_code,
     get_app_metadata,
-    mint_installation_token,
     mint_jwt,
     resolve_credentials,
     resolve_run_identity,
@@ -204,10 +204,10 @@ def test_mint_installation_token_happy_path():
         return [{"id": 999, "account": {"login": "MyOrg"}, "app_slug": "daydream-bot"}]
 
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
-        token, identity = mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
+        minted = _mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
 
-    assert token == "ghs_minted"
-    assert identity == "daydream-bot[bot]"
+    assert minted.token == "ghs_minted"
+    assert minted.identity == "daydream-bot[bot]"
     # Two API calls: list installations, then exchange. No extra GET /app.
     assert len(calls) == 2
     # GitHub only accepts App JWTs via the Bearer scheme, so both calls must
@@ -230,10 +230,10 @@ def test_mint_installation_token_missing_app_slug_yields_unknown_identity():
         return [{"id": 999, "account": {"login": "myorg"}}]
 
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
-        token, identity = mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
+        minted = _mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
 
-    assert token == "ghs_minted"
-    assert identity == "unknown"
+    assert minted.token == "ghs_minted"
+    assert minted.identity == "unknown"
 
 
 def test_mint_installation_token_no_matching_installation():
@@ -241,7 +241,7 @@ def test_mint_installation_token_no_matching_installation():
 
     with patch("daydream.git_ops.gh_api", return_value=[{"id": 1, "account": {"login": "other"}}]):
         with pytest.raises(ValueError, match="installation"):
-            mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
+            _mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
 
 
 def test_mint_installation_token_wraps_gh_api_failure():
@@ -250,7 +250,7 @@ def test_mint_installation_token_wraps_gh_api_failure():
 
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 401")):
         with pytest.raises(ValueError, match="failed to list App installations"):
-            mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
+            _mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
 
 
 def test_mint_installation_token_sets_and_clears_jwt_env():
@@ -266,7 +266,7 @@ def test_mint_installation_token_sets_and_clears_jwt_env():
 
     git_ops.reset_gh_token_env()
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
-        mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
+        _mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
 
     assert seen_during["env"] is not None
     assert "ghs_x" not in (seen_during["env"].get("GH_TOKEN") or "")  # JWT, not installation token

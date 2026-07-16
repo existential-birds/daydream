@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -25,22 +24,12 @@ from daydream.pr_review import (
     parsed_issues_from_items,
     snap_to_hunk,
 )
+from tests.harness.git_helpers import git as _git
 
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
 _gh_available = shutil.which("gh") is not None
 gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed")
 
-
-def _git(repo: Path, *args: str) -> str:
-    """Local helper for tests that need to script git directly."""
-    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", *args],  # noqa: S607 - git is a trusted command
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return proc.stdout.strip()
 
 def test_structural_item_becomes_parsed_issue():
     items = [{"id": 1, "lens": "structural", "file": "big.py", "line": 1,

@@ -1,4 +1,4 @@
-"""Exploration subagent prompts, output schemas, and AgentDefinition registry.
+"""Exploration subagent prompts and output schemas.
 
 Three specialist subagents power pre-scan exploration:
 
@@ -9,17 +9,14 @@ Three specialist subagents power pre-scan exploration:
 - **test-mapper**: locates test files for each modified source file via
   conventional path mapping.
 
-The orchestrator (Plan 04) wires these into Backend.execute() via the
-EXPLORATION_AGENTS registry and merges their partial ExplorationContext
-results with merge_contexts() in daydream.exploration.
+The orchestrator (daydream.exploration_runner) merges their partial
+ExplorationContext results with merge_contexts() in daydream.exploration.
 """
 
 from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any
-
-from claude_agent_sdk.types import AgentDefinition
 
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
@@ -121,42 +118,13 @@ def _schema_block(schema: dict[str, Any]) -> str:
     return "Return ONLY a JSON object matching this schema:\n```json\n" + json.dumps(schema, indent=2) + "\n```"
 
 
-# System prompts (static role description used by AgentDefinition.prompt)
-PATTERN_SCANNER_SYSTEM_PROMPT = """You are the **pattern-scanner** specialist. Your job is to detect the
-conventions and house style of a codebase so the review agent does not
-recommend changes that contradict existing patterns.
-
-Instructions:
-- Read CLAUDE.md at the repo root if it exists.
-- Read any other house-style config files you find (ruff.toml, .editorconfig, tsconfig.json, go.mod, Cargo.toml).
-- Infer conventions from the code itself where config files are silent.
-
-""" + _schema_block(PATTERN_SCANNER_SCHEMA)
-
-
-DEPENDENCY_TRACER_SYSTEM_PROMPT = """You are the **dependency-tracer** specialist. You extend the
-statically-resolved import graph by grepping for call sites and reading
-implementation files. Emit a Dependency edge for every import or call you
-confirm, and add any newly-discovered files to affected_files.
-
-""" + _schema_block(DEPENDENCY_TRACER_SCHEMA)
-
-
-TEST_MAPPER_SYSTEM_PROMPT = """You are the **test-mapper** specialist. For every modified source file,
-locate its tests using conventional path mapping:
-
-- `tests/test_X.py` for `daydream/X.py`
-- `*.test.ts` sibling for TypeScript modules
-- `*_test.go` sibling for Go modules
-- `tests/<crate>_test.rs` for Rust crates
-
-Emit a FileInfo entry with role="test" for each test file you find.
-
-""" + _schema_block(TEST_MAPPER_SCHEMA)
+def _files_block(affected_files: list[FileInfo]) -> str:
+    """Render the shared ``<affected_files>`` body: one ``- path (role)`` per entry."""
+    return "\n".join(f"- {f.path} ({f.role})" for f in affected_files) or "- (none yet)"
 
 
 # Dynamic prompt builders (per-run prompts injecting diff + affected files)
-def build_pattern_scanner_prompt(affected_files: list[str], diff_ref: str, *, cwd: Path) -> str:
+def build_pattern_scanner_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
     """Build the per-run pattern-scanner prompt.
 
     The prompt passes the affected file list and a diff ref. The specialist
@@ -164,11 +132,11 @@ def build_pattern_scanner_prompt(affected_files: list[str], diff_ref: str, *, cw
     receiving the full diff inline, which keeps context small for large diffs.
 
     Args:
-        affected_files: Paths of files touched by the diff under review.
+        affected_files: FileInfo entries for files reachable from the diff.
         diff_ref: Git ref (e.g. base branch or SHA) the specialist can diff against.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
     """
-    files_block = "\n".join(f"- {p}" for p in affected_files) or "- (none yet)"
+    files_block = _files_block(affected_files)
     return f"""You are the **pattern-scanner** specialist. Detect codebase conventions
 and read guideline files relevant to the changes below.
 
@@ -203,7 +171,7 @@ def build_dependency_tracer_prompt(affected_files: list[FileInfo], diff_ref: str
         diff_ref: Git ref the specialist can diff against when probing call sites.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
     """
-    files_block = "\n".join(f"- {f.path} ({f.role})" for f in affected_files) or "- (none yet)"
+    files_block = _files_block(affected_files)
     return f"""You are the **dependency-tracer** specialist. Extend the affected-files
 list beyond the static-resolved imports by grepping for call sites and
 reading the implementations. For every import or call edge you confirm,
@@ -223,7 +191,7 @@ work file-by-file so your context stays small.
 """
 
 
-def build_test_mapper_prompt(affected_files: list[str], diff_ref: str, *, cwd: Path) -> str:
+def build_test_mapper_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
     """Build the per-run test-mapper prompt.
 
     The prompt passes the affected file list and a diff ref. The specialist
@@ -231,11 +199,11 @@ def build_test_mapper_prompt(affected_files: list[str], diff_ref: str, *, cwd: P
     receiving the full diff inline.
 
     Args:
-        affected_files: Paths of files touched by the diff under review.
+        affected_files: FileInfo entries for files reachable from the diff.
         diff_ref: Git ref the specialist can diff against when locating test files.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
     """
-    files_block = "\n".join(f"- {p}" for p in affected_files) or "- (none yet)"
+    files_block = _files_block(affected_files)
     return f"""You are the **test-mapper** specialist. Locate test files for each modified
 source file using conventional path mapping (tests/test_X.py, *.test.ts,
 *_test.go, tests/<crate>_test.rs). Emit a FileInfo with role="test" for
@@ -255,37 +223,10 @@ work file-by-file so your context stays small.
 """
 
 
-# AgentDefinition registry consumed by the orchestrator (Plan 04)
-EXPLORATION_AGENTS: dict[str, AgentDefinition] = {
-    "pattern-scanner": AgentDefinition(
-        description="Detects codebase conventions and reads guideline files (CLAUDE.md, ruff.toml, etc).",
-        prompt=PATTERN_SCANNER_SYSTEM_PROMPT,
-        tools=["Bash", "Read", "Glob", "Grep"],
-        model="inherit",
-    ),
-    "dependency-tracer": AgentDefinition(
-        description="Extends the import graph by grepping call sites and emits Dependency edges.",
-        prompt=DEPENDENCY_TRACER_SYSTEM_PROMPT,
-        tools=["Bash", "Read", "Glob", "Grep"],
-        model="inherit",
-    ),
-    "test-mapper": AgentDefinition(
-        description="Locates test files for modified source files via conventional path mapping.",
-        prompt=TEST_MAPPER_SYSTEM_PROMPT,
-        tools=["Bash", "Read", "Glob", "Grep"],
-        model="inherit",
-    ),
-}
-
-
 __all__ = [
     "DEPENDENCY_TRACER_SCHEMA",
-    "DEPENDENCY_TRACER_SYSTEM_PROMPT",
-    "EXPLORATION_AGENTS",
     "PATTERN_SCANNER_SCHEMA",
-    "PATTERN_SCANNER_SYSTEM_PROMPT",
     "TEST_MAPPER_SCHEMA",
-    "TEST_MAPPER_SYSTEM_PROMPT",
     "build_dependency_tracer_prompt",
     "build_pattern_scanner_prompt",
     "build_test_mapper_prompt",

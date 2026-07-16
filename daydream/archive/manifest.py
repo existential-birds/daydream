@@ -271,7 +271,7 @@ def build_manifest(
         skill=config.skill,
         model=None,
         backend=backend_used,
-        review_backend=_resolved_backend_name(config, "review"),
+        review_backend=backend_used,
         fix_backend=_resolved_backend_name(config, "fix"),
         test_backend=_resolved_backend_name(config, "test"),
         review_only=config.output_mode == "review",

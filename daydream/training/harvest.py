@@ -434,6 +434,7 @@ def _build_rubric_pr(
     gh_api: Any,
     repo_clone: Path,
     pr_merge: PRMergeSignal | None = None,
+    changed_files: list[str],
 ) -> Rubric:
     """Compose all four signals for a row that originated from a PR.
 
@@ -442,8 +443,9 @@ def _build_rubric_pr(
             (already resolved by the caller before the catch boundary),
             ``pr_merge_signal`` is not called again. When ``None`` it is
             fetched here as before.
+        changed_files: Pre-decoded ``changed_files`` for ``row`` (the caller
+            already decoded the JSON column via ``_row_changed_files``).
     """
-    changed_files = _row_changed_files(row)
     signal_row = {**row, "changed_files": changed_files}
     if pr_merge is None:
         pr_merge = pr_merge_signal(signal_row, gh_api=gh_api)
@@ -492,9 +494,7 @@ def _build_rubric_local(
     # Invariant: the local-commit posterior is valid ONLY for PR-less runs. A
     # degraded PR row's merge evidence was merely unavailable, so emit "unknown"
     # rather than risk a "rejected" false negative.
-    if _row_is_pr(row):
-        local = LocalCommitAppliedSignal(verdict="unknown")
-    elif not clone_resolved:
+    if _row_is_pr(row) or not clone_resolved:
         local = LocalCommitAppliedSignal(verdict="unknown")
     else:
         try:
@@ -663,9 +663,10 @@ def build_annotation(
             discarded).
     """
     if _row_is_pr(row):
+        changed_files = _row_changed_files(row)
         try:
             _pr_merge = pr_merge_signal(
-                {**row, "changed_files": _row_changed_files(row)},
+                {**row, "changed_files": changed_files},
                 gh_api=gh_api,
             )
         except RateLimitError:
@@ -688,6 +689,7 @@ def build_annotation(
                 gh_api=gh_api,
                 repo_clone=repo_clone,
                 pr_merge=_pr_merge,
+                changed_files=changed_files,
             )
             valid_at = rubric.pr_merge.merged_at
             try:

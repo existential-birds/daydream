@@ -44,6 +44,7 @@ import re
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Generator
@@ -477,13 +478,7 @@ def amend_trailers(repo: Path, trailers: dict[str, str], *, message: str | None 
     for key, value in trailers.items():
         trailer_args += ["--trailer", f"{key}: {value}"]
 
-    if message is None:
-        msg_proc = _run_git(repo, ["log", "-1", "--format=%B", "HEAD"], timeout=5)
-        if msg_proc.returncode != 0:
-            raise GitError(f"cannot read HEAD message: {msg_proc.stderr.strip()}")
-        raw_message = msg_proc.stdout
-    else:
-        raw_message = message
+    raw_message = head_commit_message(repo) if message is None else message
 
     # Run directly, not via _run_git, because interpret-trailers needs stdin.
     try:
@@ -627,9 +622,7 @@ def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
 
     upstream = _resolve_upstream_if_remote_ahead(repo, base)
     if upstream is not None:
-        upstream_check = _run_git(repo, ["rev-parse", "--verify", upstream], timeout=5)
-        if upstream_check.returncode == 0:
-            preferred_ref = upstream
+        preferred_ref = upstream
 
     mb = _run_git(repo, ["merge-base", head, preferred_ref], timeout=5)
     if mb.returncode != 0:
@@ -638,12 +631,12 @@ def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
     return out or None
 
 
-def _resolve_upstream_if_remote_ahead(repo: Path, branch: str) -> str | None:
-    """Return ``<branch>@{upstream}`` iff it has commits the local branch lacks.
+def _upstream_and_ahead(repo: Path, branch: str) -> tuple[str | None, int]:
+    """Return ``(<branch>@{upstream} symbolic name, right-side ahead count)``.
 
-    Mirrors codex's ``resolve_upstream_if_remote_ahead``: parses the right-side
-    count from ``rev-list --left-right --count <branch>...<upstream>`` and
-    returns the upstream symbolic name when ``right > 0``.
+    Parses the right-side count from ``rev-list --left-right --count
+    <branch>...<upstream>``. Soft-failure semantics: returns ``(None, 0)`` when
+    *branch* has no configured upstream or the rev-list count cannot be read.
     """
     upstream_name_proc = _run_git(
         repo,
@@ -651,10 +644,10 @@ def _resolve_upstream_if_remote_ahead(repo: Path, branch: str) -> str | None:
         timeout=5,
     )
     if upstream_name_proc.returncode != 0:
-        return None
+        return None, 0
     upstream = upstream_name_proc.stdout.strip()
     if not upstream:
-        return None
+        return None, 0
 
     counts_proc = _run_git(
         repo,
@@ -662,13 +655,24 @@ def _resolve_upstream_if_remote_ahead(repo: Path, branch: str) -> str | None:
         timeout=5,
     )
     if counts_proc.returncode != 0:
-        return None
+        return None, 0
     parts = counts_proc.stdout.strip().split()
     try:
         right = int(parts[1]) if len(parts) >= 2 else 0
     except ValueError:
         right = 0
-    return upstream if right > 0 else None
+    return upstream, right
+
+
+def _resolve_upstream_if_remote_ahead(repo: Path, branch: str) -> str | None:
+    """Return ``<branch>@{upstream}`` iff it has commits the local branch lacks.
+
+    Mirrors codex's ``resolve_upstream_if_remote_ahead``: returns the upstream
+    symbolic name when the right-side count from :func:`_upstream_and_ahead`
+    is positive.
+    """
+    upstream, ahead = _upstream_and_ahead(repo, branch)
+    return upstream if ahead > 0 else None
 
 
 def _prefer_remote_base(repo: Path, base: str) -> str:
@@ -1037,14 +1041,38 @@ def show(repo: Path, ref: str, path: str) -> bytes:
     return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
 
 
-def grep(repo: Path, pattern: str) -> list[str]:
+def grep(
+    repo: Path,
+    pattern: str,
+    *,
+    word: bool = False,
+    pathspecs: Sequence[str] | None = None,
+) -> list[str]:
     """Return file paths matching *pattern* via ``git grep -l``.
+
+    Only tracked, non-ignored files are searched (``git grep`` semantics).
+
+    Args:
+        repo: Repository root to search.
+        pattern: Basic-regex pattern passed to ``git grep``.
+        word: When true, match only at word boundaries (``-w``) so ``app``
+            does not also match ``application`` or ``mapping``.
+        pathspecs: Optional ``git`` pathspecs limiting the search to matching
+            files (e.g. ``("*.py", "*.ts")``). When omitted, every tracked
+            file is searched.
 
     Raises:
         GitError: If ``git grep`` exits with an unexpected status.  Exit code
             ``1`` is "no matches" and is treated as success (empty list).
     """
-    proc = _run_git(repo, ["grep", "-l", "--", pattern], timeout=30)
+    args = ["grep", "-l"]
+    if word:
+        args.append("-w")
+    args.extend(["-e", pattern])
+    if pathspecs:
+        args.append("--")
+        args.extend(pathspecs)
+    proc = _run_git(repo, args, timeout=30)
     # git grep returns 1 when there are simply no matches.
     if proc.returncode not in (0, 1):
         raise GitError(f"git grep {pattern!r} failed: {proc.stderr.strip()}")
@@ -1085,21 +1113,16 @@ def changed_files(repo: Path) -> list[str]:
     """
     names: list[str] = []
     seen: set[str] = set()
-    for args in (
-        ["diff", "--name-only", "HEAD"],
-        ["ls-files", "--others", "--exclude-standard"],
-    ):
-        try:
-            proc = _run_git(repo, args, timeout=10)
-        except GitError:
-            continue
-        if proc.returncode != 0:
-            continue
-        for line in proc.stdout.splitlines():
-            name = line.strip()
-            if name and name not in seen:
-                seen.add(name)
-                names.append(name)
+    try:
+        proc = _run_git(repo, ["diff", "--name-only", "HEAD"], timeout=10)
+        tracked = proc.stdout.splitlines() if proc.returncode == 0 else []
+    except GitError:
+        tracked = []
+    for line in [*tracked, *list_untracked(repo)]:
+        name = line.strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
     return names
 
 
@@ -1150,28 +1173,7 @@ def upstream_ahead_count(repo: Path, branch: str) -> int:
         The right-side count from ``rev-list --left-right --count``. Returns
         ``0`` when *branch* has no configured upstream.
     """
-    upstream_name_proc = _run_git(
-        repo,
-        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", f"{branch}@{{upstream}}"],
-        timeout=5,
-    )
-    if upstream_name_proc.returncode != 0:
-        return 0
-    upstream = upstream_name_proc.stdout.strip()
-    if not upstream:
-        return 0
-    counts_proc = _run_git(
-        repo,
-        ["rev-list", "--left-right", "--count", f"{branch}...{upstream}"],
-        timeout=5,
-    )
-    if counts_proc.returncode != 0:
-        return 0
-    parts = counts_proc.stdout.strip().split()
-    try:
-        return int(parts[1]) if len(parts) >= 2 else 0
-    except ValueError:
-        return 0
+    return _upstream_and_ahead(repo, branch)[1]
 
 
 def check_ignore(repo: Path, path: str) -> bool:
@@ -1575,6 +1577,21 @@ def _gh_error_for(message: str, stderr: str) -> GitError:
     return RateLimitError(message, retry_after=retry_after)
 
 
+def _parse_gh_json(stdout: str, jq: str | None, endpoint: str, *, payload_note: str = "") -> Any:
+    """Parse ``gh api`` stdout: NDJSON list with *jq*, single JSON value otherwise.
+
+    Raises:
+        GitError: If the output is not valid JSON; *payload_note* is appended
+            to the message.
+    """
+    try:
+        if jq is not None:
+            return [json.loads(line) for line in stdout.splitlines() if line.strip()]
+        return json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise GitError(f"gh api {endpoint} returned invalid JSON: {exc}{payload_note}") from exc
+
+
 def gh_api(
     repo: Path,
     endpoint: str,
@@ -1596,8 +1613,8 @@ def gh_api(
             success the tempfile is removed; on failure it is preserved and
             its path is included in the raised :class:`GitError` so callers
             can inspect the exact request body that was sent.
-        jq: Optional ``gh --jq`` filter. The filtered stdout is parsed as
-            NDJSON (one JSON value per line) and returned as a list. With
+        jq: Optional ``gh --jq`` filter. Each filtered value is JSON-encoded,
+            then parsed as NDJSON and returned as a list. With
             ``paginate=True`` gh concatenates each page's raw JSON, which is
             not itself valid JSON for array endpoints — a filter like ``".[]"``
             flattens every page to one value per line instead.
@@ -1620,58 +1637,41 @@ def gh_api(
         GitError: If the call fails for any other reason or returns invalid JSON.
     """
     header_args = [arg for name, value in (headers or {}).items() for arg in ("-H", f"{name}: {value}")]
+    output_args: list[str] = []
+    if paginate:
+        output_args.append("--paginate")
+    if jq is not None:
+        output_args.extend(["--jq", f"({jq}) | @json"])
+    retries = _gh_retries() if idempotent else 0
+
     if input_data is None:
-        args = ["api", *header_args]
-        if method.upper() != "GET":
-            args.extend(["-X", method.upper()])
-        if paginate:
-            args.append("--paginate")
-        if jq is not None:
-            args.extend(["--jq", jq])
-        args.append(endpoint)
-        proc = _run_gh(repo, args, retries=_gh_retries() if idempotent else 0)
+        method_args = ["-X", method.upper()] if method.upper() != "GET" else []
+        args = ["api", *header_args, *method_args, *output_args, endpoint]
+        proc = _run_gh(repo, args, retries=retries)
         if proc.returncode != 0:
             raise _gh_error_for(f"gh api {endpoint} failed: {proc.stderr.strip()}", proc.stderr)
-        try:
-            if jq is not None:
-                return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
-            return json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise GitError(f"gh api {endpoint} returned invalid JSON: {exc}") from exc
+        return _parse_gh_json(proc.stdout, jq, endpoint)
 
     # input_data path: serialise to a tempfile and shell out via `--input`.
     tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 - lifecycle managed below
         suffix=".json", mode="w", delete=False, encoding="utf-8"
     )
     tmp_path = Path(tmp.name)
+    payload_note = f" (request payload preserved at {tmp_path})"
     succeeded = False
     try:
         try:
             json.dump(input_data, tmp)
         finally:
             tmp.close()
-        args = ["api", *header_args, endpoint, "--method", method.upper(), "--input", str(tmp_path)]
-        if paginate:
-            args.append("--paginate")
-        if jq is not None:
-            args.extend(["--jq", jq])
-        proc = _run_gh(repo, args, retries=_gh_retries() if idempotent else 0)
+        args = ["api", *header_args, endpoint, "--method", method.upper(), "--input", str(tmp_path), *output_args]
+        proc = _run_gh(repo, args, retries=retries)
         if proc.returncode != 0:
             raise _gh_error_for(
-                f"gh api {endpoint} failed: {proc.stderr.strip()} "
-                f"(request payload preserved at {tmp_path})",
+                f"gh api {endpoint} failed: {proc.stderr.strip()}{payload_note}",
                 proc.stderr,
             )
-        try:
-            if jq is not None:
-                result = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
-            else:
-                result = json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise GitError(
-                f"gh api {endpoint} returned invalid JSON: {exc} "
-                f"(request payload preserved at {tmp_path})"
-            ) from exc
+        result = _parse_gh_json(proc.stdout, jq, endpoint, payload_note=payload_note)
         succeeded = True
         return result
     finally:

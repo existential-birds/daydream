@@ -160,6 +160,17 @@ class AnthropicJsonClient:
             return await _complete_json_with_http(http, payload=payload, headers=headers)
 
 
+def _load_json_dict(path: Path, *, required: bool, missing_hint: str = "") -> dict[str, Any]:
+    if not path.exists():
+        if required:
+            raise BenchmarkArtifactError(f"{path} not found; {missing_hint}")
+        return {}
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise BenchmarkStepError(f"{path} must contain a JSON object.")
+    return data
+
+
 async def run_anthropic_extraction(
     benchmark_repo: Path,
     judge_model: str,
@@ -169,22 +180,12 @@ async def run_anthropic_extraction(
 ) -> None:
     """Extract Martian-compatible candidate issues using direct Anthropic JSON calls."""
     benchmark_data_file = benchmark_repo / "results" / "benchmark_data.json"
-    if not benchmark_data_file.exists():
-        raise BenchmarkArtifactError(f"{benchmark_data_file} not found; cannot extract benchmark candidates.")
-
-    data = json.loads(benchmark_data_file.read_text())
-    if not isinstance(data, dict):
-        raise BenchmarkStepError(f"{benchmark_data_file} must contain a JSON object.")
+    data = _load_json_dict(benchmark_data_file, required=True, missing_hint="cannot extract benchmark candidates.")
 
     results_dir = model_results_dir(benchmark_repo, judge_model)
     results_dir.mkdir(parents=True, exist_ok=True)
     candidates_file = results_dir / "candidates.json"
-    if candidates_file.exists():
-        all_candidates = json.loads(candidates_file.read_text())
-        if not isinstance(all_candidates, dict):
-            raise BenchmarkStepError(f"{candidates_file} must contain a JSON object.")
-    else:
-        all_candidates = {}
+    all_candidates = _load_json_dict(candidates_file, required=False)
 
     for golden_url, entry in data.items():
         reviews = entry.get("reviews", []) if isinstance(entry, dict) else []
@@ -222,20 +223,12 @@ async def run_anthropic_dedup(
     """Write Martian-compatible dedup groups using direct Anthropic JSON calls."""
     results_dir = model_results_dir(benchmark_repo, judge_model)
     candidates_file = results_dir / "candidates.json"
-    if not candidates_file.exists():
-        raise BenchmarkArtifactError(f"{candidates_file} not found; cannot deduplicate benchmark candidates.")
-
-    all_candidates = json.loads(candidates_file.read_text())
-    if not isinstance(all_candidates, dict):
-        raise BenchmarkStepError(f"{candidates_file} must contain a JSON object.")
+    all_candidates = _load_json_dict(
+        candidates_file, required=True, missing_hint="cannot deduplicate benchmark candidates."
+    )
 
     groups_file = results_dir / "dedup_groups.json"
-    if groups_file.exists():
-        all_groups = json.loads(groups_file.read_text())
-        if not isinstance(all_groups, dict):
-            raise BenchmarkStepError(f"{groups_file} must contain a JSON object.")
-    else:
-        all_groups = {}
+    all_groups = _load_json_dict(groups_file, required=False)
 
     for golden_url, tools in all_candidates.items():
         if not isinstance(tools, dict):
@@ -304,37 +297,17 @@ async def run_anthropic_evaluation(
 ) -> dict[str, dict[str, Any]]:
     """Write Martian-compatible evaluations using direct Anthropic JSON calls."""
     benchmark_data_file = benchmark_repo / "results" / "benchmark_data.json"
-    if not benchmark_data_file.exists():
-        raise BenchmarkArtifactError(f"{benchmark_data_file} not found; cannot evaluate benchmark candidates.")
-
-    data = json.loads(benchmark_data_file.read_text())
-    if not isinstance(data, dict):
-        raise BenchmarkStepError(f"{benchmark_data_file} must contain a JSON object.")
+    data = _load_json_dict(benchmark_data_file, required=True, missing_hint="cannot evaluate benchmark candidates.")
 
     results_dir = model_results_dir(benchmark_repo, judge_model)
     candidates_file = results_dir / "candidates.json"
-    if candidates_file.exists():
-        all_candidates = json.loads(candidates_file.read_text())
-        if not isinstance(all_candidates, dict):
-            raise BenchmarkStepError(f"{candidates_file} must contain a JSON object.")
-    else:
-        all_candidates = {}
+    all_candidates = _load_json_dict(candidates_file, required=False)
 
     groups_file = results_dir / "dedup_groups.json"
-    if groups_file.exists():
-        all_dedup_groups = json.loads(groups_file.read_text())
-        if not isinstance(all_dedup_groups, dict):
-            raise BenchmarkStepError(f"{groups_file} must contain a JSON object.")
-    else:
-        all_dedup_groups = {}
+    all_dedup_groups = _load_json_dict(groups_file, required=False)
 
     evaluations_file = results_dir / "evaluations.json"
-    if evaluations_file.exists():
-        evals = json.loads(evaluations_file.read_text())
-        if not isinstance(evals, dict):
-            raise BenchmarkStepError(f"{evaluations_file} must contain a JSON object.")
-    else:
-        evals = {}
+    evals = _load_json_dict(evaluations_file, required=False)
 
     evaluated = 0
     for golden_url, entry in data.items():
@@ -374,11 +347,14 @@ async def run_anthropic_evaluation(
     return evals
 
 
+def _comment_bodies(review_comments: list[Any]) -> list[str]:
+    return [comment["body"] for comment in review_comments if isinstance(comment, dict) and comment.get("body")]
+
+
 def _get_all_comment_text(review_comments: Any) -> str:
     if not isinstance(review_comments, list):
         return ""
-    bodies = [comment["body"] for comment in review_comments if isinstance(comment, dict) and comment.get("body")]
-    return "\n\n---\n\n".join(bodies)
+    return "\n\n---\n\n".join(_comment_bodies(review_comments))
 
 
 def _get_candidates_for_review(review: dict[str, Any], all_candidates: dict[str, Any], golden_url: str) -> list[str]:
@@ -390,7 +366,7 @@ def _get_candidates_for_review(review: dict[str, Any], all_candidates: dict[str,
     review_comments = review.get("review_comments", [])
     if not isinstance(review_comments, list):
         return []
-    return [comment["body"] for comment in review_comments if isinstance(comment, dict) and comment.get("body")]
+    return _comment_bodies(review_comments)
 
 
 def _get_dedup_groups(all_dedup_groups: dict[str, Any], golden_url: str, tool: str) -> list[list[int]] | None:

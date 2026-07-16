@@ -572,16 +572,19 @@ def classify(
         if snapped is None:
             out.body_only.append(issue)
             continue
-        out.inline.append(
-            {
-                "path": issue.path,
-                "line": snapped,
-                "side": "RIGHT",
-                "body": _format_inline_body(issue),
-            }
-        )
+        out.inline.append(_inline_comment(issue, snapped))
         out.inline_issues.append(issue)
     return out
+
+
+def _inline_comment(issue: ParsedIssue, line: int) -> dict[str, Any]:
+    """Build one inline review-comment dict for the review payload."""
+    return {
+        "path": issue.path,
+        "line": line,
+        "side": "RIGHT",
+        "body": _format_inline_body(issue),
+    }
 
 
 _SEVERITY_EMOJI: dict[str, str] = {
@@ -598,12 +601,19 @@ def _severity_emoji(severity: str | None) -> str:
     return _SEVERITY_EMOJI.get(severity.lower(), "")
 
 
-def _format_inline_body(issue: ParsedIssue) -> str:
+def _issue_header(issue: ParsedIssue, *, prefix: str = "", always_bold: bool = False) -> str:
+    """Compose the emoji/title/tag header line for one issue."""
     emoji = _severity_emoji(issue.severity)
     title_prefix = f"{emoji} " if emoji else ""
-    header = f"{title_prefix}**{issue.title}**" if issue.title else ""
+    header = f"{title_prefix}**{prefix}{issue.title}**" if issue.title or always_bold else ""
     tags = _format_tag_line(issue)
-    header_line = f"{header} | {tags}" if header and tags else header or tags
+    if header and tags:
+        return f"{header} | {tags}"
+    return header or tags
+
+
+def _format_inline_body(issue: ParsedIssue) -> str:
+    header_line = _issue_header(issue)
     parts = [p for p in (header_line, issue.body) if p]
     agent_prompt = _build_agent_prompt(issue)
     parts.append(agent_prompt)
@@ -669,12 +679,7 @@ def _format_body_section(body_only: list[ParsedIssue]) -> str:
         )
         for i, issue in enumerate(file_issues):
             prefix = "[cross-stack] " if issue.is_cross_stack else ""
-            emoji = _severity_emoji(issue.severity)
-            title_prefix = f"{emoji} " if emoji else ""
-            tags = _format_tag_line(issue)
-            header = f"{title_prefix}**{prefix}{issue.title}**"
-            header_line = f"{header} | {tags}" if tags else header
-            parts.append(header_line)
+            parts.append(_issue_header(issue, prefix=prefix, always_bold=True))
             if issue.body:
                 parts.append(f"\n{issue.body}\n")
             parts.append(_build_agent_prompt(issue))
@@ -1032,14 +1037,7 @@ def post_findings_from_artifact(
             continue
         issue = _issue_from_artifact_finding(finding)
         if finding.placement == "inline" and finding.line is not None:
-            classified.inline.append(
-                {
-                    "path": finding.path,
-                    "line": finding.line,
-                    "side": "RIGHT",
-                    "body": _format_inline_body(issue),
-                }
-            )
+            classified.inline.append(_inline_comment(issue, finding.line))
             classified.inline_issues.append(issue)
         else:
             classified.body_only.append(issue)

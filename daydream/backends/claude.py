@@ -160,6 +160,28 @@ def _is_read_only_command(cmd: str) -> bool:
     )
 
 
+def _tool_input(input_data: Any) -> dict[str, Any]:
+    """Defensively extract ``tool_input`` from a PreToolUse payload ({} when malformed)."""
+    if isinstance(input_data, dict):
+        tool_input = input_data.get("tool_input")
+        if isinstance(tool_input, dict):
+            return tool_input
+    return {}
+
+
+def _bash_command(input_data: Any) -> str | None:
+    """Extract the Bash command from a PreToolUse payload.
+
+    Returns ``None`` when the payload is not a Bash tool call (or is malformed),
+    and ``""`` when it is Bash but the command is missing or not a string —
+    matching the guards' fail-closed defaults.
+    """
+    if not isinstance(input_data, dict) or input_data.get("tool_name") != "Bash":
+        return None
+    raw = _tool_input(input_data).get("command")
+    return raw if isinstance(raw, str) else ""
+
+
 def _read_only_deny(reason: str) -> HookJSONOutput:
     """Build a PreToolUse deny output (``permissionDecision="deny"``)."""
     return {
@@ -179,18 +201,14 @@ async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> H
     denies everything else. Fails closed: malformed input → deny.
     Returns ``{}`` (allow) only for a permitted tool/command.
     """
-    tool_name = input_data.get("tool_name") if isinstance(input_data, dict) else None
-    if tool_name == "Bash":
-        tool_input = input_data.get("tool_input") if isinstance(input_data, dict) else None
-        command = ""
-        if isinstance(tool_input, dict):
-            raw = tool_input.get("command")
-            command = raw if isinstance(raw, str) else ""
+    command = _bash_command(input_data)
+    if command is not None:
         if _is_read_only_command(command):
             return {}
         return _read_only_deny(
             f"read-only summarizer: non-read-only Bash command blocked: {command!r}"
         )
+    tool_name = input_data.get("tool_name") if isinstance(input_data, dict) else None
     if tool_name in _READ_ONLY_ALLOWED_TOOLS:
         return {}
     return _read_only_deny(
@@ -215,14 +233,9 @@ async def _dangerous_command_guard(input_data: Any, tool_use_id: Any, context: A
     root-anchored scans and wipes (see ``_is_dangerous_command``). Codex has no
     equivalent PreToolUse seam (out of scope; its enforcement is ``--sandbox``).
     """
-    tool_name = input_data.get("tool_name") if isinstance(input_data, dict) else None
-    if tool_name != "Bash":
+    command = _bash_command(input_data)
+    if command is None:
         return {}
-    tool_input = input_data.get("tool_input") if isinstance(input_data, dict) else None
-    command = ""
-    if isinstance(tool_input, dict):
-        raw = tool_input.get("command")
-        command = raw if isinstance(raw, str) else ""
     if _is_dangerous_command(command):
         return _read_only_deny(f"dangerous command blocked (always-on guard): {command!r}")
     return {}
@@ -261,8 +274,7 @@ def _make_skill_guard(allowed_skills: frozenset[str]) -> HookCallback:
         tool_name = input_data.get("tool_name") if isinstance(input_data, dict) else None
         if tool_name != "Skill":
             return {}
-        tool_input = input_data.get("tool_input") if isinstance(input_data, dict) else None
-        requested = tool_input.get("skill") if isinstance(tool_input, dict) else None
+        requested = _tool_input(input_data).get("skill")
         if isinstance(requested, str) and (
             requested in allowed_skills
             or requested.split(":", 1)[0].startswith(_CHAINABLE_SKILL_NAMESPACE_PREFIX)

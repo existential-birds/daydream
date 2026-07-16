@@ -32,6 +32,33 @@ def _latest_main_trajectory(daydream_dir: Path) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def _run_dir_trajectory_paths(run_dir: Path) -> list[Path]:
+    """``trajectory.json`` plus sorted ``trajectories/*.json`` directly under *run_dir*."""
+    paths: list[Path] = []
+    main_path = run_dir / "trajectory.json"
+    if main_path.is_file():
+        paths.append(main_path)
+    siblings_dir = run_dir / "trajectories"
+    if siblings_dir.is_dir():
+        paths.extend(f for f in sorted(siblings_dir.glob("*.json")) if f.is_file())
+    return paths
+
+
+def collect_trajectory_paths(run_dir: Path) -> list[Path]:
+    """Collect trajectory files for *run_dir*, main trajectory first.
+
+    Looks for ``trajectory.json`` plus ``trajectories/*.json`` directly under
+    *run_dir*; when neither exists, falls back to the most recently modified
+    ``runs/<session_id>/`` run beneath it.
+    """
+    paths = _run_dir_trajectory_paths(run_dir)
+    if not paths:
+        latest = _latest_main_trajectory(run_dir)
+        if latest:
+            paths = _run_dir_trajectory_paths(latest.parent)
+    return paths
+
+
 def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict:
     """Load trajectory files for a single session from a .daydream directory.
 
@@ -73,20 +100,14 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
             # latest is runs/<session_id>/trajectory.json — parent is the run dir
             run_dir = latest.parent
 
-    # --- Resolve the main trajectory ----------------------------------------
+    # --- Resolve the main and forked trajectories ---------------------------
     if run_dir:
-        main_path = run_dir / "trajectory.json"
-        if main_path.is_file():
-            main = json.loads(main_path.read_text())
-            main["_source_file"] = main_path.name
-
-    # --- Resolve forked trajectories ----------------------------------------
-    if run_dir:
-        traj_dir = run_dir / "trajectories"
-        if traj_dir.is_dir():
-            for f in sorted(traj_dir.glob("*.json")):
-                data = json.loads(f.read_text())
-                data["_source_file"] = f.name
+        for path in _run_dir_trajectory_paths(run_dir):
+            data = json.loads(path.read_text())
+            data["_source_file"] = path.name
+            if path.name == "trajectory.json":
+                main = data
+            else:
                 forked.append(data)
 
     return {"main": main, "forked": forked}
@@ -163,6 +184,14 @@ def _path_matches(absolute: str, relative: str) -> bool:
 
 # Analysis functions
 
+def _all_trajectories(trajectories: dict) -> list[dict]:
+    all_trajs: list[dict] = []
+    if trajectories["main"]:
+        all_trajs.append(trajectories["main"])
+    all_trajs.extend(trajectories["forked"])
+    return all_trajs
+
+
 def analyze_costs(trajectories: dict) -> dict:
     """Cost and token breakdown across all agents.
 
@@ -177,12 +206,7 @@ def analyze_costs(trajectories: dict) -> dict:
     ``prompt + cached`` in that case.
     """
     agents: list[dict] = []
-    all_trajs: list[dict] = []
-    if trajectories["main"]:
-        all_trajs.append(trajectories["main"])
-    all_trajs.extend(trajectories["forked"])
-
-    for traj in all_trajs:
+    for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
         fm = traj.get("final_metrics") or {}
         agents.append({
@@ -221,16 +245,11 @@ def analyze_costs(trajectories: dict) -> dict:
 
 def analyze_tools(trajectories: dict) -> dict:
     """Tool call counts, per-agent breakdown, and redundancy detection."""
-    all_trajs: list[dict] = []
-    if trajectories["main"]:
-        all_trajs.append(trajectories["main"])
-    all_trajs.extend(trajectories["forked"])
-
     total_counts: Counter = Counter()
     by_agent: dict[str, dict] = {}
     redundant_reads: list[dict] = []
 
-    for traj in all_trajs:
+    for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
         calls = _extract_tool_calls(traj)
         counts = Counter(tc["function_name"] for tc in calls)
@@ -434,12 +453,7 @@ def analyze_timing(trajectories: dict) -> dict:
     all_timestamps: list[datetime] = []
     agent_timings: list[dict] = []
 
-    all_trajs: list[dict] = []
-    if trajectories["main"]:
-        all_trajs.append(trajectories["main"])
-    all_trajs.extend(trajectories["forked"])
-
-    for traj in all_trajs:
+    for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
         ts_list = [
             _parse_iso_ts(s["timestamp"])
@@ -576,9 +590,7 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
         "session_id": session_id,
         "agent": agent_info,
         "daydream_dir": str(daydream_dir),
-        "trajectory_count": (
-            (1 if trajectories["main"] else 0) + len(trajectories["forked"])
-        ),
+        "trajectory_count": len(_all_trajectories(trajectories)),
         "cost": costs,
         "timing": timing,
         "tools": tools,

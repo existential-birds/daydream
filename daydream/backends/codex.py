@@ -29,7 +29,8 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.pricing import compute_cost, load_user_prices, resolve_prices
+from daydream.backends._subprocess import cancel_processes, terminate_process
+from daydream.pricing import compute_cost_from_totals, load_user_prices, resolve_prices
 
 _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
 _CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
@@ -75,7 +76,6 @@ class CodexBackend:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.fanout_concurrency = 4
-        self._process: asyncio.subprocess.Process | None = None
         self._processes: list[asyncio.subprocess.Process] = []
 
     async def execute(
@@ -191,7 +191,6 @@ class CodexBackend:
                 limit=_CODEX_STDOUT_LIMIT_BYTES,
             )
             self._processes.append(proc)
-            self._process = proc
 
             if proc.stdin:
                 proc.stdin.write(prompt.encode())
@@ -368,15 +367,10 @@ class CodexBackend:
                     reasoning_tokens = usage.get("reasoning_output_tokens")
                     in_tok = usage.get("input_tokens")
                     out_tok = usage.get("output_tokens")
-                    # cached_input_tokens is a SUBSET of input_tokens (D-15);
-                    # compute_cost expects uncached input. Clamp at 0 (mirror
-                    # pr_comment_renderer:346).
-                    cached = cached_tokens or 0
-                    uncached_input = max((in_tok or 0) - cached, 0)
-                    synth_cost = compute_cost(
-                        model=self.model,
-                        input_tokens=uncached_input,
-                        cached_input_tokens=cached,
+                    synth_cost = compute_cost_from_totals(
+                        self.model,
+                        total_input_tokens=in_tok or 0,
+                        cached_input_tokens=cached_tokens or 0,
                         output_tokens=out_tok or 0,
                         prices=resolve_prices(load_user_prices()),
                     )
@@ -453,14 +447,8 @@ class CodexBackend:
 
         finally:
             if proc is not None and proc.returncode is None:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                await terminate_process(proc)
             self._processes = [active for active in self._processes if active is not proc]
-            self._process = self._processes[-1] if self._processes else None
             if schema_path:
                 Path(schema_path).unlink(missing_ok=True)
 
@@ -469,15 +457,7 @@ class CodexBackend:
 
         Sends SIGTERM, waits briefly, then SIGKILL if still running.
         """
-        processes = list(self._processes)
-        for process in processes:
-            process.terminate()
-        for process in processes:
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+        await cancel_processes(self._processes)
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
         """Format a skill invocation for Codex.

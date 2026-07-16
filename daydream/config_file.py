@@ -243,18 +243,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     model = merged.get("model")
     backend = merged.get("backend")
     reasoning_effort = merged.get("reasoning_effort")
-    # shallow_fanout_threshold: tolerate non-int (stray string, list, etc.) by
-    # degrading to None rather than crashing the loader. ``0`` is a meaningful
-    # value (disable the short-circuit) so it must round-trip unchanged.
-    raw_threshold = merged.get("shallow_fanout_threshold")
-    threshold: int | None
-    if isinstance(raw_threshold, bool):
-        # bool is a subclass of int but never a meaningful threshold value.
-        threshold = None
-    elif isinstance(raw_threshold, int):
-        threshold = raw_threshold
-    else:
-        threshold = None
+    threshold = _coerce_int(merged.get("shallow_fanout_threshold"))
     # precision_mode: bool only. Any non-bool value (str, int, list) degrades to
     # None rather than crashing the loader; truthy ints are *not* coerced to True
     # so an accidental ``precision_mode = 1`` is treated as unset, not enabled.

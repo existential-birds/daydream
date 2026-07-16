@@ -31,7 +31,7 @@ from daydream.prompts.exploration_subagents import (
     build_test_mapper_prompt,
 )
 from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
-from daydream.tree_sitter_index import detect_affected_files
+from daydream.tree_sitter_index import _parse_diff_name_status, detect_affected_files
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -51,19 +51,6 @@ _SPECIALIST_TIMEOUT_SECONDS = 300  # 5 minutes
 # Cap subagents at 50 turns: on large repos they otherwise exhaust their
 # context window and lose track of the task (D-06 graceful degradation).
 EXPLORATION_MAX_TURNS = 50
-
-
-EXPLORATION_ENVELOPE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "pattern_scanner": PATTERN_SCANNER_SCHEMA,
-        "dependency_tracer": DEPENDENCY_TRACER_SCHEMA,
-        "test_mapper": TEST_MAPPER_SCHEMA,
-    },
-    # Any subset is allowed -- single tier only emits one key.
-    "required": [],
-    "additionalProperties": False,
-}
 
 
 def count_changed_files(diff_text: str) -> int:
@@ -225,10 +212,17 @@ async def pre_scan(
     except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
         pass
 
+    rel_paths = {m.group(1) for m in _DIFF_HEADER_RE.finditer(diff_text)}
+    if not static_files:
+        # Static resolution failed outright; still seed specialists with the
+        # changed files so they have a starting point. Reuse the rename-aware
+        # name/status parser so a renamed file seeds its new path, not the old.
+        changed = sorted({e.path for e in _parse_diff_name_status(diff_text)})
+        static_files = [FileInfo(path=p, role="modified") for p in changed]
+
     static_context = ExplorationContext(affected_files=static_files)
 
-    file_count = count_changed_files(diff_text)
-    tier = select_tier(file_count)
+    tier = select_tier(len(rel_paths))
 
     if tier == "skip":
         return static_context
@@ -250,15 +244,13 @@ async def pre_scan(
             except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
                 pass
 
-    # Pass only actually-changed paths to the test-mapper and pattern-scanner:
-    # they treat the list as "files to process" and fan out a tool call per
-    # entry, so the import-expanded static_files (10K+ on monorepos) would make
-    # them run 50+ minutes. The dependency-tracer still gets static_files.
+    # All three specialists receive the same affected-files list. It is bounded
+    # at its source (detect_affected_files caps reverse-import edges), so there
+    # is no per-specialist input split.
     #
-    # Paths handed to specialists are cwd-absolute (rooted at repo_root, the
-    # actual worktree). In a linked worktree the agent must not re-root a bare
-    # relative path via git topology, which points at the sibling main worktree.
-    changed_paths = sorted({str(repo_root / m.group(1)) for m in _DIFF_HEADER_RE.finditer(diff_text)})
+    # Paths are cwd-absolute (rooted at repo_root, the actual worktree). In a
+    # linked worktree the agent must not re-root a bare relative path via git
+    # topology, which points at the sibling main worktree.
     static_files_abs = [
         FileInfo(path=str(repo_root / f.path), role=f.role, summary=f.summary) for f in static_files
     ]
@@ -271,7 +263,7 @@ async def pre_scan(
             else:  # parallel
                 tg.start_soon(
                     _run_specialist, "pattern_scanner",
-                    build_pattern_scanner_prompt(changed_paths, diff_ref, cwd=repo_root), PATTERN_SCANNER_SCHEMA,
+                    build_pattern_scanner_prompt(static_files_abs, diff_ref, cwd=repo_root), PATTERN_SCANNER_SCHEMA,
                 )
                 tg.start_soon(
                     _run_specialist, "dependency_tracer",
@@ -280,7 +272,7 @@ async def pre_scan(
                 )
                 tg.start_soon(
                     _run_specialist, "test_mapper",
-                    build_test_mapper_prompt(changed_paths, diff_ref, cwd=repo_root), TEST_MAPPER_SCHEMA,
+                    build_test_mapper_prompt(static_files_abs, diff_ref, cwd=repo_root), TEST_MAPPER_SCHEMA,
                 )
 
     if recorder is not None:
@@ -294,7 +286,6 @@ async def pre_scan(
 
 
 __all__ = [
-    "EXPLORATION_ENVELOPE_SCHEMA",
     "Tier",
     "count_changed_files",
     "pre_scan",

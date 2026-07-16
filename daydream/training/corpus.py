@@ -51,7 +51,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import shutil
 import tempfile
 import warnings
@@ -64,6 +63,7 @@ from typing import Any
 from daydream.archive import get_archive_dir
 from daydream.archive.index import bulk_latest_label_observations, count_runs, normalize_as_of, query_runs
 from daydream.config import REVIEW_SKILLS
+from daydream.json_utils import atomic_write_json
 from daydream.training.exclusion import is_copyleft, load_copyleft_list, load_exclusion_list
 from daydream.training.harvest import _read_review_output
 from daydream.training.schema import TRAINING_SCHEMA_VERSION
@@ -217,7 +217,9 @@ def _build_record(
     manifest: dict[str, Any] | None = None,
     *,
     annotation: dict[str, Any] | None = None,
-    drop_label: bool = False,
+    label: str | None = None,
+    reward: dict[str, Any] | None = None,
+    composite_reward: float | None = None,
 ) -> dict[str, Any]:
     """Assemble a training record matching ``schema/v1.json``.
 
@@ -239,23 +241,25 @@ def _build_record(
     ``<archive_path>/deep/review-output.md`` fall back to that path. Root
     wins when both exist.
 
-    The ``outcome_label``, ``reward`` and ``composite_reward`` fields come from
-    the ``as_of``-pinned silver annotation passed as ``annotation`` — never from
-    the denormalized ``runs.outcome_labels`` cache. A run with no pinned
-    annotation (``annotation is None``) is unlabeled (``outcome_label=None``,
-    ``composite_reward=None``, no ``reward`` key).
+    The ``outcome_label``, ``reward`` and ``composite_reward`` fields are
+    passed in pre-computed by the caller from the ``as_of``-pinned silver
+    annotation — never from the denormalized ``runs.outcome_labels`` cache. A
+    run without a usable pinned annotation passes ``label=None``,
+    ``reward=None`` and
+    ``composite_reward=None`` (``outcome_label=None``, ``composite_reward=None``,
+    no ``reward`` key).
 
-    The temporal-leakage guard sets ``drop_label=True`` when the pinned
+    The temporal-leakage guard is applied by the caller: when the pinned
     annotation's ``valid_at`` is posterior to ``as_of`` (see
-    :func:`_is_posterior_leak`): ``outcome_label`` is forced to ``None``
-    (the posterior-derived label is excluded as future leakage) while the
+    :func:`_is_posterior_leak`) the caller passes ``label=None`` (the
+    posterior-derived label is excluded as future leakage) while the
     intrinsic ``reward``/``composite_reward`` — capture-time fields — are
     retained.
 
     Optional surfaced fields (additive — omitted when absent, never written
     as ``None`` unless the schema models a nullable scalar):
 
-    - ``reward``: the parsed ``annotation["reward_json"]`` dict, written
+    - ``reward``: the parsed ``reward_json`` dict passed as ``reward``, written
       verbatim with no transform. For an unlabeled run this is
       ``RewardBreakdown.to_dict()``; for a labeled (PR-outcome) run it is
       ``PosteriorBreakdown.to_dict()``, which additionally carries
@@ -263,7 +267,7 @@ def _build_record(
       **population discriminator** — present only on labeled rows (C3). The key
       is omitted entirely when the annotation has no ``reward_json`` or it is
       unparseable.
-    - ``composite_reward``: ``annotation["composite_reward"]`` scalar; written
+    - ``composite_reward``: the ``composite_reward`` scalar; written
       unconditionally (``null`` when uncomputable / unscored). The schema models
       it as a nullable scalar (``["number", "null"]``), so the ``None``
       placeholder is valid and every record carries the key uniformly.
@@ -287,11 +291,14 @@ def _build_record(
             falls back to the row scalars with ``base_sha=None`` and
             ``changed_files=[]``.
         annotation: The ``as_of``-pinned ``label_observations`` row (silver) for
-            this run, or ``None`` when the run has no in-time annotation. The
-            label, reward breakdown and composite scalar are sourced from here.
-        drop_label: When ``True`` (temporal-leakage guard), emit
-            ``outcome_label=None`` regardless of the annotation's label; the
-            intrinsic reward fields are still sourced from ``annotation``.
+            this run, or ``None`` when the run has no in-time annotation. Only
+            ``rubric_json`` is read from here.
+        label: The single outcome label pre-computed by the caller from the
+            pinned annotation (post temporal-leakage guard), or ``None``.
+        reward: The parsed ``reward_json`` dict from the pinned annotation, or
+            ``None`` when absent/unparseable.
+        composite_reward: The cached composite scalar from the pinned
+            annotation, or ``None``.
 
     Returns:
         A dict that validates against ``daydream/training/schema/v1.json``.
@@ -315,10 +322,6 @@ def _build_record(
         "available": recommended_path.is_file(),
         "archive_relative_path": "recommended.patch",
     }
-
-    # Label from the as_of-pinned silver annotation (NOT runs.outcome_labels);
-    # drop_label forces unlabeled when the outcome is posterior to as_of.
-    labels = [] if drop_label else _annotation_labels(annotation, manifest_row.get("session_id"))
 
     manifest_dict = manifest or {}
     code_ctx = manifest_dict.get("code_context") or {}
@@ -357,7 +360,7 @@ def _build_record(
         "review_output": review_output,
         "fix_diff_ref": fix_diff_ref,
         "recommended_diff_ref": recommended_diff_ref,
-        "outcome_label": _single_outcome_label(labels, manifest_row["session_id"]),
+        "outcome_label": label,
         "grounding_score": manifest_row.get("grounding_rate"),
         "spans": _build_spans(trajectory),
         "trajectory_ref": {"archive_relative_path": "trajectory.json"},
@@ -367,7 +370,6 @@ def _build_record(
     # reward is omitted when absent (additionalProperties:false). reward is
     # reward_json verbatim, so "posterior_cost" in reward is the population
     # discriminator (C3); composite_reward is the pure intrinsic composite (C5).
-    reward, composite_reward = _annotation_reward(annotation, manifest_row.get("session_id"))
     record["composite_reward"] = composite_reward
     if reward is not None:
         record["reward"] = reward
@@ -807,30 +809,14 @@ def _collapse_versions(versions: list[str | None]) -> str | list[str] | None:
     return distinct
 
 
-def _atomic_write_json(out_path: Path, payload: dict[str, Any]) -> None:
-    """Write ``payload`` to ``out_path`` atomically (tempfile + replace).
-
-    Mirrors the snapshot writer's pattern: a temp file in the destination
-    directory, an ``os.replace`` rename, and best-effort cleanup of the temp
-    file if writing fails. JSON is sorted and indented for stable diffs.
-    """
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=out_path.name + ".",
-        suffix=".tmp",
-        dir=str(out_path.parent),
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fp:
-            json.dump(payload, fp, indent=2, sort_keys=True)
-            fp.write("\n")
-        os.replace(tmp_path, out_path)
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except FileNotFoundError:
-            pass
-        raise
+def _summary(total: int, after_filters: int, after_stratify: int, emitted: int) -> dict[str, int]:
+    """Assemble the ``run_build_corpus`` summary dict."""
+    return {
+        "total_runs_in_index": total,
+        "after_filters": after_filters,
+        "after_stratify": after_stratify,
+        "emitted": emitted,
+    }
 
 
 def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
@@ -871,12 +857,7 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
         config.out_path.parent.mkdir(parents=True, exist_ok=True)
         schema_dst = config.out_path.parent / "schema.json"
         shutil.copyfile(SCHEMA_V1_PATH, schema_dst)
-        return {
-            "total_runs_in_index": 0,
-            "after_filters": 0,
-            "after_stratify": 0,
-            "emitted": 0,
-        }
+        return _summary(0, 0, 0, 0)
 
     # 2. Resolve archive dir.
     archive_dir = config.archive_dir or get_archive_dir()
@@ -940,10 +921,12 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
                 f"trajectory.json at {archive_path}",
             )
             continue
+        reward, _ = _annotation_reward(annotation, session_id)
         records.append(
             _build_record(
                 row, trajectory, row.get("stack"), manifest,
-                annotation=annotation, drop_label=posterior_leak,
+                annotation=annotation, label=label,
+                reward=reward, composite_reward=composite_reward,
             )
         )
         session_versions[session_id] = (
@@ -969,12 +952,7 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
         print_info(console, f"Dry run — after_filters: {after_filters}")
         print_info(console, f"Dry run — after_stratify: {after_stratify}")
         print_info(console, f"Dry run — would emit: {len(records)} records")
-        return {
-            "total_runs_in_index": total_in_index,
-            "after_filters": after_filters,
-            "after_stratify": after_stratify,
-            "emitted": 0,
-        }
+        return _summary(total_in_index, after_filters, after_stratify, 0)
 
     # 8. Atomic write — tempfile in same dir + Path.replace.
     config.out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1002,12 +980,7 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     #    falls back to write-time. Skipped when empty (an empty-set hash misleads).
     if not records:
         print_info(console, f"Wrote 0 records to {config.out_path} — skipping lineage manifest")
-        return {
-            "total_runs_in_index": total_in_index,
-            "after_filters": after_filters,
-            "after_stratify": after_stratify,
-            "emitted": 0,
-        }
+        return _summary(total_in_index, after_filters, after_stratify, 0)
     included_session_ids = [r["session_id"] for r in records]
     included_versions = [session_versions.get(sid, (None, None)) for sid in included_session_ids]
     resolved_as_of = config.as_of or datetime.now(timezone.utc).isoformat()
@@ -1018,12 +991,9 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
         "as_of": resolved_as_of,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    _atomic_write_json(config.out_path.parent / "lineage.json", lineage)
+    atomic_write_json(
+        config.out_path.parent / "lineage.json", lineage, sort_keys=True, trailing_newline=True, fsync=False
+    )
     print_info(console, f"Wrote {len(records)} records to {config.out_path}")
 
-    return {
-        "total_runs_in_index": total_in_index,
-        "after_filters": after_filters,
-        "after_stratify": after_stratify,
-        "emitted": len(records),
-    }
+    return _summary(total_in_index, after_filters, after_stratify, len(records))

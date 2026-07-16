@@ -18,13 +18,13 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Generator
 
 import jwt as pyjwt
 
 from daydream import git_ops
+from daydream.timeutil import parse_iso_timestamp
 
 APP_ID_ENV = "DAYDREAM_APP_ID"
 APP_PRIVATE_KEY_ENV = "DAYDREAM_APP_PRIVATE_KEY"
@@ -128,37 +128,19 @@ def _scoped_gh_token(token: str) -> Generator[None, None, None]:
         yield
 
 
-def mint_installation_token(repo_dir: Path, app_id: int, private_key: str, owner: str, repo: str) -> tuple[str, str]:
-    """Exchange App credentials for a scoped installation access token.
+@contextmanager
+def app_jwt_auth(app_id: int, private_key: str) -> Generator[dict[str, str], None, None]:
+    """Mint an App JWT and yield its ``Authorization: Bearer`` headers.
 
-    Mints an App JWT, lists the App's installations to find the one owned by
-    *owner*, and exchanges that installation for a short-lived access token.
-    Both API calls authenticate with an explicit ``Authorization: Bearer``
-    header carrying the JWT (the only scheme GitHub accepts for App JWTs);
+    GitHub only accepts App JWTs via the Bearer scheme (gh sends ``GH_TOKEN``
+    with the token scheme), so the yielded explicit header authenticates;
     the JWT is also injected as ``GH_TOKEN`` via the ``git_ops`` token
-    singleton for the duration of the two calls so ``gh`` runs without
-    ambient auth, then the prior singleton value is restored.
-
-    Args:
-        repo_dir: Working directory for the ``gh`` subprocesses.
-        app_id: Numeric GitHub App ID.
-        private_key: PEM-encoded RSA private key for RS256 JWT signing.
-        owner: Repository owner (org or user) whose installation to use.
-        repo: Repository name the minted token is scoped to.
-
-    Returns:
-        A ``(token, identity)`` tuple: the scoped installation access token and
-        the App's ``"{slug}[bot]"`` identity from the matched installation's
-        ``app_slug`` field, or ``"unknown"`` if the slug is absent (identity is
-        cosmetic and never fails the mint).
-
-    Raises:
-        ValueError: If listing installations fails, returns invalid JSON, has no
-            installation for *owner*, or the token exchange fails or omits the
-            ``token`` field.
+    singleton for the duration of the block so ``gh`` runs without ambient
+    auth, then the prior singleton value is restored.
     """
-    minted = _mint_installation_token(repo_dir, app_id, private_key, owner, repo)
-    return minted.token, minted.identity
+    jwt_token = mint_jwt(app_id, private_key)
+    with _scoped_gh_token(jwt_token):
+        yield {"Authorization": f"Bearer {jwt_token}"}
 
 
 def _mint_installation_token(
@@ -168,13 +150,23 @@ def _mint_installation_token(
     owner: str,
     repo: str,
 ) -> _InstallationToken:
-    """Mint an installation token while retaining its expiry metadata."""
-    jwt_token = mint_jwt(app_id, private_key)
-    # GitHub only accepts App JWTs as Bearer (gh sends GH_TOKEN as token scheme),
-    # so the explicit Bearer header authenticates; GH_TOKEN is set only so gh
-    # runs without ambient auth in CI rather than falling back to another identity.
-    bearer = {"Authorization": f"Bearer {jwt_token}"}
-    with _scoped_gh_token(jwt_token):
+    """Exchange App credentials for a scoped installation access token.
+
+    Mints an App JWT, lists the App's installations to find the one owned by
+    *owner*, and exchanges that installation for a short-lived access token.
+
+    Returns:
+        An :class:`_InstallationToken` carrying the scoped access token, the
+        App's ``"{slug}[bot]"`` identity from the matched installation's
+        ``app_slug`` field (``"unknown"`` if the slug is absent; identity is
+        cosmetic and never fails the mint), and the token expiry.
+
+    Raises:
+        ValueError: If listing installations fails, returns invalid JSON, has no
+            installation for *owner*, or the token exchange fails or omits the
+            ``token`` field.
+    """
+    with app_jwt_auth(app_id, private_key) as bearer:
         installation_id, identity = _find_installation(repo_dir, owner, repo, bearer)
         token, expires_at = _exchange_for_token(repo_dir, installation_id, owner, repo, bearer)
     return _InstallationToken(token=token, identity=identity, expires_at=expires_at)
@@ -233,7 +225,7 @@ def _exchange_for_token(
     if not isinstance(expires_at_raw, str) or not expires_at_raw:
         raise ValueError(f"installation token response for {owner}/{repo} is missing the 'expires_at' field")
     try:
-        expires_at = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00")).timestamp()
+        expires_at = parse_iso_timestamp(expires_at_raw).timestamp()
     except ValueError as exc:
         raise ValueError(f"installation token response for {owner}/{repo} has invalid 'expires_at'") from exc
     return token, expires_at
@@ -301,9 +293,7 @@ def get_app_metadata(repo_dir: Path, app_id: int, private_key: str) -> dict:
     Raises:
         GitHubAppError: If the call fails or returns a non-object payload.
     """
-    jwt_token = mint_jwt(app_id, private_key)
-    bearer = {"Authorization": f"Bearer {jwt_token}"}
-    with _scoped_gh_token(jwt_token):
+    with app_jwt_auth(app_id, private_key) as bearer:
         try:
             payload = git_ops.gh_api(repo_dir, "/app", headers=bearer, idempotent=True)
         except git_ops.GitError as exc:

@@ -176,42 +176,45 @@ async def _step_parse(ctx: FlowContext) -> Stop | BreakLoop | None:
     config = ctx.config
     work = ctx.work
 
+    try:
+        async with phase_scope(DaydreamPhase.PARSE):
+            items = await phase_parse_feedback(ctx.backend_for("parse"), work)
+
+        if config.loop and not items:
+            print_info(console, f"Clean review on iteration {ctx.data['iteration']}")
+            ctx.data["loop_broke"] = True
+            return BreakLoop()  # should_continue=False (clean)
+
+        # Canonicalize onto the lens/severity axes, then fix high→low.
+        items = severity_sorted(to_canonical_shallow(items))
+    except ValueError as exc:
+        print_error(console, "Phase 2 Error", str(exc))
+        print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
+        return Stop(1)
+
     if config.loop:
-        try:
-            async with phase_scope(DaydreamPhase.PARSE):
-                items = await phase_parse_feedback(ctx.backend_for("parse"), work)
-
-            if not items:
-                print_info(console, f"Clean review on iteration {ctx.data['iteration']}")
-                ctx.data["loop_broke"] = True
-                return BreakLoop()  # should_continue=False (clean)
-
-            # Canonicalize onto the lens/severity axes, then fix high→low.
-            items = severity_sorted(to_canonical_shallow(items))
-        except ValueError as exc:
-            print_error(console, "Phase 2 Error", str(exc))
-            print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
-            return Stop(1)
         ctx.data["items"] = items
         ctx.data["feedback_items"].extend(items)
     else:
-        try:
-            async with phase_scope(DaydreamPhase.PARSE):
-                feedback_items = await phase_parse_feedback(ctx.backend_for("parse"), work)
-        except ValueError as exc:
-            print_error(console, "Phase 2 Error", str(exc))
-            print_error(console, "Parse Failed", "Failed to parse feedback. Exiting.")
-            return Stop(1)
-        # Canonicalize onto the lens/severity axes, then fix high→low.
-        ctx.data["feedback_items"] = severity_sorted(to_canonical_shallow(feedback_items))
+        ctx.data["feedback_items"] = items
     return None
+
+
+def _capture_recommended(ctx: FlowContext) -> None:
+    """Capture the cumulative recommended patch against the pre-first-fix base."""
+    target_dir = ctx.work.repo
+    git_ops.capture_recommended_patch_with_base(
+        target_dir,
+        ctx.data["pre_fix_snapshot"],
+        ctx.data["pre_fix_head"],
+        target_dir / ".daydream" / "recommended.patch",
+    )
 
 
 async def _step_fix(ctx: FlowContext) -> None:
     """Apply a fix per feedback item (HEAL)."""
     config = ctx.config
     work = ctx.work
-    target_dir = work.repo
 
     if config.loop:
         items = ctx.data["items"]
@@ -227,12 +230,7 @@ async def _step_fix(ctx: FlowContext) -> None:
         # Capture the recommended patch NOW, before tests run and a failure
         # reverts the tree below. Overwritten each iteration so the file holds
         # the cumulative fix against the pre-first-fix base. Best-effort.
-        git_ops.capture_recommended_patch_with_base(
-            target_dir,
-            ctx.data["pre_fix_snapshot"],
-            ctx.data["pre_fix_head"],
-            target_dir / ".daydream" / "recommended.patch",
-        )
+        _capture_recommended(ctx)
     else:
         feedback_items = ctx.data["feedback_items"]
         if feedback_items:
@@ -281,12 +279,7 @@ async def _step_test(ctx: FlowContext) -> BreakLoop | None:
     else:
         # Capture the recommended patch NOW, before tests run and a failure
         # returns early below. Best-effort; never blocks the run.
-        git_ops.capture_recommended_patch_with_base(
-            target_dir,
-            ctx.data["pre_fix_snapshot"],
-            ctx.data["pre_fix_head"],
-            target_dir / ".daydream" / "recommended.patch",
-        )
+        _capture_recommended(ctx)
 
         async with phase_scope(DaydreamPhase.TEST):
             tests_passed, test_retries = await phase_test_and_heal(

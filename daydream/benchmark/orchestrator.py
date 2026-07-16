@@ -30,6 +30,7 @@ from daydream import git_ops
 from daydream.agent import console
 from daydream.benchmark.acquire import acquire_checkout
 from daydream.benchmark.benchmark_data import (
+    _find_review,
     has_daydream_review,
     inject_daydream_review,
     load_benchmark_data,
@@ -77,11 +78,10 @@ def _trajectory_path(config: BenchConfig, pr: EvaluablePR) -> Path:
 
 def _injected_comment_count(data: dict[str, Any], golden_url: str, tool: str) -> int:
     """Count the review comments injected for *golden_url* under *tool*."""
-    entry = data.get(golden_url, {})
-    for review in entry.get("reviews", []):
-        if review.get("tool") == tool:
-            return len(review.get("review_comments", []))
-    return 0
+    review = _find_review(data.get(golden_url, {}), tool)
+    if review is None:
+        return 0
+    return len(review.get("review_comments", []))
 
 
 def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> bool:

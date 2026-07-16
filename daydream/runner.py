@@ -453,26 +453,19 @@ def _resolve_backend(
     resolved_model = _resolved_model(config, phase)
     resolved_effort = _resolved_reasoning_effort(config, phase)
 
-    cache_key = (backend_name, resolved_model, resolved_effort)
-    if cache is not None:
-        if cache_key not in cache:
-            if backend_name == "pi":
-                cache[cache_key] = create_backend(
-                    backend_name, model=resolved_model, cwd=cwd
-                )
-            elif backend_name == "codex":
-                cache[cache_key] = create_backend(
-                    backend_name, model=resolved_model, reasoning_effort=resolved_effort
-                )
-            else:
-                cache[cache_key] = create_backend(backend_name, model=resolved_model)
-        return cache[cache_key]
+    def _make() -> Backend:
+        if backend_name == "pi":
+            return create_backend(backend_name, model=resolved_model, cwd=cwd)
+        if backend_name == "codex":
+            return create_backend(backend_name, model=resolved_model, reasoning_effort=resolved_effort)
+        return create_backend(backend_name, model=resolved_model)
 
-    if backend_name == "pi":
-        return create_backend(backend_name, model=resolved_model, cwd=cwd)
-    if backend_name == "codex":
-        return create_backend(backend_name, model=resolved_model, reasoning_effort=resolved_effort)
-    return create_backend(backend_name, model=resolved_model)
+    if cache is None:
+        return _make()
+    cache_key = (backend_name, resolved_model, resolved_effort)
+    if cache_key not in cache:
+        cache[cache_key] = _make()
+    return cache[cache_key]
 
 
 def _truthy(value: str | None) -> bool:
@@ -946,6 +939,20 @@ def _write_findings_for_parsed(
     return 0
 
 
+def _gather_diff_seed(work: WorkContext, config: RunConfig) -> tuple[str | None, str, str]:
+    """Gather the (diff, log, branch) git seed for a flow preamble.
+
+    The diff is None when the base branch cannot be resolved.
+    """
+    try:
+        diff: str | None = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
+    except GitError:
+        diff = None
+    log = _git_log(work.repo)
+    branch = work.head_branch or _git_branch(work.repo)
+    return diff, log, branch
+
+
 async def _run_review_or_comment(
     work: WorkContext, config: RunConfig, *, post_to_pr: bool,
 ) -> int:
@@ -965,12 +972,7 @@ async def _run_review_or_comment(
 
     # Gather git context using the resolved base branch from work (no
     # double-detection — base resolution is locked at workspace open time).
-    try:
-        diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
-    except GitError:
-        diff = None
-    log = _git_log(target_dir)
-    branch = work.head_branch or _git_branch(target_dir)
+    diff, log, branch = _gather_diff_seed(work, config)
 
     if diff is None:
         print_error(console, "Git Error", "Unable to determine base branch for diff")
@@ -1022,12 +1024,7 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
     assert flow_name is not None
     target_dir = work.repo
 
-    try:
-        diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
-    except GitError:
-        diff = None
-    log = _git_log(target_dir)
-    branch = work.head_branch or _git_branch(target_dir)
+    diff, log, branch = _gather_diff_seed(work, config)
 
     if not diff:
         print_dim(console, "No diff found — custom flow will run without a diff seed.")

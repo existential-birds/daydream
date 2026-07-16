@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -96,6 +97,14 @@ def _build_fix_style_suffix(concise_fix_prompts: bool) -> str:
     return f"\n{_FIX_CONCISE_STYLE}\n"
 
 
+def _tail_test_output(test_output: str) -> tuple[str, bool]:
+    """Return ``(text, truncated)``: the last TEST_OUTPUT_TAIL_LINES lines when longer, else the full output."""
+    lines = test_output.splitlines()
+    if len(lines) > TEST_OUTPUT_TAIL_LINES:
+        return "\n".join(lines[-TEST_OUTPUT_TAIL_LINES:]), True
+    return test_output, False
+
+
 def _build_fix_prompt(
     test_output: str,
     feedback_items: list[dict[str, Any]] | None = None,
@@ -117,10 +126,9 @@ def _build_fix_prompt(
         Prompt string with truncated test output and file list.
 
     """
-    lines = test_output.splitlines()
-    if len(lines) > TEST_OUTPUT_TAIL_LINES:
-        truncated = "\n".join(lines[-TEST_OUTPUT_TAIL_LINES:])
-        output_section = f"Here is the tail of the test output:\n\n{truncated}"
+    tail, truncated = _tail_test_output(test_output)
+    if truncated:
+        output_section = f"Here is the tail of the test output:\n\n{tail}"
     else:
         output_section = f"Here is the test output:\n\n{test_output}"
 
@@ -165,10 +173,9 @@ def _build_setup_investigator_prompt(test_output: str) -> str:
     Returns:
         Prompt string demanding a JSON verdict.
     """
-    lines = test_output.splitlines()
-    if len(lines) > TEST_OUTPUT_TAIL_LINES:
-        truncated = "\n".join(lines[-TEST_OUTPUT_TAIL_LINES:])
-        output_section = f"Tail of the failing test output:\n\n{truncated}"
+    tail, truncated = _tail_test_output(test_output)
+    if truncated:
+        output_section = f"Tail of the failing test output:\n\n{tail}"
     else:
         output_section = f"Failing test output:\n\n{test_output}"
 
@@ -274,6 +281,30 @@ async def _run_setup_investigator(
         return None
 
 
+def _artifacts_block(
+    trajectory_path: Path | None,
+    trajectories_dir: Path | None,
+    diff_path: Path | None,
+    manifest_path: Path | None,
+    deep_dir: Path | None,
+    *,
+    empty: str,
+) -> str:
+    """Render the on-disk artifact reference list for a handoff, or *empty* when none exist."""
+    artifact_lines: list[str] = []
+    if trajectory_path is not None:
+        artifact_lines.append(f"- trajectory: {trajectory_path}")
+    if trajectories_dir is not None:
+        artifact_lines.append(f"- sub-trajectories: {trajectories_dir}")
+    if diff_path is not None:
+        artifact_lines.append(f"- diff: {diff_path}")
+    if manifest_path is not None:
+        artifact_lines.append(f"- manifest: {manifest_path}")
+    if deep_dir is not None:
+        artifact_lines.append(f"- deep artifacts: {deep_dir}")
+    return "\n".join(artifact_lines) if artifact_lines else empty
+
+
 def _build_failure_summarizer_prompt(
     *,
     test_output: str,
@@ -311,25 +342,16 @@ def _build_failure_summarizer_prompt(
     Returns:
         Prompt string demanding the JSON ``handoff_prompt`` field.
     """
-    lines = test_output.splitlines()
-    if len(lines) > TEST_OUTPUT_TAIL_LINES:
-        truncated = "\n".join(lines[-TEST_OUTPUT_TAIL_LINES:])
-        output_section = f"Tail of the failing test output:\n\n{truncated}"
+    tail, truncated = _tail_test_output(test_output)
+    if truncated:
+        output_section = f"Tail of the failing test output:\n\n{tail}"
     else:
         output_section = f"Failing test output:\n\n{test_output}"
 
-    artifact_lines: list[str] = []
-    if trajectory_path is not None:
-        artifact_lines.append(f"- trajectory: {trajectory_path}")
-    if trajectories_dir is not None:
-        artifact_lines.append(f"- sub-trajectories: {trajectories_dir}")
-    if diff_path is not None:
-        artifact_lines.append(f"- diff: {diff_path}")
-    if manifest_path is not None:
-        artifact_lines.append(f"- manifest: {manifest_path}")
-    if deep_dir is not None:
-        artifact_lines.append(f"- deep artifacts: {deep_dir}")
-    artifacts_block = "\n".join(artifact_lines) if artifact_lines else "(none on disk)"
+    artifacts_block = _artifacts_block(
+        trajectory_path, trajectories_dir, diff_path, manifest_path, deep_dir,
+        empty="(none on disk)",
+    )
 
     changed_block = (
         "\n".join(f"- {p}" for p in changed_files) if changed_files else "(none detected)"
@@ -547,24 +569,12 @@ def _build_minimal_handoff(
     *can* assert without an agent (the exit gate, the quoted failing
     output, the git-derived changed-file list) go under Verified facts.
     """
-    lines = test_output.splitlines()
-    if len(lines) > TEST_OUTPUT_TAIL_LINES:
-        output_section = "\n".join(lines[-TEST_OUTPUT_TAIL_LINES:])
-    else:
-        output_section = test_output
+    output_section, _ = _tail_test_output(test_output)
 
-    artifact_lines: list[str] = []
-    if trajectory_path is not None:
-        artifact_lines.append(f"- trajectory: {trajectory_path}")
-    if trajectories_dir is not None:
-        artifact_lines.append(f"- sub-trajectories: {trajectories_dir}")
-    if diff_path is not None:
-        artifact_lines.append(f"- diff: {diff_path}")
-    if manifest_path is not None:
-        artifact_lines.append(f"- manifest: {manifest_path}")
-    if deep_dir is not None:
-        artifact_lines.append(f"- deep artifacts: {deep_dir}")
-    artifacts_block = "\n".join(artifact_lines) if artifact_lines else "_(none on disk)_"
+    artifacts_block = _artifacts_block(
+        trajectory_path, trajectories_dir, diff_path, manifest_path, deep_dir,
+        empty="_(none on disk)_",
+    )
 
     changed_block = (
         "\n".join(f"- {p}" for p in changed_files) if changed_files else "_(none detected)_"
@@ -1765,6 +1775,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
 
     prompt += _build_fix_style_suffix(_backend_concise_fix_prompts(backend))
 
+    progress_cb: Callable[[Text], Any] | None = None
     if console_lock is not None:
         # Concurrent path: suppress the Live/LiveToolPanelRegistry renderer in
         # run_agent so multiple concurrent agents don't each start their own
@@ -1774,20 +1785,15 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
             async with console_lock:
                 console.print(text)
 
-        await run_agent(
-            backend, work.repo, prompt,
-            phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
-            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=DEFAULT_WALL_BUDGET_S,
-            progress_callback=_cb,
-        )
-    else:
-        await run_agent(
-            backend, work.repo, prompt,
-            phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
-            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=DEFAULT_WALL_BUDGET_S,
-        )
+        progress_cb = _cb
+
+    await run_agent(
+        backend, work.repo, prompt,
+        phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        progress_callback=progress_cb,
+    )
     async with (console_lock if console_lock is not None else anyio.Lock()):
         print_fix_complete(console, item_num, total)
 
@@ -1875,6 +1881,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
     scaled_tool_budget = DEFAULT_TOOL_CALL_BUDGET * count
     scaled_wall_budget = DEFAULT_WALL_BUDGET_S * count
 
+    progress_cb: Callable[[Text], Any] | None = None
     if console_lock is not None:
         # Concurrent path: suppress the Live renderer in run_agent and serialize
         # progress lines through the shared lock (see phase_fix).
@@ -1882,20 +1889,15 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
             async with console_lock:
                 console.print(text)
 
-        _, _, budget_reason = await run_agent(
-            backend, work.repo, prompt,
-            phase=DaydreamPhase.FIX, max_turns=scaled_max_turns,
-            tool_call_budget=scaled_tool_budget,
-            wall_budget_s=scaled_wall_budget,
-            progress_callback=_cb,
-        )
-    else:
-        _, _, budget_reason = await run_agent(
-            backend, work.repo, prompt,
-            phase=DaydreamPhase.FIX, max_turns=scaled_max_turns,
-            tool_call_budget=scaled_tool_budget,
-            wall_budget_s=scaled_wall_budget,
-        )
+        progress_cb = _cb
+
+    _, _, budget_reason = await run_agent(
+        backend, work.repo, prompt,
+        phase=DaydreamPhase.FIX, max_turns=scaled_max_turns,
+        tool_call_budget=scaled_tool_budget,
+        wall_budget_s=scaled_wall_budget,
+        progress_callback=progress_cb,
+    )
 
     if budget_reason is not None:
         raise RuntimeError(
@@ -2194,6 +2196,20 @@ async def phase_test_and_heal(
     continuation: ContinuationToken | None = None
     test_command_override: str | None = None
 
+    async def _launch_fix(output: str) -> None:
+        nonlocal retries_used, continuation
+        fix_prompt = get_registry().prompt("fix")(
+            output, feedback_items, repo=work.repo,
+            concise_mode=_backend_concise_fix_prompts(backend),
+        )
+        await run_agent(
+            backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        )
+        retries_used += 1
+        continuation = None
+
     while True:
         console.print()
         if retries_used > 0:
@@ -2260,17 +2276,7 @@ async def phase_test_and_heal(
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             console.print()
             print_info(console, "Launching agent to fix test failures (auto)...")
-            fix_prompt = get_registry().prompt("fix")(
-                output, feedback_items, repo=work.repo,
-                concise_mode=_backend_concise_fix_prompts(backend),
-            )
-            _, _, _ = await run_agent(
-                backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
-                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                wall_budget_s=DEFAULT_WALL_BUDGET_S,
-            )
-            retries_used += 1
-            continuation = None
+            await _launch_fix(output)
             continue
 
         print_menu(console, "What would you like to do?", [
@@ -2318,17 +2324,7 @@ async def phase_test_and_heal(
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            fix_prompt = get_registry().prompt("fix")(
-                output, feedback_items, repo=work.repo,
-                concise_mode=_backend_concise_fix_prompts(backend),
-            )
-            _, _, _ = await run_agent(
-                backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
-                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                wall_budget_s=DEFAULT_WALL_BUDGET_S,
-            )
-            retries_used += 1
-            continuation = None
+            await _launch_fix(output)
             continue
 
         elif choice == "3":
@@ -2978,6 +2974,37 @@ async def phase_supervise_review(
     return verdicts
 
 
+def _index_records(records: list[dict[str, Any]], id_key: str) -> list[dict[str, Any]]:
+    """Tag *records* with fresh 1-based ids under *id_key* for an adjudication input artifact."""
+    return [
+        {
+            id_key: i,
+            "file": rec.get("file"),
+            "line": rec.get("line"),
+            "severity": rec.get("severity"),
+            "confidence": rec.get("confidence"),
+            "description": rec.get("description"),
+            "rationale": rec.get("rationale"),
+            "evidence": rec.get("evidence"),
+        }
+        for i, rec in enumerate(records, start=1)
+    ]
+
+
+def _rekey_verdicts(
+    findings: list[dict[str, Any]], id_key: str, label: str,
+) -> dict[int, dict[str, Any]]:
+    """Re-key agent *findings* by their integer *id_key* and print the kept/dropped tally."""
+    verdicts: dict[int, dict[str, Any]] = {}
+    for finding in findings:
+        finding_id = finding.get(id_key)
+        if isinstance(finding_id, int):
+            verdicts[finding_id] = finding
+    kept = sum(1 for v in verdicts.values() if v.get("keep"))
+    print_info(console, f"{label}: kept {kept}, dropped {len(verdicts) - kept}")
+    return verdicts
+
+
 async def phase_arbiter_review(
     backend: Backend,
     work: WorkContext,
@@ -3025,19 +3052,7 @@ async def phase_arbiter_review(
 
     dd = deep_dir(work.repo)
     input_path = arbiter_input_path(dd)
-    arbiter_input = [
-        {
-            "arb_id": i,
-            "file": rec.get("file"),
-            "line": rec.get("line"),
-            "severity": rec.get("severity"),
-            "confidence": rec.get("confidence"),
-            "description": rec.get("description"),
-            "rationale": rec.get("rationale"),
-            "evidence": rec.get("evidence"),
-        }
-        for i, rec in enumerate(selected_records, start=1)
-    ]
+    arbiter_input = _index_records(selected_records, "arb_id")
     input_path.write_text(json.dumps(arbiter_input, indent=2))
 
     prompt = get_registry().prompt("arbiter")(
@@ -3053,14 +3068,7 @@ async def phase_arbiter_review(
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
         raise ValueError(f"Arbiter returned no findings list (got {type(result).__name__})")
 
-    verdicts: dict[int, dict[str, Any]] = {}
-    for finding in result["findings"]:
-        arb_id = finding.get("arb_id")
-        if isinstance(arb_id, int):
-            verdicts[arb_id] = finding
-    kept = sum(1 for v in verdicts.values() if v.get("keep"))
-    print_info(console, f"Arbiter: kept {kept}, dropped {len(verdicts) - kept}")
-    return verdicts
+    return _rekey_verdicts(result["findings"], "arb_id", "Arbiter")
 
 
 # Suppression schema (issue #232). Mirrors ARBITER_SCHEMA but the confidence enum
@@ -3139,19 +3147,7 @@ async def phase_suppression_review(
 
     dd = deep_dir(work.repo)
     input_path = suppression_input_path(dd)
-    suppression_input = [
-        {
-            "sup_id": i,
-            "file": rec.get("file"),
-            "line": rec.get("line"),
-            "severity": rec.get("severity"),
-            "confidence": rec.get("confidence"),
-            "description": rec.get("description"),
-            "rationale": rec.get("rationale"),
-            "evidence": rec.get("evidence"),
-        }
-        for i, rec in enumerate(selected_records, start=1)
-    ]
+    suppression_input = _index_records(selected_records, "sup_id")
     input_path.write_text(json.dumps(suppression_input, indent=2))
 
     prompt = get_registry().prompt("suppression")(
@@ -3169,14 +3165,7 @@ async def phase_suppression_review(
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
         raise ValueError(f"Suppression returned no findings list (got {type(result).__name__})")
 
-    verdicts: dict[int, dict[str, Any]] = {}
-    for finding in result["findings"]:
-        sup_id = finding.get("sup_id")
-        if isinstance(sup_id, int):
-            verdicts[sup_id] = finding
-    kept = sum(1 for v in verdicts.values() if v.get("keep"))
-    print_info(console, f"Suppression: kept {kept}, dropped {len(verdicts) - kept}")
-    return verdicts
+    return _rekey_verdicts(result["findings"], "sup_id", "Suppression")
 
 
 def _append_structural_and_write_merged(

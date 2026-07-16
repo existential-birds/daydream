@@ -22,6 +22,7 @@ Exports:
     load_user_prices: parse user-supplied price overrides from a TOML file.
     resolve_prices: merge user overrides over the built-in price table.
     compute_cost: function returning USD cost or None for unknown models.
+    compute_cost_from_totals: compute_cost variant taking total (not uncached) input tokens.
 """
 
 from __future__ import annotations
@@ -185,4 +186,38 @@ def compute_cost(
         input_tokens * price.input / per_token
         + cached_input_tokens * price.cached_input / per_token
         + output_tokens * price.output / per_token
+    )
+
+
+def compute_cost_from_totals(
+    model: str,
+    *,
+    total_input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+    prices: dict[str, ModelPrice] | None = None,
+) -> float | None:
+    """Compute USD cost from total input tokens, or None for unknown models.
+
+    Backends report ``cached_input_tokens`` as a subset of the total input
+    count, while :func:`compute_cost` prices *uncached* input. This variant
+    derives the uncached count (clamped at zero) and delegates, so callers
+    never repeat that subtraction.
+
+    Args:
+        model: Model identifier (e.g. "gpt-5.5"). Must match a key in the
+            active price table.
+        total_input_tokens: Total input tokens including cached ones.
+        cached_input_tokens: Count of cached input tokens (priced separately).
+        output_tokens: Count of output tokens.
+        prices: Optional price table to look up in. When None, the built-in
+            ``MODEL_PRICES`` is used.
+    """
+    uncached_input = max(total_input_tokens - cached_input_tokens, 0)
+    return compute_cost(
+        model,
+        uncached_input,
+        cached_input_tokens,
+        output_tokens,
+        prices=prices,
     )

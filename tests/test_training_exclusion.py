@@ -8,7 +8,6 @@ import pytest
 
 from daydream.training.exclusion import (
     is_copyleft,
-    is_excluded,
     load_exclusion_list,
 )
 
@@ -40,14 +39,6 @@ def test_load_exclusion_list_ignores_blank_and_comment_lines(
     )
     monkeypatch.setattr("daydream.training.exclusion.EXCLUSION_PATH", tmp_file)
     assert load_exclusion_list() == frozenset({"foo/bar", "baz/qux"})
-
-
-def test_is_excluded_returns_false_for_none() -> None:
-    assert is_excluded(None) is False
-
-
-def test_is_excluded_returns_true_for_seed_repo() -> None:
-    assert is_excluded("getsentry/sentry") is True
 
 
 def test_is_copyleft_opt_in_overrides_skip(

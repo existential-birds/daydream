@@ -18,28 +18,17 @@ Daydream trailer, and the recorded respond invocation carrying the right pr/bot.
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream.backends import ResultEvent, TextEvent
+from tests.harness.git_helpers import git as _git
 
 FIX_MARKER = "# daydream-pr-feedback-fix-applied\n"
 PR_NUMBER = 4242
 BOT = "coderabbitai[bot]"
-
-
-def _git(repo: Path, *args: str) -> str:
-    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", *args],  # noqa: S607 - git is a trusted command
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return proc.stdout.strip()
 
 
 class _PRFeedbackStubBackend:
