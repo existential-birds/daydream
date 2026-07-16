@@ -244,12 +244,19 @@ def test_parallel_tier_gives_every_specialist_the_same_list(tmp_path):
 
     assert set(calls_by_schema.keys()) == {"pattern_scanner", "dependency_tracer", "test_mapper"}
 
-    # Consolidation: every specialist receives the same role-annotated,
-    # cwd-absolute affected-files list -- no per-specialist input split.
-    for name in ("pattern_scanner", "dependency_tracer", "test_mapper"):
-        prompt = calls_by_schema[name]["prompt"]
-        for path in diff_changed:
-            assert f"- {path} (modified)" in prompt
+    def _affected_block(prompt: str) -> str:
+        start = prompt.index("<affected_files>")
+        end = prompt.index("</affected_files>", start) + len("</affected_files>")
+        return prompt[start:end]
+
+    # Consolidation: every specialist receives a byte-identical affected-files
+    # block -- no per-specialist input split.
+    blocks = [_affected_block(calls_by_schema[name]["prompt"]) for name in calls_by_schema]
+    assert blocks[0] == blocks[1] == blocks[2]
+
+    # And the shared block lists every changed file, role-annotated and cwd-absolute.
+    for path in diff_changed:
+        assert f"- {path} (modified)" in blocks[0]
 
 
 def test_parse_envelope_handles_missing_keys(tmp_path):
@@ -322,8 +329,9 @@ def test_pre_scan_passes_cwd_absolute_paths(tmp_path):
 
     joined = "\n".join(c["prompt"] for c in backend.execute_calls)
     # Specialists receive cwd-absolute paths, never bare relatives.
-    assert str(tmp_path / "services/taste/file0.py") in joined
-    assert "- services/taste/file0.py\n" not in joined
+    for p in paths:
+        assert str(tmp_path / p) in joined
+        assert f"- {p} (" not in joined
 
 
 def test_pre_scan_passes_cwd_absolute_static_files(tmp_path, monkeypatch):
@@ -343,3 +351,29 @@ def test_pre_scan_passes_cwd_absolute_static_files(tmp_path, monkeypatch):
     dep_prompt = backend.execute_calls[0]["prompt"]
     assert str(tmp_path / "services/taste/dep.py") in dep_prompt
     assert "- services/taste/dep.py (" not in dep_prompt
+
+
+def test_pre_scan_fallback_uses_rename_new_path(tmp_path, monkeypatch):
+    """Fallback seeding is rename-aware: a renamed file seeds its new path, not the old one."""
+    import daydream.exploration_runner as er
+
+    # Force the fallback path: static resolution yields nothing.
+    monkeypatch.setattr(er, "detect_affected_files", lambda diff_text, repo_root, depth: [])
+    # A rename plus a second file => 2 files => single tier => dependency_tracer runs.
+    rename_diff = (
+        "diff --git a/services/taste/old_name.py b/services/taste/new_name.py\n"
+        "similarity index 95%\n"
+        "rename from services/taste/old_name.py\n"
+        "rename to services/taste/new_name.py\n"
+        "--- a/services/taste/old_name.py\n"
+        "+++ b/services/taste/new_name.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+    diff_text = rename_diff + _multifile_diff(["services/taste/other.py"])
+    backend = _SpecialistMockBackend()
+
+    anyio.run(pre_scan, backend, tmp_path, diff_text)
+
+    dep_prompt = backend.execute_calls[0]["prompt"]
+    assert str(tmp_path / "services/taste/new_name.py") in dep_prompt
+    assert "old_name.py" not in dep_prompt

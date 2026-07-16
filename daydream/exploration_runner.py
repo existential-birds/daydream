@@ -31,7 +31,7 @@ from daydream.prompts.exploration_subagents import (
     build_test_mapper_prompt,
 )
 from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
-from daydream.tree_sitter_index import detect_affected_files
+from daydream.tree_sitter_index import _parse_diff_name_status, detect_affected_files
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -215,8 +215,10 @@ async def pre_scan(
     rel_paths = {m.group(1) for m in _DIFF_HEADER_RE.finditer(diff_text)}
     if not static_files:
         # Static resolution failed outright; still seed specialists with the
-        # changed files so they have a starting point.
-        static_files = [FileInfo(path=p, role="modified") for p in sorted(rel_paths)]
+        # changed files so they have a starting point. Reuse the rename-aware
+        # name/status parser so a renamed file seeds its new path, not the old.
+        changed = sorted({e.path for e in _parse_diff_name_status(diff_text)})
+        static_files = [FileInfo(path=p, role="modified") for p in changed]
 
     static_context = ExplorationContext(affected_files=static_files)
 
