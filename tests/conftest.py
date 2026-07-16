@@ -7,14 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from daydream.exploration import (
-    Convention,
-    Dependency,
-    ExplorationContext,
-    FileInfo,
-)
 from daydream.workspace import WorkContext
 from tests.harness.fake_gh import FakeGh, install_fake_gh
+from tests.harness.git_helpers import bare_remote as _bare_remote
+from tests.harness.git_helpers import commit as _commit
+from tests.harness.git_helpers import configure_identity as _configure_identity  # noqa: F401 - test_git_ops re-import
+from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import init_repo as _init_repo
 
 # Isolate the test process from any inherited git environment. When the suite
 # runs under a git command that exports them — most importantly a pre-push hook
@@ -50,41 +49,10 @@ os.environ["GIT_CONFIG_COUNT"] = str(_git_config_count + 1)
 # Lifted here so other test modules (notably tests/test_pr_review.py) can
 # build real repos instead of mocking subprocess. tests/test_workspace.py
 # still has its own helpers (it needs additional plumbing for bare-origin
-# push semantics) — left untouched on purpose.
-
-
-def _git(repo: Path, *args: str, check: bool = True) -> str:
-    """Run a git command in *repo* and return stripped stdout (test helper)."""
-    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", *args],  # noqa: S607 - git is a trusted command
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=check,
-    )
-    return proc.stdout.strip()
-
-
-def _configure_identity(repo: Path) -> None:
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Tester")
-
-
-def _commit(repo: Path, message: str) -> str:
-    _git(repo, "commit", "-m", message)
-    return _git(repo, "rev-parse", "HEAD")
-
-
-def _init_repo(repo: Path) -> None:
-    repo.mkdir(parents=True, exist_ok=True)
-    _git(repo, "init", "-b", "main")
-    _configure_identity(repo)
-
-
-def _bare_remote(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init", "--bare", "-b", "main")
-    return path
+# push semantics) — left untouched on purpose. The helper bodies now live in
+# tests/harness/git_helpers.py; the aliased imports above keep the local
+# `_git`/`_commit`/... names (and external `from tests.conftest import _git`
+# call sites) unchanged.
 
 
 def _make_repo_with_main(tmp_path: Path, name: str = "repo") -> Path:
@@ -175,47 +143,6 @@ def repo_with_origin(tmp_path: Path, bare_origin: Path) -> Path:
     _git(repo, "push", "-u", "origin", "main")
     _git(repo, "remote", "set-head", "origin", "main")
     return repo
-
-
-@pytest.fixture
-def exploration_context_fixture() -> ExplorationContext:
-    """Populated ExplorationContext used by Phase 03 review-integration tests.
-
-    Provides a minimal but realistic context: one modified file, one
-    convention, and one dependency edge. Wave 1 implementation work
-    will consume this fixture to verify prompt-injection behavior.
-    """
-    return ExplorationContext(
-        affected_files=[
-            FileInfo(
-                path="daydream/runner.py",
-                role="modified",
-                summary="Run orchestrator",
-            ),
-        ],
-        conventions=[
-            Convention(
-                name="snake_case_modules",
-                description="All modules use snake_case filenames",
-                source="inferred from code",
-            ),
-        ],
-        dependencies=[
-            Dependency(
-                source="daydream/runner.py",
-                target="daydream/phases.py",
-                relationship="imports",
-            ),
-        ],
-    )
-
-
-@pytest.fixture
-def exploration_dir_fixture(tmp_path: Path, exploration_context_fixture: ExplorationContext) -> Path:
-    """Write exploration context to a temp dir for phase prompt tests."""
-    exploration_dir = tmp_path / "exploration"
-    exploration_context_fixture.write_to_dir(exploration_dir)
-    return exploration_dir
 
 
 @pytest.fixture

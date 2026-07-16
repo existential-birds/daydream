@@ -20,9 +20,7 @@ in the Redactor rule list.
 from __future__ import annotations
 
 import json
-import os
 import re
-import tempfile
 from contextlib import asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -43,6 +41,7 @@ from daydream.atif import (
     ToolCall,
     Trajectory,
 )
+from daydream.json_utils import atomic_write_json
 from daydream.timeutil import parse_iso_timestamp
 from daydream.ui import create_console, print_error, print_warning
 
@@ -64,6 +63,11 @@ _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "c
 # with one of these (or empty) at init since the real model id isn't known
 # until the first agent turn streams back.
 _GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", ""})
+
+
+def _reasoning_extra(reasoning_tokens: int | None) -> dict[str, Any] | None:
+    """Metrics ``extra`` carrier for reasoning_tokens (#192), or None when absent."""
+    return {"reasoning_tokens": reasoning_tokens} if reasoning_tokens is not None else None
 
 # Redaction patterns (REDA-01..04). Order in _REDACTION_RULES matters: URL-credential
 # before bare API-key (so the captured credential isn't re-matched), PEM before env-var
@@ -583,15 +587,12 @@ class Invocation:
             # #192: reasoning_tokens is a SUBSET of completion_tokens (not
             # additive). Vendored Metrics has no dedicated field (D-03), so
             # carry it via the documented extension carrier ``extra``.
-            metrics_extra: dict[str, Any] | None = None
-            if event.reasoning_tokens is not None:
-                metrics_extra = {"reasoning_tokens": event.reasoning_tokens}
             target["_metrics"] = Metrics(
                 prompt_tokens=event.prompt_tokens,
                 completion_tokens=event.completion_tokens,
                 cached_tokens=event.cached_tokens,
                 cost_usd=event.cost_usd,
-                extra=metrics_extra,
+                extra=_reasoning_extra(event.reasoning_tokens),
             )
             if event.model_name:
                 target["_model_name"] = event.model_name
@@ -614,15 +615,12 @@ class Invocation:
             if existing is None:
                 # #192: reasoning_tokens (subset of completion_tokens) via
                 # Metrics.extra — vendored Metrics has no field (D-03).
-                cost_metrics_extra: dict[str, Any] | None = None
-                if event.reasoning_tokens is not None:
-                    cost_metrics_extra = {"reasoning_tokens": event.reasoning_tokens}
                 target["_metrics"] = Metrics(
                     prompt_tokens=event.input_tokens,
                     completion_tokens=event.output_tokens,
                     cached_tokens=event.cached_tokens,
                     cost_usd=event.cost_usd,
-                    extra=cost_metrics_extra,
+                    extra=_reasoning_extra(event.reasoning_tokens),
                 )
             else:
                 # MetricsEvent already populated this step. Prefer the
@@ -675,6 +673,38 @@ class Invocation:
             "_unmatched_tool_results": [],
         }
 
+    def _materialize_agent_step(
+        self, d: dict[str, Any], *, step_id: int, extra_overrides: dict[str, Any]
+    ) -> Step:
+        """Materialize the open-step dict *d* into a redacted agent Step."""
+        message_text = "".join(d["_text_chunks"])
+        reasoning = "\n".join(d["_thinking_chunks"]) if d["_thinking_chunks"] else None
+        tool_calls = list(d["_tool_calls"]) or None
+        observation = (
+            Observation(results=list(d["_observation_results"]))
+            if d["_observation_results"]
+            else None
+        )
+        extra: dict[str, Any] = {
+            "daydream_phase": self.phase.value,
+            "daydream_run_flow": self.recorder.run_flow.value,
+            **extra_overrides,
+        }
+        agent_step = Step(
+            step_id=step_id,
+            timestamp=now_iso(),
+            source="agent",
+            message=message_text,
+            model_name=d["_model_name"],
+            reasoning_content=reasoning,
+            tool_calls=tool_calls,
+            observation=observation,
+            metrics=d["_metrics"],
+            llm_call_count=1,
+            extra=extra,
+        )
+        return self.recorder.redactor.redact_step(agent_step)
+
     def _close_open_step(self) -> None:
         """Finalize the current open step into a Pydantic Step + redact + append.
 
@@ -690,40 +720,20 @@ class Invocation:
         d = self._open_step_dict
         self._open_step_dict = None
 
-        message_text = "".join(d["_text_chunks"])
-        reasoning = "\n".join(d["_thinking_chunks"]) if d["_thinking_chunks"] else None
-        tool_calls = list(d["_tool_calls"]) or None
-        observation = (
-            Observation(results=list(d["_observation_results"]))
-            if d["_observation_results"]
-            else None
-        )
-        extra: dict[str, Any] = {
-            "daydream_phase": self.phase.value,
-            "daydream_run_flow": self.recorder.run_flow.value,
-        }
+        extra_overrides: dict[str, Any] = {}
         if d["_unmatched_tool_results"]:
-            extra["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
+            extra_overrides["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
         if self._stop_reason is not None:
-            extra["stop_reason"] = self._stop_reason
+            extra_overrides["stop_reason"] = self._stop_reason
         if self._error_subtype is not None:
-            extra["error"] = True
-            extra["error_subtype"] = self._error_subtype
+            extra_overrides["error"] = True
+            extra_overrides["error_subtype"] = self._error_subtype
 
-        agent_step = Step(
-            step_id=self.recorder._next_step_id(),
-            timestamp=now_iso(),
-            source="agent",
-            message=message_text,
-            model_name=d["_model_name"],
-            reasoning_content=reasoning,
-            tool_calls=tool_calls,
-            observation=observation,
-            metrics=d["_metrics"],
-            llm_call_count=1,
-            extra=extra,
+        self.steps.append(
+            self._materialize_agent_step(
+                d, step_id=self.recorder._next_step_id(), extra_overrides=extra_overrides
+            )
         )
-        self.steps.append(self.recorder.redactor.redact_step(agent_step))
         closed_index = len(self.steps) - 1
         # Amend in-flight entries whose host Step just closed so a delayed
         # ToolResultEvent can still find its host via closed_index.
@@ -761,36 +771,11 @@ class Invocation:
         if self._open_step_dict is None:
             return list(self.steps)
         d = self._open_step_dict
-        message_text = "".join(d["_text_chunks"])
-        reasoning = "\n".join(d["_thinking_chunks"]) if d["_thinking_chunks"] else None
-        tool_calls = list(d["_tool_calls"]) or None
-        observation = (
-            Observation(results=list(d["_observation_results"]))
-            if d["_observation_results"]
-            else None
-        )
-        extra: dict[str, Any] = {
-            "daydream_phase": self.phase.value,
-            "daydream_run_flow": self.recorder.run_flow.value,
-            "partial_step": True,
-        }
+        extra_overrides: dict[str, Any] = {"partial_step": True}
         if d["_unmatched_tool_results"]:
-            extra["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
+            extra_overrides["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
         step_id = snapshot_step_id if snapshot_step_id is not None else self.recorder._step_id_counter + 1
-        partial_step = Step(
-            step_id=step_id,
-            timestamp=now_iso(),
-            source="agent",
-            message=message_text,
-            model_name=d["_model_name"],
-            reasoning_content=reasoning,
-            tool_calls=tool_calls,
-            observation=observation,
-            metrics=d["_metrics"],
-            llm_call_count=1,
-            extra=extra,
-        )
-        return [*self.steps, self.recorder.redactor.redact_step(partial_step)]
+        return [*self.steps, self._materialize_agent_step(d, step_id=step_id, extra_overrides=extra_overrides)]
 
     def finish(self) -> None:
         """Close any open step and flush all steps to the parent recorder."""
@@ -967,6 +952,12 @@ class TrajectoryRecorder:
         """
         return self._active_invocations[-1].phase if self._active_invocations else None
 
+    def _emit_phase_event(self, phase: DaydreamPhase, event: str, **metadata: Any) -> None:
+        """Append a :class:`PhaseEvent` stamped with ``now_iso()``."""
+        self._phase_events.append(
+            PhaseEvent(phase=phase, event=event, timestamp=now_iso(), metadata=metadata)
+        )
+
     def emit_phase_start(self, phase: DaydreamPhase, **metadata: Any) -> None:
         """Record a ``phase_start`` boundary event (issue #203).
 
@@ -974,14 +965,7 @@ class TrajectoryRecorder:
             **metadata: Optional structured metadata (e.g. ``stage="review"``
                 for the deep orchestrator's DEEP sub-stages).
         """
-        self._phase_events.append(
-            PhaseEvent(
-                phase=phase,
-                event="phase_start",
-                timestamp=now_iso(),
-                metadata=dict(metadata),
-            )
-        )
+        self._emit_phase_event(phase, "phase_start", **metadata)
 
     def emit_phase_end(self, phase: DaydreamPhase, **metadata: Any) -> None:
         """Record a ``phase_end`` boundary event (issue #203).
@@ -989,14 +973,7 @@ class TrajectoryRecorder:
         Args:
             **metadata: Optional structured metadata (mirrors emit_phase_start.
         """
-        self._phase_events.append(
-            PhaseEvent(
-                phase=phase,
-                event="phase_end",
-                timestamp=now_iso(),
-                metadata=dict(metadata),
-            )
-        )
+        self._emit_phase_event(phase, "phase_end", **metadata)
 
     def emit_file_group_budget_exceeded(
         self, *, file: str, reason: str, items_processed: int, items_skipped: int
@@ -1015,47 +992,26 @@ class TrajectoryRecorder:
             items_processed: Findings fixed before the budget fired.
             items_skipped: Remaining findings in the group left unfixed.
         """
-        self._phase_events.append(
-            PhaseEvent(
-                phase=DaydreamPhase.FIX,
-                event="file_group_budget_exceeded",
-                timestamp=now_iso(),
-                metadata={
-                    "file": file,
-                    "reason": reason,
-                    "items_processed": items_processed,
-                    "items_skipped": items_skipped,
-                },
-            )
+        self._emit_phase_event(
+            DaydreamPhase.FIX,
+            "file_group_budget_exceeded",
+            file=file,
+            reason=reason,
+            items_processed=items_processed,
+            items_skipped=items_skipped,
         )
 
     def emit_supervisor_verdict(self, finding_id: int, action: str, reason: str) -> None:
         """Record a findings supervisor verdict in the deep phase."""
-        self._phase_events.append(
-            PhaseEvent(
-                phase=DaydreamPhase.DEEP,
-                event="supervisor_verdict",
-                timestamp=now_iso(),
-                metadata={
-                    "finding_id": finding_id,
-                    "action": action,
-                    "reason": reason,
-                },
-            )
+        self._emit_phase_event(
+            DaydreamPhase.DEEP, "supervisor_verdict", finding_id=finding_id, action=action, reason=reason
         )
 
     def emit_tool_veto(
         self, tool_name: str, reason: str, *, phase: DaydreamPhase = DaydreamPhase.FIX
     ) -> None:
         """Record a tool-supervisor veto in the firing phase."""
-        self._phase_events.append(
-            PhaseEvent(
-                phase=phase,
-                event="tool_veto",
-                timestamp=now_iso(),
-                metadata={"tool_name": tool_name, "reason": reason},
-            )
-        )
+        self._emit_phase_event(phase, "tool_veto", tool_name=tool_name, reason=reason)
 
     def _register_subtrajectory(self, inv: Invocation) -> None:
         """Register a per-Invocation timing summary (issue #203).
@@ -1110,12 +1066,7 @@ class TrajectoryRecorder:
         recorder's ``agent_model_name`` so the rendered Trajectory.agent
         carries the real id rather than the alias.
         """
-        if not candidate:
-            return
-        current = self.agent_model_name or ""
-        if current and current not in _GENERIC_MODEL_LABELS and current == candidate:
-            return
-        if current in _GENERIC_MODEL_LABELS or not current:
+        if candidate and (self.agent_model_name or "") in _GENERIC_MODEL_LABELS:
             self.agent_model_name = candidate
 
     def _accumulate_metrics(
@@ -1337,28 +1288,16 @@ class TrajectoryRecorder:
         if not self.steps:
             return
         trajectory = self.build_trajectory()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         trajectory_dict = trajectory.to_json_dict()
         if self._aborted:
             extra = trajectory_dict.setdefault("extra", {})
             extra["partial"] = True
-        data = json.dumps(trajectory_dict, indent=2)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-            if self.on_write is not None:
-                try:
-                    self.on_write(self, "complete")
-                except Exception:  # noqa: BLE001 - archive failure must never affect the run
-                    pass
-        except BaseException:
-            with suppress(OSError):
-                os.unlink(tmp)
-            raise
+        atomic_write_json(self.path, trajectory_dict)
+        if self.on_write is not None:
+            try:
+                self.on_write(self, "complete")
+            except Exception:  # noqa: BLE001 - archive failure must never affect the run
+                pass
 
     def _snapshot_in_flight_steps(self) -> list[Step]:
         """Concatenate flushed steps with steps from any active invocations.

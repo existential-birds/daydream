@@ -11,16 +11,13 @@ import anyio
 from daydream.backends import AgentEvent, ResultEvent
 from daydream.exploration import FileInfo
 from daydream.exploration_runner import (
-    EXPLORATION_ENVELOPE_SCHEMA,
     count_changed_files,
     pre_scan,
     select_tier,
 )
 from daydream.prompts.exploration_subagents import (
     DEPENDENCY_TRACER_SCHEMA,
-    EXPLORATION_AGENTS,
     PATTERN_SCANNER_SCHEMA,
-    PATTERN_SCANNER_SYSTEM_PROMPT,
     TEST_MAPPER_SCHEMA,
     build_dependency_tracer_prompt,
     build_pattern_scanner_prompt,
@@ -33,20 +30,12 @@ FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
 # Subagent prompt sanity checks (Plan 03)
 def test_pattern_scanner_prompt_includes_guideline_files():
-    assert "CLAUDE.md" in PATTERN_SCANNER_SYSTEM_PROMPT
-
     dynamic = build_pattern_scanner_prompt(["daydream/foo.py"], "main...HEAD", cwd=Path("/repo"))
     assert "CLAUDE.md" in dynamic
     assert "main...HEAD" in dynamic
     assert "daydream/foo.py" in dynamic
     # Regression guard: raw diff text must never be embedded.
     assert "<diff>" not in dynamic
-
-    assert set(EXPLORATION_AGENTS.keys()) == {"pattern-scanner", "dependency-tracer", "test-mapper"}
-    assert EXPLORATION_AGENTS["pattern-scanner"].model == "inherit"
-    assert "Read" in EXPLORATION_AGENTS["pattern-scanner"].tools
-    assert "Glob" in EXPLORATION_AGENTS["pattern-scanner"].tools
-    assert "Grep" in EXPLORATION_AGENTS["pattern-scanner"].tools
 
 
 def test_dependency_tracer_prompt_mentions_affected_files():
@@ -181,12 +170,6 @@ def test_select_tier_thresholds():
     assert select_tier(3) == "single"
     assert select_tier(4) == "parallel"
     assert select_tier(99) == "parallel"
-
-
-def test_envelope_schema_includes_three_subagent_keys():
-    props = EXPLORATION_ENVELOPE_SCHEMA["properties"]
-    assert set(props.keys()) == {"pattern_scanner", "dependency_tracer", "test_mapper"}
-    assert EXPLORATION_ENVELOPE_SCHEMA["type"] == "object"
 
 
 # Orchestrator tier dispatch

@@ -48,6 +48,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends._subprocess import cancel_processes, terminate_process
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.json_utils import extract_json
 
@@ -159,9 +160,6 @@ STREAM_DROP_SIGNATURES = (
     "premature close",
     "epipe",
 )
-# Public alias; the canonical tuple is also referenced internally as the
-# underscore-prefixed name for backward compatibility.
-_STREAM_DROP_SIGNATURES = STREAM_DROP_SIGNATURES
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +239,7 @@ def _is_retryable_error_message(message: str) -> bool:
     # Stream-drop signatures (terminated, econnreset, premature close, ...).
     #
     # Unlike bench/review-bot-compare/replay.py:_is_transient — which scans raw
-    # stdout and therefore gates _STREAM_DROP_SIGNATURES behind
+    # stdout and therefore gates STREAM_DROP_SIGNATURES behind
     # _ERROR_CONTEXT_MARKERS so the substrings only count when daydream actually
     # errored — this function is only ever invoked on a PiError `errorMessage`
     # (see the turn_end / stopReason == "error" call site below), where error
@@ -249,7 +247,7 @@ def _is_retryable_error_message(message: str) -> bool:
     # the benchmark's _ERROR_CONTEXT_MARKERS gate is the harness's own concern
     # for stdout scanning, not a contract production must mirror. Matching these
     # signatures unconditionally here is therefore safe and correct.
-    if any(sig in lower for sig in _STREAM_DROP_SIGNATURES):
+    if any(sig in lower for sig in STREAM_DROP_SIGNATURES):
         return True
     return False
 
@@ -389,16 +387,19 @@ class PiBackend:
 
     def __init__(self, model: str | None = None, *, cwd: Path | None = None):
         """Initialize the backend with an optional explicit model override."""
-        self.model = (
-            model
-            or (_configured_pi_model(cwd) if cwd is not None else None)
-            or DEFAULT_PI_MODEL
-        )
         self._model_override = model
+        # ``.model`` must be resolved at construction (runner/recorder read it
+        # before execute); cache the settings lookup so execute() need not
+        # re-read settings.json for the same workspace.
+        self._configured_cache: tuple[Path, str | None] | None = None
+        configured: str | None = None
+        if model is None and cwd is not None:
+            configured = _configured_pi_model(cwd)
+            self._configured_cache = (cwd, configured)
+        self.model = model or configured or DEFAULT_PI_MODEL
         self.fanout_concurrency = 2
         self.retry_attempts = _pi_retry_attempts()
         self.retry_base_delay_s = _pi_retry_base_delay()
-        self._process: asyncio.subprocess.Process | None = None
         self._processes: list[asyncio.subprocess.Process] = []
 
     async def execute(
@@ -449,7 +450,10 @@ class PiBackend:
             args.extend(["--model", self.model])
             provider = os.environ.get("PI_PROVIDER", "zai")
         else:
-            configured_model = _configured_pi_model(cwd)
+            if self._configured_cache is not None and self._configured_cache[0] == cwd:
+                configured_model = self._configured_cache[1]
+            else:
+                configured_model = _configured_pi_model(cwd)
             self.model = configured_model or DEFAULT_PI_MODEL
             if configured_model is None:
                 args.extend(["--model", self.model])
@@ -536,7 +540,6 @@ class PiBackend:
                 limit=_PI_STDOUT_LIMIT_BYTES,
             )
             self._processes.append(proc)
-            self._process = proc
 
             is_first_line = True
             while True:
@@ -701,14 +704,8 @@ class PiBackend:
 
         finally:
             if proc is not None and proc.returncode is None:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                await terminate_process(proc)
             self._processes = [active for active in self._processes if active is not proc]
-            self._process = self._processes[-1] if self._processes else None
 
     async def cancel(self) -> None:
         """Cancel the running Pi process.
@@ -716,15 +713,7 @@ class PiBackend:
         Sends SIGTERM, waits briefly, then SIGKILL if still running (mirrors
         ``CodexBackend.cancel``).
         """
-        processes = list(self._processes)
-        for process in processes:
-            process.terminate()
-        for process in processes:
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+        await cancel_processes(self._processes)
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
         """Format a skill invocation as Pi's native ``/skill:<slug>`` command.

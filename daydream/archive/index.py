@@ -171,14 +171,17 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute(_CREATE_TABLE)
-    conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version != SCHEMA_VERSION:
+        conn.execute(_CREATE_TABLE)
+        conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
     _recreate_label_observations_if_stale(conn)
     _migrate_label_observations_schema(conn)
     _migrate_schema(conn)
-    for idx_sql in _CREATE_INDEXES:
-        conn.execute(idx_sql)
-    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    if version != SCHEMA_VERSION:
+        for idx_sql in _CREATE_INDEXES:
+            conn.execute(idx_sql)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
     return conn
 
@@ -436,20 +439,15 @@ def latest_label_observation(
             spelling (see :func:`normalize_as_of` — the entry boundary
             normalizes once; this lexical cutoff assumes canonical input).
     """
+    cutoff = "AND observed_at <= ? " if as_of is not None else ""
+    params: tuple = (session_id,) if as_of is None else (session_id, as_of)
     conn = _get_connection(archive_dir)
     try:
-        if as_of is None:
-            cursor = conn.execute(
-                f"SELECT * FROM label_observations WHERE session_id = ? "
-                f"ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
-                (session_id,),
-            )
-        else:
-            cursor = conn.execute(
-                f"SELECT * FROM label_observations WHERE session_id = ? AND observed_at <= ? "
-                f"ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
-                (session_id, as_of),
-            )
+        cursor = conn.execute(
+            f"SELECT * FROM label_observations WHERE session_id = ? "
+            f"{cutoff}ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
+            params,
+        )
         row = cursor.fetchone()
         return dict(row) if row is not None else None
     finally:
@@ -486,11 +484,12 @@ def bulk_latest_label_observations(
     if not session_ids:
         return {}
     placeholders = ",".join("?" * len(session_ids))
+    cutoff = "\n                      AND observed_at <= ?" if as_of is not None else ""
+    params = [*session_ids, as_of] if as_of is not None else list(session_ids)
     conn = _get_connection(archive_dir)
     try:
-        if as_of is None:
-            cursor = conn.execute(
-                f"""
+        cursor = conn.execute(
+            f"""
                 SELECT *
                 FROM (
                     SELECT *,
@@ -499,30 +498,12 @@ def bulk_latest_label_observations(
                                ORDER BY {_PRECEDENCE_ORDER}
                            ) AS _rn
                     FROM label_observations
-                    WHERE session_id IN ({placeholders})
+                    WHERE session_id IN ({placeholders}){cutoff}
                 )
                 WHERE _rn = 1
                 """,
-                session_ids,
-            )
-        else:
-            cursor = conn.execute(
-                f"""
-                SELECT *
-                FROM (
-                    SELECT *,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY session_id
-                               ORDER BY {_PRECEDENCE_ORDER}
-                           ) AS _rn
-                    FROM label_observations
-                    WHERE session_id IN ({placeholders})
-                      AND observed_at <= ?
-                )
-                WHERE _rn = 1
-                """,
-                [*session_ids, as_of],
-            )
+            params,
+        )
         return {row["session_id"]: dict(row) for row in cursor.fetchall()}
     finally:
         conn.close()
@@ -582,50 +563,29 @@ def reviewer_set_penalty_prior(
     # isdisjoint() for every archived row.
     placeholders = ",".join("?" * len(logins))
 
+    p = "lo." if repo_slug is not None else ""
+    alias = " lo" if repo_slug is not None else ""
+    join = "\n                JOIN runs r ON r.session_id = lo.session_id" if repo_slug is not None else ""
+    repo_filter = "\n                  AND r.repo_slug = ?" if repo_slug is not None else ""
+    params: tuple = (exclude_session, before_valid_at, *logins)
     if repo_slug is not None:
-        # Join to runs to scope the pool to the current repo only.
-        inner_where = (
-            "WHERE lo.session_id != ?"
-            "  AND lo.valid_at < ?"
-            "  AND lo.reviewer_logins IS NOT NULL"
-            "  AND EXISTS ("
-            f"      SELECT 1 FROM json_each(lo.reviewer_logins) WHERE value IN ({placeholders})"
-            "  )"
-            "  AND r.repo_slug = ?"
-        )
-        params: tuple = (exclude_session, before_valid_at, *logins, repo_slug)
-        sql = f"""
+        params = (*params, repo_slug)
+    sql = f"""
             SELECT reviewer_logins, labels
             FROM (
-                SELECT lo.reviewer_logins, lo.labels,
+                SELECT {p}reviewer_logins, {p}labels,
                        ROW_NUMBER() OVER (
-                           PARTITION BY lo.session_id
-                           ORDER BY lo.observed_at DESC
+                           PARTITION BY {p}session_id
+                           ORDER BY {p}observed_at DESC
                        ) AS _rn
-                FROM label_observations lo
-                JOIN runs r ON r.session_id = lo.session_id
-                {inner_where}
-            )
-            WHERE _rn = 1
-            """
-    else:
-        params = (exclude_session, before_valid_at, *logins)
-        sql = f"""
-            SELECT reviewer_logins, labels
-            FROM (
-                SELECT reviewer_logins, labels,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY session_id
-                           ORDER BY observed_at DESC
-                       ) AS _rn
-                FROM label_observations
-                WHERE session_id != ?
-                  AND valid_at < ?
-                  AND reviewer_logins IS NOT NULL
+                FROM label_observations{alias}{join}
+                WHERE {p}session_id != ?
+                  AND {p}valid_at < ?
+                  AND {p}reviewer_logins IS NOT NULL
                   AND EXISTS (
-                      SELECT 1 FROM json_each(reviewer_logins)
+                      SELECT 1 FROM json_each({p}reviewer_logins)
                       WHERE value IN ({placeholders})
-                  )
+                  ){repo_filter}
             )
             WHERE _rn = 1
             """
@@ -861,34 +821,20 @@ def label_count_summary(
         Dict mapping label string → count.  Always includes at least one key
         when the archive is non-empty.
     """
+    cutoff = "   WHERE observed_at <= ?" if as_of is not None else ""
+    params: tuple = (as_of,) if as_of is not None else ()
+    best_sql = (
+        f"SELECT session_id, labels FROM ("
+        f"  SELECT session_id, labels, "
+        f"         ROW_NUMBER() OVER ("
+        f"             PARTITION BY session_id "
+        f"             ORDER BY {_PRECEDENCE_ORDER}"
+        f"         ) AS _rn "
+        f"  FROM label_observations{cutoff}"
+        f") WHERE _rn = 1"
+    )
     conn = _get_connection(archive_dir)
     try:
-        if as_of is None:
-            best_sql = (
-                f"SELECT session_id, labels FROM ("
-                f"  SELECT session_id, labels, "
-                f"         ROW_NUMBER() OVER ("
-                f"             PARTITION BY session_id "
-                f"             ORDER BY {_PRECEDENCE_ORDER}"
-                f"         ) AS _rn "
-                f"  FROM label_observations"
-                f") WHERE _rn = 1"
-            )
-            params: tuple = ()
-        else:
-            best_sql = (
-                f"SELECT session_id, labels FROM ("
-                f"  SELECT session_id, labels, "
-                f"         ROW_NUMBER() OVER ("
-                f"             PARTITION BY session_id "
-                f"             ORDER BY {_PRECEDENCE_ORDER}"
-                f"         ) AS _rn "
-                f"  FROM label_observations "
-                f"  WHERE observed_at <= ?"
-                f") WHERE _rn = 1"
-            )
-            params = (as_of,)
-
         cursor = conn.execute(
             f"SELECT best.labels "  # noqa: S608
             f"FROM runs r "

@@ -173,6 +173,19 @@ def _archive_run_inner(
         shutil.copytree(run_dir, dest, dirs_exist_ok=True)
 
 
+def _read_json_artifact(path: Path, expected_type: type) -> Any | None:
+    """Read a JSON artifact from *path*, returning ``None`` when absent, empty, or malformed."""
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, expected_type) or not data:
+        return None
+    return data
+
+
 def _read_fix_failures(target_dir: Path) -> dict[str, str] | None:
     """Read ``deep/fix-failures.json`` from the source tree, if present.
 
@@ -185,14 +198,8 @@ def _read_fix_failures(target_dir: Path) -> dict[str, str] | None:
     # the archive import graph for non-deep runs.
     from daydream.deep.artifacts import fix_failures_path
 
-    path = fix_failures_path(target_dir / ".daydream" / "deep")
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(data, dict) or not data:
+    data = _read_json_artifact(fix_failures_path(target_dir / ".daydream" / "deep"), dict)
+    if data is None:
         return None
     return {str(k): str(v) for k, v in data.items()}
 
@@ -206,14 +213,8 @@ def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
     """
     from daydream.deep.artifacts import fix_leftover_untracked_path
 
-    path = fix_leftover_untracked_path(target_dir / ".daydream" / "deep")
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(data, list) or not data:
+    data = _read_json_artifact(fix_leftover_untracked_path(target_dir / ".daydream" / "deep"), list)
+    if data is None:
         return None
     return [str(p) for p in data]
 

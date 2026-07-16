@@ -42,7 +42,7 @@ from daydream.agent import (
     get_current_backends,
 )
 from daydream.benchmark.cli import _handle_bench_command
-from daydream.config_file import load_file_config
+from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.runner import RunConfig, run, run_feedback
 from daydream.trajectory import get_signal_recorder
 from daydream.ui import (
@@ -146,6 +146,20 @@ def _detect_repo_slug(repo: Path) -> str | None:
         return None
     owner, name = slug
     return f"{owner}/{name}"
+
+
+def _resolve_target_provenance(target: str | None) -> tuple[Path, str | None, DaydreamFileConfig]:
+    """Resolve provenance for the target checkout: repo path, slug, file config.
+
+    Provenance is attributed to the target checkout, not the invoking cwd —
+    daydream may run from one repo against a checkout of another. The returned
+    file config is the low-precedence model/backend source consulted by
+    ``_resolve_backend``.
+    """
+    target_repo = Path(target) if target else Path.cwd()
+    pr_repo = _detect_repo_slug(target_repo)
+    file_config = load_file_config(target_repo)
+    return target_repo, pr_repo, file_config
 
 
 def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = True) -> None:
@@ -903,15 +917,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         if loop:
             parser.error("--flow cannot be combined with --loop")
 
-    # Attribute provenance to the target checkout, not the invoking cwd —
-    # daydream may run from one repo against a checkout of another.
-    target_repo = Path(args.target) if args.target else Path.cwd()
-    pr_repo = _detect_repo_slug(target_repo)
+    target_repo, pr_repo, file_config = _resolve_target_provenance(args.target)
     # Explicit --pr-number pins the target PR; otherwise auto-detect from branch.
     pr_number = args.pr_number if args.pr_number is not None else _auto_detect_pr_number(target_repo)
-
-    # Low-precedence model/backend source consulted by ``_resolve_backend``.
-    file_config = load_file_config(target_repo)
 
     return RunConfig(
         target=args.target,
@@ -970,9 +978,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         # argparse already enforces type=int, but guard against negatives.
         raise SystemExit(f"feedback subcommand: PR number must be positive (got {pr_number})")
 
-    target_repo = Path(args.target) if args.target else Path.cwd()
-    pr_repo = _detect_repo_slug(target_repo)
-    file_config = load_file_config(target_repo)
+    _, pr_repo, file_config = _resolve_target_provenance(args.target)
 
     return RunConfig(
         target=args.target,
@@ -1102,7 +1108,7 @@ def _handle_harvest_command(argv: list[str]) -> int:
         return 1
 
     archive_dir = args.archive_dir.expanduser() if args.archive_dir is not None else _archive.get_archive_dir()
-    cache_dir = args.cache_dir.expanduser() if args.cache_dir is not None else None
+    cache_dir = args.cache_dir.expanduser()
 
     repo_clone_root = args.repo_clone_root.expanduser() if args.repo_clone_root is not None else None
 
@@ -1218,10 +1224,28 @@ _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
 }
 
 
-def _print_corpus_help(*, error: bool = False) -> None:
-    """Print usage for the ``corpus`` namespace.
+_CORPUS_USAGE = (
+    "usage: daydream corpus {harvest,build,label} ...\n"
+    "\n"
+    "Data-pipeline sub-verbs:\n"
+    "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
+    "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
+    "  label     record an authoritative human outcome label that overrides automated ones"
+)
+
+_EXT_USAGE = (
+    "usage: daydream ext {validate} ...\n"
+    "\n"
+    "Extension sub-verbs:\n"
+    "  validate   load the daydream_ext extension and resolve-check the registry"
+)
+
+
+def _print_namespace_help(usage: str, *, error: bool = False) -> None:
+    """Print a namespace usage block.
 
     Args:
+        usage: The usage text to print.
         error: When ``True`` write to stderr (unknown sub-verb error path);
             when ``False`` (default) write to stdout (bare invocation / help
             request path).
@@ -1230,59 +1254,37 @@ def _print_corpus_help(*, error: bool = False) -> None:
 
     from daydream.ui import NEON_THEME
 
-    console = Console(stderr=error, theme=NEON_THEME)
-    console.print(
-        "usage: daydream corpus {harvest,build,label} ...\n"
-        "\n"
-        "Data-pipeline sub-verbs:\n"
-        "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
-        "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
-        "  label     record an authoritative human outcome label that overrides automated ones"
-    )
+    Console(stderr=error, theme=NEON_THEME).print(usage)
+
+
+def _dispatch_namespace(argv: list[str], subverbs: dict[str, Callable[[list[str]], int]], usage: str) -> int:
+    """Dispatch a namespace sub-verb to its handler.
+
+    A bare invocation (no sub-verb) prints usage to stdout and exits 2; an
+    unknown sub-verb prints usage to stderr and exits 2. Exit codes propagate
+    unchanged from the handlers.
+    """
+    if not argv:
+        _print_namespace_help(usage)
+        return 2
+    handler = subverbs.get(argv[0])
+    if handler is None:
+        _print_namespace_help(usage, error=True)
+        return 2
+    return int(handler(argv[1:]))
 
 
 def _handle_corpus_command(argv: list[str]) -> int:
     """Dispatch a ``corpus`` sub-verb to its handler.
 
     ``corpus harvest|build|label`` routes to the existing data-pipeline
-    handlers (``build`` → the build-corpus projection). A bare ``daydream
-    corpus`` (no sub-verb) prints help to stdout and exits 2. An unknown
-    sub-verb prints help to stderr and exits 2. Exit codes propagate
-    unchanged from the handlers.
+    handlers (``build`` → the build-corpus projection).
 
     Returns:
         int: The sub-handler's exit code; ``2`` for a bare (no-arg)
         invocation or an unknown sub-verb.
     """
-    if not argv:
-        _print_corpus_help(error=False)
-        return 2
-    if argv[0] not in _CORPUS_SUBVERBS:
-        _print_corpus_help(error=True)
-        return 2
-    handler = _CORPUS_SUBVERBS[argv[0]]
-    return int(handler(argv[1:]))
-
-
-def _print_ext_help(*, error: bool = False) -> None:
-    """Print usage for the ``ext`` namespace.
-
-    Args:
-        error: When ``True`` write to stderr (unknown sub-verb error path);
-            when ``False`` (default) write to stdout (bare invocation / help
-            request path).
-    """
-    from rich.console import Console
-
-    from daydream.ui import NEON_THEME
-
-    ext_console = Console(stderr=error, theme=NEON_THEME)
-    ext_console.print(
-        "usage: daydream ext {validate} ...\n"
-        "\n"
-        "Extension sub-verbs:\n"
-        "  validate   load the daydream_ext extension and resolve-check the registry"
-    )
+    return _dispatch_namespace(argv, _CORPUS_SUBVERBS, _CORPUS_USAGE)
 
 
 def _ext_resolve_failure(registry: "Registry") -> str | None:
@@ -1384,13 +1386,10 @@ def _handle_ext_command(argv: list[str]) -> int:
         int: The sub-handler's exit code; ``2`` for a bare (no-arg)
         invocation or an unknown sub-verb.
     """
-    if not argv:
-        _print_ext_help(error=False)
+    if argv[:1] == ["validate"] and argv[1:]:
+        _print_namespace_help(_EXT_USAGE, error=True)
         return 2
-    if argv[0] != "validate" or argv[1:]:
-        _print_ext_help(error=True)
-        return 2
-    return _handle_ext_validate_command()
+    return _dispatch_namespace(argv, {"validate": lambda _argv: _handle_ext_validate_command()}, _EXT_USAGE)
 
 
 def _build_post_findings_parser() -> argparse.ArgumentParser:

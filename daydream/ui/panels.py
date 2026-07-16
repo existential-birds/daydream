@@ -167,9 +167,14 @@ class CrazySpinner:
 
         return result
 
-    def reset(self) -> None:
-        """Reset animation to beginning."""
-        self._frame = 0
+
+def _found_count_header(count: int, singular: str, plural: str) -> Text:
+    """Build the sparkle ``Found {n} {noun}`` header for Glob/Grep results."""
+    header = Text()
+    header.append("✨ ", style=STYLE_YELLOW)
+    header.append(f"Found {count} {plural if count != 1 else singular}", style=STYLE_BOLD_CYAN)
+    header.append("\n")
+    return header
 
 
 class LiveToolPanel:
@@ -267,11 +272,7 @@ class LiveToolPanel:
         lines = [line for line in self._result.strip().split("\n") if line.strip()]
         total_files = len(lines)
 
-        result = Text()
-
-        result.append("✨ ", style=STYLE_YELLOW)
-        result.append(f"Found {total_files} file{'s' if total_files != 1 else ''}", style=STYLE_BOLD_CYAN)
-        result.append("\n")
+        result = _found_count_header(total_files, "file", "files")
 
         display_lines = lines[:max_lines]
         for i, filepath in enumerate(display_lines):
@@ -302,11 +303,7 @@ class LiveToolPanel:
         lines = [line for line in self._result.strip().split("\n") if line.strip()]
         total_matches = len(lines)
 
-        result = Text()
-
-        result.append("✨ ", style=STYLE_YELLOW)
-        result.append(f"Found {total_matches} match{'es' if total_matches != 1 else ''}", style=STYLE_BOLD_CYAN)
-        result.append("\n")
+        result = _found_count_header(total_matches, "match", "matches")
 
         content, _ = _build_result_content(self._result, self._is_error, max_lines)
 

@@ -20,7 +20,6 @@ Test inventory (keyed to the Stage 4.2 spec):
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -35,20 +34,9 @@ from daydream.backends import (
     TextEvent,
 )
 from daydream.runner import RunConfig
+from tests.harness.git_helpers import git as _git
 
 # --- Helpers ---------------------------------------------------------------
-
-
-def _git(repo: Path, *args: str, check: bool = True) -> str:
-    """Run a git command in *repo* and return stripped stdout."""
-    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", *args],  # noqa: S607 - git is a trusted command
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=check,
-    )
-    return proc.stdout.strip()
 
 
 def _make_feature_branch_on_origin(

@@ -22,6 +22,7 @@ from daydream.archive.manifest import Manifest
 from daydream.training.corpus import (
     BuildCorpusConfig,
     CorpusFilters,
+    _annotation_reward,
     _build_record,
     _is_admitted,
     run_build_corpus,
@@ -446,26 +447,30 @@ def test_is_admitted_min_reward_compares_intrinsic_only() -> None:
 def test_build_record_emits_posterior_discriminator_only_for_labeled(tmp_path: Path) -> None:
     """``posterior_cost`` in ``record["reward"]`` is the population discriminator.
 
-    ``_build_record`` parses ``reward_json`` verbatim (no transform), so a
-    labeled annotation built from ``PosteriorBreakdown.to_dict()`` carries
-    ``posterior_cost`` while an unlabeled one built from
-    ``RewardBreakdown.to_dict()`` does not.
+    ``reward_json`` is parsed via ``_annotation_reward`` and written verbatim
+    (no transform), so a labeled annotation built from
+    ``PosteriorBreakdown.to_dict()`` carries ``posterior_cost`` while an
+    unlabeled one built from ``RewardBreakdown.to_dict()`` does not.
     """
     manifest_row = {"session_id": "s", "archive_path": str(tmp_path)}
 
+    labeled_reward, labeled_composite = _annotation_reward(_ann_with_posterior_reward_json(), "s")
     rec_labeled = _build_record(
         manifest_row,
         trajectory={},
         stack=None,
         manifest=None,
-        annotation=_ann_with_posterior_reward_json(),
+        reward=labeled_reward,
+        composite_reward=labeled_composite,
     )
+    intrinsic_reward, intrinsic_composite = _annotation_reward(_ann_with_intrinsic_reward_json(), "s")
     rec_intrinsic = _build_record(
         manifest_row,
         trajectory={},
         stack=None,
         manifest=None,
-        annotation=_ann_with_intrinsic_reward_json(),
+        reward=intrinsic_reward,
+        composite_reward=intrinsic_composite,
     )
 
     assert "posterior_cost" in rec_labeled["reward"]

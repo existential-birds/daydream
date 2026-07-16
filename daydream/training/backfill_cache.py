@@ -16,24 +16,22 @@ This module provides two cooperating pieces:
   and read back by :meth:`BackfillCache.completed_sessions`.
 
 The cache is intentionally process-local and lock-free: each cache key
-maps to one file, and the labeler runs single-process. The atomic write
-pattern mirrors :mod:`daydream.trajectory` (tempfile + ``os.replace``)
-so a crash mid-write leaves either the prior file or nothing — never a
-truncated read.
+maps to one file, and the labeler runs single-process. Cache files are
+written via :func:`daydream.json_utils.atomic_write_json` so a crash
+mid-write leaves either the prior file or nothing — never a truncated
+read.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import tempfile
-from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from daydream.json_utils import atomic_write_json
 from daydream.ui import create_console, print_warning
 
 GHApiFn = Callable[..., Any]
@@ -69,27 +67,6 @@ def _cache_key(repo: str, endpoint: str, kwargs: dict[str, Any]) -> str:
         default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _atomic_write_json(path: Path, data: Any) -> None:
-    """Atomically write ``data`` as JSON to ``path``.
-
-    Mirrors the tempfile + ``os.replace`` pattern in
-    :mod:`daydream.trajectory` (lines 893-916).
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(data, indent=2, default=str)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with suppress(OSError):
-            os.unlink(tmp)
-        raise
 
 
 class BackfillCache:
@@ -137,7 +114,7 @@ class BackfillCache:
                 # Fall through to refetch.
 
         result = self.inner(repo, endpoint, **kwargs)
-        _atomic_write_json(path, result)
+        atomic_write_json(path, result, default=str)
         return result
 
     def mark_session_done(self, session_id: str) -> None:

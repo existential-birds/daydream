@@ -65,9 +65,17 @@ def save_benchmark_data(path: str | Path, data: dict[str, Any]) -> None:
         fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+def _find_review(entry: dict[str, Any], tool: str) -> dict[str, Any] | None:
+    """Return the review object for *tool* in a corpus entry, or ``None``."""
+    for review in entry.get("reviews", []):
+        if review.get("tool") == tool:
+            return review
+    return None
+
+
 def has_daydream_review(entry: dict[str, Any], *, tool: str = DAYDREAM_TOOL) -> bool:
     """Report whether a corpus entry already carries a synthetic daydream review."""
-    return any(review.get("tool") == tool for review in entry.get("reviews", []))
+    return _find_review(entry, tool) is not None
 
 
 def inject_daydream_review(
@@ -95,12 +103,12 @@ def inject_daydream_review(
     entry = data[golden_url]
     reviews = entry["reviews"]
 
-    for review in reviews:
-        if review.get("tool") == tool:
-            if not force:
-                return False
-            review["review_comments"] = comments
-            return True
+    existing = _find_review(entry, tool)
+    if existing is not None:
+        if not force:
+            return False
+        existing["review_comments"] = comments
+        return True
 
     reviews.append(
         {

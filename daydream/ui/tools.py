@@ -339,6 +339,26 @@ def _append_label_and_id(header_line: Text, label: str | None, task_id: str, *, 
         header_line.append(f" ({id_prefix}{task_id})", style=STYLE_DIM)
 
 
+def _append_gradient_preview(content: Text, string: str, start_hex: str, end_hex: str, *, bold: bool) -> None:
+    """Append an Edit old/new preview with a per-char color gradient.
+
+    Truncates to ``_EDIT_PREVIEW_MAX_LINES`` lines and interpolates each
+    character's color from ``start_hex`` to ``end_hex``.
+    """
+    lines = string.split("\n")[:_EDIT_PREVIEW_MAX_LINES]
+    preview = "\n".join(lines)
+    if len(string.split("\n")) > _EDIT_PREVIEW_MAX_LINES:
+        preview += "\n..."
+    preview_len = max(len(preview) - 1, 1)
+    for i, char in enumerate(preview):
+        if char == "\n":
+            content.append("\n  ")
+        else:
+            t = i / preview_len
+            color = _interpolate_color(start_hex, end_hex, t)
+            content.append(char, style=Style(color=color, bold=bold or None))
+
+
 def _build_tool_header(
     name: str,
     args: dict[str, object],
@@ -568,36 +588,14 @@ def _build_tool_header(
         content.append("BLOCKED", style=Style(color=NEON_COLORS["red"], bold=True))
         content.append("\n")
         if old_string:
-            lines = old_string.split("\n")[:_EDIT_PREVIEW_MAX_LINES]
-            preview = "\n".join(lines)
-            if len(old_string.split("\n")) > _EDIT_PREVIEW_MAX_LINES:
-                preview += "\n..."
-            preview_len = max(len(preview) - 1, 1)
-            for i, char in enumerate(preview):
-                if char == "\n":
-                    content.append("\n  ")
-                else:
-                    t = i / preview_len
-                    color = _interpolate_color(NEON_COLORS["red"], NEON_COLORS["orange"], t)
-                    content.append(char, style=Style(color=color))
+            _append_gradient_preview(content, old_string, NEON_COLORS["red"], NEON_COLORS["orange"], bold=False)
 
         content.append("\n\n")
         content.append("  ✓ ", style=STYLE_GREEN)
         content.append("FLOWING", style=Style(color=NEON_COLORS["green"], bold=True))
         content.append("\n")
         if new_string:
-            lines = new_string.split("\n")[:_EDIT_PREVIEW_MAX_LINES]
-            preview = "\n".join(lines)
-            if len(new_string.split("\n")) > _EDIT_PREVIEW_MAX_LINES:
-                preview += "\n..."
-            preview_len = max(len(preview) - 1, 1)
-            for i, char in enumerate(preview):
-                if char == "\n":
-                    content.append("\n  ")
-                else:
-                    t = i / preview_len
-                    color = _interpolate_color(NEON_COLORS["cyan"], NEON_COLORS["green"], t)
-                    content.append(char, style=Style(color=color, bold=True))
+            _append_gradient_preview(content, new_string, NEON_COLORS["cyan"], NEON_COLORS["green"], bold=True)
 
         return content
 

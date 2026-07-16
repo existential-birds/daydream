@@ -19,11 +19,10 @@ rather than a one-shot offline backfill.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
 
 import daydream.git_ops as git_ops
+from daydream.json_utils import atomic_write_json
 
 
 def materialize_base_sha(manifest_path: Path, *, repo_clone: Path) -> str | None:
@@ -32,8 +31,8 @@ def materialize_base_sha(manifest_path: Path, *, repo_clone: Path) -> str | None
     Reads the manifest, returns any already-set ``base_sha`` without
     shelling out. Otherwise resolves it via
     :func:`daydream.git_ops.merge_base` against ``repo_clone`` and writes
-    the manifest back atomically (tempfile + ``os.replace``, mirroring
-    ``daydream/trajectory.py``'s ``_write`` pattern).
+    the manifest back atomically via
+    :func:`daydream.json_utils.atomic_write_json`.
 
     Args:
         manifest_path: Path to the on-disk ``manifest.json``.
@@ -69,21 +68,6 @@ def materialize_base_sha(manifest_path: Path, *, repo_clone: Path) -> str | None
     if resolved is None:
         return None
 
-    # Mutate and write back atomically — mirrors trajectory.py:_write.
     manifest.setdefault("code_context", {})["base_sha"] = resolved
-    data = json.dumps(manifest, indent=2)
-    fd, tmp = tempfile.mkstemp(dir=manifest_path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, manifest_path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
+    atomic_write_json(manifest_path, manifest)
     return resolved

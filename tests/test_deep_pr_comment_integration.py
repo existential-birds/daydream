@@ -27,6 +27,8 @@ from typing import Any
 
 import pytest
 
+from tests.harness.git_helpers import git as _git
+
 FIXTURE_MODEL_ID = "fixture-model-id"
 
 
@@ -375,15 +377,6 @@ class _FakeSDKClient:
 
 
 # Repo + monkeypatch fixtures.
-
-
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(  # noqa: S603 - args are not user-controlled
-        ["git", *args],  # noqa: S607
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
 
 
 @pytest.fixture

@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.style import Style
 from rich.text import Text
 
+from daydream.ui.colorize import render_segments
 from daydream.ui.console import _interpolate_color
 from daydream.ui.panels import CrazySpinner
 from daydream.ui.theme import (
@@ -40,15 +41,12 @@ def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
     if base_style is None:
         base_style = STYLE_GREEN
 
-    result = Text()
-
     code_pattern = re.compile(r"`([^`]+)`")
     bold_pattern = re.compile(r"\*\*([^*]+)\*\*")
     italic_pattern = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)")
     url_pattern = re.compile(r"https?://[^\s\])<>]+")
     file_path_pattern = re.compile(r"(?:^|[\s(])([./]?(?:[\w.-]+/)+[\w.-]+\.\w+)")
 
-    pos = 0
     segments: list[tuple[int, int, str, Style]] = []
 
     for match in code_pattern.finditer(text):
@@ -91,30 +89,7 @@ def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
             STYLE_CYAN,
         ))
 
-    segments.sort(key=lambda x: (x[0], -(x[1] - x[0])))
-
-    pos = 0
-    used_ranges: list[tuple[int, int]] = []
-
-    for start, end, display_text, style in segments:
-        overlaps = any(
-            not (end <= used_start or start >= used_end)
-            for used_start, used_end in used_ranges
-        )
-        if overlaps:
-            continue
-
-        if start > pos:
-            result.append(text[pos:start], style=base_style)
-
-        result.append(display_text, style=style)
-        used_ranges.append((start, end))
-        pos = end
-
-    if pos < len(text):
-        result.append(text[pos:], style=base_style)
-
-    return result
+    return render_segments(text, segments, base_style)
 
 
 # Detect markdown headers anywhere in text, not just line-start, to catch inline

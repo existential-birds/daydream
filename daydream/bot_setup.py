@@ -35,10 +35,9 @@ from daydream.github_app import (
     APP_PRIVATE_KEY_ENV,
     AppCredentials,
     GitHubAppError,
-    _scoped_gh_token,
+    app_jwt_auth,
     exchange_manifest_code,
     get_app_metadata,
-    mint_jwt,
     resolve_credentials,
 )
 from daydream.templates import workflow_template_files
@@ -451,14 +450,13 @@ def _bot_handle_for(slug: str | None, scope: Scope) -> str:
     return slug if slug else _owner_of(scope)
 
 
-def _installed_owner_logins(repo_dir: Path, jwt_token: str) -> set[str | None]:
+def _installed_owner_logins(repo_dir: Path, creds: AppCredentials) -> set[str | None]:
     """Return the set of account logins from ``GET /app/installations``.
 
     Callers are responsible for catching :class:`GitError` and converting it
     to their own error type or return value as appropriate.
     """
-    bearer = {"Authorization": f"Bearer {jwt_token}"}
-    with _scoped_gh_token(jwt_token):
+    with app_jwt_auth(creds.app_id, creds.private_key) as bearer:
         installations = git_ops.gh_api(repo_dir, "/app/installations", headers=bearer, idempotent=True)
     return {
         (inst.get("account") or {}).get("login")
@@ -485,9 +483,8 @@ def _check_app_installed(repo_dir: Path, scope: Scope, creds: AppCredentials | N
             required=False,
         )
     owner = _owner_of(scope)
-    jwt_token = mint_jwt(creds.app_id, creds.private_key)
     try:
-        logins = _installed_owner_logins(repo_dir, jwt_token)
+        logins = _installed_owner_logins(repo_dir, creds)
     except GitError as exc:
         return Check(
             name="app_installed",
@@ -711,9 +708,8 @@ def _owner_installed(repo_dir: Path, owner: str, creds: AppCredentials) -> bool:
         GitHubAppError: If the installations read fails (so a transport error is
             never silently read as "not installed").
     """
-    jwt_token = mint_jwt(creds.app_id, creds.private_key)
     try:
-        logins = _installed_owner_logins(repo_dir, jwt_token)
+        logins = _installed_owner_logins(repo_dir, creds)
     except GitError as exc:
         raise GitHubAppError(f"Could not read App installations: {exc}") from exc
     return owner in logins

@@ -70,6 +70,13 @@ class _ToolSupervisorFailure(Exception):
         return type(self.original).__name__
 
 
+async def _emit_progress(callback: Callable[[Text], Any], text: Text) -> None:
+    """Invoke a progress callback, awaiting its result when it is a coroutine."""
+    result = callback(text)
+    if inspect.isawaitable(result):
+        await result
+
+
 @dataclass
 class AgentState:
     """Consolidated state for agent module.
@@ -479,9 +486,7 @@ async def run_agent(
                                 elif use_callback and progress_callback is not None:
                                     last_line = event.text.strip().split("\n")[-1]
                                     if last_line:
-                                        result = progress_callback(format_callback_text(last_line))
-                                        if inspect.isawaitable(result):
-                                            await result
+                                        await _emit_progress(progress_callback, format_callback_text(last_line))
                                 elif output_schema is None:
                                     # Structured-output text is the JSON payload, redundant with
                                     # the returned structured result — don't echo it to the terminal.
@@ -510,9 +515,9 @@ async def run_agent(
                                     # can later resolve a Task-family label for the progress line.
                                     tool_registry.note_call(event.id, event.name, event.input)
                                     label = tool_registry.resolve_call_label(event.name, event.input)
-                                    result = progress_callback(format_callback_progress(event.name, event.input, label))
-                                    if inspect.isawaitable(result):
-                                        await result
+                                    await _emit_progress(
+                                        progress_callback, format_callback_progress(event.name, event.input, label)
+                                    )
                                 else:
                                     if agent_renderer.has_content:
                                         agent_renderer.finish()
@@ -639,9 +644,9 @@ async def run_agent(
                         if _state.log_mode:
                             print(f"[aborted] {budget_reason}", flush=True)
                         elif use_callback and progress_callback is not None:
-                            result = progress_callback(format_callback_text(f"[budget] aborted: {budget_reason}"))
-                            if inspect.isawaitable(result):
-                                await result
+                            await _emit_progress(
+                                progress_callback, format_callback_text(f"[budget] aborted: {budget_reason}")
+                            )
                         elif not use_callback:
                             print_warning(console, f"Turn aborted: {budget_reason}")
 
@@ -665,9 +670,7 @@ async def run_agent(
                     if _state.log_mode:
                         print(f"[retry] {retry_msg}", flush=True)
                     elif use_callback and progress_callback is not None:
-                        result = progress_callback(format_callback_text(f"[retry] {retry_msg}"))
-                        if inspect.isawaitable(result):
-                            await result
+                        await _emit_progress(progress_callback, format_callback_text(f"[retry] {retry_msg}"))
                     elif not use_callback:
                         print_warning(console, retry_msg)
                     if event_iter is not None:

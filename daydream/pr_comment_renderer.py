@@ -18,7 +18,7 @@ Architectural notes:
   member). Display labels come from :data:`_PHASE_LABELS`.
 - Cost source: when a step's ``Metrics.cost_usd`` is set (Claude SDK does
   this), it is used verbatim. When ``cost_usd`` is ``None`` (Codex), the
-  synthesized value from :func:`daydream.pricing.compute_cost` is used
+  synthesized value from :func:`daydream.pricing.compute_cost_from_totals` is used
   (reverses project decision D-16). Unknown models render ``—`` plus a
   footnote.
 - Failure mode: every entry point catches Exception and returns the
@@ -35,7 +35,7 @@ from pathlib import Path
 
 import daydream
 from daydream.atif import Step, Trajectory
-from daydream.pricing import ModelPrice, compute_cost, load_user_prices, resolve_prices
+from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 from daydream.timeutil import parse_iso_timestamp
 
 # Display labels for each phase key used in Step.extra['daydream_phase'].
@@ -314,8 +314,8 @@ def _accumulate_metrics(
     - If ``Metrics.cost_usd`` is present, use it verbatim — Claude SDK
       surfaces real billed cost, no need to synthesize.
     - Else if model is in :data:`daydream.pricing.MODEL_PRICES`, synthesize
-      cost from token counts. ``compute_cost`` expects *uncached* input
-      tokens, so we subtract the clamped ``cached`` from ``prompt``.
+      cost from token counts via ``compute_cost_from_totals`` (which derives
+      the uncached input count from the clamped totals).
     - Else mark ``phase.cost_unknown`` and remember the model name for the
       footnote.
 
@@ -330,8 +330,8 @@ def _accumulate_metrics(
         fallback_model: Model id to use when ``step.model_name`` is omitted
             (the root-level :attr:`Agent.model_name`).
         prices: Effective model price table (built-ins merged with user
-            overrides) passed to :func:`daydream.pricing.compute_cost` for
-            cost synthesis.
+            overrides) passed to :func:`daydream.pricing.compute_cost_from_totals`
+            for cost synthesis.
     """
     metrics = step.metrics
     if metrics is None:
@@ -356,10 +356,9 @@ def _accumulate_metrics(
         # price. Mark unknown so the phase row degrades to '—'.
         phase.cost_unknown = True
         return
-    uncached_input = prompt - cached  # already clamped at top — single source of truth
-    synth = compute_cost(
-        model=model,
-        input_tokens=uncached_input,
+    synth = compute_cost_from_totals(
+        model,
+        total_input_tokens=prompt,
         cached_input_tokens=cached,
         output_tokens=completion,
         prices=prices,

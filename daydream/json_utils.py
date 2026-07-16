@@ -1,15 +1,55 @@
-"""Shared JSON extraction utilities.
+"""Shared JSON utilities.
 
-Used by backends (structured-output extraction) and ``run_agent`` (raw-text
-fallback) to robustly pull JSON out of model output that may be wrapped in
-reasoning prose or markdown code fences — common with GLM and other
-OpenAI-compatible models.
+``extract_json`` is used by backends (structured-output extraction) and
+``run_agent`` (raw-text fallback) to robustly pull JSON out of model output
+that may be wrapped in reasoning prose or markdown code fences — common with
+GLM and other OpenAI-compatible models. ``atomic_write_json`` is the shared
+crash-safe JSON file writer (tempfile + ``os.replace``).
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+import os
+import tempfile
+from contextlib import suppress
+from pathlib import Path
+from typing import Any, Callable
+
+
+def atomic_write_json(
+    path: Path,
+    data: Any,
+    *,
+    indent: int = 2,
+    sort_keys: bool = False,
+    default: Callable[[Any], Any] | None = None,
+    trailing_newline: bool = False,
+    fsync: bool = True,
+) -> None:
+    """Atomically write ``data`` as JSON to ``path`` (tempfile + ``os.replace``).
+
+    The temp file lives in ``path``'s directory so the rename never crosses
+    filesystems; a crash mid-write leaves either the prior file or nothing.
+    Parent directories are created as needed. On failure the temp file is
+    removed best-effort and the original exception re-raised.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, indent=indent, sort_keys=sort_keys, default=default)
+    if trailing_newline:
+        text += "\n"
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            if fsync:
+                f.flush()
+                os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def extract_json(text: str) -> Any:

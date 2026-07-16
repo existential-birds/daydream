@@ -53,19 +53,6 @@ _SPECIALIST_TIMEOUT_SECONDS = 300  # 5 minutes
 EXPLORATION_MAX_TURNS = 50
 
 
-EXPLORATION_ENVELOPE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "pattern_scanner": PATTERN_SCANNER_SCHEMA,
-        "dependency_tracer": DEPENDENCY_TRACER_SCHEMA,
-        "test_mapper": TEST_MAPPER_SCHEMA,
-    },
-    # Any subset is allowed -- single tier only emits one key.
-    "required": [],
-    "additionalProperties": False,
-}
-
-
 def count_changed_files(diff_text: str) -> int:
     """Count unique file paths in a unified-diff string.
 
@@ -227,8 +214,8 @@ async def pre_scan(
 
     static_context = ExplorationContext(affected_files=static_files)
 
-    file_count = count_changed_files(diff_text)
-    tier = select_tier(file_count)
+    rel_paths = {m.group(1) for m in _DIFF_HEADER_RE.finditer(diff_text)}
+    tier = select_tier(len(rel_paths))
 
     if tier == "skip":
         return static_context
@@ -258,7 +245,7 @@ async def pre_scan(
     # Paths handed to specialists are cwd-absolute (rooted at repo_root, the
     # actual worktree). In a linked worktree the agent must not re-root a bare
     # relative path via git topology, which points at the sibling main worktree.
-    changed_paths = sorted({str(repo_root / m.group(1)) for m in _DIFF_HEADER_RE.finditer(diff_text)})
+    changed_paths = sorted(str(repo_root / p) for p in rel_paths)
     static_files_abs = [
         FileInfo(path=str(repo_root / f.path), role=f.role, summary=f.summary) for f in static_files
     ]
@@ -294,7 +281,6 @@ async def pre_scan(
 
 
 __all__ = [
-    "EXPLORATION_ENVELOPE_SCHEMA",
     "Tier",
     "count_changed_files",
     "pre_scan",

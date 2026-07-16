@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -49,7 +49,12 @@ from daydream.deep.artifacts import (
 from daydream.deep.artifacts import (
     intent_path as _intent_path,
 )
-from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
+from daydream.deep.dedup import (
+    CandidatePair,
+    RecordDuplicatePair,
+    build_dedup_candidates,
+    build_record_dedup_candidates,
+)
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.deep.render import render_held_section, render_report
 from daydream.extensions import get_registry
@@ -172,28 +177,30 @@ def _single_stack_agent_count(stack_count: int) -> int:
     return 2 + stack_count + stack_count
 
 
+def _resolve_config_value[T: (int, float)](config: RunConfig, attr: str, default: T) -> T:
+    """Resolve a scalar setting: ``RunConfig`` attr (when present) > file config > default.
+
+    Precedence mirrors ``_resolve_backend`` / ``_resolved_model`` at
+    ``runner.py:295-326``. Uses ``is not None`` checks rather than truthiness
+    so a configured value of ``0`` / ``0.0`` is honored.
+    """
+    value = getattr(config, attr, None)
+    if value is not None:
+        return value
+    file_config = config.file_config
+    if file_config is not None:
+        value = getattr(file_config, attr, None)
+        if value is not None:
+            return value
+    return default
+
+
 def _shallow_fanout_threshold(config: RunConfig) -> int:
     """Resolve the tiny-diff short-circuit threshold (issue #172, AC7).
 
-    Precedence (highest first), mirroring ``_resolve_backend`` /
-    ``_resolved_model`` at ``runner.py:295-326``:
-
-      1. ``RunConfig.shallow_fanout_threshold`` (CLI tier).
-      2. ``DaydreamFileConfig.shallow_fanout_threshold`` (file-config scalar).
-      3. ``DEFAULT_SHALLOW_FANOUT_THRESHOLD`` (built-in default).
-
-    Uses ``is not None`` checks rather than truthiness so a configured value
-    of ``0`` (explicitly disable the short-circuit) is honored.
-
-    Returns:
-        The resolved integer threshold. ``0`` disables the short-circuit.
+    ``0`` disables the short-circuit.
     """
-    if config.shallow_fanout_threshold is not None:
-        return config.shallow_fanout_threshold
-    file_config = config.file_config
-    if file_config is not None and file_config.shallow_fanout_threshold is not None:
-        return file_config.shallow_fanout_threshold
-    return DEFAULT_SHALLOW_FANOUT_THRESHOLD
+    return _resolve_config_value(config, "shallow_fanout_threshold", DEFAULT_SHALLOW_FANOUT_THRESHOLD)
 
 
 def _precision_mode(config: RunConfig) -> bool:
@@ -229,42 +236,6 @@ def _supervisor_mode(config: RunConfig) -> str:
 def _supervise_enabled(ctx: FlowContext) -> bool:
     """Run supervision on fresh flows, not on a fix-only resume."""
     return _supervisor_mode(ctx.config) in {"rules", "llm"} and ctx.config.start_at != "fix"
-
-
-def _resolve_group_max_wall_s(config: RunConfig) -> float:
-    """Resolve the per-file-group fix wall-clock ceiling (issue #201).
-
-    Precedence (highest first), mirroring ``_shallow_fanout_threshold`` above
-    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
-
-      1. ``DaydreamFileConfig.group_max_wall_s`` (file-config scalar).
-      2. ``DEFAULT_GROUP_MAX_WALL_S`` (built-in default).
-
-    Uses ``is not None`` rather than truthiness so a configured value of
-    ``0.0`` is honored rather than falling through to the default.
-    """
-    file_config = config.file_config
-    if file_config is not None and file_config.group_max_wall_s is not None:
-        return file_config.group_max_wall_s
-    return DEFAULT_GROUP_MAX_WALL_S
-
-
-def _resolve_group_max_serial_items(config: RunConfig) -> int:
-    """Resolve the per-file-group serial fix-call ceiling (issue #201).
-
-    Precedence (highest first), mirroring ``_shallow_fanout_threshold`` above
-    and ``_resolve_backend`` / ``_resolved_model`` at ``runner.py:295-326``:
-
-      1. ``DaydreamFileConfig.group_max_serial_items`` (file-config scalar).
-      2. ``DEFAULT_GROUP_MAX_SERIAL_ITEMS`` (built-in default).
-
-    Uses ``is not None`` rather than truthiness so a configured value of
-    ``0`` is honored rather than falling through to the default.
-    """
-    file_config = config.file_config
-    if file_config is not None and file_config.group_max_serial_items is not None:
-        return file_config.group_max_serial_items
-    return DEFAULT_GROUP_MAX_SERIAL_ITEMS
 
 
 def _collapse_stacks_for_tiny_diff(
@@ -481,12 +452,9 @@ def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> li
     return items
 
 
-def _candidate_pair_to_json(pair: Any) -> dict[str, Any]:
+def _candidate_pair_to_json(pair: CandidatePair | RecordDuplicatePair) -> dict[str, Any]:
     """Serialize a CandidatePair dataclass into a JSON-compatible dict."""
-    if is_dataclass(pair) and not isinstance(pair, type):
-        data = asdict(pair)
-    else:
-        data = dict(pair)
+    data = asdict(pair)
     # alt_files is a tuple -> convert to list for stable JSON.
     if isinstance(data.get("alt_files"), tuple):
         data["alt_files"] = list(data["alt_files"])
@@ -1324,8 +1292,8 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         pre_fix_head = None
     # Resolve per-file-group fix budgets (#201): file-config override wins, else
     # the config.py default. A runaway file group cannot silently dominate a run.
-    group_wall_s = _resolve_group_max_wall_s(config)
-    group_serial = _resolve_group_max_serial_items(config)
+    group_wall_s = _resolve_config_value(config, "group_max_wall_s", DEFAULT_GROUP_MAX_WALL_S)
+    group_serial = _resolve_config_value(config, "group_max_serial_items", DEFAULT_GROUP_MAX_SERIAL_ITEMS)
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
@@ -1578,14 +1546,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         # ``single_stack_mode`` is recomputed here (top of run_deep) so a
         # ``--start-at merge``/``--start-at fix`` resume on a tiny diff re-enters
         # the same bypass branch rather than routing to the absent merge agent.
-        threshold = _shallow_fanout_threshold(config)
-        if threshold > 0 and 0 < len(changed_files) <= threshold:
-            stacks, _ = _collapse_stacks_for_tiny_diff(
-                stacks, changed_files, threshold=threshold
-            )
-            single_stack_mode = True
-        else:
-            single_stack_mode = False
+        stacks, single_stack_mode = _collapse_stacks_for_tiny_diff(
+            stacks, changed_files, threshold=_shallow_fanout_threshold(config)
+        )
 
         # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
         # when single_stack_mode is active (issue #172): merge+arbiter are

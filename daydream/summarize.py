@@ -15,6 +15,7 @@ from pathlib import Path
 
 from rich.console import Console
 
+from daydream.eval.analyzer import collect_trajectory_paths
 from daydream.pr_comment_renderer import FALLBACK_NOTE, render_run_info_block
 from daydream.ui import NEON_THEME, print_error
 
@@ -43,7 +44,7 @@ def summarize(path: Path) -> int:
             return 1
         paths = [path]
     elif path.is_dir():
-        paths = _collect_run_dir(path)
+        paths = collect_trajectory_paths(path)
         if not paths:
             print_error(
                 err_console,
@@ -67,46 +68,6 @@ def summarize(path: Path) -> int:
     if FALLBACK_NOTE in output:
         return 2
     return 0
-
-
-def _collect_run_dir(run_dir: Path) -> list[Path]:
-    """Collect ``trajectory.json`` plus any ``trajectories/*.json`` siblings.
-
-    Supports three input shapes:
-
-    1. A specific run directory (``runs/<session_id>/``) containing
-       ``trajectory.json`` directly.
-    2. A ``.daydream/`` directory using the **old** flat layout with
-       ``trajectory.json`` (and optional ``trajectories/``) at the top level.
-    3. A ``.daydream/`` directory using the **new** layout where trajectories
-       live under ``runs/<session_id>/``.  The most recently modified run is
-       selected automatically.
-    """
-    paths: list[Path] = []
-    parent = run_dir / "trajectory.json"
-    if parent.is_file():
-        paths.append(parent)
-    siblings_dir = run_dir / "trajectories"
-    if siblings_dir.is_dir():
-        for sibling in sorted(siblings_dir.glob("*.json")):
-            if sibling.is_file():
-                paths.append(sibling)
-
-    # If nothing found directly, check for new-style runs/ subdirectory and
-    # pick the most recent run by mtime (mirrors eval/analyzer.py logic).
-    if not paths:
-        candidates = list(run_dir.glob("runs/*/trajectory.json"))
-        if candidates:
-            latest = max(candidates, key=lambda p: p.stat().st_mtime)
-            nested_run_dir = latest.parent
-            paths.append(latest)
-            nested_siblings = nested_run_dir / "trajectories"
-            if nested_siblings.is_dir():
-                for sibling in sorted(nested_siblings.glob("*.json")):
-                    if sibling.is_file():
-                        paths.append(sibling)
-
-    return paths
 
 
 __all__ = ["summarize"]

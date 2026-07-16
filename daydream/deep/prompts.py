@@ -178,6 +178,15 @@ def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
     return result
 
 
+def _full_diff_pointer(diff_path: Path) -> str:
+    """Shared paragraph pointing agents at the on-disk full PR diff."""
+    return (
+        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
+        "do NOT run `git diff` without a base ref -- on a clean branch that "
+        "returns empty and hides committed changes."
+    )
+
+
 def _diff_instruction(
     diff_path: Path,
     files: list[str],
@@ -218,12 +227,7 @@ def _diff_instruction(
     # only surfaces uncommitted workspace changes; on a clean PR branch it
     # would return empty and hide every committed change. diff_path already
     # contains the full base..HEAD diff.
-    return (
-        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
-        f"do NOT run `git diff` without a base ref -- on a clean branch that "
-        f"returns empty and hides committed changes.\n"
-        f"Focus on hunks that touch your stack's files: {joined}."
-    )
+    return f"{_full_diff_pointer(diff_path)}\nFocus on hunks that touch your stack's files: {joined}."
 
 
 def build_per_stack_prompt(
@@ -325,11 +329,7 @@ def build_structural_prompt(
         f"helpers exist, file-size budgets are honored, and the change makes "
         f"the codebase easier or harder to live with."
     )
-    parts.append(
-        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
-        f"do NOT run `git diff` without a base ref -- on a clean branch that "
-        f"returns empty and hides committed changes."
-    )
+    parts.append(_full_diff_pointer(diff_path))
     parts.append(skill_invocation)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")
@@ -369,11 +369,7 @@ def build_arbiter_prompt(
         parts.append(pointer)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
-    parts.append(
-        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
-        f"do NOT run `git diff` without a base ref -- on a clean branch that "
-        f"returns empty and hides committed changes."
-    )
+    parts.append(_full_diff_pointer(diff_path))
     parts.append(
         "You are the arbiter. The cheaper per-stack reviewers flagged the "
         f"high-severity and contested findings listed in {arbiter_input_path}. "
@@ -412,11 +408,7 @@ def build_supervise_prompt(
         parts.append(pointer)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
-    parts.append(
-        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
-        "do NOT run `git diff` without a base ref -- on a clean branch that "
-        "returns empty and hides committed changes."
-    )
+    parts.append(_full_diff_pointer(diff_path))
     parts.append(
         "Supervisor adjudication: review the canonical findings listed in "
         f"{supervise_input_path}. This is an adjudication pass, not a fresh "
@@ -471,11 +463,7 @@ def build_suppression_prompt(
         parts.append(pointer)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
-    parts.append(
-        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
-        f"do NOT run `git diff` without a base ref -- on a clean branch that "
-        f"returns empty and hides committed changes."
-    )
+    parts.append(_full_diff_pointer(diff_path))
     parts.append(
         "You are the suppression reviewer. The cheaper per-stack reviewers "
         "flagged the borderline, low-confidence / low-severity findings listed "
