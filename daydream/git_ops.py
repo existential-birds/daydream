@@ -1588,8 +1588,8 @@ def gh_api(
             success the tempfile is removed; on failure it is preserved and
             its path is included in the raised :class:`GitError` so callers
             can inspect the exact request body that was sent.
-        jq: Optional ``gh --jq`` filter. The filtered stdout is parsed as
-            NDJSON (one JSON value per line) and returned as a list. With
+        jq: Optional ``gh --jq`` filter. Each filtered value is JSON-encoded,
+            then parsed as NDJSON and returned as a list. With
             ``paginate=True`` gh concatenates each page's raw JSON, which is
             not itself valid JSON for array endpoints — a filter like ``".[]"``
             flattens every page to one value per line instead.
@@ -1616,7 +1616,7 @@ def gh_api(
     if paginate:
         output_args.append("--paginate")
     if jq is not None:
-        output_args.extend(["--jq", jq])
+        output_args.extend(["--jq", f"({jq}) | @json"])
     retries = _gh_retries() if idempotent else 0
 
     if input_data is None:

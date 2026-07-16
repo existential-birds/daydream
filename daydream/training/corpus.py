@@ -243,8 +243,9 @@ def _build_record(
 
     The ``outcome_label``, ``reward`` and ``composite_reward`` fields are
     passed in pre-computed by the caller from the ``as_of``-pinned silver
-    annotation — never from the denormalized ``runs.outcome_labels`` cache. An
-    unlabeled run passes ``label=None``, ``reward=None`` and
+    annotation — never from the denormalized ``runs.outcome_labels`` cache. A
+    run without a usable pinned annotation passes ``label=None``,
+    ``reward=None`` and
     ``composite_reward=None`` (``outcome_label=None``, ``composite_reward=None``,
     no ``reward`` key).
 
