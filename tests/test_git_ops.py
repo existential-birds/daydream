@@ -438,6 +438,28 @@ def test_grep_returns_empty_when_no_matches(tmp_path: Path) -> None:
     assert git_ops.grep(repo, "doesnotexistanywhere") == []
 
 
+def test_grep_word_matches_whole_words_only(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "whole.txt").write_text("the app runs\n")
+    (repo / "part.txt").write_text("the application runs\n")
+    _git(repo, "add", "whole.txt", "part.txt")
+    _commit(repo, "add files")
+    matches = git_ops.grep(repo, "app", word=True)
+    assert "whole.txt" in matches
+    assert "part.txt" not in matches
+
+
+def test_grep_pathspecs_restrict_search(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "code.py").write_text("widget = 1\n")
+    (repo / "notes.md").write_text("widget docs\n")
+    _git(repo, "add", "code.py", "notes.md")
+    _commit(repo, "add files")
+    matches = git_ops.grep(repo, "widget", pathspecs=("*.py",))
+    assert "code.py" in matches
+    assert "notes.md" not in matches
+
+
 def test_status_porcelain_clean_and_dirty(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     assert git_ops.status_porcelain(repo) == ""

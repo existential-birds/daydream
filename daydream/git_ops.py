@@ -44,6 +44,7 @@ import re
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Generator
@@ -1040,14 +1041,38 @@ def show(repo: Path, ref: str, path: str) -> bytes:
     return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
 
 
-def grep(repo: Path, pattern: str) -> list[str]:
+def grep(
+    repo: Path,
+    pattern: str,
+    *,
+    word: bool = False,
+    pathspecs: Sequence[str] | None = None,
+) -> list[str]:
     """Return file paths matching *pattern* via ``git grep -l``.
+
+    Only tracked, non-ignored files are searched (``git grep`` semantics).
+
+    Args:
+        repo: Repository root to search.
+        pattern: Basic-regex pattern passed to ``git grep``.
+        word: When true, match only at word boundaries (``-w``) so ``app``
+            does not also match ``application`` or ``mapping``.
+        pathspecs: Optional ``git`` pathspecs limiting the search to matching
+            files (e.g. ``("*.py", "*.ts")``). When omitted, every tracked
+            file is searched.
 
     Raises:
         GitError: If ``git grep`` exits with an unexpected status.  Exit code
             ``1`` is "no matches" and is treated as success (empty list).
     """
-    proc = _run_git(repo, ["grep", "-l", "--", pattern], timeout=30)
+    args = ["grep", "-l"]
+    if word:
+        args.append("-w")
+    args.extend(["-e", pattern])
+    if pathspecs:
+        args.append("--")
+        args.extend(pathspecs)
+    proc = _run_git(repo, args, timeout=30)
     # git grep returns 1 when there are simply no matches.
     if proc.returncode not in (0, 1):
         raise GitError(f"git grep {pattern!r} failed: {proc.stderr.strip()}")

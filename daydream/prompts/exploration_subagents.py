@@ -118,8 +118,13 @@ def _schema_block(schema: dict[str, Any]) -> str:
     return "Return ONLY a JSON object matching this schema:\n```json\n" + json.dumps(schema, indent=2) + "\n```"
 
 
+def _files_block(affected_files: list[FileInfo]) -> str:
+    """Render the shared ``<affected_files>`` body: one ``- path (role)`` per entry."""
+    return "\n".join(f"- {f.path} ({f.role})" for f in affected_files) or "- (none yet)"
+
+
 # Dynamic prompt builders (per-run prompts injecting diff + affected files)
-def build_pattern_scanner_prompt(affected_files: list[str], diff_ref: str, *, cwd: Path) -> str:
+def build_pattern_scanner_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
     """Build the per-run pattern-scanner prompt.
 
     The prompt passes the affected file list and a diff ref. The specialist
@@ -127,11 +132,11 @@ def build_pattern_scanner_prompt(affected_files: list[str], diff_ref: str, *, cw
     receiving the full diff inline, which keeps context small for large diffs.
 
     Args:
-        affected_files: Paths of files touched by the diff under review.
+        affected_files: FileInfo entries for files reachable from the diff.
         diff_ref: Git ref (e.g. base branch or SHA) the specialist can diff against.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
     """
-    files_block = "\n".join(f"- {p}" for p in affected_files) or "- (none yet)"
+    files_block = _files_block(affected_files)
     return f"""You are the **pattern-scanner** specialist. Detect codebase conventions
 and read guideline files relevant to the changes below.
 
@@ -166,7 +171,7 @@ def build_dependency_tracer_prompt(affected_files: list[FileInfo], diff_ref: str
         diff_ref: Git ref the specialist can diff against when probing call sites.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
     """
-    files_block = "\n".join(f"- {f.path} ({f.role})" for f in affected_files) or "- (none yet)"
+    files_block = _files_block(affected_files)
     return f"""You are the **dependency-tracer** specialist. Extend the affected-files
 list beyond the static-resolved imports by grepping for call sites and
 reading the implementations. For every import or call edge you confirm,
@@ -186,7 +191,7 @@ work file-by-file so your context stays small.
 """
 
 
-def build_test_mapper_prompt(affected_files: list[str], diff_ref: str, *, cwd: Path) -> str:
+def build_test_mapper_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
     """Build the per-run test-mapper prompt.
 
     The prompt passes the affected file list and a diff ref. The specialist
@@ -194,11 +199,11 @@ def build_test_mapper_prompt(affected_files: list[str], diff_ref: str, *, cwd: P
     receiving the full diff inline.
 
     Args:
-        affected_files: Paths of files touched by the diff under review.
+        affected_files: FileInfo entries for files reachable from the diff.
         diff_ref: Git ref the specialist can diff against when locating test files.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
     """
-    files_block = "\n".join(f"- {p}" for p in affected_files) or "- (none yet)"
+    files_block = _files_block(affected_files)
     return f"""You are the **test-mapper** specialist. Locate test files for each modified
 source file using conventional path mapping (tests/test_X.py, *.test.ts,
 *_test.go, tests/<crate>_test.rs). Emit a FileInfo with role="test" for

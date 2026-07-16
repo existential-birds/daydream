@@ -300,16 +300,48 @@ def _resolve_import(language_id: str, import_str: str, repo_root: Path, importer
 # --- Reverse edges (importers) ----------------------------------------------
 
 
+# Stems whose bare name is too common for a reverse-import grep to be
+# meaningful: an entrypoint or ubiquitous module name matches thousands of
+# files (e.g. ``app`` matches every file mentioning "app"). The static
+# ``imports`` edges still capture forward dependencies precisely, and the
+# dependency-tracer agent greps call sites itself, so skipping these loses
+# nothing but noise.
+_GENERIC_STEMS = frozenset(
+    {
+        "__init__", "mod", "index", "main", "app", "api", "base", "common",
+        "utils", "util", "helpers", "constants", "config", "settings",
+        "models", "model", "types", "type", "schema", "schemas", "client",
+        "server", "service", "services", "handler", "handlers", "views",
+        "urls", "test", "tests", "conftest", "setup",
+    }
+)
+
+# Reverse-edge grep is a best-effort seed, not an exhaustive index. A
+# legitimately widely-imported module can match hundreds of files; cap the
+# seed so no single module can blow the downstream prompt's context window.
+_MAX_IMPORTERS = 40
+
+# Restrict the reverse-edge grep to source files. A doc, plan, or config file
+# cannot import a code module, so matches in them are always false positives.
+_CODE_PATHSPECS: tuple[str, ...] = tuple(f"*{suffix}" for suffix in LANGUAGES)
+
+
 def _find_importers(repo_root: Path, modified_path: str) -> list[str]:
-    """Best-effort `git grep` for files that mention the modified file's stem."""
+    """Best-effort `git grep` for source files that import the modified file.
+
+    Matches the modified file's stem at word boundaries, restricted to
+    tracked source files, skipping generic stems and capping the result at
+    :data:`_MAX_IMPORTERS`.
+    """
     stem = Path(modified_path).stem
-    if not stem or stem in {"__init__", "mod", "index"}:
+    if not stem or stem in _GENERIC_STEMS:
         return []
     try:
-        matches = git_ops.grep(repo_root, stem)
+        matches = git_ops.grep(repo_root, stem, word=True, pathspecs=_CODE_PATHSPECS)
     except GitError:
         return []
-    return [line for line in matches if line and line != modified_path]
+    importers = [line for line in matches if line and line != modified_path]
+    return importers[:_MAX_IMPORTERS]
 
 
 # --- Public API --------------------------------------------------------------

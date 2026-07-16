@@ -30,7 +30,8 @@ FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
 # Subagent prompt sanity checks (Plan 03)
 def test_pattern_scanner_prompt_includes_guideline_files():
-    dynamic = build_pattern_scanner_prompt(["daydream/foo.py"], "main...HEAD", cwd=Path("/repo"))
+    files = [FileInfo("daydream/foo.py", "modified")]
+    dynamic = build_pattern_scanner_prompt(files, "main...HEAD", cwd=Path("/repo"))
     assert "CLAUDE.md" in dynamic
     assert "main...HEAD" in dynamic
     assert "daydream/foo.py" in dynamic
@@ -49,7 +50,8 @@ def test_dependency_tracer_prompt_mentions_affected_files():
 
 
 def test_test_mapper_prompt_instructs_mapping():
-    prompt = build_test_mapper_prompt(["daydream/x.py"], "main...HEAD", cwd=Path("/repo"))
+    files = [FileInfo("daydream/x.py", "modified")]
+    prompt = build_test_mapper_prompt(files, "main...HEAD", cwd=Path("/repo"))
     assert "test" in prompt.lower()
     assert "daydream/x.py" in prompt
     assert "main...HEAD" in prompt
@@ -59,7 +61,8 @@ def test_test_mapper_prompt_instructs_mapping():
 
 def test_pattern_scanner_prompt_contains_cwd_grounding():
     cwd = Path("/tmp/linked/worktree")
-    prompt = build_pattern_scanner_prompt(["daydream/foo.py"], "main...HEAD", cwd=cwd)
+    files = [FileInfo("daydream/foo.py", "modified")]
+    prompt = build_pattern_scanner_prompt(files, "main...HEAD", cwd=cwd)
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert str(cwd) in prompt
 
@@ -74,7 +77,8 @@ def test_dependency_tracer_prompt_contains_cwd_grounding():
 
 def test_test_mapper_prompt_contains_cwd_grounding():
     cwd = Path("/tmp/linked/worktree")
-    prompt = build_test_mapper_prompt(["daydream/x.py"], "main...HEAD", cwd=cwd)
+    files = [FileInfo("daydream/x.py", "modified")]
+    prompt = build_test_mapper_prompt(files, "main...HEAD", cwd=cwd)
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert str(cwd) in prompt
 
@@ -215,7 +219,7 @@ def test_parallel_tier_launches_three_agents(tmp_path):
     assert "use type hints" in ctx.guidelines
 
 
-def test_parallel_tier_routes_correct_file_lists(tmp_path):
+def test_parallel_tier_gives_every_specialist_the_same_list(tmp_path):
     py = (FIXTURES / "python_multifile.diff").read_text()
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts
@@ -223,7 +227,7 @@ def test_parallel_tier_routes_correct_file_lists(tmp_path):
     backend = _SpecialistMockBackend()
     anyio.run(pre_scan, backend, tmp_path, diff_text)
 
-    # Paths are now cwd-absolute (issue #221): rooted at repo_root (tmp_path).
+    # Paths are cwd-absolute (issue #221): rooted at repo_root (tmp_path).
     diff_changed = {
         str(tmp_path / p)
         for p in ("daydream_demo/api.py", "daydream_demo/models.py", "src/api.ts", "src/models.ts")
@@ -240,15 +244,12 @@ def test_parallel_tier_routes_correct_file_lists(tmp_path):
 
     assert set(calls_by_schema.keys()) == {"pattern_scanner", "dependency_tracer", "test_mapper"}
 
-    for name in ("pattern_scanner", "test_mapper"):
+    # Consolidation: every specialist receives the same role-annotated,
+    # cwd-absolute affected-files list -- no per-specialist input split.
+    for name in ("pattern_scanner", "dependency_tracer", "test_mapper"):
         prompt = calls_by_schema[name]["prompt"]
         for path in diff_changed:
-            assert f"- {path}" in prompt
-        assert "(modified)" not in prompt
-
-    dep_prompt = calls_by_schema["dependency_tracer"]["prompt"]
-    for path in diff_changed:
-        assert f"- {path} (modified)" in dep_prompt
+            assert f"- {path} (modified)" in prompt
 
 
 def test_parse_envelope_handles_missing_keys(tmp_path):
@@ -311,8 +312,8 @@ def _multifile_diff(paths: list[str]) -> str:
     )
 
 
-def test_pre_scan_passes_cwd_absolute_changed_paths(tmp_path):
-    # 4 files => parallel tier => pattern_scanner & test_mapper receive changed_paths.
+def test_pre_scan_passes_cwd_absolute_paths(tmp_path):
+    # 4 files => parallel tier => all specialists receive the affected-files list.
     paths = [f"services/taste/file{i}.py" for i in range(4)]
     diff_text = _multifile_diff(paths)
     backend = _SpecialistMockBackend()
