@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 
+from daydream.agent import set_log_mode
 from daydream.backends import ResultEvent, TextEvent
 from daydream.json_utils import extract_json
 from daydream.phases import phase_arbiter_review
@@ -143,3 +144,105 @@ async def test_arbiter_still_raises_on_genuinely_unparseable_output(tmp_path: Pa
             intent_path=intent_path,
             alternatives_path=alternatives_path,
         )
+
+
+# Real run (`--log`, pi/glm reviewer): the arbiter streamed a long prose
+# adjudication followed by a JSON answer that got truncated mid-string, so the
+# final assistant *text* held no closeable findings object. The backend had
+# already extracted the complete structured dict into the ResultEvent, but in
+# log_mode run_agent printed `[result]` and dropped it on the floor instead of
+# capturing it, then fell back to extract_json() over the prose. That returned
+# the raw string, and phase_arbiter_review crashed with
+# ``ValueError("Arbiter returned no findings list (got str)")``.
+PROSE_WITH_TRUNCATED_JSON = (
+    "## Adjudication\n\n"
+    "**arb_id 1** -- Confirmed real, but mis-severitied. The setLevel line has "
+    "lived beside the instrumentation calls in app.py:28 since 2023; the refactor "
+    "split it off by oversight. This is log-hygiene, not correctness -- low.\n\n"
+    # A truncated (never-closed) JSON tail: unbalanced, so extract_json() finds no
+    # object here and run_agent's text fallback yields a bare string.
+    '{"findings": [{"arb_id": 1, "keep": true, "severity": "low", "rationale": "only the web proc'
+)
+
+# What the backend actually managed to extract into the ResultEvent: the full,
+# well-formed structured answer.
+STRUCTURED_OUTPUT: dict[str, Any] = {
+    "findings": [
+        {
+            "arb_id": 1,
+            "keep": True,
+            "severity": "low",
+            "confidence": "HIGH",
+            "description": "init_instrumentation() omits the ddtrace setLevel.",
+            "rationale": "Confirmed against code; log-hygiene only.",
+        },
+        {
+            "arb_id": 2,
+            "keep": False,
+            "severity": "low",
+            "confidence": "MEDIUM",
+            "description": "Not a real defect.",
+            "rationale": "Rejected on inspection.",
+        },
+    ]
+}
+
+
+class _SplitTextBackend:
+    """Emits prose text and structured output separately (the real pi contract).
+
+    Unlike ``_PiLikeBackend``, the final ``TextEvent`` and the ResultEvent's
+    ``structured_output`` diverge: the text is prose the extractor cannot parse
+    into a findings object, while ``structured_output`` is the complete answer.
+    This is what exposes the log_mode result-capture bug -- a backend whose text
+    happens to also contain a parseable object would mask it via the fallback.
+    """
+
+    model = "glm-5.2"
+    fanout_concurrency = 4
+
+    def __init__(self, text: str, structured: Any) -> None:
+        self._text = text
+        self._structured = structured
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        yield TextEvent(text=self._text)
+        yield ResultEvent(structured_output=self._structured if output_schema else None, continuation=None)
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
+
+
+async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, make_work) -> None:
+    """In --log mode the ResultEvent's structured dict must reach the phase, not be dropped.
+
+    Regression for ``Arbiter returned no findings list (got str)``: log_mode
+    printed ``[result]`` but skipped assigning ``structured_result``, so the
+    phase received the prose-fallback string. Drives the real production path
+    (phase_arbiter_review -> run_agent -> backend events) with log_mode on.
+    """
+    set_log_mode(True)  # reset by the autouse _reset_agent_state fixture
+    diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
+    verdicts = await phase_arbiter_review(
+        _SplitTextBackend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT),
+        make_work(tmp_path),
+        selected_records=SELECTED_RECORDS,
+        diff_path=diff_path,
+        intent_path=intent_path,
+        alternatives_path=alternatives_path,
+    )
+    assert set(verdicts) == {1, 2}
+    assert verdicts[1]["keep"] is True
+    assert verdicts[2]["keep"] is False
