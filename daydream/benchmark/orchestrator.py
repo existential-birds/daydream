@@ -41,6 +41,7 @@ from daydream.benchmark.cli import _format_elapsed
 from daydream.benchmark.corpus import CorpusSource, resolve_corpus
 from daydream.benchmark.daydream_run import run_daydream_review
 from daydream.benchmark.mapping import merged_items_to_review_comments
+from daydream.benchmark.report import PRRun, aggregate_from_scores, build_report, write_report
 from daydream.benchmark.score import DaydreamScores, preflight_judge_env, resolve_judge_model, run_scoring
 from daydream.benchmark.stats import compute_distribution, distribution_to_dict, format_distribution_table
 from daydream.benchmark.trial_isolation import init_trial_corpus, trial_corpus_dir, trial_tool_label, trials_root
@@ -124,7 +125,7 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
 
 def _run_sweep(
     config: BenchConfig, source: CorpusSource, judge_model: str
-) -> tuple[bool, DaydreamScores | None]:
+) -> tuple[bool, DaydreamScores | None, list[PRRun]]:
     """Run the per-PR review/inject sweep (and optional scoring) for one config.
 
     This is the single-config workhorse: a repeated-trial run calls it once per
@@ -138,14 +139,19 @@ def _run_sweep(
         judge_model: Pre-resolved judge model id (``""`` when ``score`` is off).
 
     Returns:
-        ``(ok, scores)`` where ``ok`` is ``False`` if any PR or the scoring step
-        failed, and ``scores`` is the parsed :class:`DaydreamScores` when scoring
-        ran and succeeded, else ``None``.
+        ``(ok, scores, runs)`` where ``ok`` is ``False`` if any PR or the scoring
+        step failed, ``scores`` is the parsed :class:`DaydreamScores` when
+        scoring ran and succeeded (else ``None``), and ``runs`` carries one
+        :class:`PRRun` per PR that ended the sweep with a review in the corpus
+        (including PRs skipped as already-injected, which record
+        ``elapsed_s == 0.0`` because no review ran this time). Failed PRs are
+        absent.
     """
     data_path = _benchmark_data_path(source.root)
     data = load_benchmark_data(data_path)
     prs = _select_prs(config, source)
 
+    runs: list[PRRun] = []
     failed = 0
     total = len(prs)
     for i, pr in enumerate(prs, start=1):
@@ -157,6 +163,14 @@ def _run_sweep(
 
         if not config.force and has_daydream_review(entry, tool=config.tool_label):
             print_dim(console, f"Skipping {pr.golden_url} (daydream review already present)")
+            runs.append(
+                PRRun(
+                    golden_url=pr.golden_url,
+                    injected_comments=_injected_comment_count(data, pr.golden_url, config.tool_label),
+                    elapsed_s=0.0,
+                    trajectory_path=_trajectory_path(config, pr),
+                )
+            )
             continue
 
         print_info(console, f"▶ [{i}/{total}] Reviewing {pr.golden_url} · reviewer {config.tool_label}…")
@@ -181,6 +195,14 @@ def _run_sweep(
             print_info(console, f"Injected daydream review for {pr.golden_url}")
 
         count = _injected_comment_count(data, pr.golden_url, config.tool_label)
+        runs.append(
+            PRRun(
+                golden_url=pr.golden_url,
+                injected_comments=count,
+                elapsed_s=elapsed,
+                trajectory_path=_trajectory_path(config, pr),
+            )
+        )
         noun = "finding" if count == 1 else "findings"
         print_success(console, f"Reviewed {pr.golden_url} in {_format_elapsed(elapsed)} · {count} {noun}")
 
@@ -211,7 +233,10 @@ def _run_sweep(
         else:
             _print_score_breakdown(scores)
 
-    return (failed == 0 and not score_failed, scores)
+    if scores is not None:
+        runs = [replace(run, score_leaf=scores.per_pr.get(run.golden_url)) for run in runs]
+
+    return (failed == 0 and not score_failed, scores, runs)
 
 
 def _print_score_breakdown(scores: DaydreamScores) -> None:
@@ -309,6 +334,40 @@ def _write_trials_summary(
     return dest
 
 
+def _emit_report(
+    config: BenchConfig,
+    source: CorpusSource,
+    judge_model: str,
+    runs: list[PRRun],
+    *,
+    aggregate: dict[str, Any] | None,
+    distribution: dict[str, Any] | None,
+) -> Path:
+    """Build and write the run's JSON report, then print where it landed.
+
+    Emitted for every run — single-shot and multi-trial — so cost, latency and
+    (when scoring ran) score leaves always have one canonical artifact.
+    """
+    report = build_report(
+        corpus=source.kind,
+        corpus_root=source.root,
+        tool_label=config.tool_label,
+        reviewer_backend=config.reviewer_backend,
+        reviewer_model=config.reviewer_model,
+        reviewer_provider=config.reviewer_provider,
+        judge_route=config.judge_route,
+        judge_model=judge_model or None,
+        git_sha=_daydream_git_sha(),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        pr_runs=runs,
+        aggregate=aggregate,
+        distribution=distribution,
+    )
+    dest = write_report(source.root / ".daydream-bench" / f"report-{config.tool_label}.json", report)
+    print_info(console, f"Wrote bench report to {dest}")
+    return dest
+
+
 def _run_trials(config: BenchConfig, source: CorpusSource, judge_model: str) -> int:
     """Run ``config.trials`` isolated trials and report the score distribution.
 
@@ -332,6 +391,7 @@ def _run_trials(config: BenchConfig, source: CorpusSource, judge_model: str) -> 
         _print_cost_estimate(prs, config.trials)
 
     scored_trials: list[tuple[int, DaydreamScores]] = []
+    all_runs: list[PRRun] = []
     any_failed = False
     for t in range(config.trials):
         trial_dir = trial_corpus_dir(source.root, config.tool_label, t)
@@ -346,17 +406,29 @@ def _run_trials(config: BenchConfig, source: CorpusSource, judge_model: str) -> 
         # A trial re-roots the corpus at its own dir but reviews the same PR set.
         trial_source = CorpusSource(kind=source.kind, root=trial_dir, prs=source.prs)
         print_info(console, f"══ Trial [{t + 1}/{config.trials}] · label {trial_config.tool_label} ══")
-        ok, scores = _run_sweep(trial_config, trial_source, judge_model)
+        ok, scores, runs = _run_sweep(trial_config, trial_source, judge_model)
         any_failed = any_failed or not ok
+        all_runs.extend(runs)
         if scores is not None:
             scored_trials.append((t, scores))
+
+    trial_scores = [s for _, s in scored_trials]
+    dist = compute_distribution(trial_scores) if trial_scores else None
+    # A multi-trial run has no single aggregate — the distribution over trials
+    # is its summary; each trial's per-PR leaves are carried on `all_runs`.
+    _emit_report(
+        config,
+        source,
+        judge_model,
+        all_runs,
+        aggregate=None,
+        distribution=distribution_to_dict(dist) if dist is not None else None,
+    )
 
     if config.score:
         summary_path = _write_trials_summary(config, source.root, judge_model, prs, scored_trials)
         print_info(console, f"Wrote trial summary to {summary_path}")
-        trial_scores = [s for _, s in scored_trials]
-        if trial_scores:
-            dist = compute_distribution(trial_scores)
+        if dist is not None:
             console.print(format_distribution_table(dist))
             total_comparisons = sum(s.total_comparisons for s in trial_scores)
             print_info(console, f"Actual judge comparisons recorded: {total_comparisons}")
@@ -387,5 +459,13 @@ def run_bench(config: BenchConfig) -> int:
     if config.trials > 1:
         return _run_trials(config, source, judge_model)
 
-    ok, _scores = _run_sweep(config, source, judge_model)
+    ok, scores, runs = _run_sweep(config, source, judge_model)
+    _emit_report(
+        config,
+        source,
+        judge_model,
+        runs,
+        aggregate=aggregate_from_scores(scores) if scores is not None else None,
+        distribution=None,
+    )
     return 0 if ok else 1

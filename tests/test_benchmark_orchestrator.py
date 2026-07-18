@@ -418,3 +418,33 @@ def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):
     first = calls["n"]
     run_bench(cfg)  # force=False
     assert first == 10 and calls["n"] == 10  # second run added zero new reviews
+
+
+def test_single_shot_run_writes_json_report(tmp_path, monkeypatch):
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.acquire_checkout",
+        lambda *a, **k: _fake_acquired(tmp_path),
+    )
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.run_daydream_review",
+        lambda checkout, **k: _write_items(checkout, [_item("f.py", 1)]),
+    )
+
+    rc = run_bench(_config(tmp_path, data_path, score=False, only="grafana"))  # 10 PRs
+
+    assert rc == 0
+    report_path = tmp_path / ".daydream-bench" / "report-daydream.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["schema_version"] == 1
+    assert report["corpus"] == "withmartian"
+    assert report["corpus_root"] == str(tmp_path)
+    assert report["tool_label"] == "daydream"
+    assert len(report["prs"]) == 10
+    assert all("grafana" in entry["golden_url"] for entry in report["prs"])
+    assert all(entry["injected_comments"] == 1 for entry in report["prs"])
+    # Scoring was off, so there is no aggregate and no per-PR score leaf.
+    assert report["aggregate"] is None
+    assert report["distribution"] is None
+    assert all(entry["tp"] is None for entry in report["prs"])

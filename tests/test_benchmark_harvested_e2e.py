@@ -257,6 +257,18 @@ def test_harvested_corpus_2pr_run_through_cli_injects_reviews(harvested_run):
     assert by_head[upstream.pr1_review_sha] == upstream.m1
     assert by_head[upstream.pr2_review_sha] == upstream.m2
 
+    # Every run emits the unified JSON report, same shape as a withmartian run.
+    report = json.loads(
+        (harvest_dir / ".daydream-bench" / "report-daydream.json").read_text(encoding="utf-8")
+    )
+    assert report["schema_version"] == 1
+    assert report["corpus"] == "harvested"
+    assert report["corpus_root"] == str(harvest_dir)
+    assert report["tool_label"] == "daydream"
+    assert [entry["golden_url"] for entry in report["prs"]] == [_golden_url(1), _golden_url(2)]
+    assert all(entry["injected_comments"] == 1 for entry in report["prs"])
+    assert report["aggregate"] is None  # --no-score
+
 
 def test_harvested_corpus_scored_run_calls_judge_per_pair(harvested_run, monkeypatch):
     """A scored harvested run reaches the same `FindingJudge` the golden corpus uses.
@@ -310,6 +322,24 @@ def test_harvested_corpus_scored_run_calls_judge_per_pair(harvested_run, monkeyp
         assert leaf["errors_count"] == 0
         assert leaf["tp"] == 1 and leaf["fp"] == 0 and leaf["fn"] == 0
         assert leaf["precision"] == 1.0 and leaf["recall"] == 1.0
+
+    # The emitted report carries the aggregate the canned judge produced.
+    report = json.loads(
+        (harvest_dir / ".daydream-bench" / "report-daydream.json").read_text(encoding="utf-8")
+    )
+    assert report["schema_version"] == 1 and report["corpus"] == "harvested"
+    assert len(report["prs"]) == 2
+    assert report["judge_route"] == "anthropic-direct" and report["judge_model"] == "judge-x"
+    assert report["aggregate"] == {
+        "scored_pr_count": 2,
+        "tp": 2,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+    }
+    assert all(entry["tp"] == 1 and entry["fp"] == 0 and entry["fn"] == 0 for entry in report["prs"])
 
     # One judge call per (golden, candidate) pair, each carrying both texts.
     assert len(judged_pairs) == 2
