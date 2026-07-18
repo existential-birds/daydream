@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from rich.console import Console
 
+from daydream.benchmark.acquire import AcquiredCheckout
 from daydream.benchmark.config import BenchConfig
 from daydream.benchmark.orchestrator import run_bench
 from daydream.benchmark.prs import load_evaluable_prs
@@ -58,11 +59,11 @@ def _seed_benchmark_data_with_all_26_keys(tmp_path: Path) -> Path:
     return data_path
 
 
-def _fake_checkout(tmp_path: Path) -> Path:
-    """Return a Path to an existing checkout directory."""
+def _fake_acquired(tmp_path: Path) -> AcquiredCheckout:
+    """Return an AcquiredCheckout over an existing directory with a pinned base."""
     checkout = tmp_path / "checkout"
     checkout.mkdir(parents=True, exist_ok=True)
-    return checkout
+    return AcquiredCheckout(path=checkout, base_sha="0" * 40)
 
 
 def _write_items(checkout: Path, items: list[dict[str, Any]]) -> Path:
@@ -95,7 +96,7 @@ def test_run_bench_injects_a_daydream_review_per_selected_pr(tmp_path, monkeypat
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.run_daydream_review",
@@ -114,7 +115,7 @@ def test_run_bench_announces_and_reports_each_pr(tmp_path, monkeypatch):
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.run_daydream_review",
@@ -133,7 +134,7 @@ def test_verbose_streams_child_output(tmp_path, monkeypatch):
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
 
     def review(checkout, on_line=None, **k):
@@ -152,7 +153,7 @@ def test_orchestrator_forwards_reviewer_fields(tmp_path, monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
 
     def cap_review(checkout, **k):
@@ -185,7 +186,7 @@ def test_orchestrator_passes_judge_route_to_scoring(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-direct")
     monkeypatch.delenv("MARTIAN_BASE_URL", raising=False)
     monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
-    monkeypatch.setattr("daydream.benchmark.orchestrator.acquire_checkout", lambda *a, **k: _fake_checkout(tmp_path))
+    monkeypatch.setattr("daydream.benchmark.orchestrator.acquire_checkout", lambda *a, **k: _fake_acquired(tmp_path))
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.run_daydream_review",
         lambda checkout, **k: _write_items(checkout, [_item("f.py", 1)]),
@@ -209,7 +210,7 @@ def test_materiality_gate_filters_submission(tmp_path, monkeypatch):
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.run_daydream_review",
@@ -237,7 +238,7 @@ def _mock_review(tmp_path, monkeypatch):
     """Wire acquire_checkout + run_daydream_review to a one-finding fake review."""
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.run_daydream_review",
@@ -404,7 +405,7 @@ def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
 
     def counting_review(checkout, **k):

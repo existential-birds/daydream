@@ -93,25 +93,19 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
         review was left in place (idempotent no-op; see
         :func:`inject_daydream_review`).
     """
-    if pr.base_sha is None:
-        # Deriving a base from ``pr.base_ref`` is merge-base acquisition, which
-        # ``acquire_checkout`` does not do yet. Per-PR isolation records this and
-        # the sweep continues.
-        raise ValueError(
-            f"{pr.golden_url}: unpinned base (base_ref={pr.base_ref}) needs merge-base acquisition"
-        )
-    checkout = acquire_checkout(
+    acquired = acquire_checkout(
         pr.clone_url,
         pr.pr_number,
-        pr.base_sha,
         pr.head_sha,
+        base_sha=pr.base_sha,
+        base_ref=pr.base_ref if pr.base_sha is None else None,
         cache_dir=config.cache_dir,
     )
     config.trajectory_dir.mkdir(parents=True, exist_ok=True)
     on_line = (lambda line: console.out(line, end="", highlight=False)) if config.verbose else None
     artifact = run_daydream_review(
-        checkout,
-        base_sha=pr.base_sha,
+        acquired.path,
+        base_sha=acquired.base_sha,
         trajectory_path=_trajectory_path(config, pr),
         backend=config.reviewer_backend,
         model=config.reviewer_model,
