@@ -42,6 +42,7 @@ def _seed_run_with_annotation(
     composite_reward: float | None = None,
     reward_version: str = "r1",
     rubric_json: str | None = None,
+    has_posterior: bool | None = None,
     observed_at: str,
     valid_at: str,
 ) -> Path:
@@ -114,6 +115,9 @@ def _seed_run_with_annotation(
         reward_json=reward_json,
         composite_reward=composite_reward,
         rubric_json=rubric_json,
+        # Default: a labeled seed is an evidenced (pr_review) one, which is what
+        # every caller means. A local_branch row passes has_posterior=False.
+        has_posterior=(label is not None) if has_posterior is None else has_posterior,
     )
     # append_label_observation stamps observed_at with wall clock; overwrite it
     # so as_of pins in tests are deterministic.
@@ -442,6 +446,54 @@ def test_is_admitted_min_reward_compares_intrinsic_only() -> None:
         )
         is True
     )
+
+
+def test_default_build_excludes_accepted_without_posterior_evidence(tmp_path: Path) -> None:
+    """A ``local_branch`` "accepted" must not enter a default accepted-only corpus.
+
+    The C9 default admits ``labels=("accepted",)``. A local-commit outcome
+    carries exactly that label but no posterior evidence — a local commit is not
+    a maintainer acting in a PR. Admitting on the bare label silently mixed the
+    two evidence tiers in the training set (156 such rows in the real archive
+    against 18 evidenced accepts). Only the evidenced run may be projected.
+    """
+    _seed_run_with_annotation(
+        tmp_path, "s-evidenced", label="accepted", composite_reward=0.9,
+        rubric_json=json.dumps({"posterior_source": "pr_review"}),
+        has_posterior=True,
+        observed_at="2026-05-01T00:00:00+00:00", valid_at="2026-04-01T00:00:00+00:00",
+    )
+    _seed_run_with_annotation(
+        tmp_path, "s-local-tier", label="accepted", composite_reward=0.9,
+        rubric_json=json.dumps({"posterior_source": "local_branch"}),
+        has_posterior=False,
+        observed_at="2026-05-01T00:00:00+00:00", valid_at="2026-04-01T00:00:00+00:00",
+    )
+    out = tmp_path / "corpus.jsonl"
+    run_build_corpus(_cfg(tmp_path, out_path=out))
+
+    emitted = [json.loads(line)["session_id"] for line in out.read_text().splitlines()]
+    assert emitted == ["s-evidenced"]
+
+
+def test_min_reward_still_admits_unevidenced_run_on_intrinsic_score(tmp_path: Path) -> None:
+    """The intrinsic ``min_reward`` path is unchanged by the posterior gate.
+
+    ``min_reward`` is an explicit opt-in to intrinsic-only admission (C5), so it
+    still admits a run with no posterior evidence. The gate constrains only the
+    *label* path, which is the one that claims maintainer evidence.
+    """
+    _seed_run_with_annotation(
+        tmp_path, "s-local-tier", label="accepted", composite_reward=0.9,
+        rubric_json=json.dumps({"posterior_source": "local_branch"}),
+        has_posterior=False,
+        observed_at="2026-05-01T00:00:00+00:00", valid_at="2026-04-01T00:00:00+00:00",
+    )
+    out = tmp_path / "corpus.jsonl"
+    run_build_corpus(_cfg(tmp_path, out_path=out, filters=CorpusFilters(min_reward=0.5)))
+
+    emitted = [json.loads(line)["session_id"] for line in out.read_text().splitlines()]
+    assert emitted == ["s-local-tier"]
 
 
 def test_build_record_emits_posterior_discriminator_only_for_labeled(tmp_path: Path) -> None:

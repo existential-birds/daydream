@@ -206,13 +206,22 @@ async def test_fork_filter_controls_pr_post_payload(
             archive=False,
         )
     )
-    post = fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")[0]
-    payload = json.dumps(post.payload)
+    # A finding reaches the PR either in the review payload or as its own
+    # file-level comment; the fork's filter must govern both surfaces.
+    posted = json.dumps(
+        [
+            call.payload
+            for call in (
+                *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews"),
+                *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/comments"),
+            )
+        ]
+    )
 
     assert rc == 0
     assert fake_gh.pr_view_calls()
-    assert KEEP_ME in payload
-    assert DROP_ME not in payload
+    assert KEEP_ME in posted
+    assert DROP_ME not in posted
 
 
 async def test_fork_filter_controls_fix_prompts(

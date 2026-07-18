@@ -54,6 +54,46 @@ def test_outcome_label_accepted_when_pr_merged_and_no_unresolved() -> None:
     assert derive_outcome_label(rub) == "accepted"
 
 
+def test_outcome_label_unknown_when_merged_but_no_comments_tracked() -> None:
+    """A merged PR with zero tracked daydream comments is NOT evidence of accept.
+
+    ``unresolved == 0`` is vacuously true at ``total == 0``, which made every
+    merged PR where daydream produced no tracked comment score identically to
+    one where every finding was addressed. Such a run must be ``"unknown"``.
+    """
+    rub = Rubric(
+        pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
+        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
+        comment_resolution=CommentResolutionSignal(0, 0, 0),
+        local_commit_applied=None,
+        posterior_source="pr_review",
+    )
+    assert derive_outcome_label(rub) == "unknown"
+
+
+def test_outcome_label_accepted_requires_real_comments_all_resolved() -> None:
+    """The evidenced accept still works: three comments, none unresolved."""
+    rub = Rubric(
+        pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
+        fix_applied=FixAppliedSignal("applied", 3, 3, ["c1"]),
+        comment_resolution=CommentResolutionSignal(3, 3, 0),
+        local_commit_applied=None,
+        posterior_source="pr_review",
+    )
+    assert derive_outcome_label(rub) == "accepted"
+
+
+def test_outcome_label_contested_when_merged_with_one_unresolved_of_three() -> None:
+    rub = Rubric(
+        pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
+        fix_applied=FixAppliedSignal("applied", 2, 3, ["c1"]),
+        comment_resolution=CommentResolutionSignal(3, 2, 1),
+        local_commit_applied=None,
+        posterior_source="pr_review",
+    )
+    assert derive_outcome_label(rub) == "contested"
+
+
 def test_outcome_label_contested_when_merged_but_unresolved() -> None:
     rub = Rubric(
         pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),

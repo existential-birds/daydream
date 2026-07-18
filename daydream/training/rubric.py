@@ -95,8 +95,12 @@ def derive_outcome_label(rubric: Rubric) -> str:
     Selection follows ``rubric.posterior_source``:
 
     * ``"pr_review"`` — merge-state plus comment resolution decide:
-      ``"accepted"`` (merged, no unresolved bot comments), ``"contested"``
-      (merged but unresolved > 0), or ``"rejected"`` (not merged).
+      ``"accepted"`` (merged, at least one tracked daydream comment, none
+      unresolved), ``"contested"`` (merged but unresolved > 0),
+      ``"rejected"`` (not merged), or ``"unknown"`` (merged with **zero**
+      tracked comments). A merge alone is not an accept: with ``total == 0``
+      the run has no evidence it contributed anything to the PR, and
+      ``unresolved == 0`` would otherwise be vacuously true.
     * ``"local_branch"`` — passes through the verdict on
       :attr:`Rubric.local_commit_applied`.
     * ``"none"`` — always ``"unknown"``.
@@ -107,6 +111,9 @@ def derive_outcome_label(rubric: Rubric) -> str:
     """
     if rubric.posterior_source == "pr_review":
         if rubric.pr_merge.merged:
+            if rubric.comment_resolution.total == 0:
+                # No tracked comments ⇒ unresolved == 0 is vacuous, not evidence.
+                return "unknown"
             if rubric.comment_resolution.unresolved == 0:
                 return "accepted"
             return "contested"
