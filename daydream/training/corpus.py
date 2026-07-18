@@ -751,15 +751,30 @@ def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> 
     return datetime.fromisoformat(valid_at) > datetime.fromisoformat(as_of)
 
 
-def _is_admitted(label: str | None, composite_reward: float | None, filters: CorpusFilters) -> bool:
+def _is_admitted(
+    label: str | None,
+    composite_reward: float | None,
+    filters: CorpusFilters,
+    *,
+    has_posterior: bool = False,
+) -> bool:
     """Decide whether a run is admitted into the corpus.
 
     Admission rule (C9, with an alternative reward path):
 
     - ``include_all_labels=True`` ⇒ always admit.
     - Otherwise admit when the pinned ``label`` is in ``filters.labels``
-      (C9 accepted-only), **OR** when ``filters.min_reward`` is set and the
-      intrinsic ``composite_reward`` is present and ``>= min_reward``.
+      **and the row carries posterior evidence** (C9 accepted-only), **OR**
+      when ``filters.min_reward`` is set and the intrinsic
+      ``composite_reward`` is present and ``>= min_reward``.
+
+    The ``has_posterior`` conjunct is what makes the label path mean
+    "a maintainer acted on this in a PR". A ``local_branch`` outcome carries a
+    label but no posterior evidence (a local commit is not a maintainer acting
+    in a PR), so a bare label check would admit it into an accepted-only corpus
+    as though it were an evidenced maintainer accept, silently mixing evidence
+    tiers. Rows whose label is not backed by a posterior are admissible only via
+    the explicit intrinsic ``min_reward`` path or ``include_all_labels``.
 
     The ``min_reward`` comparison is intrinsic-only **by construction** (C5),
     not by stripping a posterior term. Post-C5 the stored ``composite_reward``
@@ -773,7 +788,7 @@ def _is_admitted(label: str | None, composite_reward: float | None, filters: Cor
     """
     if filters.include_all_labels:
         return True
-    if label is not None and label in filters.labels:
+    if label is not None and label in filters.labels and has_posterior:
         return True
     if filters.min_reward is not None and composite_reward is not None and composite_reward >= filters.min_reward:
         return True
@@ -897,7 +912,9 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
             labels = _annotation_labels(annotation, session_id)
             label = _single_outcome_label(labels, session_id)
         composite_reward = annotation.get("composite_reward") if annotation is not None else None
-        if not _is_admitted(label, composite_reward, config.filters):
+        # A leaked posterior is not evidence at this pin, so it cannot admit on the label path.
+        has_posterior = bool(annotation.get("has_posterior")) and not posterior_leak if annotation else False
+        if not _is_admitted(label, composite_reward, config.filters, has_posterior=has_posterior):
             continue
         after_filters += 1
 

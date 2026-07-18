@@ -183,4 +183,7 @@ def build_fixture_archive(root: Path) -> None:
             labeler_version="fixture",
             evidence_sha=None,
             valid_at=None,
+            # Fixture labels stand in for evidenced pr_review outcomes, which is
+            # what the label path admits post-posterior-gate.
+            has_posterior=bool(session.outcome_labels),
         )
