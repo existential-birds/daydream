@@ -38,10 +38,10 @@ jobs:
         run: uv sync
 
       - name: Lint with ruff
-        run: uv run ruff check daydream
+        run: uv run ruff check daydream tests bench
 
       - name: Type check with mypy
-        run: uv run mypy daydream
+        run: uv run mypy daydream tests bench
 
       - name: Lint workflows with actionlint
         run: docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7 -color .github/workflows/*.yml daydream/templates/workflows/*.yml

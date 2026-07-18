@@ -28,9 +28,10 @@ import json
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
-# ── Price cards (per 1M tokens). Mirrors bench/review-bot-compare/compare.py PRICING.
+# ── Price cards (per 1M tokens). The price source of record is daydream/pricing.py
+# (override via $DAYDREAM_PRICES_FILE); these local cards mirror it for the report.
 # Counters are DISJOINT: prompt = fresh input, cached = cache reads, completion = output.
 PRICE_CARDS: dict[str, dict[str, float]] = {
     "glm-5.2": {"input": 1.40, "cached": 0.26, "output": 4.40},
@@ -125,7 +126,7 @@ def discover_judges(results_root: Path, exclude_tool: str) -> dict[str, dict[str
     return judges
 
 
-def _leaf_present(leaf: dict[str, Any]) -> bool:
+def _leaf_present(leaf: dict[str, Any] | None) -> TypeGuard[dict[str, Any]]:
     return leaf is not None and not leaf.get("skipped", False)
 
 
@@ -293,10 +294,10 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         saas_tools = sorted(t for t in all_tools if t != dd_tool)
         if len(saas_tools) < _MIN_SAAS_TOOLS_FOR_PANEL:
             # Verify daydream-subset overlap so future re-judges still anchor cleanly.
-            overlap = len(dd_subset & set(evals.keys()))
+            overlap_count = len(dd_subset & set(evals.keys()))
             skipped_judges.append({"id": canon, "dirs": b["dirs"], "saas_tools": len(saas_tools),
                                    "reason": "no SaaS field (superseded or partial run)",
-                                   "daydream_overlap": overlap})
+                                   "daydream_overlap": overlap_count})
             continue
 
         overlap = dd_subset & set(evals.keys())
@@ -444,7 +445,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "judge_error_ratio_threshold": JUDGE_ERROR_RATIO_THRESHOLD,
             "metric_def": ("micro precision=ΣTP/(ΣTP+ΣFP), recall=ΣTP/(ΣTP+ΣFN), "
                            "F1=2PR/(P+R) — daydream/benchmark/score.py"),
-            "price_source": "bench/review-bot-compare/compare.py PRICING",
+            "price_source": "daydream/pricing.py (override: $DAYDREAM_PRICES_FILE)",
             "speed_analysis_present": bool(speed),
             "total_daydream_attempts": total_attempts,
         },

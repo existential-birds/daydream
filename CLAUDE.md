@@ -57,6 +57,10 @@ daydream ext validate                              # load daydream_ext, resolve-
 # Benchmark
 daydream bench --benchmark-repo ../code-review-benchmark/offline --score
 
+# Benchmark against a review bot's own PR history (harvested corpus)
+daydream bench harvest --repo OWNER/REPO --bot "coderabbitai[bot]" --out ./cr-corpus
+daydream bench --harvest-dir ./cr-corpus --judge-route anthropic-direct  # martian route needs --benchmark-repo
+
 # Per-phase model/backend overrides are config-file-only (no CLI flags):
 #   set [tool.daydream] / [tool.daydream.phases.<phase>] in pyproject.toml or .daydream.toml.
 #   Precedence: CLI (--model/--backend) > config file > built-in default.

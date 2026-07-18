@@ -22,10 +22,10 @@ echo "→ Verifying uv.lock is in sync..."
 uv lock --check
 
 echo "→ Linting with ruff..."
-uv run ruff check daydream tests
+uv run ruff check daydream tests bench
 
 echo "→ Type checking with mypy..."
-uv run mypy daydream tests
+uv run mypy daydream tests bench
 
 echo "→ Running tests (excluding integration; CI runs the full suite)..."
 uv run pytest -n auto -m "not integration"

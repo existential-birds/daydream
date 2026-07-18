@@ -248,6 +248,31 @@ The two flags are mutually exclusive: a run has exactly one corpus, and exactly 
 
 Each PR is reviewed at the bot's own snapshot — the commit its latest review was made against, which is often an ancestor of the final PR head — so daydream sees the same code the bot saw.
 
+## The run report
+
+Every run — either corpus, with or without `--score`, single-shot or multi-trial — writes a JSON report to `<corpus-root>/.daydream-bench/report-<tool-label>.json`. It is the canonical machine-readable artifact of a sweep:
+
+```json
+{
+  "schema_version": 1,
+  "corpus": "withmartian" | "harvested",
+  "corpus_root": "…", "tool_label": "…",
+  "reviewer_backend": "…", "reviewer_model": "…", "reviewer_provider": "…",
+  "judge_route": "…", "judge_model": "…", "git_sha": "…", "timestamp": "…",
+  "prs": [{"golden_url": "…", "injected_comments": 7, "elapsed_s": 412.3,
+           "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0,
+           "cost_usd": 0.41, "cost_source": "measured|synthesized|unknown",
+           "tp": 2, "fp": 5, "fn": 1, "precision": 0.29, "recall": 0.67}],
+  "aggregate": {"scored_pr_count": 22, "tp": 36, "fp": 139, "fn": 25,
+                "precision": 0.206, "recall": 0.590, "f1": 0.305},
+  "distribution": null
+}
+```
+
+`aggregate` is `null` when the run did not score, and on multi-trial runs (where `distribution` carries the summary instead and `prs` holds one entry per PR per trial). Tokens and cost come from each PR's trajectory `final_metrics`; when the backend reports no cost, it is synthesized from `daydream/pricing.py` (override the price cards with `$DAYDREAM_PRICES_FILE`) and labeled `synthesized` rather than passed off as measured. The pi backend's `prompt`/`cached` counters are *disjoint* buckets, so synthesis bills both; every other backend reports a prompt total inclusive of cache reads, and synthesis subtracts before pricing.
+
+`trials-summary.json` is unaffected and still written for `--trials > 1`.
+
 ## Comparability caveat
 
 What matters is the reviewer. A different reviewer pipeline (different backend, model config, or tool label) produces different findings — changing the reviewer changes the numbers. The offline HTML report at `bench/benchmark-report/runs/latest/index.html` documents the reviewer configuration for each run.

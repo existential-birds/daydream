@@ -2,13 +2,85 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from daydream.benchmark.daydream_run import DaydreamArtifactError, DaydreamRunError, run_daydream_review
+from daydream.benchmark.daydream_run import (
+    DaydreamArtifactError,
+    DaydreamRunError,
+    _is_transient,
+    _review_complete,
+    run_daydream_review,
+)
+
+# A real `PiError: terminated` Backend-Execution-Error panel as captured in
+# daydream's stdout when the z.ai/GLM provider drops the streaming connection.
+PIERROR_TERMINATED_STDOUT = """\
+Reviewing changed files...
+
+╔═ ⚠️  Backend Execution Error ═════════════════════════════════════════════
+║ PiError: terminated
+╚═══════════════════════════════════════════════════════════════════════════
+
+╔═ ⚠️  Fatal Error ═════════════════════════════════════════════════════════
+║ terminated
+╚═══════════════════════════════════════════════════════════════════════════
+"""
+
+ECONNRESET_STDOUT = """\
+╔═ ⚠️  Backend Execution Error ═════════════════════════════════════════════
+║ PiError: read ECONNRESET
+╚═══════════════════════════════════════════════════════════════════════════
+"""
+
+SOCKET_HANG_UP_STDOUT = """\
+╔═ ⚠️  Fatal Error ═════════════════════════════════════════════════════════
+║ socket hang up
+╚═══════════════════════════════════════════════════════════════════════════
+"""
+
+OVERLOADED_429_STDOUT = """\
+╔═ ⚠️  Backend Execution Error ═════════════════════════════════════════════
+║ 429 service may be temporarily overloaded, please try again later
+╚═══════════════════════════════════════════════════════════════════════════
+"""
+
+# A clean, successful review with NO error. Deliberately mentions "error" in
+# benign prose ("error handling", "ECONNRESET") to guard against over-broad
+# matching that would retry a perfectly good review forever.
+CLEAN_SUCCESS_STDOUT = """\
+Review complete. 2 findings written to findings.json.
+
+  - [medium] The new fetch() call has no error handling; a dropped
+    connection (e.g. ECONNRESET) would crash the worker. Wrap it in
+    try/except and log the failure.
+  - [low] The "terminated" status string is hardcoded; prefer an enum.
+
+Done.
+"""
+
+# A complete review: merged-items artifact with an items list + a trajectory
+# whose final_metrics is populated. This is exactly what's on disk after a
+# tail-end stream-drop (the review finished; only the closing socket died).
+COMPLETE_ITEMS = {"schema_version": 1, "items": [{"id": "a"}, {"id": "b"}]}
+COMPLETE_TRAJ = {
+    "final_metrics": {
+        "total_prompt_tokens": 100,
+        "total_completion_tokens": 50,
+        "total_cached_tokens": 0,
+        "total_cost_usd": 0.0,
+    }
+}
+
+
+def _write(path: Path, obj: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj))
 
 
 def test_runs_daydream_noninteractive_with_pinned_base_and_trajectory(tmp_path, monkeypatch):
@@ -205,3 +277,95 @@ def test_raises_when_artifact_missing(tmp_path, monkeypatch):
     )
     with pytest.raises(DaydreamArtifactError):
         run_daydream_review(checkout, base_sha="x", trajectory_path=tmp_path / "t.json")
+
+
+def test_pierror_terminated_is_transient():
+    # Regression guard: the stream-drop that motivated this fix MUST retry.
+    assert _is_transient(PIERROR_TERMINATED_STDOUT)
+
+
+def test_econnreset_is_transient():
+    assert _is_transient(ECONNRESET_STDOUT)
+
+
+def test_socket_hang_up_is_transient():
+    assert _is_transient(SOCKET_HANG_UP_STDOUT)
+
+
+def test_429_overload_is_transient():
+    assert _is_transient(OVERLOADED_429_STDOUT)
+
+
+def test_clean_success_is_not_transient():
+    # Mentions "error"/"ECONNRESET"/"terminated" in prose but did NOT error.
+    assert not _is_transient(CLEAN_SUCCESS_STDOUT)
+
+
+def test_empty_is_not_transient():
+    assert not _is_transient("")
+
+
+def test_review_complete_when_artifact_and_metrics_present(tmp_path):
+    artifact, traj = tmp_path / "merged-items.json", tmp_path / "traj.json"
+    _write(artifact, COMPLETE_ITEMS)
+    _write(traj, COMPLETE_TRAJ)
+    assert _review_complete(artifact, traj)
+
+
+def test_review_incomplete_when_artifact_missing(tmp_path):
+    artifact, traj = tmp_path / "merged-items.json", tmp_path / "traj.json"
+    _write(traj, COMPLETE_TRAJ)
+    assert not _review_complete(artifact, traj)
+
+
+def test_review_incomplete_when_items_key_absent(tmp_path):
+    artifact, traj = tmp_path / "merged-items.json", tmp_path / "traj.json"
+    _write(artifact, {"schema_version": 1})  # no "items" array
+    _write(traj, COMPLETE_TRAJ)
+    assert not _review_complete(artifact, traj)
+
+
+def test_review_incomplete_when_trajectory_lacks_final_metrics(tmp_path):
+    artifact, traj = tmp_path / "merged-items.json", tmp_path / "traj.json"
+    _write(artifact, COMPLETE_ITEMS)
+    _write(traj, {"steps": []})  # trajectory written but no final_metrics
+    assert not _review_complete(artifact, traj)
+
+
+def test_tail_drop_with_complete_artifacts_returns_artifact_without_retry(tmp_path, monkeypatch):
+    """daydream 'completes' (artifact + metrics on disk) but the closing stream
+    dies — exits non-zero with a PiError: terminated panel. That is a success."""
+    checkout = tmp_path / "co"
+    traj = tmp_path / "t.json"
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        _write(checkout / ".daydream" / "deep" / "merged-items.json", COMPLETE_ITEMS)
+        _write(traj, COMPLETE_TRAJ)
+        return SimpleNamespace(returncode=1, stdout=PIERROR_TERMINATED_STDOUT, stderr="")
+
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.run", fake_run)
+    out = run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=traj)
+
+    assert calls["n"] == 1  # must NOT re-run a completed review
+    assert out == checkout / ".daydream" / "deep" / "merged-items.json"
+    assert json.loads(out.read_text())["items"] == COMPLETE_ITEMS["items"]
+
+
+def test_transient_failure_without_artifacts_retries_then_raises(tmp_path, monkeypatch):
+    """No artifact ever written -> the loop must exhaust its retries and raise."""
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        return SimpleNamespace(returncode=1, stdout=PIERROR_TERMINATED_STDOUT, stderr="")
+
+    monkeypatch.setattr("daydream.benchmark.daydream_run._RETRY_BACKOFF_S", 0)
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.run", fake_run)
+    with pytest.raises(DaydreamRunError, match="exit 1"):
+        run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json")
+
+    assert calls["n"] == 3  # 1 initial + 2 retries
