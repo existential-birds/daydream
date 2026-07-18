@@ -1,6 +1,6 @@
 """Pure build-corpus projection (gold layer) over the bitemporal archive.
 
-This module owns ATIF-v1.6 trajectory → training-record conversion plus the
+This module owns ATIF-v1.7 trajectory → training-record conversion plus the
 filter/stratify pipeline that selects which archived runs become training
 records. It reads each run's label and reward from the ``as_of``-pinned silver
 annotation (``label_observations``) — *not* the denormalized
@@ -75,7 +75,7 @@ SCHEMA_V1_PATH: Path = Path(__file__).parent / "schema" / "v1.json"
 
 
 def _build_spans(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
-    """Convert an ATIF v1.6 trajectory dict into REASON/ACT span refs.
+    """Convert an ATIF v1.7 trajectory dict into REASON/ACT span refs.
 
     Implements plan §5. The output is a list of ``{step_id, kind, content_path}``
     dicts that point at substructures of ``trajectory["steps"]`` rather than
@@ -282,7 +282,7 @@ def _build_record(
             flat row from the SQLite index. Must carry ``session_id``,
             ``skill``, ``repo_slug``, ``branch``, ``base_branch``, ``head_sha``,
             ``grounding_rate``, and ``archive_path``.
-        trajectory: ATIF v1.6 trajectory dict for this run.
+        trajectory: ATIF v1.7 trajectory dict for this run.
         stack: Routing label (e.g. ``"python"``, ``"react"``). The caller
             derives this from deep-stack detection; pass ``None`` when
             unavailable.

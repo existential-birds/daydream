@@ -1,6 +1,6 @@
 """``daydream summarize <path>`` — print run-info markdown to stdout.
 
-Reads either a single ATIF v1.6 trajectory JSON file or a daydream run
+Reads either a single ATIF v1.7 trajectory JSON file or a daydream run
 directory (``runs/<session_id>/`` shape with a ``trajectory.json`` plus
 optional ``trajectories/<descriptor>.json`` siblings) and prints the same
 rollup + per-phase breakdown table the PR-comment renderer emits, followed

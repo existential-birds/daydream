@@ -160,7 +160,7 @@ class RunConfig:
             :data:`config.DEFAULT_EXPLORATION_MODEL`.
         ignore_paths: Paths to exclude from diffs (passed to `git :(exclude)` pathspecs
             and surfaced in review prompts). Default is an empty list.
-        trajectory_path: Path to write the ATIF v1.6 trajectory JSON. Default-resolved
+        trajectory_path: Path to write the ATIF v1.7 trajectory JSON. Default-resolved
             by run flows to ``<target>/.daydream/runs/<session_id>/trajectory.json``
             when None.
         pr_repo: GitHub repository in ``owner/repo`` format. Auto-detected from ``gh``
