@@ -30,12 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeGuard
 
-# ── Price cards (per 1M tokens). The price source of record is daydream/pricing.py
-# (override via $DAYDREAM_PRICES_FILE); these local cards mirror it for the report.
-# Counters are DISJOINT: prompt = fresh input, cached = cache reads, completion = output.
-PRICE_CARDS: dict[str, dict[str, float]] = {
-    "glm-5.2": {"input": 1.40, "cached": 0.26, "output": 4.40},
-}
+from daydream.pricing import ModelPrice, compute_cost, load_user_prices, resolve_prices
 
 # Judge-error guard from daydream/benchmark/score.py: above this ratio of failed
 # comparisons the tp/fp/fn collapse to noise, not a real zero.
@@ -176,11 +171,13 @@ def rank_of(rows: list[dict], target_tool: str, key: str) -> tuple[int, int]:
     return 0, len(ordered)
 
 
-def load_trajectories(traj_dir: Path, price: dict[str, float], price_model: str) -> dict[str, dict]:
+def load_trajectories(traj_dir: Path, prices: dict[str, ModelPrice], price_model: str) -> dict[str, dict]:
     """Map PR-url -> {tokens, synth cost, wall seconds, steps} from ATIF trajectories.
 
     Join key: (repo-last-segment, pr-number) parsed from the filename. Cost is
     SYNTHESIZED from measured tokens (the backend records $0 for GLM via z.ai).
+    The counters are DISJOINT (prompt = fresh input, cached = cache reads), which
+    is what :func:`compute_cost` prices — not ``compute_cost_from_totals``.
     """
     out: dict[str, dict] = {}
     if not traj_dir.is_dir():
@@ -200,7 +197,7 @@ def load_trajectories(traj_dir: Path, price: dict[str, float], price_model: str)
         prompt = int(fm.get("total_prompt_tokens", 0))
         completion = int(fm.get("total_completion_tokens", 0))
         cached = int(fm.get("total_cached_tokens", 0))
-        cost = prompt / 1e6 * price["input"] + cached / 1e6 * price["cached"] + completion / 1e6 * price["output"]
+        cost = compute_cost(price_model, prompt, cached, completion, prices=prices)
         events = (d.get("extra", {}) or {}).get("phase_events", []) or []
         stamps = [e.get("timestamp") for e in events if e.get("timestamp")]
         wall = None
@@ -257,9 +254,16 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     results_root = Path(args.results_root).resolve()
     dd_tool = args.daydream_tool
     price_model = args.price_model
-    price = PRICE_CARDS.get(price_model)
+    overrides = load_user_prices()
+    prices = resolve_prices(overrides)
+    price = prices.get(price_model)
     if price is None:
-        raise SystemExit(f"unknown --price-model {price_model!r}; known: {', '.join(PRICE_CARDS)}")
+        raise SystemExit(f"unknown --price-model {price_model!r}; known: {', '.join(sorted(prices))}")
+    price_source = (
+        "user price override ($DAYDREAM_PRICES_FILE / ~/.daydream/prices.toml)"
+        if price_model in overrides
+        else "daydream/pricing.py"
+    )
 
     dashboard = json.loads(Path(args.dashboard).read_text()) if Path(args.dashboard).is_file() else {}
     display_names = dashboard.get("tool_display_names", {})
@@ -278,7 +282,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     if not dd_subset:
         raise SystemExit(f"no judge has a present leaf for --daydream-tool {dd_tool!r}")
 
-    trajectories = load_trajectories(Path(args.trajectories), price, price_model)
+    trajectories = load_trajectories(Path(args.trajectories), prices, price_model)
     speed = {}
     if args.speed_analysis and Path(args.speed_analysis).is_file():
         speed = json.loads(Path(args.speed_analysis).read_text())
@@ -394,7 +398,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
     n_with_traj = sum(1 for r in per_pr_rows if r["cost_usd"] is not None)
     economy = {
-        "price_model": price_model, "price_card": price,
+        "price_model": price_model,
+        "price_card": {"input": price.input, "cached": price.cached_input, "output": price.output},
         "n_prs": len(dd_subset), "n_with_trajectory": n_with_traj,
         "total_prompt_tokens": tot_prompt, "total_completion_tokens": tot_completion,
         "total_cached_tokens": tot_cached, "total_cost_usd": tot_cost,
@@ -445,7 +450,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "judge_error_ratio_threshold": JUDGE_ERROR_RATIO_THRESHOLD,
             "metric_def": ("micro precision=ΣTP/(ΣTP+ΣFP), recall=ΣTP/(ΣTP+ΣFN), "
                            "F1=2PR/(P+R) — daydream/benchmark/score.py"),
-            "price_source": "daydream/pricing.py (override: $DAYDREAM_PRICES_FILE)",
+            "price_source": price_source,
             "speed_analysis_present": bool(speed),
             "total_daydream_attempts": total_attempts,
         },
@@ -465,7 +470,8 @@ def main() -> None:
     ap.add_argument("results_root", help="Path to the benchmark results/ dir (contains <judge>/evaluations.json)")
     ap.add_argument("--daydream-tool", default="daydream-owl-alpha")
     ap.add_argument("--exclude-tool", default="daydream-glm", help="Stale daydream label to drop")
-    ap.add_argument("--price-model", default="glm-5.2", help=f"Price card; known: {', '.join(PRICE_CARDS)}")
+    ap.add_argument("--price-model", default="glm-5.2",
+                    help="Model id to price from daydream/pricing.py (override via $DAYDREAM_PRICES_FILE)")
     ap.add_argument("--trajectories", default="", help="Path to .daydream-bench/trajectories")
     ap.add_argument("--pr-labels", default="", help="Path to results/pr_labels.json")
     ap.add_argument("--dashboard", default="", help="Path to analysis/benchmark_dashboard.json")

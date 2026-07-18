@@ -44,7 +44,6 @@ from daydream.benchmark.mapping import merged_items_to_review_comments
 from daydream.benchmark.report import PRRun, aggregate_from_scores, build_report, write_report
 from daydream.benchmark.score import (
     DaydreamScores,
-    model_results_dir,
     preflight_judge_env,
     resolve_judge_model,
     run_scoring,
@@ -92,25 +91,34 @@ def _injected_comment_count(data: dict[str, Any], golden_url: str, tool: str) ->
     return len(review.get("review_comments", []))
 
 
-def _invalidate_scoring_artifacts(corpus_root: Path, judge_model: str, tool: str) -> None:
-    results_dir = model_results_dir(corpus_root, judge_model)
-    for name in ("candidates.json", "dedup_groups.json", "evaluations.json"):
-        path = results_dir / name
-        if not path.exists():
-            continue
-        artifact = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(artifact, dict):
-            continue
-        changed = False
-        for golden_url, tools in list(artifact.items()):
-            if not isinstance(tools, dict) or tool not in tools:
+def _invalidate_scoring_artifacts(corpus_root: Path, tool: str) -> None:
+    """Drop *tool*'s leaves from every per-judge-model scoring artifact.
+
+    Runs at corpus-mutation time, not scoring time: a ``--force`` run without
+    ``--score`` must still leave no stale leaves behind for a later scoring run,
+    which may use a judge model this run never resolved.
+    """
+    results_root = corpus_root / "results"
+    if not results_root.is_dir():
+        return
+    for results_dir in sorted(p for p in results_root.iterdir() if p.is_dir()):
+        for name in ("candidates.json", "dedup_groups.json", "evaluations.json"):
+            path = results_dir / name
+            if not path.exists():
                 continue
-            del tools[tool]
-            changed = True
-            if not tools:
-                del artifact[golden_url]
-        if changed:
-            path.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(artifact, dict):
+                continue
+            changed = False
+            for golden_url, tools in list(artifact.items()):
+                if not isinstance(tools, dict) or tool not in tools:
+                    continue
+                del tools[tool]
+                changed = True
+                if not tools:
+                    del artifact[golden_url]
+            if changed:
+                path.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
 
 
 def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> bool:
@@ -180,7 +188,6 @@ def _run_sweep(
 
     runs: list[PRRun] = []
     failed = 0
-    force_modified = False
     total = len(prs)
     for i, pr in enumerate(prs, start=1):
         entry = data.get(pr.golden_url)
@@ -219,7 +226,8 @@ def _run_sweep(
             continue
 
         if modified:
-            force_modified = force_modified or config.force
+            if config.force:
+                _invalidate_scoring_artifacts(source.root, config.tool_label)
             save_benchmark_data(data_path, data)
             print_info(console, f"Injected daydream review for {pr.golden_url}")
 
@@ -242,12 +250,10 @@ def _run_sweep(
     scores: DaydreamScores | None = None
     if config.score:
         try:
-            if force_modified:
-                _invalidate_scoring_artifacts(source.root, judge_model, config.tool_label)
             scores = run_scoring(
                 source.root,
                 judge_model,
-                pr_count=len(prs),
+                golden_urls=[pr.golden_url for pr in prs],
                 tool=config.tool_label,
                 judge_route=config.judge_route,
             )
@@ -439,7 +445,7 @@ def _run_trials(config: BenchConfig, source: CorpusSource, judge_model: str) -> 
         print_info(console, f"══ Trial [{t + 1}/{config.trials}] · label {trial_config.tool_label} ══")
         ok, scores, runs = _run_sweep(trial_config, trial_source, judge_model)
         any_failed = any_failed or not ok
-        all_runs.extend(runs)
+        all_runs.extend(replace(run, trial_index=t) for run in runs)
         if scores is not None:
             scored_trials.append((t, scores))
 

@@ -353,6 +353,52 @@ def test_tail_drop_with_complete_artifacts_returns_artifact_without_retry(tmp_pa
     assert json.loads(out.read_text())["items"] == COMPLETE_ITEMS["items"]
 
 
+def test_stale_artifacts_from_prior_run_do_not_rescue_a_failed_attempt(tmp_path, monkeypatch):
+    """The checkout is reused and .daydream/ is gitignored, so a previous run can
+    leave complete artifacts behind. A subprocess that crashes before writing
+    anything must be reported as a failure, not salvaged by those stale files."""
+    checkout = tmp_path / "co"
+    traj = tmp_path / "t.json"
+    artifact = checkout / ".daydream" / "deep" / "merged-items.json"
+    _write(artifact, COMPLETE_ITEMS)
+    _write(traj, COMPLETE_TRAJ)
+    seen: list[bool] = []
+
+    def fake_run(cmd, **kw):
+        seen.append(artifact.exists())
+        return SimpleNamespace(returncode=1, stdout="daydream: unknown flag --base\n", stderr="")
+
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.run", fake_run)
+    with pytest.raises(DaydreamRunError, match="exit 1"):
+        run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=traj)
+
+    assert seen == [False]  # stale outputs cleared before the attempt ran
+    assert not artifact.exists()
+    assert not traj.exists()
+
+
+def test_stale_artifacts_do_not_preempt_transient_retries(tmp_path, monkeypatch):
+    """A transient failure must still consume its retries even when a prior run
+    left complete artifacts on disk; the salvage path must not short-circuit it."""
+    checkout = tmp_path / "co"
+    traj = tmp_path / "t.json"
+    artifact = checkout / ".daydream" / "deep" / "merged-items.json"
+    _write(artifact, COMPLETE_ITEMS)
+    _write(traj, COMPLETE_TRAJ)
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        return SimpleNamespace(returncode=1, stdout=OVERLOADED_429_STDOUT, stderr="")
+
+    monkeypatch.setattr("daydream.benchmark.daydream_run._RETRY_BACKOFF_S", 0)
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.run", fake_run)
+    with pytest.raises(DaydreamRunError, match="exit 1"):
+        run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=traj)
+
+    assert calls["n"] == 3  # 1 initial + 2 retries, not rescued on attempt 1
+
+
 def test_transient_failure_without_artifacts_retries_then_raises(tmp_path, monkeypatch):
     """No artifact ever written -> the loop must exhaust its retries and raise."""
     checkout = tmp_path / "co"

@@ -1,7 +1,7 @@
-"""Hardcoded OpenAI price table for cost synthesis.
+"""Hardcoded price table for cost synthesis.
 
-Provide a static, code-reviewed price table covering the OpenAI models daydream
-runs through Codex and direct API backends. Used by the enriched PR comment
+Provide a static, code-reviewed price table covering the models daydream runs
+through the Codex, Pi, and direct API backends. Used by the enriched PR comment
 renderer to synthesize cost from token counts when a backend (notably Codex)
 does not surface USD cost directly. Anthropic-backed runs use cost values
 already supplied by the Claude SDK and do not pass through this module.
@@ -14,7 +14,8 @@ prices for `gpt-5.5-pro`, `gpt-5-codex`, and `gpt-5.3-codex` were not
 published in USD on https://openai.com/api/pricing/ or
 https://developers.openai.com/codex/pricing at build time; those entries fall
 back to the input-token price as a conservative upper bound (slight overcount,
-transparent).
+transparent). `glm-5.2` is priced from the z.ai published rates; the `pi`
+backend reports $0 for it, so its cost is always synthesized here.
 
 Exports:
     ModelPrice: dataclass holding input/cached_input/output USD per 1M tokens.
@@ -64,6 +65,7 @@ MODEL_PRICES: dict[str, ModelPrice] = {
     "gpt-5-codex": ModelPrice(input=1.25, cached_input=1.25, output=10.00),
     # cached_input fallback to input price — unpublished USD value at build time
     "gpt-5.3-codex": ModelPrice(input=1.75, cached_input=1.75, output=14.00),
+    "glm-5.2": ModelPrice(input=1.40, cached_input=0.26, output=4.40),
 }
 
 

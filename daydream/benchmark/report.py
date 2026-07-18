@@ -19,6 +19,7 @@ existing ``$DAYDREAM_PRICES_FILE`` override, not a table in this module.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +47,11 @@ class PRRun:
             not exist when the review was skipped or failed.
         score_leaf: The PR's ``daydream`` scoring leaf, or None when scoring
             was off or the PR was not scored.
+        trial_index: Which repeated trial produced this run, or None for a
+            single-shot run. Joins the entry to ``trials-summary.json``'s
+            ``per_trial[].trial`` (and through it, the trial's tool label),
+            without which a multi-trial report repeats each ``golden_url``
+            indistinguishably.
     """
 
     golden_url: str
@@ -53,6 +59,7 @@ class PRRun:
     elapsed_s: float
     trajectory_path: Path
     score_leaf: dict[str, Any] | None = field(default=None)
+    trial_index: int | None = field(default=None)
 
 
 def _read_final_metrics(trajectory_path: Path) -> dict[str, Any]:
@@ -112,7 +119,7 @@ def synthesize_cost(
 def _int_metric(metrics: dict[str, Any], key: str) -> int:
     """Coerce a trajectory token counter to a non-negative int (None → 0)."""
     value = metrics.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return 0
     return max(int(value), 0)
 
@@ -128,7 +135,12 @@ def _pr_entry(
 
     measured = metrics.get("total_cost_usd")
     cost: float | None
-    if isinstance(measured, (int, float)) and not isinstance(measured, bool) and measured:
+    if (
+        isinstance(measured, (int, float))
+        and not isinstance(measured, bool)
+        and math.isfinite(measured)
+        and measured > 0
+    ):
         cost, cost_source = float(measured), "measured"
     else:
         cost = synthesize_cost(
@@ -143,6 +155,7 @@ def _pr_entry(
     leaf = run.score_leaf or {}
     return {
         "golden_url": run.golden_url,
+        "trial_index": run.trial_index,
         "injected_comments": run.injected_comments,
         "elapsed_s": round(run.elapsed_s, 3),
         "prompt_tokens": prompt,

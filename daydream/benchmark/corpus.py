@@ -31,9 +31,6 @@ from daydream.benchmark.prs import EvaluablePR, load_evaluable_prs
 if TYPE_CHECKING:
     from daydream.benchmark.config import BenchConfig
 
-#: Base branch assumed for a harvested PR record whose ``base_ref`` is missing.
-_DEFAULT_BASE_REF = "main"
-
 
 @dataclass(frozen=True)
 class CorpusSource:
@@ -59,29 +56,35 @@ def harvested_corpus(harvest_dir: Path) -> CorpusSource:
     """Build a corpus source from a harvest dir's ``index.json``.
 
     Each indexed PR becomes an :class:`EvaluablePR` whose head is the bot's
-    review snapshot commit (``review_commit_id``) and whose base is unpinned —
-    it is derived from ``base_ref`` at acquisition time, matching the 3-dot diff
-    the bot itself reviewed. Records without a ``review_commit_id`` have no
-    snapshot to replay and are skipped.
+    review snapshot commit (``review_commit_id``) and whose base is the PR's
+    recorded ``base_sha``. Corpora harvested before ``base_sha`` was captured
+    fall back to deriving the base from ``base_ref`` at acquisition time.
+    Records without a ``review_commit_id`` have no snapshot to replay and are
+    skipped.
 
     Raises:
         FileNotFoundError: If ``index.json`` is absent.
         KeyError: If the index lacks the ``repo`` slug.
+        ValueError: If a replayable record has no ``base_ref``; guessing one
+            would silently replay the PR against the wrong base branch.
     """
     index = json.loads((harvest_dir / "index.json").read_text(encoding="utf-8"))
     repo = index["repo"]
+    records = [record for record in index.get("prs", []) if record.get("review_commit_id")]
+    for record in records:
+        if not record.get("base_ref"):
+            raise ValueError(f"harvested record for {repo} PR #{record['pr_number']} has no base_ref")
     prs = tuple(
         EvaluablePR(
             golden_url=f"https://github.com/{repo}/pull/{record['pr_number']}",
             clone_url=f"https://github.com/{repo}",
             source_repo=repo,
             pr_number=record["pr_number"],
-            base_sha=None,
+            base_sha=record.get("base_sha") or None,
             head_sha=record["review_commit_id"],
-            base_ref=record.get("base_ref") or _DEFAULT_BASE_REF,
+            base_ref=record["base_ref"],
         )
-        for record in index.get("prs", [])
-        if record.get("review_commit_id")
+        for record in records
     )
     return CorpusSource(kind="harvested", root=harvest_dir, prs=prs)
 

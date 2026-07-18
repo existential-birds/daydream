@@ -70,6 +70,18 @@ def _is_transient(stdout: str) -> bool:
     return False
 
 
+def _clear_attempt_outputs(artifact: Path, trajectory_path: Path) -> None:
+    """Remove the outputs :func:`_review_complete` inspects.
+
+    The checkout is reused across bench runs and ``.daydream/`` is gitignored, so
+    a prior run's complete artifacts survive into this one. Clearing them before
+    the subprocess starts is what makes a surviving artifact proof that *this*
+    attempt produced it.
+    """
+    for path in (artifact, trajectory_path):
+        path.unlink(missing_ok=True)
+
+
 def _review_complete(artifact: Path, trajectory_path: Path) -> bool:
     """True when a non-zero exit nonetheless left a *complete* review on disk.
 
@@ -182,8 +194,8 @@ def run_daydream_review(
 ) -> Path:
     """Run a non-interactive deep daydream review against a checkout.
 
-    A non-zero exit is not automatically fatal: if the review artifacts are
-    complete on disk the exit is treated as a tail-end stream drop and the
+    A non-zero exit is not automatically fatal: if *this attempt's* review
+    artifacts are complete on disk the exit is treated as a tail-end drop and the
     artifact is returned; a transient backend overload is retried up to
     ``_TRANSIENT_RETRIES`` times with exponential backoff.
 
@@ -241,6 +253,7 @@ def run_daydream_review(
     attempt = 0
     while True:
         attempt += 1
+        _clear_attempt_outputs(artifact, trajectory_path)
         if on_line is None:
             returncode, tail = _run_captured(cmd, env, checkout)
         else:

@@ -44,7 +44,7 @@ def test_harvested_corpus_builds_prs_from_index(tmp_path):
         harvest_dir,
         [
             {"pr_number": 12, "review_commit_id": "a" * 40, "base_ref": "develop"},
-            {"pr_number": 7, "review_commit_id": "b" * 40, "base_ref": None},
+            {"pr_number": 7, "review_commit_id": "b" * 40, "base_ref": "master"},
         ],
     )
     source = resolve_corpus(_config(harvest_dir=harvest_dir))
@@ -56,10 +56,39 @@ def test_harvested_corpus_builds_prs_from_index(tmp_path):
     assert first.golden_url == "https://github.com/acme/widgets/pull/12"
     assert first.clone_url == "https://github.com/acme/widgets"
     assert first.source_repo == "acme/widgets"
-    assert first.base_sha is None  # derived from base_ref at acquisition time
+    assert first.base_sha is None  # pre-base_sha corpus: derived from base_ref at acquisition time
     assert first.head_sha == "a" * 40  # the bot's review snapshot, not the PR head
     assert first.base_ref == "develop"
-    assert second.base_ref == "main"  # missing base_ref falls back to main
+    assert second.base_ref == "master"
+
+
+def test_harvested_corpus_pins_recorded_base_sha(tmp_path):
+    harvest_dir = tmp_path / "harvest"
+    _write_index(
+        harvest_dir,
+        [
+            {"pr_number": 12, "review_commit_id": "a" * 40, "base_ref": "develop", "base_sha": "c" * 40},
+            {"pr_number": 7, "review_commit_id": "b" * 40, "base_ref": "master", "base_sha": ""},
+        ],
+    )
+    source = resolve_corpus(_config(harvest_dir=harvest_dir))
+
+    pinned, legacy = source.prs
+    assert pinned.base_sha == "c" * 40
+    assert pinned.base_ref == "develop"  # kept as the fallback for acquisition
+    assert legacy.base_sha is None
+
+
+@pytest.mark.parametrize("base_ref", [None, "", "missing"])
+def test_harvested_corpus_rejects_record_without_base_ref(tmp_path, base_ref):
+    harvest_dir = tmp_path / "harvest"
+    record = {"pr_number": 7, "review_commit_id": "b" * 40}
+    if base_ref != "missing":
+        record["base_ref"] = base_ref
+    _write_index(harvest_dir, [{"pr_number": 12, "review_commit_id": "a" * 40, "base_ref": "develop"}, record])
+
+    with pytest.raises(ValueError, match=r"acme/widgets PR #7 has no base_ref"):
+        resolve_corpus(_config(harvest_dir=harvest_dir))
 
 
 def test_harvested_corpus_skips_records_without_commit_id(tmp_path):

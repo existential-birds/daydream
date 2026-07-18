@@ -152,6 +152,36 @@ def test_acquire_raises_giterror_when_no_merge_base(tmp_path):
         acquire_checkout(up.url, 7, up.c1, base_ref="unrelated", cache_dir=tmp_path / "cache")
 
 
+def _make_merged_upstream(tmp_path: Path) -> _BranchedUpstream:
+    """A bare upstream where the PR branch was merged into ``main`` by a merge commit.
+
+    Same shape as :func:`_make_branched_upstream`, plus ``main`` now has ``c2``
+    (and therefore the snapshot ``c1``) as an ancestor — the state every
+    merge-commit-merged PR reaches once it lands.
+    """
+    up = _make_branched_upstream(tmp_path)
+    work = tmp_path / "branched-work"
+    _git(work, "merge", "--no-ff", "-m", "merge pr", up.c2)
+    _git(work, "push", str(tmp_path / "branched.git"), "main:main")
+    return up
+
+
+def test_acquire_rejects_derived_base_equal_to_head(tmp_path):
+    # Once the snapshot is an ancestor of the base tip, merge-base returns the
+    # snapshot itself: an empty diff, which must fail loudly rather than score 0.
+    up = _make_merged_upstream(tmp_path)
+    with pytest.raises(git_ops.GitError, match="derived base equals head"):
+        acquire_checkout(up.url, 7, up.c1, base_ref="main", cache_dir=tmp_path / "cache")
+
+
+def test_acquire_uses_pinned_base_for_merged_snapshot(tmp_path):
+    # The pinned historic base keeps the same merged PR reviewable.
+    up = _make_merged_upstream(tmp_path)
+    acquired = acquire_checkout(up.url, 7, up.c1, base_sha=up.m1, cache_dir=tmp_path / "cache")
+    assert acquired.base_sha == up.m1
+    assert _git(acquired.path, "rev-parse", "HEAD") == up.c1
+
+
 def test_acquire_rejects_both_or_neither_base_arguments(tmp_path):
     up = _make_branched_upstream(tmp_path)
     with pytest.raises(ValueError, match="exactly one"):

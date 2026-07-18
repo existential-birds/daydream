@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import subprocess
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -212,7 +213,12 @@ def _summarize_judge_errors(errors: list[str], *, cap: int = 3) -> str:
     return "; ".join(parts)
 
 
-def parse_daydream_scores(evals: dict[str, dict[str, Any]], *, tool: str = _TOOL) -> DaydreamScores:
+def parse_daydream_scores(
+    evals: dict[str, dict[str, Any]],
+    *,
+    tool: str = _TOOL,
+    golden_urls: Collection[str] | None = None,
+) -> DaydreamScores:
     """Extract per-PR and aggregate scores for ``tool`` from a parsed evaluations dict.
 
     Only the ``tool`` leaf of each PR entry is retained; other tools' leaves are
@@ -221,6 +227,9 @@ def parse_daydream_scores(evals: dict[str, dict[str, Any]], *, tool: str = _TOOL
 
     Args:
         evals: The parsed `evaluations.json` object — golden PR URL → tool → leaf.
+        golden_urls: When provided, only these PR URLs contribute. `evaluations.json`
+            is a resumable artifact that can hold leaves for the same tool from an
+            earlier, wider run, so a selected subset must be filtered by identity.
 
     Raises:
         JudgeFailedError: If the judge errored on at least
@@ -231,7 +240,10 @@ def parse_daydream_scores(evals: dict[str, dict[str, Any]], *, tool: str = _TOOL
     total_tp = total_fp = total_fn = 0
     total_errors = total_comparisons = 0
     judge_errors: list[str] = []
+    selected = set(golden_urls) if golden_urls is not None else None
     for golden_url, tools in evals.items():
+        if selected is not None and golden_url not in selected:
+            continue
         leaf = tools.get(tool)
         if leaf is None:
             continue
@@ -333,21 +345,23 @@ async def run_anthropic_scoring(
     benchmark_repo: Path,
     judge_model: str,
     *,
-    pr_count: int | None = None,
+    golden_urls: Collection[str] | None = None,
     tool: str = _TOOL,
     client: Any | None = None,
 ) -> DaydreamScores:
     """Lazy bridge to the direct Anthropic scorer, kept patchable for tests."""
     from daydream.benchmark.anthropic_score import run_anthropic_scoring as direct_run_anthropic_scoring
 
-    return await direct_run_anthropic_scoring(benchmark_repo, judge_model, pr_count=pr_count, tool=tool, client=client)
+    return await direct_run_anthropic_scoring(
+        benchmark_repo, judge_model, golden_urls=golden_urls, tool=tool, client=client
+    )
 
 
 def run_scoring(
     benchmark_repo: Path,
     judge_model: str,
     *,
-    pr_count: int | None = None,
+    golden_urls: Collection[str] | None = None,
     tool: str = _TOOL,
     judge_route: str = "martian",
 ) -> DaydreamScores:
@@ -365,15 +379,17 @@ def run_scoring(
 
     Args:
         judge_model: Resolved judge model id (see `resolve_judge_model`).
-        pr_count: When provided, bounds how many PR reviews the judge evaluates
-            (passed as ``--limit`` to Martian step3).
+        golden_urls: When provided, the selected PR URLs. Only these contribute to
+            the parsed scores, so leaves left in a resumable `evaluations.json` by a
+            wider earlier run cannot leak into the aggregates. Martian step3 has no
+            per-URL selector, so it additionally receives the count as ``--limit``.
 
     Raises:
         BenchmarkStepError: If scoring fails.
         BenchmarkArtifactError: If `evaluations.json` is absent after scoring.
     """
     if judge_route == "anthropic-direct":
-        return asyncio.run(run_anthropic_scoring(benchmark_repo, judge_model, pr_count=pr_count, tool=tool))
+        return asyncio.run(run_anthropic_scoring(benchmark_repo, judge_model, golden_urls=golden_urls, tool=tool))
     if judge_route != "martian":
         raise BenchmarkStepError(f"Unknown judge route: {judge_route}")
 
@@ -389,8 +405,8 @@ def run_scoring(
     _run_step(_STEP2_MODULE, [], cwd=benchmark_repo, tool=tool, judge_model=judge_model)
     _run_step(_STEP2_5_MODULE, [], cwd=benchmark_repo, tool=tool, judge_model=judge_model)
     step3_extra: list[str] = ["--dedup-groups", str(dedup_groups)]
-    if pr_count is not None:
-        step3_extra += ["--limit", str(pr_count)]
+    if golden_urls is not None:
+        step3_extra += ["--limit", str(len(golden_urls))]
     _run_step(_STEP3_MODULE, step3_extra, cwd=benchmark_repo, tool=tool, judge_model=judge_model)
 
     evaluations_file = results_dir / "evaluations.json"
@@ -399,4 +415,4 @@ def run_scoring(
             f"{evaluations_file} not found after step3; the judge step produced no evaluations."
         )
     evals = json.loads(evaluations_file.read_text())
-    return parse_daydream_scores(evals, tool=tool)
+    return parse_daydream_scores(evals, tool=tool, golden_urls=golden_urls)

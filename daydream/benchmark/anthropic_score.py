@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -240,7 +241,7 @@ async def run_anthropic_scoring(
     benchmark_repo: Path,
     judge_model: str,
     *,
-    pr_count: int | None = None,
+    golden_urls: Collection[str] | None = None,
     tool: str = _TOOL,
     client: _AnthropicJsonCompleter | None = None,
 ) -> DaydreamScores:
@@ -259,22 +260,27 @@ async def run_anthropic_scoring(
     evals = await run_anthropic_evaluation(
         benchmark_repo,
         judge_model,
-        pr_count=pr_count,
+        golden_urls=golden_urls,
         tool=tool,
         client=client,
     )
-    return parse_daydream_scores(evals, tool=tool)
+    return parse_daydream_scores(evals, tool=tool, golden_urls=golden_urls)
 
 
 async def run_anthropic_evaluation(
     benchmark_repo: Path,
     judge_model: str,
     *,
-    pr_count: int | None = None,
+    golden_urls: Collection[str] | None = None,
     tool: str = _TOOL,
     client: _AnthropicJsonCompleter,
 ) -> dict[str, dict[str, Any]]:
-    """Write Martian-compatible evaluations using direct Anthropic JSON calls."""
+    """Write Martian-compatible evaluations using direct Anthropic JSON calls.
+
+    ``golden_urls``, when given, restricts evaluation to those PR URLs; entries
+    already present in a resumable `evaluations.json` for other PRs are left
+    untouched and unscored.
+    """
     benchmark_data_file = benchmark_repo / "results" / "benchmark_data.json"
     data = _load_json_dict(benchmark_data_file, required=True, missing_hint="cannot evaluate benchmark candidates.")
 
@@ -289,8 +295,10 @@ async def run_anthropic_evaluation(
     evals = _load_json_dict(evaluations_file, required=False)
 
     judge = AnthropicFindingJudge(client)
-    evaluated = 0
+    selected = set(golden_urls) if golden_urls is not None else None
     for golden_url, entry in data.items():
+        if selected is not None and golden_url not in selected:
+            continue
         if not isinstance(entry, dict):
             continue
         golden_comments = entry.get("golden_comments", [])
@@ -303,10 +311,6 @@ async def run_anthropic_evaluation(
         for review in reviews:
             if not isinstance(review, dict) or review.get("tool") != tool:
                 continue
-            if pr_count is not None and evaluated >= pr_count:
-                evaluations_file.write_text(json.dumps(evals, indent=2))
-                return evals
-
             candidates = _get_candidates_for_review(review, all_candidates, golden_url)
             dedup_groups = _get_dedup_groups(all_dedup_groups, golden_url, tool)
             result = await _evaluate_review(judge, golden_comments, candidates, dedup_groups)
@@ -318,7 +322,6 @@ async def run_anthropic_evaluation(
 
             evals.setdefault(golden_url, {})[tool] = result
             evaluations_file.write_text(json.dumps(evals, indent=2))
-            evaluated += 1
 
     evaluations_file.write_text(json.dumps(evals, indent=2))
     return evals
@@ -423,6 +426,8 @@ async def _evaluate_review(
     sibling_map = _build_sibling_map(candidates, dedup_groups)
     errors = []
 
+    positives: list[tuple[Any, int, str, str, JudgeVerdict]] = []
+
     for index, result in enumerate(results):
         meta = task_meta[index]
         golden_text = meta["golden"]
@@ -431,15 +436,26 @@ async def _evaluate_review(
             errors.append({"golden": golden_text, "candidate": candidate, "error": str(result)})
             continue
 
-        confidence: Any = result.confidence
-        if result.match and confidence >= golden_matched[golden_text]["best_confidence"]:
-            golden_matched[golden_text]["matched"] = True
-            golden_matched[golden_text]["best_confidence"] = confidence
-            golden_matched[golden_text]["matched_candidate"] = candidate
-            golden_matched[golden_text]["reasoning"] = result.reasoning
-            candidate_matched[candidate] = True
-            for sibling in sibling_map.get(candidate, set()):
-                candidate_matched[sibling] = True
+        if result.match:
+            positives.append((-result.confidence, index, golden_text, candidate, result))
+
+    # One-to-one assignment: each candidate (with its dedup siblings) satisfies at most one golden.
+    positives.sort(key=lambda item: (item[0], item[1]))
+    used_groups: set[frozenset[str]] = set()
+    for negated_confidence, _index, golden_text, candidate, result in positives:
+        info = golden_matched[golden_text]
+        siblings = sibling_map.get(candidate, set())
+        group = frozenset({candidate} | siblings)
+        if info["matched"] or group in used_groups:
+            continue
+        used_groups.add(group)
+        info["matched"] = True
+        info["best_confidence"] = -negated_confidence
+        info["matched_candidate"] = candidate
+        info["reasoning"] = result.reasoning
+        candidate_matched[candidate] = True
+        for sibling in siblings:
+            candidate_matched[sibling] = True
 
     true_positives = []
     false_negatives = []

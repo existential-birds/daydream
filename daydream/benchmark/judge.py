@@ -30,6 +30,7 @@ All three wrap or consume the Protocol; none of them requires touching
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -113,9 +114,12 @@ def _parse_verdict(response: dict[str, Any]) -> JudgeVerdict:
     if not isinstance(response.get("match"), bool):
         raise JudgeError("Anthropic judge response 'match' must be a boolean.")
     confidence = response.get("confidence")
-    if not isinstance(confidence, int | float):
+    if isinstance(confidence, bool) or not isinstance(confidence, int | float):
         raise JudgeError("Anthropic judge response 'confidence' must be a number.")
+    confidence = float(confidence)
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        raise JudgeError("Anthropic judge response 'confidence' must be between 0.0 and 1.0.")
     reasoning = response.get("reasoning", "")
     if not isinstance(reasoning, str):
         raise JudgeError("Anthropic judge response 'reasoning' must be a string.")
-    return JudgeVerdict(match=response["match"], confidence=float(confidence), reasoning=reasoning)
+    return JudgeVerdict(match=response["match"], confidence=confidence, reasoning=reasoning)

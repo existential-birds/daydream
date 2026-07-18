@@ -9,13 +9,15 @@ Two corpora supply the base differently, so the base is either **pinned** or
 **derived**:
 
 - withmartian: ``base_sha`` is pinned in :mod:`daydream.benchmark.prs`.
-- harvested: only the PR's base branch is known, and the head is the bot's
-  review snapshot commit (which may be behind the PR head). The base is the
-  3-dot merge-base of ``origin/<base_ref>`` and that snapshot — the same base
-  GitHub's compare view (and therefore the bot) saw. There is deliberately no
-  first-parent fallback: a two-dot ``head^`` base reviews a *different* diff
-  than the bot did, silently corrupting the comparison this harness exists to
-  make, so a missing merge-base fails loudly instead.
+- harvested: ``base_sha`` is the PR's recorded base commit, or — for corpora
+  harvested before that was captured — only the base branch is known and the
+  base is the 3-dot merge-base of ``origin/<base_ref>`` and the bot's review
+  snapshot. That derivation is history-dependent: once the snapshot is an
+  ancestor of the base branch tip (a merge-commit merge), the merge-base is the
+  snapshot itself and the diff is empty, so that case fails loudly. There is
+  likewise no first-parent fallback: a two-dot ``head^`` base reviews a
+  *different* diff than the bot did, silently corrupting the comparison this
+  harness exists to make, so a missing merge-base fails loudly too.
 
 All git failures raise :class:`daydream.git_ops.GitError`; nothing is
 swallowed.
@@ -81,7 +83,8 @@ def acquire_checkout(
     Raises:
         ValueError: If both or neither of *base_sha* / *base_ref* is given.
         GitError: If any git step fails, HEAD does not land on *head_sha*, or
-            no merge-base exists between ``origin/<base_ref>`` and *head_sha*.
+            the merge-base of ``origin/<base_ref>`` and *head_sha* is missing or
+            is *head_sha* itself (which would yield an empty diff).
     """
     if (base_sha is None) == (base_ref is None):
         raise ValueError("acquire_checkout needs exactly one of base_sha / base_ref")
@@ -116,4 +119,9 @@ def acquire_checkout(
     merge_base = git_ops.merge_base(checkout, f"origin/{base_ref}", head_sha)
     if merge_base is None:
         raise git_ops.GitError(f"no merge-base between origin/{base_ref} and {head_sha} in {checkout}")
+    if merge_base == head_sha:
+        raise git_ops.GitError(
+            f"derived base equals head {head_sha} in {checkout}: {head_sha} is already an ancestor of "
+            f"origin/{base_ref}, so the diff would be empty; re-harvest to pin the PR's base_sha"
+        )
     return AcquiredCheckout(path=checkout, base_sha=merge_base)

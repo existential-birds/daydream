@@ -105,6 +105,49 @@ def test_measured_cost_wins_over_synthesis(tmp_path, monkeypatch):
     assert entry["elapsed_s"] == 12.5
 
 
+def test_non_finite_metrics_fall_back_instead_of_crashing(tmp_path, monkeypatch):
+    """json.loads accepts NaN/Infinity — they must not reach int()/the report."""
+    _install_price_card(tmp_path, monkeypatch)
+    trajectory = tmp_path / "acme_widgets-2.json"
+    trajectory.write_text(
+        '{"final_metrics": {"total_prompt_tokens": Infinity, '
+        '"total_cached_tokens": 1000000, "total_completion_tokens": NaN, '
+        '"total_cost_usd": NaN}}',
+        encoding="utf-8",
+    )
+
+    report = build_report(
+        corpus="harvested",
+        corpus_root=tmp_path,
+        tool_label="daydream",
+        reviewer_backend="pi",
+        reviewer_model="test-model",
+        reviewer_provider=None,
+        judge_route="anthropic-direct",
+        judge_model=None,
+        git_sha="abc123",
+        timestamp="2026-07-18T00:00:00+00:00",
+        pr_runs=[
+            PRRun(
+                golden_url="https://github.com/acme/widgets/pull/2",
+                injected_comments=1,
+                elapsed_s=1.0,
+                trajectory_path=trajectory,
+            )
+        ],
+    )
+
+    entry = report["prs"][0]
+    assert entry["prompt_tokens"] == 0
+    assert entry["completion_tokens"] == 0
+    assert entry["cached_tokens"] == 1_000_000
+    # NaN cost is not "measured": it falls through to synthesis from the
+    # surviving counters (1M cached × $0.10 under the pi branch).
+    assert entry["cost_source"] == "synthesized"
+    assert entry["cost_usd"] == 0.10
+    assert json.dumps(report, allow_nan=False)
+
+
 def test_missing_trajectory_yields_unknown_cost_without_raising(tmp_path):
     """A PR whose trajectory never landed still gets a well-formed entry."""
     report = build_report(
@@ -191,6 +234,7 @@ def test_build_report_shape_is_corpus_agnostic(tmp_path):
     assert set(withmartian["prs"][0]) == set(harvested["prs"][0])
     assert set(withmartian["prs"][0]) == {
         "golden_url",
+        "trial_index",
         "injected_comments",
         "elapsed_s",
         "prompt_tokens",

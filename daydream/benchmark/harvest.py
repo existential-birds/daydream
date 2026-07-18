@@ -6,11 +6,13 @@ that ``daydream bench --harvest-dir DIR`` can run against. For every PR the bot
 touched it captures:
 
 - the bot's review summaries (with the ``commit_id`` each was made against),
-- the bot's standalone inline comments (thread replies excluded — they are not
-  findings and would inflate the golden set),
+- the bot's standalone inline comments anchored to the snapshot commit (thread
+  replies and off-snapshot comments excluded — they are not findings about the
+  replayed tree and would inflate the golden set),
 - review-thread resolution status (the "acted upon" signal, stored as metadata),
 - the snapshot commit to replay daydream against (the latest bot review's
-  ``commit_id``).
+  ``commit_id``), plus the PR's immutable ``base.sha`` so the historic diff
+  stays reproducible after the base branch has moved on.
 
 Output layout — one harvest dir is one corpus, so nothing is nested per repo::
 
@@ -144,6 +146,8 @@ def harvest_pr(repo_slug: str, pr: dict[str, Any], bot: str) -> dict[str, Any] |
 
     Returns:
         The harvest record, or ``None`` when the bot left nothing on this PR.
+        ``comments`` is narrowed to the ``review_commit_id`` snapshot so the
+        golden findings and the replayed commit describe the same tree.
     """
     number = pr["number"]
 
@@ -179,6 +183,22 @@ def harvest_pr(repo_slug: str, pr: dict[str, Any], bot: str) -> dict[str, Any] |
         latest_comment = max(bot_comments, key=lambda c: c.get("created_at") or "")
         review_commit_id = latest_comment.get("commit_id") or latest_comment.get("original_commit_id")
 
+    # The golden findings must describe the commit that gets replayed, so drop
+    # comments anchored to any other one.
+    if review_commit_id:
+        snapshot_comments = [
+            comment
+            for comment in bot_comments
+            if review_commit_id in (comment.get("commit_id"), comment.get("original_commit_id"))
+        ]
+        dropped = len(bot_comments) - len(snapshot_comments)
+        if dropped:
+            print_dim(
+                console,
+                f"PR #{number}: dropped {dropped} inline comment(s) outside snapshot {review_commit_id[:8]}",
+            )
+        bot_comments = snapshot_comments
+
     threads, threads_complete = fetch_review_threads(repo_slug, number)
     bot_threads = [t for t in threads if bot_login_matches(t.get("author"), bot)]
 
@@ -190,6 +210,7 @@ def harvest_pr(repo_slug: str, pr: dict[str, Any], bot: str) -> dict[str, Any] |
         "merged_at": pr.get("merged_at"),
         "created_at": pr.get("created_at"),
         "base_ref": (pr.get("base") or {}).get("ref"),
+        "base_sha": (pr.get("base") or {}).get("sha"),
         "head_ref": (pr.get("head") or {}).get("ref"),
         "bot": bot,
         "review_commit_id": review_commit_id,
@@ -333,6 +354,7 @@ def run_harvest(repo: str, bot: str, out_dir: Path, *, limit: int = 200, state: 
                 "state": record["state"],
                 "merged": bool(record["merged_at"]),
                 "base_ref": record["base_ref"],
+                "base_sha": record["base_sha"],
                 "review_commit_id": record["review_commit_id"],
                 "n_inline_comments": record["n_inline_comments"],
                 "n_review_summaries": record["n_review_summaries"],

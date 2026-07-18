@@ -31,3 +31,20 @@ async def test_anthropic_judge_rejects_malformed_verdict():
 
     with pytest.raises(JudgeError, match="'match' must be a boolean"):
         await judge.same_issue("golden", "candidate")
+
+
+@pytest.mark.parametrize("confidence", [-1, 2, float("nan"), float("inf")])
+@pytest.mark.asyncio
+async def test_anthropic_judge_rejects_out_of_range_confidence(confidence):
+    judge = AnthropicFindingJudge(FakeCompleter({"match": True, "confidence": confidence, "reasoning": "x"}))
+
+    with pytest.raises(JudgeError, match="'confidence' must be between 0.0 and 1.0"):
+        await judge.same_issue("golden", "candidate")
+
+
+@pytest.mark.asyncio
+async def test_anthropic_judge_rejects_bool_confidence():
+    judge = AnthropicFindingJudge(FakeCompleter({"match": True, "confidence": True, "reasoning": "x"}))
+
+    with pytest.raises(JudgeError, match="'confidence' must be a number"):
+        await judge.same_issue("golden", "candidate")
