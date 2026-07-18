@@ -1307,6 +1307,43 @@ def test_gh_pr_create_failure_raises_git_error(fake_gh: FakeGh, git_repo: Path) 
         git_ops.gh_pr_create(git_repo, head="b", base="main", title="t", body="b")
 
 
+def test_log_shas_returns_none_when_ref_is_gone(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A deleted branch ref yields None ("could not look"), never [].
+
+    Squash-merge deletes the branch, so the recorded ref no longer resolves and
+    git exits 128. Returning [] here made callers read the unanswerable query as
+    "no follow-up commits" and label the run rejected.
+    """
+    repo = _make_repo_with_main(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="daydream.git_ops"):
+        result = git_ops.log_shas(repo, "deleted-branch", since="main")
+
+    assert result is None
+    assert any("log_shas" in record.message for record in caplog.records)
+
+
+def test_log_shas_returns_empty_list_when_range_is_genuinely_empty(tmp_path: Path) -> None:
+    """A resolvable ref with no commits ahead yields [] — distinct from None."""
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "topic")
+
+    assert git_ops.log_shas(repo, "topic", since="main") == []
+
+
+def test_log_shas_returns_commits_ahead_of_since(tmp_path: Path) -> None:
+    """The success path still returns SHAs, newest first."""
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "topic")
+    (repo / "a.txt").write_text("a\n")
+    _git(repo, "add", "a.txt")
+    _commit(repo, "topic-1")
+
+    shas = git_ops.log_shas(repo, "topic", since="main")
+
+    assert shas == [_git(repo, "rev-parse", "topic").strip()]
+
+
 def test_log_shas_since_returns_commits_in_range(tmp_path: Path) -> None:
     """log_shas_since returns SHAs for commits in head..base range."""
     repo = _make_repo_with_main(tmp_path)

@@ -906,11 +906,14 @@ def log(repo: Path, base: str, head: str = "HEAD") -> str:
     return proc.stdout.strip()
 
 
-def log_shas(repo: Path, ref: str, *, since: str) -> list[str]:
+def log_shas(repo: Path, ref: str, *, since: str) -> list[str] | None:
     """Return full SHAs of commits on ``since..ref``.
 
-    Soft-failure semantics: returns ``[]`` on any git error or non-zero exit
-    so callers can treat "no commits available" without try/except plumbing.
+    Soft-failure semantics distinguish "we looked and found nothing" from
+    "we could not look": a git failure (commonly a deleted branch ref or a
+    squash-merged SHA that no longer resolves) returns ``None``, never
+    ``[]``. Collapsing the two lets callers read an unanswerable query as a
+    negative answer.
 
     Args:
         since: Base ref or SHA; commits reachable from *ref* but not from
@@ -918,36 +921,37 @@ def log_shas(repo: Path, ref: str, *, since: str) -> list[str]:
 
     Returns:
         List of 40-character SHA strings in ``git log`` output order
-        (newest first). Empty list on any soft failure.
+        (newest first), possibly empty. ``None`` if the query could not be
+        answered.
     """
     try:
         proc = _run_git(repo, ["log", "--pretty=%H", f"{since}..{ref}"], timeout=30)
     except GitTimeoutError:
         _logger.warning(
             "log_shas: git log %s..%s timed out after retries; "
-            "returning empty list",
+            "returning None (commit window unavailable)",
             since,
             ref,
         )
-        return []
+        return None
     except GitError as exc:
         _logger.warning(
             "log_shas: git log %s..%s failed: %s; "
-            "returning empty list",
+            "returning None (commit window unavailable)",
             since,
             ref,
             exc,
         )
-        return []
+        return None
     if proc.returncode != 0:
         _logger.warning(
             "log_shas: git log %s..%s exited non-zero (%d); "
-            "returning empty list",
+            "returning None (commit window unavailable)",
             since,
             ref,
             proc.returncode,
         )
-        return []
+        return None
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 

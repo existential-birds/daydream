@@ -130,7 +130,8 @@ class LocalCommitAppliedSignal:
     Attributes:
         verdict: ``"applied"`` if a later local commit contains the
             recommended diff content; ``"rejected"`` if no qualifying
-            commit exists; ``"unknown"`` if the repo clone is missing.
+            commit exists; ``"unknown"`` if the repo clone is missing or
+            the commit window could not be read.
     """
 
     verdict: Literal["applied", "rejected", "unknown"]
@@ -596,7 +597,7 @@ def local_commit_applied_signal(
     row: dict[str, Any],
     *,
     repo_clone: Path,
-    commits_since_fetcher: Callable[[Path, str, str], list[str]],
+    commits_since_fetcher: Callable[[Path, str, str], list[str] | None],
     file_at_fetcher: Callable[[Path, str, str], str],
 ) -> LocalCommitAppliedSignal:
     """Posterior signal for PR-less runs.
@@ -610,14 +611,15 @@ def local_commit_applied_signal(
         row: Manifest row with ``branch``, ``head_sha``, ``archive_path``.
         repo_clone: Path to local clone. ``"unknown"`` if not a directory.
         commits_since_fetcher: Returns ordered commit SHAs on ``branch``
-            after ``since_sha``.
+            after ``since_sha``, or ``None`` if the window is unknowable.
         file_at_fetcher: Returns file content at a given SHA.
 
     Returns:
         :class:`LocalCommitAppliedSignal` with ``verdict="unknown"``
-        when ``repo_clone`` is not a directory, ``"rejected"`` when no
-        commits follow ``head_sha`` or none contain the recommended
-        hunk's added lines, and ``"applied"`` when at least one does.
+        when ``repo_clone`` is not a directory or the commit window is
+        unknowable, ``"rejected"`` when no commits follow ``head_sha`` or
+        none contain the recommended hunk's added lines, and ``"applied"``
+        when at least one does.
 
     Raises:
         KeyError: If ``row`` is missing ``archive_path``, ``branch``,
@@ -637,6 +639,10 @@ def local_commit_applied_signal(
     hunks = _parse_diff_hunks(diff_patch)
 
     commits = commits_since_fetcher(repo_clone, row["branch"], row["head_sha"])
+    if commits is None:
+        # Window unknowable (deleted branch ref / squash-merged head SHA) —
+        # indistinguishable from "no follow-up commit", so do not call it rejected.
+        return LocalCommitAppliedSignal(verdict="unknown")
     if not commits:
         return LocalCommitAppliedSignal(verdict="rejected")
 

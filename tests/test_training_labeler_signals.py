@@ -274,6 +274,29 @@ def test_local_commit_applied_signal_no_local_commits_returns_rejected(tmp_path:
     assert sig == LocalCommitAppliedSignal(verdict="rejected")
 
 
+def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path: Path) -> None:
+    """A None commit window means "could not look" — not "nobody applied it".
+
+    Same inputs as the rejected case above; only the fetcher's answer differs
+    ([] vs None). The verdicts must differ too, or an unreadable branch ref
+    silently becomes a negative training label.
+    """
+    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    row = {
+        "repo_slug": "org/repo",
+        "head_sha": "abc",
+        "branch": "feat/x",
+        "archive_path": str(tmp_path),
+    }
+    sig = local_commit_applied_signal(
+        row,
+        repo_clone=tmp_path,
+        commits_since_fetcher=lambda repo, branch, since_sha: None,
+        file_at_fetcher=lambda repo, path, sha: "",
+    )
+    assert sig == LocalCommitAppliedSignal(verdict="unknown")
+
+
 def _fake_commits_pulls(pulls):
     # pulls: list returned by repos/{slug}/commits/{sha}/pulls
     def responder(repo, endpoint, **kwargs):

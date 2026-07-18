@@ -306,11 +306,13 @@ def _commits_in_window(repo: Path, head: str, base: str) -> list[str]:
     return list(reversed(git_ops.log_shas_since(repo, head, base)))
 
 
-def _commits_since(repo: Path, branch: str, since: str) -> list[str]:
-    """Return commits on ``branch`` after ``since``.
+def _commits_since(repo: Path, branch: str, since: str) -> list[str] | None:
+    """Return commits on ``branch`` after ``since``, or ``None`` if unknowable.
 
     Used by the local-branch posterior path to walk commits pushed after
-    the daydream-recorded ``head_sha``.
+    the daydream-recorded ``head_sha``. ``None`` propagates the "could not
+    look" case (deleted branch ref, squash-merged head SHA) so the caller
+    does not read it as "no follow-up commit".
     """
     return git_ops.log_shas(repo, branch, since=since)
 
