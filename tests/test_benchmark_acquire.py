@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from daydream import git_ops
 from daydream.benchmark.acquire import acquire_checkout
 from tests.harness.git_helpers import git as _git
@@ -60,15 +62,129 @@ def _make_upstream_with_pr(tmp_path: Path) -> _Upstream:
     return _Upstream(url=str(bare), base_sha=base_sha, head_sha=head_sha)
 
 
+@dataclass
+class _BranchedUpstream:
+    """A bare upstream whose PR branch diverged before the base branch moved on.
+
+    ``main`` is ``m1 -> m2``; the PR branch forks at ``m1`` and runs
+    ``c0 -> c1 -> c2``, with ``refs/pull/7/head`` at ``c2``. ``c1`` stands in for
+    a bot review snapshot taken mid-PR: it is neither the PR head nor a child of
+    the merge-base, so a first-parent base (``c1^`` == ``c0``) and the tip of the
+    base branch (``m2``) are both wrong; only the 3-dot merge-base ``m1`` is right.
+    """
+
+    url: str
+    m1: str
+    m2: str
+    c0: str
+    c1: str
+    c2: str
+
+
+def _make_branched_upstream(tmp_path: Path) -> _BranchedUpstream:
+    work = tmp_path / "branched-work"
+    work.mkdir(parents=True, exist_ok=True)
+    _git(work, "init", "-b", "main")
+    _git(work, "config", "user.email", "test@example.com")
+    _git(work, "config", "user.name", "Tester")
+
+    def _commit(name: str, content: str) -> str:
+        (work / name).write_text(content)
+        _git(work, "add", name)
+        _git(work, "commit", "-m", f"add {name}")
+        return _git(work, "rev-parse", "HEAD")
+
+    m1 = _commit("m1.txt", "m1\n")
+    _git(work, "checkout", "-b", "pr")
+    c0 = _commit("c0.txt", "c0\n")
+    c1 = _commit("c1.txt", "c1\n")
+    c2 = _commit("c2.txt", "c2\n")
+    _git(work, "checkout", "main")
+    m2 = _commit("m2.txt", "m2\n")
+
+    _git(work, "update-ref", "refs/pull/7/head", c2)
+    # An orphan branch with no common ancestor, for the no-merge-base case.
+    _git(work, "checkout", "--orphan", "unrelated")
+    _git(work, "rm", "-rf", ".")
+    _commit("u.txt", "unrelated\n")
+    _git(work, "checkout", "main")
+
+    bare = tmp_path / "branched.git"
+    _git(work, "clone", "--bare", str(work), str(bare))
+    _git(bare, "update-ref", "refs/pull/7/head", c2)
+
+    return _BranchedUpstream(url=str(bare), m1=m1, m2=m2, c0=c0, c1=c1, c2=c2)
+
+
 def test_acquire_checks_out_pr_head_and_keeps_base_resolvable(tmp_path):
     up = _make_upstream_with_pr(tmp_path)
-    checkout = acquire_checkout(up.url, 7, up.base_sha, up.head_sha, cache_dir=tmp_path / "cache")
-    assert _git(checkout, "rev-parse", "HEAD") == up.head_sha
-    assert git_ops.ref_exists(checkout, up.base_sha)  # usable as daydream --base
+    acquired = acquire_checkout(up.url, 7, up.head_sha, base_sha=up.base_sha, cache_dir=tmp_path / "cache")
+    assert _git(acquired.path, "rev-parse", "HEAD") == up.head_sha
+    assert acquired.base_sha == up.base_sha
+    assert git_ops.ref_exists(acquired.path, up.base_sha)  # usable as daydream --base
 
 
 def test_second_acquire_reuses_clone_cache(tmp_path):
     up = _make_upstream_with_pr(tmp_path)
-    a = acquire_checkout(up.url, 7, up.base_sha, up.head_sha, cache_dir=tmp_path / "c")
-    b = acquire_checkout(up.url, 7, up.base_sha, up.head_sha, cache_dir=tmp_path / "c")
-    assert a == b
+    a = acquire_checkout(up.url, 7, up.head_sha, base_sha=up.base_sha, cache_dir=tmp_path / "c")
+    b = acquire_checkout(up.url, 7, up.head_sha, base_sha=up.base_sha, cache_dir=tmp_path / "c")
+    assert a.path == b.path
+
+
+def test_acquire_derives_merge_base_for_bot_commit_not_pr_head(tmp_path):
+    up = _make_branched_upstream(tmp_path)
+    acquired = acquire_checkout(up.url, 7, up.c1, base_ref="main", cache_dir=tmp_path / "cache")
+
+    # The 3-dot base GitHub's compare view (and the bot) saw — not the base
+    # branch tip, and not the snapshot's first parent.
+    assert acquired.base_sha == up.m1
+    assert acquired.base_sha != up.m2
+    assert acquired.base_sha != up.c0
+    assert _git(acquired.path, "rev-parse", f"{up.c1}^") == up.c0  # first-parent really differs
+    # HEAD sits on the bot's snapshot, not the PR head.
+    assert _git(acquired.path, "rev-parse", "HEAD") == up.c1
+    assert _git(acquired.path, "rev-parse", "HEAD") != up.c2
+
+
+def test_acquire_raises_giterror_when_no_merge_base(tmp_path):
+    up = _make_branched_upstream(tmp_path)
+    with pytest.raises(git_ops.GitError, match="no merge-base"):
+        acquire_checkout(up.url, 7, up.c1, base_ref="unrelated", cache_dir=tmp_path / "cache")
+
+
+def _make_merged_upstream(tmp_path: Path) -> _BranchedUpstream:
+    """A bare upstream where the PR branch was merged into ``main`` by a merge commit.
+
+    Same shape as :func:`_make_branched_upstream`, plus ``main`` now has ``c2``
+    (and therefore the snapshot ``c1``) as an ancestor — the state every
+    merge-commit-merged PR reaches once it lands.
+    """
+    up = _make_branched_upstream(tmp_path)
+    work = tmp_path / "branched-work"
+    _git(work, "merge", "--no-ff", "-m", "merge pr", up.c2)
+    _git(work, "push", str(tmp_path / "branched.git"), "main:main")
+    return up
+
+
+def test_acquire_rejects_derived_base_equal_to_head(tmp_path):
+    # Once the snapshot is an ancestor of the base tip, merge-base returns the
+    # snapshot itself: an empty diff, which must fail loudly rather than score 0.
+    up = _make_merged_upstream(tmp_path)
+    with pytest.raises(git_ops.GitError, match="derived base equals head"):
+        acquire_checkout(up.url, 7, up.c1, base_ref="main", cache_dir=tmp_path / "cache")
+
+
+def test_acquire_uses_pinned_base_for_merged_snapshot(tmp_path):
+    # The pinned historic base keeps the same merged PR reviewable.
+    up = _make_merged_upstream(tmp_path)
+    acquired = acquire_checkout(up.url, 7, up.c1, base_sha=up.m1, cache_dir=tmp_path / "cache")
+    assert acquired.base_sha == up.m1
+    assert _git(acquired.path, "rev-parse", "HEAD") == up.c1
+
+
+def test_acquire_rejects_both_or_neither_base_arguments(tmp_path):
+    up = _make_branched_upstream(tmp_path)
+    with pytest.raises(ValueError, match="exactly one"):
+        acquire_checkout(up.url, 7, up.c1, base_sha=up.m1, base_ref="main", cache_dir=tmp_path / "cache")
+    with pytest.raises(ValueError, match="exactly one"):
+        acquire_checkout(up.url, 7, up.c1, cache_dir=tmp_path / "cache")

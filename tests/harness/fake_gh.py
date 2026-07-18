@@ -22,6 +22,11 @@ response map (``responses.json``) plus built-in behaviors:
 - ``gh repo view --json nameWithOwner -q .nameWithOwner`` emits the configured
   ``repo-view`` slug (or ``acme/widgets`` when ``pr-view`` is configured).
 
+A canned ``gh api`` response is looked up by ``"<METHOD> <endpoint>"``, falling
+back to the endpoint with its query string stripped. Under ``--jq`` the reply is
+emitted as NDJSON (one ``@json``-encoded element per line), matching real ``gh``
+so :func:`daydream.git_ops.gh_api`'s paginate+jq contract runs for real.
+
 Any other invocation exits non-zero so unexpected calls surface as failures.
 """
 
@@ -82,6 +87,7 @@ def _parse(argv):
     method = "GET"
     endpoint = None
     payload = None
+    jq = None
     i = 0
     while i < len(argv):
         tok = argv[i]
@@ -91,14 +97,28 @@ def _parse(argv):
         elif tok == "--input":
             payload = json.loads(Path(argv[i + 1]).read_text(encoding="utf-8"))
             i += 2
-        elif tok in ("--jq", "-H", "--header"):
+        elif tok == "--jq":
+            jq = argv[i + 1]
+            i += 2
+        elif tok in ("-H", "--header"):
             i += 2
         elif tok.startswith("-"):
             i += 1
         else:
             endpoint = tok
             i += 1
-    return method, (endpoint or "").lstrip("/"), payload
+    return method, (endpoint or "").lstrip("/"), payload, jq
+
+
+def _emit(value, jq):
+    """Print a response the way gh does: NDJSON of @json-encoded values under --jq."""
+    if jq is None:
+        print(json.dumps(value))
+        return
+    # Production only ever passes the `(.[]) | @json` flattening filter, whose
+    # output is one JSON-encoded element per line.
+    for item in value if isinstance(value, list) else [value]:
+        print(json.dumps(item))
 
 
 def _opt(argv, name):
@@ -203,7 +223,7 @@ def main():
     if not argv or argv[0] != "api":
         sys.stderr.write("fake gh: unsupported invocation: %r\\n" % (argv,))
         return 1
-    method, endpoint, payload = _parse(argv[1:])
+    method, endpoint, payload, jq = _parse(argv[1:])
     with CALLS.open("a", encoding="utf-8") as f:
         f.write(json.dumps(
             {"argv": argv, "method": method, "endpoint": endpoint, "payload": payload}
@@ -222,10 +242,15 @@ def main():
         return 1
     key = method + " " + endpoint
     if key in responses:
-        print(json.dumps(responses[key]))
+        _emit(responses[key], jq)
+        return 0
+    # Query strings select/paginate; the canned response is keyed by path alone.
+    bare_key = method + " " + endpoint.split("?")[0]
+    if bare_key in responses:
+        _emit(responses[bare_key], jq)
         return 0
     if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\\d+/reviews", endpoint):
-        print(json.dumps([]))
+        _emit([], jq)
         return 0
     if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\\d+/reviews", endpoint):
         print(json.dumps({"html_url": "https://github.test/fake/pull/7#pullrequestreview-1"}))

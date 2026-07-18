@@ -1,14 +1,15 @@
 """Benchmark orchestrator — acquire → review → map → inject (+ optional score).
 
-Drives the full benchmark sweep over the pinned evaluable PRs. For each
-selected PR it acquires a checkout, runs a non-interactive daydream review,
-maps the canonical findings to benchmark review comments, and injects a
-synthetic ``daydream`` review into the corpus.
+Drives the full benchmark sweep over one corpus source's PRs. For each selected
+PR it acquires a checkout, runs a non-interactive daydream review, maps the
+canonical findings to benchmark review comments, and injects a synthetic
+``daydream`` review into the corpus.
 
 Path convention: the benchmark corpus is read from and written to
-``config.benchmark_repo / "results" / "benchmark_data.json"`` (the layout the
-benchmark scoring artifacts expect). The corpus is saved after every PR so an
-interrupted sweep is resumable.
+``<corpus root> / "results" / "benchmark_data.json"`` (the layout the benchmark
+scoring artifacts expect). The corpus root is the withmartian checkout or a
+harvested corpus dir — see :mod:`daydream.benchmark.corpus`. The corpus is saved
+after every PR so an interrupted sweep is resumable.
 
 A single PR's failure is logged and recorded but does not abort the sweep; the
 returned exit code is non-zero if any selected PR failed. When ``config.score``
@@ -37,10 +38,16 @@ from daydream.benchmark.benchmark_data import (
     save_benchmark_data,
 )
 from daydream.benchmark.cli import _format_elapsed
+from daydream.benchmark.corpus import CorpusSource, resolve_corpus
 from daydream.benchmark.daydream_run import run_daydream_review
 from daydream.benchmark.mapping import merged_items_to_review_comments
-from daydream.benchmark.prs import load_evaluable_prs
-from daydream.benchmark.score import DaydreamScores, preflight_judge_env, resolve_judge_model, run_scoring
+from daydream.benchmark.report import PRRun, aggregate_from_scores, build_report, write_report
+from daydream.benchmark.score import (
+    DaydreamScores,
+    preflight_judge_env,
+    resolve_judge_model,
+    run_scoring,
+)
 from daydream.benchmark.stats import compute_distribution, distribution_to_dict, format_distribution_table
 from daydream.benchmark.trial_isolation import init_trial_corpus, trial_corpus_dir, trial_tool_label, trials_root
 from daydream.ui import print_dim, print_error, print_info, print_success, print_warning
@@ -54,14 +61,14 @@ if TYPE_CHECKING:
 _CREATED_AT = "2026-06-03T00:00:00Z"
 
 
-def _benchmark_data_path(config: BenchConfig) -> Path:
-    """Resolve the corpus path under the benchmark repo's ``results`` dir."""
-    return config.benchmark_repo / "results" / "benchmark_data.json"
+def _benchmark_data_path(root: Path) -> Path:
+    """Resolve the corpus path under a corpus root's ``results`` dir."""
+    return root / "results" / "benchmark_data.json"
 
 
-def _select_prs(config: BenchConfig) -> list[EvaluablePR]:
-    """Filter the pinned PRs by ``config.only`` (substring) and ``config.limit``."""
-    prs = list(load_evaluable_prs())
+def _select_prs(config: BenchConfig, source: CorpusSource) -> list[EvaluablePR]:
+    """Filter the source's PRs by ``config.only`` (substring) and ``config.limit``."""
+    prs = list(source.prs)
     if config.only:
         needle = config.only
         prs = [pr for pr in prs if needle in pr.source_repo or needle in pr.golden_url]
@@ -84,6 +91,36 @@ def _injected_comment_count(data: dict[str, Any], golden_url: str, tool: str) ->
     return len(review.get("review_comments", []))
 
 
+def _invalidate_scoring_artifacts(corpus_root: Path, tool: str) -> None:
+    """Drop *tool*'s leaves from every per-judge-model scoring artifact.
+
+    Runs at corpus-mutation time, not scoring time: a ``--force`` run without
+    ``--score`` must still leave no stale leaves behind for a later scoring run,
+    which may use a judge model this run never resolved.
+    """
+    results_root = corpus_root / "results"
+    if not results_root.is_dir():
+        return
+    for results_dir in sorted(p for p in results_root.iterdir() if p.is_dir()):
+        for name in ("candidates.json", "dedup_groups.json", "evaluations.json"):
+            path = results_dir / name
+            if not path.exists():
+                continue
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(artifact, dict):
+                continue
+            changed = False
+            for golden_url, tools in list(artifact.items()):
+                if not isinstance(tools, dict) or tool not in tools:
+                    continue
+                del tools[tool]
+                changed = True
+                if not tools:
+                    del artifact[golden_url]
+            if changed:
+                path.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+
+
 def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> bool:
     """Acquire, review, map, and inject a single PR into *data* (mutated).
 
@@ -92,18 +129,19 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
         review was left in place (idempotent no-op; see
         :func:`inject_daydream_review`).
     """
-    checkout = acquire_checkout(
+    acquired = acquire_checkout(
         pr.clone_url,
         pr.pr_number,
-        pr.base_sha,
         pr.head_sha,
+        base_sha=pr.base_sha,
+        base_ref=pr.base_ref if pr.base_sha is None else None,
         cache_dir=config.cache_dir,
     )
     config.trajectory_dir.mkdir(parents=True, exist_ok=True)
     on_line = (lambda line: console.out(line, end="", highlight=False)) if config.verbose else None
     artifact = run_daydream_review(
-        checkout,
-        base_sha=pr.base_sha,
+        acquired.path,
+        base_sha=acquired.base_sha,
         trajectory_path=_trajectory_path(config, pr),
         backend=config.reviewer_backend,
         model=config.reviewer_model,
@@ -120,7 +158,9 @@ def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> b
     return inject_daydream_review(data, pr.golden_url, comments, force=config.force, tool=config.tool_label)
 
 
-def _run_sweep(config: BenchConfig, judge_model: str) -> tuple[bool, DaydreamScores | None]:
+def _run_sweep(
+    config: BenchConfig, source: CorpusSource, judge_model: str
+) -> tuple[bool, DaydreamScores | None, list[PRRun]]:
     """Run the per-PR review/inject sweep (and optional scoring) for one config.
 
     This is the single-config workhorse: a repeated-trial run calls it once per
@@ -130,17 +170,23 @@ def _run_sweep(config: BenchConfig, judge_model: str) -> tuple[bool, DaydreamSco
     this runs, so ``judge_model`` is already resolved (``""`` when not scoring).
 
     Args:
+        source: The resolved corpus (root dir + PR set) this sweep runs over.
         judge_model: Pre-resolved judge model id (``""`` when ``score`` is off).
 
     Returns:
-        ``(ok, scores)`` where ``ok`` is ``False`` if any PR or the scoring step
-        failed, and ``scores`` is the parsed :class:`DaydreamScores` when scoring
-        ran and succeeded, else ``None``.
+        ``(ok, scores, runs)`` where ``ok`` is ``False`` if any PR or the scoring
+        step failed, ``scores`` is the parsed :class:`DaydreamScores` when
+        scoring ran and succeeded (else ``None``), and ``runs`` carries one
+        :class:`PRRun` per PR that ended the sweep with a review in the corpus
+        (including PRs skipped as already-injected, which record
+        ``elapsed_s == 0.0`` because no review ran this time). Failed PRs are
+        absent.
     """
-    data_path = _benchmark_data_path(config)
+    data_path = _benchmark_data_path(source.root)
     data = load_benchmark_data(data_path)
-    prs = _select_prs(config)
+    prs = _select_prs(config, source)
 
+    runs: list[PRRun] = []
     failed = 0
     total = len(prs)
     for i, pr in enumerate(prs, start=1):
@@ -152,6 +198,14 @@ def _run_sweep(config: BenchConfig, judge_model: str) -> tuple[bool, DaydreamSco
 
         if not config.force and has_daydream_review(entry, tool=config.tool_label):
             print_dim(console, f"Skipping {pr.golden_url} (daydream review already present)")
+            runs.append(
+                PRRun(
+                    golden_url=pr.golden_url,
+                    injected_comments=_injected_comment_count(data, pr.golden_url, config.tool_label),
+                    elapsed_s=0.0,
+                    trajectory_path=_trajectory_path(config, pr),
+                )
+            )
             continue
 
         print_info(console, f"▶ [{i}/{total}] Reviewing {pr.golden_url} · reviewer {config.tool_label}…")
@@ -172,10 +226,20 @@ def _run_sweep(config: BenchConfig, judge_model: str) -> tuple[bool, DaydreamSco
             continue
 
         if modified:
+            if config.force:
+                _invalidate_scoring_artifacts(source.root, config.tool_label)
             save_benchmark_data(data_path, data)
             print_info(console, f"Injected daydream review for {pr.golden_url}")
 
         count = _injected_comment_count(data, pr.golden_url, config.tool_label)
+        runs.append(
+            PRRun(
+                golden_url=pr.golden_url,
+                injected_comments=count,
+                elapsed_s=elapsed,
+                trajectory_path=_trajectory_path(config, pr),
+            )
+        )
         noun = "finding" if count == 1 else "findings"
         print_success(console, f"Reviewed {pr.golden_url} in {_format_elapsed(elapsed)} · {count} {noun}")
 
@@ -187,9 +251,9 @@ def _run_sweep(config: BenchConfig, judge_model: str) -> tuple[bool, DaydreamSco
     if config.score:
         try:
             scores = run_scoring(
-                config.benchmark_repo,
+                source.root,
                 judge_model,
-                pr_count=len(prs),
+                golden_urls=[pr.golden_url for pr in prs],
                 tool=config.tool_label,
                 judge_route=config.judge_route,
             )
@@ -206,7 +270,10 @@ def _run_sweep(config: BenchConfig, judge_model: str) -> tuple[bool, DaydreamSco
         else:
             _print_score_breakdown(scores)
 
-    return (failed == 0 and not score_failed, scores)
+    if scores is not None:
+        runs = [replace(run, score_leaf=scores.per_pr.get(run.golden_url)) for run in runs]
+
+    return (failed == 0 and not score_failed, scores, runs)
 
 
 def _print_score_breakdown(scores: DaydreamScores) -> None:
@@ -254,6 +321,7 @@ def _print_cost_estimate(prs: list[EvaluablePR], trials: int) -> None:
 
 def _write_trials_summary(
     config: BenchConfig,
+    corpus_root: Path,
     judge_model: str,
     prs: list[EvaluablePR],
     scored_trials: list[tuple[int, DaydreamScores]],
@@ -261,11 +329,12 @@ def _write_trials_summary(
     """Write ``trials-summary.json`` with reproducibility metadata + distribution.
 
     Args:
+        corpus_root: The run's corpus root; the trials tree lives under it.
         scored_trials: ``(trial_index, scores)`` pairs for each successfully
             scored trial, so ``per_trial`` labels stay accurate even when some
             trials failed scoring and are absent from the list.
     """
-    root = trials_root(config.benchmark_repo, config.tool_label)
+    root = trials_root(corpus_root, config.tool_label)
     root.mkdir(parents=True, exist_ok=True)
     trial_scores = [s for _, s in scored_trials]
     summary: dict[str, Any] = {
@@ -302,7 +371,41 @@ def _write_trials_summary(
     return dest
 
 
-def _run_trials(config: BenchConfig, judge_model: str) -> int:
+def _emit_report(
+    config: BenchConfig,
+    source: CorpusSource,
+    judge_model: str,
+    runs: list[PRRun],
+    *,
+    aggregate: dict[str, Any] | None,
+    distribution: dict[str, Any] | None,
+) -> Path:
+    """Build and write the run's JSON report, then print where it landed.
+
+    Emitted for every run — single-shot and multi-trial — so cost, latency and
+    (when scoring ran) score leaves always have one canonical artifact.
+    """
+    report = build_report(
+        corpus=source.kind,
+        corpus_root=source.root,
+        tool_label=config.tool_label,
+        reviewer_backend=config.reviewer_backend,
+        reviewer_model=config.reviewer_model,
+        reviewer_provider=config.reviewer_provider,
+        judge_route=config.judge_route,
+        judge_model=judge_model or None,
+        git_sha=_daydream_git_sha(),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        pr_runs=runs,
+        aggregate=aggregate,
+        distribution=distribution,
+    )
+    dest = write_report(source.root / ".daydream-bench" / f"report-{config.tool_label}.json", report)
+    print_info(console, f"Wrote bench report to {dest}")
+    return dest
+
+
+def _run_trials(config: BenchConfig, source: CorpusSource, judge_model: str) -> int:
     """Run ``config.trials`` isolated trials and report the score distribution.
 
     Each trial materializes its own corpus dir (a fresh copy of the canonical
@@ -313,39 +416,56 @@ def _run_trials(config: BenchConfig, judge_model: str) -> int:
 
     Args:
         config: Base run configuration (``config.trials > 1``).
+        source: The resolved corpus; each trial re-roots it at its own dir.
         judge_model: Pre-resolved judge model id (``""`` when not scoring).
 
     Returns:
         ``0`` if every trial's sweep succeeded, non-zero otherwise.
     """
-    canonical = _benchmark_data_path(config)
-    prs = _select_prs(config)
+    canonical = _benchmark_data_path(source.root)
+    prs = _select_prs(config, source)
     if config.score:
         _print_cost_estimate(prs, config.trials)
 
     scored_trials: list[tuple[int, DaydreamScores]] = []
+    all_runs: list[PRRun] = []
     any_failed = False
     for t in range(config.trials):
-        trial_dir = trial_corpus_dir(config.benchmark_repo, config.tool_label, t)
+        trial_dir = trial_corpus_dir(source.root, config.tool_label, t)
         init_trial_corpus(canonical, trial_dir)
         trial_config = replace(
             config,
             benchmark_repo=trial_dir,
+            harvest_dir=None,
             tool_label=trial_tool_label(config.tool_label, t),
             trajectory_dir=trial_dir / "trajectories",
         )
+        # A trial re-roots the corpus at its own dir but reviews the same PR set.
+        trial_source = CorpusSource(kind=source.kind, root=trial_dir, prs=source.prs)
         print_info(console, f"══ Trial [{t + 1}/{config.trials}] · label {trial_config.tool_label} ══")
-        ok, scores = _run_sweep(trial_config, judge_model)
+        ok, scores, runs = _run_sweep(trial_config, trial_source, judge_model)
         any_failed = any_failed or not ok
+        all_runs.extend(replace(run, trial_index=t) for run in runs)
         if scores is not None:
             scored_trials.append((t, scores))
 
+    trial_scores = [s for _, s in scored_trials]
+    dist = compute_distribution(trial_scores) if trial_scores else None
+    # A multi-trial run has no single aggregate — the distribution over trials
+    # is its summary; each trial's per-PR leaves are carried on `all_runs`.
+    _emit_report(
+        config,
+        source,
+        judge_model,
+        all_runs,
+        aggregate=None,
+        distribution=distribution_to_dict(dist) if dist is not None else None,
+    )
+
     if config.score:
-        summary_path = _write_trials_summary(config, judge_model, prs, scored_trials)
+        summary_path = _write_trials_summary(config, source.root, judge_model, prs, scored_trials)
         print_info(console, f"Wrote trial summary to {summary_path}")
-        trial_scores = [s for _, s in scored_trials]
-        if trial_scores:
-            dist = compute_distribution(trial_scores)
+        if dist is not None:
             console.print(format_distribution_table(dist))
             total_comparisons = sum(s.total_comparisons for s in trial_scores)
             print_info(console, f"Actual judge comparisons recorded: {total_comparisons}")
@@ -371,8 +491,18 @@ def run_bench(config: BenchConfig) -> int:
         preflight_judge_env(judge_route=config.judge_route)
         judge_model = resolve_judge_model(config.model)
 
-    if config.trials > 1:
-        return _run_trials(config, judge_model)
+    source = resolve_corpus(config)
 
-    ok, _scores = _run_sweep(config, judge_model)
+    if config.trials > 1:
+        return _run_trials(config, source, judge_model)
+
+    ok, scores, runs = _run_sweep(config, source, judge_model)
+    _emit_report(
+        config,
+        source,
+        judge_model,
+        runs,
+        aggregate=aggregate_from_scores(scores) if scores is not None else None,
+        distribution=None,
+    )
     return 0 if ok else 1

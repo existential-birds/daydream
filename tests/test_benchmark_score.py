@@ -72,19 +72,19 @@ def test_resolve_judge_model(monkeypatch):
 def test_run_scoring_dispatches_to_anthropic_direct(tmp_path, monkeypatch):
     called = {}
 
-    async def fake_direct(repo, model, *, pr_count, tool):
-        called.update(repo=repo, model=model, pr_count=pr_count, tool=tool)
+    async def fake_direct(repo, model, *, golden_urls, tool):
+        called.update(repo=repo, model=model, golden_urls=golden_urls, tool=tool)
         return DaydreamScores(scored_pr_count=1, total_tp=1, precision=1.0, recall=1.0)
 
     monkeypatch.setattr("daydream.benchmark.score.run_anthropic_scoring", fake_direct)
     scores = run_scoring(
         tmp_path,
         "claude-opus-4-5-20251101",
-        pr_count=1,
+        golden_urls=[URL],
         tool="daydream",
         judge_route="anthropic-direct",
     )
-    assert called == {"repo": tmp_path, "model": "claude-opus-4-5-20251101", "pr_count": 1, "tool": "daydream"}
+    assert called == {"repo": tmp_path, "model": "claude-opus-4-5-20251101", "golden_urls": [URL], "tool": "daydream"}
     assert scores.scored_pr_count == 1
 
 
@@ -340,10 +340,10 @@ def test_run_scoring_raises_judge_failed_when_evaluations_all_errored(tmp_path, 
 
     monkeypatch.setattr("daydream.benchmark.score.subprocess.run", fake_run)
     with pytest.raises(JudgeFailedError):
-        run_scoring(tmp_path, model, pr_count=1, tool="daydream-glm")
+        run_scoring(tmp_path, model, golden_urls=[URL], tool="daydream-glm")
 
 
-def _record_run_scoring_calls(tmp_path, monkeypatch, *, pr_count=None):
+def _record_run_scoring_calls(tmp_path, monkeypatch, *, golden_urls=None):
     """Run run_scoring with faked subprocess capture, returning the captured cmds.
 
     Sets MARTIAN_API_KEY, stubs subprocess.run to record each argv and drop an
@@ -358,7 +358,7 @@ def _record_run_scoring_calls(tmp_path, monkeypatch, *, pr_count=None):
     rdir = tmp_path / "results" / "anthropic_claude-opus-4.5"
     rdir.mkdir(parents=True)
     (rdir / "evaluations.json").write_text("{}")
-    kwargs = {} if pr_count is None else {"pr_count": pr_count}
+    kwargs = {} if golden_urls is None else {"golden_urls": golden_urls}
     run_scoring(tmp_path, "anthropic/claude-opus-4.5", **kwargs)
     return calls
 
@@ -377,13 +377,13 @@ def test_run_scoring_invokes_three_steps_in_order(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("pr_count", "expect_limit"),
-    [(3, "3"), (None, None)],
-    ids=["pr-count-given", "pr-count-omitted"],
+    ("golden_urls", "expect_limit"),
+    [(["u1", "u2", "u3"], "3"), (None, None)],
+    ids=["selection-given", "selection-omitted"],
 )
-def test_run_scoring_limit_passthrough_to_step3(tmp_path, monkeypatch, pr_count, expect_limit):
-    """step3 gets --limit exactly when pr_count is supplied, with the given value."""
-    step3_cmd = _step3_cmd(_record_run_scoring_calls(tmp_path, monkeypatch, pr_count=pr_count))
+def test_run_scoring_limit_passthrough_to_step3(tmp_path, monkeypatch, golden_urls, expect_limit):
+    """step3 gets --limit exactly when a selection is supplied, sized to it."""
+    step3_cmd = _step3_cmd(_record_run_scoring_calls(tmp_path, monkeypatch, golden_urls=golden_urls))
     if expect_limit is None:
         assert "--limit" not in step3_cmd
     else:
@@ -448,7 +448,7 @@ def test_run_scoring_with_relative_benchmark_repo_resolves_dedup_path(tmp_path, 
 
     # benchmark_repo passed RELATIVE while the process cwd is its parent — the
     # exact shape the harness hits (`--benchmark-repo ../code-review-benchmark/offline`).
-    scores = run_scoring(Path("bench"), model, pr_count=2)
+    scores = run_scoring(Path("bench"), model, golden_urls=["https://x/pull/1"])
 
     assert scores.scored_pr_count == 1
     assert scores.total_tp == 1

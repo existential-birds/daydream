@@ -1,104 +1,106 @@
 ---
 name: rerun-review-bot-bench
 description: >-
-  Re-run the review-bot-compare benchmark pilot — replay daydream against a
-  GitHub review bot's PR history and score the overlap. Use when asked to
-  "re-run the review-bot benchmark", "rerun the GLM pilot", "replay daydream
-  against coderabbit/greptile", "redo the review-bot-compare run", or to
-  benchmark daydream vs a SaaS review bot on a repo's real PRs. Encodes the
-  verified traps (stale artifacts, pi --session-id version floor, z.ai
-  overload, no --provider on replay.py) so the re-run doesn't waste hours.
+  Benchmark daydream against a GitHub review bot's PR history — harvest the
+  bot's reviews into a corpus, replay daydream at each bot snapshot, and score
+  the overlap with the in-process judge. Use when asked to "re-run the
+  review-bot benchmark", "rerun the GLM pilot", "replay daydream against
+  coderabbit/greptile", or to benchmark daydream vs a SaaS review bot on a
+  repo's real PRs. Encodes the verified traps (pi --session-id version floor,
+  z.ai overload, disjoint pi token counters) so the re-run doesn't waste hours.
 ---
 
-# Re-run the review-bot-compare benchmark
+# Benchmark daydream against a review bot
 
-Harness lives at `bench/review-bot-compare/` (run all `python3` commands from
-there). Pipeline: `harvest.py` → `replay.py` → `judge.py` → `compare.py`.
-Artifacts land in `out/<owner__repo>/{findings,traj,logs,replay,judge,worktrees}/pr-<N>.json`
-plus `report.md` + `comparison.csv`. The `<owner__repo>` slug replaces `/` with
-a double underscore (e.g. `shelfspace-app/shelfspace-mono` → `shelfspace-app__shelfspace-mono`).
+This runs entirely through the production harness — `daydream bench`. There are
+no standalone scripts (the `bench/review-bot-compare/` pilot was absorbed into
+`daydream/benchmark/`).
+
+Two commands:
+
+1. `daydream bench harvest` — pull the bot's review history into a **harvested
+   corpus** (`<DIR>/results/benchmark_data.json` + `<DIR>/harvest/pr-<N>.json` +
+   `<DIR>/index.json`). The bot's standalone inline comments become the golden
+   set; its own review is injected as a `tool=<bot stem>` review entry.
+2. `daydream bench --harvest-dir <DIR>` — acquire each PR at the **bot's
+   snapshot** (head = the bot review's `commit_id`, base = `merge-base(
+   origin/<base_ref>, head)`, i.e. GitHub's 3-dot compare base), run daydream,
+   inject the review, and score.
 
 Worked example below: the **shelfspace / coderabbit** GLM (pi) pilot.
-Parameterize `--repo`, `--bot`, `--source`, and the PR set for any repo/bot.
+Parameterize `--repo`, `--bot`, and the reviewer flags for any repo/bot.
 
-Deep mode (no `--shallow`) is ~10–20 min/PR on GLM. Budget accordingly; use
-`--shallow` only for a fast single-stack smoke.
+Deep mode is ~10–20 min/PR on GLM. Budget accordingly.
 
 ## Steps
 
-### 1. Preflight pi (do this FIRST — skips the #1 and #2 traps below)
+### 1. Preflight pi (do this FIRST — skips traps 1 and 2 below)
 
 ```bash
 # (a) version floor: daydream's pi backend passes `--session-id <uuid>`,
 #     which only exists in pi >= 0.80.2. pi 0.74.2 rejects it and every run
 #     aborts in ~2s. Both checks must pass:
 pi --version                                  # must be >= 0.80.2
-pi --help | grep -- --session-id              # must show: --session-id <id>  Use exact project session ID, creating it if missing
+pi --help | grep -- --session-id              # must show: --session-id <id>
 
 # If either fails, upgrade (the `pi` on PATH is the HOMEBREW npm global,
 # NOT nvm's — use the homebrew npm explicitly):
 /opt/homebrew/bin/npm install -g @earendil-works/pi-coding-agent@latest
-# Reference source if you need to inspect: /Users/ka/github/reference_agents/pi-mono
 
 # (b) one-shot smoke — catches z.ai overload AND a broken provider:
 pi -p --no-tools --provider zai --model glm-5.2 'reply with {"ok":true}'
 ```
 
 - One-shot 429s/errors → **z.ai is overloaded. STOP** and retry later; deep
-  replays will all fail.
-- One-shot is clean but a real replay still prints `Unknown option:
-  --session-id` → that's the **version trap (1a)**, not overload. Re-run the
-  version check.
+  runs will all fail.
+- One-shot is clean but a real run still prints `Unknown option: --session-id`
+  → that's the **version trap (1a)**, not overload. Re-run the version check.
 
-### 2. Clear stale per-PR artifacts for the target PRs (before any clean re-run)
-
-`replay/` and `judge/` records are **NOT** auto-cleared, so a fast-abort run
-can leave them showing the PREVIOUS run's numbers (real case: "findings=6/28"
-reported for PRs that actually aborted in 2s — old codex-era findings on disk).
-Clear them for every PR you're about to re-run:
+### 2. Harvest the bot's review history
 
 ```bash
-REPO_SLUG=shelfspace-app__shelfspace-mono
-for N in 1290 1291 1292 1293 1295; do
-  rm -f out/$REPO_SLUG/findings/pr-$N.json \
-        out/$REPO_SLUG/traj/pr-$N.json \
-        out/$REPO_SLUG/judge/pr-$N.json \
-        out/$REPO_SLUG/replay/pr-$N.json
-done
-# Do NOT delete out/$REPO_SLUG/logs/ — keep crash logs. (Just know logs LAG;
-# never diagnose an in-progress run from them — see Gotchas.)
-```
-
-### 3. (If re-harvesting) refresh the bot's review history — usually skip
-
-Harvest is pure `gh api`, no checkout. Only needed if PRs changed since last
-harvest:
-
-```bash
-python3 harvest.py --repo shelfspace-app/shelfspace-mono --bot "coderabbitai[bot]" --out ./out --limit 300
 # Confirm the real bot handle first:
-#   gh api repos/OWNER/REPO/pulls/N/comments --jq '.[].user.login' | sort -u
+gh api repos/OWNER/REPO/pulls/N/comments --jq '.[].user.login' | sort -u
+
+daydream bench harvest \
+    --repo shelfspace-app/shelfspace-mono \
+    --bot "coderabbitai[bot]" \
+    --out ./out/shelfspace-coderabbit \
+    --limit 300 --state all
 ```
 
-### 4. Replay daydream at each snapshot (run in BACKGROUND, then monitor live)
+Harvest is pure `gh api` — no checkout, no model calls. Re-harvest only when
+the PR set has changed.
 
-`replay.py` has **NO `--provider`/`--model` flags** — `--backend pi` alone
-gives GLM (its pi backend defaults to `--provider zai` + `glm-5.2`). Passing
-`--provider` to replay.py errors.
+### 3. Run the benchmark
+
+A harvested corpus **must** score via `--judge-route anthropic-direct`: the
+`martian` route shells `python -m code_review_benchmark.step*` with the corpus
+root as cwd, and that package only exists inside the withmartian checkout. The
+CLI rejects the combination.
 
 ```bash
-python3 replay.py --repo shelfspace-app/shelfspace-mono \
-    --source /Users/ka/github/shelfspace-app/shelfspace-mono \
-    --in ./out --backend pi --pr 1295 --pr 1293 --pr 1292 --pr 1291 --pr 1290 \
-    --timeout 2700 --retries 3 --backoff 30
-#   --limit N  instead of repeated --pr to take the first N harvested PRs
-#   --shallow  for a fast single-stack smoke (skip for the real deep review)
-#   --retry-failed  to re-run only PRs whose replay record is not 'ok'
+export ANTHROPIC_API_KEY=...   # the judge
+daydream bench \
+    --harvest-dir ./out/shelfspace-coderabbit \
+    --reviewer-backend pi --reviewer-model glm-5.2 --reviewer-provider zai \
+    --tool-label daydream-glm \
+    --judge-route anthropic-direct --model anthropic/claude-opus-4-5-20251101
+#   --reviewer NAME               instead, to expand a [tool.daydream.bench.reviewers.NAME] preset
+#   --limit N / --only <pr-url>   to narrow the PR set
+#   --force                       to re-review PRs already injected
+#   --no-score                    to review only, score later (scoring is ON by default)
+#   --trials N                    repeat the sweep and get a distribution
 ```
 
-Run this with `run_in_background: true` and tail its output file. The replay's
-own **stdout result line** (`-> ok | findings=N | cost=$...`) is the
-authoritative per-PR completion signal — NOT the on-disk logs/findings.
+`--model` is the **judge** model; the reviewer under test is configured with
+the `--reviewer-*` flags.
+
+Run it with `run_in_background: true` and tail the output.
+
+Per-PR failures are isolated — one PR's `GitError` or `DaydreamRunError` never
+aborts the sweep. Transient backend overload and tail-end stream drops are
+handled inside `run_daydream_review` (see trap 3).
 
 While it runs, judge live progress ONLY via these signals:
 
@@ -109,74 +111,60 @@ ps aux | grep -E "[d]aydream|[p]i --mode json"
 find ~/.pi/agent/sessions -name '*.jsonl' -newermt '-3 minutes'
 ```
 
-### 5. LLM judge (semantic overlap — one light call per PR)
-
-`judge.py` DOES take `--provider`/`--model` (unlike replay.py):
+### 4. Read the report
 
 ```bash
-python3 judge.py --repo shelfspace-app/shelfspace-mono --in ./out \
-    --backend pi --provider zai --model glm-5.2 --retries 3
-#   --pr N  to judge specific PRs
+cat ./out/shelfspace-coderabbit/.daydream-bench/report-daydream-glm.json
 ```
 
-### 6. Compare + read the report
+The JSON report carries per-PR `elapsed_s`, tokens, `cost_usd` +
+`cost_source` ("measured" | "synthesized" | "unknown"), and tp/fp/fn/precision/
+recall leaves, plus an `aggregate` block. GLM reports `cost_usd=0`, so cost is
+synthesized from tokens via `daydream/pricing.py` and labeled `synthesized` —
+not faked. Add a GLM price card through `$DAYDREAM_PRICES_FILE`.
 
-```bash
-python3 compare.py --repo shelfspace-app/shelfspace-mono --bot-name coderabbit \
-    --in ./out --min-conf 0.5
-cat out/shelfspace-app__shelfspace-mono/report.md
-```
-
-GLM reports `cost_usd=0`, so `compare.py` synthesizes $ from tokens via the
-`glm-5.2` price card (`--price-model glm-5.2`, the default known card). Cost is
-labeled synthetic in the report — not faked.
+`bench/benchmark-report/build.py` renders the HTML view over run dirs.
 
 ## Gotchas / traps
 
-1. **Stale artifacts are the #1 time-waster — NEVER diagnose an in-progress
-   run from `logs/`, `findings/`, or `traj/`.** `replay.py` writes
-   `logs/pr-N.log` and `findings/pr-N.json` only AS/AFTER a PR's daydream run
-   finishes (findings only on a *successful* exit), and the `replay/pr-N.json`
-   record only after `replay_one` returns. During a re-run, those files still
-   hold the PREVIOUS run's output and will show you old errors. A PR's
-   artifacts are trustworthy only once its `replay/pr-N.json` is rewritten OR
-   the replay stdout prints its result line. Trust live signals (step 4),
-   not on-disk per-PR files.
-
-2. **Clear stale artifacts before a clean re-run** (step 2). `replay.py` does
-   **NOT** pre-clear anything — line 111 only `mkdir`s parent dirs. `findings/`
-   and `traj/` are overwritten by daydream *only on a successful exit*; `logs/`
-   only after the run returns; `replay/` + `judge/` records are never
-   auto-cleared. So a fast-abort run leaves the PREVIOUS run's `findings`,
-   `traj`, `replay`, and `judge` files intact → stale numbers (the real
-   "findings=6/28" misreport). Manually `rm` them for every PR you re-run.
-
-3. **pi version floor `>= 0.80.2`.** `--session-id <uuid>` is rejected by
+1. **pi version floor `>= 0.80.2`.** `--session-id <uuid>` is rejected by
    0.74.2 (`Error: Unknown option: --session-id`) → every run aborts in ~2s
    with a "Backend Execution Error". Preflight per step 1a.
 
-4. **z.ai overload.** The one-shot smoke (step 1b) 429ing means deep replays
-   will all fail — stop and retry later, don't burn the batch.
+2. **z.ai overload.** The one-shot smoke (step 1b) 429ing means deep runs will
+   all fail — stop and retry later, don't burn the batch.
 
-5. **`replay.py` takes no `--provider`/`--model`.** `--backend pi` is enough
-   for GLM. (`judge.py` is the script that takes those flags.)
+3. **Transient failure and tail-end stream drops are already handled.**
+   `daydream/benchmark/daydream_run.py` retries overload/rate-limit signatures
+   twice with exponential backoff, and treats a non-zero exit whose
+   `merged-items.json` + trajectory `final_metrics` are complete on disk as a
+   success (the review finished; only the closing socket died). Don't add a
+   retry wrapper around the CLI.
 
-6. **App-identity hard-abort is already handled** — `replay.py` strips
-   `DAYDREAM_APP_ID` / `DAYDREAM_APP_PRIVATE_KEY` from the child env so
-   `--review` doesn't hard-abort under a GitHub App identity. Don't re-add them.
+4. **App-identity hard-abort is already handled** — `run_daydream_review`
+   strips `DAYDREAM_APP_ID` / `DAYDREAM_APP_PRIVATE_KEY` from the child env so
+   the review doesn't hard-abort under a GitHub App identity. Don't re-add them.
 
-7. **`[bot]` suffix mismatch is handled** — GitHub REST keeps `coderabbitai[bot]`,
-   GraphQL drops it to `coderabbitai`. The harness matches both; harvest with
-   the REST form (`--bot "coderabbitai[bot]"`).
+5. **`[bot]` suffix mismatch is handled** — GitHub REST keeps `coderabbitai[bot]`,
+   GraphQL drops it to `coderabbitai`. `bot_login_matches` matches both; harvest
+   with the REST form (`--bot "coderabbitai[bot]"`).
 
-8. **pi token counters are disjoint** — `prompt`=input, `cached`=cacheRead (a
-   *separate* cache-read bucket). They bill separately; don't sum them as
-   one input total.
+6. **pi token counters are disjoint** — `prompt`=input, `cached`=cacheRead (a
+   *separate* cache-read bucket). They bill separately; don't sum them as one
+   input total. `report.synthesize_cost` branches on backend for exactly this.
 
-9. **A giant-diff PR can kill the pi process.** shelfspace **PR #1292** is a
-   ~17k-line diff that can OOM/terminate pi ("terminated"). The harness
-   isolates per-PR failures — accept 4/5 and move on, or retry just that one:
-   `python3 replay.py ... --backend pi --pr 1292 --retries 3`.
+7. **Re-runs skip already-injected PRs.** The corpus-level skip is the resume
+   mechanism; pass `--force` for a genuinely clean re-review. There are no
+   stale per-PR artifact files to hand-clear anymore.
+
+8. **A giant-diff PR can kill the pi process.** shelfspace **PR #1292** is a
+   ~17k-line diff that can OOM/terminate pi ("terminated"). Per-PR isolation
+   records the failure and moves on; retry it alone with `--only <pr-url>`.
+
+9. **No merge-base means the PR fails loudly.** A snapshot whose base ref has
+   no merge-base with the bot's commit raises `GitError` rather than silently
+   reviewing a different diff than the bot saw. Fix the `base_ref` in
+   `index.json`; don't work around it.
 
 10. **Never `--no-verify`, never bypass a failing gate.** If something fails,
     fix the root cause (usually the pi version or z.ai availability above).

@@ -57,6 +57,10 @@ daydream ext validate                              # load daydream_ext, resolve-
 # Benchmark
 daydream bench --benchmark-repo ../code-review-benchmark/offline --score
 
+# Benchmark against a review bot's own PR history (harvested corpus)
+daydream bench harvest --repo OWNER/REPO --bot "coderabbitai[bot]" --out ./cr-corpus
+daydream bench --harvest-dir ./cr-corpus --judge-route anthropic-direct  # martian route needs --benchmark-repo
+
 # Per-phase model/backend overrides are config-file-only (no CLI flags):
 #   set [tool.daydream] / [tool.daydream.phases.<phase>] in pyproject.toml or .daydream.toml.
 #   Precedence: CLI (--model/--backend) > config file > built-in default.
@@ -236,9 +240,10 @@ name inventories, module shape, supervision seam, and bump policy — is
 
 ## Conventions
 
-- **`make check`** = ruff + `mypy daydream` + pytest. The pre-push hook
-  (`scripts/hooks/pre-push`) runs `mypy daydream tests` (includes the tests directory).
-  Test-file type errors pass `make check` but fail the pre-push hook.
+- **`make check`** = `uv lock --check` + ruff over `daydream tests bench` +
+  `mypy daydream tests bench` + pytest. The pre-push hook
+  (`scripts/hooks/pre-push`) runs the same lockcheck/lint/typecheck gate, then
+  pytest excluding integration tests.
 - Ruff: 120 cols, rules `E F I W`, target py312.
 - **Conventional Commits** (`feat(backends): ...`, `fix(agent): ...`). Stage files
   explicitly (`git add <path>`), never `git add -A`.

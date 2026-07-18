@@ -11,6 +11,7 @@ forwarded via the ``PI_PROVIDER`` environment variable, never as an argv flag.
 from __future__ import annotations
 
 import collections
+import json
 import os
 import queue
 import subprocess
@@ -18,7 +19,10 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from daydream.agent import console
+from daydream.backends.pi import STREAM_DROP_SIGNATURES
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV
+from daydream.ui import print_warning
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -31,6 +35,72 @@ _STDERR_TAIL = 4000
 #: A full deep review can take many minutes; 1 hour is a generous upper bound.
 _DAYDREAM_TIMEOUT = 3600
 
+#: Retries granted to a transient (overload / rate-limit / stream-drop) failure.
+_TRANSIENT_RETRIES = 2
+
+#: Base seconds to sleep before a transient retry; doubled per attempt.
+_RETRY_BACKOFF_S = 30
+
+# Backend overload / rate-limit signatures worth a retry (vs. a real review
+# failure). Matched case-insensitively against daydream's captured stdout.
+_TRANSIENT_SIGNATURES = (
+    "429",
+    "service may be temporarily overloaded",
+    "temporarily overloaded",
+    "rate limit",
+    "rate_limit",
+    "overloaded_error",
+    "try again later",
+)
+
+_ERROR_CONTEXT_MARKERS = (
+    "pierror",
+    "backend execution error",
+    "fatal error",
+)
+
+
+def _is_transient(stdout: str) -> bool:
+    low = (stdout or "").lower()
+    if any(sig in low for sig in _TRANSIENT_SIGNATURES):
+        return True
+    # Stream-drop signatures only count when daydream actually errored out.
+    if any(marker in low for marker in _ERROR_CONTEXT_MARKERS):
+        return any(sig in low for sig in STREAM_DROP_SIGNATURES)
+    return False
+
+
+def _clear_attempt_outputs(artifact: Path, trajectory_path: Path) -> None:
+    """Remove the outputs :func:`_review_complete` inspects.
+
+    The checkout is reused across bench runs and ``.daydream/`` is gitignored, so
+    a prior run's complete artifacts survive into this one. Clearing them before
+    the subprocess starts is what makes a surviving artifact proof that *this*
+    attempt produced it.
+    """
+    for path in (artifact, trajectory_path):
+        path.unlink(missing_ok=True)
+
+
+def _review_complete(artifact: Path, trajectory_path: Path) -> bool:
+    """True when a non-zero exit nonetheless left a *complete* review on disk.
+
+    daydream writes the merged-items artifact and the trajectory's
+    ``final_metrics`` only at the very end of the review pipeline. A z.ai/GLM
+    stream-drop at the closing stream (``PiError: terminated``) exits the
+    subprocess non-zero but leaves both files fully written — the review is
+    done, only the socket died. Re-running it wastes many minutes and risks
+    dropping again, so it is treated as a success and never retried.
+    """
+    try:
+        items = json.loads(artifact.read_text())
+        if not isinstance(items, dict) or not isinstance(items.get("items"), list):
+            return False
+        traj = json.loads(trajectory_path.read_text())
+    except (ValueError, OSError):
+        return False
+    return isinstance(traj, dict) and bool(traj.get("final_metrics"))
+
 
 class DaydreamRunError(Exception):
     """Raised when the daydream subprocess exits non-zero."""
@@ -40,8 +110,12 @@ class DaydreamArtifactError(Exception):
     """Raised when daydream exits 0 but the expected findings artifact is absent."""
 
 
-def _run_captured(cmd: list[str], env: dict[str, str], checkout: Path) -> None:
-    """Quiet path: run to completion, capturing output; raise on timeout/non-zero."""
+def _run_captured(cmd: list[str], env: dict[str, str], checkout: Path) -> tuple[int, str]:
+    """Quiet path: run to completion, capturing output; raise only on timeout.
+
+    Returns ``(returncode, tail)``; the non-zero decision is made by the retry
+    loop in :func:`run_daydream_review`.
+    """
     try:
         result = subprocess.run(  # noqa: S603 - args are harness-controlled, not user input
             cmd,  # noqa: S607 - daydream is a trusted command
@@ -55,18 +129,15 @@ def _run_captured(cmd: list[str], env: dict[str, str], checkout: Path) -> None:
         raise DaydreamRunError(
             f"daydream review timed out after {_DAYDREAM_TIMEOUT}s for {checkout}"
         ) from exc
-    if result.returncode != 0:
-        # daydream prints its errors to stdout (Rich console), so a stderr-only
-        # message is frequently empty; surface both streams' tails.
-        tail = f"{result.stdout or ''}\n{result.stderr or ''}".strip()[-_STDERR_TAIL:]
-        raise DaydreamRunError(
-            f"daydream review failed (exit {result.returncode}) for {checkout}:\n{tail}"
-        )
+    # daydream prints its errors to stdout (Rich console), so a stderr-only
+    # message is frequently empty; surface both streams' tails.
+    tail = f"{result.stdout or ''}\n{result.stderr or ''}".strip()[-_STDERR_TAIL:]
+    return result.returncode, tail
 
 
 def _run_streamed(
     cmd: list[str], env: dict[str, str], checkout: Path, on_line: Callable[[str], None]
-) -> None:
+) -> tuple[int, str]:
     """Verbose path: stream merged stdout/stderr line-by-line to ``on_line``.
 
     A bounded tail of the most recent lines is retained so a non-zero exit can
@@ -108,10 +179,7 @@ def _run_streamed(
             on_line(line)
             tail.append(line)
         returncode = proc.wait()
-    if returncode != 0:
-        raise DaydreamRunError(
-            f"daydream review failed (exit {returncode}) for {checkout}:\n{'\n'.join(tail)}"
-        )
+    return returncode, "\n".join(tail)
 
 
 def run_daydream_review(
@@ -125,6 +193,11 @@ def run_daydream_review(
     on_line: Callable[[str], None] | None = None,
 ) -> Path:
     """Run a non-interactive deep daydream review against a checkout.
+
+    A non-zero exit is not automatically fatal: if *this attempt's* review
+    artifacts are complete on disk the exit is treated as a tail-end drop and the
+    artifact is returned; a transient backend overload is retried up to
+    ``_TRANSIENT_RETRIES`` times with exponential backoff.
 
     Args:
         checkout: Path to the target repository checkout to review.
@@ -175,12 +248,40 @@ def run_daydream_review(
     else:
         env.pop("PI_PROVIDER", None)
 
-    if on_line is None:
-        _run_captured(cmd, env, checkout)
-    else:
-        _run_streamed(cmd, env, checkout, on_line)
-
     artifact = checkout / ".daydream" / "deep" / "merged-items.json"
+
+    attempt = 0
+    while True:
+        attempt += 1
+        _clear_attempt_outputs(artifact, trajectory_path)
+        if on_line is None:
+            returncode, tail = _run_captured(cmd, env, checkout)
+        else:
+            returncode, tail = _run_streamed(cmd, env, checkout, on_line)
+        if returncode == 0:
+            break
+        if _review_complete(artifact, trajectory_path):
+            # The review finished; only the closing stream died. Re-running it
+            # would waste many minutes and risk dropping again.
+            print_warning(
+                console,
+                f"daydream exited {returncode} for {checkout} but the review completed "
+                "(tail-end stream drop); keeping the artifact",
+            )
+            break
+        if _is_transient(tail) and attempt <= _TRANSIENT_RETRIES:
+            wait = _RETRY_BACKOFF_S * (2 ** (attempt - 1))
+            print_warning(
+                console,
+                f"transient backend error for {checkout} "
+                f"(attempt {attempt}/{_TRANSIENT_RETRIES + 1}); retrying in {wait}s",
+            )
+            time.sleep(wait)
+            continue
+        raise DaydreamRunError(
+            f"daydream review failed (exit {returncode}) for {checkout}:\n{tail}"
+        )
+
     if not artifact.exists():
         raise DaydreamArtifactError(
             f"daydream exited 0 but findings artifact is missing: {artifact}"

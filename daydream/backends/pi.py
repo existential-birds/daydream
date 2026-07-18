@@ -238,7 +238,7 @@ def _is_retryable_error_message(message: str) -> bool:
         return True
     # Stream-drop signatures (terminated, econnreset, premature close, ...).
     #
-    # Unlike bench/review-bot-compare/replay.py:_is_transient — which scans raw
+    # Unlike daydream/benchmark/daydream_run.py:_is_transient — which scans raw
     # stdout and therefore gates STREAM_DROP_SIGNATURES behind
     # _ERROR_CONTEXT_MARKERS so the substrings only count when daydream actually
     # errored — this function is only ever invoked on a PiError `errorMessage`

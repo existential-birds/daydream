@@ -15,7 +15,8 @@ class BenchConfig:
     """Immutable configuration for a benchmark run.
 
     Attributes:
-        benchmark_repo: Path to the external `code-review-benchmark` checkout.
+        benchmark_repo: Path to the external `code-review-benchmark` checkout,
+            or None when the run is driven by a harvested corpus instead.
         cache_dir: Directory for per-PR blobless clones and fetched heads.
         judge_route: Benchmark scoring route; "martian" preserves the existing
             OpenAI-compatible Martian path.
@@ -39,9 +40,12 @@ class BenchConfig:
         trials: Number of full end-to-end trials to run per reviewer config
             (default 1 = single-shot, back-compat). N>1 isolates each trial in
             its own corpus dir and enables distribution reporting.
+        harvest_dir: Root of a harvested bot-review corpus (see
+            `daydream bench harvest`), or None for a withmartian run. Exactly
+            one of `benchmark_repo` / `harvest_dir` is set; the CLI enforces it.
     """
 
-    benchmark_repo: Path
+    benchmark_repo: Path | None
     cache_dir: Path
     force: bool
     score: bool
@@ -58,3 +62,21 @@ class BenchConfig:
     min_confidence: str | None = None
     min_severity: str | None = None
     trials: int = 1
+    harvest_dir: Path | None = None
+
+    @property
+    def corpus_root(self) -> Path:
+        """Resolve the corpus root: the harvest dir or the benchmark repo.
+
+        Returns:
+            Whichever of ``harvest_dir`` / ``benchmark_repo`` is set. Both being
+            set is unreachable — the CLI rejects it before a config is built.
+
+        Raises:
+            ValueError: If neither is set.
+        """
+        if self.harvest_dir is not None:
+            return self.harvest_dir
+        if self.benchmark_repo is not None:
+            return self.benchmark_repo
+        raise ValueError("BenchConfig needs benchmark_repo or harvest_dir")

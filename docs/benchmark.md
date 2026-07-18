@@ -16,7 +16,7 @@ This runbook takes you from nothing to a scored result.
   `--judge-route martian` is the default, backward-compatible OpenAI-compatible Martian/OpenRouter route. It drives the benchmark step2/2.5/3 modules through their OpenAI Chat Completions-compatible client.
   - `MARTIAN_API_KEY`: an OpenRouter `sk-or-...` key (or a withmartian key). Required for `--score` on this route.
   - `MARTIAN_BASE_URL`: the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1` (default set by the withmartian step modules, not by daydream); set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
-  - `MARTIAN_MODEL`: the judge model id fallback when `--model` is omitted. Defaults to `openai/gpt-4o-mini` in the withmartian step modules.
+  - `MARTIAN_MODEL`: the judge model id fallback when `--model` is omitted. Required for scoring if `--model` is omitted.
 
   `--judge-route anthropic-direct` sends scoring calls directly to the Anthropic Messages API for extraction, deduplication, and final judging. It is not a `MARTIAN_BASE_URL` setting and it is not an OpenAI-compatible proxy route.
   - `ANTHROPIC_API_KEY`: required for `--score` on this route.
@@ -212,6 +212,66 @@ A `trials-summary.json` is written to `<benchmark-repo>/.daydream-bench/trials/<
 **Choosing N.** The bootstrap CI width shrinks roughly as `1/√N`. Use `N ≥ 10` for a reasonable band and `N ≥ 30` when you need a tight interval to separate two close configs. Trials multiply judge cost linearly, so the harness prints an up-front estimate (`~|candidates| × |golden| × PRs × N` judge calls) before the loop starts.
 
 **Seeds are best-effort.** LLM provider seeds are soft-honored at best and never guaranteed across a fleet; aggregation across trials is the mechanism that quantifies the residual noise, and it is mandatory regardless of any seed the provider accepts. Only the bootstrap resampling itself is deterministically seeded.
+
+## Harvested bot-review corpora
+
+The withmartian set is not the only corpus. `daydream bench harvest` builds one from a repository's own history with a commercial review bot: every PR the bot reviewed becomes a benchmark entry whose golden comments are the bot's findings. That measures daydream against a bot on *your* code, not on 26 fixed upstream PRs.
+
+```bash
+daydream bench harvest --repo acme/widgets --bot "coderabbitai[bot]" --out ./cr-corpus --limit 200
+```
+
+`--bot` takes the bot's login; the `[bot]` suffix is optional (GitHub's REST API keeps it on `user.login` while GraphQL drops it, and the harvester matches either form). `--state {all,open,closed,merged}` filters which PRs are scanned. The output dir *is* the corpus — one harvest, one corpus, no per-repo nesting:
+
+```text
+./cr-corpus/index.json                    # PR inventory: snapshot commit, base ref, counts
+./cr-corpus/harvest/pr-<N>.json           # full per-PR record (reviews, comments, threads)
+./cr-corpus/results/benchmark_data.json   # the corpus daydream reviews are injected into
+```
+
+> **Not to be confused with `daydream corpus harvest`**, which annotates archived daydream runs for the training pipeline. Different namespace, unrelated job.
+
+Run against it with `--harvest-dir` in place of `--benchmark-repo`:
+
+```bash
+daydream bench --harvest-dir ./cr-corpus \
+  --judge-route anthropic-direct \
+  --model claude-opus-4-5-20251101 \
+  --score
+```
+
+The two flags are mutually exclusive: a run has exactly one corpus, and exactly one of them must resolve — from the flag or from a `[tool.daydream.bench]` `harvest-dir` / `benchmark-repo` key. Everything else — `--only`/`--limit`, `--reviewer*`/`--tool-label`, `--trials`, `--force`, resumability — behaves identically, because both corpora share the same on-disk shape.
+
+**Scoring a harvested corpus requires `--judge-route anthropic-direct`.** This is a hard constraint, not a preference: the `martian` route does not judge in-process, it shells `python -m code_review_benchmark.step2/2.5/3` with the corpus root as the working directory, and that package only exists inside the withmartian checkout. Pairing `--harvest-dir` with `--judge-route martian` and `--score` is a usage error.
+
+**Golden semantics.** Golden comments are *all* of the bot's standalone inline comments on the PR — thread replies are excluded (they are follow-ups, not findings) and so are body-only review summaries. Each golden comment also carries a `resolved` flag derived from GitHub's review-thread resolution state. That flag is recorded metadata only: nothing scores on it today. It is the raw "acted upon" signal, on the assumption that a resolved thread is a finding the author acted on, and an unresolved one may be noise. Treat unfiltered bot comments as a noisy recall denominator when reading precision/recall from a harvested run.
+
+Each PR is reviewed at the bot's own snapshot — the commit its latest review was made against, which is often an ancestor of the final PR head — so daydream sees the same code the bot saw.
+
+## The run report
+
+Every run — either corpus, with or without `--score`, single-shot or multi-trial — writes a JSON report to `<corpus-root>/.daydream-bench/report-<tool-label>.json`. It is the canonical machine-readable artifact of a sweep:
+
+```json
+{
+  "schema_version": 1,
+  "corpus": "withmartian" | "harvested",
+  "corpus_root": "…", "tool_label": "…",
+  "reviewer_backend": "…", "reviewer_model": "…", "reviewer_provider": "…",
+  "judge_route": "…", "judge_model": "…", "git_sha": "…", "timestamp": "…",
+  "prs": [{"golden_url": "…", "injected_comments": 7, "elapsed_s": 412.3,
+           "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0,
+           "cost_usd": 0.41, "cost_source": "measured|synthesized|unknown",
+           "tp": 2, "fp": 5, "fn": 1, "precision": 0.29, "recall": 0.67}],
+  "aggregate": {"scored_pr_count": 22, "tp": 36, "fp": 139, "fn": 25,
+                "precision": 0.206, "recall": 0.590, "f1": 0.305},
+  "distribution": null
+}
+```
+
+`aggregate` is `null` when the run did not score, and on multi-trial runs (where `distribution` carries the summary instead and `prs` holds one entry per PR per trial). Tokens and cost come from each PR's trajectory `final_metrics`; when the backend reports no cost, it is synthesized from `daydream/pricing.py` (override the price cards with `$DAYDREAM_PRICES_FILE`) and labeled `synthesized` rather than passed off as measured. The pi backend's `prompt`/`cached` counters are *disjoint* buckets, so synthesis bills both; every other backend reports a prompt total inclusive of cache reads, and synthesis subtracts before pricing.
+
+`trials-summary.json` is unaffected and still written for `--trials > 1`.
 
 ## Comparability caveat
 

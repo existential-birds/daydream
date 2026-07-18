@@ -6,11 +6,13 @@ import json
 import re
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from rich.console import Console
 
+from daydream.benchmark.acquire import AcquiredCheckout
 from daydream.benchmark.config import BenchConfig
 from daydream.benchmark.orchestrator import run_bench
 from daydream.benchmark.prs import load_evaluable_prs
@@ -58,11 +60,11 @@ def _seed_benchmark_data_with_all_26_keys(tmp_path: Path) -> Path:
     return data_path
 
 
-def _fake_checkout(tmp_path: Path) -> Path:
-    """Return a Path to an existing checkout directory."""
+def _fake_acquired(tmp_path: Path) -> AcquiredCheckout:
+    """Return an AcquiredCheckout over an existing directory with a pinned base."""
     checkout = tmp_path / "checkout"
     checkout.mkdir(parents=True, exist_ok=True)
-    return checkout
+    return AcquiredCheckout(path=checkout, base_sha="0" * 40)
 
 
 def _write_items(checkout: Path, items: list[dict[str, Any]]) -> Path:
@@ -95,7 +97,7 @@ def test_run_bench_injects_a_daydream_review_per_selected_pr(tmp_path, monkeypat
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.run_daydream_review",
@@ -114,7 +116,7 @@ def test_run_bench_announces_and_reports_each_pr(tmp_path, monkeypatch):
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.run_daydream_review",
@@ -133,7 +135,7 @@ def test_verbose_streams_child_output(tmp_path, monkeypatch):
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
 
     def review(checkout, on_line=None, **k):
@@ -152,7 +154,7 @@ def test_orchestrator_forwards_reviewer_fields(tmp_path, monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
 
     def cap_review(checkout, **k):
@@ -185,22 +187,155 @@ def test_orchestrator_passes_judge_route_to_scoring(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-direct")
     monkeypatch.delenv("MARTIAN_BASE_URL", raising=False)
     monkeypatch.setenv("MARTIAN_MODEL", "claude-opus-4-5-20251101")
-    monkeypatch.setattr("daydream.benchmark.orchestrator.acquire_checkout", lambda *a, **k: _fake_checkout(tmp_path))
+    monkeypatch.setattr("daydream.benchmark.orchestrator.acquire_checkout", lambda *a, **k: _fake_acquired(tmp_path))
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.run_daydream_review",
         lambda checkout, **k: _write_items(checkout, [_item("f.py", 1)]),
     )
     captured = {}
 
-    def fake_score(repo, model, *, pr_count, tool, judge_route):
-        captured.update(model=model, pr_count=pr_count, tool=tool, judge_route=judge_route)
+    def fake_score(repo, model, *, golden_urls, tool, judge_route):
+        captured.update(model=model, golden_urls=golden_urls, tool=tool, judge_route=judge_route)
         return DaydreamScores(scored_pr_count=1, total_tp=1, precision=1.0, recall=1.0)
 
     monkeypatch.setattr("daydream.benchmark.orchestrator.run_scoring", fake_score)
     cfg = replace(_config(tmp_path, data_path, score=True, only="grafana"), limit=1, judge_route="anthropic-direct")
     assert run_bench(cfg) == 0
     assert captured["judge_route"] == "anthropic-direct"
-    assert captured["pr_count"] == 1
+    assert len(captured["golden_urls"]) == 1
+
+
+def test_force_score_invalidates_stale_scorer_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
+    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    golden_url = next(url for url in data if "grafana" in url)
+    data[golden_url]["reviews"].append(
+        {
+            "tool": "daydream",
+            "repo_name": "daydream",
+            "pr_url": golden_url,
+            "review_comments": [{"body": "old candidate"}],
+        }
+    )
+    data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    scores_dir = tmp_path / "results" / "judge-model"
+    scores_dir.mkdir(parents=True)
+    for name in ("candidates.json", "dedup_groups.json", "evaluations.json"):
+        (scores_dir / name).write_text(
+            json.dumps({golden_url: {"daydream": ["stale"], "other-tool": ["keep"]}}, indent=2),
+            encoding="utf-8",
+        )
+
+    _mock_review(tmp_path, monkeypatch)
+
+    def fake_score(repo, model, *, golden_urls, tool, judge_route):
+        for name in ("candidates.json", "dedup_groups.json", "evaluations.json"):
+            artifact = json.loads((scores_dir / name).read_text(encoding="utf-8"))
+            assert artifact == {golden_url: {"other-tool": ["keep"]}}
+        return DaydreamScores(scored_pr_count=1, total_tp=1, precision=1.0, recall=1.0)
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_scoring", fake_score)
+    cfg = replace(_config(tmp_path, data_path, score=True, only="grafana"), force=True, limit=1)
+
+    assert run_bench(cfg) == 0
+
+
+def test_force_without_score_invalidates_artifacts_for_a_later_scoring_run(tmp_path, monkeypatch):
+    """Real-path cross-run: run 1 is --force with no --score, run 2 is --score with no
+    --force. Run 2 takes the already-injected skip branch, so the stale leaves run 1
+    orphaned must already be gone from disk by the time scoring is dispatched.
+    """
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
+    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    golden_url = next(url for url in data if "grafana" in url)
+    data[golden_url]["reviews"].append(
+        {
+            "tool": "daydream",
+            "repo_name": "daydream",
+            "pr_url": golden_url,
+            "review_comments": [{"body": "old candidate"}],
+        }
+    )
+    data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    scores_dir = tmp_path / "results" / "judge-model"
+    scores_dir.mkdir(parents=True)
+    for name in ("candidates.json", "dedup_groups.json", "evaluations.json"):
+        (scores_dir / name).write_text(
+            json.dumps({golden_url: {"daydream": ["stale"], "other-tool": ["keep"]}}, indent=2),
+            encoding="utf-8",
+        )
+
+    _mock_review(tmp_path, monkeypatch)
+
+    assert run_bench(replace(_config(tmp_path, data_path, score=False, only="grafana"), force=True, limit=1)) == 0
+    for name in ("candidates.json", "dedup_groups.json", "evaluations.json"):
+        artifact = json.loads((scores_dir / name).read_text(encoding="utf-8"))
+        assert artifact == {golden_url: {"other-tool": ["keep"]}}, f"{name} kept a stale daydream leaf"
+
+    dispatched: dict[str, Any] = {}
+
+    def fake_score(repo, model, *, golden_urls, tool, judge_route):
+        dispatched["artifacts"] = {
+            name: json.loads((scores_dir / name).read_text(encoding="utf-8"))
+            for name in ("candidates.json", "dedup_groups.json", "evaluations.json")
+        }
+        return DaydreamScores(scored_pr_count=1, total_tp=1, precision=1.0, recall=1.0)
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_scoring", fake_score)
+    assert run_bench(replace(_config(tmp_path, data_path, score=True, only="grafana"), limit=1)) == 0
+    assert dispatched["artifacts"] == {
+        name: {golden_url: {"other-tool": ["keep"]}}
+        for name in ("candidates.json", "dedup_groups.json", "evaluations.json")
+    }
+
+
+def test_scoring_ignores_unselected_prs_left_in_evaluations(tmp_path, monkeypatch):
+    """Real-path: with --only selecting one PR, leaves that a wider earlier run left
+    in the resumable evaluations.json under the same tool label must not be scored.
+
+    Only the judge subprocesses are faked; selection, scoring dispatch, artifact
+    read, and parse run for real.
+    """
+    rec = Console(record=True, force_terminal=True, width=200)
+    monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
+    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    selected = next(url for url in data if "grafana" in url)
+    stale = next(url for url in data if "grafana" not in url)
+
+    scores_dir = tmp_path / "results" / "judge-model"
+    scores_dir.mkdir(parents=True)
+    (scores_dir / "evaluations.json").write_text(
+        json.dumps(
+            {
+                selected: {"daydream": {"tp": 1, "fp": 0, "fn": 0, "total_candidates": 1, "total_golden": 1}},
+                stale: {"daydream": {"tp": 0, "fp": 9, "fn": 9, "total_candidates": 9, "total_golden": 9}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _mock_review(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "daydream.benchmark.score.subprocess.run",
+        lambda cmd, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    cfg = replace(_config(tmp_path, data_path, score=True, only="grafana"), limit=1)
+    assert run_bench(cfg) == 0
+
+    out = rec.export_text()
+    assert "aggregate over 1 PR(s)" in out
+    assert stale not in out
+    assert "precision=1.000" in out and "recall=1.000" in out
 
 
 def test_materiality_gate_filters_submission(tmp_path, monkeypatch):
@@ -209,7 +344,7 @@ def test_materiality_gate_filters_submission(tmp_path, monkeypatch):
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.run_daydream_review",
@@ -237,7 +372,7 @@ def _mock_review(tmp_path, monkeypatch):
     """Wire acquire_checkout + run_daydream_review to a one-finding fake review."""
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.run_daydream_review",
@@ -254,7 +389,7 @@ def _scores_by_trial(tmp_path, monkeypatch):
     """
     captured = {"tools": [], "repos": []}
 
-    def fake_score(repo, model, *, pr_count, tool, judge_route):
+    def fake_score(repo, model, *, golden_urls, tool, judge_route):
         captured["tools"].append(tool)
         captured["repos"].append(repo)
         idx = int(tool.rsplit("-t", 1)[1]) if "-t" in tool else 0
@@ -404,7 +539,7 @@ def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_checkout(tmp_path),
+        lambda *a, **k: _fake_acquired(tmp_path),
     )
 
     def counting_review(checkout, **k):
@@ -417,3 +552,68 @@ def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):
     first = calls["n"]
     run_bench(cfg)  # force=False
     assert first == 10 and calls["n"] == 10  # second run added zero new reviews
+
+
+def test_single_shot_run_writes_json_report(tmp_path, monkeypatch):
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.acquire_checkout",
+        lambda *a, **k: _fake_acquired(tmp_path),
+    )
+    monkeypatch.setattr(
+        "daydream.benchmark.orchestrator.run_daydream_review",
+        lambda checkout, **k: _write_items(checkout, [_item("f.py", 1)]),
+    )
+
+    rc = run_bench(_config(tmp_path, data_path, score=False, only="grafana"))  # 10 PRs
+
+    assert rc == 0
+    report_path = tmp_path / ".daydream-bench" / "report-daydream.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["schema_version"] == 1
+    assert report["corpus"] == "withmartian"
+    assert report["corpus_root"] == str(tmp_path)
+    assert report["tool_label"] == "daydream"
+    assert len(report["prs"]) == 10
+    assert all("grafana" in entry["golden_url"] for entry in report["prs"])
+    assert all(entry["injected_comments"] == 1 for entry in report["prs"])
+    # Scoring was off, so there is no aggregate and no per-PR score leaf.
+    assert report["aggregate"] is None
+    assert report["distribution"] is None
+    assert all(entry["tp"] is None for entry in report["prs"])
+    assert all(entry["trial_index"] is None for entry in report["prs"])  # single-shot carries no trial identity
+
+
+def test_multi_trial_report_attributes_each_pr_entry_to_its_trial(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
+    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    _mock_review(tmp_path, monkeypatch)
+
+    def fake_score(repo, model, *, golden_urls, tool, judge_route):
+        idx = int(tool.rsplit("-t", 1)[1])
+        return DaydreamScores(
+            scored_pr_count=1,
+            total_tp=idx,
+            total_fp=0,
+            total_fn=0,
+            total_errors=0,
+            total_comparisons=1,
+            precision=1.0,
+            recall=1.0,
+            f1=1.0,
+            per_pr={url: {"tp": idx, "fp": 0, "fn": 0} for url in golden_urls},
+        )
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_scoring", fake_score)
+
+    assert run_bench(_scored_trials_config(tmp_path, data_path, 3)) == 0
+
+    report = json.loads((tmp_path / ".daydream-bench" / "report-daydream.json").read_text(encoding="utf-8"))
+    entries = report["prs"]
+    assert len(entries) == 3
+    assert len({e["golden_url"] for e in entries}) == 1  # one PR reviewed three times
+    assert [e["trial_index"] for e in entries] == [0, 1, 2]
+    # Each entry's score leaf tracks its own trial, so leaves stay attributable.
+    assert [e["tp"] for e in entries] == [0, 1, 2]

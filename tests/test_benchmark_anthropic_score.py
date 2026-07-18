@@ -126,12 +126,17 @@ async def test_direct_judge_writes_evaluations_and_metadata(tmp_path):
     seed_benchmark_data(tmp_path, tool="daydream", body="candidate")
     seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=["candidate"])
     seed_dedup_groups(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", groups=[[0]])
-    client = FakeAnthropicJson([{"reasoning": "same bug", "match": True, "confidence": 0.91}])
+    client = FakeAnthropicJson(
+        [
+            {"issues": ["candidate"]},
+            {"reasoning": "same bug", "match": True, "confidence": 0.91},
+        ]
+    )
 
     scores = await run_anthropic_scoring(
         tmp_path,
         "claude-opus-4-5-20251101",
-        pr_count=1,
+        golden_urls=[URL],
         tool="daydream",
         client=client,
     )
@@ -146,6 +151,58 @@ async def test_direct_judge_writes_evaluations_and_metadata(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_direct_judge_does_not_reuse_one_candidate_for_two_goldens(tmp_path):
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "benchmark_data.json").write_text(
+        json.dumps(
+            {
+                URL: {
+                    "golden_comments": [
+                        {"comment": "golden one", "severity": "medium"},
+                        {"comment": "golden two", "severity": "medium"},
+                    ],
+                    "reviews": [
+                        {
+                            "tool": "daydream",
+                            "repo_name": "repo",
+                            "pr_url": URL,
+                            "review_comments": [{"body": "candidate"}],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=["candidate"])
+    seed_dedup_groups(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", groups=[[0]])
+    client = FakeAnthropicJson(
+        [
+            {"issues": ["candidate"]},
+            {"reasoning": "matches one", "match": True, "confidence": 0.7},
+            {"reasoning": "matches two", "match": True, "confidence": 0.9},
+        ]
+    )
+
+    scores = await run_anthropic_scoring(
+        tmp_path,
+        "claude-opus-4-5-20251101",
+        golden_urls=[URL],
+        tool="daydream",
+        client=client,
+    )
+
+    assert scores.total_tp == 1 and scores.total_fn == 1
+    leaf = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "evaluations.json").read_text()
+    )[URL]["daydream"]
+    assert leaf["tp"] == 1
+    assert leaf["precision"] <= 1.0
+    assert [tp["golden_comment"] for tp in leaf["true_positives"]] == ["golden two"]
+    assert [fn["golden_comment"] for fn in leaf["false_negatives"]] == ["golden one"]
+
+
+@pytest.mark.asyncio
 async def test_direct_route_artifacts_are_martian_compatible(tmp_path):
     seed_benchmark_data(tmp_path, tool="daydream", body="candidate")
     client = FakeAnthropicJson(
@@ -157,7 +214,7 @@ async def test_direct_route_artifacts_are_martian_compatible(tmp_path):
     scores = await run_anthropic_scoring(
         tmp_path,
         "claude-opus-4-5-20251101",
-        pr_count=1,
+        golden_urls=[URL],
         tool="daydream",
         client=client,
     )
@@ -165,4 +222,32 @@ async def test_direct_route_artifacts_are_martian_compatible(tmp_path):
     assert (model_dir / "candidates.json").exists()
     assert (model_dir / "dedup_groups.json").exists()
     assert (model_dir / "evaluations.json").exists()
+    assert scores.total_tp == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_route_recomputes_existing_artifacts_for_current_review(tmp_path):
+    seed_benchmark_data(tmp_path, tool="daydream", body="new candidate")
+    model = "claude-opus-4-5-20251101"
+    model_dir = model_results_dir(tmp_path, model)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "candidates.json").write_text(
+        json.dumps({URL: {"daydream": [{"text": "stale candidate", "path": None, "line": None}]}})
+    )
+    (model_dir / "evaluations.json").write_text(
+        json.dumps({URL: {"daydream": {"errors_count": 0, "tp": 1, "fp": 0, "fn": 0}}})
+    )
+    client = FakeAnthropicJson(
+        [
+            {"issues": ["new candidate"]},
+            {"reasoning": "same", "match": True, "confidence": 1.0},
+        ]
+    )
+
+    scores = await run_anthropic_scoring(tmp_path, model, golden_urls=[URL], tool="daydream", client=client)
+
+    candidates = json.loads((model_dir / "candidates.json").read_text())
+    evals = json.loads((model_dir / "evaluations.json").read_text())
+    assert [c["text"] for c in candidates[URL]["daydream"]] == ["new candidate"]
+    assert evals[URL]["daydream"]["total_candidates"] == 1
     assert scores.total_tp == 1
