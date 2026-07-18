@@ -4,6 +4,11 @@ These helpers are called from :func:`daydream.cli.main` when ``bench`` is the
 first argv token. They live here rather than in the top-level ``daydream.cli``
 module to keep that file below the 1 000-line threshold and to co-locate the
 bench argument-parsing logic with the rest of the benchmark package.
+
+``bench`` carries one sub-verb: ``daydream bench harvest`` builds a corpus from
+a review bot's PR history (see :mod:`daydream.benchmark.harvest`). Every other
+argv shape is a benchmark run over one corpus — a withmartian checkout
+(``--benchmark-repo``) or a harvested dir (``--harvest-dir``).
 """
 
 from __future__ import annotations
@@ -61,6 +66,15 @@ def _build_bench_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Path to the external code-review-benchmark checkout "
         "(optional when [tool.daydream.bench] benchmark-repo is set)",
+    )
+    parser.add_argument(
+        "--harvest-dir",
+        type=Path,
+        default=None,
+        dest="harvest_dir",
+        metavar="PATH",
+        help="Root of a harvested bot-review corpus (see 'daydream bench harvest'); "
+        "mutually exclusive with --benchmark-repo and requires --judge-route anthropic-direct",
     )
     parser.add_argument(
         "--cache-dir",
@@ -221,8 +235,10 @@ def _resolve_reviewer_preset(
 def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
     """Parse ``daydream bench`` argv into a :class:`BenchConfig`.
 
-    Optional path flags fall back to a ``.daydream-bench`` cache derived from
-    ``--benchmark-repo``. No directories are created at parse time.
+    Exactly one of ``--benchmark-repo`` / ``--harvest-dir`` must resolve (flag or
+    ``[tool.daydream.bench]`` key); optional path flags fall back to a
+    ``.daydream-bench`` dir under whichever corpus root that is. No directories
+    are created at parse time.
     """
     from daydream.benchmark import BenchConfig
     from daydream.config_file import load_file_config
@@ -264,9 +280,28 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         parser.error("--min-confidence must be one of: LOW, MEDIUM, HIGH")
     if min_severity is not None and min_severity.lower() not in {"low", "medium", "high"}:
         parser.error("--min-severity must be one of: low, medium, high")
-    if benchmark_repo is None:
-        parser.error("--benchmark-repo is required (pass the flag or set [tool.daydream.bench] benchmark-repo)")
-    bench_root = benchmark_repo / ".daydream-bench"
+    harvest_dir = (
+        args.harvest_dir
+        if args.harvest_dir is not None
+        else Path(bench["harvest-dir"])
+        if "harvest-dir" in bench
+        else None
+    )
+    if benchmark_repo is not None and harvest_dir is not None:
+        parser.error("--benchmark-repo and --harvest-dir are mutually exclusive (a run has exactly one corpus)")
+    corpus_root = harvest_dir if harvest_dir is not None else benchmark_repo
+    if corpus_root is None:
+        parser.error(
+            "one of --benchmark-repo / --harvest-dir is required "
+            "(pass the flag or set [tool.daydream.bench] benchmark-repo / harvest-dir)"
+        )
+    if harvest_dir is not None and args.score and judge_route == "martian":
+        # The martian route shells `uv run python -m code_review_benchmark.step*`
+        # with cwd=<corpus root>; that package only exists inside the withmartian
+        # checkout, so a harvested corpus can only be scored in-process. Gated on
+        # --score because the route is never driven when scoring is off.
+        parser.error("--judge-route martian requires --benchmark-repo; score a harvested corpus with anthropic-direct")
+    bench_root = corpus_root / ".daydream-bench"
     cache_dir = args.cache_dir if args.cache_dir is not None else bench_root / "cache"
     trajectory_dir = args.trajectory_dir if args.trajectory_dir is not None else bench_root / "trajectories"
     # P1: a --reviewer preset is the config layer under explicit --reviewer-*/--tool-label flags.
@@ -301,11 +336,51 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         min_confidence=min_confidence,
         min_severity=min_severity,
         trials=trials,
+        harvest_dir=harvest_dir,
     )
+
+
+def _build_bench_harvest_parser() -> argparse.ArgumentParser:
+    """Build the parser for the ``daydream bench harvest`` sub-verb."""
+    parser = argparse.ArgumentParser(
+        prog="daydream bench harvest",
+        description="Harvest a review bot's historic PR reviews into a benchmark corpus. "
+        "(Unrelated to 'daydream corpus harvest', which annotates archived daydream runs.)",
+    )
+    parser.add_argument("--repo", required=True, metavar="OWNER/REPO", help="Repository to scan")
+    parser.add_argument(
+        "--bot",
+        required=True,
+        metavar="LOGIN",
+        help="Bot login, e.g. 'coderabbitai[bot]'; the '[bot]' suffix is optional",
+    )
+    parser.add_argument("--out", required=True, type=Path, metavar="DIR", help="Corpus output directory")
+    parser.add_argument("--limit", type=int, default=200, metavar="N", help="Max PRs to scan (default: 200)")
+    parser.add_argument(
+        "--state",
+        default="all",
+        choices=["all", "open", "closed", "merged"],
+        help="PR state filter (default: all)",
+    )
+    return parser
+
+
+def _handle_bench_harvest_command(argv: list[str]) -> int:
+    """Handle ``daydream bench harvest --repo O/R --bot LOGIN --out DIR [...]``."""
+    from daydream.benchmark.harvest import run_harvest
+
+    parser = _build_bench_harvest_parser()
+    args = parser.parse_args(argv)
+    if args.limit <= 0:
+        parser.error("--limit must be a positive integer")
+    return run_harvest(args.repo, args.bot, args.out, limit=args.limit, state=args.state)
 
 
 def _handle_bench_command(argv: list[str]) -> int:
     """Handle ``daydream bench --benchmark-repo <path> [...]``.
+
+    ``daydream bench harvest [...]`` dispatches to
+    :func:`_handle_bench_harvest_command` instead.
 
     Parses argv into a :class:`BenchConfig` and drives
     :func:`daydream.benchmark.run_bench` synchronously. Returns an exit code
@@ -315,6 +390,9 @@ def _handle_bench_command(argv: list[str]) -> int:
     is allowed to surface to the top-level CLI boundary as a non-zero exit.
     """
     from daydream.benchmark import run_bench
+
+    if argv and argv[0] == "harvest":
+        return _handle_bench_harvest_command(argv[1:])
 
     _load_bench_dotenv()
     config = _bench_config_from_argv(argv)

@@ -33,16 +33,23 @@ class EvaluablePR:
         source_repo: Logical repo name as stored in ``benchmark_data.json``
             (``"sentry"``, ``"grafana"``, ``"cal.com"``).
         pr_number: Upstream pull-request number.
-        base_sha: Full 40-char hex base commit SHA (daydream's diff base).
-        head_sha: Full 40-char hex head commit SHA (``pull/<N>/head``).
+        base_sha: Full 40-char hex base commit SHA (daydream's diff base), or
+            ``None`` when the base is not pinned and must be derived at
+            acquisition time from ``base_ref`` (harvested bot-review corpora).
+        head_sha: Full 40-char hex head commit SHA (``pull/<N>/head`` for the
+            pinned withmartian set; the bot's review snapshot commit for a
+            harvested corpus, which may be an ancestor of the PR head).
+        base_ref: Base branch name (e.g. ``"main"``) used to derive the
+            merge-base when ``base_sha`` is ``None``; ``None`` for pinned PRs.
     """
 
     golden_url: str
     clone_url: str
     source_repo: str
     pr_number: int
-    base_sha: str
+    base_sha: str | None
     head_sha: str
+    base_ref: str | None = None
 
 
 _SENTRY_CLONE_URL = "https://github.com/getsentry/sentry"

@@ -89,6 +89,40 @@ def test_missing_benchmark_repo_everywhere_errors(tmp_path, monkeypatch):
         _bench_config_from_argv(["--no-score"])
 
 
+def test_harvest_dir_flag_reaches_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv(["--harvest-dir", "/h", "--no-score"])
+    assert cfg.harvest_dir == Path("/h")
+    assert cfg.benchmark_repo is None
+    assert cfg.corpus_root == Path("/h")
+    # Derived path defaults hang off the harvest dir, not a benchmark repo.
+    assert cfg.cache_dir == Path("/h/.daydream-bench/cache")
+    assert cfg.trajectory_dir == Path("/h/.daydream-bench/trajectories")
+
+
+def test_harvest_dir_and_benchmark_repo_are_mutually_exclusive(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        _bench_config_from_argv(["--benchmark-repo", "/b", "--harvest-dir", "/h", "--no-score"])
+
+
+def test_harvest_dir_with_martian_route_errors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # The martian route shells the withmartian step modules, which only exist
+    # inside that checkout; a harvested corpus must score anthropic-direct.
+    with pytest.raises(SystemExit):
+        _bench_config_from_argv(["--harvest-dir", "/h", "--score", "--judge-route", "martian"])
+    cfg = _bench_config_from_argv(["--harvest-dir", "/h", "--score", "--judge-route", "anthropic-direct"])
+    assert cfg.judge_route == "anthropic-direct"
+
+
+def test_harvest_dir_config_file_fallback(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text('[tool.daydream.bench]\nharvest-dir = "/from/config"\n')
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv(["--no-score"])  # no --harvest-dir flag
+    assert cfg.harvest_dir == Path("/from/config") and cfg.benchmark_repo is None
+
+
 def test_reviewer_preset_resolves_and_derives_label(tmp_path, monkeypatch):
     (tmp_path / "pyproject.toml").write_text(
         '[tool.daydream.bench]\nbenchmark-repo = "/b"\n'

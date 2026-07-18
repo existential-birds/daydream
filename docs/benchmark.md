@@ -213,6 +213,41 @@ A `trials-summary.json` is written to `<benchmark-repo>/.daydream-bench/trials/<
 
 **Seeds are best-effort.** LLM provider seeds are soft-honored at best and never guaranteed across a fleet; aggregation across trials is the mechanism that quantifies the residual noise, and it is mandatory regardless of any seed the provider accepts. Only the bootstrap resampling itself is deterministically seeded.
 
+## Harvested bot-review corpora
+
+The withmartian set is not the only corpus. `daydream bench harvest` builds one from a repository's own history with a commercial review bot: every PR the bot reviewed becomes a benchmark entry whose golden comments are the bot's findings. That measures daydream against a bot on *your* code, not on 26 fixed upstream PRs.
+
+```bash
+daydream bench harvest --repo acme/widgets --bot "coderabbitai[bot]" --out ./cr-corpus --limit 200
+```
+
+`--bot` takes the bot's login; the `[bot]` suffix is optional (GitHub's REST API keeps it on `user.login` while GraphQL drops it, and the harvester matches either form). `--state {all,open,closed,merged}` filters which PRs are scanned. The output dir *is* the corpus — one harvest, one corpus, no per-repo nesting:
+
+```text
+./cr-corpus/index.json                    # PR inventory: snapshot commit, base ref, counts
+./cr-corpus/harvest/pr-<N>.json           # full per-PR record (reviews, comments, threads)
+./cr-corpus/results/benchmark_data.json   # the corpus daydream reviews are injected into
+```
+
+> **Not to be confused with `daydream corpus harvest`**, which annotates archived daydream runs for the training pipeline. Different namespace, unrelated job.
+
+Run against it with `--harvest-dir` in place of `--benchmark-repo`:
+
+```bash
+daydream bench --harvest-dir ./cr-corpus \
+  --judge-route anthropic-direct \
+  --model claude-opus-4-5-20251101 \
+  --score
+```
+
+The two flags are mutually exclusive: a run has exactly one corpus, and exactly one of them must resolve — from the flag or from a `[tool.daydream.bench]` `harvest-dir` / `benchmark-repo` key. Everything else — `--only`/`--limit`, `--reviewer*`/`--tool-label`, `--trials`, `--force`, resumability — behaves identically, because both corpora share the same on-disk shape.
+
+**Scoring a harvested corpus requires `--judge-route anthropic-direct`.** This is a hard constraint, not a preference: the `martian` route does not judge in-process, it shells `python -m code_review_benchmark.step2/2.5/3` with the corpus root as the working directory, and that package only exists inside the withmartian checkout. Pairing `--harvest-dir` with `--judge-route martian` and `--score` is a usage error.
+
+**Golden semantics.** Golden comments are *all* of the bot's standalone inline comments on the PR — thread replies are excluded (they are follow-ups, not findings) and so are body-only review summaries. Each golden comment also carries a `resolved` flag derived from GitHub's review-thread resolution state. That flag is recorded metadata only: nothing scores on it today. It is the raw "acted upon" signal, on the assumption that a resolved thread is a finding the author acted on, and an unresolved one may be noise. Treat unfiltered bot comments as a noisy recall denominator when reading precision/recall from a harvested run.
+
+Each PR is reviewed at the bot's own snapshot — the commit its latest review was made against, which is often an ancestor of the final PR head — so daydream sees the same code the bot saw.
+
 ## Comparability caveat
 
 What matters is the reviewer. A different reviewer pipeline (different backend, model config, or tool label) produces different findings — changing the reviewer changes the numbers. The offline HTML report at `bench/benchmark-report/runs/latest/index.html` documents the reviewer configuration for each run.
