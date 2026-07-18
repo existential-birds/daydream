@@ -59,11 +59,43 @@ def _seed_deep_bronze(tmp_path: Path, *, verdict: str, grounding: float) -> Path
 
 
 def _fake_gh_merged(merged_at: str):
-    """Return a ``gh_api(repo, endpoint, **kw)`` responder for a merged PR.
+    """Return a ``gh_api(repo, endpoint, **kw)`` responder for an *evidenced*
+    merged PR — daydream posted a finding and it was addressed.
 
-    Reuses the labeler-test responder shape: keyed on the endpoint, the
-    ``pulls/<n>`` endpoint reports merged with the given timestamp and the
-    ``comments`` endpoint reports no comments (clean → ``accepted``).
+    Keyed on the endpoint: ``pulls/<n>`` reports merged with the given
+    timestamp, and ``comments`` carries one footer-marked daydream finding plus
+    a human reply to it — ``comment_resolution == (1, 1, 0)``, so the rubric
+    yields ``accepted`` on real evidence.
+
+    A merged PR with *no* tracked comments is deliberately NOT this shape: it
+    labels ``unknown``, and :func:`_fake_gh_merged_no_comments` covers it.
+    """
+
+    def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/reviews"):
+            return []
+        if endpoint.endswith("/comments"):
+            return [
+                {
+                    "id": 1,
+                    "in_reply_to_id": None,
+                    "user": {"login": "daydream-runner"},
+                    "body": f"finding\n\n{DAYDREAM_FOOTER}",
+                },
+                {"id": 2, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "fixed"},
+            ]
+        return {"merged": True, "merged_at": merged_at}
+
+    return responder
+
+
+def _fake_gh_merged_no_comments(merged_at: str):
+    """Return a ``gh_api`` responder for a merged PR with NO daydream comments.
+
+    The vacuous-accept shape: the PR merged, but daydream produced nothing
+    tracked, so ``comment_resolution`` is ``(0, 0, 0)`` and ``unresolved == 0``
+    is vacuously true. The rubric must read this as ``unknown``, never
+    ``accepted`` — a merge alone is not evidence daydream contributed.
     """
 
     def responder(repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -387,11 +419,11 @@ def test_build_annotation_below_threshold_falls_back_to_default_prior(tmp_path, 
 
 
 def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path, monkeypatch):
-    # PR-less row -> reviewer_logins == [], outcome_prior None, prior query never
-    # consulted; still a PosteriorBreakdown when the local verdict maps to a label.
+    # PR-less row -> reviewer_logins == [], prior query never consulted, and the
+    # local verdict is withheld from the posterior axis: a local commit is not a
+    # maintainer acting in a PR, so the label is kept but has_posterior is False.
     from daydream.training.labeler_signals import LocalCommitAppliedSignal
 
-    # Mapped local verdict "rejected" so the posterior axis is present.
     monkeypatch.setattr(
         harvest, "local_commit_applied_signal", lambda *a, **k: LocalCommitAppliedSignal(verdict="rejected")
     )
@@ -406,11 +438,11 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path, monkeypatch)
     p = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
                          repo_clone=tmp_path)
     assert p.reviewer_logins == []
-    assert p.labels == ["rejected"]
-    assert p.has_posterior is True
+    assert p.labels == ["rejected"]  # label kept — consumers may still want it
+    assert p.has_posterior is False  # ...but it is not maintainer-PR evidence
     rb = json.loads(p.reward_json)
-    assert rb["outcome_prior"] is None and rb["outcome_prior_n"] == 0
-    assert rb["posterior_cost"] == 0.5  # max(0, 1.0 - 0.5 default prior)
+    assert "posterior_cost" not in rb and "outcome_prior" not in rb
+    assert rb["composite"] is not None  # the intrinsic axes are unaffected
 
 
 def test_build_annotation_asserts_canonical_version(tmp_path, monkeypatch):
@@ -919,6 +951,115 @@ async def test_harvest_live_branch_with_applied_fix_labels_accepted(tmp_path, ar
     assert json.loads(row["outcome_labels"]) == ["accepted"]
 
 
+async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(
+    tmp_path, archive_dir, monkeypatch
+):
+    """Real-path: a merged PR where daydream tracked NO comments is unlabeled.
+
+    The vacuous-accept bug. ``comment_resolution == (0, 0, 0)`` made
+    ``unresolved == 0`` trivially true, so "merged, daydream contributed
+    nothing observable" scored identically to "merged, every finding
+    addressed" — 152 of 170 ``pr_review`` accepts in the real archive were this
+    shape. Such a run carries no evidence either way, so it must persist as
+    ``unknown`` (empty labels) and stay out of the posterior population.
+    """
+    _seed_archived_deep_run(archive_dir, "s-vacuous", merged_at="2026-02-01T00:00:00+00:00")
+    monkeypatch.setattr(
+        "daydream.training.harvest._gh_api",
+        _fake_gh_merged_no_comments("2026-02-01T00:00:00+00:00"),
+    )
+
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0 and summary["annotated"] == 1
+    row = query_runs(archive_dir, "session_id = ?", ("s-vacuous",))[0]
+    assert json.loads(row["outcome_labels"]) == []  # NOT ["accepted"]
+    obs = latest_label_observation(archive_dir, "s-vacuous")
+    assert obs["pr_state"] == "merged"  # merge state still recorded, just not decisive
+    assert json.loads(obs["rubric_json"])["comment_resolution"]["total"] == 0
+    # "unknown" maps to no penalty, so the row is excluded from the posterior population.
+    assert obs["has_posterior"] == 0
+    assert "posterior_cost" not in json.loads(obs["reward_json"])
+
+
+async def test_harvest_merged_pr_with_replied_comment_is_labeled_accepted(
+    tmp_path, archive_dir, monkeypatch
+):
+    """Real-path: the evidenced accept survives the fix and IS posterior evidence.
+
+    The positive arm of the same distinction: one tracked daydream finding, a
+    human reply resolving it, PR merged. This must stay ``accepted`` with
+    ``has_posterior`` set, or the fix would have erased the only genuinely
+    discriminative positives in the corpus.
+    """
+    _seed_archived_deep_run(archive_dir, "s-evidenced", merged_at="2026-02-01T00:00:00+00:00")
+    monkeypatch.setattr(
+        "daydream.training.harvest._gh_api",
+        _fake_gh_merged("2026-02-01T00:00:00+00:00"),
+    )
+
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0 and summary["annotated"] == 1
+    row = query_runs(archive_dir, "session_id = ?", ("s-evidenced",))[0]
+    assert json.loads(row["outcome_labels"]) == ["accepted"]
+    obs = latest_label_observation(archive_dir, "s-evidenced")
+    resolution = json.loads(obs["rubric_json"])["comment_resolution"]
+    assert (resolution["total"], resolution["unresolved"]) == (1, 0)
+    # A maintainer acting on a real PR IS posterior evidence.
+    assert obs["has_posterior"] == 1
+    assert json.loads(obs["reward_json"])["false_positive_penalty"] == 0.0
+
+
+async def test_harvest_local_branch_accept_keeps_label_but_is_not_posterior_evidence(
+    tmp_path, archive_dir, monkeypatch
+):
+    """Real-path: a local-commit "accepted" is a weaker evidence tier.
+
+    A commit on the recorded branch containing the recommended lines is not a
+    maintainer acting in a PR, so it must not enter the reward-model posterior
+    population. The label is still persisted (consumers may want it), but
+    ``has_posterior`` is 0 and no ``posterior_cost`` is written — letting
+    consumers split on the column instead of silently mixing evidence tiers
+    with real merged-PR outcomes.
+    """
+    clone = _make_repo_with_main(tmp_path, name="clone")
+    _git(clone, "checkout", "-b", "feat/local-tier")
+    head_sha = _git(clone, "rev-parse", "HEAD").strip()
+    run_dir = _seed_orphan_run(
+        archive_dir,
+        tmp_path / "bronze",
+        session_id="s-local-tier",
+        head_sha=head_sha,
+        branch="feat/local-tier",
+        source_path=clone,
+    )
+    (run_dir / "recommended.patch").write_text(
+        "diff --git a/app.py b/app.py\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " existing\n"
+        "+guarded = True\n"
+    )
+    (clone / "app.py").write_text("existing\nguarded = True\n")
+    _git(clone, "add", "app.py")
+    _commit(clone, "apply the recommended fix")
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_unpushed_422)
+
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0
+    row = query_runs(archive_dir, "session_id = ?", ("s-local-tier",))[0]
+    assert json.loads(row["outcome_labels"]) == ["accepted"]  # label kept
+    obs = latest_label_observation(archive_dir, "s-local-tier")
+    assert json.loads(obs["rubric_json"])["posterior_source"] == "local_branch"
+    # Weaker tier: labeled, but withheld from the posterior population.
+    assert obs["has_posterior"] == 0
+    assert "posterior_cost" not in json.loads(obs["reward_json"])
+
+
 async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_link(
     tmp_path, archive_dir, monkeypatch
 ):
@@ -1232,7 +1373,16 @@ async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(tmp_path, a
         if endpoint.endswith("/reviews"):
             raise GitError("gh: Internal Server Error (HTTP 500)")
         if endpoint.endswith("/comments"):
-            return []
+            # A resolved daydream thread: the evidence that makes the merge decisive.
+            return [
+                {
+                    "id": 1,
+                    "in_reply_to_id": None,
+                    "user": {"login": "daydream-runner"},
+                    "body": f"finding\n\n{DAYDREAM_FOOTER}",
+                },
+                {"id": 2, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "fixed"},
+            ]
         return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
 
     monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_reviews_fail)

@@ -562,8 +562,11 @@ class AnnotationPayload:
             seeded the posterior axis — captured at harvest time (irreproducible
             later) and persisted. ``[]`` for local/non-PR rows.
         has_posterior: Population discriminator — ``True`` when the scored
-            breakdown is a :class:`~daydream.training.reward.PosteriorBreakdown`
-            (a mapped maintainer outcome label was supplied).
+            breakdown is a :class:`~daydream.training.reward.PosteriorBreakdown`,
+            i.e. a ``pr_review`` row whose maintainer outcome label mapped to a
+            penalty. ``local_branch`` rows keep their label but are **not**
+            posterior evidence (a local commit is not a maintainer acting in a
+            PR), so they carry ``False`` and no ``posterior_cost``.
     """
 
     labels: list[str]
@@ -621,11 +624,13 @@ def build_annotation(
     rows have no reviewer set (``reviewer_logins=[]``, ``outcome_prior=None``,
     ``outcome_prior_n=0``).
 
-    Scores the reward via :func:`~daydream.training.reward.score_trajectory` with
-    the outcome label + prior; a mapped label yields a
-    :class:`~daydream.training.reward.PosteriorBreakdown` whose ``composite`` is
-    the pure intrinsic score (C5 — the posterior penalty is a sibling, never
-    folded in). Asserts the breakdown carries the canonical
+    Scores the reward via :func:`~daydream.training.reward.score_trajectory`. The
+    outcome label is fed to the posterior axis **only** for ``pr_review`` rows;
+    ``local_branch`` outcomes keep their label but are withheld from
+    ``pr_feedback`` so they never enter the posterior population. A mapped label
+    yields a :class:`~daydream.training.reward.PosteriorBreakdown` whose
+    ``composite`` is the pure intrinsic score (C5 — the posterior penalty is a
+    sibling, never folded in). Asserts the breakdown carries the canonical
     :data:`~daydream.training.reward.REWARD_VERSION` before returning, so a
     non-canonical (analysis-time override) score can never reach canonical
     storage. Returns a frozen :class:`AnnotationPayload`; the orchestrator
@@ -722,9 +727,13 @@ def build_annotation(
     labels = [outcome_label] if outcome_label != "unknown" else []
 
     inputs = assemble_scoring_inputs(run_dir, row)
+    # Only a maintainer acting on a real PR is posterior evidence; a local commit
+    # containing the recommended lines is a weaker tier and must not enter the
+    # posterior population (the label is still recorded on `labels`).
+    posterior_feedback = outcome_label if rubric.posterior_source == "pr_review" else None
     rb = score_trajectory(
         inputs,
-        pr_feedback=outcome_label,
+        pr_feedback=posterior_feedback,
         outcome_prior=outcome_prior,
         outcome_prior_n=prior_n,
     )
