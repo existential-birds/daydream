@@ -21,7 +21,10 @@ from typing import Any
 import pytest
 
 from daydream.benchmark.acquire import _cache_subdir_name
+from daydream.benchmark.anthropic_score import _DEDUP_SYSTEM, _EXTRACTION_SYSTEM, AnthropicJsonClient
 from daydream.benchmark.cli import _handle_bench_command
+from daydream.benchmark.judge import _JUDGE_SYSTEM
+from daydream.benchmark.score import ANTHROPIC_JUDGE_API_KEY_ENV, JUDGE_BASE_URL_ENV, model_results_dir
 from tests.harness.git_helpers import git as _git
 
 #: Slug used for the fixture corpus. The derived ``clone_url``
@@ -253,6 +256,66 @@ def test_harvested_corpus_2pr_run_through_cli_injects_reviews(harvested_run):
     # PR 1's base is the fork point, not the base-branch tip.
     assert by_head[upstream.pr1_review_sha] == upstream.m1
     assert by_head[upstream.pr2_review_sha] == upstream.m2
+
+
+def test_harvested_corpus_scored_run_calls_judge_per_pair(harvested_run, monkeypatch):
+    """A scored harvested run reaches the same `FindingJudge` the golden corpus uses.
+
+    The network is mocked at the Anthropic client seam only; extraction, dedup
+    and every per-pair ``same_issue`` call run through the production
+    ``anthropic-direct`` scoring path.
+    """
+    _upstream, harvest_dir, cache_dir, calls = harvested_run
+
+    monkeypatch.setenv(ANTHROPIC_JUDGE_API_KEY_ENV, "sk-ant-test")
+    monkeypatch.delenv(JUDGE_BASE_URL_ENV, raising=False)
+
+    judged_pairs: list[str] = []
+
+    async def _canned(self, *, system, user, max_tokens):
+        if system == _EXTRACTION_SYSTEM:
+            return {"issues": ["daydream finding"]}
+        if system == _DEDUP_SYSTEM:
+            return {"groups": [[0]]}
+        assert system == _JUDGE_SYSTEM, f"unexpected judge-client system prompt: {system}"
+        judged_pairs.append(user)
+        return {"reasoning": "same underlying issue", "match": True, "confidence": 0.95}
+
+    monkeypatch.setattr(AnthropicJsonClient, "complete_json", _canned)
+
+    rc = _handle_bench_command(
+        [
+            "--harvest-dir",
+            str(harvest_dir),
+            "--cache-dir",
+            str(cache_dir),
+            "--score",
+            "--judge-route",
+            "anthropic-direct",
+            "--model",
+            "judge-x",
+        ]
+    )
+
+    assert rc == 0
+    assert len(calls) == 2  # both PRs were reviewed before scoring
+
+    evals = json.loads(
+        (model_results_dir(harvest_dir, "judge-x") / "evaluations.json").read_text(encoding="utf-8")
+    )
+    for pr_number in (1, 2):
+        leaf = evals[_golden_url(pr_number)]["daydream"]
+        assert leaf["judge_route"] == "anthropic-direct"
+        assert leaf["judge_model"] == "judge-x"
+        assert leaf["errors_count"] == 0
+        assert leaf["tp"] == 1 and leaf["fp"] == 0 and leaf["fn"] == 0
+        assert leaf["precision"] == 1.0 and leaf["recall"] == 1.0
+
+    # One judge call per (golden, candidate) pair, each carrying both texts.
+    assert len(judged_pairs) == 2
+    for pr_number, prompt in zip((1, 2), judged_pairs, strict=True):
+        assert f"bot finding on PR {pr_number}" in prompt
+        assert "daydream finding" in prompt
 
 
 def test_harvested_rerun_is_idempotent(harvested_run):

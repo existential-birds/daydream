@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from daydream.benchmark.judge import AnthropicFindingJudge, FindingJudge, JudgeVerdict
 from daydream.benchmark.score import (
     ANTHROPIC_JUDGE_API_KEY_ENV,
     BenchmarkArtifactError,
@@ -31,14 +32,12 @@ _REQUEST_TIMEOUT = 60.0
 _MAX_RETRIES = 3
 _MAX_EXTRACTION_TOKENS = 4096
 _MAX_DEDUP_TOKENS = 4096
-_MAX_JUDGE_TOKENS = 1024
 _MIN_DEDUP_CANDIDATES = 2
 _JUDGE_CONCURRENCY = 10  # max parallel judge calls; mirrors CapacityLimiter convention in phases.py
 _TOOL = "daydream"
 
 _EXTRACTION_SYSTEM = "You extract code review issues from comments. Always respond with valid JSON."
 _DEDUP_SYSTEM = "You group duplicate code review comments. Always respond with valid JSON only."
-_JUDGE_SYSTEM = "You are a precise code review evaluator. Always respond with valid JSON."
 
 _EXTRACTION_PROMPT = """You are analyzing an AI code review comment to extract individual issues mentioned.
 
@@ -100,23 +99,6 @@ Example for 4 candidates where 0 and 2 are duplicates:
 {{"groups": [[0, 2], [1], [3]]}}
 
 Your response:"""
-
-_JUDGE_PROMPT = """You are evaluating AI code review tools.
-Determine if the candidate issue matches the golden (expected) comment.
-
-Golden Comment (the issue we're looking for):
-{golden_comment}
-
-Candidate Issue (from the tool's review):
-{candidate}
-
-Instructions:
-- Determine if the candidate identifies the SAME underlying issue as the golden comment
-- Accept semantic matches - different wording is fine if it's the same problem
-- Focus on whether they point to the same bug, concern, or code issue
-
-Respond with ONLY a JSON object:
-{{"reasoning": "brief explanation", "match": true/false, "confidence": 0.0-1.0}}"""
 
 
 class _AsyncHttpClient(Protocol):
@@ -309,6 +291,7 @@ async def run_anthropic_evaluation(
     evaluations_file = results_dir / "evaluations.json"
     evals = _load_json_dict(evaluations_file, required=False)
 
+    judge = AnthropicFindingJudge(client)
     evaluated = 0
     for golden_url, entry in data.items():
         if not isinstance(entry, dict):
@@ -332,7 +315,7 @@ async def run_anthropic_evaluation(
 
             candidates = _get_candidates_for_review(review, all_candidates, golden_url)
             dedup_groups = _get_dedup_groups(all_dedup_groups, golden_url, tool)
-            result = await _evaluate_review(client, golden_comments, candidates, dedup_groups)
+            result = await _evaluate_review(judge, golden_comments, candidates, dedup_groups)
             result["tool"] = tool
             result["repo_name"] = review.get("repo_name")
             result["pr_url"] = review.get("pr_url")
@@ -385,7 +368,7 @@ def _get_dedup_groups(all_dedup_groups: dict[str, Any], golden_url: str, tool: s
 
 
 async def _evaluate_review(
-    client: _AnthropicJsonCompleter,
+    judge: FindingJudge,
     golden_comments: list[Any],
     candidates: list[str],
     dedup_groups: list[list[int]] | None,
@@ -423,7 +406,7 @@ async def _evaluate_review(
     task_meta = []
     for golden_comment in golden:
         for candidate in candidates:
-            tasks.append(_match_comment_limited(semaphore, client, golden_comment["comment"], candidate))
+            tasks.append(_judge_limited(semaphore, judge, golden_comment["comment"], candidate))
             task_meta.append(
                 {
                     "golden": golden_comment["comment"],
@@ -453,16 +436,13 @@ async def _evaluate_review(
         if isinstance(result, BaseException):
             errors.append({"golden": golden_text, "candidate": candidate, "error": str(result)})
             continue
-        if result.get("error"):
-            errors.append({"golden": golden_text, "candidate": candidate, "error": result["error"]})
-            continue
 
-        confidence = result.get("confidence", 0)
-        if result.get("match") and confidence >= golden_matched[golden_text]["best_confidence"]:
+        confidence: Any = result.confidence
+        if result.match and confidence >= golden_matched[golden_text]["best_confidence"]:
             golden_matched[golden_text]["matched"] = True
             golden_matched[golden_text]["best_confidence"] = confidence
             golden_matched[golden_text]["matched_candidate"] = candidate
-            golden_matched[golden_text]["reasoning"] = result.get("reasoning")
+            golden_matched[golden_text]["reasoning"] = result.reasoning
             candidate_matched[candidate] = True
             for sibling in sibling_map.get(candidate, set()):
                 candidate_matched[sibling] = True
@@ -507,37 +487,12 @@ async def _evaluate_review(
     }
 
 
-async def _match_comment_limited(
-    semaphore: asyncio.Semaphore, client: _AnthropicJsonCompleter, golden_comment: str, candidate: str
-) -> dict[str, Any]:
+async def _judge_limited(
+    semaphore: asyncio.Semaphore, judge: FindingJudge, golden_comment: str, candidate: str
+) -> JudgeVerdict:
+    """Bound judge concurrency; `JudgeError` propagates to the per-pair error record."""
     async with semaphore:
-        return await _match_comment(client, golden_comment, candidate)
-
-
-async def _match_comment(client: _AnthropicJsonCompleter, golden_comment: str, candidate: str) -> dict[str, Any]:
-    try:
-        response = await client.complete_json(
-            system=_JUDGE_SYSTEM,
-            user=_JUDGE_PROMPT.format(golden_comment=golden_comment, candidate=candidate),
-            max_tokens=_MAX_JUDGE_TOKENS,
-        )
-    except Exception as exc:
-        return {"error": str(exc)}
-    return _extract_match_result(response)
-
-
-def _extract_match_result(response: dict[str, Any]) -> dict[str, Any]:
-    if "error" in response:
-        return {"error": str(response["error"])}
-    if not isinstance(response.get("match"), bool):
-        return {"error": "Anthropic judge response 'match' must be a boolean."}
-    confidence = response.get("confidence")
-    if not isinstance(confidence, int | float):
-        return {"error": "Anthropic judge response 'confidence' must be a number."}
-    reasoning = response.get("reasoning", "")
-    if not isinstance(reasoning, str):
-        return {"error": "Anthropic judge response 'reasoning' must be a string."}
-    return {"reasoning": reasoning, "match": response["match"], "confidence": float(confidence)}
+        return await judge.same_issue(golden_comment, candidate)
 
 
 def _build_sibling_map(candidates: list[str], groups: list[list[int]] | None) -> dict[str, set[str]]:
