@@ -129,6 +129,14 @@ def _opt(argv, name):
     return None
 
 
+def _next_comment_seq():
+    """Monotonic counter so each posted comment gets a distinct id."""
+    seq_file = HERE / "comment_seq"
+    n = int(seq_file.read_text()) + 1 if seq_file.exists() else 1
+    seq_file.write_text(str(n))
+    return n
+
+
 def _record(kind, argv, stdin):
     with CALLS.open("a", encoding="utf-8") as f:
         f.write(json.dumps({"kind": kind, "argv": argv, "stdin": stdin}) + "\\n")
@@ -254,6 +262,19 @@ def main():
         return 0
     if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\\d+/reviews", endpoint):
         print(json.dumps({"html_url": "https://github.test/fake/pull/7#pullrequestreview-1"}))
+        return 0
+    if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\\d+/comments", endpoint):
+        # Real GitHub 422s a file-level comment whose path is not in the PR
+        # diff; `diff-paths`, when configured, reproduces that rejection.
+        allowed = responses.get("diff-paths")
+        path = (payload or {}).get("path")
+        if allowed is not None and path not in allowed:
+            sys.stderr.write("fake gh: path %r not in PR diff (422)\\n" % (path,))
+            return 1
+        print(json.dumps({
+            "id": 9000 + _next_comment_seq(),
+            "html_url": "https://github.test/fake/pull/7#discussion_r1",
+        }))
         return 0
     sys.stderr.write("fake gh: no canned response for %s\\n" % key)
     return 1

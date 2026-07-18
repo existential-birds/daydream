@@ -1,7 +1,7 @@
 """Findings artifact for the Phase A → Phase B review handoff.
 
 Phase A (unprivileged analyze job, has the PR checkout) classifies review
-issues into inline vs body-only placement and serializes the result as a
+issues into inline / file-level / body-only placement and serializes it as a
 strict-schema JSON artifact. Phase B (privileged poster, never touches PR
 code) consumes the artifact and renders/posts from artifact data only.
 
@@ -70,7 +70,7 @@ FINDINGS_SCHEMA: dict[str, Any] = {
                     "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                     "path": {"type": "string"},
                     "line": {"type": ["integer", "null"]},
-                    "placement": {"enum": ["inline", "body"]},
+                    "placement": {"enum": ["inline", "file", "body"]},
                     "title": {"type": "string"},
                     "body": {"type": "string"},
                     "severity": {"type": ["string", "null"]},
@@ -94,8 +94,8 @@ class ArtifactFinding:
     Attributes:
         fingerprint: 64-hex cross-run dedup identity.
         path: Repo-relative file path the finding targets.
-        line: Snapped inline line, or None for body-only findings.
-        placement: "inline" or "body".
+        line: Snapped inline line, or None for file-level / body-only findings.
+        placement: "inline", "file" (file-level comment), or "body".
         title: Finding title.
         body: Finding body (raw, unrendered).
         severity: Severity label, or None.
@@ -166,14 +166,17 @@ def build_findings_artifact(
 
     Returns:
         The artifact dict, matching ``FINDINGS_SCHEMA``: inline findings
-        carry ``placement="inline"`` with the snapped line; body-only
-        findings carry ``placement="body"`` and ``line=None``.
+        carry ``placement="inline"`` with the snapped line; findings with no
+        line home but whose file is in the PR diff carry ``placement="file"``;
+        the remainder carry ``placement="body"``. Both non-inline placements
+        have ``line=None``.
     """
     classified = pr_review.classify(target_dir, pr, issues)
     findings = [
         _finding_dict(issue, placement="inline", line=entry["line"])
         for entry, issue in zip(classified.inline, classified.inline_issues, strict=True)
     ]
+    findings.extend(_finding_dict(issue, placement="file", line=None) for issue in classified.file_level)
     findings.extend(_finding_dict(issue, placement="body", line=None) for issue in classified.body_only)
     return {
         "schema_version": FINDINGS_SCHEMA_VERSION,
