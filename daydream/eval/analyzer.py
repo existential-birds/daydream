@@ -1,4 +1,4 @@
-"""Quantitative analysis of ATIF v1.6 trajectory data from daydream runs.
+"""Quantitative analysis of ATIF v1.7 trajectory data from daydream runs.
 
 Parses trajectory JSON files and deep review artifacts, computes metrics
 across cost, tool usage, file coverage, finding quality, grounding, and

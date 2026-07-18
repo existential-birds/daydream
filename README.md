@@ -1,9 +1,9 @@
 # daydream
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/existential-birds/daydream)
 
-Daydream is a code-review agent that produces structured training data from its own runs. It reviews diffs using stack-specific [Beagle](https://github.com/existential-birds/beagle) skills, applies fixes, validates via test suite, and records every agent interaction as an [ATIF v1.6](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus pipeline then scores, labels, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
+Daydream is a code-review agent that produces structured training data from its own runs. It reviews diffs using stack-specific [Beagle](https://github.com/existential-birds/beagle) skills, applies fixes, validates via test suite, and records every agent interaction as an [ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus pipeline then scores, labels, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
 
-The goal is an open-weight code-review model (Qwen2.5-Coder-7B, QLoRA) trained on daydream's own trajectory archive, benchmarked against commercial code-review bots on a held-out PR replay corpus.
+The goal is an open-weight code-review model trained on daydream's own trajectory archive, benchmarked against commercial code-review bots on a held-out PR replay corpus.
 
 ![demo](https://github.com/user-attachments/assets/60a80645-36de-410e-afa7-7a96efef3f57)
 
@@ -53,7 +53,7 @@ To update: `git pull && uv sync`
 
 ## Architecture
 
-Daydream runs a deep multi-stack review pipeline (exploration, intent analysis, alternative review, per-stack Beagle skill reviews, arbiter pass, cross-stack merge, recommendation verification), with a `--shallow` single-skill mode for simpler projects. Every run is recorded as an ATIF v1.6 trajectory and archived (unless `--no-archive` is passed). A bitemporal corpus pipeline harvests, scores, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
+Daydream runs a deep multi-stack review pipeline (exploration, intent analysis, alternative review, per-stack Beagle skill reviews, arbiter pass, cross-stack merge, recommendation verification), with a `--shallow` single-skill mode for simpler projects. Every run is recorded as an ATIF v1.7 trajectory and archived (unless `--no-archive` is passed). A bitemporal corpus pipeline harvests, scores, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
 
 Full architectural details about the review pipeline stages, trajectory recording format, corpus pipeline, training roadmap, and benchmarking methodology are documented on the [project page](https://existentialbirds.com/projects/daydream).
 
@@ -255,7 +255,7 @@ Daydream can run as a self-hosted PR review bot in your own repository's GitHub 
 
 | Path | Description |
 |------|-------------|
-| `.daydream/runs/<id>/trajectory.json` | ATIF v1.6 trajectory (customize with `--trajectory`) |
+| `.daydream/runs/<id>/trajectory.json` | ATIF v1.7 trajectory (customize with `--trajectory`) |
 | `.daydream/runs/<id>/trajectories/` | Forked sub-trajectories from parallel fan-outs |
 | `.daydream/diff.patch` | Unified diff captured at run start |
 | `.daydream/deep/` | Deep pipeline artifacts: intent, per-stack reviews, merged report |

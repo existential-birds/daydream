@@ -193,7 +193,7 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         type=Path,
         dest="trajectory_path",
         help=(
-            "Write ATIF v1.6 trajectory JSON to this path "
+            "Write ATIF v1.7 trajectory JSON to this path "
             "(default: <target>/.daydream/runs/<session_id>/trajectory.json)"
         ) if full_help else argparse.SUPPRESS,
     )

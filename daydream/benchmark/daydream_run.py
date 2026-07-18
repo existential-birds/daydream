@@ -202,7 +202,7 @@ def run_daydream_review(
     Args:
         checkout: Path to the target repository checkout to review.
         base_sha: Raw commit-ish (SHA) to diff against, passed verbatim to ``--base``.
-        trajectory_path: Destination for the ATIF v1.6 trajectory JSON.
+        trajectory_path: Destination for the ATIF v1.7 trajectory JSON.
         backend: Reviewer backend; appended as ``--backend <backend>`` when set.
         model: Reviewer model; appended as ``--model <model>`` when set.
         provider: Reviewer provider; forwarded via the ``PI_PROVIDER`` environment

@@ -192,7 +192,7 @@ def render_run_info_block(trajectory_paths: list[Path]) -> str:
     fallback block ('run details unavailable' + version footer).
 
     Args:
-        trajectory_paths: Filesystem paths to ATIF v1.6 trajectory JSON
+        trajectory_paths: Filesystem paths to ATIF v1.7 trajectory JSON
             files. May be empty (deep-mode parent + sibling forks). Each
             file is parsed independently; metrics are summed across them.
 
@@ -242,7 +242,7 @@ def _load_trajectories(paths: list[Path]) -> list[Trajectory]:
 def _aggregate(trajectories: list[Trajectory], prices: dict[str, ModelPrice]) -> _RunAgg:
     """Walk every step in every trajectory, summing into per-phase rollups.
 
-    ATIF v1.6 spec: ``Step.model_name`` omission implies the model defined in
+    ATIF v1.7 spec: ``Step.model_name`` omission implies the model defined in
     the root-level agent config (``Trajectory.agent.model_name``). We honor
     that by computing ``effective_model = step.model_name or
     traj.agent.model_name`` for each step. Generic backend labels (see
@@ -319,7 +319,7 @@ def _accumulate_metrics(
     - Else mark ``phase.cost_unknown`` and remember the model name for the
       footnote.
 
-    Per ATIF v1.6 (``Step.model_name`` field docs), an omitted step model
+    Per ATIF v1.7 (``Step.model_name`` field docs), an omitted step model
     implies the root-level :attr:`Agent.model_name`. Callers thread that
     value in via ``fallback_model`` so cost synthesis can land on the
     intended model when the step itself doesn't carry an explicit id.

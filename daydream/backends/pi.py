@@ -8,7 +8,7 @@ and translates it into the unified :data:`daydream.backends.AgentEvent` stream.
 Pi is a subprocess + JSONL backend — the same proven shape as
 :mod:`daydream.backends.codex`. The Pi backend is a second instance of that
 pattern; it emits the same event vocabulary so the existing
-:class:`daydream.trajectory.TrajectoryRecorder` produces valid ATIF v1.6
+:class:`daydream.trajectory.TrajectoryRecorder` produces valid ATIF v1.7
 trajectories indistinguishable in shape from the other two backends.
 
 z.ai coding plan wiring (GLM models) is registered via a pi extension at
@@ -380,7 +380,7 @@ class PiBackend:
     """Backend that wraps the Pi CLI subprocess.
 
     Translates the Pi JSONL event stream into the unified ``AgentEvent`` stream
-    so trajectory recording (ATIF v1.6) works identically to Claude/Codex.
+    so trajectory recording (ATIF v1.7) works identically to Claude/Codex.
     """
 
     concise_fix_prompts = True  # GLM produces verbose reasoning in fix prompts
