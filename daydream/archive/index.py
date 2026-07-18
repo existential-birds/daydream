@@ -349,7 +349,7 @@ def append_label_observation(
         # appended in between cannot mask a genuine automated re-score.
         if source == "auto":
             latest_auto = conn.execute(
-                "SELECT evidence_sha, reward_version, labels FROM label_observations "
+                "SELECT evidence_sha, reward_version, labels, has_posterior FROM label_observations "
                 "WHERE session_id = ? AND source = 'auto' "
                 "ORDER BY observed_at DESC LIMIT 1",
                 (session_id,),
@@ -359,6 +359,9 @@ def append_label_observation(
                 and latest_auto["evidence_sha"] == evidence_sha
                 and latest_auto["reward_version"] == reward_version
                 and latest_auto["labels"] == labels_json
+                # Population membership varies independently of the label (a
+                # local_branch outcome is labeled but not posterior evidence).
+                and latest_auto["has_posterior"] == has_posterior_int
             ):
                 return False
         # Bump observed_at by a microsecond and retry on a same-microsecond

@@ -764,6 +764,32 @@ def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path):
     assert len(label_observation_history(tmp_path, "s-dedup")) == 2
 
 
+def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path):
+    """A re-score that moves a row out of the posterior population must append.
+
+    ``has_posterior`` is no longer a function of the label: a ``local_branch``
+    outcome carries a label but is not maintainer-PR evidence. If the
+    idempotency key ignored it, a re-harvest that demotes such a row would
+    silently no-op and leave the stale population flag in place.
+    """
+    upsert_run(tmp_path, _make_manifest(session_id="s-pop"))
+    first = append_label_observation(tmp_path, "s-pop", labels=["accepted"], pr_state=None,
+                                     labeler_version="rv1", evidence_sha="shaA",
+                                     reward_version="rv1", has_posterior=True, source="auto")
+    demoted = append_label_observation(tmp_path, "s-pop", labels=["accepted"], pr_state=None,
+                                       labeler_version="rv1", evidence_sha="shaA",
+                                       reward_version="rv1", has_posterior=False, source="auto")
+    assert first is True and demoted is True
+    assert len(label_observation_history(tmp_path, "s-pop")) == 2
+    latest = latest_label_observation(tmp_path, "s-pop")
+    assert latest is not None and latest["has_posterior"] == 0
+    # Still idempotent once the demotion has landed.
+    assert append_label_observation(tmp_path, "s-pop", labels=["accepted"], pr_state=None,
+                                    labeler_version="rv1", evidence_sha="shaA",
+                                    reward_version="rv1", has_posterior=False,
+                                    source="auto") is False
+
+
 def test_human_append_never_dedups(tmp_path: Path):
     upsert_run(tmp_path, _make_manifest(session_id="s-h"))
     append_label_observation(tmp_path, "s-h", labels=["accepted"], pr_state=None,
