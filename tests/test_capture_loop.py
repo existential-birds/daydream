@@ -19,7 +19,6 @@ These tests cover the two halves of that loop:
 from __future__ import annotations
 
 import json
-import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -29,7 +28,7 @@ import pytest
 from daydream import cli, git_ops
 from daydream.backends import ResultEvent, TextEvent
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
-from daydream.pr_review import PRInfo, parse_finding_markers
+from daydream.pr_review import parse_finding_markers
 from daydream.runner import RunConfig, run
 from daydream.training.labeler_signals import (
     comment_resolution_signal,
@@ -65,10 +64,27 @@ def cli_main(argv: list[str]) -> int:
 
 
 @contextmanager
-def _review_run_env(repo: Path, monkeypatch, out: Path, backend, pr: PRInfo):
-    """`--review --findings-out` real-path setup, mocking only the backend + gh lookups."""
+def _review_run_env(repo: Path, monkeypatch, out: Path, backend, fake_gh):
+    """`--review --findings-out` real-path setup, mocking ONLY the backend seam.
+
+    PR discovery runs for real through ``git_ops``' ``gh`` subprocess seam
+    against the fake ``gh`` binary, so a regression in PR lookup surfaces here
+    instead of being patched out.
+    """
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    fake_gh.serve_pr_view(
+        {
+            "number": 7,
+            "state": "OPEN",
+            "headRefName": "feature",
+            "baseRefName": "main",
+            "headRefOid": git_ops.head_sha(repo),
+            "baseRefOid": git_ops.merge_base(repo, "main"),
+            "url": "https://github.com/acme/widgets/pull/7",
+            "body": "",
+        }
+    )
     config = RunConfig(
         target=str(repo),
         output_mode="review",
@@ -76,16 +92,12 @@ def _review_run_env(repo: Path, monkeypatch, out: Path, backend, pr: PRInfo):
         findings_out=str(out),
         non_interactive=True,
     )
-    with (
-        patch("daydream.runner.create_backend", return_value=backend),
-        patch("daydream.github_app.resolve_user_identity", return_value="tester"),
-        patch("daydream.pr_review.find_pr_by_number", return_value=pr),
-    ):
+    with patch("daydream.runner.create_backend", return_value=backend):
         yield config
 
 
 async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
-    feature_branch_repo, monkeypatch, tmp_path
+    feature_branch_repo, monkeypatch, tmp_path, fake_gh
 ):
     """A finding whose anchors match nothing still gets a trackable placement.
 
@@ -112,25 +124,7 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
             ResultEvent(structured_output={"issues": [issue]}, continuation=None),
         ]
     )
-    head = git_ops.head_sha(feature_branch_repo)
-    base = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", "rev-parse", "main"],  # noqa: S607 - git is a trusted command
-        cwd=feature_branch_repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    pr = PRInfo(
-        number=7,
-        head_sha=head,
-        base_sha=base,
-        base_ref="main",
-        owner="o",
-        repo="r",
-        url="https://example.invalid/pr/7",
-    )
-
-    with _review_run_env(feature_branch_repo, monkeypatch, out, backend, pr) as config:
+    with _review_run_env(feature_branch_repo, monkeypatch, out, backend, fake_gh) as config:
         assert await run(config) == 0
 
     findings = json.loads(out.read_text())["findings"]
@@ -260,3 +254,27 @@ def test_file_level_post_rejected_falls_back_to_review_body(fake_gh, file_level_
     assert parse_finding_markers(reviews[0].payload["body"]) == [FILE_FINGERPRINT], (
         "a rejected file-level finding must fall back into the review body"
     )
+
+
+def test_review_failure_still_reports_live_file_level_comments(
+    fake_gh, file_level_artifact, capsys
+) -> None:
+    """A failed review POST must not claim nothing was posted.
+
+    File-level comments post *before* the consolidated review, so when the
+    review POST fails they are already live on the PR. Reporting "no comments
+    were posted" would send the operator looking for a clean slate that does
+    not exist.
+    """
+    fake_gh.set_response("diff-paths", value=["b.py"])
+    fake_gh.set_response("POST", "/repos/o/r/pulls/7/reviews", value=None)
+
+    rc = cli_main(
+        ["post-findings", str(file_level_artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r"]
+    )
+
+    assert rc == 1, "a failed review POST is still a failure"
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/comments")) == 1
+    out = capsys.readouterr().out
+    assert "1 file-level comment(s) were already posted" in out, out
+    assert "No comments were posted" not in out, out

@@ -1034,10 +1034,14 @@ async def _post(
         # ``error_msg`` carries the GitError text from git_ops, which includes
         # the preserved tempfile path on failure (see git_ops.gh_api).
         suffix = f" ({error_msg})" if error_msg else ""
-        print_warning(
-            console,
-            f"Failed to post PR review; no comments were posted.{suffix}",
+        # File-level comments post before the review, so some may already be
+        # live on the PR — saying "no comments were posted" would be false.
+        already = (
+            f" {len(classified.file_level)} file-level comment(s) were already posted."
+            if classified.file_level
+            else " No comments were posted."
         )
+        print_warning(console, f"Failed to post PR review;{already}{suffix}")
         return
 
     print_success(console, f"Posted review: {review_url}")
@@ -1202,11 +1206,12 @@ def post_findings_from_artifact(
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:
         suffix = f" ({error_msg})" if error_msg else ""
-        print_error(
-            console,
-            "PR Review Post Failed",
-            f"No comments were posted.{suffix}",
+        already = (
+            f"{len(posted_files)} file-level comment(s) were already posted."
+            if posted_files
+            else "No comments were posted."
         )
+        print_error(console, "PR Review Post Failed", f"{already}{suffix}")
         return 1
     print_success(console, f"Posted review: {review_url}")
     return 0
