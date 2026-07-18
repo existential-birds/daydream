@@ -203,6 +203,39 @@ async def test_direct_judge_does_not_reuse_one_candidate_for_two_goldens(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_direct_judge_precision_counts_dedup_siblings_once(tmp_path):
+    """A dedup sibling group is one logical candidate: matching it must not leave
+    its siblings inflating the precision denominator behind ``fp``'s back."""
+    seed_benchmark_data(tmp_path, tool="daydream", body="same bug, said three ways")
+    client = FakeAnthropicJson(
+        [
+            {"issues": ["same bug A", "same bug B", "same bug C"]},
+            {"groups": [[0, 1, 2]]},
+            {"reasoning": "same", "match": True, "confidence": 0.9},
+            {"reasoning": "same", "match": True, "confidence": 0.8},
+            {"reasoning": "same", "match": True, "confidence": 0.7},
+        ]
+    )
+
+    scores = await run_anthropic_scoring(
+        tmp_path,
+        "claude-opus-4-5-20251101",
+        golden_urls=[URL],
+        tool="daydream",
+        client=client,
+    )
+
+    leaf = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "evaluations.json").read_text()
+    )[URL]["daydream"]
+    assert leaf["tp"] == 1 and leaf["fp"] == 0
+    assert leaf["total_candidates"] == 3
+    assert leaf["precision"] == 1.0
+    assert leaf["precision"] == leaf["tp"] / (leaf["tp"] + leaf["fp"])
+    assert scores.precision == 1.0
+
+
+@pytest.mark.asyncio
 async def test_direct_route_artifacts_are_martian_compatible(tmp_path):
     seed_benchmark_data(tmp_path, tool="daydream", body="candidate")
     client = FakeAnthropicJson(

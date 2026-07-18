@@ -477,7 +477,8 @@ async def _evaluate_review(
     total_candidates = len(candidates)
     total_golden = len(golden)
     tp_count = len(true_positives)
-    precision = tp_count / total_candidates if total_candidates > 0 else 0.0
+    predicted_count = tp_count + len(false_positives)
+    precision = tp_count / predicted_count if predicted_count > 0 else 0.0
     recall = tp_count / total_golden if total_golden > 0 else 0.0
 
     return {
