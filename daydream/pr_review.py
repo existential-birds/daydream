@@ -7,7 +7,8 @@ Flow:
     1. Locate the open PR for the current branch via `gh pr list`.
     2. Parse issues (from canonical merged items or alt-issue dicts).
     3. Resolve each issue to a real head-SHA line via anchor grep.
-    4. Classify into inline (line within a diff hunk) vs body-only.
+    4. Classify into inline (line within a diff hunk), file-level (file in
+       the diff but no line home), or body-only (last resort).
     5. Render comment bodies, embedding a hidden `daydream-finding` marker
        per fingerprinted issue (cross-run dedup; see `finding_marker`).
     6. Build a single review payload, show a summary, ask y/n.
@@ -108,6 +109,27 @@ class _ClassifiedIssues:
     # Parallel list to `inline`: the original ParsedIssue for each inline
     # comment. Used to roll severity/confidence into the summary body.
     inline_issues: list[ParsedIssue] = field(default_factory=list)
+    # Findings with no diff-line home whose file is still part of the PR
+    # diff. Posted as file-level review comments so they land in
+    # `/pulls/{n}/comments` as repliable threads the labeler can read back.
+    file_level: list[ParsedIssue] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        """True when nothing would be posted in any placement.
+
+        Checks ``inline`` (the rendered comment dicts) rather than
+        ``inline_issues``, so the guard holds even if the two parallel lists
+        ever drift.
+        """
+        return not (self.inline or self.file_level or self.body_only)
+
+    def total(self) -> int:
+        """Count of findings across every placement."""
+        return len(self.inline) + len(self.file_level) + len(self.body_only)
+
+    def all_issues(self) -> list[ParsedIssue]:
+        """Every classified :class:`ParsedIssue`, for severity/confidence rollups."""
+        return [*self.inline_issues, *self.file_level, *self.body_only]
 
 
 # --- Public entry points ----------------------------------------------------
@@ -505,6 +527,31 @@ def _gh_pr_diff_for_path(target_dir: Path, pr_number: int, path: str) -> str:
     return ""
 
 
+_DIFF_GIT_HEADER = re.compile(r"(?m)^diff --git a/.+ b/(.+)$")
+
+
+def pr_changed_files(target_dir: Path, pr: PRInfo) -> set[str]:
+    """Return the head-side paths touched by ``pr``.
+
+    Primary path is ``git diff <base>..<head>``; when the local clone cannot
+    resolve ``base_sha`` (rewritten by a rebase) the full PR diff from
+    ``gh pr diff`` is parsed instead — the same two-tier strategy as
+    :func:`file_hunks`.
+
+    GitHub rejects a file-level review comment whose path is not part of the
+    PR diff (HTTP 422), so this set gates file-level placement in
+    :func:`classify`.
+    """
+    changed = set(git_ops.diff_name_only(target_dir, pr.base_sha, pr.head_sha))
+    if changed:
+        return changed
+    try:
+        full_diff = git_ops.gh_pr_diff(target_dir, pr.number)
+    except GitError:
+        return set()
+    return set(_DIFF_GIT_HEADER.findall(full_diff))
+
+
 def _parse_hunks(diff_text: str) -> list[tuple[int, int]]:
     hunks: list[tuple[int, int]] = []
     for m in _HUNK_HEADER.finditer(diff_text):
@@ -549,16 +596,32 @@ def snap_to_hunk(
 def classify(
     target_dir: Path, pr: PRInfo, issues: list[ParsedIssue]
 ) -> _ClassifiedIssues:
-    """Split issues into inline vs body-only based on diff hunks."""
+    """Split issues into inline, file-level, and body-only placements.
+
+    A finding with no resolvable diff-line home is not automatically demoted
+    to the review body: when its file is part of the PR diff it becomes a
+    file-level comment instead. The review body is invisible to the
+    ``/pulls/{n}/comments`` endpoint the labeler reads back, so body-only is
+    the placement of last resort — used only when GitHub could not accept a
+    comment for that path at all.
+    """
     out = _ClassifiedIssues()
     hunks_cache: dict[str, list[tuple[int, int]]] = {}
+    changed_files = pr_changed_files(target_dir, pr)
+
+    def _unplaced(issue: ParsedIssue) -> None:
+        if issue.path in changed_files:
+            out.file_level.append(issue)
+        else:
+            out.body_only.append(issue)
+
     for issue in issues:
         if issue.is_cross_stack:
-            out.body_only.append(issue)
+            _unplaced(issue)
             continue
         line = resolve_line(target_dir, pr.head_sha, issue)
         if line is None:
-            out.body_only.append(issue)
+            _unplaced(issue)
             continue
         if issue.path not in hunks_cache:
             hunks_cache[issue.path] = file_hunks(
@@ -570,7 +633,7 @@ def classify(
             )
         snapped = snap_to_hunk(line, hunks_cache[issue.path])
         if snapped is None:
-            out.body_only.append(issue)
+            _unplaced(issue)
             continue
         out.inline.append(_inline_comment(issue, snapped))
         out.inline_issues.append(issue)
@@ -617,6 +680,23 @@ def _format_inline_body(issue: ParsedIssue) -> str:
     parts = [p for p in (header_line, issue.body) if p]
     agent_prompt = _build_agent_prompt(issue)
     parts.append(agent_prompt)
+    parts.append(DAYDREAM_FOOTER)
+    if issue.fingerprint:
+        parts.append(finding_marker(issue.fingerprint))
+    return "\n\n".join(parts).strip()
+
+
+def _format_file_level_body(issue: ParsedIssue) -> str:
+    """Render the body of a file-level review comment.
+
+    Carries the same :data:`DAYDREAM_FOOTER` badge and hidden finding marker
+    as an inline comment, so the labeler's author check and fingerprint join
+    recognise it without any read-side special-casing.
+    """
+    prefix = "[cross-stack] " if issue.is_cross_stack else ""
+    header = _issue_header(issue, prefix=prefix, always_bold=True)
+    parts = [p for p in (header, issue.body) if p]
+    parts.append(_build_agent_prompt(issue))
     parts.append(DAYDREAM_FOOTER)
     if issue.fingerprint:
         parts.append(finding_marker(issue.fingerprint))
@@ -714,7 +794,7 @@ def _build_consolidated_prompt(
     pr: PRInfo,
 ) -> str:
     """Build a single collapsible prompt block that tells AI agents to fetch and fix review comments."""
-    total = len(classified.inline_issues) + len(classified.body_only)
+    total = classified.total()
 
     prompt_body = (
         f"Fix the {total} review comment(s) posted on this PR.\n"
@@ -841,8 +921,7 @@ def build_payload(
             data; there is no recorder in that process). ``None`` renders the
             live block as usual.
     """
-    all_issues_with_inline_meta = [*classified.body_only]
-    all_issues_with_inline_meta.extend(classified.inline_issues)
+    all_issues_with_inline_meta = classified.all_issues()
 
     body_chunks: list[str] = []
     body_chunks.append("**Code Review Summary**")
@@ -852,7 +931,7 @@ def build_payload(
         body_chunks.append(body_section)
 
     # Consolidated AI agent prompt.
-    if classified.inline_issues or classified.body_only:
+    if not classified.is_empty():
         body_chunks.append(_build_consolidated_prompt(classified, pr))
 
     # Collapsible review info: enriched run-info (rollup + per-phase
@@ -913,7 +992,7 @@ async def _post(
         return
 
     classified = classify(target_dir, pr, issues)
-    if not classified.inline and not classified.body_only:
+    if classified.is_empty():
         print_info(
             console, "No postable issues after classification; skipping PR post."
         )
@@ -923,6 +1002,7 @@ async def _post(
     summary = (
         f"{len(classified.inline)} inline on "
         f"{', '.join(inline_files) if inline_files else '(none)'}, "
+        f"{len(classified.file_level)} file-level, "
         f"{len(classified.body_only)} folded into body"
     )
     print_info(console, f"PR #{pr.number}: {summary}")
@@ -937,6 +1017,17 @@ async def _post(
         print_info(console, "Skipped posting to PR.")
         return
 
+    # File-level comments post first: a failure here has to fall back into the
+    # review body, which is built below.
+    posted, failed = _submit_file_level_comments(target_dir, pr, classified.file_level)
+    if failed:
+        classified.file_level = posted
+        classified.body_only.extend(failed)
+        print_warning(
+            console,
+            f"{len(failed)} file-level comment(s) failed to post; folded into the review body.",
+        )
+
     payload = build_payload(pr, classified)
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:
@@ -950,6 +1041,43 @@ async def _post(
         return
 
     print_success(console, f"Posted review: {review_url}")
+
+
+def _submit_file_level_comments(
+    target_dir: Path, pr: PRInfo, issues: list[ParsedIssue]
+) -> tuple[list[ParsedIssue], list[ParsedIssue]]:
+    """POST each issue as a file-level review comment; return the ones that failed.
+
+    GitHub rejects ``subject_type`` inside a batch review payload (HTTP 422),
+    so file-level comments must be posted one at a time against
+    ``/pulls/{n}/comments``. Each one becomes a top-level, repliable thread on
+    that endpoint — the surface :func:`index_pr_review_comments` reads — which
+    is what makes these findings labelable at all.
+
+    Failures are returned rather than raised so the caller can fold them back
+    into the review body: a finding that cannot get its own thread must still
+    reach the maintainer.
+
+    Returns:
+        ``(posted, failed)`` partitioning ``issues`` in input order.
+    """
+    endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments"
+    posted: list[ParsedIssue] = []
+    failed: list[ParsedIssue] = []
+    for issue in issues:
+        payload = {
+            "commit_id": pr.head_sha,
+            "path": issue.path,
+            "subject_type": "file",
+            "body": _format_file_level_body(issue),
+        }
+        try:
+            git_ops.gh_api(target_dir, endpoint, method="POST", input_data=payload)
+        except GitError:
+            failed.append(issue)
+        else:
+            posted.append(issue)
+    return posted, failed
 
 
 def _submit_review(
@@ -1039,10 +1167,12 @@ def post_findings_from_artifact(
         if finding.placement == "inline" and finding.line is not None:
             classified.inline.append(_inline_comment(issue, finding.line))
             classified.inline_issues.append(issue)
+        elif finding.placement == "file":
+            classified.file_level.append(issue)
         else:
             classified.body_only.append(issue)
 
-    if not classified.inline and not classified.body_only:
+    if classified.is_empty():
         print_info(
             console,
             f"No new findings to post ({len(plan.matched)} already on PR #{pr_number}).",
@@ -1059,6 +1189,15 @@ def post_findings_from_artifact(
         repo=repo_name,
         url="",
     )
+    posted_files, failed_files = _submit_file_level_comments(target_dir, pr, classified.file_level)
+    if failed_files:
+        classified.file_level = posted_files
+        classified.body_only.extend(failed_files)
+        print_info(
+            console,
+            f"{len(failed_files)} file-level comment(s) failed to post; folded into the review body.",
+        )
+
     payload = build_payload(pr, classified, run_info_override=artifact.run_info)
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:
