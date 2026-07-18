@@ -788,7 +788,65 @@ async def test_harvest_deleted_branch_ref_labels_unknown_not_rejected(tmp_path, 
     assert latest_label_observation(archive_dir, "s-gone") is not None  # still annotated
     row = query_runs(archive_dir, "session_id = ?", ("s-gone",))[0]
     # The central contract: unreadable commit window → "unknown" (empty), NOT "rejected".
+    # The recommended change is absent from main here, so the base-branch
+    # fallback cannot upgrade it — see the squash-merge test below for that arm.
     assert json.loads(row["outcome_labels"]) == []
+
+
+async def test_harvest_squash_merged_branch_recovers_accepted_from_base_branch(
+    tmp_path, archive_dir, monkeypatch
+):
+    """Real-path: a squash-merged run is recovered as "accepted", not lost to "unknown".
+
+    The full production shape of the 286-row mislabel. The branch was squash-
+    merged and deleted, so ``git log <sha>..<branch>`` exits 128 and the
+    per-commit walk is impossible — but the recommended change IS on ``main``,
+    carried there by the squash commit. The posterior's real question ("did the
+    change land?") is therefore still answerable, and the run is a genuine
+    positive that must not be discarded.
+
+    Uses real git throughout: the branch is created, committed, merged with
+    ``--squash``, then deleted, exactly as GitHub leaves the repo.
+    """
+    clone = _make_repo_with_main(tmp_path, name="clone")
+    head_sha_holder: dict[str, str] = {}
+    _git(clone, "checkout", "-b", "feat/squash-me")
+    (clone / "app.py").write_text("existing\nguarded = True\n")
+    _git(clone, "add", "app.py")
+    _commit(clone, "add the guard")
+    head_sha_holder["sha"] = _git(clone, "rev-parse", "HEAD").strip()
+    # Squash-merge into main and delete the branch — the GitHub end state.
+    _git(clone, "checkout", "main")
+    _git(clone, "merge", "--squash", "feat/squash-me")
+    _commit(clone, "add the guard (#220)")
+    _git(clone, "branch", "-D", "feat/squash-me")
+
+    run_dir = _seed_orphan_run(
+        archive_dir,
+        tmp_path / "bronze",
+        session_id="s-squash",
+        head_sha=head_sha_holder["sha"],
+        branch="feat/squash-me",
+        source_path=clone,
+    )
+    (run_dir / "recommended.patch").write_text(
+        "diff --git a/app.py b/app.py\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " existing\n"
+        "+guarded = True\n"
+    )
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_unpushed_422)
+
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0
+    row = query_runs(archive_dir, "session_id = ?", ("s-squash",))[0]
+    # Recovered as a real positive — not "rejected" (the bug) and not "unknown"
+    # (giving up on evidence that is plainly there on the base branch).
+    assert json.loads(row["outcome_labels"]) == ["accepted"]
 
 
 async def test_harvest_live_branch_with_no_followup_commits_still_labels_rejected(

@@ -593,6 +593,45 @@ def pr_link_signal(
     return None
 
 
+def _default_branch_applied(
+    row: dict[str, Any],
+    *,
+    repo_clone: Path,
+    hunks: list[_Hunk],
+    file_at_fetcher: Callable[[Path, str, str], str],
+) -> LocalCommitAppliedSignal:
+    """Fallback posterior when the recorded branch ref no longer resolves.
+
+    A squash merge rewrites the commit and deletes the branch, so the
+    per-commit walk has nothing to walk. The recommended change, if it
+    landed, is still visible at the tip of the base branch — so check there.
+
+    ``origin/<base>`` is tried before the bare local ref: a stale worktree's
+    local branch can sit behind the remote, which would read a landed change
+    as absent. ``file_at_fetcher`` yields ``""`` for an unresolvable ref, so
+    an unusable candidate simply falls through.
+
+    Returns ``"applied"`` when a recommended hunk is present, else
+    ``"unknown"`` — absence at the tip is not evidence of rejection, since
+    the squash may have reworked the change beyond verbatim matching.
+    """
+    base_branch = row.get("base_branch")
+    if not base_branch or not hunks:
+        return LocalCommitAppliedSignal(verdict="unknown")
+
+    for ref in (f"origin/{base_branch}", base_branch):
+        file_content_cache: dict[str, str] = {}
+        for hunk in hunks:
+            content = file_content_cache.get(hunk.file)
+            if content is None:
+                content = file_at_fetcher(repo_clone, hunk.file, ref)
+                file_content_cache[hunk.file] = content
+            if _hunk_lines_present(hunk.added_lines, content):
+                return LocalCommitAppliedSignal(verdict="applied")
+
+    return LocalCommitAppliedSignal(verdict="unknown")
+
+
 def local_commit_applied_signal(
     row: dict[str, Any],
     *,
@@ -616,10 +655,13 @@ def local_commit_applied_signal(
 
     Returns:
         :class:`LocalCommitAppliedSignal` with ``verdict="unknown"``
-        when ``repo_clone`` is not a directory or the commit window is
-        unknowable, ``"rejected"`` when no commits follow ``head_sha`` or
-        none contain the recommended hunk's added lines, and ``"applied"``
-        when at least one does.
+        when ``repo_clone`` is not a directory, ``"rejected"`` when no
+        commits follow ``head_sha`` or none contain the recommended hunk's
+        added lines, and ``"applied"`` when at least one does.
+
+        When the branch ref no longer resolves (``commits_since_fetcher``
+        returns ``None``), falls back to :func:`_default_branch_applied`,
+        which yields ``"applied"`` or ``"unknown"`` — never ``"rejected"``.
 
     Raises:
         KeyError: If ``row`` is missing ``archive_path``, ``branch``,
@@ -640,9 +682,13 @@ def local_commit_applied_signal(
 
     commits = commits_since_fetcher(repo_clone, row["branch"], row["head_sha"])
     if commits is None:
-        # Window unknowable (deleted branch ref / squash-merged head SHA) —
-        # indistinguishable from "no follow-up commit", so do not call it rejected.
-        return LocalCommitAppliedSignal(verdict="unknown")
+        # Branch ref unreadable — the usual cause is a squash merge, which
+        # deletes the branch. The question the posterior actually asks ("did
+        # the recommended change land?") survives that, so ask it of the
+        # default branch instead of giving up.
+        return _default_branch_applied(
+            row, repo_clone=repo_clone, hunks=hunks, file_at_fetcher=file_at_fetcher
+        )
     if not commits:
         return LocalCommitAppliedSignal(verdict="rejected")
 

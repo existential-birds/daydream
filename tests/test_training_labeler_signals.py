@@ -279,13 +279,15 @@ def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path:
 
     Same inputs as the rejected case above; only the fetcher's answer differs
     ([] vs None). The verdicts must differ too, or an unreadable branch ref
-    silently becomes a negative training label.
+    silently becomes a negative training label. Here the change is absent from
+    the base branch too, so the fallback cannot upgrade it past "unknown".
     """
     (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
         "branch": "feat/x",
+        "base_branch": "main",
         "archive_path": str(tmp_path),
     }
     sig = local_commit_applied_signal(
@@ -293,6 +295,92 @@ def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path:
         repo_clone=tmp_path,
         commits_since_fetcher=lambda repo, branch, since_sha: None,
         file_at_fetcher=lambda repo, path, sha: "",
+    )
+    assert sig == LocalCommitAppliedSignal(verdict="unknown")
+
+
+def test_local_commit_applied_signal_unreadable_window_falls_back_to_base_branch(tmp_path: Path) -> None:
+    """A deleted branch ref still resolves via the base branch tip.
+
+    The squash-merge case: the branch is gone, but the recommended line is
+    present on ``main``, so the change demonstrably landed → "applied".
+    """
+    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    row = {
+        "repo_slug": "org/repo",
+        "head_sha": "abc",
+        "branch": "feat/squashed-away",
+        "base_branch": "main",
+        "archive_path": str(tmp_path),
+    }
+    seen_refs: list[str] = []
+
+    def _file_at(repo: Path, path: str, ref: str) -> str:
+        seen_refs.append(ref)
+        return "existing\nfoo = 1\n" if ref == "origin/main" else ""
+
+    sig = local_commit_applied_signal(
+        row,
+        repo_clone=tmp_path,
+        commits_since_fetcher=lambda repo, branch, since_sha: None,
+        file_at_fetcher=_file_at,
+    )
+    assert sig == LocalCommitAppliedSignal(verdict="applied")
+    assert seen_refs == ["origin/main"]  # remote ref preferred; no stale-local read needed
+
+
+def test_local_commit_applied_signal_base_branch_fallback_prefers_remote_over_stale_local(
+    tmp_path: Path,
+) -> None:
+    """``origin/<base>`` is consulted before the bare local ref.
+
+    A worktree's local ``main`` can sit behind the remote. Reading it first
+    would report a landed change as absent, so the remote ref must win — but
+    the local ref is still tried when the remote is unresolvable.
+    """
+    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    row = {
+        "repo_slug": "org/repo",
+        "head_sha": "abc",
+        "branch": "feat/squashed-away",
+        "base_branch": "main",
+        "archive_path": str(tmp_path),
+    }
+    seen_refs: list[str] = []
+
+    def _file_at(repo: Path, path: str, ref: str) -> str:
+        seen_refs.append(ref)
+        return "existing\nfoo = 1\n" if ref == "main" else ""  # no origin/ ref in this clone
+
+    sig = local_commit_applied_signal(
+        row,
+        repo_clone=tmp_path,
+        commits_since_fetcher=lambda repo, branch, since_sha: None,
+        file_at_fetcher=_file_at,
+    )
+    assert sig == LocalCommitAppliedSignal(verdict="applied")
+    assert seen_refs == ["origin/main", "main"]  # remote tried first, then local fallback
+
+
+def test_local_commit_applied_signal_unreadable_window_no_hunks_is_unknown(tmp_path: Path) -> None:
+    """A run that recommended nothing cannot be "applied" by the fallback.
+
+    With no recommended hunks there is nothing to look for on the base branch,
+    so the fallback must not read "no hunks absent" as "everything landed".
+    """
+    (tmp_path / "diff.patch").write_text("")
+    row = {
+        "repo_slug": "org/repo",
+        "head_sha": "abc",
+        "branch": "feat/squashed-away",
+        "base_branch": "main",
+        "archive_path": str(tmp_path),
+    }
+    sig = local_commit_applied_signal(
+        row,
+        repo_clone=tmp_path,
+        commits_since_fetcher=lambda repo, branch, since_sha: None,
+        file_at_fetcher=lambda repo, path, ref: "anything at all\n",
     )
     assert sig == LocalCommitAppliedSignal(verdict="unknown")
 
