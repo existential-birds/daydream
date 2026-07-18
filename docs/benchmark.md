@@ -16,7 +16,7 @@ This runbook takes you from nothing to a scored result.
   `--judge-route martian` is the default, backward-compatible OpenAI-compatible Martian/OpenRouter route. It drives the benchmark step2/2.5/3 modules through their OpenAI Chat Completions-compatible client.
   - `MARTIAN_API_KEY`: an OpenRouter `sk-or-...` key (or a withmartian key). Required for `--score` on this route.
   - `MARTIAN_BASE_URL`: the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1` (default set by the withmartian step modules, not by daydream); set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
-  - `MARTIAN_MODEL`: the judge model id fallback when `--model` is omitted. Defaults to `openai/gpt-4o-mini` in the withmartian step modules.
+  - `MARTIAN_MODEL`: the judge model id fallback when `--model` is omitted. Required for scoring if `--model` is omitted.
 
   `--judge-route anthropic-direct` sends scoring calls directly to the Anthropic Messages API for extraction, deduplication, and final judging. It is not a `MARTIAN_BASE_URL` setting and it is not an OpenAI-compatible proxy route.
   - `ANTHROPIC_API_KEY`: required for `--score` on this route.

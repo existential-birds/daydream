@@ -42,7 +42,13 @@ from daydream.benchmark.corpus import CorpusSource, resolve_corpus
 from daydream.benchmark.daydream_run import run_daydream_review
 from daydream.benchmark.mapping import merged_items_to_review_comments
 from daydream.benchmark.report import PRRun, aggregate_from_scores, build_report, write_report
-from daydream.benchmark.score import DaydreamScores, preflight_judge_env, resolve_judge_model, run_scoring
+from daydream.benchmark.score import (
+    DaydreamScores,
+    model_results_dir,
+    preflight_judge_env,
+    resolve_judge_model,
+    run_scoring,
+)
 from daydream.benchmark.stats import compute_distribution, distribution_to_dict, format_distribution_table
 from daydream.benchmark.trial_isolation import init_trial_corpus, trial_corpus_dir, trial_tool_label, trials_root
 from daydream.ui import print_dim, print_error, print_info, print_success, print_warning
@@ -84,6 +90,27 @@ def _injected_comment_count(data: dict[str, Any], golden_url: str, tool: str) ->
     if review is None:
         return 0
     return len(review.get("review_comments", []))
+
+
+def _invalidate_scoring_artifacts(corpus_root: Path, judge_model: str, tool: str) -> None:
+    results_dir = model_results_dir(corpus_root, judge_model)
+    for name in ("candidates.json", "dedup_groups.json", "evaluations.json"):
+        path = results_dir / name
+        if not path.exists():
+            continue
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(artifact, dict):
+            continue
+        changed = False
+        for golden_url, tools in list(artifact.items()):
+            if not isinstance(tools, dict) or tool not in tools:
+                continue
+            del tools[tool]
+            changed = True
+            if not tools:
+                del artifact[golden_url]
+        if changed:
+            path.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
 
 
 def _process_pr(config: BenchConfig, pr: EvaluablePR, data: dict[str, Any]) -> bool:
@@ -153,6 +180,7 @@ def _run_sweep(
 
     runs: list[PRRun] = []
     failed = 0
+    force_modified = False
     total = len(prs)
     for i, pr in enumerate(prs, start=1):
         entry = data.get(pr.golden_url)
@@ -191,6 +219,7 @@ def _run_sweep(
             continue
 
         if modified:
+            force_modified = force_modified or config.force
             save_benchmark_data(data_path, data)
             print_info(console, f"Injected daydream review for {pr.golden_url}")
 
@@ -213,6 +242,8 @@ def _run_sweep(
     scores: DaydreamScores | None = None
     if config.score:
         try:
+            if force_modified:
+                _invalidate_scoring_artifacts(source.root, judge_model, config.tool_label)
             scores = run_scoring(
                 source.root,
                 judge_model,

@@ -204,6 +204,44 @@ def test_orchestrator_passes_judge_route_to_scoring(tmp_path, monkeypatch):
     assert captured["pr_count"] == 1
 
 
+def test_force_score_invalidates_stale_scorer_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
+    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    golden_url = next(url for url in data if "grafana" in url)
+    data[golden_url]["reviews"].append(
+        {
+            "tool": "daydream",
+            "repo_name": "daydream",
+            "pr_url": golden_url,
+            "review_comments": [{"body": "old candidate"}],
+        }
+    )
+    data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    scores_dir = tmp_path / "results" / "judge-model"
+    scores_dir.mkdir(parents=True)
+    for name in ("candidates.json", "dedup_groups.json", "evaluations.json"):
+        (scores_dir / name).write_text(
+            json.dumps({golden_url: {"daydream": ["stale"], "other-tool": ["keep"]}}, indent=2),
+            encoding="utf-8",
+        )
+
+    _mock_review(tmp_path, monkeypatch)
+
+    def fake_score(repo, model, *, pr_count, tool, judge_route):
+        for name in ("candidates.json", "dedup_groups.json", "evaluations.json"):
+            artifact = json.loads((scores_dir / name).read_text(encoding="utf-8"))
+            assert artifact == {golden_url: {"other-tool": ["keep"]}}
+        return DaydreamScores(scored_pr_count=1, total_tp=1, precision=1.0, recall=1.0)
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_scoring", fake_score)
+    cfg = replace(_config(tmp_path, data_path, score=True, only="grafana"), force=True, limit=1)
+
+    assert run_bench(cfg) == 0
+
+
 def test_materiality_gate_filters_submission(tmp_path, monkeypatch):
     from daydream.benchmark.orchestrator import _injected_comment_count
 

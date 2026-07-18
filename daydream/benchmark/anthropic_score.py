@@ -174,9 +174,6 @@ async def run_anthropic_extraction(
         for review in reviews:
             if not isinstance(review, dict) or review.get("tool") != tool:
                 continue
-            existing_tools = all_candidates.get(golden_url)
-            if isinstance(existing_tools, dict) and tool in existing_tools:
-                continue
 
             all_text = _get_all_comment_text(review.get("review_comments", []))
             if not all_text.strip():
@@ -305,9 +302,6 @@ async def run_anthropic_evaluation(
 
         for review in reviews:
             if not isinstance(review, dict) or review.get("tool") != tool:
-                continue
-            existing_leaf = evals.get(golden_url, {}).get(tool)
-            if isinstance(existing_leaf, dict) and existing_leaf.get("errors_count", 0) == 0:
                 continue
             if pr_count is not None and evaluated >= pr_count:
                 evaluations_file.write_text(json.dumps(evals, indent=2))
