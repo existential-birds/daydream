@@ -26,9 +26,18 @@ from daydream.improve.artifacts import (
     services_path,
     vetted_findings_path,
 )
-from daydream.improve.plans import load_rejections, record_rejections
+from daydream.improve.plans import (
+    load_rejections,
+    planned_fingerprints,
+    record_rejections,
+    write_plans,
+)
 from daydream.improve.prioritize import order_by_leverage, partition_direction
-from daydream.improve.prompts import AUDIT_FINDINGS_SCHEMA, VET_SCHEMA
+from daydream.improve.prompts import (
+    AUDIT_FINDINGS_SCHEMA,
+    PLAN_WRITER_SCHEMA,
+    VET_SCHEMA,
+)
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
 from daydream.trajectory import (
@@ -37,7 +46,7 @@ from daydream.trajectory import (
     maybe_fork,
     phase_scope,
 )
-from daydream.ui import print_error, print_success
+from daydream.ui import print_error, print_success, print_warning
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
@@ -71,6 +80,7 @@ _RECON_SCHEMA: dict[str, Any] = {
 _EVIDENCE_LOCATION = re.compile(
     r"^`?(.+?):(\d+)(?::\d+)?(?:`|\b)"
 )
+_PLAN_SLUG = re.compile(r"^[a-z0-9-]{1,60}$")
 
 
 @dataclass(frozen=True)
@@ -674,11 +684,13 @@ async def _step_select(ctx: FlowContext) -> Stop | None:
     selected_numbers = default_numbers
 
     if not defects:
+        ctx.data["selected_findings"] = []
+        ctx.data["selection_mode"] = mode
         (ctx.data["improve_dir"] / "selected.json").write_text(
             json.dumps({"mode": mode, "selected": []}, indent=2) + "\n"
         )
         print_success(console, "No vetted defect findings -- done.")
-        return Stop(0)
+        return None
 
     if not get_non_interactive():
         default_text = (
@@ -706,10 +718,137 @@ async def _step_select(ctx: FlowContext) -> Stop | None:
     selected = [
         selectable[number - 1]["fingerprint"] for number in selected_numbers
     ]
+    ctx.data["selected_findings"] = [
+        selectable[number - 1] for number in selected_numbers
+    ]
+    ctx.data["selection_mode"] = mode
     (ctx.data["improve_dir"] / "selected.json").write_text(
         json.dumps({"mode": mode, "selected": selected}, indent=2) + "\n"
     )
     return None
+
+
+def _plan_slug(value: Any, title: Any) -> str:
+    candidate = str(value or "")
+    if _PLAN_SLUG.fullmatch(candidate):
+        return candidate
+    derived = re.sub(r"[^a-z0-9]+", "-", str(title or "").lower()).strip("-")
+    return derived[:60].rstrip("-") or "plan"
+
+
+def _verification_commands(recon: dict[str, Any]) -> dict[str, str]:
+    raw_commands = recon.get("commands")
+    if not isinstance(raw_commands, dict):
+        return {}
+    commands: dict[str, str] = {}
+    for purpose, values in raw_commands.items():
+        if not isinstance(values, list):
+            continue
+        valid = [value for value in values if isinstance(value, str) and value]
+        for index, command in enumerate(valid, start=1):
+            label = str(purpose).replace("_", " ").title()
+            if len(valid) > 1:
+                label += f" {index}"
+            commands[label] = command
+    return commands
+
+
+async def _step_write_plans(ctx: FlowContext) -> None:
+    """Write selected findings as host-stamped, reconciling handoff plans."""
+    selected: list[dict[str, Any]] = ctx.data["selected_findings"]
+    tier: EffortTier = ctx.data["effort_tier"]
+    backend = ctx.backend_for("plan_write")
+    recorder = get_current_recorder()
+    limiter = anyio.CapacityLimiter(tier.max_concurrency)
+    outputs: dict[str, dict[str, Any]] = {}
+    plans_dir = ctx.work.repo / "daydream_plans"
+    known = planned_fingerprints(plans_dir) | set(
+        load_rejections(plans_dir)
+    )
+
+    async with anyio.create_task_group() as task_group:
+        for finding in selected:
+            fingerprint = str(finding["fingerprint"])
+            if fingerprint in known:
+                outputs[fingerprint] = {"finding": finding}
+                continue
+            prompt = ctx.registry.prompt("plan-writer")(
+                finding=finding,
+                recon_summary=json.dumps(ctx.data["recon"], sort_keys=True),
+                verification_commands=list(
+                    _verification_commands(ctx.data["recon"]).values()
+                ),
+                cwd=ctx.work.repo,
+            )
+
+            async def _task(
+                current: dict[str, Any] = finding,
+                current_fingerprint: str = fingerprint,
+                task_prompt: str = prompt,
+            ) -> None:
+                descriptor = f"plan-{_plan_slug('', current.get('title'))}"
+                async with maybe_fork(recorder, descriptor):
+                    try:
+                        async with limiter:
+                            async with phase_scope(DaydreamPhase.PLAN_WRITE):
+                                output, _, _ = await run_agent(
+                                    backend,
+                                    ctx.work.repo,
+                                    task_prompt,
+                                    phase=DaydreamPhase.PLAN_WRITE,
+                                    output_schema=PLAN_WRITER_SCHEMA,
+                                    read_only=True,
+                                )
+                        if not isinstance(output, dict):
+                            raise ValueError("plan writer returned no object")
+                        title = output.get("title") or current.get("title")
+                        outputs[current_fingerprint] = {
+                            "finding": current,
+                            **output,
+                            "slug": _plan_slug(output.get("slug"), title),
+                            "title": title,
+                        }
+                    except Exception as exc:  # noqa: BLE001 - isolate each plan
+                        outputs[current_fingerprint] = {
+                            "finding": current,
+                            "title": current.get("title"),
+                            "priority": "P2",
+                            "depends_on": [],
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+
+            task_group.start_soon(_task)
+
+    try:
+        planned_at = git_ops.head_sha(ctx.work.repo)
+    except git_ops.GitError:
+        planned_at = ctx.work.head_sha
+    ordered_outputs = [
+        outputs[str(finding["fingerprint"])] for finding in selected
+    ]
+    result = write_plans(
+        plans_dir,
+        ordered_outputs,
+        planned_at=planned_at,
+        commands=_verification_commands(ctx.data["recon"]),
+        non_interactive_default=(
+            ctx.data["selection_mode"] == "non-interactive-default"
+        ),
+    )
+    ctx.data["plan_write"] = result
+    ctx.data["plan_exit_code"] = (
+        1 if result["failed"] and not result["written"] else 0
+    )
+    if result["skipped"]:
+        print_warning(
+            console,
+            f"Skipped {len(result['skipped'])} already planned or rejected finding(s).",
+        )
+    if result["failed"]:
+        print_warning(
+            console,
+            f"Plan writing failed for {len(result['failed'])} finding(s).",
+        )
 
 
 def _render_report(
@@ -725,6 +864,7 @@ def _render_report(
     direction_section: str,
     effort: str,
     scope: str | None,
+    plan_write: dict[str, list[dict[str, Any]]],
 ) -> str:
     service_lines = (
         "\n".join(
@@ -765,6 +905,12 @@ def _render_report(
         if scope
         else "No explicit service scope slicing was requested."
     )
+    plan_lines = (
+        f"- Plans written: {len(plan_write['written'])}\n"
+        f"- Findings skipped as already planned or rejected: "
+        f"{len(plan_write['skipped'])}\n"
+        f"- Plans blocked by plan-writing failure: {len(plan_write['failed'])}\n"
+    )
     return (
         "# Improve Report\n\n"
         "## Findings\n\n"
@@ -788,10 +934,12 @@ def _render_report(
         f"- Non-HIGH-confidence findings dropped by tier: {dropped_low_confidence}\n"
         f"- Lowest-leverage findings dropped by tier cap: {dropped_by_cap}\n"
         f"- Previously rejected findings suppressed: {previously_rejected}\n"
+        "\n## Plan writing\n\n"
+        f"{plan_lines}"
     )
 
 
-async def _step_report(ctx: FlowContext) -> None:
+async def _step_report(ctx: FlowContext) -> Stop | None:
     """Render the improve report for reconnaissance and audit coverage."""
     report_path(ctx.data["improve_dir"]).write_text(
         _render_report(
@@ -807,6 +955,7 @@ async def _step_report(ctx: FlowContext) -> None:
             ctx.data["direction_section"],
             ctx.config.improve_effort,
             ctx.config.improve_scope,
+            ctx.data["plan_write"],
         )
     )
     print_success(
@@ -816,6 +965,9 @@ async def _step_report(ctx: FlowContext) -> None:
         f"{len(ctx.data['stacks'])} stacks, "
         f"{len(ctx.data['vetted']['findings'])} vetted findings.",
     )
+    if ctx.data["plan_exit_code"]:
+        return Stop(ctx.data["plan_exit_code"])
+    return None
 
 
 STEPS: tuple[FlowStep, ...] = (
@@ -823,10 +975,15 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="audit", run=_step_audit),
     FlowStep(name="vet", run=_step_vet),
     FlowStep(name="prioritize", run=_step_prioritize),
+    FlowStep(name="select-plans", run=_step_select),
+    FlowStep(
+        name="write-plans",
+        run=_step_write_plans,
+        config_phase="plan_write",
+    ),
     FlowStep(
         name="improve-report",
         run=_step_report,
         config_phase="recon",
     ),
-    FlowStep(name="select-plans", run=_step_select),
 )

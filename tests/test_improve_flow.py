@@ -10,6 +10,7 @@ from daydream.backends import ResultEvent
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.loader import build_registry
+from daydream.git_ops import head_sha
 from daydream.runner import RunConfig, run
 
 
@@ -59,6 +60,8 @@ class _ImproveStubBackend:
             )
         elif "You are the improve vet." in prompt:
             marker = "vet"
+        elif "You are writing a self-contained implementation plan" in prompt:
+            marker = "plan-writer"
         self.calls.append(
             {
                 "cwd": cwd,
@@ -186,6 +189,38 @@ class _ImproveStubBackend:
                         }
                         for candidate in candidates
                     ]
+                },
+                continuation=None,
+            )
+            return
+        if marker == "plan-writer":
+            match = re.search(
+                r"Selected vetted finding:\n```json\n(.*?)\n```",
+                prompt,
+                flags=re.DOTALL,
+            )
+            assert match is not None
+            finding = json.loads(match.group(1))
+            slug = re.sub(r"[^a-z0-9]+", "-", finding["title"].lower()).strip(
+                "-"
+            )
+            yield ResultEvent(
+                structured_output={
+                    "slug": slug,
+                    "title": finding["title"],
+                    "priority": "P1",
+                    "depends_on": [],
+                    "markdown": (
+                        "## Why this matters\n\nConcrete impact.\n\n"
+                        "## Current state\n\n`apps/billing/api.py:1`.\n\n"
+                        "## Commands you will need\n\nUse verified commands.\n\n"
+                        "## Scope\n\nOnly the cited file.\n\n"
+                        "## Steps\n\n### Step 1\n\nMake the change.\n\n"
+                        "## Test plan\n\nRun the tests.\n\n"
+                        "## Done criteria\n\n- [ ] Tests pass.\n\n"
+                        "## STOP conditions\n\nStop on drift.\n\n"
+                        "## Maintenance notes\n\nReview carefully."
+                    ),
                 },
                 continuation=None,
             )
@@ -462,6 +497,32 @@ async def test_non_interactive_selects_top_findings_never_touching_stdin(
     )
     assert len(selected["selected"]) == 5
     assert selected["mode"] == "non-interactive-default"
+
+
+@pytest.mark.anyio
+async def test_non_interactive_run_writes_plans_and_index(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=8,
+    )
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    plans_dir = improve_monorepo_target / "daydream_plans"
+    plan_files = sorted(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
+    assert code == 0
+    assert 1 <= len(plan_files) <= 5
+    index = (plans_dir / "README.md").read_text()
+    assert "non-interactive default" in index.lower()
+    assert head_sha(improve_monorepo_target)[:7] in plan_files[0].read_text()
 
 
 @pytest.mark.anyio

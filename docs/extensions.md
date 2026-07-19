@@ -279,8 +279,9 @@ an existing config key.
 | 2 | `audit` | `audit` |
 | 3 | `vet` | `vet` |
 | 4 | `prioritize` | `prioritize` |
-| 5 | `improve-report` | `recon` |
-| 6 | `select-plans` | `select-plans` |
+| 5 | `select-plans` | `select-plans` |
+| 6 | `write-plans` | `plan_write` |
+| 7 | `improve-report` | `recon` |
 
 The improve run configuration also carries `improve_effort`, `improve_focus`,
 `improve_scope`, `improve_plan_description`, and `improve_review_plan`.
