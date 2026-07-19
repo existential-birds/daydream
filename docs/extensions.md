@@ -518,8 +518,9 @@ model = "claude-sonnet-5"
 ```
 
 A fork-defined phase has no entry in the built-in `PHASE_DEFAULT_MODELS` /
-`PHASE_DEFAULT_EFFORT` tables, so it falls through to the config-file global and
-then to the backend default. Set `model` / `reasoning_effort` on the phase table
+`PHASE_DEFAULT_EFFORT` tables, so it skips only that tier: CLI `--model` /
+`--reasoning-effort` still win, then the phase table, then the config-file
+global, then the backend default. Set `model` / `reasoning_effort` on the phase table
 to pin it (see the README's [Reasoning Effort](../README.md#reasoning-effort-codex-only)
 section for the precedence chain).
 
