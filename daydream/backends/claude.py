@@ -373,9 +373,11 @@ class ClaudeBackend:
 
         async with ClaudeSDKClient(options=options) as client:
             self._active_clients.add(client)
+            response = client.receive_response()
+            response_terminated = False
             try:
                 await client.query(prompt)
-                async for msg in client.receive_response():
+                async for msg in response:
                     if isinstance(msg, AssistantMessage):
                         msg_model = getattr(msg, "model", None)
                         if isinstance(msg_model, str) and msg_model:
@@ -436,6 +438,7 @@ class ClaudeBackend:
                                 )
 
                     elif isinstance(msg, ResultMessage):
+                        response_terminated = True
                         if msg.is_error:
                             detail = msg.result or msg.subtype or "unknown error"
                             if msg.subtype == "error_max_turns":
@@ -467,6 +470,12 @@ class ClaudeBackend:
                     structured_output=structured_result,
                     continuation=None,
                 )
+            except GeneratorExit:
+                if not response_terminated:
+                    await client.interrupt()
+                    async for _ in response:
+                        pass
+                raise
             finally:
                 self._active_clients.discard(client)
 

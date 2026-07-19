@@ -172,6 +172,46 @@ async def test_execute_yields_tool_events(patch_sdk):
 
 
 @pytest.mark.asyncio
+async def test_execute_early_close_interrupts_and_drains_before_disconnect(patch_sdk):
+    lifecycle: list[str] = []
+
+    class EarlyCloseClient:
+        def __init__(self, options: Any = None) -> None:
+            self.options = options
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            lifecycle.append("disconnect")
+
+        async def query(self, prompt: str) -> None:
+            pass
+
+        async def interrupt(self) -> None:
+            lifecycle.append("interrupt")
+
+        async def receive_response(self):
+            yield MockAssistantMessage(
+                content=[MockToolUseBlock(id="tool-1", name="Read", input={"file_path": "a.py"})]
+            )
+            lifecycle.append("terminal")
+            yield MockResultMessage()
+
+    patch_sdk(EarlyCloseClient)
+    backend = ClaudeBackend(model="opus")
+    event_stream = backend.execute(Path("/tmp"), "Review this")
+
+    async for event in event_stream:
+        if isinstance(event, ToolStartEvent):
+            break
+
+    await event_stream.aclose()
+
+    assert lifecycle == ["interrupt", "terminal", "disconnect"]
+
+
+@pytest.mark.asyncio
 async def test_execute_structured_output(patch_sdk):
     events = await _drive_claude_backend_to_list(
         messages=[
