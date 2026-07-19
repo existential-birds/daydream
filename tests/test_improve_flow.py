@@ -18,8 +18,9 @@ class _ImproveStubBackend:
 
     model = "mock-model"
 
-    def __init__(self, target: Path) -> None:
+    def __init__(self, target: Path, *, n_findings: int | None = None) -> None:
         self._target = target
+        self._n_findings = n_findings
         self.calls: list[dict[str, Any]] = []
         self.fail_categories: set[str] = set()
         self.vet_reject_titles: set[str] = set()
@@ -102,15 +103,34 @@ class _ImproveStubBackend:
             )
             return
         if category is not None:
+            category_index = AUDIT_CATEGORIES.index(category)
+            if (
+                self._n_findings is not None
+                and category_index >= self._n_findings
+            ):
+                yield ResultEvent(
+                    structured_output={"findings": []},
+                    continuation=None,
+                )
+                return
+            title = f"{category.title()} finding"
+            impact = "HIGH"
+            effort = "S"
+            if category == "correctness":
+                title = "high-leverage-title"
+            elif category == "docs":
+                title = "low-leverage-title"
+                impact = "LOW"
+                effort = "L"
             findings = [
                 {
-                    "title": f"{category.title()} finding",
+                    "title": title,
                     "category": "wrong-agent-category",
                     "path": "apps/billing/api.py",
                     "line": 1,
                     "body": f"Concrete {category} impact and fix.",
-                    "impact": "HIGH",
-                    "effort": "S",
+                    "impact": impact,
+                    "effort": effort,
                     "risk": "LOW",
                     "confidence": "HIGH",
                     "evidence": ["apps/billing/api.py:1"],
@@ -185,9 +205,12 @@ def tmp_git_repo(improve_monorepo_target: Path) -> Path:
 
 
 def _install_improve_stub(
-    monkeypatch: pytest.MonkeyPatch, target: Path
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    *,
+    n_findings: int | None = None,
 ) -> _ImproveStubBackend:
-    stub = _ImproveStubBackend(target)
+    stub = _ImproveStubBackend(target, n_findings=n_findings)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: stub)
     return stub
 
@@ -204,6 +227,17 @@ def _git_status_porcelain(repo: Path) -> str:
 
 def _dd(repo: Path, name: str) -> Path:
     return repo / ".daydream" / "improve" / name
+
+
+def _forbidden_input(*_args: Any, **_kwargs: Any) -> str:
+    raise AssertionError(
+        "input() was called in non-interactive mode -- stdin must not be touched"
+    )
+
+
+def _force_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
 
 
 @pytest.mark.anyio
@@ -402,3 +436,82 @@ async def test_previously_rejected_finding_is_not_revetted_or_rereported(
     assert all("Phantom N+1" not in call["prompt"] for call in vet_calls)
     report = _dd(improve_monorepo_target, "report.md").read_text()
     assert "previously rejected" in report.lower()
+
+
+@pytest.mark.anyio
+async def test_non_interactive_selects_top_findings_never_touching_stdin(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("builtins.input", _forbidden_input)
+    _install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=8,
+    )
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    assert code == 0
+    selected = json.loads(
+        _dd(improve_monorepo_target, "selected.json").read_text()
+    )
+    assert len(selected["selected"]) == 5
+    assert selected["mode"] == "non-interactive-default"
+
+
+@pytest.mark.anyio
+async def test_interactive_selection_honors_user_choice(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "2")
+    _install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=8,
+    )
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=False,
+            archive=False,
+        )
+    )
+    assert code == 0
+    selected = json.loads(
+        _dd(improve_monorepo_target, "selected.json").read_text()
+    )
+    assert len(selected["selected"]) == 1
+    assert selected["mode"] == "interactive"
+
+
+@pytest.mark.anyio
+async def test_report_orders_by_leverage_and_separates_direction(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=9,
+    )
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    assert code == 0
+    report = _dd(improve_monorepo_target, "report.md").read_text()
+    assert report.index("high-leverage-title") < report.index(
+        "low-leverage-title"
+    )
+    assert "## Direction" in report
+    assert "not audited" in report.lower()

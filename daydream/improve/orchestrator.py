@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+import daydream.agent as agent
 from daydream import git_ops
-from daydream.agent import console, run_agent
+from daydream.agent import console, get_non_interactive, run_agent
 from daydream.config import AUDIT_CATEGORIES, EffortTier
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.detection import StackAssignment, detect_stacks
@@ -26,7 +27,7 @@ from daydream.improve.artifacts import (
     vetted_findings_path,
 )
 from daydream.improve.plans import load_rejections, record_rejections
-from daydream.improve.prioritize import order_by_leverage
+from daydream.improve.prioritize import order_by_leverage, partition_direction
 from daydream.improve.prompts import AUDIT_FINDINGS_SCHEMA, VET_SCHEMA
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
@@ -516,6 +517,199 @@ async def _step_vet(ctx: FlowContext) -> None:
     )
     ctx.data["vetted"] = vetted
     ctx.data["previously_rejected"] = previously_rejected
+    ctx.data["vet_rejected"] = len(rejected)
+
+
+def _markdown_cell(value: Any) -> str:
+    """Render a value safely inside a Markdown table cell."""
+    return str(value or "—").replace("|", "\\|").replace("\n", " ")
+
+
+def _evidence_cell(finding: dict[str, Any]) -> str:
+    evidence = finding.get("evidence", [])
+    if not isinstance(evidence, list):
+        return "—"
+    return "<br>".join(_markdown_cell(entry) for entry in evidence) or "—"
+
+
+def _findings_table(
+    findings: list[dict[str, Any]],
+    *,
+    start: int = 1,
+) -> str:
+    lines = [
+        "| # | Finding | Category | Impact | Effort | Risk | Confidence | Evidence |",
+        "|---:|---|---|---|---|---|---|---|",
+    ]
+    for number, finding in enumerate(findings, start=start):
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    str(number),
+                    _markdown_cell(finding.get("title")),
+                    _markdown_cell(finding.get("category")),
+                    _markdown_cell(finding.get("impact")),
+                    _markdown_cell(finding.get("effort")),
+                    _markdown_cell(finding.get("risk")),
+                    _markdown_cell(finding.get("confidence")),
+                    _evidence_cell(finding),
+                )
+            )
+            + " |"
+        )
+    if not findings:
+        lines.append("| — | No vetted defect findings. | — | — | — | — | — | — |")
+    return "\n".join(lines)
+
+
+def _direction_section(
+    findings: list[dict[str, Any]],
+    *,
+    start: int,
+    limit: int = 4,
+) -> str:
+    if not findings:
+        return "## Direction\n\nNo grounded direction findings."
+    entries: list[str] = []
+    for number, finding in enumerate(findings[:limit], start=start):
+        entries.append(
+            f"### {number}. {_markdown_cell(finding.get('title'))}\n\n"
+            f"{_markdown_cell(finding.get('body'))} "
+            f"Impact: {_markdown_cell(finding.get('impact'))}; "
+            f"effort: {_markdown_cell(finding.get('effort'))}; "
+            f"fix risk: {_markdown_cell(finding.get('risk'))}. "
+            f"Evidence: {_evidence_cell(finding)}."
+        )
+    return "## Direction\n\n" + "\n\n".join(entries)
+
+
+async def _step_prioritize(ctx: FlowContext) -> None:
+    """Partition and leverage-order vetted findings for reporting and selection."""
+    directory: Path = ctx.data["improve_dir"]
+    payload = json.loads(vetted_findings_path(directory).read_text())
+    raw_findings = payload.get("findings", [])
+    findings = [
+        finding for finding in raw_findings if isinstance(finding, dict)
+    ]
+    defects, direction = partition_direction(findings)
+    ordered_defects = order_by_leverage(defects)
+    ordered_direction = order_by_leverage(direction)
+    vetted = {
+        "findings": [*ordered_defects, *ordered_direction],
+        "defects": ordered_defects,
+        "direction": ordered_direction,
+    }
+    vetted_findings_path(directory).write_text(
+        json.dumps(vetted, indent=2) + "\n"
+    )
+    ctx.data["vetted"] = vetted
+    ctx.data["defects"] = ordered_defects
+    ctx.data["direction"] = ordered_direction
+    ctx.data["findings_table"] = _findings_table(ordered_defects)
+    ctx.data["direction_section"] = _direction_section(
+        ordered_direction,
+        start=len(ordered_defects) + 1,
+    )
+
+
+def _parse_selection(raw: str, *, total: int) -> list[int] | None:
+    """Parse comma-separated numbers and inclusive ranges."""
+    if not raw.strip():
+        return []
+    selected: list[int] = []
+    try:
+        for part in raw.split(","):
+            token = part.strip()
+            if not token:
+                return None
+            numbers: range | tuple[int, ...]
+            if "-" in token:
+                bounds = [piece.strip() for piece in token.split("-", 1)]
+                start, end = (int(piece) for piece in bounds)
+                if start > end:
+                    return None
+                numbers = range(start, end + 1)
+            else:
+                numbers = (int(token),)
+            for number in numbers:
+                if number < 1 or number > total:
+                    return None
+                if number not in selected:
+                    selected.append(number)
+    except ValueError:
+        return None
+    return selected
+
+
+def _default_selection(defects: list[dict[str, Any]]) -> list[int]:
+    return list(range(1, min(5, len(defects)) + 1))
+
+
+def _selection_prompt(
+    defects: list[dict[str, Any]],
+    direction: list[dict[str, Any]],
+) -> str:
+    sections = [
+        "Choose findings to turn into plans (comma-separated numbers or ranges).",
+        _findings_table(defects),
+    ]
+    if direction:
+        sections.append(
+            _direction_section(
+                direction,
+                start=len(defects) + 1,
+                limit=len(direction),
+            )
+        )
+    return "\n\n".join(sections)
+
+
+async def _step_select(ctx: FlowContext) -> Stop | None:
+    """Persist the user's plan selection or the silent unattended default."""
+    defects: list[dict[str, Any]] = ctx.data["defects"]
+    direction: list[dict[str, Any]] = ctx.data["direction"]
+    default_numbers = _default_selection(defects)
+    mode = "non-interactive-default" if get_non_interactive() else "interactive"
+    selected_numbers = default_numbers
+
+    if not defects:
+        (ctx.data["improve_dir"] / "selected.json").write_text(
+            json.dumps({"mode": mode, "selected": []}, indent=2) + "\n"
+        )
+        print_success(console, "No vetted defect findings -- done.")
+        return Stop(0)
+
+    if not get_non_interactive():
+        default_text = (
+            f"1-{len(default_numbers)}" if len(default_numbers) > 1 else "1"
+        )
+        prompt = _selection_prompt(defects, direction)
+        raw = agent.prompt_user(console, prompt, default=default_text)
+        parsed = _parse_selection(
+            raw,
+            total=len(defects) + len(direction),
+        )
+        if parsed is None:
+            raw = agent.prompt_user(
+                console,
+                "Invalid selection; try once more",
+                default=default_text,
+            )
+            parsed = _parse_selection(
+                raw,
+                total=len(defects) + len(direction),
+            )
+        selected_numbers = parsed if parsed is not None else default_numbers
+
+    selectable = [*defects, *direction]
+    selected = [
+        selectable[number - 1]["fingerprint"] for number in selected_numbers
+    ]
+    (ctx.data["improve_dir"] / "selected.json").write_text(
+        json.dumps({"mode": mode, "selected": selected}, indent=2) + "\n"
+    )
+    return None
 
 
 def _render_report(
@@ -526,6 +720,11 @@ def _render_report(
     dropped_low_confidence: int,
     dropped_by_cap: int,
     previously_rejected: int,
+    vet_rejected: int,
+    findings_table: str,
+    direction_section: str,
+    effort: str,
+    scope: str | None,
 ) -> str:
     service_lines = (
         "\n".join(
@@ -539,15 +738,38 @@ def _render_report(
         or "- No stacks detected."
     )
     failures = audit.get("failed", {})
-    not_audited_lines = (
+    failed_assignment_lines = (
         "\n".join(
             f"- **{assignment}** — {reason}"
             for assignment, reason in failures.items()
         )
         or "- None."
     )
+    tier_bound = {
+        "quick": (
+            "Recon hotspots only; categories outside correctness, security, "
+            "and tests were not audited."
+        ),
+        "standard": (
+            "Coverage was hotspot-weighted across key packages; exhaustive "
+            "whole-repository coverage was not attempted."
+        ),
+        "deep": (
+            "Coverage included every detected package; untracked files and "
+            "surfaces outside detected services were not audited."
+        ),
+    }[effort]
+    scope_statement = (
+        f"Service scope slicing was limited to `{scope}`; other services were "
+        "not audited."
+        if scope
+        else "No explicit service scope slicing was requested."
+    )
     return (
         "# Improve Report\n\n"
+        "## Findings\n\n"
+        f"{findings_table}\n\n"
+        f"{direction_section}\n\n"
         "## Services\n\n"
         f"{service_lines}\n\n"
         "## Stacks\n\n"
@@ -555,10 +777,14 @@ def _render_report(
         "## What ran\n\n"
         "- Read-only repository reconnaissance\n"
         f"- Read-only audits across {len(audit.get('categories_run', []))} categories\n\n"
-        "## Not audited\n\n"
-        f"{not_audited_lines}\n\n"
+        "## What was not audited\n\n"
+        f"- {tier_bound}\n"
+        f"- {scope_statement}\n\n"
+        "### Failed audit assignments\n\n"
+        f"{failed_assignment_lines}\n\n"
         "## Audit filtering\n\n"
         f"- Findings without `path:line` evidence discarded: {discarded_no_evidence}\n"
+        f"- Findings rejected during vetting: {vet_rejected}\n"
         f"- Non-HIGH-confidence findings dropped by tier: {dropped_low_confidence}\n"
         f"- Lowest-leverage findings dropped by tier cap: {dropped_by_cap}\n"
         f"- Previously rejected findings suppressed: {previously_rejected}\n"
@@ -576,6 +802,11 @@ async def _step_report(ctx: FlowContext) -> None:
             ctx.data["audit_dropped_low_confidence"],
             ctx.data["audit_dropped_by_cap"],
             ctx.data["previously_rejected"],
+            ctx.data["vet_rejected"],
+            ctx.data["findings_table"],
+            ctx.data["direction_section"],
+            ctx.config.improve_effort,
+            ctx.config.improve_scope,
         )
     )
     print_success(
@@ -591,9 +822,11 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="recon", run=_step_recon),
     FlowStep(name="audit", run=_step_audit),
     FlowStep(name="vet", run=_step_vet),
+    FlowStep(name="prioritize", run=_step_prioritize),
     FlowStep(
         name="improve-report",
         run=_step_report,
         config_phase="recon",
     ),
+    FlowStep(name="select-plans", run=_step_select),
 )
