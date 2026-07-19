@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from daydream.backends import ResultEvent
+from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.loader import build_registry
@@ -19,9 +19,17 @@ class _ImproveStubBackend:
 
     model = "mock-model"
 
-    def __init__(self, target: Path, *, n_findings: int | None = None) -> None:
+    def __init__(
+        self,
+        target: Path,
+        *,
+        n_findings: int | None = None,
+        attempt_write: bool = False,
+    ) -> None:
         self._target = target
         self._n_findings = n_findings
+        self._attempt_write = attempt_write
+        self._write_attempted = False
         self.calls: list[dict[str, Any]] = []
         self.fail_categories: set[str] = set()
         self.vet_reject_titles: set[str] = set()
@@ -75,6 +83,30 @@ class _ImproveStubBackend:
                 "marker": marker,
             }
         )
+        if self._attempt_write and not self._write_attempted:
+            self._write_attempted = True
+            write_path = self._target / "agent-write-attempt.txt"
+            yield ToolStartEvent(
+                id="improve-write-attempt",
+                name="Write",
+                input={
+                    "file_path": str(write_path),
+                    "content": "must not be written",
+                },
+            )
+            if read_only:
+                yield ToolResultEvent(
+                    id="improve-write-attempt",
+                    output="denied by read-only backend profile",
+                    is_error=True,
+                )
+            else:
+                write_path.write_text("must not be written")
+                yield ToolResultEvent(
+                    id="improve-write-attempt",
+                    output="written",
+                    is_error=False,
+                )
         if category in self.fail_categories:
             raise RuntimeError(f"{category} audit failed")
         if "you are the **pattern-scanner** specialist" in prompt.lower():
@@ -269,8 +301,13 @@ def _install_improve_stub(
     target: Path,
     *,
     n_findings: int | None = None,
+    attempt_write: bool = False,
 ) -> _ImproveStubBackend:
-    stub = _ImproveStubBackend(target, n_findings=n_findings)
+    stub = _ImproveStubBackend(
+        target,
+        n_findings=n_findings,
+        attempt_write=attempt_write,
+    )
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: stub)
     return stub
 
@@ -283,6 +320,34 @@ def _git_status_porcelain(repo: Path) -> str:
         capture_output=True,
         text=True,
     ).stdout
+
+
+def _untracked(repo: Path) -> list[str]:
+    return subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+
+
+def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
+    values: list[str] = []
+    for trajectory_file in list(run_root.rglob("*.json")) + (
+        [traj] if traj.exists() else []
+    ):
+        try:
+            payload = json.loads(trajectory_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for step in payload.get("steps", []):
+            value = (step.get("extra") or {}).get(key)
+            if value:
+                values.append(value)
+    return values
 
 
 def _dd(repo: Path, name: str) -> Path:
@@ -788,3 +853,103 @@ async def test_review_plan_tightens_in_place(
 
     assert code == 0
     assert "## STOP conditions" in plan.read_text()
+
+
+@pytest.mark.anyio
+async def test_full_run_leaves_tracked_tree_and_untracked_set_untouched(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        attempt_write=True,
+    )
+    before_status = _git_status_porcelain(improve_monorepo_target)
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    assert _git_status_porcelain(improve_monorepo_target) == before_status
+    new_untracked = _untracked(improve_monorepo_target)
+    assert all(
+        path.startswith(("daydream_plans/", ".daydream/"))
+        for path in new_untracked
+    )
+
+
+@pytest.mark.anyio
+async def test_every_agent_call_in_every_mode_is_read_only(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configs = (
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        ),
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_focus="next",
+            non_interactive=True,
+            archive=False,
+        ),
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="x",
+            non_interactive=True,
+            archive=False,
+        ),
+    )
+    for config in configs:
+        stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+        code = await run(config)
+        assert code == 0
+        assert stub.calls and all(call["read_only"] for call in stub.calls)
+
+
+@pytest.mark.anyio
+async def test_trajectory_records_improve_flow_and_phases(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_improve_stub(monkeypatch, improve_monorepo_target)
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    trajectories = list(
+        (improve_monorepo_target / ".daydream" / "runs").glob(
+            "*/trajectory.json"
+        )
+    )
+    assert len(trajectories) == 1
+    trajectory = trajectories[0]
+    run_root = trajectory.parent
+    flows = _scan_trajectory_extra(
+        run_root,
+        trajectory,
+        "daydream_run_flow",
+    )
+    phases = _scan_trajectory_extra(
+        run_root,
+        trajectory,
+        "daydream_phase",
+    )
+    assert flows and set(flows) == {"improve"}
+    assert {"recon", "audit", "vet", "plan_write"} <= set(phases)

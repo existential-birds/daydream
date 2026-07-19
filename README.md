@@ -51,6 +51,59 @@ advanced surface (`--start-at`, `--ignore-path`, `--worktree`, `--trajectory`, â
 
 To update: `git pull && uv sync`
 
+## Audit a repository and write implementation plans
+
+`daydream improve` audits the whole repository, verifies candidate findings,
+prioritizes them by leverage, and writes self-contained implementation plans.
+Every agent call uses a read-only backend profile. Daydream's host code writes
+only run artifacts under `.daydream/` and durable advisory artifacts under
+`daydream_plans/`; it does not modify tracked source files.
+
+```bash
+daydream improve /path/to/project
+daydream improve --effort deep --scope "apps/*" /path/to/project
+daydream improve --focus security /path/to/project
+```
+
+### Effort tiers
+
+| Tier | Audit coverage |
+|------|----------------|
+| `quick` | Correctness, security, and tests; serial, HIGH-confidence findings only, capped near six |
+| `standard` | All nine categories with concurrency four; the default |
+| `deep` | All nine categories with concurrency eight; includes LOW-confidence investigation items |
+
+### Focus modes
+
+| Focus | Behavior |
+|-------|----------|
+| `security` | Audit only security |
+| `performance` | Audit only performance |
+| `tests` | Audit only test coverage |
+| `branch` | Audit the merge-base diff and label findings as introduced or inherited |
+| `next` | Produce grounded direction proposals as spike plans |
+
+Use `--scope SERVICE_OR_GLOB` to restrict the audit to matching detected
+services. The report names detected services that the scope did not cover.
+
+### Plan subcommands
+
+```bash
+daydream improve plan "add rate limiting" /path/to/project
+daydream improve review-plan daydream_plans/001-rate-limiting.md /path/to/project
+```
+
+`plan` runs reconnaissance and writes one plan for the supplied request without
+running the category audit. `review-plan` critiques and rewrites an existing
+file in `daydream_plans/`; paths outside that directory are rejected.
+
+Each audit writes its report and structured intermediate data under
+`.daydream/improve/`. Durable output under `daydream_plans/` consists of
+numbered plan files, a `README.md` plan index, and `rejected.json` for findings
+that later runs should suppress. In non-interactive mode, Daydream selects the
+top five or fewer vetted defect findings by leverage; direction findings are
+never selected automatically.
+
 ## Architecture
 
 Daydream runs a deep multi-stack review pipeline (exploration, intent analysis, alternative review, per-stack Beagle skill reviews, arbiter pass, cross-stack merge, recommendation verification), with a `--shallow` single-skill mode for simpler projects. Every run is recorded as an ATIF v1.7 trajectory and archived (unless `--no-archive` is passed). A bitemporal corpus pipeline harvests, scores, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
@@ -78,6 +131,9 @@ daydream post-findings findings.json --pr 7 --head-sha <sha> --repo owner/repo  
 daydream --review --findings-out findings.json --pr-number 7 /path  # Phase A: emit findings artifact
 daydream feedback 42 --bot "<bot-login>[bot]" /path  # ingest and fix bot PR comments
 daydream ext validate                              # resolve-check the daydream_ext extension registry
+daydream improve /path/to/project                  # read-only audit and prioritized plans
+daydream improve plan "add rate limiting" /path/to/project
+daydream improve review-plan daydream_plans/001-rate-limiting.md /path/to/project
 ```
 
 ### Corpus Commands

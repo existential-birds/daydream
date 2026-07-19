@@ -25,6 +25,9 @@ make check     # lint + typecheck + full pytest (the gate)
 # Golden paths (near-zero-flag; `daydream /path` == `daydream review /path`)
 daydream /path/to/project                          # review -> fix -> test (deep multi-stack)
 daydream --comment /path/to/project                # review -> post inline PR comments, then exit
+daydream improve /path/to/project                  # read-only repo audit -> prioritized plans
+daydream improve plan "add rate limiting" /path/to/project  # investigate one request -> plan
+daydream improve review-plan daydream_plans/001-rate-limiting.md /path/to/project  # tighten a plan
 
 # Other verbs / flags
 daydream --shallow -s python /path/to/project      # shallow Python review-fix-test loop
@@ -110,7 +113,8 @@ and unusable.
 
 ```text
 cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
-              -> deep/orchestrator.py | flows/{shallow,review,pr_feedback}.py
+              -> deep/orchestrator.py | improve/orchestrator.py
+              |  flows/{shallow,review,pr_feedback}.py
               -> phases.py -> agent.py -> Backend.execute()
               \-> ui/ (terminal output)
 ```
@@ -118,9 +122,9 @@ cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
 - `runner.run()` is the async entry. It builds the per-run extension `Registry`
   (`build_registry()`), sets it on a `ContextVar`, and dispatches one of five
   registered flows — `deep` (default), `shallow`, `review` (`--review`/`--comment`),
-  `pr-feedback` (`daydream feedback <pr#>`), or a custom extension flow
-  (`--flow NAME`) — each a preamble plus `flows.run_flow()` over the flow's
-  ordered `FlowStep` list.
+  `pr-feedback` (`daydream feedback <pr#>`), or `improve`
+  (`daydream improve`) — or a custom extension flow (`--flow NAME`). Each uses
+  a preamble plus `flows.run_flow()` over the flow's ordered `FlowStep` list.
 - `agent.run_agent()` is the only agent call site. Never call a backend/SDK directly
   from phases. It wraps `Backend.execute()` and drives the Rich UI + trajectory recorder.
 - Subagent fan-out (exploration, per-stack review, parallel fix) is N parallel
@@ -137,6 +141,7 @@ cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
 | Flows | `FlowContext` + `run_flow()` engine (ordering, `enabled` gates, `Stop`/`BreakLoop`, loop groups); shallow/review/pr-feedback step functions | `flows/` |
 | Extensions | Versioned extension API: `Registry` (phases+flows, skill slots, named prompts, stack rules), `daydream_ext` loader, built-in seeding | `extensions/` |
 | Deep orchestrator | Deep-flow step functions (exploration, intent, alternatives, per-stack, arbiter, merge, verify, fix) | `deep/orchestrator.py` |
+| Improve advisor | Read-only repository reconnaissance, category audits, vetting, prioritization, and host-rendered plan artifacts | `improve/` |
 | Phases | Stateless async `phase_*()` workflow steps and prompt builders | `phases.py` |
 | Agent | Backend wrapper, event stream to UI, global state, budget enforcement | `agent.py` |
 | Trajectory | ATIF v1.7 recorder, redaction, ContextVar propagation | `trajectory.py` |
@@ -198,6 +203,22 @@ config-file phase override > config-file global > backend default. Resolved in
 `runner._resolve_backend()`. `[tool.daydream.phases.<phase>]` accepts any registered
 step's config key, including fork-defined phases (per-flow key tables in
 `docs/extensions.md`).
+
+Improve runtime controls are CLI-derived `RunConfig` fields:
+`improve_effort`, `improve_focus`, `improve_scope`,
+`improve_plan_description`, and `improve_review_plan`. They have no environment
+variable equivalents. Service discovery is config-file-only:
+
+```toml
+[tool.daydream.improve]
+service_roots = ["apps/*", "web"]
+
+[tool.daydream.improve.service_groups]
+commerce = ["apps/billing", "apps/catalog"]
+```
+
+Use the equivalent top-level `[improve]` and `[improve.service_groups]` tables
+in `.daydream.toml`.
 
 ### Deep-review pipeline
 
