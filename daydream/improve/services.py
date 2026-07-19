@@ -174,7 +174,7 @@ def _conventional_manifest_roots(repo_root: Path) -> list[Path]:
     for root_name in _CONVENTIONAL_ROOTS:
         parent = repo_root / root_name
         try:
-            children = parent.iterdir()
+            children = list(parent.iterdir())
         except OSError:
             continue
         for child in children:

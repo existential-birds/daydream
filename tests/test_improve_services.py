@@ -36,6 +36,10 @@ def test_single_package_repo_yields_no_services(tmp_path: Path) -> None:
     assert enumerate_services(tmp_path, DaydreamFileConfig()) == []
 
 
+def test_absent_conventional_roots_yield_no_services(tmp_path: Path) -> None:
+    assert enumerate_services(tmp_path, DaydreamFileConfig()) == []
+
+
 def test_scope_filters_search_not_read(tmp_path_repo: Path) -> None:
     services = enumerate_services(tmp_path_repo, DaydreamFileConfig())
     scoped = filter_scope(services, "apps/billing")
