@@ -1,13 +1,11 @@
-"""Pre-scan orchestrator.
+"""Exploration orchestrator.
 
-Counts changed files in a diff, selects an exploration tier (skip / single /
-parallel), launches specialist ``backend.execute()`` calls in parallel (one
-per specialist), parses each specialist's structured-JSON result into a partial
-``ExplorationContext``, and merges everything (including the static tree-sitter
-file map from ``detect_affected_files``) into a single context.
+Provides two exploration entries:
 
-The orchestrator is intentionally tier-driven so a trivial diff produces zero
-backend calls and a multi-file diff fans out to three parallel specialists.
+- ``pre_scan`` is diff-scoped. It selects a tier from changed-file count and
+  combines specialist results with the static tree-sitter file map.
+- ``repo_scan`` is repo-scoped. It seeds tracked files and runs only the
+  pattern-scanner specialist to discover repository conventions.
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
+from daydream import git_ops
 from daydream.exploration import (
     Convention,
     Dependency,
@@ -285,9 +284,79 @@ async def pre_scan(
     return merge_contexts(static_context, subagent_context)
 
 
+async def repo_scan(
+    backend: Backend,
+    repo_root: Path,
+    *,
+    max_files: int = 500,
+) -> ExplorationContext:
+    """Discover repository conventions from a bounded tracked-file seed."""
+    import anyio
+
+    from daydream.agent import run_agent
+
+    static_files: list[FileInfo] = []
+    try:
+        proc = git_ops._run_git(  # noqa: SLF001 - git_ops is the subprocess boundary
+            repo_root,
+            ["ls-files", "-z"],
+            capture_bytes=True,
+        )
+        if proc.returncode == 0:
+            stdout = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
+            paths = [
+                path.decode("utf-8", errors="surrogateescape")
+                for path in stdout.split(b"\0")
+                if path
+            ]
+            static_files = [
+                FileInfo(path=path, role="tracked")
+                for path in paths[:max(0, max_files)]
+            ]
+    except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+        pass
+
+    static_context = ExplorationContext(affected_files=static_files)
+    static_files_abs = [
+        FileInfo(path=str(repo_root / f.path), role=f.role, summary=f.summary)
+        for f in static_files
+    ]
+    results: dict[str, Any] = {}
+    recorder = get_current_recorder()
+
+    async def _run_specialist() -> None:
+        async with maybe_fork(recorder, "explore-pattern_scanner"):
+            try:
+                structured, _, _ = await run_agent(
+                    backend,
+                    repo_root,
+                    build_pattern_scanner_prompt(static_files_abs, "HEAD", cwd=repo_root),
+                    output_schema=PATTERN_SCANNER_SCHEMA,
+                    max_turns=EXPLORATION_MAX_TURNS,
+                    phase=DaydreamPhase.EXPLORATION,
+                    read_only=True,
+                )
+                if isinstance(structured, dict):
+                    results["pattern_scanner"] = structured
+            except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+                pass
+
+    with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS):
+        await _run_specialist()
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
+
+    if not results:
+        return static_context
+
+    return merge_contexts(static_context, _parse_envelope(results))
+
+
 __all__ = [
     "Tier",
     "count_changed_files",
     "pre_scan",
+    "repo_scan",
     "select_tier",
 ]
