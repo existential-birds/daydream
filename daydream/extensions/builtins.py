@@ -1,8 +1,8 @@
 """Built-in registry seed.
 
 ``register_builtins(registry)`` seeds the registry with everything daydream
-does today: built-in skill slots, prompt names, and all four flow definitions
-(pr-feedback, review/comment, shallow, deep).
+does today: built-in skill slots, prompt names, and all five flow definitions
+(pr-feedback, review/comment, shallow, deep, improve).
 
 Uses only function-local late imports (import-cycle guard): this module must
 not import from ``daydream.runner`` or ``daydream.phases`` at module level.
@@ -73,6 +73,7 @@ def _register_builtin_flows(registry: Registry) -> None:
     """Seed the built-in flow definitions."""
     from daydream.deep import orchestrator as deep
     from daydream.flows import pr_feedback, review, shallow
+    from daydream.improve import orchestrator as improve
 
     for step in pr_feedback.STEPS:
         registry.register_phase(step)
@@ -89,3 +90,7 @@ def _register_builtin_flows(registry: Registry) -> None:
     for step in deep.STEPS:
         registry.register_phase(step)
     registry.set_flow("deep", [step.name for step in deep.STEPS])
+
+    for step in improve.STEPS:
+        registry.register_phase(step)
+    registry.set_flow("improve", [step.name for step in improve.STEPS])

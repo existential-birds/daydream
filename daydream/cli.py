@@ -10,6 +10,7 @@ top-level ``TARGET`` positional):
 
 - ``daydream [review] <target>`` — the review/fix loop (default verb)
 - ``daydream feedback <pr#>`` — apply bot PR-review comments
+- ``daydream improve <target>`` — audit a repository and write advisory artifacts
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
 - ``daydream bench`` — score deep-review findings against the offline benchmark
 - ``daydream post-findings <artifact>`` — validate a Phase A findings artifact
@@ -58,7 +59,17 @@ if TYPE_CHECKING:
 # Verb-first dispatch table. ``_first_verb`` classifies the leading argv token;
 # anything that isn't an explicit verb (bare path, leading flag, empty argv)
 # falls through to the ``review`` golden path via the default-verb shim.
-KNOWN_VERBS = {"review", "feedback", "summarize", "corpus", "bench", "post-findings", "setup", "ext"}
+KNOWN_VERBS = {
+    "review",
+    "feedback",
+    "improve",
+    "summarize",
+    "corpus",
+    "bench",
+    "post-findings",
+    "setup",
+    "ext",
+}
 
 
 def _first_verb(argv: list[str]) -> str:
@@ -528,6 +539,60 @@ def _build_feedback_parser() -> argparse.ArgumentParser:
     )
     _add_shared_arguments(parser)
     return parser
+
+
+def _build_improve_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream improve <target>``."""
+    parser = argparse.ArgumentParser(
+        prog="daydream improve",
+        description="Audit a repository and write prioritized advisory artifacts.",
+    )
+    parser.add_argument("target", metavar="TARGET", help="Repository to audit")
+    parser.add_argument(
+        "--effort",
+        choices=["quick", "standard", "deep"],
+        default="standard",
+        dest="improve_effort",
+    )
+    parser.add_argument(
+        "--focus",
+        choices=["security", "performance", "tests", "branch", "next"],
+        default=None,
+        dest="improve_focus",
+    )
+    parser.add_argument(
+        "--scope",
+        default=None,
+        metavar="SERVICE_OR_GLOB",
+        dest="improve_scope",
+    )
+    _add_shared_arguments(parser)
+    return parser
+
+
+def _parse_improve_args(argv: list[str]) -> RunConfig:
+    """Parse an improve invocation into the shared run configuration."""
+    improve_argv = argv[1:] if argv and argv[0] == "improve" else argv
+    args = _build_improve_parser().parse_args(improve_argv)
+    _, pr_repo, file_config = _resolve_target_provenance(args.target)
+    return RunConfig(
+        target=args.target,
+        backend=args.backend,
+        model=args.model,
+        reasoning_effort=args.reasoning_effort,
+        file_config=file_config,
+        trajectory_path=args.trajectory_path,
+        pr_repo=pr_repo,
+        archive=not args.no_archive,
+        run_eval=args.run_eval,
+        dump_artifacts=args.dump_artifacts,
+        non_interactive=args.non_interactive,
+        assume=args.assume,
+        flow_name="improve",
+        improve_effort=args.improve_effort,
+        improve_focus=args.improve_focus,
+        improve_scope=args.improve_scope,
+    )
 
 
 class _HelpAllAction(argparse.Action):
@@ -1612,7 +1677,11 @@ def main() -> None:
         if verb == "ext":
             sys.exit(_handle_ext_command(argv[1:]))
 
-        config = _parse_args()
+        config = (
+            _parse_improve_args(argv)
+            if verb == "improve"
+            else _parse_args()
+        )
         if verb == "feedback":
             assert config.pr_number is not None  # _build_feedback_config guarantees
             exit_code = anyio.run(run_feedback, config, config.pr_number)

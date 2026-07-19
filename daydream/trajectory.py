@@ -177,6 +177,10 @@ class DaydreamPhase(str, Enum):
     DEEP = "deep"
     EXPLORATION = "exploration"
     VERIFY = "verify"
+    RECON = "recon"
+    AUDIT = "audit"
+    VET = "vet"
+    PLAN_WRITE = "plan_write"
 
 
 class DaydreamRunFlow(str, Enum):
@@ -190,6 +194,7 @@ class DaydreamRunFlow(str, Enum):
     PR = "pr"
     DEEP = "deep"
     CUSTOM = "custom"
+    IMPROVE = "improve"
 
 
 class Redactor:

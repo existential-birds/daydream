@@ -10,7 +10,7 @@ bare-target and explicit-``review`` forms are proven to parse identically.
 
 import pytest
 
-from daydream.cli import _first_verb, _parse_args
+from daydream.cli import _first_verb, _parse_args, _parse_improve_args
 from daydream.runner import RunConfig
 
 
@@ -30,3 +30,19 @@ def test_first_verb_routing() -> None:
 def test_bare_and_review_verb_parse_identically(argv: list[str]) -> None:
     cfg = _parse_argv_for_test(argv)
     assert cfg.target == "/t" and cfg.output_mode == "loop"
+
+
+def test_improve_verb_builds_improve_config() -> None:
+    config = _parse_improve_args(
+        ["improve", "/tmp/x", "--effort", "deep", "--focus", "security"]
+    )
+    assert (
+        config.flow_name,
+        config.improve_effort,
+        config.improve_focus,
+    ) == ("improve", "deep", "security")
+
+
+def test_improve_rejects_unknown_effort() -> None:
+    with pytest.raises(SystemExit):
+        _parse_improve_args(["improve", "/tmp/x", "--effort", "extreme"])

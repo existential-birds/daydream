@@ -203,7 +203,8 @@ policy or the built-in policy.
 
 ### Flows and steps
 
-Four flows are registered: `deep`, `shallow`, `review`, and `pr-feedback`.
+Five flows are registered: `deep`, `shallow`, `review`, `pr-feedback`, and
+`improve`.
 Each step's *config key* is its `[tool.daydream.phases.<key>]` key
 (`FlowStep.config_phase`, defaulting to the step name) — the key per-phase
 model/backend overrides resolve against.
@@ -269,6 +270,16 @@ an existing config key.
 | 3 | `fix-items` | `fix` |
 | 4 | `commit-push` | `review` |
 | 5 | `respond-feedback` | `pr_feedback` |
+
+#### `improve` (`daydream improve <target>`)
+
+| # | Step | Config key |
+|---|------|------------|
+| 1 | `recon` | `recon` |
+| 2 | `improve-report` | `recon` |
+
+The improve run configuration also carries `improve_effort`, `improve_focus`,
+`improve_scope`, `improve_plan_description`, and `improve_review_plan`.
 
 Steps carry `enabled` predicates internally (tier gates, `--loop` mode,
 resume points); a step listed here may be skipped for a given run, but the
