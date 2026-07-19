@@ -401,6 +401,56 @@ async def test_quick_effort_restricts_categories(
 
 
 @pytest.mark.anyio
+async def test_focus_security_audits_single_category(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_improve_stub(monkeypatch, improve_monorepo_target)
+    await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_focus="security",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    audited = json.loads(
+        _dd(improve_monorepo_target, "audit-findings.json").read_text()
+    )
+    assert audited["categories_run"] == ["security"]
+
+
+@pytest.mark.anyio
+async def test_focus_next_is_direction_only_and_plans_are_spikes(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_focus="next",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    audited = json.loads(
+        _dd(improve_monorepo_target, "audit-findings.json").read_text()
+    )
+    assert audited["categories_run"] == ["direction"]
+    audit_prompts = [
+        call["prompt"] for call in stub.calls if call["marker"] == "audit"
+    ]
+    assert audit_prompts and all(
+        "4–6 grounded suggestions" in prompt for prompt in audit_prompts
+    )
+    plan = next(
+        (improve_monorepo_target / "daydream_plans").glob("0*.md")
+    ).read_text()
+    assert "spike" in plan.lower()
+
+
+@pytest.mark.anyio
 async def test_failed_category_is_reported_not_silently_dropped(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

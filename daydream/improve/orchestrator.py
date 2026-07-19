@@ -292,13 +292,25 @@ def _stamp_finding(
     return stamped
 
 
+def resolve_categories(
+    tier: EffortTier,
+    focus: str | None,
+) -> tuple[str, ...]:
+    """Resolve the audit categories for an effort tier and optional focus."""
+    if focus in {"security", "performance", "tests"}:
+        return (focus,)
+    if focus == "next":
+        return ("direction",)
+    return tier.categories or AUDIT_CATEGORIES
+
+
 async def _step_audit(ctx: FlowContext) -> None:
     """Run tier-driven category audits and persist grounded findings."""
     directory: Path = ctx.data["improve_dir"]
     tier: EffortTier = ctx.data["effort_tier"]
     services: list[Service] = ctx.data["services"]
     stacks: list[StackAssignment] = ctx.data["stacks"]
-    categories = tier.categories or AUDIT_CATEGORIES
+    categories = resolve_categories(tier, ctx.config.improve_focus)
     assignments = _audit_assignments(ctx, categories, stacks)
     backend = ctx.backend_for("audit")
     recorder = get_current_recorder()
@@ -321,6 +333,11 @@ async def _step_audit(ctx: FlowContext) -> None:
                 else "Cover the remaining repository surface. Relevant tracked files: "
                 + (", ".join(assignment.files) or "(all tracked files)")
             )
+            if ctx.config.improve_focus == "next":
+                scope_note += (
+                    "\nReturn 4–6 grounded suggestions with honest tradeoffs "
+                    "and design/spike-sized next steps."
+                )
             prompt = ctx.registry.prompt("audit")(
                 category=assignment.category,
                 skill_invocation=invocation,
@@ -679,11 +696,14 @@ async def _step_select(ctx: FlowContext) -> Stop | None:
     """Persist the user's plan selection or the silent unattended default."""
     defects: list[dict[str, Any]] = ctx.data["defects"]
     direction: list[dict[str, Any]] = ctx.data["direction"]
-    default_numbers = _default_selection(defects)
+    default_findings = (
+        direction if ctx.config.improve_focus == "next" else defects
+    )
+    default_numbers = _default_selection(default_findings)
     mode = "non-interactive-default" if get_non_interactive() else "interactive"
     selected_numbers = default_numbers
 
-    if not defects:
+    if not default_findings:
         ctx.data["selected_findings"] = []
         ctx.data["selection_mode"] = mode
         (ctx.data["improve_dir"] / "selected.json").write_text(
