@@ -11,6 +11,8 @@ top-level ``TARGET`` positional):
 - ``daydream [review] <target>`` — the review/fix loop (default verb)
 - ``daydream feedback <pr#>`` — apply bot PR-review comments
 - ``daydream improve <target>`` — audit a repository and write advisory artifacts
+    - ``improve plan <description> <target>`` — investigate and write one plan
+    - ``improve review-plan <file> <target>`` — critique and tighten a durable plan
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
 - ``daydream bench`` — score deep-review findings against the offline benchmark
 - ``daydream post-findings <artifact>`` — validate a Phase A findings artifact
@@ -541,12 +543,27 @@ def _build_feedback_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_improve_parser() -> argparse.ArgumentParser:
-    """Build the parser for ``daydream improve <target>``."""
+def _build_improve_parser(
+    subverb: str | None = None,
+) -> argparse.ArgumentParser:
+    """Build the parser for an improve audit or manual sub-verb."""
+    suffix = f" {subverb}" if subverb else ""
     parser = argparse.ArgumentParser(
-        prog="daydream improve",
+        prog=f"daydream improve{suffix}",
         description="Audit a repository and write prioritized advisory artifacts.",
     )
+    if subverb == "plan":
+        parser.add_argument(
+            "improve_plan_description",
+            metavar="DESCRIPTION",
+            help="Change to investigate and turn into one implementation plan",
+        )
+    elif subverb == "review-plan":
+        parser.add_argument(
+            "improve_review_plan",
+            metavar="FILE",
+            help="Plan under TARGET/daydream_plans to critique and tighten",
+        )
     parser.add_argument("target", metavar="TARGET", help="Repository to audit")
     parser.add_argument(
         "--effort",
@@ -573,7 +590,14 @@ def _build_improve_parser() -> argparse.ArgumentParser:
 def _parse_improve_args(argv: list[str]) -> RunConfig:
     """Parse an improve invocation into the shared run configuration."""
     improve_argv = argv[1:] if argv and argv[0] == "improve" else argv
-    args = _build_improve_parser().parse_args(improve_argv)
+    subverb = (
+        improve_argv[0]
+        if improve_argv and improve_argv[0] in {"plan", "review-plan"}
+        else None
+    )
+    if subverb is not None:
+        improve_argv = improve_argv[1:]
+    args = _build_improve_parser(subverb).parse_args(improve_argv)
     _, pr_repo, file_config = _resolve_target_provenance(args.target)
     return RunConfig(
         target=args.target,
@@ -592,6 +616,10 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
         improve_effort=args.improve_effort,
         improve_focus=args.improve_focus,
         improve_scope=args.improve_scope,
+        improve_plan_description=getattr(
+            args, "improve_plan_description", None
+        ),
+        improve_review_plan=getattr(args, "improve_review_plan", None),
     )
 
 

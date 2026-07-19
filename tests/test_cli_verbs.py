@@ -43,6 +43,13 @@ def test_improve_verb_builds_improve_config() -> None:
     ) == ("improve", "deep", "security")
 
 
+def test_improve_plan_subverb_parses_description() -> None:
+    config = _parse_improve_args(
+        ["improve", "plan", "add rate limiting", "/tmp/x"]
+    )
+    assert config.improve_plan_description == "add rate limiting"
+
+
 def test_improve_rejects_unknown_effort() -> None:
     with pytest.raises(SystemExit):
         _parse_improve_args(["improve", "/tmp/x", "--effort", "extreme"])

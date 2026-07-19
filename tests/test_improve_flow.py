@@ -60,6 +60,8 @@ class _ImproveStubBackend:
             )
         elif "You are the improve vet." in prompt:
             marker = "vet"
+        elif "You are reviewing an existing daydream implementation plan" in prompt:
+            marker = "plan-reviewer"
         elif "You are writing a self-contained implementation plan" in prompt:
             marker = "plan-writer"
         self.calls.append(
@@ -220,6 +222,29 @@ class _ImproveStubBackend:
                         "## Done criteria\n\n- [ ] Tests pass.\n\n"
                         "## STOP conditions\n\nStop on drift.\n\n"
                         "## Maintenance notes\n\nReview carefully."
+                    ),
+                },
+                continuation=None,
+            )
+            return
+        if marker == "plan-reviewer":
+            yield ResultEvent(
+                structured_output={
+                    "critique": "The original plan lacked executable detail.",
+                    "markdown": (
+                        "# Plan 001: Fix\n\n"
+                        "## Status\n\n- **Priority**: P1\n\n"
+                        "## Why this matters\n\nConcrete impact.\n\n"
+                        "## Current state\n\n`apps/billing/api.py:1`.\n\n"
+                        "## Commands you will need\n\n"
+                        "| Purpose | Command | Expected on success |\n"
+                        "|---|---|---|\n"
+                        "| Test | `uv run pytest` | exit 0 |\n\n"
+                        "## Scope\n\nOnly `apps/billing/api.py`.\n\n"
+                        "## Steps\n\n### Step 1\n\nMake the change.\n\n"
+                        "## Test plan\n\nRun `uv run pytest`.\n\n"
+                        "## Done criteria\n\n- [ ] Tests pass.\n\n"
+                        "## STOP conditions\n\nStop on drift.\n"
                     ),
                 },
                 continuation=None,
@@ -670,3 +695,70 @@ async def test_report_orders_by_leverage_and_separates_direction(
     )
     assert "## Direction" in report
     assert "not audited" in report.lower()
+
+
+@pytest.mark.anyio
+async def test_plan_subverb_skips_audit_and_writes_single_plan(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_improve_stub(monkeypatch, improve_monorepo_target)
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    assert not _dd(improve_monorepo_target, "audit-findings.json").exists()
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert len(plans) == 1
+    assert "rate limiting" in plans[0].read_text().lower()
+
+
+@pytest.mark.anyio
+async def test_review_plan_rejects_files_outside_daydream_plans(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_improve_stub(monkeypatch, improve_monorepo_target)
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_review_plan="README.md",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 1
+
+
+@pytest.mark.anyio
+async def test_review_plan_tightens_in_place(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_improve_stub(monkeypatch, improve_monorepo_target)
+    plan = improve_monorepo_target / "daydream_plans" / "001-fix.md"
+    plan.parent.mkdir()
+    plan.write_text("# Plan 001: Fix\n\nMake the fix.\n")
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_review_plan=str(plan),
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    assert "## STOP conditions" in plan.read_text()

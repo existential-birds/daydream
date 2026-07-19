@@ -25,6 +25,17 @@ _BODY_SECTIONS = (
     "Done criteria",
     "STOP conditions",
 )
+_REQUIRED_PLAN_SECTIONS = (
+    "Status",
+    "Why this matters",
+    "Current state",
+    "Commands you will need",
+    "Scope",
+    "Steps",
+    "Test plan",
+    "Done criteria",
+    "STOP conditions",
+)
 
 
 def load_rejections(plans_dir: Path) -> dict[str, dict[str, Any]]:
@@ -91,6 +102,33 @@ def _section_content(markdown: str) -> dict[str, str]:
         end = matches[index + 1].start() if index + 1 < len(matches) else None
         sections[match.group(1)] = markdown[match.end() : end].strip()
     return sections
+
+
+def missing_required_sections(markdown: str) -> tuple[str, ...]:
+    """Return required plan sections that are absent or empty."""
+    sections = _section_content(markdown)
+    return tuple(
+        section
+        for section in _REQUIRED_PLAN_SECTIONS
+        if not sections.get(section, "").strip()
+    )
+
+
+def resolve_review_plan_path(repo: Path, requested: str) -> Path:
+    """Resolve a review target confined to ``repo/daydream_plans``."""
+    plans_dir = (repo / "daydream_plans").resolve()
+    candidate = Path(requested)
+    if not candidate.is_absolute():
+        candidate = repo / candidate
+    candidate = candidate.resolve()
+    if not candidate.is_relative_to(plans_dir):
+        raise ValueError(
+            "review-plan only accepts files under "
+            f"{plans_dir}; received {requested!r}"
+        )
+    if not candidate.is_file():
+        raise ValueError(f"review-plan file does not exist: {candidate}")
+    return candidate
 
 
 def _scope_paths(finding: dict[str, Any]) -> list[str]:
