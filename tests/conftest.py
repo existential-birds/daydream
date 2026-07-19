@@ -146,6 +146,26 @@ def repo_with_origin(tmp_path: Path, bare_origin: Path) -> Path:
 
 
 @pytest.fixture
+def improve_monorepo_target(tmp_path: Path) -> Path:
+    """Committed multi-service repository for improve-flow real-path tests."""
+    project = tmp_path / "improve_monorepo"
+    for service in ("billing", "catalog"):
+        root = project / "apps" / service
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
+        (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
+    web = project / "web"
+    web.mkdir()
+    (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
+    (project / "README.md").write_text("# Improve monorepo\n")
+    (project / "pyproject.toml").write_text("[project]\nname = \"improve-monorepo\"\n")
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    return project
+
+
+@pytest.fixture
 def multi_stack_target(tmp_path: Path) -> Path:
     """Git repo with a Python + React + Markdown diff on a feature branch.
 
