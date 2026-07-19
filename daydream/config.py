@@ -247,7 +247,7 @@ EFFORT_TIERS: dict[str, EffortTier] = {
     ),
     "deep": EffortTier(
         categories=None,
-        max_concurrency=8,
+        max_concurrency=4,
         high_confidence_only=False,
         max_findings=None,
         include_investigate=True,

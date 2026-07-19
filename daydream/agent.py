@@ -30,6 +30,7 @@ from daydream.backends import (
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
+    TurnEndEvent,
 )
 from daydream.config import UNKNOWN_SKILL_PATTERN
 from daydream.extensions import get_registry
@@ -641,6 +642,7 @@ async def run_agent(
                             pass
                         if inv is not None:
                             inv.mark_aborted(budget_reason)
+                            inv.observe(TurnEndEvent())
                         if _state.log_mode:
                             print(f"[aborted] {budget_reason}", flush=True)
                         elif use_callback and progress_callback is not None:

@@ -38,12 +38,16 @@ class FlowContext:
         work: The resolved workspace for the run.
         registry: The per-run extension registry the flow resolves against.
         data: Cross-step scratch state; steps replace locals with keys here.
+        wall_budget_s: Per-agent wall-clock limit for this flow.
+        tool_call_budget: Per-agent tool-call limit for this flow.
     """
 
     config: RunConfig
     work: WorkContext
     registry: Registry
     data: dict[str, Any] = field(default_factory=dict)
+    wall_budget_s: float | None = None
+    tool_call_budget: int | None = None
     _backend_cache: dict[tuple[str, str | None, str | None], Backend] = field(
         default_factory=dict, repr=False
     )

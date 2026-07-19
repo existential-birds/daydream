@@ -465,8 +465,9 @@ class Invocation:
 
         The reason is stamped onto the closing Step's ``extra["stop_reason"]``
         when the open step is finalized (mirrors the ``extra["partial_step"]``
-        mechanism). ATIF's Step model has no dedicated status field, so the
-        ``extra`` dict is the established extension point.
+        mechanism), and the trajectory and its ancestors are marked partial.
+        ATIF's Step model has no dedicated status field, so the ``extra`` dict
+        is the established extension point.
 
         If the budget fires before any event is received, no step is open yet,
         so we open one here to ensure ``_close_open_step`` (called from
@@ -474,6 +475,10 @@ class Invocation:
         """
         self._stop_reason = reason
         self._ensure_open_step()
+        recorder: TrajectoryRecorder | None = self.recorder
+        while recorder is not None:
+            recorder._aborted = True
+            recorder = recorder.parent
 
     def mark_errored(self, subtype: str) -> None:
         """Record that this invocation ended in a fatal error.

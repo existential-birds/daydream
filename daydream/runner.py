@@ -52,6 +52,8 @@ from daydream.agent import (
 )
 from daydream.backends import Backend, create_backend
 from daydream.config import (
+    DEFAULT_TOOL_CALL_BUDGET,
+    DEFAULT_WALL_BUDGET_S,
     EFFORT_TIERS,
     PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_MODELS,
@@ -1050,7 +1052,13 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         work=work,
         flow_kind=DaydreamRunFlow.IMPROVE,
     ):
-        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx = FlowContext(
+            config=config,
+            work=work,
+            registry=get_registry(),
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        )
         ctx.data["improve_dir"] = directory
         ctx.data["effort_tier"] = tier
 

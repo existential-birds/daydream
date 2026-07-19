@@ -14,6 +14,7 @@ import re
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from daydream import git_ops
+from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.exploration import (
     Convention,
     Dependency,
@@ -237,6 +238,8 @@ async def pre_scan(
                 structured, _, _ = await run_agent(
                     backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
                     phase=DaydreamPhase.EXPLORATION,
+                    wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                 )
                 if isinstance(structured, dict):
                     results[name] = structured
@@ -324,6 +327,8 @@ async def repo_scan(
                     max_turns=EXPLORATION_MAX_TURNS,
                     phase=DaydreamPhase.EXPLORATION,
                     read_only=True,
+                    wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                 )
                 if isinstance(structured, dict):
                     results["pattern_scanner"] = structured

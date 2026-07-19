@@ -48,7 +48,7 @@ class _ImproveStubBackend:
     ):
         marker = "other"
         category = None
-        if "you are a **pattern-scanner** specialist" in prompt.lower():
+        if "you are the **pattern-scanner** specialist" in prompt.lower():
             marker = "repo-scan"
         elif "IMPROVE_RECON" in prompt:
             marker = "recon"
@@ -373,6 +373,7 @@ async def test_repo_scan_seeds_specialists_from_tracked_files(tmp_git_repo: Path
     ctx = await repo_scan(stub, tmp_git_repo, max_files=500)
     assert any(c.name == "OpenAPI First" for c in ctx.conventions)
     prompt = stub.calls[0]["prompt"]
+    assert stub.calls[0]["marker"] == "repo-scan"
     assert "api.py" in prompt
     assert stub.calls[0]["read_only"] is True
 

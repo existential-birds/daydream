@@ -227,6 +227,8 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             phase=DaydreamPhase.RECON,
             output_schema=_RECON_SCHEMA,
             read_only=True,
+            wall_budget_s=ctx.wall_budget_s,
+            tool_call_budget=ctx.tool_call_budget,
         )
 
     recon_data = recon if isinstance(recon, dict) else {}
@@ -493,6 +495,8 @@ async def _step_audit(ctx: FlowContext) -> None:
                                     else AUDIT_FINDINGS_SCHEMA
                                 ),
                                 read_only=True,
+                                wall_budget_s=ctx.wall_budget_s,
+                                tool_call_budget=ctx.tool_call_budget,
                             )
                         raw_findings = (
                             output.get("findings", [])
@@ -678,6 +682,8 @@ async def _step_vet(ctx: FlowContext) -> None:
                         else VET_SCHEMA
                     ),
                     read_only=True,
+                    wall_budget_s=ctx.wall_budget_s,
+                    tool_call_budget=ctx.tool_call_budget,
                 )
         except Exception:  # noqa: BLE001 - no verdict fails closed
             output = {}
@@ -1021,6 +1027,8 @@ async def _review_plan(ctx: FlowContext, requested: str) -> None:
                 phase=DaydreamPhase.PLAN_WRITE,
                 output_schema=_PLAN_REVIEW_SCHEMA,
                 read_only=True,
+                wall_budget_s=ctx.wall_budget_s,
+                tool_call_budget=ctx.tool_call_budget,
             )
         if not isinstance(output, dict):
             raise ValueError("plan reviewer returned no object")
@@ -1124,6 +1132,8 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                                     phase=DaydreamPhase.PLAN_WRITE,
                                     output_schema=PLAN_WRITER_SCHEMA,
                                     read_only=True,
+                                    wall_budget_s=ctx.wall_budget_s,
+                                    tool_call_budget=ctx.tool_call_budget,
                                 )
                         if not isinstance(output, dict):
                             raise ValueError("plan writer returned no object")
