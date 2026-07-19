@@ -2723,7 +2723,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
 def test_intent_phase_resolves_to_sonnet_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC3: the ``intent`` phase resolves to ``claude-sonnet-4-6`` by default.
+    """AC3: the ``intent`` phase resolves to ``claude-sonnet-5`` by default.
 
     Intent summarization is a single mid-complexity turn that does not need Opus;
     Sonnet matches the FIX/TEST/EXPLORATION/PER_STACK_REVIEW tier. Captures the
@@ -2746,8 +2746,8 @@ def test_intent_phase_resolves_to_sonnet_default(
 
     # Default: intent lands on Sonnet (mid tier), not Opus.
     backend = _resolve_backend(RunConfig(), "intent", {})
-    assert backend.model == "claude-sonnet-4-6", (
-        f"intent phase default should be claude-sonnet-4-6, got {backend.model!r}"
+    assert backend.model == "claude-sonnet-5", (
+        f"intent phase default should be claude-sonnet-5, got {backend.model!r}"
     )
 
     # An explicit global model override still wins over the phase default.
@@ -2768,7 +2768,7 @@ async def test_intent_phase_runs_on_sonnet_through_runner_run(
     real-path counterpart: it drives runner.run via _run_deep (which calls
     ``await run(config)``), captures the model on the backend that actually
     executes the intent prompt via _install_model_capturing_stubs, and asserts
-    it is claude-sonnet-4-6 (mid tier). Mirrors the exact pattern of
+    it is claude-sonnet-5 (mid tier). Mirrors the exact pattern of
     test_per_stack_sonnet_merge_opus_and_arbiter_on_high_severity. Regression: a
     revert of the intent default to Opus fails this assertion.
     """
@@ -2788,8 +2788,8 @@ async def test_intent_phase_runs_on_sonnet_through_runner_run(
         if "understand the intent of these changes" in c["prompt"].lower()
     ]
     assert intent_models, "intent phase did not execute through runner.run"
-    assert set(intent_models) == {"claude-sonnet-4-6"}, (
-        f"intent phase should run on claude-sonnet-4-6 (mid tier), got {sorted(intent_models)!r}"
+    assert set(intent_models) == {"claude-sonnet-5"}, (
+        f"intent phase should run on claude-sonnet-5 (mid tier), got {sorted(intent_models)!r}"
     )
 
 
@@ -3450,7 +3450,7 @@ async def test_per_stack_sonnet_merge_opus_and_arbiter_on_high_severity(
     # (a) Per-stack fan-out created with a Sonnet model id (N>1 multi-stack).
     per_stack_models = models_where(lambda pl: "you are reviewing the" in pl and "stack" in pl)
     assert len(per_stack_models) >= 2, f"expected an N>1 fan-out, got {per_stack_models!r}"
-    assert set(per_stack_models) == {"claude-sonnet-4-6"}
+    assert set(per_stack_models) == {"claude-sonnet-5"}
 
     # (b) Merge backend created with an Opus model id.
     assert models_where(lambda pl: "cross-stack merge agent" in pl) == ["claude-opus-4-8"]
@@ -3523,7 +3523,7 @@ async def test_no_arbiter_when_all_findings_low_and_uncontested(
     per_stack_models = {
         c["model"] for c in calls if "you are reviewing the" in c["prompt"].lower() and "stack" in c["prompt"].lower()
     }
-    assert per_stack_models == {"claude-sonnet-4-6"}
+    assert per_stack_models == {"claude-sonnet-5"}
 
 
 # Issue #232: precision-mode suppression pass over borderline uncontested findings.
@@ -3648,7 +3648,7 @@ async def test_precision_on_drops_unconfirmed_low_finding(
     # phase key (Sonnet), NOT per-finding Opus.
     sup_calls = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
     assert len(sup_calls) == 1, f"suppression must make exactly one batched call, got {len(sup_calls)}"
-    assert sup_calls[0]["model"] == "claude-sonnet-4-6"
+    assert sup_calls[0]["model"] == "claude-sonnet-5"
 
     # The arbiter still ran on the HIGH finding (fail-open, unchanged by #232).
     arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]

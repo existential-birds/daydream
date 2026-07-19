@@ -362,6 +362,7 @@ def _accumulate_metrics(
         cached_input_tokens=cached,
         output_tokens=completion,
         prices=prices,
+        effective_date=_parse_ts(step.timestamp).date() if step.timestamp else None,
     )
     if synth is None:
         phase.cost_unknown = True

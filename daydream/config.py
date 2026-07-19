@@ -18,6 +18,9 @@ Exports:
         model mapping. Outer key is backend name ("claude" or "codex"),
         inner key is the phase name (lowercase, e.g. "review", "parse", "fix"),
         value is the concrete model id.
+    PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] - Per-backend per-phase default
+        reasoning effort, same key shape as PHASE_DEFAULT_MODELS. Only consumed by
+        the Codex backend.
     STRUCTURE_SKILL: str - Beagle skill name for the structural-maintainability
         meta-stack reviewer. Invoked internally by deep mode; not user-selectable
         (intentionally absent from REVIEW_SKILLS, SKILL_MAP, and ReviewSkillChoice).
@@ -31,9 +34,9 @@ from enum import Enum
 # when no explicit override is supplied. Every other layer takes ``model: str``
 # as required and does no fallback of its own.
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
-DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_PI_MODEL = "glm-5.2"
-DEFAULT_EXPLORATION_MODEL = "claude-sonnet-4-6"
+DEFAULT_EXPLORATION_MODEL = "claude-sonnet-5"
 
 # Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).
 DEFAULT_WALL_BUDGET_S = 1800.0
@@ -68,6 +71,12 @@ DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 #   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT, SUPPRESSION
 #   - heavy (opus):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER
 #
+# Codex tiering mirrors it across the GPT-5.6 lineup:
+#   - cheap (gpt-5.6-luna):   PARSE
+#   - mid   (gpt-5.6-terra):  FIX, TEST, VERIFY, EXPLORATION, PER_STACK_REVIEW,
+#                             INTENT, SUPPRESSION, SUPERVISE
+#   - heavy (gpt-5.6-sol):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER
+#
 # ``suppression`` (issue #232) is the precision-mode skeptical second opinion over
 # borderline uncontested findings; it runs on the cheap mid tier by design (never
 # per-finding Opus) -- one batched Sonnet call over all suppression targets.
@@ -80,9 +89,8 @@ DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 # findings they surface. ``per_stack_review`` is independently overridable from
 # ``review``/``wonder``/``merge``.
 #
-# Codex side defaults to ``gpt-5.5`` across the board in v1; per-phase tiering
-# for codex is deferred until concrete model picks across the codex lineup are
-# settled.
+# ``PHASE_DEFAULT_EFFORT`` supplies the matching per-phase reasoning-effort
+# defaults; see its own docstring below.
 #
 # Pi's ``DEFAULT_PI_MODEL`` is resolved by ``PiBackend`` after Pi's own settings
 # have had a chance to select a model. It is a backend fallback, not a
@@ -90,35 +98,67 @@ DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
     "claude": {
         "parse": "claude-haiku-4-5",
-        "fix": "claude-sonnet-4-6",
-        "test": "claude-sonnet-4-6",
-        "verify": "claude-sonnet-4-6",
-        "exploration": "claude-sonnet-4-6",
-        "per_stack_review": "claude-sonnet-4-6",
+        "fix": "claude-sonnet-5",
+        "test": "claude-sonnet-5",
+        "verify": "claude-sonnet-5",
+        "exploration": "claude-sonnet-5",
+        "per_stack_review": "claude-sonnet-5",
         "review": "claude-opus-4-8",
         "arbiter": "claude-opus-4-8",
-        "suppression": "claude-sonnet-4-6",
-        "supervise": "claude-sonnet-4-6",
+        "suppression": "claude-sonnet-5",
+        "supervise": "claude-sonnet-5",
         "wonder": "claude-opus-4-8",
         "merge": "claude-opus-4-8",
-        "intent": "claude-sonnet-4-6",
+        "intent": "claude-sonnet-5",
         "pr_feedback": "claude-opus-4-8",
     },
     "codex": {
-        "parse": "gpt-5.5",
-        "fix": "gpt-5.5",
-        "test": "gpt-5.5",
-        "verify": "gpt-5.5",
-        "exploration": "gpt-5.5",
-        "per_stack_review": "gpt-5.5",
-        "review": "gpt-5.5",
-        "arbiter": "gpt-5.5",
-        "suppression": "gpt-5.5",
-        "supervise": "gpt-5.5",
-        "wonder": "gpt-5.5",
-        "merge": "gpt-5.5",
-        "intent": "gpt-5.5",
-        "pr_feedback": "gpt-5.5",
+        "parse": "gpt-5.6-luna",
+        "fix": "gpt-5.6-terra",
+        "test": "gpt-5.6-terra",
+        "verify": "gpt-5.6-terra",
+        "exploration": "gpt-5.6-terra",
+        "per_stack_review": "gpt-5.6-terra",
+        "review": "gpt-5.6-sol",
+        "arbiter": "gpt-5.6-sol",
+        "suppression": "gpt-5.6-terra",
+        "supervise": "gpt-5.6-terra",
+        "wonder": "gpt-5.6-sol",
+        "merge": "gpt-5.6-sol",
+        "intent": "gpt-5.6-terra",
+        "pr_feedback": "gpt-5.6-sol",
+    },
+}
+
+# Per-backend per-phase default reasoning effort, resolved by
+# ``daydream.runner._resolved_reasoning_effort`` as the lowest precedence tier
+# (below ``--reasoning-effort`` and both config-file tiers). A backend absent
+# from this table, or a phase absent from its sub-table, resolves to ``None`` —
+# the backend then applies its own ambient default.
+#
+# Only Codex consumes the resolved value. GPT-5.6 accepts ``none``, ``low``,
+# ``medium``, ``high``, ``xhigh``, and ``max``, defaulting to ``medium``.
+# Tiering follows OpenAI's guidance: ``low`` for latency-sensitive mechanical
+# work, ``medium`` as the balanced baseline, ``high``/``xhigh`` where more
+# reasoning buys measured quality. ``arbiter`` gets ``xhigh`` because it is the
+# scoped quality-first pass over only high-severity/contested findings, so the
+# extra reasoning is bounded to a small input.
+PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
+    "codex": {
+        "parse": "low",
+        "fix": "medium",
+        "test": "medium",
+        "verify": "medium",
+        "exploration": "low",
+        "per_stack_review": "high",
+        "review": "high",
+        "arbiter": "xhigh",
+        "suppression": "medium",
+        "supervise": "medium",
+        "wonder": "high",
+        "merge": "medium",
+        "intent": "medium",
+        "pr_feedback": "high",
     },
 }
 

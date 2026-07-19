@@ -12,8 +12,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from daydream.backends.codex import CodexBackend
 from daydream.config_file import DaydreamFileConfig
-from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model, _resolved_reasoning_effort
+from daydream.runner import (
+    RunConfig,
+    _resolve_backend,
+    _resolved_backend_name,
+    _resolved_model,
+    _resolved_reasoning_effort,
+)
 
 
 def test_model_precedence_cli_over_file_over_table(monkeypatch, tmp_path: Path) -> None:
@@ -40,7 +47,7 @@ def test_per_stack_review_and_arbiter_resolution(tmp_path: Path) -> None:
     ``review``.
     """
     bare = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
-    assert _resolved_model(bare, "per_stack_review") == "claude-sonnet-4-6"  # table default
+    assert _resolved_model(bare, "per_stack_review") == "claude-sonnet-5"    # table default
     assert _resolved_model(bare, "arbiter") == "claude-opus-4-8"             # table default
     assert _resolved_model(bare, "review") == "claude-opus-4-8"              # unchanged
 
@@ -104,6 +111,67 @@ def test_reasoning_effort_precedence_cli_over_file(tmp_path: Path) -> None:
     assert _resolved_reasoning_effort(cfg, "review") == "file-global"  # no phase override -> file global
     cfg2 = RunConfig(target=str(tmp_path), reasoning_effort=None, file_config=DaydreamFileConfig())
     assert _resolved_reasoning_effort(cfg2, "review") is None  # no source -> backend applies its own default
+
+
+def _codex_backend(cfg: RunConfig, phase: str, cache: dict | None = None) -> CodexBackend:
+    """Resolve ``phase`` and narrow to the concrete Codex backend under test."""
+    backend = _resolve_backend(cfg, phase, cache)
+    assert isinstance(backend, CodexBackend), f"{phase} should resolve to a CodexBackend, got {type(backend)}"
+    return backend
+
+
+def test_phase_default_effort_table_is_the_lowest_precedence_tier(tmp_path: Path) -> None:
+    """``PHASE_DEFAULT_EFFORT`` supplies a per-phase effort when no higher tier does.
+
+    Asserts on the effort the resolved ``CodexBackend`` actually carries — that
+    is the value forwarded to the ``codex`` CLI — not on the helper alone.
+    """
+    bare = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=DaydreamFileConfig())
+    # (a) no override anywhere -> the phase's table default, tiered per phase.
+    assert _codex_backend(bare, "arbiter").reasoning_effort == "xhigh"
+    assert _codex_backend(bare, "review").reasoning_effort == "high"
+    assert _codex_backend(bare, "fix").reasoning_effort == "medium"
+    assert _codex_backend(bare, "parse").reasoning_effort == "low"
+
+    # (b) a config-file phase override beats the table, and only for that phase.
+    fc = DaydreamFileConfig(model=None, backend=None, phases={"parse": {"reasoning_effort": "xhigh"}})
+    cfg = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=fc)
+    assert _codex_backend(cfg, "parse").reasoning_effort == "xhigh"
+    assert _codex_backend(cfg, "fix").reasoning_effort == "medium"  # still the table default
+
+    # (c) --reasoning-effort beats both the file override and the table, everywhere.
+    cfg.reasoning_effort = "low"
+    assert _codex_backend(cfg, "parse").reasoning_effort == "low"
+    assert _codex_backend(cfg, "arbiter").reasoning_effort == "low"
+
+    # A config-file *global* also outranks the table but loses to the CLI.
+    fc_global = DaydreamFileConfig(model=None, backend=None, reasoning_effort="high")
+    cfg2 = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=fc_global)
+    assert _codex_backend(cfg2, "parse").reasoning_effort == "high"
+
+
+def test_claude_phases_resolve_to_no_reasoning_effort(tmp_path: Path) -> None:
+    """Only Codex has an effort table, so Claude phases carry no effort at all."""
+    cfg = RunConfig(target=str(tmp_path), backend="claude", model=None, file_config=DaydreamFileConfig())
+    assert _resolved_reasoning_effort(cfg, "arbiter") is None
+    backend = _resolve_backend(cfg, "arbiter")
+    assert getattr(backend, "reasoning_effort", None) is None
+
+
+def test_backend_cache_splits_on_table_default_effort(tmp_path: Path) -> None:
+    """Two codex phases sharing a model but not an effort must not share a backend.
+
+    ``review`` and ``arbiter`` both default to ``gpt-5.6-sol`` but to ``high``
+    and ``xhigh`` respectively, so the cache key must keep them distinct.
+    """
+    cfg = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=DaydreamFileConfig())
+    cache: dict = {}
+    review = _codex_backend(cfg, "review", cache)
+    arbiter = _codex_backend(cfg, "arbiter", cache)
+    assert review.model == arbiter.model == "gpt-5.6-sol"
+    assert review is not arbiter
+    assert (review.reasoning_effort, arbiter.reasoning_effort) == ("high", "xhigh")
+    assert _resolve_backend(cfg, "review", cache) is review  # still cached per (backend, model, effort)
 
 
 def test_pi_native_model_is_not_replaced_by_glm_fallback(tmp_path: Path) -> None:

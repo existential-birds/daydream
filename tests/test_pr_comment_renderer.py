@@ -107,6 +107,21 @@ def _write_trajectory(
     return p
 
 
+def test_archived_claude_sonnet_5_usage_keeps_its_introductory_rate(tmp_path: Path) -> None:
+    """Rendering after the transition uses the archived step's usage date."""
+    step = _agent_step(
+        step_id=2,
+        phase="review",
+        model="claude-sonnet-5",
+        prompt=2_000_000,
+        completion=1_000_000,
+        cached=1_000_000,
+    )
+    step["timestamp"] = "2026-08-31T12:00:00.000000Z"
+    trajectory = _write_trajectory(tmp_path, steps=[_user_step(), step], model="claude-sonnet-5")
+    assert "- **Cost:** $12.20" in render_run_info_block([trajectory])
+
+
 # M1 — visible rollup
 def test_m1_visible_rollup_includes_required_fields() -> None:
     """Rollup must list Model, Cost, Tokens, Steps/tool calls (Mode line dropped)."""

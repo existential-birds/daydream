@@ -3,6 +3,7 @@
 from daydream.config import (
     DEFAULT_EXPLORATION_MODEL,
     DEFAULT_PI_MODEL,
+    PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_MODELS,
 )
 
@@ -32,33 +33,53 @@ def test_phase_default_models_claude_tier_assignments():
         assert claude[phase] == "claude-opus-4-8"
     # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT
     for phase in ("fix", "test", "exploration", "per_stack_review", "intent"):
-        assert claude[phase] == "claude-sonnet-4-6"
+        assert claude[phase] == "claude-sonnet-5"
 
 
 def test_per_stack_review_and_arbiter_split():
     """#168: per-stack fan-out defaults to Sonnet; the arbiter stays on Opus."""
     claude = PHASE_DEFAULT_MODELS["claude"]
-    assert claude["per_stack_review"] == "claude-sonnet-4-6"
+    assert claude["per_stack_review"] == "claude-sonnet-5"
     assert claude["arbiter"] == "claude-opus-4-8"
     codex = PHASE_DEFAULT_MODELS["codex"]
-    assert codex["per_stack_review"] == "gpt-5.5"
-    assert codex["arbiter"] == "gpt-5.5"
+    assert codex["per_stack_review"] == "gpt-5.6-terra"
+    assert codex["arbiter"] == "gpt-5.6-sol"
 
 
 def test_suppression_uses_cheap_tier():
     """#232: the precision-mode suppression pass defaults to the cheap mid tier
     (never per-finding Opus). Pi keeps its single backend fallback."""
-    assert PHASE_DEFAULT_MODELS["claude"]["suppression"] == "claude-sonnet-4-6"
-    assert PHASE_DEFAULT_MODELS["codex"]["suppression"] == "gpt-5.5"
+    assert PHASE_DEFAULT_MODELS["claude"]["suppression"] == "claude-sonnet-5"
+    assert PHASE_DEFAULT_MODELS["codex"]["suppression"] == "gpt-5.6-terra"
     assert DEFAULT_PI_MODEL == "glm-5.2"
 
 
-def test_phase_default_models_codex_uses_gpt_5_5_for_every_phase():
+def test_phase_default_models_codex_tier_assignments():
+    """Codex mirrors the Claude cheap/mid/heavy tiering across the GPT-5.6 lineup."""
     codex = PHASE_DEFAULT_MODELS["codex"]
-    for phase in PHASE_NAMES:
-        assert codex[phase] == "gpt-5.5", (
-            f"codex phase {phase} should default to gpt-5.5 in v1"
-        )
+    assert codex["parse"] == "gpt-5.6-luna"
+    for phase in ("fix", "test", "verify", "exploration", "per_stack_review", "suppression", "supervise", "intent"):
+        assert codex[phase] == "gpt-5.6-terra", f"codex phase {phase} should default to the mid tier"
+    for phase in ("review", "arbiter", "wonder", "merge", "pr_feedback"):
+        assert codex[phase] == "gpt-5.6-sol", f"codex phase {phase} should default to the heavy tier"
+
+
+def test_phase_default_effort_is_codex_only_and_covers_every_phase():
+    """Only Codex consumes reasoning effort, so only Codex has a default table."""
+    assert set(PHASE_DEFAULT_EFFORT.keys()) == {"codex"}
+    assert set(PHASE_DEFAULT_EFFORT["codex"].keys()) == PHASE_NAMES
+
+
+def test_phase_default_effort_tier_assignments():
+    effort = PHASE_DEFAULT_EFFORT["codex"]
+    for phase in ("parse", "exploration"):
+        assert effort[phase] == "low", f"{phase} should be latency-tier effort"
+    for phase in ("fix", "test", "verify", "suppression", "supervise", "merge", "intent"):
+        assert effort[phase] == "medium", f"{phase} should be baseline effort"
+    for phase in ("per_stack_review", "review", "wonder", "pr_feedback"):
+        assert effort[phase] == "high", f"{phase} should be high effort"
+    # The arbiter is the scoped quality-first pass over a small input.
+    assert effort["arbiter"] == "xhigh"
 
 
 def test_pi_model_is_a_backend_fallback_not_a_phase_override():

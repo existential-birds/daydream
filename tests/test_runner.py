@@ -334,13 +334,13 @@ class TestResolveBackendPhaseModel:
     def test_codex_table_default(self):
         config = RunConfig(backend="codex")
         backend = runner._resolve_backend(config, "parse")
-        assert backend.model == "gpt-5.5"
+        assert backend.model == "gpt-5.6-luna"  # codex PARSE default (cheap tier)
 
     def test_backend_override_uses_overridden_backends_table(self):
         # review_backend=codex while default is claude: resolver must use the codex table.
         config = RunConfig(backend="claude", review_backend="codex")
         backend = runner._resolve_backend(config, "review")
-        assert backend.model == "gpt-5.5"  # codex REVIEW default (v1)
+        assert backend.model == "gpt-5.6-sol"  # codex REVIEW default (heavy tier)
 
     def test_cache_returns_same_instance_for_same_phase_and_backend(self):
         cache: dict = {}
