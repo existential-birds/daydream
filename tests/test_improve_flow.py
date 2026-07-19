@@ -698,6 +698,32 @@ async def test_report_orders_by_leverage_and_separates_direction(
 
 
 @pytest.mark.anyio
+async def test_scope_slices_search_but_report_names_the_unaudited_rest(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_scope="apps/billing",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    assert all("apps/billing" in call["prompt"] for call in audit_calls)
+    assert any(
+        "bounds where the audit searches" in call["prompt"].lower()
+        for call in audit_calls
+    )
+    report = _dd(improve_monorepo_target, "report.md").read_text()
+    assert "catalog" in report and "not audited" in report.lower()
+
+
+@pytest.mark.anyio
 async def test_plan_subverb_skips_audit_and_writes_single_plan(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -34,7 +34,12 @@ from daydream.improve.plans import (
     resolve_review_plan_path,
     write_plans,
 )
-from daydream.improve.prioritize import order_by_leverage, partition_direction
+from daydream.improve.prioritize import (
+    aggregate_cross_service,
+    leverage_score,
+    order_by_leverage,
+    partition_direction,
+)
 from daydream.improve.prompts import (
     AUDIT_FINDINGS_SCHEMA,
     PLAN_WRITER_SCHEMA,
@@ -195,7 +200,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     ctx.data["branch_diff"] = branch_diff
     ctx.data["branch_files"] = branch_files
 
-    services = (
+    all_services = (
         []
         if description_mode
         else enumerate_services(
@@ -203,6 +208,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             ctx.config.file_config or DaydreamFileConfig(),
         )
     )
+    services = all_services
     if ctx.config.improve_scope and not description_mode:
         try:
             services = filter_scope(services, ctx.config.improve_scope)
@@ -247,6 +253,9 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             skill_availability=availability,
             registry=ctx.registry,
         )
+        if ctx.config.improve_scope:
+            stacks = _stacks_for_services(stacks, services)
+    ctx.data["all_services"] = all_services
     ctx.data["services"] = services
     ctx.data["recon"] = recon_data
     ctx.data["stacks"] = stacks
@@ -302,6 +311,30 @@ def _services_for_files(
             for path in files
         )
     ]
+
+
+def _stacks_for_services(
+    stacks: list[StackAssignment],
+    services: list[Service],
+) -> list[StackAssignment]:
+    roots = tuple(service.root.as_posix() for service in services)
+    scoped: list[StackAssignment] = []
+    for stack in stacks:
+        files = [
+            path
+            for path in stack.files
+            if any(path == root or path.startswith(f"{root}/") for root in roots)
+        ]
+        if files:
+            scoped.append(
+                StackAssignment(
+                    stack_name=stack.stack_name,
+                    skill_invocation=stack.skill_invocation,
+                    files=files,
+                    is_docs_only=stack.is_docs_only,
+                )
+            )
+    return scoped
 
 
 def _evidence_paths(finding: dict[str, Any]) -> list[str]:
@@ -411,6 +444,14 @@ async def _step_audit(ctx: FlowContext) -> None:
                 scope_note += (
                     "\nReturn 4–6 grounded suggestions with honest tradeoffs "
                     "and design/spike-sized next steps."
+                )
+            if ctx.config.improve_scope:
+                scope_note += (
+                    f"\nService scope slice: `{ctx.config.improve_scope}`. "
+                    "The slice bounds where the audit searches. Slicing bounds "
+                    "where you search, never what you may read; cross-service "
+                    "boundary findings (traffic and data flow between services) "
+                    "remain in scope."
                 )
             if branch_focus:
                 scope_note += (
@@ -734,9 +775,9 @@ async def _step_prioritize(ctx: FlowContext) -> None:
     directory: Path = ctx.data["improve_dir"]
     payload = json.loads(vetted_findings_path(directory).read_text())
     raw_findings = payload.get("findings", [])
-    findings = [
-        finding for finding in raw_findings if isinstance(finding, dict)
-    ]
+    findings = aggregate_cross_service(
+        [finding for finding in raw_findings if isinstance(finding, dict)]
+    )
     defects, direction = partition_direction(findings)
     ordered_defects = order_by_leverage(defects)
     ordered_direction = order_by_leverage(direction)
@@ -1130,8 +1171,10 @@ async def _step_write_plans(ctx: FlowContext) -> None:
 
 def _render_report(
     services: list[Service],
+    all_services: list[Service],
     stacks: list[StackAssignment],
     audit: dict[str, Any],
+    findings: list[dict[str, Any]],
     discarded_no_evidence: int,
     dropped_low_confidence: int,
     dropped_by_cap: int,
@@ -1150,6 +1193,7 @@ def _render_report(
         )
         or "- No service roots detected."
     )
+    top_offender_lines = _top_offender_lines(findings)
     stack_lines = (
         "\n".join(f"- **{stack.stack_name}**" for stack in stacks)
         or "- No stacks detected."
@@ -1176,12 +1220,25 @@ def _render_report(
             "surfaces outside detected services were not audited."
         ),
     }[effort]
-    scope_statement = (
-        f"Service scope slicing was limited to `{scope}`; other services were "
-        "not audited."
-        if scope
-        else "No explicit service scope slicing was requested."
-    )
+    if scope:
+        audited_roots = {service.root for service in services}
+        unaudited = [
+            service for service in all_services if service.root not in audited_roots
+        ]
+        unaudited_lines = (
+            "\n".join(
+                f"  - **{service.name}** — `{service.root.as_posix()}`"
+                for service in unaudited
+            )
+            or "  - No other detected service directories."
+        )
+        scope_statement = (
+            f"Service scope slicing was limited to `{scope}`. The following "
+            "detected services/directories were not audited:\n"
+            f"{unaudited_lines}"
+        )
+    else:
+        scope_statement = "No explicit service scope slicing was requested."
     plan_lines = (
         f"- Plans written: {len(plan_write['written'])}\n"
         f"- Findings skipped as already planned or rejected: "
@@ -1195,6 +1252,8 @@ def _render_report(
         f"{direction_section}\n\n"
         "## Services\n\n"
         f"{service_lines}\n\n"
+        "## Top offenders\n\n"
+        f"{top_offender_lines}\n\n"
         "## Stacks\n\n"
         f"{stack_lines}\n\n"
         "## What ran\n\n"
@@ -1213,6 +1272,27 @@ def _render_report(
         f"- Previously rejected findings suppressed: {previously_rejected}\n"
         "\n## Plan writing\n\n"
         f"{plan_lines}"
+    )
+
+
+def _top_offender_lines(findings: list[dict[str, Any]]) -> str:
+    totals: dict[str, float] = {}
+    for finding in findings:
+        services = finding.get("services")
+        if not isinstance(services, list):
+            continue
+        for service in dict.fromkeys(
+            item for item in services if isinstance(item, str) and item
+        ):
+            totals[service] = totals.get(service, 0.0) + leverage_score(finding)
+    if not totals:
+        return "- No vetted findings were assigned to a detected service."
+    return "\n".join(
+        f"- **{service}** — summed leverage {total:.2f}"
+        for service, total in sorted(
+            totals.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
     )
 
 
@@ -1259,8 +1339,10 @@ async def _step_report(ctx: FlowContext) -> Stop | None:
     report_path(ctx.data["improve_dir"]).write_text(
         _render_report(
             ctx.data["services"],
+            ctx.data["all_services"],
             ctx.data["stacks"],
             ctx.data["audit"],
+            ctx.data["vetted"]["findings"],
             ctx.data["audit_discarded_no_evidence"],
             ctx.data["audit_dropped_low_confidence"],
             ctx.data["audit_dropped_by_cap"],

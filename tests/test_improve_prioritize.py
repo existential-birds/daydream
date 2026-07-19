@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from daydream.improve.prioritize import (
+    aggregate_cross_service,
     leverage_score,
     order_by_leverage,
     partition_direction,
@@ -31,6 +32,8 @@ def _f(**overrides: Any) -> dict[str, Any]:
         "provenance": "inherited",
     }
     finding.update(overrides)
+    if "evidence" not in overrides:
+        finding["evidence"] = [f"{finding['path']}:{finding['line']}"]
     return finding
 
 
@@ -59,3 +62,31 @@ def test_equal_leverage_same_category_preserves_input_order() -> None:
     first = _f(title="First")
     second = _f(title="Second")
     assert order_by_leverage([first, second]) == [first, second]
+
+
+def test_same_pattern_across_services_aggregates_to_one_finding() -> None:
+    a = _f(
+        title="Unbounded query in list endpoint",
+        path="apps/billing/api.py",
+        services=["billing"],
+    )
+    b = _f(
+        title="Unbounded query in the list endpoint",
+        path="apps/catalog/api.py",
+        services=["catalog"],
+    )
+    merged = aggregate_cross_service([a, b])
+    assert len(merged) == 1
+    assert set(merged[0]["services"]) == {"billing", "catalog"}
+    assert len(merged[0]["evidence"]) >= 2
+
+
+def test_distinct_findings_do_not_aggregate() -> None:
+    assert (
+        len(
+            aggregate_cross_service(
+                [_f(title="SQL injection"), _f(title="Slow CI cache")]
+            )
+        )
+        == 2
+    )
