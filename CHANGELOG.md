@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **config:** Update default models and add per-phase reasoning-effort defaults
+
+  `DEFAULT_CODEX_MODEL` moves to `gpt-5.6-sol` and the Claude mid tier to
+  `claude-sonnet-5`. `PHASE_DEFAULT_MODELS["codex"]` is now tiered across the
+  GPT-5.6 lineup (`gpt-5.6-luna` parse / `gpt-5.6-terra` mid / `gpt-5.6-sol`
+  heavy) instead of uniform. A new `PHASE_DEFAULT_EFFORT` table supplies
+  codex-only per-phase reasoning-effort defaults, resolved by
+  `runner._resolved_reasoning_effort` as the lowest precedence tier below
+  `--reasoning-effort` and both config-file tiers. Pricing entries are added for
+  the new ids; existing entries are retained so archived runs still price.
+
 ## [0.24.0] - 2026-07-15
 
 ### Added

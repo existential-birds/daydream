@@ -134,7 +134,8 @@ backend = "claude"            # global default backend
 
 [tool.daydream.phases.fix]    # per-phase override
 backend = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
+reasoning_effort = "medium"
 
 [tool.daydream.phases.review]
 model = "claude-opus-4-8"
@@ -173,6 +174,30 @@ per-backend table in `daydream/config.py`. The same order applies to backend
 selection via `--backend` / config / the `claude` fallback. (There is no
 environment-variable tier. `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
 
+### Reasoning Effort (Codex only)
+
+`reasoning_effort` is accepted as a global key and per-phase, alongside
+`model`/`backend`. Only the Codex backend consumes it (forwarded as
+`-c model_reasoning_effort=...`); it is ignored for `claude` and `pi`. GPT-5.6
+accepts `none`, `low`, `medium`, `high`, `xhigh`, and `max`.
+
+Resolution precedence, highest first:
+
+**`--reasoning-effort` > config file (phase, then global) > built-in per-phase default.**
+
+The built-in Codex defaults are:
+
+| Effort | Phases |
+|--------|--------|
+| `low` | `parse`, `exploration` |
+| `medium` | `fix`, `test`, `verify`, `suppression`, `supervise`, `merge`, `intent` |
+| `high` | `per_stack_review`, `review`, `wonder`, `pr_feedback` |
+| `xhigh` | `arbiter` |
+
+When no tier supplies a value the flag is not passed at all, and the backend
+applies its own ambient default (for Codex, `model_reasoning_effort` from
+`~/.codex/config.toml`).
+
 For the `pi` backend, an unset daydream model leaves Pi's own configured
 `defaultModel` intact. The built-in `glm-5.2` value is used only when neither
 daydream nor Pi has selected a model.
@@ -199,7 +224,7 @@ replace a built-in entry wholesale per model. There is no per-field merge.
 
 ```toml
 # ~/.daydream/prices.toml: USD per 1M tokens. User entries override built-ins per-model.
-[prices."gpt-5.5"]
+[prices."gpt-5.6-sol"]
 input = 4.50
 cached_input = 0.45
 output = 27.00

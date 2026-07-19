@@ -51,6 +51,7 @@ from daydream.agent import (
 )
 from daydream.backends import Backend, create_backend
 from daydream.config import (
+    PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_MODELS,
     REVIEW_SKILLS,
     ReviewSkillChoice,
@@ -395,19 +396,24 @@ def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
     """Resolve the reasoning effort for ``phase`` across all precedence tiers.
 
     Order (highest first): global ``config.reasoning_effort``
-    (``--reasoning-effort``), file-config phase override, file-config global.
-    There is no per-phase RunConfig field and no built-in default table (unlike
-    :func:`_resolved_model`) — ``None`` means the backend applies its own
-    ambient default (e.g. Codex reads ``model_reasoning_effort`` from
-    ``~/.codex/config.toml`` when daydream passes nothing).
+    (``--reasoning-effort``), file-config phase override, file-config global,
+    then ``PHASE_DEFAULT_EFFORT[backend][phase]``. There is no per-phase
+    RunConfig field. ``None`` means no source supplied one and the backend
+    applies its own ambient default (e.g. Codex reads
+    ``model_reasoning_effort`` from ``~/.codex/config.toml`` when daydream
+    passes nothing).
 
-    Only the Codex backend consumes the resolved value today.
+    Like :func:`_resolved_model`, the default-table lookup keys off the backend
+    kind resolved by :func:`_resolved_backend_name`. Only the Codex backend
+    consumes the resolved value today, and only ``codex`` has a default table.
     """
     file_config = _file_config_or_empty(config)
+    backend_name = _resolved_backend_name(config, phase)
     return (
         config.reasoning_effort
         or file_config.phase_reasoning_effort(phase)
         or file_config.reasoning_effort
+        or PHASE_DEFAULT_EFFORT.get(backend_name, {}).get(phase)
     )
 
 
@@ -432,8 +438,8 @@ def _resolve_backend(
       ``None``, where ``None`` falls through to the backend's own default).
     - Reasoning effort via :func:`_resolved_reasoning_effort`
       (``config.reasoning_effort`` → file-config phase → file-config global →
-      ``None``, where ``None`` falls through to the backend's own default).
-      Only Codex applies the resolved value.
+      ``PHASE_DEFAULT_EFFORT`` → ``None``, where ``None`` falls through to the
+      backend's own default). Only Codex applies the resolved value.
 
     Args:
         config: Run configuration with backend/model/reasoning-effort and

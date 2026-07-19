@@ -54,7 +54,17 @@ def test_compute_cost_zero_tokens_returns_zero() -> None:
 
 def test_all_covered_models_have_complete_entries() -> None:
     """Every model in MODEL_PRICES must have all ModelPrice fields populated and non-negative."""
-    required_models = {"gpt-5.5", "gpt-5.5-pro", "gpt-5-codex", "gpt-5.3-codex"}
+    required_models = {
+        "gpt-5.5",
+        "gpt-5.5-pro",
+        "gpt-5-codex",
+        "gpt-5.3-codex",
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "claude-sonnet-5",
+    }
     assert required_models.issubset(MODEL_PRICES.keys())
     field_names = {f.name for f in fields(ModelPrice)}
     assert field_names == {"input", "cached_input", "output"}
@@ -90,6 +100,65 @@ def test_cached_tokens_priced_separately_from_input() -> None:
     # Concrete values: 100K * $5/1M = $0.50; 100K * $0.50/1M = $0.05
     assert input_only == pytest.approx(0.50)
     assert cached_only == pytest.approx(0.05)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        # 1M input + 1M output at the published per-1M rates.
+        ("gpt-5.6-sol", 5.00 + 30.00),
+        ("gpt-5.6-terra", 2.50 + 15.00),
+        ("gpt-5.6-luna", 1.00 + 6.00),
+        ("gpt-5.6", 5.00 + 30.00),
+        ("claude-sonnet-5", 3.00 + 15.00),
+    ],
+)
+def test_new_default_model_ids_price_to_published_rates(model: str, expected: float) -> None:
+    """Every newly-defaulted model id resolves to its published, non-zero rate.
+
+    Lookup is exact-match with no prefix fallback, so each id — including the
+    bare `gpt-5.6` alias — must carry its own entry or cost synthesis silently
+    returns None for runs on the new defaults.
+    """
+    cost = compute_cost(
+        model=model,
+        input_tokens=1_000_000,
+        cached_input_tokens=0,
+        output_tokens=1_000_000,
+    )
+    assert cost is not None, model
+    assert cost > 0, model
+    assert cost == pytest.approx(expected), model
+
+
+def test_gpt56_bare_alias_matches_sol() -> None:
+    """The bare `gpt-5.6` alias routes to gpt-5.6-sol and must price identically."""
+    assert MODEL_PRICES["gpt-5.6"] == MODEL_PRICES["gpt-5.6-sol"]
+
+
+def test_gpt56_tiers_are_strictly_ordered_by_cost() -> None:
+    """sol > terra > luna on both input and output — proves tiers aren't copy-pasted."""
+    sol, terra, luna = (MODEL_PRICES[f"gpt-5.6-{t}"] for t in ("sol", "terra", "luna"))
+    assert sol.input > terra.input > luna.input
+    assert sol.output > terra.output > luna.output
+    assert sol.cached_input > terra.cached_input > luna.cached_input
+
+
+def test_superseded_model_ids_still_price() -> None:
+    """Adding new defaults is additive: archived runs on old ids must still price.
+
+    Trajectories archived before the default-model bump still reference these
+    ids; dropping an entry would regress their synthesized cost to None.
+    """
+    for legacy in ("gpt-5.5", "gpt-5.5-pro", "gpt-5-codex", "gpt-5.3-codex", "glm-5.2"):
+        cost = compute_cost(
+            model=legacy,
+            input_tokens=1_000_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+        )
+        assert cost is not None, legacy
+        assert cost > 0, legacy
 
 
 # --- User-overridable pricing -------------------------------------------------

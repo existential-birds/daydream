@@ -180,7 +180,7 @@ tool_supervisor = "rules"
 tool_bash_deny = ["rm -rf", "git push --force"]
 
 [phases.supervise]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5"
 ```
 
 The built-in tool supervisor applies the shared file globs to `Write` and
@@ -508,13 +508,20 @@ def register(r):
     r.insert_after("deep", anchor="intent", step="ro_gate")
 ```
 
-Per-phase model/backend config needs no extension code — `[tool.daydream.phases.<name>]`
-in `pyproject.toml` or `.daydream.toml` already accepts arbitrary phase names:
+Per-phase model/backend/reasoning-effort config needs no extension code —
+`[tool.daydream.phases.<name>]` in `pyproject.toml` or `.daydream.toml` already
+accepts arbitrary phase names:
 
 ```toml
 [tool.daydream.phases.ro_gate]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-5"
 ```
+
+A fork-defined phase has no entry in the built-in `PHASE_DEFAULT_MODELS` /
+`PHASE_DEFAULT_EFFORT` tables, so it falls through to the config-file global and
+then to the backend default. Set `model` / `reasoning_effort` on the phase table
+to pin it (see the README's [Reasoning Effort](../README.md#reasoning-effort-codex-only)
+section for the precedence chain).
 
 ### Validate the registry
 

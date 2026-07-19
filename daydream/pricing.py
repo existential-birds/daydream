@@ -17,6 +17,15 @@ back to the input-token price as a conservative upper bound (slight overcount,
 transparent). `glm-5.2` is priced from the z.ai published rates; the `pi`
 backend reports $0 for it, so its cost is always synthesized here.
 
+The `gpt-5.6-{sol,terra,luna}` rates are from
+https://developers.openai.com/api/docs/pricing (July 2026). Bare `gpt-5.6` is an
+alias routing to `gpt-5.6-sol` and carries the same rate — lookup is exact-match,
+so the alias needs its own entry. `claude-sonnet-5` is from
+https://platform.claude.com/docs/en/about-claude/pricing and uses the standard
+$3/$0.30/$15 rate, not the introductory $2/$0.20/$10 rate that lapses
+2026-08-31, so archived runs priced after that date stay correct. Entries are
+never removed: archived trajectories still reference retired model ids.
+
 Exports:
     ModelPrice: dataclass holding input/cached_input/output USD per 1M tokens.
     MODEL_PRICES: dict[str, ModelPrice] - the built-in price table.
@@ -65,6 +74,13 @@ MODEL_PRICES: dict[str, ModelPrice] = {
     "gpt-5-codex": ModelPrice(input=1.25, cached_input=1.25, output=10.00),
     # cached_input fallback to input price — unpublished USD value at build time
     "gpt-5.3-codex": ModelPrice(input=1.75, cached_input=1.75, output=14.00),
+    "gpt-5.6-sol": ModelPrice(input=5.00, cached_input=0.50, output=30.00),
+    "gpt-5.6-terra": ModelPrice(input=2.50, cached_input=0.25, output=15.00),
+    "gpt-5.6-luna": ModelPrice(input=1.00, cached_input=0.10, output=6.00),
+    # Bare alias routes to gpt-5.6-sol; priced identically (lookup is exact-match, no prefix fallback).
+    "gpt-5.6": ModelPrice(input=5.00, cached_input=0.50, output=30.00),
+    # Post-introductory standard rate; the $2/$0.20/$10 intro rate lapses 2026-08-31.
+    "claude-sonnet-5": ModelPrice(input=3.00, cached_input=0.30, output=15.00),
     "glm-5.2": ModelPrice(input=1.40, cached_input=0.26, output=4.40),
 }
 
