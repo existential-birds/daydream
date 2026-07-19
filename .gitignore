@@ -82,3 +82,10 @@ Thumbs.db
 
 # Machine-local daydream config (benchmark-repo, reviewer presets)
 .daydream.toml
+
+# Per-developer agent tooling config and session transcripts
+.codex/
+.cursor/
+.entire/
+.opencode/
+.pi/
