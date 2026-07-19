@@ -20,11 +20,12 @@ backend reports $0 for it, so its cost is always synthesized here.
 The `gpt-5.6-{sol,terra,luna}` rates are from
 https://developers.openai.com/api/docs/pricing (July 2026). Bare `gpt-5.6` is an
 alias routing to `gpt-5.6-sol` and carries the same rate — lookup is exact-match,
-so the alias needs its own entry. `claude-sonnet-5` is from
-https://platform.claude.com/docs/en/about-claude/pricing and uses the standard
-$3/$0.30/$15 rate, not the introductory $2/$0.20/$10 rate that lapses
-2026-08-31, so archived runs priced after that date stay correct. Entries are
-never removed: archived trajectories still reference retired model ids.
+so the alias needs its own entry. Requests over 272K input tokens use the
+published long-context tier for the whole request. `claude-sonnet-5` uses the
+introductory $2/$0.20/$10 rate through 2026-08-31 and the standard
+$3/$0.30/$15 rate from 2026-09-01; archived usage is resolved by its recorded
+timestamp, while provider-reported costs are already persisted verbatim.
+Entries are never removed: archived trajectories still reference retired model ids.
 
 Exports:
     ModelPrice: dataclass holding input/cached_input/output USD per 1M tokens.
@@ -41,6 +42,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +66,39 @@ class ModelPrice:
     output: float
 
 
+@dataclass(frozen=True)
+class PricingPolicy:
+    """A model's dated and context-sensitive pricing policy."""
+
+    price: ModelPrice
+    long_context_threshold: int | None = None
+    long_context_multiplier: ModelPrice | None = None
+    effective_prices: tuple[tuple[date, ModelPrice], ...] = ()
+
+    def resolve(self, *, total_input_tokens: int, effective_date: date) -> ModelPrice:
+        """Return the price for the request's complete input context."""
+        price = self.price
+        for starts_on, candidate in self.effective_prices:
+            if effective_date >= starts_on:
+                price = candidate
+        if self.long_context_threshold is not None and total_input_tokens > self.long_context_threshold:
+            assert self.long_context_multiplier is not None
+            return ModelPrice(
+                input=price.input * self.long_context_multiplier.input,
+                cached_input=price.cached_input * self.long_context_multiplier.cached_input,
+                output=price.output * self.long_context_multiplier.output,
+            )
+        return price
+
+
+class _ResolvedPrices(dict[str, ModelPrice]):
+    """Resolved prices with policies for models not explicitly overridden."""
+
+    def __init__(self, *args: Any, policies: dict[str, PricingPolicy], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.policies = policies
+
+
 # Per 1M tokens, USD. May 2026 snapshot.
 # Users can override these per-model via ~/.daydream/prices.toml (see load_user_prices).
 MODEL_PRICES: dict[str, ModelPrice] = {
@@ -84,6 +119,23 @@ MODEL_PRICES: dict[str, ModelPrice] = {
     "glm-5.2": ModelPrice(input=1.40, cached_input=0.26, output=4.40),
 }
 
+_GPT56_LONG_CONTEXT_THRESHOLD = 272_000
+_GPT56_POLICIES = {
+    model: PricingPolicy(
+        price,
+        _GPT56_LONG_CONTEXT_THRESHOLD,
+        ModelPrice(input=2.0, cached_input=2.0, output=1.5),
+    )
+    for model, price in MODEL_PRICES.items()
+    if model.startswith("gpt-5.6")
+}
+_BUILTIN_POLICIES: dict[str, PricingPolicy] = {
+    **_GPT56_POLICIES,
+    "claude-sonnet-5": PricingPolicy(
+        ModelPrice(input=2.00, cached_input=0.20, output=10.00),
+        effective_prices=((date(2026, 9, 1), MODEL_PRICES["claude-sonnet-5"]),),
+    ),
+}
 
 def _coerce_price(model: str, table: Any) -> ModelPrice | None:
     """Coerce one ``[prices."<model>"]`` table into a ModelPrice, or None.
@@ -175,7 +227,11 @@ def resolve_prices(overrides: dict[str, ModelPrice] | None = None) -> dict[str, 
     Returns:
         A new dict of built-in prices with ``overrides`` applied per-model.
     """
-    return {**MODEL_PRICES, **(overrides or {})}
+    override_models = set(overrides or {})
+    return _ResolvedPrices(
+        {**MODEL_PRICES, **(overrides or {})},
+        policies={model: policy for model, policy in _BUILTIN_POLICIES.items() if model not in override_models},
+    )
 
 
 def compute_cost(
@@ -185,6 +241,8 @@ def compute_cost(
     output_tokens: int,
     *,
     prices: dict[str, ModelPrice] | None = None,
+    total_input_tokens: int | None = None,
+    effective_date: date | None = None,
 ) -> float | None:
     """Compute USD cost for a model invocation, or None for unknown models.
 
@@ -194,11 +252,21 @@ def compute_cost(
         cached_input_tokens: Count of cached input tokens (priced separately).
         prices: Optional price table to look up in. When None, the built-in
             ``MODEL_PRICES`` is used (back-compatible with existing callers).
+        total_input_tokens: Total request input used for context-sensitive
+            policies; defaults to uncached plus cached input.
+        effective_date: Usage date for effective-date-aware policies; omitted
+            dates preserve the table's standard-rate behavior.
     """
     table = MODEL_PRICES if prices is None else prices
     price = table.get(model)
     if price is None:
         return None
+    policies = _BUILTIN_POLICIES if prices is None else getattr(prices, "policies", {})
+    if policy := policies.get(model):
+        price = policy.resolve(
+            total_input_tokens=input_tokens + cached_input_tokens if total_input_tokens is None else total_input_tokens,
+            effective_date=date.max if effective_date is None else effective_date,
+        )
     per_token = 1_000_000.0
     return (
         input_tokens * price.input / per_token
@@ -214,6 +282,7 @@ def compute_cost_from_totals(
     cached_input_tokens: int,
     output_tokens: int,
     prices: dict[str, ModelPrice] | None = None,
+    effective_date: date | None = None,
 ) -> float | None:
     """Compute USD cost from total input tokens, or None for unknown models.
 
@@ -230,6 +299,7 @@ def compute_cost_from_totals(
         output_tokens: Count of output tokens.
         prices: Optional price table to look up in. When None, the built-in
             ``MODEL_PRICES`` is used.
+        effective_date: Usage date for effective-date-aware policies.
     """
     uncached_input = max(total_input_tokens - cached_input_tokens, 0)
     return compute_cost(
@@ -238,4 +308,6 @@ def compute_cost_from_totals(
         cached_input_tokens,
         output_tokens,
         prices=prices,
+        total_input_tokens=total_input_tokens,
+        effective_date=effective_date,
     )

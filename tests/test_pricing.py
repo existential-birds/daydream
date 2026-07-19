@@ -1,6 +1,7 @@
 """Tests for the OpenAI cost-synthesis price table."""
 
 from dataclasses import fields
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -9,9 +10,42 @@ from daydream.pricing import (
     MODEL_PRICES,
     ModelPrice,
     compute_cost,
+    compute_cost_from_totals,
     load_user_prices,
     resolve_prices,
 )
+
+
+@pytest.mark.parametrize("model", ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6"))
+def test_gpt56_long_context_rates_apply_to_whole_request(model: str) -> None:
+    """All GPT-5.6 ids use long-context rates only above the 272K boundary."""
+    price = MODEL_PRICES[model]
+    assert compute_cost_from_totals(
+        model, total_input_tokens=272_000, cached_input_tokens=72_000, output_tokens=10_000
+    ) == pytest.approx((200_000 * price.input + 72_000 * price.cached_input + 10_000 * price.output) / 1_000_000)
+    assert compute_cost_from_totals(
+        model, total_input_tokens=272_001, cached_input_tokens=72_000, output_tokens=10_000
+    ) == pytest.approx(
+        (200_001 * price.input * 2 + 72_000 * price.cached_input * 2 + 10_000 * price.output * 1.5) / 1_000_000
+    )
+
+
+def test_claude_sonnet_5_uses_the_rate_in_effect_on_the_usage_date() -> None:
+    """Introductory pricing lasts through 2026-08-31."""
+    assert compute_cost(
+        model="claude-sonnet-5",
+        input_tokens=1_000_000,
+        cached_input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        effective_date=date(2026, 8, 31),
+    ) == pytest.approx(12.20)
+    assert compute_cost(
+        model="claude-sonnet-5",
+        input_tokens=1_000_000,
+        cached_input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        effective_date=date(2026, 9, 1),
+    ) == pytest.approx(18.30)
 
 
 def test_compute_cost_gpt55_baseline() -> None:
@@ -105,12 +139,12 @@ def test_cached_tokens_priced_separately_from_input() -> None:
 @pytest.mark.parametrize(
     ("model", "expected"),
     [
-        # 1M input + 1M output at the published per-1M rates.
-        ("gpt-5.6-sol", 5.00 + 30.00),
-        ("gpt-5.6-terra", 2.50 + 15.00),
-        ("gpt-5.6-luna", 1.00 + 6.00),
-        ("gpt-5.6", 5.00 + 30.00),
-        ("claude-sonnet-5", 3.00 + 15.00),
+        # 100K input + 100K output at the published per-1M rates.
+        ("gpt-5.6-sol", (5.00 + 30.00) * 0.1),
+        ("gpt-5.6-terra", (2.50 + 15.00) * 0.1),
+        ("gpt-5.6-luna", (1.00 + 6.00) * 0.1),
+        ("gpt-5.6", (5.00 + 30.00) * 0.1),
+        ("claude-sonnet-5", (3.00 + 15.00) * 0.1),
     ],
 )
 def test_new_default_model_ids_price_to_published_rates(model: str, expected: float) -> None:
@@ -122,9 +156,9 @@ def test_new_default_model_ids_price_to_published_rates(model: str, expected: fl
     """
     cost = compute_cost(
         model=model,
-        input_tokens=1_000_000,
+        input_tokens=100_000,
         cached_input_tokens=0,
-        output_tokens=1_000_000,
+        output_tokens=100_000,
     )
     assert cost is not None, model
     assert cost > 0, model
