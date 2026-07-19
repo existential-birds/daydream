@@ -287,6 +287,19 @@ name is stable.
 | `structural` | `beagle-core:review-structure` |
 | `pr-feedback-fetch` | `beagle-core:fetch-pr-feedback` |
 | `pr-feedback-respond` | `beagle-core:respond-pr-feedback` |
+| `audit:correctness:python` | `beagle-python:review-python` |
+| `audit:correctness:react` | `beagle-react:review-frontend` |
+| `audit:correctness:elixir` | `beagle-elixir:review-elixir` |
+| `audit:correctness:go` | `beagle-go:review-go` |
+| `audit:correctness:rust` | `beagle-rust:review-rust` |
+| `audit:correctness:ios` | `beagle-ios:review-ios` |
+| `audit:security:elixir` | `beagle-elixir:elixir-security-review` |
+| `audit:performance:elixir` | `beagle-elixir:elixir-performance-review` |
+| `audit:tests:python` | `beagle-python:pytest-code-review` |
+| `audit:tests:go` | `beagle-go:go-testing-code-review` |
+| `audit:tests:rust` | `beagle-rust:rust-testing-code-review` |
+| `audit:tests:elixir` | `beagle-elixir:exunit-code-review` |
+| `audit:tech-debt` | `beagle-core:review-structure` |
 
 `phase:<name>` is the phase-bound slot convention: no `phase:*` slot is
 registered by default, but when a fork binds one, the phase resolves its skill
@@ -295,7 +308,7 @@ reads its own `phase:<name>` slot).
 
 ### Prompts
 
-The 12 registered prompt names and the exact kwargs their builders receive
+The 15 registered prompt names and the exact kwargs their builders receive
 (an override gets the same kwargs). All kwargs are keyword-only except where
 noted.
 
@@ -313,6 +326,9 @@ noted.
 | `suppression` | `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path` |
 | `verify` | `items`, `cwd`, `output_path` |
+| `audit` | `category`, `skill_invocation`, `services`, `scope_note`, `recon_summary`, `cwd`, `tier` |
+| `vet` | `findings`, `cwd` |
+| `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
 
 ### Stable `ctx.data` keys
 

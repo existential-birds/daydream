@@ -26,8 +26,24 @@ def register_builtins(registry: Registry) -> None:
     registry.override_skill("pr-feedback-fetch", config.PR_FEEDBACK_FETCH_SKILL)
     registry.override_skill("pr-feedback-respond", config.PR_FEEDBACK_RESPOND_SKILL)
 
+    _register_improve_builtins(registry)
     _register_builtin_prompts(registry)
     _register_builtin_flows(registry)
+
+
+def _register_improve_builtins(registry: Registry) -> None:
+    """Seed improve audit skill slots and named prompts."""
+    from daydream import config
+    from daydream.improve import prompts
+
+    for category, stack_skills in config.AUDIT_SKILL_MAP.items():
+        for stack, skill in stack_skills.items():
+            slot = f"audit:{category}" if stack == "*" else f"audit:{category}:{stack}"
+            registry.override_skill(slot, skill)
+
+    registry.override_prompt("audit", prompts.build_audit_prompt)
+    registry.override_prompt("vet", prompts.build_vet_prompt)
+    registry.override_prompt("plan-writer", prompts.build_plan_writer_prompt)
 
 
 def _register_builtin_prompts(registry: Registry) -> None:
