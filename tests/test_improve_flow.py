@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ class _ImproveStubBackend:
         self._target = target
         self.calls: list[dict[str, Any]] = []
         self.fail_categories: set[str] = set()
+        self.vet_reject_titles: set[str] = set()
 
     async def execute(
         self,
@@ -54,6 +56,8 @@ class _ImproveStubBackend:
             category = next(
                 name for name, heading in headings.items() if heading in prompt
             )
+        elif "You are the improve vet." in prompt:
+            marker = "vet"
         self.calls.append(
             {
                 "cwd": cwd,
@@ -98,21 +102,69 @@ class _ImproveStubBackend:
             )
             return
         if category is not None:
+            findings = [
+                {
+                    "title": f"{category.title()} finding",
+                    "category": "wrong-agent-category",
+                    "path": "apps/billing/api.py",
+                    "line": 1,
+                    "body": f"Concrete {category} impact and fix.",
+                    "impact": "HIGH",
+                    "effort": "S",
+                    "risk": "LOW",
+                    "confidence": "HIGH",
+                    "evidence": ["apps/billing/api.py:1"],
+                }
+            ]
+            if category == "performance":
+                findings.append(
+                    {
+                        "title": "Phantom N+1",
+                        "category": "wrong-agent-category",
+                        "path": "apps/catalog/api.py",
+                        "line": 1,
+                        "body": "Claims a query loop that is not present.",
+                        "impact": "HIGH",
+                        "effort": "S",
+                        "risk": "LOW",
+                        "confidence": "HIGH",
+                        "evidence": ["apps/catalog/api.py:1"],
+                    }
+                )
+            yield ResultEvent(
+                structured_output={"findings": findings},
+                continuation=None,
+            )
+            return
+        if marker == "vet":
+            match = re.search(
+                r"Candidates .*?:\n```json\n(.*?)\n```",
+                prompt,
+                flags=re.DOTALL,
+            )
+            assert match is not None
+            candidates = json.loads(match.group(1))
             yield ResultEvent(
                 structured_output={
-                    "findings": [
+                    "verdicts": [
                         {
-                            "title": f"{category.title()} finding",
-                            "category": "wrong-agent-category",
-                            "path": "apps/billing/api.py",
-                            "line": 1,
-                            "body": f"Concrete {category} impact and fix.",
-                            "impact": "HIGH",
-                            "effort": "S",
-                            "risk": "LOW",
-                            "confidence": "HIGH",
-                            "evidence": ["apps/billing/api.py:1"],
+                            "vet_id": candidate["vet_id"],
+                            "keep": candidate["title"]
+                            not in self.vet_reject_titles,
+                            "reason": (
+                                "No query loop exists at the cited location."
+                                if candidate["title"] in self.vet_reject_titles
+                                else "Confirmed from cited evidence."
+                            ),
+                            "severity": None,
+                            "impact": candidate["impact"],
+                            "effort": candidate["effort"],
+                            "risk": candidate["risk"],
+                            "confidence": candidate["confidence"],
+                            "path": candidate["path"],
+                            "line": candidate["line"],
                         }
+                        for candidate in candidates
                     ]
                 },
                 continuation=None,
@@ -297,3 +349,56 @@ async def test_failed_category_is_reported_not_silently_dropped(
     report = _dd(improve_monorepo_target, "report.md").read_text()
     assert "performance" in report.lower()
     assert "not audited" in report.lower()
+
+
+@pytest.mark.anyio
+async def test_vet_rejects_unconfirmed_finding_with_reason_and_persists(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.vet_reject_titles = {"Phantom N+1"}
+    await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    vetted = json.loads(
+        _dd(improve_monorepo_target, "vetted-findings.json").read_text()
+    )
+    assert all(
+        finding["title"] != "Phantom N+1" for finding in vetted["findings"]
+    )
+    rejected = json.loads(
+        (
+            improve_monorepo_target / "daydream_plans" / "rejected.json"
+        ).read_text()
+    )
+    assert rejected["rejected"][0]["title"] == "Phantom N+1"
+    assert rejected["rejected"][0]["reason"]
+
+
+@pytest.mark.anyio
+async def test_previously_rejected_finding_is_not_revetted_or_rereported(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.vet_reject_titles = {"Phantom N+1"}
+    config = RunConfig(
+        target=str(improve_monorepo_target),
+        flow_name="improve",
+        non_interactive=True,
+        archive=False,
+    )
+    await run(config)
+
+    stub.calls.clear()
+    await run(config)
+
+    vet_calls = [call for call in stub.calls if call["marker"] == "vet"]
+    assert all("Phantom N+1" not in call["prompt"] for call in vet_calls)
+    report = _dd(improve_monorepo_target, "report.md").read_text()
+    assert "previously rejected" in report.lower()

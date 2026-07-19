@@ -23,9 +23,11 @@ from daydream.improve.artifacts import (
     recon_path,
     report_path,
     services_path,
+    vetted_findings_path,
 )
+from daydream.improve.plans import load_rejections, record_rejections
 from daydream.improve.prioritize import order_by_leverage
-from daydream.improve.prompts import AUDIT_FINDINGS_SCHEMA
+from daydream.improve.prompts import AUDIT_FINDINGS_SCHEMA, VET_SCHEMA
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
 from daydream.trajectory import (
@@ -408,6 +410,114 @@ async def _step_audit(ctx: FlowContext) -> None:
     ctx.data["audit_dropped_by_cap"] = dropped_by_cap
 
 
+def _apply_vet_verdicts(
+    findings: list[dict[str, Any]],
+    verdicts: list[Any],
+    *,
+    rejected_at_sha: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply positional, 1-based vet verdicts with fail-closed polarity."""
+    kept: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    corrected_fields = (
+        "severity",
+        "impact",
+        "effort",
+        "risk",
+        "confidence",
+        "path",
+        "line",
+    )
+    for offset, finding in enumerate(findings):
+        vet_id = offset + 1
+        verdict = verdicts[offset] if offset < len(verdicts) else None
+        if not isinstance(verdict, dict) or verdict.get("vet_id") != vet_id:
+            continue
+        if not verdict.get("keep", False):
+            rejected.append(
+                {
+                    "fingerprint": finding["fingerprint"],
+                    "title": finding.get("title", ""),
+                    "path": finding.get("path", ""),
+                    "reason": verdict.get("reason") or "vet rejected finding",
+                    "rejected_at_sha": rejected_at_sha,
+                }
+            )
+            continue
+        corrected = dict(finding)
+        for field in corrected_fields:
+            if verdict.get(field) is not None:
+                corrected[field] = verdict[field]
+        kept.append(corrected)
+    return kept, rejected
+
+
+async def _step_vet(ctx: FlowContext) -> None:
+    """Re-verify audit findings and persist model-confirmed rejections."""
+    directory: Path = ctx.data["improve_dir"]
+    plans_dir = ctx.work.repo / "daydream_plans"
+    previous = load_rejections(plans_dir)
+    audit_findings = ctx.data["audit"].get("findings", [])
+    candidates = [
+        finding
+        for finding in audit_findings
+        if isinstance(finding, dict)
+        and finding.get("fingerprint") not in previous
+    ]
+    previously_rejected = len(audit_findings) - len(candidates)
+
+    by_category: dict[str, list[dict[str, Any]]] = {}
+    for finding in candidates:
+        category = str(finding.get("category", "unknown"))
+        by_category.setdefault(category, []).append(finding)
+
+    backend = ctx.backend_for("vet")
+    kept: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for category_findings in by_category.values():
+        indexed = [
+            {**finding, "vet_id": vet_id}
+            for vet_id, finding in enumerate(category_findings, start=1)
+        ]
+        prompt = ctx.registry.prompt("vet")(
+            findings=indexed,
+            cwd=ctx.work.repo,
+        )
+        try:
+            async with phase_scope(DaydreamPhase.VET):
+                output, _, _ = await run_agent(
+                    backend,
+                    ctx.work.repo,
+                    prompt,
+                    phase=DaydreamPhase.VET,
+                    output_schema=VET_SCHEMA,
+                    read_only=True,
+                )
+        except Exception:  # noqa: BLE001 - no verdict fails closed
+            output = {}
+        verdicts = (
+            output.get("verdicts", [])
+            if isinstance(output, dict)
+            and isinstance(output.get("verdicts"), list)
+            else []
+        )
+        category_kept, category_rejected = _apply_vet_verdicts(
+            category_findings,
+            verdicts,
+            rejected_at_sha=ctx.work.head_sha,
+        )
+        kept.extend(category_kept)
+        rejected.extend(category_rejected)
+
+    record_rejections(plans_dir, rejected)
+    vetted = {"findings": order_by_leverage(kept)}
+    vetted_findings_path(directory).write_text(
+        json.dumps(vetted, indent=2) + "\n"
+    )
+    ctx.data["vetted"] = vetted
+    ctx.data["previously_rejected"] = previously_rejected
+
+
 def _render_report(
     services: list[Service],
     stacks: list[StackAssignment],
@@ -415,6 +525,7 @@ def _render_report(
     discarded_no_evidence: int,
     dropped_low_confidence: int,
     dropped_by_cap: int,
+    previously_rejected: int,
 ) -> str:
     service_lines = (
         "\n".join(
@@ -450,6 +561,7 @@ def _render_report(
         f"- Findings without `path:line` evidence discarded: {discarded_no_evidence}\n"
         f"- Non-HIGH-confidence findings dropped by tier: {dropped_low_confidence}\n"
         f"- Lowest-leverage findings dropped by tier cap: {dropped_by_cap}\n"
+        f"- Previously rejected findings suppressed: {previously_rejected}\n"
     )
 
 
@@ -463,6 +575,7 @@ async def _step_report(ctx: FlowContext) -> None:
             ctx.data["audit_discarded_no_evidence"],
             ctx.data["audit_dropped_low_confidence"],
             ctx.data["audit_dropped_by_cap"],
+            ctx.data["previously_rejected"],
         )
     )
     print_success(
@@ -470,13 +583,14 @@ async def _step_report(ctx: FlowContext) -> None:
         "Improve audit complete: "
         f"{len(ctx.data['services'])} services, "
         f"{len(ctx.data['stacks'])} stacks, "
-        f"{len(ctx.data['audit']['findings'])} findings.",
+        f"{len(ctx.data['vetted']['findings'])} vetted findings.",
     )
 
 
 STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="recon", run=_step_recon),
     FlowStep(name="audit", run=_step_audit),
+    FlowStep(name="vet", run=_step_vet),
     FlowStep(
         name="improve-report",
         run=_step_report,
