@@ -4,15 +4,19 @@ import json
 import re
 import subprocess
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
+import jsonschema
 import pytest
 
 from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
 from daydream.findings import (
+    FINDINGS_SCHEMA,
     FINDINGS_SCHEMA_VERSION,
     MAX_ARTIFACT_BYTES,
+    ArtifactFinding,
     FindingsValidationError,
     build_findings_artifact,
     load_findings_artifact,
@@ -21,6 +25,53 @@ from daydream.findings import (
 from daydream.pr_review import ParsedIssue, PRInfo
 from daydream.runner import RunConfig, run
 from tests.harness.phase_backend import PhaseDispatchBackend
+
+
+def _finding(**overrides) -> dict:
+    finding = {
+        "fingerprint": "f" * 64,
+        "path": "a.py",
+        "line": 12,
+        "placement": "inline",
+        "title": "T",
+        "body": "B",
+        "severity": "high",
+        "confidence": "HIGH",
+        "is_cross_stack": False,
+    }
+    finding.update(overrides)
+    return finding
+
+
+def _valid_artifact_envelope() -> dict:
+    return {
+        "schema_version": FINDINGS_SCHEMA_VERSION,
+        "repo": "o/r",
+        "pr_number": 7,
+        "head_sha": "h" * 40,
+        "run_info": None,
+        "findings": [_finding()],
+    }
+
+
+def test_finding_entry_accepts_advisory_fields_and_round_trips(tmp_path: Path) -> None:
+    entry = _finding(
+        impact="HIGH",
+        effort="S",
+        risk="LOW",
+        leverage=3.0,
+        category="correctness",
+        services=["billing"],
+        provenance=None,
+    )
+    artifact = {**_valid_artifact_envelope(), "findings": [entry]}
+    jsonschema.validate(artifact, FINDINGS_SCHEMA)
+    loaded = ArtifactFinding(**entry)
+    assert (loaded.impact, loaded.effort, loaded.risk) == ("HIGH", "S", "LOW")
+
+
+def test_pr_artifact_without_advisory_fields_still_validates() -> None:
+    jsonschema.validate(_valid_artifact_envelope(), FINDINGS_SCHEMA)
 
 
 def test_build_artifact_declares_target_envelope(tmp_path) -> None:
@@ -52,26 +103,7 @@ def test_write_artifact_round_trips(tmp_path) -> None:
 @pytest.fixture
 def valid_artifact() -> dict:
     """Artifact dict with one inline finding."""
-    return {
-        "schema_version": FINDINGS_SCHEMA_VERSION,
-        "repo": "o/r",
-        "pr_number": 7,
-        "head_sha": "h" * 40,
-        "run_info": None,
-        "findings": [
-            {
-                "fingerprint": "f" * 64,
-                "path": "a.py",
-                "line": 12,
-                "placement": "inline",
-                "title": "T",
-                "body": "B",
-                "severity": "high",
-                "confidence": "HIGH",
-                "is_cross_stack": False,
-            }
-        ],
-    }
+    return _valid_artifact_envelope()
 
 
 @pytest.mark.parametrize("mutate, match", [
