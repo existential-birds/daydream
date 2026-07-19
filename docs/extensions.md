@@ -276,7 +276,8 @@ an existing config key.
 | # | Step | Config key |
 |---|------|------------|
 | 1 | `recon` | `recon` |
-| 2 | `improve-report` | `recon` |
+| 2 | `audit` | `audit` |
+| 3 | `improve-report` | `recon` |
 
 The improve run configuration also carries `improve_effort`, `improve_focus`,
 `improve_scope`, `improve_plan_description`, and `improve_review_plan`.

@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from daydream.backends import ResultEvent
-from daydream.config import EFFORT_TIERS
+from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.runner import RunConfig, run
@@ -20,6 +20,7 @@ class _ImproveStubBackend:
     def __init__(self, target: Path) -> None:
         self._target = target
         self.calls: list[dict[str, Any]] = []
+        self.fail_categories: set[str] = set()
 
     async def execute(
         self,
@@ -31,6 +32,28 @@ class _ImproveStubBackend:
         max_turns: Any = None,
         read_only: bool = False,
     ):
+        marker = "other"
+        category = None
+        if "you are a **pattern-scanner** specialist" in prompt.lower():
+            marker = "repo-scan"
+        elif "IMPROVE_RECON" in prompt:
+            marker = "recon"
+        elif "read-only improve audit specialist" in prompt:
+            marker = "audit"
+            headings = {
+                "correctness": "## Correctness / Bugs",
+                "security": "## Security",
+                "performance": "## Performance",
+                "tests": "## Test Coverage",
+                "tech-debt": "## Tech Debt & Architecture",
+                "dependencies": "## Dependencies & Migrations",
+                "dx": "## DX & Tooling",
+                "docs": "## Docs",
+                "direction": "## Direction",
+            }
+            category = next(
+                name for name, heading in headings.items() if heading in prompt
+            )
         self.calls.append(
             {
                 "cwd": cwd,
@@ -39,8 +62,11 @@ class _ImproveStubBackend:
                 "agents": agents,
                 "max_turns": max_turns,
                 "read_only": read_only,
+                "marker": marker,
             }
         )
+        if category in self.fail_categories:
+            raise RuntimeError(f"{category} audit failed")
         if "you are the **pattern-scanner** specialist" in prompt.lower():
             yield ResultEvent(
                 structured_output={
@@ -56,7 +82,7 @@ class _ImproveStubBackend:
                 continuation=None,
             )
             return
-        if "improve_recon" in prompt:
+        if "IMPROVE_RECON" in prompt:
             yield ResultEvent(
                 structured_output={
                     "languages": ["python", "typescript"],
@@ -67,6 +93,27 @@ class _ImproveStubBackend:
                     },
                     "conventions": ["OpenAPI First"],
                     "intent_docs": ["README.md"],
+                },
+                continuation=None,
+            )
+            return
+        if category is not None:
+            yield ResultEvent(
+                structured_output={
+                    "findings": [
+                        {
+                            "title": f"{category.title()} finding",
+                            "category": "wrong-agent-category",
+                            "path": "apps/billing/api.py",
+                            "line": 1,
+                            "body": f"Concrete {category} impact and fix.",
+                            "impact": "HIGH",
+                            "effort": "S",
+                            "risk": "LOW",
+                            "confidence": "HIGH",
+                            "evidence": ["apps/billing/api.py:1"],
+                        }
+                    ]
                 },
                 continuation=None,
             )
@@ -101,6 +148,10 @@ def _git_status_porcelain(repo: Path) -> str:
         capture_output=True,
         text=True,
     ).stdout
+
+
+def _dd(repo: Path, name: str) -> Path:
+    return repo / ".daydream" / "improve" / name
 
 
 @pytest.mark.anyio
@@ -177,3 +228,72 @@ async def test_improve_recon_writes_artifacts_and_never_mutates_source(
     )
     assert all(call["read_only"] for call in stub.calls)
     assert _git_status_porcelain(improve_monorepo_target) == before
+
+
+@pytest.mark.anyio
+async def test_standard_effort_fans_out_all_nine_categories_read_only(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    audited = json.loads(
+        _dd(improve_monorepo_target, "audit-findings.json").read_text()
+    )
+    assert set(audited["categories_run"]) == set(AUDIT_CATEGORIES)
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    assert audit_calls and all(call["read_only"] for call in audit_calls)
+    assert any(
+        "beagle-python:review-python" in call["prompt"]
+        for call in audit_calls
+    )
+
+
+@pytest.mark.anyio
+async def test_quick_effort_restricts_categories(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_improve_stub(monkeypatch, improve_monorepo_target)
+    await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_effort="quick",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    audited = json.loads(
+        _dd(improve_monorepo_target, "audit-findings.json").read_text()
+    )
+    assert set(audited["categories_run"]) == {
+        "correctness",
+        "security",
+        "tests",
+    }
+
+
+@pytest.mark.anyio
+async def test_failed_category_is_reported_not_silently_dropped(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.fail_categories = {"performance"}
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    assert code == 0
+    report = _dd(improve_monorepo_target, "report.md").read_text()
+    assert "performance" in report.lower()
+    assert "not audited" in report.lower()
