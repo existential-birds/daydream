@@ -451,6 +451,50 @@ async def test_focus_next_is_direction_only_and_plans_are_spikes(
 
 
 @pytest.mark.anyio
+async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
+    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_branch_target)
+    await run(
+        RunConfig(
+            target=str(improve_branch_target),
+            flow_name="improve",
+            improve_focus="branch",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    assert all(
+        "apps/billing/api.py" in call["prompt"] for call in audit_calls
+    )
+    vetted = json.loads(
+        _dd(improve_branch_target, "vetted-findings.json").read_text()
+    )
+    assert {finding["provenance"] for finding in vetted["findings"]} <= {
+        "introduced",
+        "inherited",
+    }
+
+
+@pytest.mark.anyio
+async def test_branch_focus_on_base_branch_reports_and_exits_cleanly(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_improve_stub(monkeypatch, improve_monorepo_target)
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_focus="branch",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    assert code == 1
+
+
+@pytest.mark.anyio
 async def test_failed_category_is_reported_not_silently_dropped(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

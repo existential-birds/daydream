@@ -16,7 +16,7 @@ from daydream.agent import console, get_non_interactive, run_agent
 from daydream.config import AUDIT_CATEGORIES, EffortTier
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.detection import StackAssignment, detect_stacks
-from daydream.deep.orchestrator import get_installed_skills
+from daydream.deep.orchestrator import _diff_changed_files, get_installed_skills
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.api import FlowStep, Stop
 from daydream.improve.artifacts import (
@@ -81,6 +81,7 @@ _EVIDENCE_LOCATION = re.compile(
     r"^`?(.+?):(\d+)(?::\d+)?(?:`|\b)"
 )
 _PLAN_SLUG = re.compile(r"^[a-z0-9-]{1,60}$")
+_PROVENANCE_VALUES = {"introduced", "inherited"}
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,37 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     """Enumerate services, inspect repository conventions, and detect stacks."""
     target = ctx.work.repo
     directory: Path = ctx.data["improve_dir"]
+    branch_focus = ctx.config.improve_focus == "branch"
+    if (
+        branch_focus
+        and ctx.work.head_branch is not None
+        and ctx.work.head_branch == ctx.work.base_branch
+    ):
+        print_error(
+            console,
+            "Branch Focus Requires a Feature Branch",
+            f"cwd is on the base branch {ctx.work.base_branch!r} -- "
+            "there are no branch changes to audit.\n"
+            "Check out a feature branch and re-run, or run a full improve "
+            "audit without --focus branch.",
+        )
+        return Stop(1)
+
+    branch_diff = (
+        git_ops.diff(target, ctx.work.base_branch) if branch_focus else ""
+    )
+    branch_files = _diff_changed_files(branch_diff) if branch_focus else []
+    if branch_focus:
+        ctx.data["effort_tier"] = EffortTier(
+            categories=None,
+            max_concurrency=1,
+            high_confidence_only=False,
+            max_findings=None,
+            include_investigate=False,
+        )
+    ctx.data["branch_diff"] = branch_diff
+    ctx.data["branch_files"] = branch_files
+
     services = enumerate_services(
         target,
         ctx.config.file_config or DaydreamFileConfig(),
@@ -161,6 +193,8 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         except ValueError as exc:
             print_error(console, "Invalid Improve Scope", str(exc))
             return Stop(1)
+    if branch_focus:
+        services = _services_for_files(services, tuple(branch_files))
 
     services_path(directory).write_text(
         json.dumps(
@@ -190,7 +224,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         installed if installed is not None else ctx.registry.stack_keys()
     )
     stacks = detect_stacks(
-        _tracked_files(target),
+        branch_files if branch_focus else _tracked_files(target),
         skill_availability=availability,
         registry=ctx.registry,
     )
@@ -301,7 +335,27 @@ def resolve_categories(
         return (focus,)
     if focus == "next":
         return ("direction",)
+    if focus == "branch":
+        return AUDIT_CATEGORIES
     return tier.categories or AUDIT_CATEGORIES
+
+
+def _schema_with_provenance(
+    schema: dict[str, Any],
+    *,
+    require: bool,
+) -> dict[str, Any]:
+    """Return a structured-output schema extended with branch provenance."""
+    extended = json.loads(json.dumps(schema))
+    items = extended["properties"][
+        "findings" if "findings" in extended["properties"] else "verdicts"
+    ]["items"]
+    items["properties"]["provenance"] = {
+        "enum": sorted(_PROVENANCE_VALUES),
+    }
+    if require:
+        items["required"].append("provenance")
+    return extended
 
 
 async def _step_audit(ctx: FlowContext) -> None:
@@ -311,6 +365,7 @@ async def _step_audit(ctx: FlowContext) -> None:
     services: list[Service] = ctx.data["services"]
     stacks: list[StackAssignment] = ctx.data["stacks"]
     categories = resolve_categories(tier, ctx.config.improve_focus)
+    branch_focus = ctx.config.improve_focus == "branch"
     assignments = _audit_assignments(ctx, categories, stacks)
     backend = ctx.backend_for("audit")
     recorder = get_current_recorder()
@@ -338,6 +393,16 @@ async def _step_audit(ctx: FlowContext) -> None:
                     "\nReturn 4–6 grounded suggestions with honest tradeoffs "
                     "and design/spike-sized next steps."
                 )
+            if branch_focus:
+                scope_note += (
+                    "\nThis is a branch-focused audit. Limit findings to the "
+                    "changed-file scope above. Tag every finding with "
+                    '`provenance: "introduced"` when the supplied diff is '
+                    "evidence that the branch introduced it; otherwise tag it "
+                    '`provenance: "inherited"`.\n'
+                    "Merge-base diff:\n```diff\n"
+                    f"{ctx.data['branch_diff']}\n```"
+                )
             prompt = ctx.registry.prompt("audit")(
                 category=assignment.category,
                 skill_invocation=invocation,
@@ -347,6 +412,12 @@ async def _step_audit(ctx: FlowContext) -> None:
                 cwd=ctx.work.repo,
                 tier=tier,
             )
+            if branch_focus:
+                prompt += (
+                    "\nFor this branch-focused audit, the structured-output "
+                    "schema additionally requires each finding to include "
+                    '`provenance` as either `"introduced"` or `"inherited"`.'
+                )
 
             async def _task(
                 current: _AuditAssignment = assignment,
@@ -363,7 +434,14 @@ async def _step_audit(ctx: FlowContext) -> None:
                                 ctx.work.repo,
                                 task_prompt,
                                 phase=DaydreamPhase.AUDIT,
-                                output_schema=AUDIT_FINDINGS_SCHEMA,
+                                output_schema=(
+                                    _schema_with_provenance(
+                                        AUDIT_FINDINGS_SCHEMA,
+                                        require=True,
+                                    )
+                                    if branch_focus
+                                    else AUDIT_FINDINGS_SCHEMA
+                                ),
                                 read_only=True,
                             )
                         raw_findings = (
@@ -443,6 +521,7 @@ def _apply_vet_verdicts(
     verdicts: list[Any],
     *,
     rejected_at_sha: str,
+    default_provenance: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Apply positional, 1-based vet verdicts with fail-closed polarity."""
     kept: list[dict[str, Any]] = []
@@ -455,6 +534,7 @@ def _apply_vet_verdicts(
         "confidence",
         "path",
         "line",
+        "provenance",
     )
     for offset, finding in enumerate(findings):
         vet_id = offset + 1
@@ -476,6 +556,11 @@ def _apply_vet_verdicts(
         for field in corrected_fields:
             if verdict.get(field) is not None:
                 corrected[field] = verdict[field]
+        if (
+            default_provenance is not None
+            and corrected.get("provenance") not in _PROVENANCE_VALUES
+        ):
+            corrected["provenance"] = default_provenance
         kept.append(corrected)
     return kept, rejected
 
@@ -485,6 +570,7 @@ async def _step_vet(ctx: FlowContext) -> None:
     directory: Path = ctx.data["improve_dir"]
     plans_dir = ctx.work.repo / "daydream_plans"
     previous = load_rejections(plans_dir)
+    branch_focus = ctx.config.improve_focus == "branch"
     audit_findings = ctx.data["audit"].get("findings", [])
     candidates = [
         finding
@@ -511,6 +597,14 @@ async def _step_vet(ctx: FlowContext) -> None:
             findings=indexed,
             cwd=ctx.work.repo,
         )
+        if branch_focus:
+            prompt += (
+                "\nConfirm each candidate's branch provenance against this "
+                "merge-base diff. Return `provenance` as `introduced` only "
+                "when the diff supports that conclusion; otherwise return "
+                "`inherited`.\n```diff\n"
+                f"{ctx.data['branch_diff']}\n```"
+            )
         try:
             async with phase_scope(DaydreamPhase.VET):
                 output, _, _ = await run_agent(
@@ -518,7 +612,11 @@ async def _step_vet(ctx: FlowContext) -> None:
                     ctx.work.repo,
                     prompt,
                     phase=DaydreamPhase.VET,
-                    output_schema=VET_SCHEMA,
+                    output_schema=(
+                        _schema_with_provenance(VET_SCHEMA, require=False)
+                        if branch_focus
+                        else VET_SCHEMA
+                    ),
                     read_only=True,
                 )
         except Exception:  # noqa: BLE001 - no verdict fails closed
@@ -533,6 +631,7 @@ async def _step_vet(ctx: FlowContext) -> None:
             category_findings,
             verdicts,
             rejected_at_sha=ctx.work.head_sha,
+            default_provenance="inherited" if branch_focus else None,
         )
         kept.extend(category_kept)
         rejected.extend(category_rejected)
@@ -633,7 +732,25 @@ async def _step_prioritize(ctx: FlowContext) -> None:
     ctx.data["vetted"] = vetted
     ctx.data["defects"] = ordered_defects
     ctx.data["direction"] = ordered_direction
-    ctx.data["findings_table"] = _findings_table(ordered_defects)
+    if ctx.config.improve_focus == "branch":
+        introduced = [
+            finding
+            for finding in ordered_defects
+            if finding.get("provenance") == "introduced"
+        ]
+        inherited = [
+            finding
+            for finding in ordered_defects
+            if finding.get("provenance") != "introduced"
+        ]
+        ctx.data["findings_table"] = (
+            "### Introduced by this branch\n\n"
+            f"{_findings_table(introduced)}\n\n"
+            "### Inherited from the base\n\n"
+            f"{_findings_table(inherited, start=len(introduced) + 1)}"
+        )
+    else:
+        ctx.data["findings_table"] = _findings_table(ordered_defects)
     ctx.data["direction_section"] = _direction_section(
         ordered_direction,
         start=len(ordered_defects) + 1,
