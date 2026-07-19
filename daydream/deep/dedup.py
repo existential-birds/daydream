@@ -52,14 +52,14 @@ class CandidatePair:
     similarity: float
 
 
-def _normalize_title(text: str) -> str:
+def normalize_title(text: str) -> str:
     """Lowercase, strip punctuation, drop stop words, return whitespace-joined string."""
     cleaned = _PUNCT_RE.sub(" ", text.lower())
     tokens = [tok for tok in cleaned.split() if tok and tok not in _STOP_WORDS]
     return " ".join(tokens)
 
 
-def _bigrams(normalized: str) -> set[str]:
+def bigrams(normalized: str) -> set[str]:
     """Return the set of 2-character bigrams from a normalized title string.
 
     Character-level bigrams are used because they are robust to token
@@ -72,7 +72,7 @@ def _bigrams(normalized: str) -> set[str]:
     return {normalized[i : i + 2] for i in range(len(normalized) - 1)}
 
 
-def _jaccard(a: set[str], b: set[str]) -> float:
+def jaccard(a: set[str], b: set[str]) -> float:
     """Return Jaccard similarity, or 0.0 when both sets are empty."""
     if not a and not b:
         return 0.0
@@ -135,7 +135,7 @@ def build_dedup_candidates(
     for r in records:
         r_file = str(r.get("file", ""))
         r_desc = str(r.get("description", ""))
-        r_bigrams = _bigrams(_normalize_title(r_desc))
+        r_bigrams = bigrams(normalize_title(r_desc))
         if not r_file or not r_bigrams:
             continue
         for a in alt_issues:
@@ -145,7 +145,7 @@ def build_dedup_candidates(
                 continue
             if not _files_overlap(r_file, a_files):
                 continue
-            sim = _jaccard(r_bigrams, _bigrams(_normalize_title(a_title)))
+            sim = jaccard(r_bigrams, bigrams(normalize_title(a_title)))
             if sim >= _SIM_THRESHOLD:
                 pairs.append(
                     CandidatePair(
@@ -194,17 +194,17 @@ def build_record_dedup_candidates(
         a_file = str(r_a.get("file", ""))
         a_desc = str(r_a.get("description", ""))
         a_source = sources[i]
-        a_bigrams = _bigrams(_normalize_title(a_desc))
+        a_bigrams = bigrams(normalize_title(a_desc))
         if not a_desc or not a_bigrams:
             continue
         for j in range(i + 1, n):
             r_b = records[j]
             b_id = str(r_b.get("id", ""))
             b_desc = str(r_b.get("description", ""))
-            b_bigrams = _bigrams(_normalize_title(b_desc))
+            b_bigrams = bigrams(normalize_title(b_desc))
             if not b_desc or not b_bigrams:
                 continue
-            sim = _jaccard(a_bigrams, b_bigrams)
+            sim = jaccard(a_bigrams, b_bigrams)
             if sim >= _SIM_THRESHOLD:
                 pairs.append(
                     RecordDuplicatePair(

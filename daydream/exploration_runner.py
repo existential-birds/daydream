@@ -297,22 +297,11 @@ async def repo_scan(
 
     static_files: list[FileInfo] = []
     try:
-        proc = git_ops._run_git(  # noqa: SLF001 - git_ops is the subprocess boundary
-            repo_root,
-            ["ls-files", "-z"],
-            capture_bytes=True,
-        )
-        if proc.returncode == 0:
-            stdout = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
-            paths = [
-                path.decode("utf-8", errors="surrogateescape")
-                for path in stdout.split(b"\0")
-                if path
-            ]
-            static_files = [
-                FileInfo(path=path, role="tracked")
-                for path in paths[:max(0, max_files)]
-            ]
+        paths = git_ops.ls_files(repo_root)
+        static_files = [
+            FileInfo(path=path, role="tracked")
+            for path in paths[:max(0, max_files)]
+        ]
     except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
         pass
 

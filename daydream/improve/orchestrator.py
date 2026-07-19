@@ -27,11 +27,13 @@ from daydream.improve.artifacts import (
     vetted_findings_path,
 )
 from daydream.improve.plans import (
+    _markdown_cell,
     load_rejections,
     missing_required_sections,
     planned_fingerprints,
     record_rejections,
     resolve_review_plan_path,
+    split_plan_at_status,
     write_plans,
 )
 from daydream.improve.prioritize import (
@@ -124,22 +126,6 @@ def _service_dict(service: Service) -> dict[str, str]:
     }
 
 
-def _tracked_files(repo: Path) -> list[str]:
-    proc = git_ops._run_git(  # noqa: SLF001 - git_ops owns the subprocess boundary
-        repo,
-        ["ls-files", "-z"],
-        capture_bytes=True,
-    )
-    if proc.returncode != 0:
-        return []
-    stdout = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
-    return [
-        path.decode("utf-8", errors="surrogateescape")
-        for path in stdout.split(b"\0")
-        if path
-    ]
-
-
 def _build_recon_prompt(
     repo: Path, services: list[Service], exploration_summary: str
 ) -> str:
@@ -211,7 +197,11 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     services = all_services
     if ctx.config.improve_scope and not description_mode:
         try:
-            services = filter_scope(services, ctx.config.improve_scope)
+            services = filter_scope(
+                services,
+                ctx.config.improve_scope,
+                (ctx.config.file_config or DaydreamFileConfig()).improve_service_groups,
+            )
         except ValueError as exc:
             print_error(console, "Invalid Improve Scope", str(exc))
             return Stop(1)
@@ -249,7 +239,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             installed if installed is not None else ctx.registry.stack_keys()
         )
         stacks = detect_stacks(
-            branch_files if branch_focus else _tracked_files(target),
+            branch_files if branch_focus else git_ops.ls_files(target),
             skill_availability=availability,
             registry=ctx.registry,
         )
@@ -583,7 +573,17 @@ def _apply_vet_verdicts(
     rejected_at_sha: str,
     default_provenance: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Apply positional, 1-based vet verdicts with fail-closed polarity."""
+    """Apply 1-based, vet_id-keyed vet verdicts with fail-closed polarity.
+
+    Verdicts are matched by ``vet_id`` rather than array position, so the
+    model may return them in any order. A finding with no matching verdict
+    (missing, non-dict, or unmatched id) is dropped, preserving the
+    fail-closed polarity.
+    """
+    by_vet_id: dict[int, dict[str, Any]] = {}
+    for verdict in verdicts:
+        if isinstance(verdict, dict) and isinstance(verdict.get("vet_id"), int):
+            by_vet_id[verdict["vet_id"]] = verdict
     kept: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     corrected_fields = (
@@ -598,8 +598,8 @@ def _apply_vet_verdicts(
     )
     for offset, finding in enumerate(findings):
         vet_id = offset + 1
-        verdict = verdicts[offset] if offset < len(verdicts) else None
-        if not isinstance(verdict, dict) or verdict.get("vet_id") != vet_id:
+        verdict = by_vet_id.get(vet_id)
+        if verdict is None:
             continue
         if not verdict.get("keep", False):
             rejected.append(
@@ -704,11 +704,6 @@ async def _step_vet(ctx: FlowContext) -> None:
     ctx.data["vetted"] = vetted
     ctx.data["previously_rejected"] = previously_rejected
     ctx.data["vet_rejected"] = len(rejected)
-
-
-def _markdown_cell(value: Any) -> str:
-    """Render a value safely inside a Markdown table cell."""
-    return str(value or "—").replace("|", "\\|").replace("\n", " ")
 
 
 def _evidence_cell(finding: dict[str, Any]) -> str:
@@ -1053,7 +1048,20 @@ async def _review_plan(ctx: FlowContext, requested: str) -> None:
         ctx.data["plan_exit_code"] = 1
         return
 
-    plan_path.write_text(tightened.rstrip() + "\n", encoding="utf-8")
+    # The host-stamped drift-check / Executor-instructions blockquote lives in
+    # the region before ``## Status`` (emitted only by ``render_plan``). The
+    # reviewer returns tightened ``##`` sections but may drop that blockquote,
+    # and ``missing_required_sections`` only validates ``##`` headings so it
+    # cannot detect the loss. Re-stamp the original host header and take only
+    # the tightened body so the header survives the round-trip.
+    original_head, _ = split_plan_at_status(original)
+    _, tightened_body = split_plan_at_status(tightened)
+    reassembled = (
+        original_head.rstrip() + "\n\n" + tightened_body
+        if original_head.strip()
+        else tightened_body
+    )
+    plan_path.write_text(reassembled.rstrip() + "\n", encoding="utf-8")
     ctx.data["plan_review"] = {
         "path": str(plan_path),
         "critique": critique,

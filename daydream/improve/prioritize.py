@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from daydream.deep.dedup import _bigrams, _jaccard, _normalize_title
+from daydream.deep.dedup import bigrams, jaccard, normalize_title
 
 _IMPACT = {"HIGH": 3.0, "MED": 2.0, "LOW": 1.0}
 _EFFORT = {"S": 1.0, "M": 2.0, "L": 3.0}
@@ -63,7 +63,7 @@ def aggregate_cross_service(
         if index in consumed:
             continue
         services = _finding_services(finding)
-        title_bigrams = _bigrams(_normalize_title(str(finding.get("title", ""))))
+        title_bigrams = bigrams(normalize_title(str(finding.get("title", ""))))
         group = [finding]
 
         if services and title_bigrams:
@@ -78,11 +78,11 @@ def aggregate_cross_service(
                     or services & candidate_services
                 ):
                     continue
-                candidate_bigrams = _bigrams(
-                    _normalize_title(str(candidate.get("title", "")))
+                candidate_bigrams = bigrams(
+                    normalize_title(str(candidate.get("title", "")))
                 )
                 if (
-                    _jaccard(title_bigrams, candidate_bigrams)
+                    jaccard(title_bigrams, candidate_bigrams)
                     < _CROSS_SERVICE_SIMILARITY
                 ):
                     continue

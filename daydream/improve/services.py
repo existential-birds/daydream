@@ -52,15 +52,29 @@ def enumerate_services(repo_root: Path, file_config: DaydreamFileConfig) -> list
     return _build_services(repo_root, discovered)
 
 
-def filter_scope(services: list[Service], scope: str) -> list[Service]:
-    """Filter services by exact name, root path, or a glob over root paths."""
+def filter_scope(
+    services: list[Service],
+    scope: str,
+    service_groups: dict[str, list[str]] | None = None,
+) -> list[Service]:
+    """Filter services by exact name, root path, a glob over root paths, or a named group.
+
+    A named group expands to its member service-root patterns, each matched by
+    exact root path or glob (the same matching a root pattern uses).
+    """
     normalized_scope = scope.removeprefix("./").rstrip("/")
+    group_patterns = service_groups.get(scope, []) if service_groups else []
     matched = [
         service
         for service in services
         if service.name == scope
         or service.root.as_posix() == normalized_scope
         or fnmatch.fnmatchcase(service.root.as_posix(), scope)
+        or any(
+            service.root.as_posix() == pattern.removeprefix("./").rstrip("/")
+            or fnmatch.fnmatchcase(service.root.as_posix(), pattern)
+            for pattern in group_patterns
+        )
     ]
     if matched:
         return matched

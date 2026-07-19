@@ -328,7 +328,7 @@ Expect and explicitly check the three common failure classes:
 Correct supported metadata or citations when needed. If a claim cannot be
 confirmed from the repository, reject it with a concise reason by default.
 
-Candidates (the `vet_id` is the zero-based array index and must be echoed):
+Candidates (the `vet_id` is the 1-based array index and must be echoed):
 ```json
 {json.dumps(list(findings), indent=2, default=str)}
 ```

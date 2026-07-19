@@ -92,6 +92,7 @@ def record_rejections(
 
 
 def _markdown_cell(value: Any) -> str:
+    """Render a value safely inside a Markdown table cell."""
     return str(value or "—").replace("|", "\\|").replace("\n", " ")
 
 
@@ -112,6 +113,24 @@ def missing_required_sections(markdown: str) -> tuple[str, ...]:
         for section in _REQUIRED_PLAN_SECTIONS
         if not sections.get(section, "").strip()
     )
+
+
+def split_plan_at_status(markdown: str) -> tuple[str, str]:
+    """Split a plan into ``(head, body)`` at the ``## Status`` heading.
+
+    ``head`` is everything before the ``## Status`` line: the title and the
+    host-stamped drift-check / Executor-instructions blockquote that
+    :func:`render_plan` emits. ``body`` is the ``## Status`` line through end
+    of document. ``_review_plan`` re-stamps ``head`` from the original plan on
+    a round-trip (the blockquote is not a ``##`` section, so
+    :func:`missing_required_sections` cannot detect its loss) and takes
+    ``body`` from the tightened output. Returns ``("", markdown)`` when no
+    ``## Status`` heading is present.
+    """
+    match = re.search(r"^## Status\b", markdown, re.MULTILINE)
+    if match is None:
+        return "", markdown
+    return markdown[: match.start()], markdown[match.start():]
 
 
 def resolve_review_plan_path(repo: Path, requested: str) -> Path:

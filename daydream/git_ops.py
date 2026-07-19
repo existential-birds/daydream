@@ -1146,6 +1146,35 @@ def list_untracked(repo: Path) -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+def ls_files(repo: Path) -> list[str]:
+    """Return repo-relative paths of tracked files.
+
+    Enumerates every file git knows about via ``git ls-files -z``, NUL-split
+    and ``surrogateescape``-decoded so filenames containing newlines or invalid
+    UTF-8 survive intact. This is the canonical primitive for tracked-file
+    enumeration; the improve recon flow and repo-scoped exploration share it.
+
+    Soft-failure semantics mirror :func:`list_untracked`: returns ``[]`` on any
+    non-zero ``git`` exit. :class:`GitError` (timeout, missing binary)
+    propagates so callers that distinguish "looked and found nothing" from
+    "could not look" can catch it; best-effort callers wrap the call in
+    ``try/except``.
+
+    Returns:
+        Repo-relative path strings in ``git ls-files`` output order. Empty
+        list on a non-zero exit.
+    """
+    proc = _run_git(repo, ["ls-files", "-z"], capture_bytes=True)
+    if proc.returncode != 0:
+        return []
+    stdout = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
+    return [
+        path.decode("utf-8", errors="surrogateescape")
+        for path in stdout.split(b"\0")
+        if path
+    ]
+
+
 def stash_create(repo: Path) -> str | None:
     """Capture tracked working-tree + index changes as a dangling commit.
 

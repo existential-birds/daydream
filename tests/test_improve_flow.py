@@ -8,9 +8,11 @@ import pytest
 
 from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS
+from daydream.config_file import DaydreamFileConfig
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.git_ops import head_sha
+from daydream.improve.orchestrator import _apply_vet_verdicts
 from daydream.runner import RunConfig, run
 
 
@@ -789,6 +791,36 @@ async def test_scope_slices_search_but_report_names_the_unaudited_rest(
 
 
 @pytest.mark.anyio
+async def test_group_scope_expands_named_service_group_to_all_members(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ``--scope <group>`` must expand the named group from improve_service_groups
+    # to its members (previously this raised ValueError and stopped with code 1).
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_scope="core",
+            file_config=DaydreamFileConfig(
+                improve_service_groups={"core": ["apps/billing", "apps/catalog"]}
+            ),
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    audited_paths = {call["prompt"] for call in audit_calls}
+    assert any("apps/billing" in p for p in audited_paths)
+    assert any("apps/catalog" in p for p in audited_paths)
+    report = _dd(improve_monorepo_target, "report.md").read_text()
+    # the group covered every detected service, so the unaudited list is empty
+    assert "No other detected service directories." in report
+
+
+@pytest.mark.anyio
 async def test_plan_subverb_skips_audit_and_writes_single_plan(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -839,7 +871,14 @@ async def test_review_plan_tightens_in_place(
     _install_improve_stub(monkeypatch, improve_monorepo_target)
     plan = improve_monorepo_target / "daydream_plans" / "001-fix.md"
     plan.parent.mkdir()
-    plan.write_text("# Plan 001: Fix\n\nMake the fix.\n")
+    plan.write_text(
+        "# Plan 001: Fix\n\n"
+        "> **Executor instructions**: Follow this plan step by step.\n"
+        ">\n"
+        "> **Drift check (run first)**: `git diff --stat abcdef0..HEAD -- apps/billing/api.py`\n\n"
+        "## Status\n\n- **Priority**: P1\n\n"
+        "Make the fix.\n"
+    )
 
     code = await run(
         RunConfig(
@@ -852,7 +891,14 @@ async def test_review_plan_tightens_in_place(
     )
 
     assert code == 0
-    assert "## STOP conditions" in plan.read_text()
+    rewritten = plan.read_text()
+    assert "## STOP conditions" in rewritten
+    # The stub's tightened markdown omits the host blockquote header entirely;
+    # the round-trip must re-stamp the original drift-check / Executor header
+    # (which ``missing_required_sections`` cannot detect, since it only scans
+    # ``##`` sections).
+    assert "**Executor instructions**" in rewritten
+    assert "git diff --stat abcdef0..HEAD -- apps/billing/api.py" in rewritten
 
 
 @pytest.mark.anyio
@@ -953,3 +999,45 @@ async def test_trajectory_records_improve_flow_and_phases(
     )
     assert flows and set(flows) == {"improve"}
     assert {"recon", "audit", "vet", "plan_write"} <= set(phases)
+
+
+def test_apply_vet_verdicts_matches_by_vet_id_ignoring_order() -> None:
+    """Reordered verdicts must not silently drop findings.
+
+    Regression for the positional/order-sensitive matcher: the model may
+    return verdicts in any order, and matching must be by ``vet_id``.
+    """
+    findings = [
+        {"fingerprint": "a", "title": "A", "path": "a.py", "line": 1},
+        {"fingerprint": "b", "title": "B", "path": "b.py", "line": 2},
+        {"fingerprint": "c", "title": "C", "path": "c.py", "line": 3},
+    ]
+    # Returned in reverse order with 1-based vet_ids.
+    verdicts = [
+        {"vet_id": 3, "keep": True, "reason": "ok"},
+        {"vet_id": 1, "keep": False, "reason": "rejected"},
+        {"vet_id": 2, "keep": True, "reason": "ok"},
+    ]
+    kept, rejected = _apply_vet_verdicts(
+        findings, verdicts, rejected_at_sha="sha"
+    )
+    kept_fps = {f["fingerprint"] for f in kept}
+    rejected_fps = {f["fingerprint"] for f in rejected}
+    assert kept_fps == {"b", "c"}
+    assert rejected_fps == {"a"}
+
+
+def test_apply_vet_verdicts_drops_finding_when_verdict_missing() -> None:
+    """A finding whose vet_id has no matching verdict is dropped (fail-closed)."""
+    findings = [
+        {"fingerprint": "a", "title": "A", "path": "a.py", "line": 1},
+        {"fingerprint": "b", "title": "B", "path": "b.py", "line": 2},
+    ]
+    # Only vet_id=2 is provided; vet_id=1 (model obeying the old zero-based
+    # prose would emit vet_id=0) must be dropped, not kept.
+    verdicts = [{"vet_id": 2, "keep": True, "reason": "ok"}]
+    kept, rejected = _apply_vet_verdicts(
+        findings, verdicts, rejected_at_sha="sha"
+    )
+    assert {f["fingerprint"] for f in kept} == {"b"}
+    assert rejected == []
