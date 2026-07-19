@@ -138,11 +138,13 @@ def test_agent_definition_importable():
 @pytest.mark.asyncio
 async def test_backend_execute_accepts_agents_kwarg():
     """MockBackend (satisfying Backend protocol) should accept agents=None."""
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
     from daydream.backends import AgentEvent, Backend
 
     class MockBackendWithAgents:
+        model = "mock-model"
+
         async def execute(
             self,
             cwd,
@@ -150,8 +152,9 @@ async def test_backend_execute_accepts_agents_kwarg():
             output_schema=None,
             continuation=None,
             agents=None,
+            max_turns=None,
             read_only=False,
-        ) -> AsyncIterator[AgentEvent]:
+        ) -> AsyncGenerator[AgentEvent, None]:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 

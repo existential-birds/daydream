@@ -151,10 +151,11 @@ synchronous; it must not be declared with `async def`.
 
 Return `ToolDecision(veto=False)` to let the invocation continue. Return
 `ToolDecision(veto=True, reason="...")` to abort the current agent turn; a veto
-requires a non-blank reason. Daydream cancels the backend, records the partial
-turn, and returns a `tool_vetoed:<name>` budget reason to the caller. If the
-supervisor raises, the failure propagates as an extension failure rather than
-being treated as a backend retry.
+requires a non-blank reason. Daydream closes the current invocation's event
+stream, records the partial turn, and returns a `tool_vetoed:<name>` budget
+reason to the caller. Other invocations sharing the backend continue running.
+If the supervisor raises, the failure propagates as an extension failure rather
+than being treated as a backend retry.
 
 `register_tool_supervisor` accepts only one callable per registry. A second
 registration or a non-callable value raises `ExtensionError`. If an extension

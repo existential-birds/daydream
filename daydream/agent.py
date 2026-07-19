@@ -8,11 +8,12 @@ import math
 import os
 import random
 import re
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from types import TracebackType
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from rich.text import Text
 
 from daydream.backends import (
+    AgentEventStream,
     Backend,
     ContinuationToken,
     CostEvent,
@@ -69,6 +71,35 @@ class _ToolSupervisorFailure(Exception):
     def subtype(self) -> str:
         """Expose the original error's type name for trajectory recording."""
         return type(self.original).__name__
+
+
+class _EventStreamScope:
+    """Idempotent owner for one backend invocation's event stream."""
+
+    def __init__(self, event_iter: AgentEventStream) -> None:
+        self.event_iter = event_iter
+        self._closed = False
+
+    async def __aenter__(self) -> AgentEventStream:
+        return self.event_iter
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Close the invocation once without masking its outcome."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self.event_iter.aclose()
+        except Exception:  # noqa: BLE001 - cleanup must not mask the invocation outcome
+            pass
 
 
 @dataclass
@@ -379,7 +410,7 @@ async def run_agent(
             ``--sandbox read-only``). Wired True only for the read-only
             failure-summarizer call; all other call sites keep the default.
         wall_budget_s: Opt-in per-invocation wall-clock budget. When exceeded
-            the loop is cancelled, ``backend.cancel()`` is awaited, the ATIF
+            the loop and this invocation's event iterator are closed, the ATIF
             turn is marked aborted, and the partial output is returned — no
             exception reaches the caller. ``None`` (the default) disables the
             wall budget.
@@ -407,7 +438,6 @@ async def run_agent(
     tool_supervisor = get_registry().tool_supervisor_if_registered()
 
     _state.current_backends.append(backend)
-    event_iter: AsyncGenerator[Any, None] | None = None
     try:
         # Open Invocation scope when a recorder is active; nullcontext keeps the
         # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
@@ -440,18 +470,16 @@ async def run_agent(
             agent_renderer = AgentTextRenderer(console)
 
             try:
-                event_iter = cast(
-                    AsyncGenerator[Any, None],
-                    backend.execute(
-                        cwd, prompt, output_schema, continuation,
-                        agents=agents, max_turns=max_turns, read_only=read_only,
-                    ),
+                event_iter = backend.execute(
+                    cwd, prompt, output_schema, continuation,
+                    agents=agents, max_turns=max_turns, read_only=read_only,
                 )
                 invocation_cm: Any = (
                     recorder.invocation(phase=phase) if recorder is not None else nullcontext(None)
                 )
+                event_stream_scope = _EventStreamScope(event_iter)
 
-                async with invocation_cm as inv:
+                async with invocation_cm as inv, event_stream_scope:
                     if inv is not None:
                         inv.observe_user_step(prompt=prompt)
 
@@ -623,23 +651,15 @@ async def run_agent(
                                     inv.observe(event)
 
                     # Abort handling: the wall scope cancelled the loop, a quantitative
-                    # tool ceiling fired, or a supervisor veto broke out. Cancel the
-                    # backend (swallow any error — an abort must NEVER raise into the
-                    # CLI), mark the ATIF turn aborted, surface a marker, then fall
-                    # through to the partial-output return.
+                    # tool ceiling fired, or a supervisor veto broke out. Mark the
+                    # ATIF turn aborted and let the invocation's event-stream scope
+                    # close its resources before returning partial output.
                     wall_cancelled = bool(getattr(wall_scope, "cancelled_caught", False))
                     if budget_reason is None and wall_cancelled:
                         budget_reason = "wall_budget_exceeded"
                     aborted_reason = budget_reason
                     if budget_reason is not None:
-                        try:
-                            await event_iter.aclose()
-                        except Exception:  # noqa: BLE001 - abort must not raise into the CLI
-                            pass
-                        try:
-                            await backend.cancel()
-                        except Exception:  # noqa: BLE001 - abort must not raise into the CLI
-                            pass
+                        await event_stream_scope.aclose()
                         if inv is not None:
                             inv.mark_aborted(budget_reason)
                             inv.observe(TurnEndEvent())
@@ -677,18 +697,8 @@ async def run_agent(
                             await result
                     elif not use_callback:
                         print_warning(console, retry_msg)
-                    if event_iter is not None:
-                        try:
-                            await event_iter.aclose()
-                        except Exception:  # noqa: BLE001
-                            pass
-                        event_iter = None
-                    # Do NOT call backend.cancel() here: the execute() generator's
-                    # finally block already terminates and removes the failed
-                    # invocation's process when event_iter.aclose() is called above.
-                    # Calling cancel() would terminate all processes on the shared
-                    # backend instance, killing sibling concurrent tasks under
-                    # fan-out (phases.py phase_per_stack_reviews).
+                    # The event-stream scope has already closed only this failed
+                    # invocation. Backend-wide cancel() is reserved for shutdown.
                     tool_registry.discard_all()
                     await anyio.sleep(delay)
                     continue
@@ -702,16 +712,6 @@ async def run_agent(
         raise
     finally:
         _state.current_backends.remove(backend)
-        # Always close the async generator explicitly so the SDK's internal
-        # TaskGroup / cancel scope exits in the same task that entered it.
-        # Without this, the async-gen finalizer can fire during GC in a
-        # different task, causing "Attempted to exit a cancel scope in a
-        # different task" RuntimeError from anyio (D-20).
-        if event_iter is not None:
-            try:
-                await event_iter.aclose()
-            except Exception:  # noqa: BLE001 — cleanup must not raise
-                pass
 
     if output_schema is not None and structured_result is not None:
         return structured_result, result_continuation, aborted_reason

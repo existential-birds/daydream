@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -94,10 +94,10 @@ class MockBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         events = self.events
 
-        async def _gen() -> AsyncIterator[AgentEvent]:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
             for event in events:
                 yield event
 

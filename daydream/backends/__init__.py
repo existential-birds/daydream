@@ -21,6 +21,7 @@ Event vocabulary (members of the ``AgentEvent`` TypeAlias union):
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -28,8 +29,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from daydream.trajectory import now_iso
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
     from claude_agent_sdk.types import AgentDefinition
 
 
@@ -247,6 +246,19 @@ AgentEvent = (
 )
 
 
+class AgentEventStream(AsyncIterator[AgentEvent], Protocol):
+    """Closable event stream owned by one backend invocation.
+
+    Closing the stream must release only the resources created by the matching
+    :meth:`Backend.execute` call. It must not interrupt other streams returned
+    by the same backend instance.
+    """
+
+    async def aclose(self) -> None:
+        """Close this invocation and release its resources."""
+        ...
+
+
 class Backend(Protocol):
     """Protocol for agent backends.
 
@@ -274,7 +286,7 @@ class Backend(Protocol):
         agents: dict[str, AgentDefinition] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AgentEventStream:
         """Yield AgentEvents for *prompt*.
 
         Args:
@@ -295,7 +307,13 @@ class Backend(Protocol):
         """
         ...
 
-    async def cancel(self) -> None: ...
+    async def cancel(self) -> None:
+        """Cancel every active invocation on this backend.
+
+        This backend-wide operation is reserved for process shutdown. Callers
+        ending one invocation must close the corresponding AgentEventStream.
+        """
+        ...
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str: ...
 
@@ -340,6 +358,7 @@ from daydream.backends.pi import PiBackend  # noqa: E402
 
 __all__ = [
     "AgentEvent",
+    "AgentEventStream",
     "Backend",
     "ClaudeBackend",
     "ContinuationToken",

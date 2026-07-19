@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import io
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +54,7 @@ class _LogModeStubBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Emit the configured events in sequence."""
         for event in self.events:
             yield event

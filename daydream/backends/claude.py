@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -311,7 +311,7 @@ class ClaudeBackend:
         agents: dict[str, AgentDefinition] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt and yield unified events.
 
         Args:

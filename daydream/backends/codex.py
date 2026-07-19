@@ -13,7 +13,7 @@ import logging
 import re
 import tempfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +87,7 @@ class CodexBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt via Codex CLI and yield unified events.
 
         Args:
@@ -453,7 +453,7 @@ class CodexBackend:
                 Path(schema_path).unlink(missing_ok=True)
 
     async def cancel(self) -> None:
-        """Cancel the running Codex process.
+        """Cancel all running Codex processes.
 
         Sends SIGTERM, waits briefly, then SIGKILL if still running.
         """

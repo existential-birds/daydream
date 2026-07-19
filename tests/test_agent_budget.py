@@ -2,15 +2,15 @@
 
 Both budgets live inside run_agent: the loop is wrapped in
 ``anyio.move_on_after(wall_budget_s)`` and a ToolStartEvent counter trips the
-tool-call ceiling. On abort, ``backend.cancel()`` is awaited (errors swallowed),
-the recorder Invocation is marked aborted via ``inv.mark_aborted(reason)``, and
-the partial output is returned — no exception reaches the caller.
+tool-call ceiling. On abort, the invocation's event iterator is closed, the
+recorder Invocation is marked aborted via ``inv.mark_aborted(reason)``, and the
+partial output is returned without cancelling sibling backend invocations.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,7 +22,10 @@ from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
+    ResultEvent,
+    TextEvent,
     ToolStartEvent,
+    TurnEndEvent,
 )
 from daydream.trajectory import (
     DaydreamPhase,
@@ -61,11 +64,11 @@ class _BurstBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         count = self.count
         sleep_s = self.sleep_s
 
-        async def _gen() -> AsyncIterator[AgentEvent]:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
             for i in range(count):
                 if sleep_s:
                     await anyio.sleep(sleep_s)
@@ -115,18 +118,16 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
             )
 
     assert isinstance(result, str)
-    assert backend.cancel_calls == 1
+    assert backend.cancel_calls == 0
     traj = json.loads(recorder.path.read_text(encoding="utf-8"))
     step = _agent_step_with_stop_reason(traj)
     assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
 
 
-async def test_run_agent_cancel_error_swallowed(tmp_path: Path) -> None:
-    """cancel() raising must not propagate — abort path must never raise into the CLI."""
+async def test_run_agent_abort_does_not_call_backend_cancel(tmp_path: Path) -> None:
+    """An abort must not invoke the backend-wide cancellation API."""
 
     class _RaisingCancelBackend(_BurstBackend):
-        """_BurstBackend whose cancel() raises; verifies the swallow contract in run_agent."""
-
         async def cancel(self) -> None:
             self.cancel_calls += 1
             raise RuntimeError("cancel exploded")
@@ -134,7 +135,6 @@ async def test_run_agent_cancel_error_swallowed(tmp_path: Path) -> None:
     backend = _RaisingCancelBackend()
     recorder = _make_recorder(tmp_path)
 
-    # Must complete without raising — error-swallow contract
     with anyio.fail_after(5):
         async with recorder:
             result, _, _ = await run_agent(
@@ -147,10 +147,138 @@ async def test_run_agent_cancel_error_swallowed(tmp_path: Path) -> None:
             )
 
     assert isinstance(result, str)
-    assert backend.cancel_calls == 1
+    assert backend.cancel_calls == 0
     traj = json.loads(recorder.path.read_text(encoding="utf-8"))
     step = _agent_step_with_stop_reason(traj)
     assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
+
+
+async def test_run_agent_abort_swallows_event_stream_close_error(tmp_path: Path) -> None:
+    """Invocation cleanup failures must not replace the successful abort result."""
+
+    class _RaisingCloseBackend(_BurstBackend):
+        def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: dict[str, Any] | None = None,
+            continuation: ContinuationToken | None = None,
+            agents: dict[str, Any] | None = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            async def _gen() -> AsyncGenerator[AgentEvent, None]:
+                try:
+                    yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
+                finally:
+                    raise RuntimeError("stream close exploded")
+
+            return _gen()
+
+    backend = _RaisingCloseBackend()
+
+    with anyio.fail_after(5):
+        result, _, reason = await run_agent(
+            backend,
+            tmp_path,
+            "go",
+            phase=DaydreamPhase.FIX,
+            tool_call_budget=0,
+        )
+
+    assert isinstance(result, str)
+    assert reason == "tool_call_budget_exceeded"
+    assert backend.cancel_calls == 0
+
+
+async def test_run_agent_abort_records_reason_and_turn_end(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Abort bookkeeping preserves both the reason and synthetic turn boundary."""
+
+    class _InvocationSpy:
+        def __init__(self) -> None:
+            self.abort_reasons: list[str] = []
+            self.events: list[AgentEvent] = []
+
+        async def __aenter__(self) -> _InvocationSpy:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+        def observe_user_step(self, *, prompt: str) -> None:
+            pass
+
+        def mark_aborted(self, reason: str) -> None:
+            self.abort_reasons.append(reason)
+
+        def observe(self, event: AgentEvent) -> None:
+            self.events.append(event)
+
+    invocation = _InvocationSpy()
+
+    class _RecorderSpy:
+        def invocation(self, *, phase: DaydreamPhase) -> _InvocationSpy:
+            return invocation
+
+    monkeypatch.setattr("daydream.agent.get_current_recorder", lambda: _RecorderSpy())
+
+    await run_agent(
+        _BurstBackend(),
+        tmp_path,
+        "go",
+        phase=DaydreamPhase.FIX,
+        tool_call_budget=0,
+        progress_callback=lambda _: None,
+    )
+
+    assert invocation.abort_reasons == ["tool_call_budget_exceeded"]
+    assert isinstance(invocation.events[-1], TurnEndEvent)
+
+
+async def test_run_agent_closes_event_stream_before_abort_callback(tmp_path: Path) -> None:
+    """Invocation resources are released before abort notification can block."""
+
+    class _CloseTrackingBackend(_BurstBackend):
+        stream_closed = False
+
+        def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: dict[str, Any] | None = None,
+            continuation: ContinuationToken | None = None,
+            agents: dict[str, Any] | None = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            async def _gen() -> AsyncGenerator[AgentEvent, None]:
+                try:
+                    yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
+                finally:
+                    self.stream_closed = True
+
+            return _gen()
+
+    backend = _CloseTrackingBackend()
+    closed_during_abort_callback: list[bool] = []
+
+    def progress_callback(message: Any) -> None:
+        if "aborted" in str(message):
+            closed_during_abort_callback.append(backend.stream_closed)
+
+    await run_agent(
+        backend,
+        tmp_path,
+        "go",
+        phase=DaydreamPhase.FIX,
+        tool_call_budget=0,
+        progress_callback=progress_callback,
+    )
+
+    assert closed_during_abort_callback == [True]
 
 
 async def test_run_agent_wall_budget(tmp_path: Path) -> None:
@@ -170,7 +298,93 @@ async def test_run_agent_wall_budget(tmp_path: Path) -> None:
             )
 
     assert isinstance(result, str)
-    assert backend.cancel_calls == 1
+    assert backend.cancel_calls == 0
     traj = json.loads(recorder.path.read_text(encoding="utf-8"))
     step = _agent_step_with_stop_reason(traj)
     assert step["extra"]["stop_reason"] == "wall_budget_exceeded"
+
+
+async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(
+    tmp_path: Path,
+) -> None:
+    """An invocation budget abort closes its stream without cancelling a sibling."""
+
+    class _SharedBackend:
+        model = "mock-model"
+        fanout_concurrency = 2
+
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+            self.closed_prompts: set[str] = set()
+            self.sibling_started = anyio.Event()
+            self.release_sibling = anyio.Event()
+
+        def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: dict[str, Any] | None = None,
+            continuation: ContinuationToken | None = None,
+            agents: dict[str, Any] | None = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            async def _gen() -> AsyncGenerator[AgentEvent, None]:
+                try:
+                    if prompt == "sibling":
+                        self.sibling_started.set()
+                        await self.release_sibling.wait()
+                        if self.cancel_calls:
+                            return
+                        yield TextEvent(text="sibling completed")
+                        yield ResultEvent(structured_output=None, continuation=None)
+                        return
+
+                    await self.sibling_started.wait()
+                    yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
+                finally:
+                    self.closed_prompts.add(prompt)
+
+            return _gen()
+
+        async def cancel(self) -> None:
+            self.cancel_calls += 1
+
+        def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+            return f"/{skill_key}"
+
+    backend = _SharedBackend()
+    results: dict[str, str | bool] = {}
+
+    async def run_sibling() -> None:
+        output, _, _ = await run_agent(
+            backend,
+            tmp_path,
+            "sibling",
+            phase=DaydreamPhase.REVIEW,
+        )
+        results["sibling"] = output
+
+    async def run_aborting_invocation() -> None:
+        _, _, reason = await run_agent(
+            backend,
+            tmp_path,
+            "abort",
+            phase=DaydreamPhase.FIX,
+            tool_call_budget=0,
+        )
+        results["abort_reason"] = reason or ""
+        results["abort_iterator_closed"] = "abort" in backend.closed_prompts
+        backend.release_sibling.set()
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run_sibling)
+            task_group.start_soon(run_aborting_invocation)
+
+    assert results == {
+        "sibling": "sibling completed",
+        "abort_reason": "tool_call_budget_exceeded",
+        "abort_iterator_closed": True,
+    }
+    assert backend.cancel_calls == 0

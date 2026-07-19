@@ -32,7 +32,7 @@ import math
 import os
 import re
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -411,7 +411,7 @@ class PiBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt via the Pi CLI and yield unified events.
 
         Args:
@@ -708,7 +708,7 @@ class PiBackend:
             self._processes = [active for active in self._processes if active is not proc]
 
     async def cancel(self) -> None:
-        """Cancel the running Pi process.
+        """Cancel all running Pi processes.
 
         Sends SIGTERM, waits briefly, then SIGKILL if still running (mirrors
         ``CodexBackend.cancel``).
