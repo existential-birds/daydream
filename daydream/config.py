@@ -5,6 +5,11 @@ This module contains constants for skill mappings, file paths, and regex pattern
 used by the review and fix loop system.
 
 Exports:
+    AUDIT_CATEGORIES: tuple[str, ...] - Improve audit categories.
+    AUDIT_SKILL_MAP: dict[str, dict[str, str]] - Audit skill names by category
+        and detected stack.
+    EffortTier: Frozen improve audit effort-tier configuration.
+    EFFORT_TIERS: dict[str, EffortTier] - Improve audit effort tiers.
     ReviewSkillChoice: Enum for review skill menu choices.
     REVIEW_SKILLS: dict[ReviewSkillChoice, str] - Mapping of review type identifiers to skill names.
     REVIEW_OUTPUT_FILE: str - Default filename for storing review results.
@@ -28,6 +33,7 @@ Exports:
         structural meta-stack assignment.
 """
 
+from dataclasses import dataclass
 from enum import Enum
 
 # Default model ids — single source of truth. Resolved by ``create_backend`` only
@@ -64,18 +70,22 @@ DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 # flag is supplied. Phase names are lowercase and match the strings passed by
 # every call site (``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
 # ``"exploration"``, ``"intent"``, ``"wonder"``, ``"merge"``,
-# ``"pr_feedback"``).
+# ``"pr_feedback"``, ``"recon"``, ``"audit"``, ``"vet"``,
+# ``"plan_write"``).
 #
 # Claude tiering:
 #   - cheap (haiku):   PARSE
-#   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT, SUPPRESSION
-#   - heavy (opus):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER
+#   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT,
+#                      SUPPRESSION, RECON, AUDIT
+#   - heavy (opus):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER, VET,
+#                      PLAN_WRITE
 #
 # Codex tiering mirrors it across the GPT-5.6 lineup:
 #   - cheap (gpt-5.6-luna):   PARSE
 #   - mid   (gpt-5.6-terra):  FIX, TEST, VERIFY, EXPLORATION, PER_STACK_REVIEW,
-#                             INTENT, SUPPRESSION, SUPERVISE
-#   - heavy (gpt-5.6-sol):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER
+#                             INTENT, SUPPRESSION, SUPERVISE, RECON, AUDIT
+#   - heavy (gpt-5.6-sol):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER, VET,
+#                             PLAN_WRITE
 #
 # ``suppression`` (issue #232) is the precision-mode skeptical second opinion over
 # borderline uncontested findings; it runs on the cheap mid tier by design (never
@@ -111,6 +121,10 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "merge": "claude-opus-4-8",
         "intent": "claude-sonnet-5",
         "pr_feedback": "claude-opus-4-8",
+        "recon": "claude-sonnet-5",
+        "audit": "claude-sonnet-5",
+        "vet": "claude-opus-4-8",
+        "plan_write": "claude-opus-4-8",
     },
     "codex": {
         "parse": "gpt-5.6-luna",
@@ -127,6 +141,10 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "merge": "gpt-5.6-sol",
         "intent": "gpt-5.6-terra",
         "pr_feedback": "gpt-5.6-sol",
+        "recon": "gpt-5.6-terra",
+        "audit": "gpt-5.6-terra",
+        "vet": "gpt-5.6-sol",
+        "plan_write": "gpt-5.6-sol",
     },
 }
 
@@ -159,6 +177,10 @@ PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
         "merge": "medium",
         "intent": "medium",
         "pr_feedback": "high",
+        "recon": "low",
+        "audit": "high",
+        "vet": "xhigh",
+        "plan_write": "high",
     },
 }
 
@@ -182,6 +204,84 @@ REVIEW_SKILLS: dict[ReviewSkillChoice, str] = {
     ReviewSkillChoice.GO: "beagle-go:review-go",
     ReviewSkillChoice.RUST: "beagle-rust:review-rust",
     ReviewSkillChoice.IOS: "beagle-ios:review-ios",
+}
+
+AUDIT_CATEGORIES: tuple[str, ...] = (
+    "correctness",
+    "security",
+    "performance",
+    "tests",
+    "tech-debt",
+    "dependencies",
+    "dx",
+    "docs",
+    "direction",
+)
+
+
+@dataclass(frozen=True)
+class EffortTier:
+    """Configuration for one improve audit effort tier."""
+
+    categories: tuple[str, ...] | None
+    max_concurrency: int
+    high_confidence_only: bool
+    max_findings: int | None
+    include_investigate: bool
+
+
+EFFORT_TIERS: dict[str, EffortTier] = {
+    "quick": EffortTier(
+        categories=("correctness", "security", "tests"),
+        max_concurrency=1,
+        high_confidence_only=True,
+        max_findings=6,
+        include_investigate=False,
+    ),
+    "standard": EffortTier(
+        categories=None,
+        max_concurrency=4,
+        high_confidence_only=False,
+        max_findings=None,
+        include_investigate=False,
+    ),
+    "deep": EffortTier(
+        categories=None,
+        max_concurrency=8,
+        high_confidence_only=False,
+        max_findings=None,
+        include_investigate=True,
+    ),
+}
+
+AUDIT_SKILL_MAP: dict[str, dict[str, str]] = {
+    "correctness": {
+        "python": REVIEW_SKILLS[ReviewSkillChoice.PYTHON],
+        "react": REVIEW_SKILLS[ReviewSkillChoice.REACT],
+        "elixir": REVIEW_SKILLS[ReviewSkillChoice.ELIXIR],
+        "go": REVIEW_SKILLS[ReviewSkillChoice.GO],
+        "rust": REVIEW_SKILLS[ReviewSkillChoice.RUST],
+        "ios": REVIEW_SKILLS[ReviewSkillChoice.IOS],
+    },
+    "security": {
+        "elixir": "beagle-elixir:elixir-security-review",
+    },
+    "performance": {
+        "elixir": "beagle-elixir:elixir-performance-review",
+    },
+    "tests": {
+        "python": "beagle-python:pytest-code-review",
+        "go": "beagle-go:go-testing-code-review",
+        "rust": "beagle-rust:rust-testing-code-review",
+        "elixir": "beagle-elixir:exunit-code-review",
+    },
+    "tech-debt": {
+        "*": "beagle-core:review-structure",
+    },
+    "dependencies": {},
+    "dx": {},
+    "docs": {},
+    "direction": {},
 }
 
 # CLI skill name to full skill path mapping (derived from REVIEW_SKILLS to avoid duplication)

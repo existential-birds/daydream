@@ -62,6 +62,9 @@ class DaydreamFileConfig:
         tool_supervisor: Built-in tool supervisor mode (``"off"`` or ``"rules"``),
             or None when unset/invalid.
         tool_bash_deny: Regular expressions for denied Bash commands.
+        improve_service_roots: Repository-relative glob patterns identifying
+            service roots for the improve flow.
+        improve_service_groups: Named groups of repository-relative service roots.
     """
 
     model: str | None = None
@@ -77,6 +80,8 @@ class DaydreamFileConfig:
     supervisor_deny_globs: list[str] = field(default_factory=list)
     tool_supervisor: str | None = None
     tool_bash_deny: list[str] = field(default_factory=list)
+    improve_service_roots: list[str] = field(default_factory=list)
+    improve_service_groups: dict[str, list[str]] = field(default_factory=dict)
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase."""
@@ -135,7 +140,8 @@ def _merge_section(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
 
     Scalar keys (``model``, ``backend``) from ``override`` replace ``base``.
     The ``phases`` sub-table is merged per-phase so an override phase table
-    does not discard phases declared only in ``base``.
+    does not discard phases declared only in ``base``. The ``improve``
+    sub-table is likewise merged per-key.
     """
     merged: dict[str, Any] = dict(base)
     for key, value in override.items():
@@ -147,6 +153,8 @@ def _merge_section(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
                 else:
                     phases[phase_name] = phase_table
             merged["phases"] = phases
+        elif key == "improve" and isinstance(value, dict) and isinstance(merged.get("improve"), dict):
+            merged["improve"] = {**merged["improve"], **value}
         elif key == "bench" and isinstance(value, dict) and isinstance(merged.get("bench"), dict):
             bench: dict[str, Any] = dict(merged["bench"])
             for bench_key, bench_value in value.items():
@@ -249,6 +257,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     # so an accidental ``precision_mode = 1`` is treated as unset, not enabled.
     raw_precision = merged.get("precision_mode")
     precision: bool | None = raw_precision if isinstance(raw_precision, bool) else None
+    improve = merged.get("improve")
+    improve = improve if isinstance(improve, dict) else {}
+    service_groups = improve.get("service_groups")
+    service_groups = service_groups if isinstance(service_groups, dict) else {}
     # Per-file-group fix budgets (#201): tolerate junk by degrading to None (the
     # config.py default then applies). bool is excluded even though it subclasses
     # int/float — ``group_max_serial_items = true`` is never a meaningful count.
@@ -266,4 +278,9 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         supervisor_deny_globs=_coerce_string_list(merged.get("supervisor_deny_globs")),
         tool_supervisor=_coerce_choice(merged.get("tool_supervisor"), {"off", "rules"}),
         tool_bash_deny=_coerce_string_list(merged.get("tool_bash_deny")),
+        improve_service_roots=_coerce_string_list(improve.get("service_roots")),
+        improve_service_groups={
+            str(group): _coerce_string_list(roots)
+            for group, roots in service_groups.items()
+        },
     )

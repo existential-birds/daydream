@@ -1,16 +1,44 @@
 """Tests for daydream.config module."""
 
 from daydream.config import (
+    AUDIT_CATEGORIES,
+    AUDIT_SKILL_MAP,
     DEFAULT_EXPLORATION_MODEL,
     DEFAULT_PI_MODEL,
+    EFFORT_TIERS,
     PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_MODELS,
 )
 
 PHASE_NAMES = {
     "review", "per_stack_review", "arbiter", "suppression", "supervise", "parse", "fix", "test", "verify",
-    "exploration", "intent", "wonder", "merge", "pr_feedback",
+    "exploration", "intent", "wonder", "merge", "pr_feedback", "recon", "audit", "vet", "plan_write",
 }
+
+
+def test_audit_categories_match_playbook() -> None:
+    assert set(AUDIT_CATEGORIES) == {
+        "correctness",
+        "security",
+        "performance",
+        "tests",
+        "tech-debt",
+        "dependencies",
+        "dx",
+        "docs",
+        "direction",
+    }
+
+
+def test_quick_effort_tier_uses_high_confidence_core_categories() -> None:
+    assert EFFORT_TIERS["quick"].categories == ("correctness", "security", "tests")
+
+
+def test_audit_skill_map_values_are_plugin_skill_names() -> None:
+    for stack_skills in AUDIT_SKILL_MAP.values():
+        for skill in stack_skills.values():
+            plugin, separator, skill_name = skill.partition(":")
+            assert separator == ":" and plugin and skill_name
 
 
 def test_phase_default_models_covers_all_backends():
@@ -28,11 +56,11 @@ def test_phase_default_models_claude_tier_assignments():
     claude = PHASE_DEFAULT_MODELS["claude"]
     # PARSE is the cheap tier
     assert claude["parse"] == "claude-haiku-4-5"
-    # Expensive tier: REVIEW, WONDER, MERGE, PR_FEEDBACK
-    for phase in ("review", "wonder", "merge", "pr_feedback"):
+    # Expensive tier: REVIEW, WONDER, MERGE, PR_FEEDBACK, VET, PLAN_WRITE
+    for phase in ("review", "wonder", "merge", "pr_feedback", "vet", "plan_write"):
         assert claude[phase] == "claude-opus-4-8"
-    # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT
-    for phase in ("fix", "test", "exploration", "per_stack_review", "intent"):
+    # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT, RECON, AUDIT
+    for phase in ("fix", "test", "exploration", "per_stack_review", "intent", "recon", "audit"):
         assert claude[phase] == "claude-sonnet-5"
 
 
@@ -58,9 +86,12 @@ def test_phase_default_models_codex_tier_assignments():
     """Codex mirrors the Claude cheap/mid/heavy tiering across the GPT-5.6 lineup."""
     codex = PHASE_DEFAULT_MODELS["codex"]
     assert codex["parse"] == "gpt-5.6-luna"
-    for phase in ("fix", "test", "verify", "exploration", "per_stack_review", "suppression", "supervise", "intent"):
+    for phase in (
+        "fix", "test", "verify", "exploration", "per_stack_review", "suppression", "supervise", "intent", "recon",
+        "audit",
+    ):
         assert codex[phase] == "gpt-5.6-terra", f"codex phase {phase} should default to the mid tier"
-    for phase in ("review", "arbiter", "wonder", "merge", "pr_feedback"):
+    for phase in ("review", "arbiter", "wonder", "merge", "pr_feedback", "vet", "plan_write"):
         assert codex[phase] == "gpt-5.6-sol", f"codex phase {phase} should default to the heavy tier"
 
 
@@ -72,14 +103,15 @@ def test_phase_default_effort_is_codex_only_and_covers_every_phase():
 
 def test_phase_default_effort_tier_assignments():
     effort = PHASE_DEFAULT_EFFORT["codex"]
-    for phase in ("parse", "exploration"):
+    for phase in ("parse", "exploration", "recon"):
         assert effort[phase] == "low", f"{phase} should be latency-tier effort"
     for phase in ("fix", "test", "verify", "suppression", "supervise", "merge", "intent"):
         assert effort[phase] == "medium", f"{phase} should be baseline effort"
-    for phase in ("per_stack_review", "review", "wonder", "pr_feedback"):
+    for phase in ("per_stack_review", "review", "wonder", "pr_feedback", "audit", "plan_write"):
         assert effort[phase] == "high", f"{phase} should be high effort"
-    # The arbiter is the scoped quality-first pass over a small input.
-    assert effort["arbiter"] == "xhigh"
+    # The arbiter and vet phases are scoped quality-first passes over small inputs.
+    for phase in ("arbiter", "vet"):
+        assert effort[phase] == "xhigh"
 
 
 def test_pi_model_is_a_backend_fallback_not_a_phase_override():

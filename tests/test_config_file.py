@@ -7,6 +7,20 @@ import pytest
 from daydream.config_file import DaydreamFileConfig, load_file_config
 
 
+def test_improve_config_table_parses_service_roots(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.daydream.improve]\nservice_roots = ["apps/*"]\n'
+        '[tool.daydream.improve.service_groups]\ncore = ["apps/billing", "apps/catalog"]\n'
+    )
+    cfg = load_file_config(tmp_path)
+    assert cfg.improve_service_roots == ["apps/*"]
+    assert cfg.improve_service_groups == {"core": ["apps/billing", "apps/catalog"]}
+
+
+def test_improve_config_absent_defaults_empty(tmp_path: Path) -> None:
+    assert load_file_config(tmp_path).improve_service_roots == []
+
+
 def test_dotfile_wins_over_pyproject(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text('[tool.daydream]\nmodel = "from-pyproject"\n')
     (tmp_path / ".daydream.toml").write_text('model = "from-dotfile"\n[phases.fix]\nbackend = "codex"\n')
