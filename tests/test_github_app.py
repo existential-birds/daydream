@@ -305,6 +305,23 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypa
     assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
 
 
+def test_resolve_run_identity_skips_minting_when_not_posting(monkeypatch):
+    """With App credentials configured and owner/repo resolvable, is_posting=False
+    must never attempt minting — a read-only run has no need for a scoped token."""
+    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", _TEST_PEM)
+
+    def fake_gh_api(repo, endpoint, **kwargs):
+        if endpoint == "/user":
+            return {"login": "personal-user"}
+        raise AssertionError(f"minting must not be attempted when is_posting=False (hit {endpoint})")
+
+    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
+        identity = resolve_run_identity(Path("/tmp"), "myorg/myrepo", is_posting=False)
+
+    assert identity == "personal-user"
+
+
 def test_resolve_user_identity_returns_login():
     """resolve_user_identity reads the current gh-authenticated user."""
     with patch("daydream.git_ops.gh_api", return_value={"login": "personal-user"}):
