@@ -64,6 +64,7 @@ class _BurstBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         count = self.count
         sleep_s = self.sleep_s
@@ -166,6 +167,7 @@ async def test_run_agent_abort_swallows_event_stream_close_error(tmp_path: Path)
             agents: dict[str, Any] | None = None,
             max_turns: int | None = None,
             read_only: bool = False,
+            persist_session: bool = True,
         ) -> AsyncGenerator[AgentEvent, None]:
             async def _gen() -> AsyncGenerator[AgentEvent, None]:
                 try:
@@ -253,6 +255,7 @@ async def test_run_agent_closes_event_stream_before_abort_callback(tmp_path: Pat
             agents: dict[str, Any] | None = None,
             max_turns: int | None = None,
             read_only: bool = False,
+            persist_session: bool = True,
         ) -> AsyncGenerator[AgentEvent, None]:
             async def _gen() -> AsyncGenerator[AgentEvent, None]:
                 try:
@@ -328,6 +331,7 @@ async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(
             agents: dict[str, Any] | None = None,
             max_turns: int | None = None,
             read_only: bool = False,
+            persist_session: bool = True,
         ) -> AsyncGenerator[AgentEvent, None]:
             async def _gen() -> AsyncGenerator[AgentEvent, None]:
                 try:

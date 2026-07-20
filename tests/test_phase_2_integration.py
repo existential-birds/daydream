@@ -94,6 +94,7 @@ class MockBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         events = self.events
 

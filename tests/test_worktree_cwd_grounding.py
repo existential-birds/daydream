@@ -43,6 +43,7 @@ class _PromptCapturingBackend:
         agents=None,
         max_turns=None,
         read_only=False,
+        persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         self.prompts.append(prompt)
         result: dict[str, Any] = {}

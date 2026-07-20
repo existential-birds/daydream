@@ -37,6 +37,7 @@ class _RetryableThenSuccessBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         self.call_count += 1
         if self.call_count == 1:
@@ -69,6 +70,7 @@ class _NonRetryableBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         self.call_count += 1
         raise PiError("auth failed", retryable=False)
@@ -99,6 +101,7 @@ class _AlwaysRetryableBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         self.call_count += 1
         raise PiError("429 rate limit", retryable=True)
@@ -129,6 +132,7 @@ class _PartialThenRetryBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         self.call_count += 1
         if self.call_count == 1:
@@ -244,6 +248,7 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
             agents: Any = None,
             max_turns: Any = None,
             read_only: bool = False,
+            persist_session: bool = True,
         ):
             key = (
                 "fail-once"
@@ -326,6 +331,7 @@ class _StreamDropThenSuccessBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         self.call_count += 1
         if self.call_count == 1:

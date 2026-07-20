@@ -54,6 +54,7 @@ class _LogModeStubBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ) -> AsyncGenerator[Any, None]:
         """Emit the configured events in sequence."""
         for event in self.events:
