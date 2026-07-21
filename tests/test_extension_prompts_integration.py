@@ -249,7 +249,7 @@ async def test_plan_writer_prompt_exception_blocks_only_that_plan(
         improve_monorepo_target,
         "plan-write-diagnostics.json",
     ).read_text(encoding="utf-8")
-    assert rc == 1
+    assert rc == 0
     assert list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
     assert "BLOCKED (PLAN_WRITER_FAILED: PROMPT_CONSTRUCTION_FAILED)" in index
     assert "PROMPT_CONSTRUCTION_FAILED" in diagnostics

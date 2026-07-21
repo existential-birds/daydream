@@ -19,7 +19,11 @@ import daydream.agent as agent
 from daydream import git_ops
 from daydream.agent import console, get_non_interactive, run_agent
 from daydream.backends import effective_fanout_concurrency
-from daydream.config import AUDIT_CATEGORIES, EffortTier
+from daydream.config import (
+    AUDIT_CATEGORIES,
+    PLAN_WRITE_MAX_CONCURRENCY,
+    EffortTier,
+)
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.orchestrator import _diff_changed_files, get_installed_skills
@@ -60,6 +64,7 @@ from daydream.improve.prompts import (
     AUDIT_FINDINGS_SCHEMA,
     PLAN_WRITER_SCHEMA,
     VET_SCHEMA,
+    build_plan_writer_repair_prompt,
 )
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
@@ -89,7 +94,6 @@ _RECON_SCHEMA: dict[str, Any] = {
         "languages": {"type": "array", "items": {"type": "string"}},
         "commands": {
             "type": "array",
-            "uniqueItems": True,
             "items": RECON_COMMAND_SCHEMA,
         },
         "conventions": {"type": "array", "items": {"type": "string"}},
@@ -104,8 +108,6 @@ _SAFE_RECON_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _PLAN_SLUG = re.compile(r"^[a-z0-9-]{1,60}$")
 _PROVENANCE_VALUES = {"introduced", "inherited"}
 _PLAN_REVIEW_SCHEMA: dict[str, Any] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "PlanReviewResult",
     "type": "object",
     "additionalProperties": False,
     "required": ["critique", "plan"],
@@ -124,12 +126,6 @@ _REVIEW_FILENAME = re.compile(
 )
 _REVIEW_TITLE = re.compile(
     r"\A# Plan (?P<number>\d{3}): (?P<title>[^\r\n]+)\r?\n"
-)
-_REVIEW_DRIFT = re.compile(
-    r"^> \*\*Drift check \(run first\)\*\*: "
-    r"`git diff --stat (?P<sha>[0-9a-f]{40}|[0-9a-f]{64})"
-    r"\.\.HEAD -- (?P<paths>[^`\r\n]+)`$",
-    re.MULTILINE,
 )
 _REVIEW_STATUS_FIELD = {
     "priority": re.compile(r"^- \*\*Priority\*\*: (P[123])$", re.MULTILINE),
@@ -298,10 +294,7 @@ def _command_validation_diagnostics(
             safe_container_errors.append(error)
     rejections: list[dict[str, Any]] = []
     for index, command in enumerate(commands):
-        errors = [
-            *errors_by_index.get(index, []),
-            *candidate_container_errors,
-        ]
+        errors = errors_by_index.get(index, [])
         if not errors:
             continue
         candidate_id = (
@@ -315,11 +308,7 @@ def _command_validation_diagnostics(
             {
                 "candidate_id": candidate_id,
                 "evidence": _safe_evidence_location(command),
-                "validation_stage": (
-                    "container"
-                    if candidate_container_errors
-                    else stages.get(index, "semantic")
-                ),
+                "validation_stage": stages.get(index, "semantic"),
                 "errors": errors,
             }
         )
@@ -551,38 +540,28 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             safe_recon,
             repo=target,
         )
-        if not container_errors:
-            valid_commands = candidate_commands
-            recon_data = {
-                **safe_recon,
-                "artifact_type": "daydream.improve-recon",
-                "artifact_provenance": _artifact_provenance(
-                    phase=DaydreamPhase.RECON
-                ),
-                "commands": valid_commands,
-                "command_rejections": [
-                    {
-                        "code": error.partition("@")[0],
-                        "pointer": error.partition("@")[2] or "/commands",
-                    }
-                    for error in command_errors
-                ],
-            }
-        else:
-            recon_data = {
-                "artifact_type": "daydream.improve-recon",
-                "artifact_provenance": _artifact_provenance(
-                    phase=DaydreamPhase.RECON
-                ),
-                "commands": [],
-                "command_rejections": [
-                    {
-                        "code": error.partition("@")[0],
-                        "pointer": error.partition("@")[2] or "/",
-                    }
-                    for error in [*container_errors, *command_errors]
-                ],
-            }
+        valid_commands = candidate_commands
+        recon_data = {
+            "artifact_type": "daydream.improve-recon",
+            "artifact_provenance": _artifact_provenance(
+                phase=DaydreamPhase.RECON
+            ),
+            **{
+                field: value
+                if isinstance((value := safe_recon.get(field)), list)
+                and all(isinstance(item, str) for item in value)
+                else []
+                for field in ("languages", "conventions", "intent_docs")
+            },
+            "commands": valid_commands,
+            "command_rejections": [
+                {
+                    "code": error.partition("@")[0],
+                    "pointer": error.partition("@")[2] or "/",
+                }
+                for error in [*container_errors, *command_errors]
+            ],
+        }
     else:
         recon_data = {
             "artifact_type": "daydream.improve-recon",
@@ -651,14 +630,14 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
                 "candidates were found but rejected. "
             )
         )
-        print_error(
+        print_warning(
             console,
-            "Repository command candidates rejected",
-            candidate_summary
-            + f"Reasons: {reason_summary}. Audit and planning were not started. "
+            "Repository command candidates rejected. "
+            + candidate_summary
+            + f"Reasons: {reason_summary}. Audit and planning will continue "
+            "without executable verification commands. "
             "See .daydream/improve/command-validation-diagnostics.json.",
         )
-        return Stop(1)
 
     stacks: list[StackAssignment] = []
     if not description_mode:
@@ -812,8 +791,6 @@ def resolve_categories(
 
 def _schema_with_provenance(
     schema: dict[str, Any],
-    *,
-    require: bool,
 ) -> dict[str, Any]:
     """Return a structured-output schema extended with branch provenance."""
     extended = json.loads(json.dumps(schema))
@@ -821,10 +798,10 @@ def _schema_with_provenance(
         "findings" if "findings" in extended["properties"] else "verdicts"
     ]["items"]
     items["properties"]["provenance"] = {
+        "type": "string",
         "enum": sorted(_PROVENANCE_VALUES),
     }
-    if require:
-        items["required"].append("provenance")
+    items["required"].append("provenance")
     return extended
 
 
@@ -917,7 +894,6 @@ async def _step_audit(ctx: FlowContext) -> None:
                                 output_schema=(
                                     _schema_with_provenance(
                                         AUDIT_FINDINGS_SCHEMA,
-                                        require=True,
                                     )
                                     if branch_focus
                                     else AUDIT_FINDINGS_SCHEMA
@@ -1116,7 +1092,7 @@ async def _step_vet(ctx: FlowContext) -> None:
                     prompt,
                     phase=DaydreamPhase.VET,
                     output_schema=(
-                        _schema_with_provenance(VET_SCHEMA, require=False)
+                        _schema_with_provenance(VET_SCHEMA)
                         if branch_focus
                         else VET_SCHEMA
                     ),
@@ -1483,15 +1459,8 @@ def _parse_review_plan_identity(
         raise ValueError("PLAN_IDENTITY_NUMBER_MISMATCH")
     title = title_match.group("title")
 
-    drift_match = _one_review_match(
-        _REVIEW_DRIFT,
-        markdown,
-        code="PLAN_IDENTITY_DRIFT_INVALID",
-    )
-    planned_at = drift_match.group("sha")
-
     values: dict[str, str] = {}
-    planned_short = ""
+    planned_at = ""
     planned_on_text = ""
     for field, pattern in _REVIEW_STATUS_FIELD.items():
         match = _one_review_match(
@@ -1500,11 +1469,9 @@ def _parse_review_plan_identity(
             code=f"PLAN_IDENTITY_{field.upper()}_INVALID",
         )
         if field == "planned_at":
-            planned_short, planned_on_text = match.groups()
+            planned_at, planned_on_text = match.groups()
         else:
             values[field] = match.group(1)
-    if not planned_at.startswith(planned_short):
-        raise ValueError("PLAN_IDENTITY_SHA_MISMATCH")
     try:
         planned_on = date.fromisoformat(planned_on_text)
     except ValueError:
@@ -1882,11 +1849,10 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         ctx.data["selection_mode"] = "description"
     else:
         selected = ctx.data["selected_findings"]
-    tier: EffortTier = ctx.data["effort_tier"]
     backend = ctx.backend_for("plan_write")
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
-        effective_fanout_concurrency(tier.max_concurrency, backend)
+        effective_fanout_concurrency(PLAN_WRITE_MAX_CONCURRENCY, backend)
     )
     outputs: list[dict[str, Any] | None] = [None] * len(selected)
     plans_dir = ctx.work.repo / "daydream_plans"
@@ -1947,59 +1913,96 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                 async with limiter:
                     async with maybe_fork(recorder, task_descriptor):
                         try:
-                            async with phase_scope(DaydreamPhase.PLAN_WRITE):
-                                output, _, aborted_reason = await run_agent(
-                                    backend,
-                                    ctx.work.repo,
-                                    task_prompt,
-                                    phase=DaydreamPhase.PLAN_WRITE,
-                                    output_schema=PLAN_WRITER_SCHEMA,
-                                    read_only=True,
-                                    persist_session=False,
-                                    wall_budget_s=ctx.wall_budget_s,
-                                    tool_call_budget=ctx.tool_call_budget,
+                            current_prompt = task_prompt
+                            for generation_index in range(2):
+                                async with phase_scope(DaydreamPhase.PLAN_WRITE):
+                                    output, _, aborted_reason = await run_agent(
+                                        backend,
+                                        ctx.work.repo,
+                                        current_prompt,
+                                        phase=DaydreamPhase.PLAN_WRITE,
+                                        output_schema=PLAN_WRITER_SCHEMA,
+                                        read_only=True,
+                                        persist_session=False,
+                                        wall_budget_s=ctx.wall_budget_s,
+                                        tool_call_budget=ctx.tool_call_budget,
+                                    )
+                                output = _redact_model_value(output)
+                                if aborted_reason is not None:
+                                    abort_code = {
+                                        "tool_call_budget_exceeded": (
+                                            "TOOL_CALL_BUDGET_EXCEEDED"
+                                        ),
+                                        "wall_budget_exceeded": (
+                                            "WALL_BUDGET_EXCEEDED"
+                                        ),
+                                    }.get(
+                                        aborted_reason,
+                                        (
+                                            "TOOL_VETOED"
+                                            if aborted_reason.startswith(
+                                                "tool_vetoed:"
+                                            )
+                                            else "AGENT_ABORTED"
+                                        ),
+                                    )
+                                    outputs[current_index] = {
+                                        "finding": current,
+                                        "_attempt": {
+                                            **task_attempt,
+                                            "received_result": output,
+                                            "errors": (abort_code,),
+                                        },
+                                        "error": True,
+                                    }
+                                    return
+                                validation_errors = (
+                                    validate_plan_result(
+                                        output,
+                                        repo=ctx.work.repo,
+                                        planned_at=planned_at,
+                                        finding=current,
+                                        recon_commands=_verification_commands(
+                                            ctx.data["recon"]
+                                        ),
+                                    )
+                                    if isinstance(output, dict)
+                                    else ("NO_STRUCTURED_OBJECT",)
                                 )
-                            output = _redact_model_value(output)
-                            if aborted_reason is not None:
-                                abort_code = {
-                                    "tool_call_budget_exceeded": (
-                                        "TOOL_CALL_BUDGET_EXCEEDED"
-                                    ),
-                                    "wall_budget_exceeded": "WALL_BUDGET_EXCEEDED",
-                                }.get(
-                                    aborted_reason,
-                                    (
-                                        "TOOL_VETOED"
-                                        if aborted_reason.startswith("tool_vetoed:")
-                                        else "AGENT_ABORTED"
-                                    ),
-                                )
+                                if not validation_errors:
+                                    outputs[current_index] = {
+                                        "finding": current,
+                                        "_attempt": task_attempt,
+                                        **output,
+                                    }
+                                    return
+                                if generation_index == 0:
+                                    current_prompt = (
+                                        build_plan_writer_repair_prompt(
+                                            task_prompt,
+                                            validation_errors,
+                                        )
+                                    )
+                                    continue
+                                if not isinstance(output, dict):
+                                    outputs[current_index] = {
+                                        "finding": current,
+                                        "_attempt": {
+                                            **task_attempt,
+                                            "received_result": output,
+                                            "errors": (
+                                                "NO_STRUCTURED_OBJECT",
+                                            ),
+                                        },
+                                        "error": True,
+                                    }
+                                    return
                                 outputs[current_index] = {
                                     "finding": current,
-                                    "_attempt": {
-                                        **task_attempt,
-                                        "received_result": output,
-                                        "errors": (abort_code,),
-                                    },
-                                    "error": True,
+                                    "_attempt": task_attempt,
+                                    **output,
                                 }
                                 return
-                            if not isinstance(output, dict):
-                                outputs[current_index] = {
-                                    "finding": current,
-                                    "_attempt": {
-                                        **task_attempt,
-                                        "received_result": output,
-                                        "errors": ("NO_STRUCTURED_OBJECT",),
-                                    },
-                                    "error": True,
-                                }
-                                return
-                            outputs[current_index] = {
-                                "finding": current,
-                                "_attempt": task_attempt,
-                                **output,
-                            }
                         except Exception as exc:  # noqa: BLE001 - isolate each plan safely
                             category = getattr(exc, "category", "UNKNOWN")
                             stable_category = (
@@ -2049,7 +2052,9 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         ),
     )
     ctx.data["plan_write"] = result
-    ctx.data["plan_exit_code"] = 1 if result["failed"] else 0
+    ctx.data["plan_exit_code"] = (
+        1 if result["failed"] and not result["written"] else 0
+    )
     if result["skipped"]:
         print_warning(
             console,

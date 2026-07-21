@@ -58,7 +58,7 @@ class _RunawayReconBackend:
 
 
 @pytest.mark.anyio
-async def test_improve_recon_budget_exhaustion_marks_trajectory_partial(
+async def test_improve_recon_budget_exhaustion_is_diagnostic_and_nonfatal(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -84,7 +84,14 @@ async def test_improve_recon_budget_exhaustion_marks_trajectory_partial(
             )
         )
 
-    assert code == 1
+    assert code == 0
+    assert (
+        improve_monorepo_target / ".daydream/improve/report.md"
+    ).is_file()
+    assert (
+        improve_monorepo_target
+        / ".daydream/improve/command-validation-diagnostics.json"
+    ).is_file()
     trajectories = list(
         (improve_monorepo_target / ".daydream" / "runs").glob(
             "*/trajectory.json"

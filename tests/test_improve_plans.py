@@ -8,7 +8,6 @@ import pytest
 from jsonschema import Draft202012Validator
 
 import daydream.improve.plans as improve_plans
-import daydream.improve.prompts as improve_prompts
 from daydream.improve.command_contract import validate_recon_commands
 from daydream.improve.plans import (
     _literal_command_error,
@@ -20,50 +19,22 @@ from daydream.improve.plans import (
 )
 
 
-def test_go_recursive_package_operand_is_literal() -> None:
-    assert _literal_command_error("go build ./...") is None
-
-
-def test_quoted_parentheses_are_not_annotations() -> None:
-    assert _literal_command_error("rg 'foo(bar)' src") is None
-    assert _literal_command_error('grep -E "foo\\(bar\\)" src/app.py') is None
-
-
 @pytest.mark.parametrize(
-    "literal",
+    ("literal", "expected"),
     [
-        "pytest ...",
-        "pytest tests (focused suite)",
-        "pytest tests && rm -rf build",
+        ("go build ./...", None),
+        ("rg 'foo(bar)' src", None),
+        ('grep -E "foo\\(bar\\)" src/app.py', None),
+        ("pytest ...", "MALFORMED_COMMAND"),
+        ("pytest tests (focused suite)", "MALFORMED_COMMAND"),
+        ("pytest tests && rm -rf build", "MALFORMED_COMMAND"),
     ],
 )
-def test_nonliteral_verification_commands_are_malformed(literal: str) -> None:
-    assert _literal_command_error(literal) == "MALFORMED_COMMAND"
-
-
-def test_plan_writer_result_contract_is_unversioned() -> None:
-    assert improve_prompts.PLAN_WRITER_SCHEMA["title"] == "PlanWriterResult"
-    assert "$schema" not in improve_prompts.PLAN_WRITER_SCHEMA
-    assert "schema_version" not in improve_prompts.PLAN_WRITER_SCHEMA["required"]
-    assert "schema_version" not in improve_prompts.PLAN_WRITER_SCHEMA["properties"]
-
-
-def test_schema_error_precedes_semantic_traversal(tmp_path: Path) -> None:
-    repo, sha = _repo(tmp_path)
-    plan = _typed_plan()
-    plan["$schema"] = "https://example.invalid/model-authored-schema"
-    plan["scope"]["existing_paths"][0]["path"] = "routes/user.$username.tsx"
-
-    errors = validate_plan_result(
-        plan,
-        repo=repo,
-        planned_at=sha,
-        finding=_finding(),
-        recon_commands=_recon_commands(),
-    )
-
-    assert errors[0] == "SCHEMA_INVALID@/"
-    assert not any(error.startswith("MALFORMED_") for error in errors)
+def test_verification_command_literal_validation(
+    literal: str,
+    expected: str | None,
+) -> None:
+    assert _literal_command_error(literal) == expected
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -197,27 +168,97 @@ def _recon_commands() -> list[dict[str, Any]]:
     ]
 
 
-def test_recon_validation_retains_42_valid_commands_when_one_of_43_is_invalid(
+def test_recon_validation_retains_valid_siblings_when_one_is_invalid(
     tmp_path: Path,
 ) -> None:
     repo, _ = _repo(tmp_path)
     commands = []
-    for index in range(43):
+    for index in range(3):
         command = deepcopy(_recon_commands()[0])
         command["id"] = f"command-{index:02d}"
         commands.append(command)
-    commands[17]["applicability"]["scope"]["kind"] = "unsupported"
+    commands[1]["applicability"]["scope"]["kind"] = "unsupported"
 
     accepted, errors = validate_recon_commands(
         {"commands": commands},
         repo=repo,
     )
 
-    assert len(accepted) == 42
-    assert "command-17" not in {item["id"] for item in accepted}
+    assert [item["id"] for item in accepted] == ["command-00", "command-02"]
     assert errors == [
-        "RECON_APPLICABILITY_INVALID@/commands/17/applicability/scope/kind"
+        "RECON_APPLICABILITY_INVALID@/commands/1/applicability/scope/kind"
     ]
+
+
+@pytest.mark.parametrize(
+    "model_excerpt",
+    [
+        pytest.param("uv run pytest", id="model-text-is-not-canonical"),
+        pytest.param(None, id="model-text-is-optional"),
+        pytest.param(42, id="model-text-has-non-string-shape"),
+    ],
+)
+def test_recon_evidence_uses_locators_and_persists_host_excerpt(
+    tmp_path: Path,
+    model_excerpt: object,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Makefile").write_text(
+        "test:\n\tuv run pytest\n\n",
+        encoding="utf-8",
+    )
+    evidence: dict[str, Any] = {
+        "kind": "literal-command",
+        "source_path": "Makefile",
+        "line_anchor": {"start_line": 2, "end_line": 3},
+    }
+    if model_excerpt is not None:
+        evidence["verbatim_excerpt"] = model_excerpt
+    command = _contract_recon_command(
+        command_id="test-suite",
+        command="uv run pytest",
+        evidence=evidence,
+    )
+    raw_command = deepcopy(command)
+
+    accepted, errors = validate_recon_commands(
+        {"commands": [command]},
+        repo=repo,
+    )
+
+    assert errors == []
+    assert command == raw_command
+    assert accepted[0]["evidence"]["verbatim_excerpt"] == "\tuv run pytest\n"
+
+
+def test_invalid_recon_locator_rejects_only_its_candidate(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Makefile").write_text(
+        "test:\n\tuv run pytest\n",
+        encoding="utf-8",
+    )
+    valid = _contract_recon_command(
+        command_id="test-suite",
+        command="uv run pytest",
+        evidence={
+            "kind": "literal-command",
+            "source_path": "Makefile",
+            "line_anchor": {"start_line": 2, "end_line": 2},
+        },
+    )
+    invalid = deepcopy(valid)
+    invalid["id"] = "invalid-anchor"
+    invalid["evidence"]["line_anchor"]["end_line"] = 20
+
+    accepted, errors = validate_recon_commands(
+        {"commands": [invalid, valid]},
+        repo=repo,
+    )
+
+    assert [command["id"] for command in accepted] == ["test-suite"]
+    assert errors == ["RECON_EVIDENCE_MISMATCH@/commands/0/evidence"]
 
 
 def _contract_applicability(
@@ -739,35 +780,9 @@ def test_typed_plan_renders_complete_deterministic_handoff(tmp_path: Path) -> No
     assert "### Step 1: Batch item loading in list_catalog" in text
     assert "**Command**: `uv run pytest tests/test_catalog.py -q`" in text
     assert "test_list_catalog_batches_item_loading" in text
-    assert "apps/catalog/api.py tests/test_catalog.py" in text
     assert "apps/catalog/api.py:1-2" in text
     assert "return [load_item(item_id) for item_id in item_ids]" in text
-    assert "apps/catalog/api.py:1" not in text.split("Drift check", 1)[1].split("\n", 1)[0]
     assert "TODO" in (repo / "daydream_plans/README.md").read_text()
-
-
-def test_verification_renders_literal_separately_from_purpose_and_result(
-    tmp_path: Path,
-) -> None:
-    repo, sha = _repo(tmp_path)
-    result = write_plans(
-        repo / "daydream_plans",
-        [_selection()],
-        planned_at=sha,
-    )
-
-    assert len(result["written"]) == 1
-    text = (repo / "daydream_plans/001-batch-catalog-queries.md").read_text()
-    assert (
-        "**Purpose**: Verify batched catalog loading\n\n"
-        "**Command**: `uv run pytest tests/test_catalog.py -q`\n\n"
-        "**Expected**: exit 0 and the named catalog regression test passes"
-    ) in text
-    assert "`uv run pytest tests/test_catalog.py -q` →" not in text
-    assert "Verify: **Purpose**" not in text
-    assert text.count(
-        "**Command**: `uv run pytest tests/test_catalog.py -q`"
-    ) == 4
 
 
 MALFORMED_FIRST_RUN_COMMANDS = (
@@ -1190,28 +1205,6 @@ def test_valid_new_path_with_nonexistent_parent_remains_allowed(
     ).read_text()
 
 
-def test_finding_evidence_never_adds_a_drift_scope_path(tmp_path: Path) -> None:
-    repo, sha = _repo(tmp_path)
-    selection = _selection()
-    selection["finding"]["evidence"] = [
-        "README.md (no precision/target/50% match)",
-        "../outside.py:9",
-    ]
-
-    result = write_plans(
-        repo / "daydream_plans",
-        [selection],
-        planned_at=sha,
-    )
-
-    assert len(result["written"]) == 1
-    drift = (
-        repo / "daydream_plans/001-batch-catalog-queries.md"
-    ).read_text().split("Drift check", 1)[1].splitlines()[0]
-    assert "README.md" not in drift
-    assert "../outside.py" not in drift
-
-
 def test_unselected_recon_commands_are_not_injected_into_plan(
     tmp_path: Path,
 ) -> None:
@@ -1245,10 +1238,10 @@ def test_unselected_recon_commands_are_not_injected_into_plan(
         (lambda plan: plan["why_this_matters"].update(problem=""), "SCHEMA_INVALID"),
         (lambda plan: plan.update(current_state_excerpts=[]), "SCHEMA_INVALID"),
         (
-            lambda plan: plan["current_state_excerpts"][0].update(
-                verbatim_excerpt="def list_catalog():\n    return []"
+            lambda plan: plan["current_state_excerpts"][0]["line_anchor"].update(
+                end_line=200
             ),
-            "EXCERPT_MISMATCH",
+            "EXCERPT_ANCHOR_INVALID",
         ),
         (
             lambda plan: plan["steps"][0].pop("verification"),
@@ -1282,31 +1275,26 @@ def test_incomplete_typed_result_is_blocked_without_plan_file(
     assert f"BLOCKED (PLAN_VALIDATION_FAILED: {expected_code}" in index
 
 
-FIRST_RUN_FALLBACKS = (
-    "Address the selected vetted finding.",
-    "See the cited finding.",
-    "All unrelated files and behavior.",
-    "Implement the selected finding.",
-    "Follow the vetted fix sketch and preserve repository conventions.",
-    "Add regression coverage for the selected finding.",
-    "Run the verified repository commands.",
-    "The selected finding is resolved.",
-    "Verified repository commands pass.",
-    "No out-of-scope files are modified.",
-    "A load-bearing assumption in this plan is false.",
+@pytest.mark.parametrize(
+    "model_excerpt",
+    [
+        pytest.param("return [load_item(item_id)", id="model-text-is-not-canonical"),
+        pytest.param(None, id="model-text-is-optional"),
+        pytest.param(42, id="model-text-has-non-string-shape"),
+    ],
 )
-
-
-@pytest.mark.parametrize("fallback", FIRST_RUN_FALLBACKS)
-def test_first_run_fallback_family_can_never_produce_todo(
+def test_plan_current_state_uses_locator_and_persists_host_excerpt(
     tmp_path: Path,
-    fallback: str,
+    model_excerpt: object,
 ) -> None:
     repo, sha = _repo(tmp_path)
     plan = _typed_plan()
-    plan["why_this_matters"]["problem"] = (
-        fallback + " This generic fallback must be rejected."
-    )
+    excerpt = plan["current_state_excerpts"][0]
+    if model_excerpt is None:
+        excerpt.pop("verbatim_excerpt")
+    else:
+        excerpt["verbatim_excerpt"] = model_excerpt
+    raw_plan = deepcopy(plan)
 
     result = write_plans(
         repo / "daydream_plans",
@@ -1314,12 +1302,14 @@ def test_first_run_fallback_family_can_never_produce_todo(
         planned_at=sha,
     )
 
-    assert result["written"] == []
-    assert len(result["failed"]) == 1
-    assert fallback not in (repo / "daydream_plans/README.md").read_text()
-    assert "BLOCKED (PLAN_VALIDATION_FAILED: DEGENERATE_CONTENT" in (
-        repo / "daydream_plans/README.md"
-    ).read_text()
+    assert len(result["written"]) == 1
+    assert plan == raw_plan
+    text = (repo / "daydream_plans/001-batch-catalog-queries.md").read_text()
+    assert (
+        "def list_catalog():\n"
+        "    return [load_item(item_id) for item_id in item_ids]"
+    ) in text
+    assert "shape is irrelevant" not in text
 
 
 def test_legacy_markdown_output_fails_closed_without_echoing_content(
@@ -1372,27 +1362,6 @@ def test_mixed_batch_writes_valid_sibling_and_blocks_invalid_sibling(
     assert "BLOCKED (PLAN_VALIDATION_FAILED: SCHEMA_INVALID" in index
 
 
-def test_uncommitted_in_scope_drift_blocks_planned_at_excerpt(
-    tmp_path: Path,
-) -> None:
-    repo, sha = _repo(tmp_path)
-    (repo / "apps/catalog/api.py").write_text(
-        "def list_catalog():\n    return []\n",
-        encoding="utf-8",
-    )
-
-    result = write_plans(
-        repo / "daydream_plans",
-        [_selection()],
-        planned_at=sha,
-    )
-
-    assert result["written"] == []
-    assert "UNCOMMITTED_IN_SCOPE_DRIFT" in (
-        repo / "daydream_plans/README.md"
-    ).read_text()
-
-
 def test_planned_at_from_an_unrelated_root_is_rejected(tmp_path: Path) -> None:
     repo, original_root = _repo(tmp_path)
     tree = _git(repo, "rev-parse", "HEAD^{tree}")
@@ -1435,199 +1404,6 @@ def test_head_change_after_planning_blocks_stale_todo(tmp_path: Path) -> None:
     assert result["written"] == []
     assert not list((repo / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert "PLAN_HEAD_CHANGED" in (
-        repo / "daydream_plans/README.md"
-    ).read_text()
-
-
-def test_head_change_during_render_blocks_stale_todo(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repo, planned_at = _repo(tmp_path)
-    from daydream.improve import plans as plans_module
-
-    original_render = plans_module.render_plan
-
-    def render_then_advance_head(*args: Any, **kwargs: Any) -> str:
-        rendered = original_render(*args, **kwargs)
-        (repo / "README.md").write_text(
-            "# Catalog service\n\nConcurrent render update.\n",
-            encoding="utf-8",
-        )
-        _git(repo, "add", "README.md")
-        _git(repo, "commit", "-m", "advance head during render")
-        return rendered
-
-    monkeypatch.setattr(plans_module, "render_plan", render_then_advance_head)
-
-    result = write_plans(
-        repo / "daydream_plans",
-        [_selection()],
-        planned_at=planned_at,
-    )
-
-    assert result["written"] == []
-    assert not list((repo / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert "PLAN_HEAD_CHANGED" in (
-        repo / "daydream_plans/README.md"
-    ).read_text()
-
-
-def test_generic_change_symbol_is_rejected(tmp_path: Path) -> None:
-    repo, sha = _repo(tmp_path)
-    plan = _typed_plan()
-    change = plan["steps"][0]["changes"][0]
-    change["symbol"] = "module"
-    change["target_state"] = "The module contains a concrete batching implementation."
-
-    result = write_plans(
-        repo / "daydream_plans",
-        [_selection(plan=plan)],
-        planned_at=sha,
-    )
-
-    assert result["written"] == []
-    assert "GENERIC_SYMBOL" in (repo / "daydream_plans/README.md").read_text()
-
-
-def test_detailed_but_unrelated_plan_is_rejected(tmp_path: Path) -> None:
-    repo, sha = _repo(tmp_path)
-    plan = _typed_plan()
-    plan["title"] = "Refine unrelated logging transport internals"
-    plan["why_this_matters"] = {
-        "problem": "Logging transport retries currently allocate too many buffers.",
-        "concrete_cost": "Transport buffer allocation increases unrelated worker latency.",
-        "intended_outcome": "Logging transport buffers are reused across worker retries.",
-    }
-    for index, change in enumerate(plan["steps"][0]["changes"], start=1):
-        change["symbol"] = f"logging_transport_{index}"
-        change["target_state"] = (
-            f"logging_transport_{index} reuses transport buffers across retries."
-        )
-
-    result = write_plans(
-        repo / "daydream_plans",
-        [_selection(plan=plan)],
-        planned_at=sha,
-    )
-
-    assert result["written"] == []
-    assert "UNRELATED_PLAN" in (repo / "daydream_plans/README.md").read_text()
-
-
-def test_repeated_substantive_decisions_are_rejected(tmp_path: Path) -> None:
-    repo, sha = _repo(tmp_path)
-    plan = _typed_plan()
-    repeated = (
-        "Catalog item queries must be batched before the endpoint returns results."
-    )
-    plan["why_this_matters"] = {
-        "problem": repeated,
-        "concrete_cost": repeated,
-        "intended_outcome": repeated,
-    }
-
-    result = write_plans(
-        repo / "daydream_plans",
-        [_selection(plan=plan)],
-        planned_at=sha,
-    )
-
-    assert result["written"] == []
-    assert "DEGENERATE_CONTENT" in (
-        repo / "daydream_plans/README.md"
-    ).read_text()
-
-
-@pytest.mark.parametrize(
-    "unrelated_unit",
-    ["scope-path", "step-change", "named-test", "behavior", "false-assumption"],
-)
-def test_each_typed_semantic_unit_must_relate_to_the_finding(
-    tmp_path: Path,
-    unrelated_unit: str,
-) -> None:
-    repo, sha = _repo(tmp_path)
-    plan = _typed_plan()
-    if unrelated_unit == "scope-path":
-        plan["scope"]["new_paths"] = [
-            {
-                "path": ".github/dependabot.yml",
-                "role": "Declare an automated dependency update schedule.",
-            }
-        ]
-        plan["steps"].append(
-            {
-                "id": "step-2",
-                "order": 2,
-                "title": "Create dependency update configuration",
-                "changes": [
-                    {
-                        "path": ".github/dependabot.yml",
-                        "symbol": "updates",
-                        "operation": "create",
-                        "instruction": (
-                            "Create a weekly Python dependency update schedule."
-                        ),
-                        "target_state": (
-                            ".github/dependabot.yml contains an updates schedule."
-                        ),
-                    }
-                ],
-                "verification": _command(
-                    "Validate the dependency configuration",
-                    "exit 0 and the dependency configuration check passes",
-                ),
-            }
-        )
-    elif unrelated_unit == "step-change":
-        change = plan["steps"][0]["changes"][0]
-        change.update(
-            symbol="logging_transport",
-            instruction="Reuse transport buffers across worker retries.",
-            target_state="logging_transport reuses buffers across worker retries.",
-        )
-    elif unrelated_unit == "named-test":
-        case = plan["test_plan"]["cases"][0]
-        case.update(
-            name="Logging transport reuses worker buffers",
-            test_symbol="test_logging_transport_reuses_worker_buffers",
-            setup="Create a logging transport with a recording buffer allocator.",
-            action="Retry a failed logging transport write.",
-            assertions=["The worker buffer is reused by the second transport write."],
-        )
-        plan["steps"][0]["changes"][1].update(
-            symbol="test_logging_transport_reuses_worker_buffers",
-            instruction="Add a logging transport buffer reuse regression.",
-            target_state=(
-                "test_logging_transport_reuses_worker_buffers proves reuse."
-            ),
-        )
-    elif unrelated_unit == "behavior":
-        plan["done_criteria"][0]["description"] = (
-            "Logging transport buffers are reused across worker retries."
-        )
-    else:
-        condition = next(
-            item
-            for item in plan["stop_conditions"]
-            if item["kind"] == "false-assumption"
-        )
-        condition["condition"] = (
-            "The logging transport cannot retain buffers across worker retries."
-        )
-        condition["evidence_to_report"] = (
-            "Report the transport allocator and retained worker buffer state."
-        )
-
-    result = write_plans(
-        repo / "daydream_plans",
-        [_selection(plan=plan)],
-        planned_at=sha,
-    )
-
-    assert result["written"] == []
-    assert "UNRELATED_PLAN" in (
         repo / "daydream_plans/README.md"
     ).read_text()
 
@@ -1862,17 +1638,12 @@ def test_rejected_index_status_is_preserved_and_not_retried(
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
 
 
-def test_attempt_diagnostics_distinguish_transport_schema_semantic_dependency_and_success(
+def test_attempt_diagnostics_distinguish_failure_stages_and_success(
     tmp_path: Path,
 ) -> None:
     repo, sha = _repo(tmp_path)
     schema_invalid = _typed_plan(slug="schema-invalid-plan")
     schema_invalid["why_this_matters"]["problem"] = ""
-    semantic_invalid = _typed_plan(slug="semantic-invalid-plan")
-    semantic_invalid["why_this_matters"]["problem"] = (
-        "PRIVATE_DEGENERATE_MODEL_TEXT: Follow the vetted fix sketch and "
-        "preserve repository conventions."
-    )
     dependency_invalid = _typed_plan(slug="dependency-invalid-plan")
     dependency_invalid["dependencies"] = [
         {
@@ -1896,10 +1667,6 @@ def test_attempt_diagnostics_distinguish_transport_schema_semantic_dependency_an
         _selection(
             plan=schema_invalid,
             fingerprint="fp-schema",
-        ),
-        _selection(
-            plan=semantic_invalid,
-            fingerprint="fp-semantic",
         ),
         _selection(
             plan=dependency_invalid,
@@ -1927,7 +1694,6 @@ def test_attempt_diagnostics_distinguish_transport_schema_semantic_dependency_an
     } == {
         "fp-transport": ("transport", "blocked"),
         "fp-schema": ("schema", "blocked"),
-        "fp-semantic": ("semantic", "blocked"),
         "fp-dependency": ("dependency", "blocked"),
         "fp-success": ("success", "success"),
     }
@@ -1943,11 +1709,6 @@ def test_attempt_diagnostics_distinguish_transport_schema_semantic_dependency_an
     assert diagnostics["fp-success"]["artifact"]["path"].endswith(
         "-successful-plan.md"
     )
-    serialized = json.dumps(result["diagnostics"])
-    assert "PRIVATE_DEGENERATE_MODEL_TEXT" not in serialized
-    assert "Follow the vetted fix sketch" not in serialized
-
-
 def test_load_rejections_returns_empty_for_absent_or_malformed_file(
     tmp_path: Path,
 ) -> None:

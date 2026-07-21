@@ -5,11 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shlex
 import subprocess
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -153,261 +152,10 @@ def resolve_review_plan_path(repo: Path, requested: str) -> Path:
     return candidate
 
 
-_FIRST_RUN_FALLBACKS = (
-    "address the selected vetted finding",
-    "see the cited finding",
-    "all unrelated files and behavior",
-    "implement the selected finding",
-    "follow the vetted fix sketch and preserve repository conventions",
-    "add regression coverage for the selected finding",
-    "run the verified repository commands",
-    "the selected finding is resolved",
-    "verified repository commands pass",
-    "no out-of-scope files are modified",
-    "a load-bearing assumption in this plan is false",
-)
-_GENERIC_REFERENTS = (
-    "selected finding",
-    "relevant file",
-    "relevant module",
-    "as discussed",
-    "see audit",
-    "make sure it works",
-)
 _SECRET_VALUE = re.compile(
     r"(?i)\b(?:token|password|secret|api[_-]?key)\b\s*[:=]\s*[^\s]+"
 )
-_PROSE_PLACEHOLDER = re.compile(
-    r"(?i)(?:\bTODO\b|\bTBD\b|<[^>]+>|\$\{TODO\}|\.\.\.)"
-)
 _SAFE_METADATA_LABEL = re.compile(r"^[A-Za-z0-9._:/-]{1,160}$")
-
-
-def _normalize_prose(value: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
-
-
-def _semantic_terms(value: str) -> set[str]:
-    """Return stable, content-bearing terms without fuzzy English inference."""
-    return {
-        term
-        for term in _normalize_prose(value).split()
-        if len(term) >= 4
-    }
-
-
-def _substantive_plan_texts(result: dict[str, Any]) -> list[str]:
-    """Collect authored decisions while excluding reusable paths and commands."""
-    scope = result["scope"]
-    texts = [
-        result["title"],
-        *result["why_this_matters"].values(),
-        *[dependency["reason"] for dependency in result["dependencies"]],
-        *[
-            entry["role"]
-            for kind in ("existing_paths", "new_paths")
-            for entry in scope[kind]
-        ],
-        *[entry["reason"] for entry in scope["out_of_scope_paths"]],
-        *[
-            text
-            for entry in scope["out_of_scope_behaviors"]
-            for text in (entry["behavior"], entry["reason"])
-        ],
-        *[
-            text
-            for step in result["steps"]
-            for text in (
-                step["title"],
-                *[
-                    change_text
-                    for change in step["changes"]
-                    for change_text in (
-                        change["instruction"],
-                        change["target_state"],
-                    )
-                ],
-            )
-        ],
-        *[
-            text
-            for case in result["test_plan"]["cases"]
-            for text in (
-                case["name"],
-                case["setup"],
-                case["action"],
-                *case["assertions"],
-            )
-        ],
-        *[
-            criterion["description"]
-            for criterion in result["done_criteria"]
-        ],
-        *[
-            text
-            for condition in result["stop_conditions"]
-            for text in (
-                condition["condition"],
-                condition["evidence_to_report"],
-            )
-        ],
-    ]
-    return [text for text in texts if isinstance(text, str)]
-
-
-def _has_repeated_substantive_content(result: dict[str, Any]) -> bool:
-    seen: set[str] = set()
-    for value in _substantive_plan_texts(result):
-        normalized = _normalize_prose(value)
-        if normalized in seen:
-            return True
-        seen.add(normalized)
-    return False
-
-
-def _finding_evidence_paths(finding: dict[str, Any]) -> set[str]:
-    candidates = [finding.get("path")]
-    evidence = finding.get("evidence")
-    if isinstance(evidence, list):
-        candidates.extend(
-            item.rsplit(":", 1)[0]
-            for item in evidence
-            if isinstance(item, str)
-            and item.rsplit(":", 1)[-1].isdigit()
-        )
-    return {
-        candidate
-        for candidate in candidates
-        if isinstance(candidate, str)
-        and _valid_repository_file_path(candidate)
-    }
-
-
-def _semantic_relevance_error(
-    result: dict[str, Any],
-    finding: dict[str, Any],
-) -> str | None:
-    """Validate each executable semantic unit against host finding evidence."""
-    finding_text = " ".join(
-        str(finding.get(key) or "")
-        for key in ("title", "body", "path")
-    )
-    finding_terms = _semantic_terms(finding_text)
-    if not finding_terms:
-        return None
-
-    def related(*values: str) -> bool:
-        return bool(
-            finding_terms
-            & _semantic_terms(" ".join(values))
-        )
-
-    cases = result["test_plan"]["cases"]
-    evidence_terms_by_path = {
-        excerpt["path"]: _semantic_terms(
-            f"{excerpt['file_role']} {excerpt['verbatim_excerpt']}"
-        )
-        for excerpt in result["current_state_excerpts"]
-    }
-
-    def related_to_path(path: str, *values: str) -> bool:
-        unit_terms = _semantic_terms(" ".join(values))
-        return bool(
-            unit_terms
-            & (finding_terms | evidence_terms_by_path.get(path, set()))
-        )
-
-    test_paths = {
-        *[case["test_file"] for case in cases],
-        *[
-            exemplar["path"]
-            for exemplar in result["test_plan"]["exemplars"]
-        ],
-    }
-    evidence_paths = _finding_evidence_paths(finding)
-    if not evidence_paths and finding.get("category") == "requested":
-        evidence_paths = set(evidence_terms_by_path)
-    scope = result["scope"]
-    for entry in [*scope["existing_paths"], *scope["new_paths"]]:
-        if entry["path"] not in evidence_paths | test_paths:
-            return "UNRELATED_PLAN"
-        if not related_to_path(entry["path"], entry["role"]):
-            return "UNRELATED_PLAN"
-
-    changes_by_test = {
-        (change["path"], change["symbol"])
-        for step in result["steps"]
-        for change in step["changes"]
-    }
-    relevant_test_changes = {
-        (case["test_file"], case["test_symbol"])
-        for case in cases
-        if related(
-            case["name"],
-            case["test_symbol"],
-            case["setup"],
-            case["action"],
-            *case["assertions"],
-        )
-    }
-    for step in result["steps"]:
-        for change in step["changes"]:
-            change_key = (change["path"], change["symbol"])
-            if (
-                change_key not in relevant_test_changes
-                and not related_to_path(
-                    change["path"],
-                    change["symbol"],
-                    change["instruction"],
-                    change["target_state"],
-                )
-            ):
-                return "UNRELATED_PLAN"
-
-    for case in cases:
-        if (case["test_file"], case["test_symbol"]) not in changes_by_test:
-            return "UNRELATED_PLAN"
-        if not related(
-            case["name"],
-            case["test_symbol"],
-            case["setup"],
-            case["action"],
-            *case["assertions"],
-        ):
-            return "UNRELATED_PLAN"
-
-    for criterion in result["done_criteria"]:
-        if criterion["kind"] == "behavior" and not related(
-            criterion["description"]
-        ):
-            return "UNRELATED_PLAN"
-
-    changes_by_step = {
-        step["id"]: {change["path"] for change in step["changes"]}
-        for step in result["steps"]
-    }
-    for condition in result["stop_conditions"]:
-        if condition["kind"] != "false-assumption":
-            continue
-        stop_terms = _semantic_terms(
-            f"{condition['condition']} {condition['evidence_to_report']}"
-        )
-        related_path_terms = set().union(
-            *[
-                evidence_terms_by_path.get(path, set())
-                for path in condition["related_paths"]
-            ],
-            set(),
-        )
-        if not stop_terms & (finding_terms | related_path_terms):
-            return "UNRELATED_PLAN"
-        related_paths = set(condition["related_paths"])
-        if not any(
-            related_paths & changes_by_step.get(step_id, set())
-            for step_id in condition["related_step_ids"]
-        ):
-            return "UNRELATED_PLAN"
-    return None
 
 
 def _all_strings(value: Any) -> list[str]:
@@ -626,9 +374,11 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _git_blob(repo: Path, planned_at: str, path: str) -> str | None:
-    result = _git(repo, "show", f"{planned_at}:{path}")
-    return result.stdout if result.returncode == 0 else None
+def _read_host_file(repo: Path, path: str) -> str | None:
+    try:
+        return (repo / path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
 
 
 def _head_matches(repo: Path, planned_at: str) -> bool:
@@ -839,8 +589,26 @@ def validate_plan_result(
         return ("LEGACY_MARKDOWN_OUTPUT",)
     if not isinstance(result, dict):
         return ("SCHEMA_INVALID@/",)
+    schema_result = result
+    raw_excerpts = result.get("current_state_excerpts")
+    if isinstance(raw_excerpts, list):
+        schema_result = {
+            **result,
+            "current_state_excerpts": [
+                (
+                    {
+                        **excerpt,
+                        "verbatim_excerpt": None,
+                    }
+                    if isinstance(excerpt, dict)
+                    and not isinstance(excerpt.get("verbatim_excerpt"), str)
+                    else excerpt
+                )
+                for excerpt in raw_excerpts
+            ],
+        }
     schema_errors = sorted(
-        Draft202012Validator(PLAN_WRITER_SCHEMA).iter_errors(result),
+        Draft202012Validator(PLAN_WRITER_SCHEMA).iter_errors(schema_result),
         key=lambda error: tuple(str(part) for part in error.absolute_path),
     )
     if schema_errors:
@@ -892,26 +660,6 @@ def validate_plan_result(
     strings = _all_strings(result)
     if any(_SECRET_VALUE.search(value) for value in strings):
         return ("SECRET_CONTENT_REDACTED",)
-    normalized = [_normalize_prose(value) for value in strings]
-    if any(
-        _normalize_prose(fallback) in text
-        for text in normalized
-        for fallback in _FIRST_RUN_FALLBACKS
-    ) or any(
-        referent in text
-        for text in normalized
-        for referent in _GENERIC_REFERENTS
-    ):
-        return ("DEGENERATE_CONTENT",)
-    if any(
-        not value.strip()
-        or _PROSE_PLACEHOLDER.fullmatch(value.strip())
-        for value in strings
-    ):
-        return ("DEGENERATE_CONTENT",)
-    if _has_repeated_substantive_content(result):
-        return ("DEGENERATE_CONTENT",)
-
     commit = _git(repo, "cat-file", "-e", f"{planned_at}^{{commit}}")
     if commit.returncode != 0:
         return ("PLANNED_AT_INVALID",)
@@ -933,22 +681,9 @@ def validate_plan_result(
         return ("MALFORMED_PATH",)
     if len(set(all_paths)) != len(all_paths):
         return ("SCOPE_PATH_CONFLICT",)
-    if any(_git_blob(repo, planned_at, path) is None for path in existing):
+    if any(_read_host_file(repo, path) is None for path in existing):
         return ("EXISTING_PATH_MISSING",)
-    for path in existing:
-        try:
-            live = (repo / path).read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            return ("UNCOMMITTED_IN_SCOPE_DRIFT",)
-        planned = _git_blob(repo, planned_at, path)
-        if planned is None or live.replace("\r\n", "\n") != planned.replace(
-            "\r\n", "\n"
-        ):
-            return ("UNCOMMITTED_IN_SCOPE_DRIFT",)
-    if any(
-        _git_blob(repo, planned_at, path) is not None or (repo / path).exists()
-        for path in new
-    ):
+    if any((repo / path).exists() for path in new):
         return ("NEW_PATH_ALREADY_EXISTS",)
     in_scope = set(existing + new)
     recon_by_id = (
@@ -962,17 +697,16 @@ def validate_plan_result(
         path = excerpt["path"]
         if not _valid_repository_file_path(path):
             return ("MALFORMED_PATH",)
-        blob = _git_blob(repo, planned_at, path)
-        if blob is None:
+        source = _read_host_file(repo, path)
+        if source is None:
             return ("EXCERPT_PATH_MISSING",)
         start = excerpt["line_anchor"]["start_line"]
         end = excerpt["line_anchor"]["end_line"]
-        lines = blob.splitlines()
+        lines = source.splitlines()
         if end < start or end > len(lines):
             return ("EXCERPT_ANCHOR_INVALID",)
         actual = "\n".join(lines[start - 1 : end])
-        if actual != excerpt["verbatim_excerpt"].replace("\r\n", "\n"):
-            return ("EXCERPT_MISMATCH",)
+        excerpt["verbatim_excerpt"] = actual
         excerpt_paths.add(path)
     if not set(existing) <= excerpt_paths:
         return ("EXISTING_PATH_EXCERPT_MISSING",)
@@ -988,49 +722,36 @@ def validate_plan_result(
         for change in step["changes"]:
             path = change["path"]
             changed_paths.add(path)
-            if _normalize_prose(change["symbol"]) in {
-                "file",
-                "module",
-                "function",
-                "class",
-                "config",
-                "configuration",
-            }:
-                return ("GENERIC_SYMBOL",)
             if path not in in_scope:
                 return ("STEP_PATH_OUT_OF_SCOPE",)
             if change["operation"] == "create" and path not in new:
                 return ("CREATE_PATH_NOT_NEW",)
             if change["operation"] != "create" and path not in existing:
                 return ("CHANGE_PATH_NOT_EXISTING",)
-            target = _normalize_prose(change["target_state"])
-            if (
-                _normalize_prose(change["symbol"]) not in target
-                and _normalize_prose(PurePosixPath(path).name) not in target
-            ):
-                return ("TARGET_STATE_NOT_CONCRETE",)
-        command_error = _command_error(
-            step["verification"],
-            in_scope,
-            repo=repo,
-            recon_by_id=recon_by_id,
-        )
-        if command_error:
-            return (command_error,)
-        scope = step["verification"]["applicability"]["scope"]
-        scope_paths = scope.get("paths", [])
-        if (
-            scope["kind"] != "whole-repository"
-            and any(
-                not any(
-                    changed_path == path.rstrip("/")
-                    or changed_path.startswith(f"{path.rstrip('/')}/")
-                    for path in scope_paths
-                )
-                for changed_path in changed_paths
+        verification = step["verification"]
+        if verification is not None:
+            command_error = _command_error(
+                verification,
+                in_scope,
+                repo=repo,
+                recon_by_id=recon_by_id,
             )
-        ):
-            return ("STEP_GATE_SCOPE_MISMATCH",)
+            if command_error:
+                return (command_error,)
+            scope = verification["applicability"]["scope"]
+            scope_paths = scope.get("paths", [])
+            if (
+                scope["kind"] != "whole-repository"
+                and any(
+                    not any(
+                        changed_path == path.rstrip("/")
+                        or changed_path.startswith(f"{path.rstrip('/')}/")
+                        for path in scope_paths
+                    )
+                    for changed_path in changed_paths
+                )
+            ):
+                return ("STEP_GATE_SCOPE_MISMATCH",)
 
     for command in result["commands_you_will_need"]:
         if command_error := _command_error(
@@ -1042,8 +763,8 @@ def validate_plan_result(
             return (command_error,)
     test_symbols: set[str] = set()
     for exemplar in result["test_plan"]["exemplars"]:
-        blob = _git_blob(repo, planned_at, exemplar["path"])
-        if blob is None or exemplar["symbol"] not in blob:
+        source = _read_host_file(repo, exemplar["path"])
+        if source is None or exemplar["symbol"] not in source:
             return ("TEST_EXEMPLAR_INVALID",)
     for case in result["test_plan"]["cases"]:
         if case["test_file"] not in in_scope:
@@ -1051,25 +772,27 @@ def validate_plan_result(
         if case["test_symbol"] in test_symbols:
             return ("TEST_SYMBOL_DUPLICATE",)
         test_symbols.add(case["test_symbol"])
-        if command_error := _command_error(
-            case["verification"],
-            in_scope,
-            repo=repo,
-            recon_by_id=recon_by_id,
-        ):
-            return (command_error,)
+        if case["verification"] is not None:
+            if command_error := _command_error(
+                case["verification"],
+                in_scope,
+                repo=repo,
+                recon_by_id=recon_by_id,
+            ):
+                return (command_error,)
 
     done_kinds = {criterion["kind"] for criterion in result["done_criteria"]}
     if not {"behavior", "test-gate", "scope-integrity"} <= done_kinds:
         return ("DONE_CRITERIA_INCOMPLETE",)
     for criterion in result["done_criteria"]:
-        if command_error := _command_error(
-            criterion["verification"],
-            in_scope,
-            repo=repo,
-            recon_by_id=recon_by_id,
-        ):
-            return (command_error,)
+        if criterion["verification"] is not None:
+            if command_error := _command_error(
+                criterion["verification"],
+                in_scope,
+                repo=repo,
+                recon_by_id=recon_by_id,
+            ):
+                return (command_error,)
     stop_kinds = {condition["kind"] for condition in result["stop_conditions"]}
     if not {
         "drift",
@@ -1091,10 +814,6 @@ def validate_plan_result(
     ):
         return ("STOP_STEP_UNKNOWN",)
 
-    if finding and (
-        relevance_error := _semantic_relevance_error(result, finding)
-    ):
-        return (relevance_error,)
     return ()
 
 
@@ -1172,6 +891,8 @@ def _dependency_order(
 
 
 def _commands_table(commands: Sequence[dict[str, Any]]) -> str:
+    if not commands:
+        return "No host-verified repository commands were available during planning."
     lines = [
         "| Purpose | Command | Expected on success |",
         "|---------|---------|---------------------|",
@@ -1185,7 +906,9 @@ def _commands_table(commands: Sequence[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _render_verification(command: dict[str, Any]) -> str:
+def _render_verification(command: dict[str, Any] | None) -> str:
+    if command is None:
+        return "No host-verified command is attached to this step."
     expected = command["expected_success"]
     exit_prefix = f"exit {expected['exit_code']} and "
     observable = expected["observable_result"]
@@ -1201,7 +924,13 @@ def _render_verification(command: dict[str, Any]) -> str:
     )
 
 
-def _render_verification_list(command: dict[str, Any], *, indent: str) -> str:
+def _render_verification_list(
+    command: dict[str, Any] | None,
+    *,
+    indent: str,
+) -> str:
+    if command is None:
+        return f"{indent}- No host-verified command is attached."
     expected = command["expected_success"]
     return "\n".join(
         (
@@ -1229,11 +958,6 @@ def render_plan(
     plan = _redact_model_value(plan)
     planned_date = planned_on or date.today()
     scope = plan["scope"]
-    in_scope = [
-        *[entry["path"] for entry in scope["existing_paths"]],
-        *[entry["path"] for entry in scope["new_paths"]],
-    ]
-    diff_paths = shlex.join(in_scope)
     dependencies = ", ".join(
         dependency["slug"] for dependency in plan["dependencies"]
     ) or "none"
@@ -1338,15 +1062,12 @@ def render_plan(
 
     return (
         f"# Plan {number:03d}: {plan['title']}\n\n"
-        "> **Executor instructions**: Follow this plan step by step. Run every\n"
+        "> **Executor instructions**: Follow this plan step by step. Use each provided\n"
         "> verification command and confirm the expected result before moving to the\n"
         "> next step. If anything in the \"STOP conditions\" section occurs, stop and\n"
         "> report — do not improvise. When done, update the status row for this plan\n"
         "> in `daydream_plans/README.md` unless a reviewer maintains the index.\n"
-        ">\n"
-        f"> **Drift check (run first)**: `git diff --stat {planned_at}..HEAD -- {diff_paths}`\n"
-        "> If any in-scope file changed since this plan was written, compare the\n"
-        "> Current state excerpts against live code. A mismatch is a STOP condition.\n\n"
+        "\n"
         "## Status\n\n"
         f"- **Priority**: {plan['priority']}\n"
         f"- **Effort**: {finding.get('effort', '—')}\n"

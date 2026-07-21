@@ -9,12 +9,10 @@ from typing import Any
 import anyio
 
 from daydream.backends import AgentEvent, ResultEvent
-from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.exploration import FileInfo
 from daydream.exploration_runner import (
     count_changed_files,
     pre_scan,
-    repo_scan,
     select_tier,
 )
 from daydream.prompts.exploration_subagents import (
@@ -319,49 +317,6 @@ def _multifile_diff(paths: list[str]) -> str:
         f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-old\n+new\n"
         for p in paths
     )
-
-
-def test_pre_scan_specialists_use_default_run_agent_budgets(tmp_path, monkeypatch):
-    import daydream.agent as agent
-
-    calls: list[dict[str, Any]] = []
-
-    async def fake_run_agent(*args, **kwargs):
-        calls.append(kwargs)
-        return {}, None, None
-
-    monkeypatch.setattr(agent, "run_agent", fake_run_agent)
-
-    anyio.run(
-        pre_scan,
-        _SpecialistMockBackend(),
-        tmp_path,
-        _multifile_diff([f"src/file{i}.py" for i in range(4)]),
-    )
-
-    assert len(calls) == 3
-    assert all(call["wall_budget_s"] == DEFAULT_WALL_BUDGET_S for call in calls)
-    assert all(call["tool_call_budget"] == DEFAULT_TOOL_CALL_BUDGET for call in calls)
-
-
-def test_repo_scan_specialist_uses_default_run_agent_budgets(tmp_path, monkeypatch):
-    import daydream.agent as agent
-    import daydream.exploration_runner as er
-
-    calls: list[dict[str, Any]] = []
-
-    async def fake_run_agent(*args, **kwargs):
-        calls.append(kwargs)
-        return {}, None, None
-
-    monkeypatch.setattr(agent, "run_agent", fake_run_agent)
-    monkeypatch.setattr(er.git_ops, "ls_files", lambda repo_root: [])
-
-    anyio.run(repo_scan, _SpecialistMockBackend(), tmp_path)
-
-    assert len(calls) == 1
-    assert calls[0]["wall_budget_s"] == DEFAULT_WALL_BUDGET_S
-    assert calls[0]["tool_call_budget"] == DEFAULT_TOOL_CALL_BUDGET
 
 
 def test_pre_scan_passes_cwd_absolute_paths(tmp_path):

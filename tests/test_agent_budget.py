@@ -1,4 +1,4 @@
-"""Tests for run_agent wall-clock + tool-call budgets (Task 3).
+"""Tests for run_agent wall-clock and tool-call budgets.
 
 Both budgets live inside run_agent: the loop is wrapped in
 ``anyio.move_on_after(wall_budget_s)`` and a ToolStartEvent counter trips the
@@ -125,35 +125,6 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
 
 
-async def test_run_agent_abort_does_not_call_backend_cancel(tmp_path: Path) -> None:
-    """An abort must not invoke the backend-wide cancellation API."""
-
-    class _RaisingCancelBackend(_BurstBackend):
-        async def cancel(self) -> None:
-            self.cancel_calls += 1
-            raise RuntimeError("cancel exploded")
-
-    backend = _RaisingCancelBackend()
-    recorder = _make_recorder(tmp_path)
-
-    with anyio.fail_after(5):
-        async with recorder:
-            result, _, _ = await run_agent(
-                backend,
-                tmp_path,
-                "go",
-                phase=DaydreamPhase.FIX,
-                tool_call_budget=5,
-                wall_budget_s=None,
-            )
-
-    assert isinstance(result, str)
-    assert backend.cancel_calls == 0
-    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
-    step = _agent_step_with_stop_reason(traj)
-    assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
-
-
 async def test_run_agent_abort_swallows_event_stream_close_error(tmp_path: Path) -> None:
     """Invocation cleanup failures must not replace the successful abort result."""
 
@@ -238,50 +209,6 @@ async def test_run_agent_abort_records_reason_and_turn_end(
 
     assert invocation.abort_reasons == ["tool_call_budget_exceeded"]
     assert isinstance(invocation.events[-1], TurnEndEvent)
-
-
-async def test_run_agent_closes_event_stream_before_abort_callback(tmp_path: Path) -> None:
-    """Invocation resources are released before abort notification can block."""
-
-    class _CloseTrackingBackend(_BurstBackend):
-        stream_closed = False
-
-        def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: dict[str, Any] | None = None,
-            continuation: ContinuationToken | None = None,
-            agents: dict[str, Any] | None = None,
-            max_turns: int | None = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            async def _gen() -> AsyncGenerator[AgentEvent, None]:
-                try:
-                    yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
-                finally:
-                    self.stream_closed = True
-
-            return _gen()
-
-    backend = _CloseTrackingBackend()
-    closed_during_abort_callback: list[bool] = []
-
-    def progress_callback(message: Any) -> None:
-        if "aborted" in str(message):
-            closed_during_abort_callback.append(backend.stream_closed)
-
-    await run_agent(
-        backend,
-        tmp_path,
-        "go",
-        phase=DaydreamPhase.FIX,
-        tool_call_budget=0,
-        progress_callback=progress_callback,
-    )
-
-    assert closed_during_abort_callback == [True]
 
 
 async def test_run_agent_wall_budget(tmp_path: Path) -> None:

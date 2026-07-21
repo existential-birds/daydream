@@ -67,7 +67,7 @@ WHOLE_REPOSITORY_SCOPE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["kind"],
     "properties": {
-        "kind": {"type": "string", "const": "whole-repository"},
+        "kind": {"type": "string", "enum": ["whole-repository"]},
     },
 }
 IN_SCOPE_PATHS_SCOPE_SCHEMA: dict[str, Any] = {
@@ -75,17 +75,16 @@ IN_SCOPE_PATHS_SCOPE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["kind", "paths"],
     "properties": {
-        "kind": {"type": "string", "const": "in-scope-paths"},
+        "kind": {"type": "string", "enum": ["in-scope-paths"]},
         "paths": {
             "type": "array",
             "minItems": 1,
-            "uniqueItems": True,
             "items": DIRECTORY_SCOPE_SCHEMA,
         },
     },
 }
 SCOPE_SCHEMA: dict[str, Any] = {
-    "oneOf": [
+    "anyOf": [
         WHOLE_REPOSITORY_SCOPE_SCHEMA,
         IN_SCOPE_PATHS_SCOPE_SCHEMA,
     ],
@@ -98,7 +97,6 @@ APPLICABILITY_SCHEMA: dict[str, Any] = {
         "scope": SCOPE_SCHEMA,
         "preconditions": {
             "type": "array",
-            "uniqueItems": True,
             "items": {
                 "type": "string",
                 "minLength": 5,
@@ -116,11 +114,9 @@ APPLICABILITY_SCHEMA: dict[str, Any] = {
 _EVIDENCE_COMMON_PROPERTIES: dict[str, Any] = {
     "source_path": REPOSITORY_FILE_PATH_SCHEMA,
     "line_anchor": LINE_ANCHOR_SCHEMA,
-    "verbatim_excerpt": {
-        "type": "string",
-        "minLength": 3,
-        "maxLength": 4000,
-    },
+    # Discovery excerpts are hints only. The host replaces this value with the
+    # canonical source slice after resolving and bounds-checking the locator.
+    "verbatim_excerpt": {"type": ["string", "null"]},
 }
 
 
@@ -129,7 +125,7 @@ def _evidence_variant(
     specific: dict[str, Any],
 ) -> dict[str, Any]:
     properties = {
-        "kind": {"type": "string", "const": kind},
+        "kind": {"type": "string", "enum": [kind]},
         **_EVIDENCE_COMMON_PROPERTIES,
         **specific,
     }
@@ -173,7 +169,7 @@ PACKAGE_SCRIPT_EVIDENCE_SCHEMA = _evidence_variant(
     },
 )
 EVIDENCE_SCHEMA: dict[str, Any] = {
-    "oneOf": [
+    "anyOf": [
         LITERAL_COMMAND_EVIDENCE_SCHEMA,
         MAKE_TARGET_EVIDENCE_SCHEMA,
         PACKAGE_SCRIPT_EVIDENCE_SCHEMA,
@@ -492,28 +488,29 @@ def literal_command_error(
 def _source_slice(
     repo: Path,
     evidence: dict[str, Any],
-) -> tuple[str | None, ContractRejection | None]:
+) -> tuple[str | None, str | None, ContractRejection | None]:
     source_path = evidence["source_path"]
     if (
         not valid_repository_file_path(source_path)
         or not path_is_confined(repo, source_path)
     ):
-        return None, ContractRejection("RECON_EVIDENCE_INVALID", "/evidence")
+        return None, None, ContractRejection(
+            "RECON_EVIDENCE_INVALID", "/evidence"
+        )
     try:
         source = (repo / source_path).read_text(encoding="utf-8")
         start = evidence["line_anchor"]["start_line"]
         end = evidence["line_anchor"]["end_line"]
     except (OSError, UnicodeError, KeyError, TypeError):
-        return None, ContractRejection("RECON_EVIDENCE_INVALID", "/evidence")
+        return None, None, ContractRejection(
+            "RECON_EVIDENCE_INVALID", "/evidence"
+        )
     lines = source.splitlines()
-    if (
-        end < start
-        or end > len(lines)
-        or "\n".join(lines[start - 1 : end])
-        != evidence["verbatim_excerpt"].replace("\r\n", "\n")
-    ):
-        return None, ContractRejection("RECON_EVIDENCE_MISMATCH", "/evidence")
-    return source, None
+    if end < start or end > len(lines):
+        return None, None, ContractRejection(
+            "RECON_EVIDENCE_MISMATCH", "/evidence"
+        )
+    return source, "\n".join(lines[start - 1 : end]), None
 
 
 def _package_invocation(package_manager: str, script: str) -> str:
@@ -597,21 +594,24 @@ def _validate_evidence(
     command: dict[str, Any],
     *,
     repo: Path,
-) -> ContractRejection | None:
+) -> tuple[dict[str, Any] | None, ContractRejection | None]:
     evidence = command["evidence"]
-    source, rejection = _source_slice(repo, evidence)
+    source, excerpt, rejection = _source_slice(repo, evidence)
     if rejection is not None:
-        return rejection
-    assert source is not None
-    excerpt = evidence["verbatim_excerpt"]
+        return None, rejection
+    assert source is not None and excerpt is not None
+    canonical_evidence = {
+        **evidence,
+        "verbatim_excerpt": excerpt,
+    }
     kind = evidence["kind"]
     if kind == "literal-command":
         if command["command"] not in excerpt:
-            return ContractRejection(
+            return None, ContractRejection(
                 "RECON_EVIDENCE_MISMATCH",
                 "/evidence",
             )
-        return None
+        return canonical_evidence, None
 
     if kind == "make-target":
         target = evidence["target"]
@@ -630,11 +630,11 @@ def _validate_evidence(
             or target not in {item for group in declarations for item in group}
             or command["command"] != f"make {target}"
         ):
-            return ContractRejection(
+            return None, ContractRejection(
                 "RECON_EVIDENCE_MISMATCH",
                 "/evidence",
             )
-        return None
+        return canonical_evidence, None
 
     package_manager = evidence["package_manager"]
     script = evidence["script"]
@@ -648,7 +648,9 @@ def _validate_evidence(
         manifest = json.loads(source)
         key_spans = _json_key_spans(source)
     except (json.JSONDecodeError, ValueError):
-        return ContractRejection("RECON_EVIDENCE_MISMATCH", "/evidence")
+        return None, ContractRejection(
+            "RECON_EVIDENCE_MISMATCH", "/evidence"
+        )
     package_manager_declaration = manifest.get("packageManager")
     scripts = manifest.get("scripts")
     script_key_spans = key_spans.get(("scripts", script), [])
@@ -668,8 +670,10 @@ def _validate_evidence(
         )
         or command["command"] != _package_invocation(package_manager, script)
     ):
-        return ContractRejection("RECON_EVIDENCE_MISMATCH", "/evidence")
-    return None
+        return None, ContractRejection(
+            "RECON_EVIDENCE_MISMATCH", "/evidence"
+        )
+    return canonical_evidence, None
 
 
 def validate_recon_commands(
@@ -701,8 +705,22 @@ def validate_recon_commands(
         errors.append(rejection.render(f"/commands/{index}"))
 
     for index, command in enumerate(commands):
+        candidate = command
+        if isinstance(command, dict):
+            evidence = command.get("evidence")
+            if (
+                isinstance(evidence, dict)
+                and not isinstance(evidence.get("verbatim_excerpt"), str)
+            ):
+                candidate = {
+                    **command,
+                    "evidence": {
+                        **evidence,
+                        "verbatim_excerpt": None,
+                    },
+                }
         record_errors = sorted(
-            validator.iter_errors(command),
+            validator.iter_errors(candidate),
             key=lambda error: repr(list(error.absolute_path)),
         )
         if record_errors:
@@ -714,7 +732,8 @@ def validate_recon_commands(
             )
             reject(index, ContractRejection(code, _json_pointer(path)))
             continue
-        assert isinstance(command, dict)
+        assert isinstance(candidate, dict)
+        command = candidate
         if literal_command_error(command["command"]):
             reject(
                 index,
@@ -760,12 +779,21 @@ def validate_recon_commands(
                 ),
             )
             continue
-        evidence_rejection = _validate_evidence(command, repo=repo)
+        canonical_evidence, evidence_rejection = _validate_evidence(
+            command,
+            repo=repo,
+        )
         if evidence_rejection is not None:
             reject(index, evidence_rejection)
             continue
-        assert applicability is not None
-        validated.append({**command, "applicability": applicability})
+        assert applicability is not None and canonical_evidence is not None
+        validated.append(
+            {
+                **command,
+                "applicability": applicability,
+                "evidence": canonical_evidence,
+            }
+        )
     return validated, errors
 
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,11 @@ from daydream.improve.command_contract import (
 )
 from daydream.improve.services import Service
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+
+_OPTIONAL_COMMAND_SCHEMA: dict[str, Any] = {
+    **_COMMAND_SCHEMA,
+    "type": ["object", "null"],
+}
 
 AUDIT_FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -129,7 +135,6 @@ _LINE_ANCHOR_SCHEMA: dict[str, Any] = {
     },
 }
 PLAN_WRITER_SCHEMA: dict[str, Any] = {
-    "title": "PlanWriterResult",
     "type": "object",
     "additionalProperties": False,
     "required": [
@@ -159,7 +164,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
         "priority": {"type": "string", "enum": ["P1", "P2", "P3"]},
         "dependencies": {
             "type": "array",
-            "uniqueItems": True,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -191,7 +195,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
         "current_state_excerpts": {
             "type": "array",
             "minItems": 1,
-            "uniqueItems": True,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -209,18 +212,14 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                         "minLength": 15,
                         "maxLength": 300,
                     },
-                    "verbatim_excerpt": {
-                        "type": "string",
-                        "minLength": 8,
-                        "maxLength": 4000,
-                    },
+                    # The model value is a discovery hint. The host resolves
+                    # the locator and persists the canonical repository slice.
+                    "verbatim_excerpt": {"type": ["string", "null"]},
                 },
             },
         },
         "commands_you_will_need": {
             "type": "array",
-            "minItems": 1,
-            "uniqueItems": True,
             "items": _COMMAND_SCHEMA,
         },
         "scope": {
@@ -235,7 +234,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
             "properties": {
                 "existing_paths": {
                     "type": "array",
-                    "uniqueItems": True,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -252,7 +250,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                 },
                 "new_paths": {
                     "type": "array",
-                    "uniqueItems": True,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -270,7 +267,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                 "out_of_scope_paths": {
                     "type": "array",
                     "minItems": 1,
-                    "uniqueItems": True,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -288,7 +284,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                 "out_of_scope_behaviors": {
                     "type": "array",
                     "minItems": 1,
-                    "uniqueItems": True,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -346,7 +341,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
         "steps": {
             "type": "array",
             "minItems": 1,
-            "uniqueItems": True,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -366,7 +360,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                     "changes": {
                         "type": "array",
                         "minItems": 1,
-                        "uniqueItems": True,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
@@ -407,7 +400,7 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                             },
                         },
                     },
-                    "verification": _COMMAND_SCHEMA,
+                    "verification": _OPTIONAL_COMMAND_SCHEMA,
                 },
             },
         },
@@ -419,7 +412,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                 "exemplars": {
                     "type": "array",
                     "minItems": 1,
-                    "uniqueItems": True,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -442,7 +434,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                 "cases": {
                     "type": "array",
                     "minItems": 1,
-                    "uniqueItems": True,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -490,14 +481,13 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                             "assertions": {
                                 "type": "array",
                                 "minItems": 1,
-                                "uniqueItems": True,
                                 "items": {
                                     "type": "string",
                                     "minLength": 15,
                                     "maxLength": 500,
                                 },
                             },
-                            "verification": _COMMAND_SCHEMA,
+                            "verification": _OPTIONAL_COMMAND_SCHEMA,
                         },
                     },
                 },
@@ -506,7 +496,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
         "done_criteria": {
             "type": "array",
             "minItems": 3,
-            "uniqueItems": True,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -532,14 +521,13 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                         "minLength": 20,
                         "maxLength": 500,
                     },
-                    "verification": _COMMAND_SCHEMA,
+                    "verification": _OPTIONAL_COMMAND_SCHEMA,
                 },
             },
         },
         "stop_conditions": {
             "type": "array",
             "minItems": 4,
-            "uniqueItems": True,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -579,12 +567,10 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                     },
                     "related_paths": {
                         "type": "array",
-                        "uniqueItems": True,
                         "items": _REPOSITORY_FILE_PATH_SCHEMA,
                     },
                     "related_step_ids": {
                         "type": "array",
-                        "uniqueItems": True,
                         "items": {
                             "type": "string",
                             "pattern": r"^step-[1-9][0-9]*$",
@@ -601,7 +587,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                 "future_interactions": {
                     "type": "array",
                     "minItems": 1,
-                    "uniqueItems": True,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -623,7 +608,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                 "review_risks": {
                     "type": "array",
                     "minItems": 1,
-                    "uniqueItems": True,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -640,7 +624,6 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                 },
                 "deferred_items": {
                     "type": "array",
-                    "uniqueItems": True,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -770,14 +753,14 @@ not Markdown. Every required field is authored explicitly; the host never fills
 missing implementation steps, tests, scope boundaries, done criteria, or STOP
 conditions. Current-state excerpts must be exact planned-at repository lines.
 Existing and new writable paths must be declared separately. Every ordered step
-names files and symbols and owns a literal verification command plus its
-observable success result. Test cases name their location, symbol, assertions,
-exemplar, command, and expected result. Done criteria are machine-checkable.
+names files and symbols. Test cases name their location, symbol, assertions, and
+exemplar. Done criteria are machine-checkable.
 STOP conditions must cover drift, twice-failing verification, out-of-scope
 work, and one named plan-specific false assumption. Dependencies include a
 slug and ordering reason. Git workflow and maintenance notes are explicit.
 
-Every plan command selects one applicable recon command by id. A command with
+When verified recon commands are available, every plan command selects one by
+id. A command with
 `provenance.kind` `recon` repeats that validated recon record exactly. A
 `planner-derived` step or test gate may only append focused arguments to the
 selected recon command's executable argv prefix; it names a relevant in-scope
@@ -786,6 +769,12 @@ include only commands selected for this plan and attach each focused gate to
 the step, named test, or done criterion it proves. A command field contains
 literal executable shell text only—never labels, arrows, annotations,
 placeholders, Markdown backticks, or narrative prefixes.
+
+If recon contains no verified commands, return an empty
+`commands_you_will_need` array and null for step, test-case, and done-criterion
+verification. Do not invent a command or treat an unverified suggestion as
+authorized. Commands in this plan are implementation guidance; this workflow
+does not execute them.
 
 Do not return a `markdown` field. The host owns deterministic Markdown
 rendering, plan numbering, planned-at stamps, finding metadata, and index
@@ -914,8 +903,8 @@ def build_plan_writer_prompt(
     return f"""You are writing a self-contained implementation plan for a different,
 potentially weaker executor with zero context from this audit or conversation.
 The plan is the product: inline every load-bearing fact, name exact paths and
-symbols, give every step a verification gate, and add hard boundaries and escape
-hatches wherever the executor must stop instead of guessing.
+symbols, include only host-verified command material, and add hard boundaries
+and escape hatches wherever the executor must stop instead of guessing.
 
 {CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
 
@@ -941,6 +930,40 @@ typed records from the recon summary above):
 """
 
 
+_STABLE_PLAN_ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_STABLE_JSON_POINTER = re.compile(
+    r"^/(?:[A-Za-z0-9_.~-]+(?:/[A-Za-z0-9_.~-]+)*)?$"
+)
+
+
+def build_plan_writer_repair_prompt(
+    original_prompt: str,
+    validation_errors: Sequence[str],
+) -> str:
+    """Request one complete replacement using sanitized host feedback only."""
+    feedback: list[dict[str, str]] = []
+    for raw_error in validation_errors:
+        code, separator, pointer = raw_error.partition("@")
+        if not _STABLE_PLAN_ERROR_CODE.fullmatch(code):
+            code = "PLAN_VALIDATION_FAILED"
+        item = {"code": code}
+        if separator and _STABLE_JSON_POINTER.fullmatch(pointer):
+            item["pointer"] = pointer
+        elif code == "NO_STRUCTURED_OBJECT":
+            item["pointer"] = "/"
+        feedback.append(item)
+    return (
+        f"{original_prompt}\n\n"
+        "The host rejected the previous response. Do not repeat, quote, or "
+        "describe that response. Use only this sanitized host validation "
+        "feedback:\n"
+        f"{json.dumps(feedback, indent=2, sort_keys=True)}\n\n"
+        "Return a complete replacement object matching the original schema. "
+        "This must be the entire plan object, not a patch, diff, fragment, or "
+        "explanation."
+    )
+
+
 __all__ = [
     "AUDIT_FINDINGS_SCHEMA",
     "AUDIT_PLAYBOOK_SECTIONS",
@@ -949,5 +972,6 @@ __all__ = [
     "VET_SCHEMA",
     "build_audit_prompt",
     "build_plan_writer_prompt",
+    "build_plan_writer_repair_prompt",
     "build_vet_prompt",
 ]

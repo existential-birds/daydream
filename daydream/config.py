@@ -10,6 +10,7 @@ Exports:
         and detected stack.
     EffortTier: Frozen improve audit effort-tier configuration.
     EFFORT_TIERS: dict[str, EffortTier] - Improve audit effort tiers.
+    PLAN_WRITE_MAX_CONCURRENCY: int - Improve plan-writer concurrency ceiling.
     ReviewSkillChoice: Enum for review skill menu choices.
     REVIEW_SKILLS: dict[ReviewSkillChoice, str] - Mapping of review type identifiers to skill names.
     REVIEW_OUTPUT_FILE: str - Default filename for storing review results.
@@ -63,6 +64,11 @@ DEFAULT_TOOL_CALL_BUDGET = 50
 #   the lowest-severity findings (the group is severity-sorted).
 DEFAULT_GROUP_MAX_WALL_S = 600.0  # 10 min of wall-clock across one file group
 DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
+
+# Plan writers are long, expensive turns and hit Pi's provider rate limit when
+# they inherit the standard/deep audit fanout of ten. Keep plan generation at
+# the prior stable Pi fanout while audit retains its independent tier ceiling.
+PLAN_WRITE_MAX_CONCURRENCY = 2
 
 # Per-backend per-phase default model table. The phase resolver in
 # ``daydream.runner._resolve_backend`` looks up
