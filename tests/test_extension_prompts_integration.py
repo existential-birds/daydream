@@ -17,8 +17,10 @@ import pytest
 
 from daydream import runner
 from daydream.backends import ResultEvent, TextEvent
+from daydream.improve.prompts import PLAN_WRITER_SCHEMA
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
+from tests.test_improve_flow import _dd, _ImproveStubBackend
 
 
 class RecordingBackend:
@@ -109,3 +111,146 @@ async def test_fork_prompt_override_reaches_backend(
     assert rc == 0
     review_prompts = [p for p in backend.prompts if p.startswith("RO-REVIEW")]
     assert review_prompts and "beagle-python:review-python" in review_prompts[0]
+
+
+def _plan_writer_override(*, raises_on_first_call: bool = False) -> str:
+    failure = (
+        "    if _calls == 1:\n"
+        "        raise RuntimeError('PRIVATE_PROMPT_EXCEPTION_SECRET')\n"
+        if raises_on_first_call
+        else ""
+    )
+    return (
+        "import json\n"
+        "DAYDREAM_EXT_API = 2\n"
+        "_calls = 0\n"
+        "def _plan_writer(*, finding, recon_summary, verification_commands, cwd):\n"
+        "    global _calls\n"
+        "    _calls += 1\n"
+        "    joined = '\\n'.join(verification_commands)\n"
+        "    assert all(isinstance(command, str) for command in verification_commands)\n"
+        f"{failure}"
+        "    return (\n"
+        "        'You are writing a self-contained implementation plan.\\n'\n"
+        "        'EXTENSION_TYPED_PLAN_WRITER\\n'\n"
+        "        f'Legacy commands:\\n{joined}\\n'\n"
+        "        'Selected vetted finding:\\n```json\\n'\n"
+        "        + json.dumps(finding)\n"
+        "        + '\\n```\\nRecon:\\n'\n"
+        "        + recon_summary\n"
+        "    )\n"
+        "def register(r):\n"
+        "    r.override_prompt('plan-writer', _plan_writer)\n"
+    )
+
+
+@pytest.mark.anyio
+async def test_plan_writer_override_receives_legacy_string_commands_and_typed_output_succeeds(
+    ext_dir: ExtDir,
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ext_dir.write_module(_plan_writer_override())
+    backend = _ImproveStubBackend(improve_monorepo_target, n_findings=1)
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None: backend,
+    )
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert rc == 0
+    plan_calls = [
+        call
+        for call in backend.calls
+        if "EXTENSION_TYPED_PLAN_WRITER" in call["prompt"]
+    ]
+    assert plan_calls
+    assert all(call["output_schema"] == PLAN_WRITER_SCHEMA for call in plan_calls)
+    assert all("uv run pytest" in call["prompt"] for call in plan_calls)
+    assert all('"id": "test-suite"' in call["prompt"] for call in plan_calls)
+    assert all('"working_directory": "."' in call["prompt"] for call in plan_calls)
+    assert list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+
+
+@pytest.mark.anyio
+async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagnostics(
+    ext_dir: ExtDir,
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ext_dir.write_module(_plan_writer_override())
+    backend = _ImproveStubBackend(improve_monorepo_target, n_findings=1)
+    backend.return_legacy_plan = True
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None: backend,
+    )
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans_dir = improve_monorepo_target / "daydream_plans"
+    diagnostics = _dd(
+        improve_monorepo_target,
+        "plan-write-diagnostics.json",
+    ).read_text(encoding="utf-8")
+    assert rc == 1
+    assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
+    assert "BLOCKED (PLAN_VALIDATION_FAILED: LEGACY_MARKDOWN_OUTPUT" in (
+        plans_dir / "README.md"
+    ).read_text(encoding="utf-8")
+    assert "LEGACY_MARKDOWN_OUTPUT" in diagnostics
+    assert "Make the change." not in diagnostics
+
+
+@pytest.mark.anyio
+async def test_plan_writer_prompt_exception_blocks_only_that_plan(
+    ext_dir: ExtDir,
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ext_dir.write_module(_plan_writer_override(raises_on_first_call=True))
+    backend = _ImproveStubBackend(improve_monorepo_target, n_findings=2)
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None: backend,
+    )
+
+    rc = await runner.run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans_dir = improve_monorepo_target / "daydream_plans"
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    diagnostics = _dd(
+        improve_monorepo_target,
+        "plan-write-diagnostics.json",
+    ).read_text(encoding="utf-8")
+    assert rc == 1
+    assert list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
+    assert "BLOCKED (PLAN_WRITER_FAILED: PROMPT_CONSTRUCTION_FAILED)" in index
+    assert "PROMPT_CONSTRUCTION_FAILED" in diagnostics
+    assert "PRIVATE_PROMPT_EXCEPTION_SECRET" not in diagnostics

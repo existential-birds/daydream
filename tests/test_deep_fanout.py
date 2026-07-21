@@ -6,7 +6,11 @@ from typing import Any
 
 import anyio
 
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import (
+    ResultEvent,
+    TextEvent,
+    effective_fanout_concurrency,
+)
 from daydream.deep.detection import StackAssignment
 from daydream.phases import phase_per_stack_reviews
 
@@ -42,6 +46,15 @@ class _RecordingBackend:
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
         return f"/{skill_key}"
+
+
+def test_effective_fanout_concurrency_caps_backend_hint() -> None:
+    class _PiShaped:
+        fanout_concurrency = 10
+
+    assert effective_fanout_concurrency(12, _PiShaped()) == 10
+    assert effective_fanout_concurrency(6, _PiShaped()) == 6
+    assert effective_fanout_concurrency(12, object()) == 4
 
 
 def _mk_stacks() -> list[StackAssignment]:

@@ -70,8 +70,8 @@ daydream improve --focus security /path/to/project
 | Tier | Audit coverage |
 |------|----------------|
 | `quick` | Correctness, security, and tests; serial, HIGH-confidence findings only, capped near six |
-| `standard` | All nine categories with concurrency four; the default |
-| `deep` | All nine categories with concurrency eight; includes LOW-confidence investigation items |
+| `standard` | All nine categories with a concurrency ceiling of ten; the default |
+| `deep` | All nine categories with a concurrency ceiling of ten; includes LOW-confidence investigation items |
 
 ### Focus modes
 
@@ -257,6 +257,19 @@ applies its own ambient default (for Codex, `model_reasoning_effort` from
 For the `pi` backend, an unset daydream model leaves Pi's own configured
 `defaultModel` intact. The built-in `glm-5.2` value is used only when neither
 daydream nor Pi has selected a model.
+
+Pi accepts `PI_PROVIDER`, `PI_API_KEY`, and `PI_THINKING` as compatibility
+overrides. For the built-in `zai` provider, daydream passes `PI_API_KEY` to the
+child process as `ZAI_API_KEY`; credentials are never placed in process
+arguments. Providers without a known native credential environment variable
+must be configured through Pi directly instead of `PI_API_KEY`.
+
+Daydream schedules Pi fan-outs with a default concurrency hint of 10 for
+standard and deep workflows; quick improve remains serial. Set
+`DAYDREAM_PI_FANOUT_CONCURRENCY` to a positive integer to lower or raise the
+Pi hint. Each workflow still applies its own ceiling, so this setting is not a
+process-global Pi limit and does not affect Claude or Codex's existing hint of
+four.
 
 ### Cost Pricing
 

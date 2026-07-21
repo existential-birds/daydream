@@ -34,8 +34,10 @@ def test_quick_effort_tier_uses_high_confidence_core_categories() -> None:
     assert EFFORT_TIERS["quick"].categories == ("correctness", "security", "tests")
 
 
-def test_deep_effort_tier_caps_concurrency_at_shared_limit() -> None:
-    assert EFFORT_TIERS["deep"].max_concurrency == 4
+def test_improve_effort_tier_concurrency_ceilings() -> None:
+    assert EFFORT_TIERS["quick"].max_concurrency == 1
+    assert EFFORT_TIERS["standard"].max_concurrency == 10
+    assert EFFORT_TIERS["deep"].max_concurrency == 10
 
 
 def test_audit_skill_map_values_are_plugin_skill_names() -> None:

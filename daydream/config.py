@@ -240,14 +240,14 @@ EFFORT_TIERS: dict[str, EffortTier] = {
     ),
     "standard": EffortTier(
         categories=None,
-        max_concurrency=4,
+        max_concurrency=10,
         high_confidence_only=False,
         max_findings=None,
         include_investigate=False,
     ),
     "deep": EffortTier(
         categories=None,
-        max_concurrency=4,
+        max_concurrency=10,
         high_confidence_only=False,
         max_findings=None,
         include_investigate=True,

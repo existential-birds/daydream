@@ -158,7 +158,14 @@ def improve_monorepo_target(tmp_path: Path) -> Path:
     web.mkdir()
     (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
     (project / "README.md").write_text("# Improve monorepo\n")
-    (project / "pyproject.toml").write_text("[project]\nname = \"improve-monorepo\"\n")
+    (project / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "improve-monorepo"\n'
+        "\n"
+        "[tool.daydream]\n"
+        'test-command = "uv run pytest"\n'
+        'scope-command = "git diff --exit-code"\n'
+    )
     _init_repo(project)
     _git(project, "add", ".")
     _commit(project, "initial")
@@ -178,7 +185,14 @@ def improve_branch_target(tmp_path: Path) -> Path:
     web.mkdir()
     (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
     (project / "README.md").write_text("# Improve monorepo\n")
-    (project / "pyproject.toml").write_text("[project]\nname = \"improve-monorepo\"\n")
+    (project / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "improve-monorepo"\n'
+        "\n"
+        "[tool.daydream]\n"
+        'test-command = "uv run pytest"\n'
+        'scope-command = "git diff --exit-code"\n'
+    )
     _init_repo(project)
     _git(project, "add", ".")
     _commit(project, "initial")

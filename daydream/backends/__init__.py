@@ -264,10 +264,10 @@ class Backend(Protocol):
 
     Each backend yields a stream of AgentEvent instances from execute().
 
-    Optional extension: backends may expose ``fanout_concurrency: int`` to
-    advertise how many parallel execute() calls phase_per_stack_reviews should
-    run concurrently. When absent, the caller falls back to 4 via
-    ``getattr(backend, "fanout_concurrency", 4)``.
+    Optional extension: backends may expose ``fanout_concurrency: int`` as a
+    scheduling hint for orchestrator-managed parallel calls. Callers combine
+    the hint with their workflow ceiling via
+    :func:`effective_fanout_concurrency`; absent hints fall back to four.
 
     Optional extension: backends may expose ``concise_fix_prompts: bool`` to
     request verbosity-suppressing fix-phase prompts (set True for pi/GLM, which
@@ -286,6 +286,7 @@ class Backend(Protocol):
         agents: dict[str, AgentDefinition] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ) -> AgentEventStream:
         """Yield AgentEvents for *prompt*.
 
@@ -304,9 +305,11 @@ class Backend(Protocol):
                 index/object-store operations.  Callers relying on a
                 git-immutable guarantee must not assume ``read_only=True`` is
                 sufficient across all backends.
+            persist_session: When False, request an invocation that leaves no
+                resumable backend session. Backends without persisted sessions
+                accept and ignore this option.
         """
         ...
-
     async def cancel(self) -> None:
         """Cancel every active invocation on this backend.
 
@@ -316,6 +319,14 @@ class Backend(Protocol):
         ...
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str: ...
+
+
+def effective_fanout_concurrency(workflow_ceiling: int, backend: object) -> int:
+    """Combine a positive workflow ceiling with a backend scheduling hint."""
+    hint = getattr(backend, "fanout_concurrency", 4)
+    if not isinstance(hint, int) or isinstance(hint, bool) or hint <= 0:
+        hint = 4
+    return min(workflow_ceiling, hint)
 
 
 def create_backend(
@@ -373,4 +384,5 @@ __all__ = [
     "ToolStartEvent",
     "TurnEndEvent",
     "create_backend",
+    "effective_fanout_concurrency",
 ]

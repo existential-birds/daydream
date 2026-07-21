@@ -347,6 +347,40 @@ noted.
 | `vet` | `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
 
+#### `plan-writer` compatibility and output contract
+
+The `plan-writer` override keeps its existing keyword-only callable contract.
+In particular, `verification_commands` remains a `Sequence[str]` of literal
+repository command strings so an existing override may continue to join or
+render those values directly. The serialized `recon_summary` contains the full
+typed recon command records, including ids, working directories, applicability,
+expected results, and evidence. Override authors should use those typed records
+when composing detailed command guidance; adding a required `recon_commands`
+kwarg would break exact-signature builders.
+
+A plan-writer must ask the backend to return `PlanWriterResult` structured
+data, not authored Markdown. `PLAN_WRITER_CONTRACT_INSTRUCTIONS` and
+`PLAN_WRITER_SCHEMA` are available from `daydream.improve.prompts` for
+overrides that want to compose the built-in typed-contract guidance.
+Regardless of prompt content, the host-owned `PLAN_WRITER_SCHEMA` is supplied
+to the backend separately and the host runs repository-aware semantic
+validation before rendering a plan. A wholesale prompt override cannot replace
+or weaken either validation boundary.
+
+Legacy override output containing `{markdown: ...}` fails closed with
+`LEGACY_MARKDOWN_OUTPUT`: the finding is indexed as `BLOCKED`, sanitized
+diagnostics record only stable metadata and error codes, and no plan file is
+written. There is intentionally no Markdown-to-typed adapter. Override authors
+must update their prompt to request `PlanWriterResult`.
+
+This compatibility repair does not bump `EXTENSION_API_VERSION` or its support
+floor. The documented prompt name and kwargs are unchanged, and the legacy
+`verification_commands` value shape is preserved for both supported API
+versions. The authoritative output validation is a host safety boundary, not a
+fork-selectable schema. A future release that renames this kwarg or replaces it
+with required typed command kwargs must follow the breaking-change version
+policy above.
+
 ### Stable `ctx.data` keys
 
 Steps share state through `FlowContext.data`. Forks may **read** these keys;

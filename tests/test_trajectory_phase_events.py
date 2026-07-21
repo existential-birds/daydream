@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.atif import validate as atif_validate
@@ -13,6 +14,8 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
+from daydream.deep.detection import StackAssignment
+from daydream.phases import phase_per_stack_reviews
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
@@ -39,6 +42,37 @@ def _make_recorder(tmp_path: Path, *, agent_model_name: str = "opus") -> Traject
 
 def _read_trajectory(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+class _DelayedSingleSlotBackend:
+    model = "mock-model"
+    fanout_concurrency = 1
+
+    def __init__(self) -> None:
+        self.admissions: list[str] = []
+        self.releases: list[str] = []
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        **kwargs: Any,
+    ):
+        from daydream.trajectory import now_iso
+
+        self.admissions.append(now_iso())
+        await anyio.sleep(0.05)
+        self.releases.append(now_iso())
+        yield TextEvent(text="done")
+        yield ResultEvent(structured_output=None, continuation=None)
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
 
 
 # --- PhaseEvent.to_dict ----------------------------------------------------
@@ -121,6 +155,38 @@ async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
     assert rec._phase_events[1].metadata == {
         "tool_name": "Write",
         "reason": "protected path",
+    }
+
+
+async def test_emit_command_validation_summary_is_structured_and_redacted(
+    tmp_path: Path,
+) -> None:
+    rec = _make_recorder(tmp_path)
+
+    rec.emit_command_validation_summary(
+        total_candidates=33,
+        accepted=4,
+        rejected=29,
+        reasons={"RECON_EVIDENCE_MISMATCH": 28, "RECON_MALFORMED_COMMAND": 1},
+        diagnostics_artifact=".daydream/improve/command-validation-diagnostics.json",
+    )
+
+    event = rec._phase_events[0]
+    assert event.event == "command_validation"
+    assert event.phase is DaydreamPhase.RECON
+    assert event.metadata == {
+        "counts": {
+            "total_candidates": 33,
+            "accepted": 4,
+            "rejected": 29,
+        },
+        "reasons": {
+            "RECON_EVIDENCE_MISMATCH": 28,
+            "RECON_MALFORMED_COMMAND": 1,
+        },
+        "diagnostics_artifact": (
+            ".daydream/improve/command-validation-diagnostics.json"
+        ),
     }
 
 
@@ -282,6 +348,121 @@ async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> Non
     assert ".json" in sub["sibling_trajectory_ref"], (
         f"sibling_trajectory_ref should be a .json path, got {sub['sibling_trajectory_ref']!r}"
     )
+
+
+async def test_queued_fork_timing_starts_after_capacity_admission(
+    tmp_path: Path, make_work
+) -> None:
+    """Queued fan-out time is excluded from child trajectory execution time."""
+    backend = _DelayedSingleSlotBackend()
+    stacks = [
+        StackAssignment(
+            stack_name=name,
+            skill_invocation=f"review-{name}",
+            files=[f"{name}.py"],
+            is_docs_only=False,
+        )
+        for name in ("first", "second")
+    ]
+    diff = tmp_path / "diff.patch"
+    intent = tmp_path / "intent.md"
+    alternatives = tmp_path / "alternatives.json"
+    diff.write_text("", encoding="utf-8")
+    intent.write_text("intent", encoding="utf-8")
+    alternatives.write_text("[]", encoding="utf-8")
+    recorder = _make_recorder(tmp_path)
+
+    async with recorder:
+        await phase_per_stack_reviews(
+            backend,  # type: ignore[arg-type]
+            make_work(tmp_path),
+            stacks,
+            diff_path=diff,
+            intent_path=intent,
+            alternatives_path=alternatives,
+        )
+
+    forks = sorted(
+        (
+            item
+            for item in recorder._subtrajectories
+            if item.get("descriptor", "").startswith("deep-")
+        ),
+        key=lambda item: item["started_at"],
+    )
+    assert len(forks) == 2
+    first, second = forks
+    assert first["started_at"] <= backend.admissions[0]
+    assert second["started_at"] >= backend.releases[0]
+    assert second["started_at"] <= backend.admissions[1]
+
+
+async def test_cancellation_while_queued_creates_no_empty_fork_artifact(
+    tmp_path: Path, make_work, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fan-out cancelled before admission never enters its trajectory fork."""
+    import daydream.phases as phases
+
+    admitted = anyio.Event()
+
+    class _BlockingBackend(_DelayedSingleSlotBackend):
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            **kwargs: Any,
+        ):
+            admitted.set()
+            await anyio.sleep_forever()
+            yield ResultEvent(structured_output=None, continuation=None)
+
+    entered_descriptors: list[str] = []
+    real_maybe_fork = phases.maybe_fork
+
+    def _record_fork(recorder: TrajectoryRecorder | None, descriptor: str):
+        entered_descriptors.append(descriptor)
+        return real_maybe_fork(recorder, descriptor)
+
+    monkeypatch.setattr(phases, "maybe_fork", _record_fork)
+    backend = _BlockingBackend()
+    stacks = [
+        StackAssignment(
+            stack_name=name,
+            skill_invocation=f"review-{name}",
+            files=[f"{name}.py"],
+            is_docs_only=False,
+        )
+        for name in ("first", "second")
+    ]
+    diff = tmp_path / "diff.patch"
+    intent = tmp_path / "intent.md"
+    alternatives = tmp_path / "alternatives.json"
+    diff.write_text("", encoding="utf-8")
+    intent.write_text("intent", encoding="utf-8")
+    alternatives.write_text("[]", encoding="utf-8")
+    recorder = _make_recorder(tmp_path)
+
+    async def _run_reviews() -> None:
+        await phase_per_stack_reviews(
+            backend,  # type: ignore[arg-type]
+            make_work(tmp_path),
+            stacks,
+            diff_path=diff,
+            intent_path=intent,
+            alternatives_path=alternatives,
+        )
+
+    async with recorder:
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(_run_reviews)
+            await admitted.wait()
+            await anyio.sleep(0)
+            task_group.cancel_scope.cancel()
+
+    assert entered_descriptors == ["deep-first"]
+    assert not recorder._sibling_path_for("deep-second").exists()
 
 
 # --- compute_phase_timings -------------------------------------------------

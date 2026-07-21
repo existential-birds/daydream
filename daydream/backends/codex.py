@@ -87,6 +87,7 @@ class CodexBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt via Codex CLI and yield unified events.
 
@@ -99,6 +100,8 @@ class CodexBackend:
                 spike): ``--sandbox read-only`` does not block ``git commit``;
                 the working tree — the failure-handoff incident's danger — is
                 fully protected. Default False keeps ``danger-full-access``.
+            persist_session: Accepted for backend protocol parity. Codex does
+                not expose persisted CLI sessions here, so this is ignored.
 
         Raises:
             CodexError: If the Codex turn fails.

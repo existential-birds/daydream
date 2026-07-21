@@ -104,6 +104,16 @@ _REDACTION_RULES: tuple[tuple[Any, str], ...] = (
 )
 
 
+def redact_text(value: str) -> str:
+    """Return redacted text, replacing the whole field if redaction fails."""
+    try:
+        for pattern, replacement in _REDACTION_RULES:
+            value = pattern.sub(replacement, value)
+    except Exception:  # noqa: BLE001 - fail closed at every host boundary
+        return "[REDACTION_FAILED]"
+    return value
+
+
 def _safe_descriptor(raw: str) -> str:
     """Slugify a descriptor to filesystem-safe characters (D-06).
 
@@ -211,18 +221,13 @@ class Redactor:
 
     def _redact_text(self, s: str) -> str:
         """Apply every redaction rule to *s* and return the result."""
-        for pattern, replacement in _REDACTION_RULES:
-            s = pattern.sub(replacement, s)
-        return s
+        return redact_text(s)
 
     def _redact_optional_text(self, value: str | None) -> str | None:
         """Redact a possibly-None text field; degrade to [REDACTION_FAILED] on error."""
         if value is None:
             return None
-        try:
-            return self._redact_text(value)
-        except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
-            return "[REDACTION_FAILED]"
+        return redact_text(value)
 
     def _redact_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Redact every value inside a ToolCall.arguments dict.
@@ -307,7 +312,7 @@ class Redactor:
                 return step
             return step.model_copy(update=updates)
         except Exception as exc:  # noqa: BLE001 - REDA-05 redact-or-omit (top-level fallback)
-            print_warning(_console, f"Redactor failure: {type(exc).__name__}: {exc}")
+            print_warning(_console, f"Redactor failure: {type(exc).__name__}")
             # Wipe every text-bearing surface — partial wipes leak secrets
             # if redaction failed mid-arguments / mid-observation.
             safe_updates: dict[str, Any] = {"message": "[REDACTION_FAILED]"}
@@ -1022,6 +1027,34 @@ class TrajectoryRecorder:
     ) -> None:
         """Record a tool-supervisor veto in the firing phase."""
         self._emit_phase_event(phase, "tool_veto", tool_name=tool_name, reason=reason)
+
+    def emit_command_validation_summary(
+        self,
+        *,
+        total_candidates: int,
+        accepted: int,
+        rejected: int,
+        reasons: dict[str, int],
+        diagnostics_artifact: str,
+        container_errors: list[dict[str, str]] | None = None,
+    ) -> None:
+        """Record a redacted repository-command validation summary."""
+        metadata: dict[str, Any] = {
+            "counts": {
+                "total_candidates": total_candidates,
+                "accepted": accepted,
+                "rejected": rejected,
+            },
+            "reasons": dict(sorted(reasons.items())),
+            "diagnostics_artifact": diagnostics_artifact,
+        }
+        if container_errors:
+            metadata["container_errors"] = container_errors
+        self._emit_phase_event(
+            DaydreamPhase.RECON,
+            "command_validation",
+            **metadata,
+        )
 
     def _register_subtrajectory(self, inv: Invocation) -> None:
         """Register a per-Invocation timing summary (issue #203).

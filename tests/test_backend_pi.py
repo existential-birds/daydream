@@ -37,6 +37,7 @@ from daydream.backends.pi import (
     PiError,
     _is_retryable_error_message,
     _is_retryable_exit_code,
+    _pi_error_category,
     _pi_retry_attempts,
     _pi_retry_base_delay,
     _render_tool_result,
@@ -229,6 +230,34 @@ async def test_fresh_run_uses_session_id_not_no_session():
 
 
 @pytest.mark.asyncio
+async def test_ephemeral_pi_call_uses_no_session():
+    backend = PiBackend(model="glm-5.2")
+
+    flat_args, _ = await _run_and_capture_args(
+        backend,
+        persist_session=False,
+    )
+    assert "--no-session" in flat_args
+    assert "--session-id" not in flat_args
+
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    with patch(
+        "daydream.backends.pi.asyncio.create_subprocess_exec",
+        return_value=mock_proc,
+    ):
+        result_events = [
+            event
+            async for event in backend.execute(
+                Path("/tmp"),
+                "p",
+                persist_session=False,
+            )
+            if isinstance(event, ResultEvent)
+        ]
+    assert result_events[0].continuation is None
+
+
+@pytest.mark.asyncio
 async def test_read_only_restricts_tools():
     """read_only=True adds --tools read,find,ls,grep (excludes mutating tools)."""
     backend = PiBackend(model="glm-5.2")
@@ -241,18 +270,35 @@ async def test_read_only_restricts_tools():
 
 
 @pytest.mark.asyncio
-async def test_env_overrides_forwarded_as_flags(monkeypatch):
-    """PI_PROVIDER / PI_API_KEY / PI_THINKING env vars become CLI flags."""
+async def test_pi_api_key_never_enters_process_argv(monkeypatch):
+    sentinel = "synthetic-pi-api-key-sentinel"
     monkeypatch.setenv("PI_PROVIDER", "zai")
-    monkeypatch.setenv("PI_API_KEY", "secret-key")
+    monkeypatch.setenv("PI_API_KEY", sentinel)
     monkeypatch.setenv("PI_THINKING", "medium")
 
     backend = PiBackend(model="glm-5.2")
 
-    flat_args, _ = await _run_and_capture_args(backend)
+    flat_args, mock_exec = await _run_and_capture_args(backend)
     assert flat_args[flat_args.index("--provider") + 1] == "zai"
-    assert flat_args[flat_args.index("--api-key") + 1] == "secret-key"
+    assert sentinel not in flat_args
+    assert "--api-key" not in flat_args
+    assert mock_exec.call_args.kwargs["env"]["ZAI_API_KEY"] == sentinel
     assert flat_args[flat_args.index("--thinking") + 1] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_pi_api_key_unknown_provider_fails_with_safe_category(monkeypatch):
+    sentinel = "synthetic-unknown-provider-key"
+    monkeypatch.setenv("PI_PROVIDER", "custom-provider")
+    monkeypatch.setenv("PI_API_KEY", sentinel)
+    backend = PiBackend(model="custom-model")
+
+    with pytest.raises(PiError) as exc_info:
+        async for _ in backend.execute(Path("/tmp"), "p"):
+            pass
+
+    assert exc_info.value.category == "AUTH_CONFIG"
+    assert sentinel not in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -967,6 +1013,32 @@ def test_pierror_retryable_default_and_kwarg_and_message():
     assert str(PiError("auth failed", retryable=False)) == "auth failed"
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("429 Too Many Requests", "RATE_LIMIT"),
+        ("request timed out after 30 seconds", "TIMEOUT"),
+        ("socket hang up", "STREAM_DROP"),
+        ("Pi CLI exited with return code 1", "PROCESS_EXIT"),
+        ("authentication required", "AUTH_CONFIG"),
+        ("synthetic opaque failure", "UNKNOWN"),
+    ],
+    ids=[
+        "rate-limit",
+        "timeout",
+        "stream-drop",
+        "process-exit",
+        "auth-config",
+        "unknown",
+    ],
+)
+def test_pi_error_categories_are_stable_host_codes(
+    message: str,
+    expected: str,
+) -> None:
+    assert _pi_error_category(message) == expected
+
+
 # ---------------------------------------------------------------------------
 # _is_retryable_error_message
 # ---------------------------------------------------------------------------
@@ -1132,6 +1204,25 @@ def test_pi_retry_base_delay(monkeypatch, env_value, expected):
 # ---------------------------------------------------------------------------
 
 
-def test_pi_backend_fanout_concurrency():
+def test_pi_fanout_concurrency_defaults_to_ten(monkeypatch):
+    monkeypatch.delenv("DAYDREAM_PI_FANOUT_CONCURRENCY", raising=False)
     backend = PiBackend(model="glm-5.2")
-    assert backend.fanout_concurrency == 2
+    assert backend.fanout_concurrency == 10
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        ("6", 6),
+        ("0", 10),
+        ("-1", 10),
+        ("invalid", 10),
+    ],
+)
+def test_pi_fanout_concurrency_env_validation(
+    monkeypatch, caplog, env_value, expected
+):
+    monkeypatch.setenv("DAYDREAM_PI_FANOUT_CONCURRENCY", env_value)
+    assert PiBackend(model="glm-5.2").fanout_concurrency == expected
+    if expected == 10:
+        assert "using default 10" in caplog.text

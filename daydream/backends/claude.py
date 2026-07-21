@@ -311,6 +311,7 @@ class ClaudeBackend:
         agents: dict[str, AgentDefinition] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt and yield unified events.
 
@@ -324,6 +325,8 @@ class ClaudeBackend:
                 not on ``READ_ONLY_BASH_ALLOWLIST``. The hook is the enforcement
                 — under ``bypassPermissions`` ``allowed_tools`` does not restrict
                 the toolset — so the tool list is left unchanged.
+            persist_session: Accepted for backend protocol parity. Claude does
+                not expose persisted CLI sessions here, so this is ignored.
 
         Raises:
             ClaudeAgentError: If the agent run ends with an error result

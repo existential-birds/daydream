@@ -22,6 +22,7 @@ class _RunawayReconBackend:
         agents: Any = None,
         max_turns: int | None = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         async def _events() -> AsyncIterator[AgentEvent]:
             if "IMPROVE_RECON" in prompt:
@@ -83,7 +84,7 @@ async def test_improve_recon_budget_exhaustion_marks_trajectory_partial(
             )
         )
 
-    assert code == 0
+    assert code == 1
     trajectories = list(
         (improve_monorepo_target / ".daydream" / "runs").glob(
             "*/trajectory.json"

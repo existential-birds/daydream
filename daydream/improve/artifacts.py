@@ -22,6 +22,11 @@ def recon_path(improve_dir_path: Path) -> Path:
     return improve_dir_path / "recon.json"
 
 
+def command_validation_diagnostics_path(improve_dir_path: Path) -> Path:
+    """Return the redacted repository-command validation diagnostics path."""
+    return improve_dir_path / "command-validation-diagnostics.json"
+
+
 def audit_findings_path(
     improve_dir_path: Path, category: str, stack: str | None
 ) -> Path:
@@ -38,3 +43,8 @@ def vetted_findings_path(improve_dir_path: Path) -> Path:
 def report_path(improve_dir_path: Path) -> Path:
     """Return the rendered improve report path."""
     return improve_dir_path / "report.md"
+
+
+def plan_write_diagnostics_path(improve_dir_path: Path) -> Path:
+    """Return the sanitized plan-writer attempt diagnostics path."""
+    return improve_dir_path / "plan-write-diagnostics.json"

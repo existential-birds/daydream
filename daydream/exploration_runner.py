@@ -14,6 +14,7 @@ import re
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from daydream import git_ops
+from daydream.backends import effective_fanout_concurrency
 from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.exploration import (
     Convention,
@@ -231,9 +232,12 @@ async def pre_scan(
 
     specialist_max_turns = EXPLORATION_MAX_TURNS
     recorder = get_current_recorder()
+    limiter = anyio.CapacityLimiter(
+        effective_fanout_concurrency(10, backend)
+    )
 
     async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
-        async with maybe_fork(recorder, f"explore-{name}"):
+        async with limiter, maybe_fork(recorder, f"explore-{name}"):
             try:
                 structured, _, _ = await run_agent(
                     backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,

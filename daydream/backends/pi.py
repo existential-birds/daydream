@@ -76,6 +76,10 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
 # Read-only tool subset (plan §3). Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
 
+_PI_PROVIDER_API_KEY_ENV = {
+    "zai": "ZAI_API_KEY",
+}
+
 
 def _read_pi_default_model(path: Path) -> str | None:
     """Read Pi's configured default model, ignoring malformed settings."""
@@ -149,8 +153,10 @@ Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
 
 
-_PI_DEFAULT_RETRY_ATTEMPTS = 3
-_PI_DEFAULT_RETRY_BASE_DELAY = 2.0
+_PI_DEFAULT_RETRY_ATTEMPTS = 10
+_PI_DEFAULT_RETRY_BASE_DELAY = 10.0
+_PI_DEFAULT_RETRY_MAX_DELAY = 120.0
+_PI_DEFAULT_FANOUT_CONCURRENCY = 10
 
 STREAM_DROP_SIGNATURES = (
     "terminated",
@@ -162,6 +168,29 @@ STREAM_DROP_SIGNATURES = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _pi_fanout_concurrency() -> int:
+    raw = os.environ.get("DAYDREAM_PI_FANOUT_CONCURRENCY")
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                "DAYDREAM_PI_FANOUT_CONCURRENCY is not a valid integer; "
+                "using default %d",
+                _PI_DEFAULT_FANOUT_CONCURRENCY,
+            )
+        else:
+            if value <= 0:
+                logger.warning(
+                    "DAYDREAM_PI_FANOUT_CONCURRENCY must be positive; "
+                    "using default %d",
+                    _PI_DEFAULT_FANOUT_CONCURRENCY,
+                )
+            else:
+                return value
+    return _PI_DEFAULT_FANOUT_CONCURRENCY
 
 
 def _pi_retry_attempts() -> int:
@@ -216,6 +245,35 @@ def _pi_retry_base_delay() -> float:
     return _PI_DEFAULT_RETRY_BASE_DELAY
 
 
+def _pi_retry_max_delay() -> float:
+    raw = os.environ.get("DAYDREAM_PI_RETRY_MAX_DELAY_S")
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning(
+                "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is not a valid float; using default %g",
+                raw,
+                _PI_DEFAULT_RETRY_MAX_DELAY,
+            )
+        else:
+            if not math.isfinite(value):
+                logger.warning(
+                    "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is not finite; using default %g",
+                    raw,
+                    _PI_DEFAULT_RETRY_MAX_DELAY,
+                )
+            elif value < 0:
+                logger.warning(
+                    "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is negative; using default %g",
+                    raw,
+                    _PI_DEFAULT_RETRY_MAX_DELAY,
+                )
+            else:
+                return value
+    return _PI_DEFAULT_RETRY_MAX_DELAY
+
+
 def _is_retryable_error_message(message: str) -> bool:
     """Return True if the error message signals a transient overload or rate-limit.
 
@@ -257,12 +315,50 @@ def _is_retryable_exit_code(code: int) -> bool:
     return code in (-9, 137)
 
 
+def _pi_error_category(message: str) -> str:
+    """Classify Pi failures into stable host-owned diagnostic categories."""
+    lower = message.casefold()
+    if any(
+        token in lower
+        for token in ("429", "rate limit", "rate_limit", "too many requests")
+    ):
+        return "RATE_LIMIT"
+    if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
+        return "TIMEOUT"
+    if any(signature in lower for signature in STREAM_DROP_SIGNATURES):
+        return "STREAM_DROP"
+    if "pi cli exited with return code" in lower:
+        return "PROCESS_EXIT"
+    if any(
+        token in lower
+        for token in (
+            "auth",
+            "credential",
+            "api key",
+            "api_key",
+            "configuration",
+            "not configured",
+            "provider",
+            "model not found",
+        )
+    ):
+        return "AUTH_CONFIG"
+    return "UNKNOWN"
+
+
 class PiError(Exception):
     """Raised when a Pi turn fails (e.g. ``stopReason == "error"``)."""
 
-    def __init__(self, message: str, *, retryable: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        category: str = "UNKNOWN",
+    ):
         super().__init__(message)
         self.retryable = retryable
+        self.category = category
 
 
 def _render_tool_result(result: Any) -> str:
@@ -397,9 +493,10 @@ class PiBackend:
             configured = _configured_pi_model(cwd)
             self._configured_cache = (cwd, configured)
         self.model = model or configured or DEFAULT_PI_MODEL
-        self.fanout_concurrency = 2
+        self.fanout_concurrency = _pi_fanout_concurrency()
         self.retry_attempts = _pi_retry_attempts()
         self.retry_base_delay_s = _pi_retry_base_delay()
+        self.retry_max_delay_s = _pi_retry_max_delay()
         self._processes: list[asyncio.subprocess.Process] = []
 
     async def execute(
@@ -411,6 +508,7 @@ class PiBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt via the Pi CLI and yield unified events.
 
@@ -420,16 +518,15 @@ class PiBackend:
                 the final assistant text is parsed as JSON at ``agent_end``.
             continuation: Optional token for session resumption. When present
                 and ``backend == "pi"``, ``--session-id <id>`` resumes that
-                session. Fresh runs generate a UUID and also pass
-                ``--session-id <uuid>`` so the returned token always points to
-                a saved (resumable) session — Pi's ``--no-session`` is
-                ephemeral and cannot be resumed.
+                session when ``persist_session`` is True.
             agents: Optional subagent mapping. Pi does not support non-empty
                 subagent maps and will raise if provided.
             max_turns: NOT enforced by Pi (no direct turn-count flag). Documented
                 gap; the argument is accepted for protocol parity only.
             read_only: When True, restricts Pi's tools to the read-only subset
                 (``read,find,ls,grep``) so the agent cannot write/edit/bash.
+            persist_session: When False, pass ``--no-session`` and return no
+                continuation. The default preserves resumable sessions.
 
         Raises:
             PiError: If a Pi turn ends with ``stopReason == "error"``.
@@ -465,10 +562,24 @@ class PiBackend:
         thinking = os.environ.get("PI_THINKING")
         if provider:
             args.extend(["--provider", provider])
-        if api_key:
-            args.extend(["--api-key", api_key])
         if thinking:
             args.extend(["--thinking", thinking])
+
+        child_env = os.environ.copy()
+        child_env.pop("PI_API_KEY", None)
+        if api_key:
+            native_key_name = (
+                _PI_PROVIDER_API_KEY_ENV.get(provider.casefold())
+                if provider
+                else None
+            )
+            if native_key_name is None:
+                raise PiError(
+                    "PI_API_KEY requires a provider with a supported "
+                    "native credential environment variable",
+                    category="AUTH_CONFIG",
+                )
+            child_env[native_key_name] = api_key
 
         # Pi's built-in system prompt is minimal; append the daydream preamble
         # so the GLM model gets the same tool-efficiency / budget-awareness
@@ -478,16 +589,15 @@ class PiBackend:
         if read_only:
             args.extend(["--tools", _PI_READ_ONLY_TOOLS])
 
-        # Pi's --no-session is ephemeral (pi docs: "Don't save session
-        # (ephemeral)"); resuming it with --session-id <id> "creates it if
-        # missing" → an empty session that discards prior turns. So every run
-        # uses --session-id with a persistent id: the continuation's id when
-        # resuming, or a freshly generated UUID for a new session.
         resume_id: str | None = None
-        if continuation and continuation.backend == "pi":
+        if persist_session and continuation and continuation.backend == "pi":
             resume_id = continuation.data.get("session_id")
-        effective_session_id = resume_id or str(uuid.uuid4())
-        args.extend(["--session-id", effective_session_id])
+        effective_session_id: str | None = None
+        if persist_session:
+            effective_session_id = resume_id or str(uuid.uuid4())
+            args.extend(["--session-id", effective_session_id])
+        else:
+            args.append("--no-session")
 
         full_prompt = prompt
         if output_schema:
@@ -538,6 +648,7 @@ class PiBackend:
                 # text mixed into stdout is harmlessly skipped.
                 stderr=asyncio.subprocess.STDOUT,
                 limit=_PI_STDOUT_LIMIT_BYTES,
+                env=child_env,
             )
             self._processes.append(proc)
 
@@ -621,7 +732,11 @@ class PiBackend:
                     stop_reason = msg.get("stopReason")
                     if stop_reason == "error":
                         error_msg = msg.get("errorMessage") or "Unknown Pi error"
-                        raise PiError(error_msg, retryable=_is_retryable_error_message(error_msg))
+                        raise PiError(
+                            error_msg,
+                            retryable=_is_retryable_error_message(error_msg),
+                            category=_pi_error_category(error_msg),
+                        )
                     usage = _extract_usage(msg)
                     inp = usage["input"]
                     outp = usage["output"]
@@ -677,6 +792,7 @@ class PiBackend:
                 raise PiError(
                     f"Pi CLI exited with return code {returncode}.{detail}",
                     retryable=_is_retryable_exit_code(returncode),
+                    category="PROCESS_EXIT",
                 )
 
             # Single finalization path (plan §10): runs exactly once whether
@@ -691,14 +807,20 @@ class PiBackend:
                 cached_tokens=total_cache_read,
                 model_name=self.model,
             )
-            # Prefer the id pi reports in the session header (authoritative);
-            # fall back to the persistent id we passed via --session-id.
-            token_session = session_id or effective_session_id
+            token_session = (
+                session_id or effective_session_id
+                if persist_session
+                else None
+            )
             yield ResultEvent(
                 structured_output=structured_result,
-                continuation=ContinuationToken(
-                    backend="pi",
-                    data={"session_id": token_session},
+                continuation=(
+                    ContinuationToken(
+                        backend="pi",
+                        data={"session_id": token_session},
+                    )
+                    if token_session is not None
+                    else None
                 ),
             )
 

@@ -22,6 +22,10 @@ def test_contract_doc_names_every_registered_surface() -> None:
         "rewrite",
         "DAYDREAM_EXT_API = 2",
         "raise the floor",
+        "PlanWriterResult",
+        "Sequence[str]",
+        "LEGACY_MARKDOWN_OUTPUT",
+        "host-owned",
     ):
         assert fragment in doc, f"contract detail {fragment!r} undocumented"
     for symbol in extension_api.__all__:

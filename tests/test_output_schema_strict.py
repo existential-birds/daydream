@@ -27,12 +27,19 @@ from typing import Any
 
 import pytest
 
+import daydream.improve.orchestrator as improve_orchestrator
+import daydream.improve.prompts as improve_prompts
 import daydream.phases as phases
 import daydream.prompts.exploration_subagents as exploration_subagents
 
 # Modules whose ``*_SCHEMA`` constants are all passed to a backend as
 # ``output_schema`` (verified against every ``output_schema=`` call site).
-_SCHEMA_MODULES = [phases, exploration_subagents]
+_SCHEMA_MODULES = [
+    phases,
+    exploration_subagents,
+    improve_prompts,
+    improve_orchestrator,
+]
 
 
 def _collect_output_schemas() -> list[tuple[str, dict[str, Any]]]:
@@ -78,6 +85,10 @@ _SCHEMAS = _collect_output_schemas()
 def test_output_schemas_were_discovered() -> None:
     """Guard the guard: discovery must not silently match zero schemas."""
     assert _SCHEMAS, "No *_SCHEMA constants discovered — schema collection is broken"
+
+
+def test_plan_review_result_contract_is_unversioned() -> None:
+    assert improve_orchestrator._PLAN_REVIEW_SCHEMA["title"] == "PlanReviewResult"
 
 
 @pytest.mark.parametrize("name,schema", _SCHEMAS, ids=[n for n, _ in _SCHEMAS])

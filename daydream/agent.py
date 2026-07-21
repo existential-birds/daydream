@@ -378,6 +378,7 @@ async def run_agent(
     agents: dict[str, AgentDefinition] | None = None,
     max_turns: int | None = None,
     read_only: bool = False,
+    persist_session: bool = True,
     wall_budget_s: float | None = None,
     tool_call_budget: int | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
@@ -409,6 +410,8 @@ async def run_agent(
             at the tool layer (Claude PreToolUse guard hook; Codex
             ``--sandbox read-only``). Wired True only for the read-only
             failure-summarizer call; all other call sites keep the default.
+        persist_session: When False, request an ephemeral backend invocation.
+            The default preserves existing continuation behavior.
         wall_budget_s: Opt-in per-invocation wall-clock budget. When exceeded
             the loop and this invocation's event iterator are closed, the ATIF
             turn is marked aborted, and the partial output is returned — no
@@ -445,14 +448,22 @@ async def run_agent(
         recorder = get_current_recorder()
         _default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "3"))
         _default_delay = float(os.environ.get("DAYDREAM_PI_RETRY_BASE_DELAY_S", "2.0"))
+        _default_max_delay = float(
+            os.environ.get("DAYDREAM_PI_RETRY_MAX_DELAY_S", "120.0")
+        )
         max_attempts = getattr(backend, "retry_attempts", _default_attempts)
         base_delay = getattr(backend, "retry_base_delay_s", _default_delay)
+        max_delay = getattr(backend, "retry_max_delay_s", _default_max_delay)
         if max_attempts < 0:
             raise ValueError("retry attempts must be >= 0")
         if not math.isfinite(base_delay):
             raise ValueError("retry base delay must be finite")
         if base_delay < 0:
             raise ValueError("retry base delay must be >= 0")
+        if not math.isfinite(max_delay):
+            raise ValueError("retry max delay must be finite")
+        if max_delay < 0:
+            raise ValueError("retry max delay must be >= 0")
 
         for attempt in range(max_attempts + 1):
             # Reset accumulated state so a failed attempt's partial output
@@ -470,9 +481,16 @@ async def run_agent(
             agent_renderer = AgentTextRenderer(console)
 
             try:
+                execute_kwargs: dict[str, Any] = {
+                    "agents": agents,
+                    "max_turns": max_turns,
+                    "read_only": read_only,
+                }
+                if not persist_session:
+                    execute_kwargs["persist_session"] = False
                 event_iter = backend.execute(
                     cwd, prompt, output_schema, continuation,
-                    agents=agents, max_turns=max_turns, read_only=read_only,
+                    **execute_kwargs,
                 )
                 invocation_cm: Any = (
                     recorder.invocation(phase=phase) if recorder is not None else nullcontext(None)
@@ -684,7 +702,10 @@ async def run_agent(
                 raise
             except Exception as exc:
                 if attempt < max_attempts and getattr(exc, "retryable", False):
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    delay = min(
+                        base_delay * (2 ** attempt) + random.uniform(0, 1),
+                        max_delay,
+                    )
                     retry_msg = (
                         f"Backend error ({type(exc).__name__}), retrying "
                         f"attempt {attempt + 2}/{max_attempts + 1} after {delay:.1f}s..."
@@ -708,7 +729,13 @@ async def run_agent(
         print_error(console, "Extension Failure", f"{type(exc.original).__name__}: {exc.original}")
         raise exc.original from None
     except Exception as exc:
-        print_error(console, "Backend Execution Error", f"{type(exc).__name__}: {exc}")
+        category = getattr(exc, "category", None)
+        diagnostic = (
+            f"{type(exc).__name__}: {category}"
+            if isinstance(category, str)
+            else type(exc).__name__
+        )
+        print_error(console, "Backend Execution Error", diagnostic)
         raise
     finally:
         _state.current_backends.remove(backend)
