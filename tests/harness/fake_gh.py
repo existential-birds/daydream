@@ -316,7 +316,7 @@ class GhSetCall:
         org: The ``--org`` scope value, or None.
         repo: The ``--repo`` scope value, or None.
         argv: The full argv (after ``gh``) — assert PEM material never appears.
-        stdin: The value piped on stdin (for ``--body-file -`` secrets).
+        stdin: The value piped on stdin (for secrets set without ``--body``).
     """
 
     name: str | None
