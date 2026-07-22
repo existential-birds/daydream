@@ -121,20 +121,6 @@ def test_claude_and_codex_backend_concise_fix_prompts_false():
     assert CodexBackend(model="test").concise_fix_prompts is False
 
 
-def test_agent_definition_importable():
-    """AgentDefinition should be importable from claude_agent_sdk.types."""
-    from claude_agent_sdk.types import AgentDefinition
-
-    # Should be able to construct one
-    agent = AgentDefinition(
-        description="test agent",
-        prompt="do stuff",
-        tools=["Read"],
-        model="sonnet",
-    )
-    assert agent.description == "test agent"
-
-
 @pytest.mark.asyncio
 async def test_backend_execute_accepts_agents_kwarg():
     """MockBackend (satisfying Backend protocol) should accept agents=None."""

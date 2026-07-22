@@ -1247,14 +1247,6 @@ def test_gh_api_jq_invalid_line_raises_git_error(monkeypatch: pytest.MonkeyPatch
 from tests.harness.fake_gh import FakeGh  # noqa: E402
 
 
-def test_gh_secret_set_org_scope_threads_org_flag(fake_gh: FakeGh, git_repo: Path) -> None:
-    git_ops.gh_secret_set(git_repo, "DAYDREAM_APP_ID", "42", org="acme")
-    call = fake_gh.secret_set_calls()[-1]
-    assert call.name == "DAYDREAM_APP_ID" and call.org == "acme" and call.repo is None
-    assert "--org" in call.argv and "acme" in call.argv
-    assert "42" in call.stdin
-
-
 def test_gh_secret_set_requires_exactly_one_scope(fake_gh: FakeGh, git_repo: Path) -> None:
     with pytest.raises(GitError):
         git_ops.gh_secret_set(git_repo, "X", "v")

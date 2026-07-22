@@ -144,7 +144,6 @@ def _record(kind, argv, stdin):
 
 def _handle_set(kind, argv):
     """Handle ``secret set`` / ``variable set``. Value via stdin or --body."""
-    name = argv[2] if len(argv) > 2 and not argv[2].startswith("-") else None
     body = _opt(argv, "--body")
     stdin = "" if body is not None else sys.stdin.read()
     _record(kind + " set", argv, stdin)
