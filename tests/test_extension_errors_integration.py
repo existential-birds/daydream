@@ -10,6 +10,7 @@ error output naming the broken piece (Task 16 of the extension-seam plan).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,10 @@ import pytest
 
 from daydream import runner
 from daydream.backends import ResultEvent, TextEvent
+from daydream.extensions import (
+    EXTENSION_API_VERSION,
+    MIN_SUPPORTED_EXTENSION_API_VERSION,
+)
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
 
@@ -100,5 +105,11 @@ async def test_version_mismatch_exits_1_naming_versions(
     rc = await runner.run(RunConfig(target=str(multi_stack_target), non_interactive=True, archive=False))
 
     assert rc == 1
-    out = capsys.readouterr().out
-    assert "99" in out and "2" in out
+    # Collapse the Rich panel's borders and wrapping: the message is wrapped at
+    # width 80, so a bare substring check can straddle a line break.
+    out = " ".join(re.sub(r"[\u2550-\u256c]", " ", capsys.readouterr().out).split())
+    assert "DAYDREAM_EXT_API = 99" in out
+    assert (
+        f"supports {MIN_SUPPORTED_EXTENSION_API_VERSION}..{EXTENSION_API_VERSION}"
+        in out
+    )
