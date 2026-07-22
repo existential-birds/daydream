@@ -42,6 +42,7 @@ def _register_improve_builtins(registry: Registry) -> None:
             registry.override_skill(slot, skill)
 
     registry.override_prompt("audit", prompts.build_audit_prompt)
+    registry.override_prompt("recon-commands", prompts.build_recon_commands_prompt)
     registry.override_prompt("vet", prompts.build_vet_prompt)
     registry.override_prompt("plan-writer", prompts.build_plan_writer_prompt)
 

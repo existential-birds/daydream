@@ -9,7 +9,7 @@ programs against, and the policy for when those names may change. A drift-guard
 test (`tests/test_extension_contract_doc.py`) pins this document to the
 registered inventories in the code.
 
-Current contract version: **`EXTENSION_API_VERSION = 2`** (supported: `1..2`).
+Current contract version: **`EXTENSION_API_VERSION = 3`** (supported: `3..3`).
 
 ## Extension module contract
 
@@ -23,7 +23,7 @@ daydream_ext/
 `__init__.py` must export exactly two things:
 
 ```python
-DAYDREAM_EXT_API = 2          # must be within daydream's supported range
+DAYDREAM_EXT_API = 3          # must be within daydream's supported range
 
 def register(registry):       # receives a daydream.extensions.Registry
     ...                       # mutate flows / skills / prompts / stacks here
@@ -120,12 +120,23 @@ not bump the version.
 
 ### Changelog
 
+- **Version 3** — hard-breaking. The `audit` prompt is re-signed: the `services`
+  kwarg is replaced by `group`, a partition-group mapping
+  (`name`, `stack`, `file_count`, `partitions[{name, root, file_count, service}]`),
+  and the host no longer inlines tracked-file lists into audit prompts — an
+  audit agent enumerates its own group roots. Adds the `recon-commands` prompt
+  slot for per-partition-group command discovery. Because no older extension can
+  satisfy the changed kwargs, the floor rises with the ceiling in this same
+  release: the supported range is `3..3` and a v1/v2 extension fails to load
+  with `ExtensionVersionError` until it declares `DAYDREAM_EXT_API = 3` (and, if
+  it overrides `audit`, adopts the `group` kwarg). `vet` and `plan-writer` are
+  unchanged.
 - **Version 2** — adds the synchronous tool-supervisor seam, the
   `ToolDecision` result, and the public `items_file` findings surface. The
-  extension module literal is now `DAYDREAM_EXT_API = 2`.
+  extension module literal is now `DAYDREAM_EXT_API = 2`. Aged out of the
+  supported range in version 3.
 - **Version 1** — initial flow, skill, prompt, stack, loader, and validation
-  contract. Remains within the supported range (`1..2`) as the current
-  deprecation window: a v1 extension still loads under v2 tooling.
+  contract. Aged out of the supported range in version 3.
 
 ## Tool supervision
 
@@ -343,7 +354,8 @@ noted.
 | `suppression` | `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path` |
 | `verify` | `items`, `cwd`, `output_path` |
-| `audit` | `category`, `skill_invocation`, `services`, `scope_note`, `recon_summary`, `cwd`, `tier` |
+| `audit` | `category`, `skill_invocation`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
+| `recon-commands` | `group`, `recon_summary`, `cwd` |
 | `vet` | `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
 
@@ -375,8 +387,8 @@ must update their prompt to request `PlanWriterResult`.
 
 This compatibility repair does not bump `EXTENSION_API_VERSION` or its support
 floor. The documented prompt name and kwargs are unchanged, and the legacy
-`verification_commands` value shape is preserved for both supported API
-versions. The authoritative output validation is a host safety boundary, not a
+`verification_commands` value shape is preserved. The authoritative output
+validation is a host safety boundary, not a
 fork-selectable schema. A future release that renames this kwarg or replaces it
 with required typed command kwargs must follow the breaking-change version
 policy above.
@@ -417,7 +429,7 @@ def register(r):
 
 ### Filter findings and supervise tools
 
-This v2 recipe inserts a step after `load-items` to rewrite the canonical
+This recipe inserts a step after `load-items` to rewrite the canonical
 findings file, and registers a singleton supervisor for tool invocations:
 
 ```python
@@ -425,7 +437,7 @@ import json
 
 from daydream.extensions import FlowStep, ToolDecision
 
-DAYDREAM_EXT_API = 2
+DAYDREAM_EXT_API = 3
 
 async def _filter_items(ctx):
     items_file = ctx.data["items_file"]
@@ -555,7 +567,7 @@ builders' outputs and are replaced along with them).
 ```python
 from daydream.extensions import FlowStep, get_registry
 
-DAYDREAM_EXT_API = 2
+DAYDREAM_EXT_API = 3
 
 def _ro_prompt(skill):
     return f"RO-GATE {skill}"
@@ -602,7 +614,7 @@ supervisor is `registered` or `none`, resolve-checks every flow entry, skill
 slot, and stack rule, and prints a registry summary. Broken references exit 1
 naming the broken piece. Runs anywhere — no target repo needed.
 
-## Exclusions (Version 2)
+## Exclusions (Version 3)
 
 - **No backend registration.** Backends are the built-in `Backend`
   implementations (claude, codex, pi); forks cannot register new ones.

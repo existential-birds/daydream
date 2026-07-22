@@ -69,6 +69,7 @@ from daydream.improve.prioritize import (
 from daydream.improve.prompts import (
     AUDIT_FINDINGS_SCHEMA,
     PLAN_AUTHOR_SCHEMA,
+    RECON_COMMAND_CONTRACT_BULLET,
     VET_SCHEMA,
     build_plan_writer_repair_prompt,
 )
@@ -421,21 +422,7 @@ Read the repository at {repo} without modifying it. Return structured
 reconnaissance facts only:
 
 - languages and frameworks in active use;
-- exact build, test, and lint commands supported by repository files. Return
-  one structured record per executable command, with a stable id,
-  purpose, working directory, expected exit code and observable result,
-  applicability, and exact source path/line/excerpt evidence. Applicability
-  has two independent concepts: `scope` is either `whole-repository` or
-  `in-scope-paths` with one or more repository file-or-directory scopes, while
-  `preconditions` is a list of runtime requirements such as Docker, installed
-  dependencies, environment variables, or a required harness. Never encode a
-  prerequisite as scope or discard either concept. Use `literal-command`
-  evidence only when the exact invocation appears in the cited slice. Use
-  `make-target` evidence for a declared Make target and derive exactly
-  `make <target>`. Use `package-script` evidence for a package.json script,
-  naming its package manager, script key, and working directory so the host can
-  derive and verify the invocation. Never combine a label, arrow, annotation,
-  or explanatory prose with the command;
+- {RECON_COMMAND_CONTRACT_BULLET}
 - conventions that implementation plans must preserve;
 - intent documents such as README, roadmap, ADR, and architecture files.
 
@@ -813,6 +800,38 @@ def _schema_with_provenance(
     return extended
 
 
+def _shim_group(
+    assignment: _AuditAssignment, services: list[Service]
+) -> dict[str, Any]:
+    """Render one assignment as a single partition group (replaced in Task 4)."""
+    partitions = [
+        {
+            "name": service.name,
+            "root": service.root.as_posix(),
+            "file_count": sum(
+                1
+                for path in assignment.files
+                if path.startswith(f"{service.root.as_posix()}/")
+            ),
+            "service": service.name,
+        }
+        for service in services
+    ] or [
+        {
+            "name": assignment.stack or "repository",
+            "root": ".",
+            "file_count": len(assignment.files),
+            "service": None,
+        }
+    ]
+    return {
+        "name": "group-01",
+        "stack": assignment.stack,
+        "file_count": len(assignment.files),
+        "partitions": partitions,
+    }
+
+
 async def _step_audit(ctx: FlowContext) -> None:
     """Run tier-driven category audits and persist grounded findings."""
     directory: Path = ctx.data["improve_dir"]
@@ -840,11 +859,9 @@ async def _step_audit(ctx: FlowContext) -> None:
             )
             scoped_services = _services_for_files(services, assignment.files)
             scope_note = (
-                f"Audit the {assignment.stack} stack. Relevant tracked files: "
-                + ", ".join(assignment.files)
+                f"Audit the {assignment.stack} stack."
                 if assignment.stack is not None
-                else "Cover the remaining repository surface. Relevant tracked files: "
-                + (", ".join(assignment.files) or "(all tracked files)")
+                else "Cover the remaining repository surface."
             )
             if ctx.config.improve_focus == "next":
                 scope_note += (
@@ -872,7 +889,7 @@ async def _step_audit(ctx: FlowContext) -> None:
             prompt = ctx.registry.prompt("audit")(
                 category=assignment.category,
                 skill_invocation=invocation,
-                services=scoped_services,
+                group=_shim_group(assignment, scoped_services),
                 scope_note=scope_note,
                 recon_summary=json.dumps(ctx.data["recon"], sort_keys=True),
                 cwd=ctx.work.repo,

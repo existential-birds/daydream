@@ -9,7 +9,7 @@ import anyio
 import pytest
 
 from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
-from daydream.config import AUDIT_CATEGORIES
+from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration_runner import _sample_paths, repo_scan
 from daydream.extensions.loader import build_registry
@@ -19,9 +19,45 @@ from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
 )
 from daydream.improve.plans import render_plan
-from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
+from daydream.improve.prompts import (
+    PLAN_AUTHOR_SCHEMA,
+    build_audit_prompt,
+    build_recon_commands_prompt,
+)
 from daydream.runner import RunConfig, run
 from tests.harness.git_helpers import commit, git
+
+_GROUP = {
+    "name": "group-01",
+    "stack": "python",
+    "file_count": 24,
+    "partitions": [
+        {"name": "billing", "root": "apps/billing", "file_count": 12, "service": "billing"},
+        {"name": "web", "root": "frontend/web", "file_count": 12, "service": None},
+    ],
+}
+
+
+def test_audit_prompt_carries_group_roots_and_no_file_list() -> None:
+    prompt = build_audit_prompt(
+        category="correctness",
+        skill_invocation=None,
+        group=_GROUP,
+        scope_note="",
+        recon_summary="{}",
+        cwd=Path("/repo"),
+        tier=EFFORT_TIERS["standard"],
+    )
+    assert "apps/billing" in prompt and "group-01" in prompt
+    assert "Relevant tracked files:" not in prompt
+    assert "frontend/web" in prompt and "service billing" in prompt
+
+
+def test_recon_commands_prompt_names_group_roots() -> None:
+    prompt = build_recon_commands_prompt(group=_GROUP, recon_summary="{}", cwd=Path("/repo"))
+    assert "group-01" in prompt
+    assert "apps/billing" in prompt and "frontend/web" in prompt
+    assert "build, test, and lint commands" in prompt
 
 
 def _plan_ref(

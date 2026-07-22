@@ -241,7 +241,7 @@ hunks are inlined directly into a single review prompt.
 
 A fork customizes phases, skills, and prompts from a top-level `daydream_ext` package
 (discovered via `$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`.
-The module exports `DAYDREAM_EXT_API` equal to `EXTENSION_API_VERSION` (currently 2);
+The module exports `DAYDREAM_EXT_API` equal to `EXTENSION_API_VERSION` (currently 3);
 extensions can also register one `ToolDecision`-returning tool supervisor, and
 `daydream ext validate` resolve-checks the loaded registry. The versioned contract —
 name inventories, module shape, supervision seam, and bump policy — is

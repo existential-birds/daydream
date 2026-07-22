@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,10 +28,30 @@ from daydream.improve.command_contract import (
     PLAN_COMMAND_SCHEMA as _COMMAND_SCHEMA,
 )
 from daydream.improve.command_contract import (
+    RECON_COMMAND_SCHEMA as _RECON_COMMAND_SCHEMA,
+)
+from daydream.improve.command_contract import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
 )
-from daydream.improve.services import Service
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+
+# Single source for the structured repository-command contract wording shared by
+# the repo-level recon prompt and the per-partition-group command discovery.
+RECON_COMMAND_CONTRACT_BULLET = """exact build, test, and lint commands supported by repository files. Return
+  one structured record per executable command, with a stable id,
+  purpose, working directory, expected exit code and observable result,
+  applicability, and exact source path/line/excerpt evidence. Applicability
+  has two independent concepts: `scope` is either `whole-repository` or
+  `in-scope-paths` with one or more repository file-or-directory scopes, while
+  `preconditions` is a list of runtime requirements such as Docker, installed
+  dependencies, environment variables, or a required harness. Never encode a
+  prerequisite as scope or discard either concept. Use `literal-command`
+  evidence only when the exact invocation appears in the cited slice. Use
+  `make-target` evidence for a declared Make target and derive exactly
+  `make <target>`. Use `package-script` evidence for a package.json script,
+  naming its package manager, script key, and working directory so the host can
+  derive and verify the invocation. Never combine a label, arrow, annotation,
+  or explanatory prose with the command;"""
 
 _OPTIONAL_COMMAND_SCHEMA: dict[str, Any] = {
     **_COMMAND_SCHEMA,
@@ -76,6 +96,18 @@ AUDIT_FINDINGS_SCHEMA: dict[str, Any] = {
                     },
                 },
             },
+        },
+    },
+}
+
+RECON_COMMANDS_ONLY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["commands"],
+    "properties": {
+        "commands": {
+            "type": "array",
+            "items": _RECON_COMMAND_SCHEMA,
         },
     },
 }
@@ -1306,10 +1338,23 @@ def _schema_block(schema: dict[str, Any]) -> str:
     return "Return ONLY a JSON object matching this schema:\n```json\n" + json.dumps(schema, indent=2) + "\n```"
 
 
-def _service_block(services: Sequence[Service]) -> str:
+def _group_block(group: Mapping[str, Any]) -> str:
+    """Render one line per member partition — roots and counts, never file lists."""
+    lines: list[str] = []
+    for partition in group.get("partitions", ()):
+        service = partition.get("service")
+        owner = f", service {service}" if service else ""
+        lines.append(
+            f"- {partition['name']} — `{partition['root']}/` "
+            f"({partition['file_count']} files{owner})"
+        )
+    return "\n".join(lines) or "- repository root"
+
+
+def _group_heading(group: Mapping[str, Any]) -> str:
     return (
-        "\n".join(f"- {service.name}: {service.root.as_posix()} ({service.source})" for service in services)
-        or "- repository root"
+        f"Partition group `{group['name']}` "
+        f"(stack {group.get('stack') or 'mixed'}, {group['file_count']} files):"
     )
 
 
@@ -1332,13 +1377,13 @@ def build_audit_prompt(
     *,
     category: str,
     skill_invocation: str | None,
-    services: Sequence[Service],
+    group: Mapping[str, Any],
     scope_note: str,
     recon_summary: str,
     cwd: Path,
     tier: EffortTier,
 ) -> str:
-    """Build one category audit prompt from recon facts and the playbook."""
+    """Build one category audit prompt for one partition group."""
     try:
         playbook = AUDIT_PLAYBOOK_SECTIONS[category]
     except KeyError:
@@ -1352,8 +1397,10 @@ do not edit files, propose file dumps, or claim issues without evidence.
 Recon facts:
 {recon_summary or "(none supplied)"}
 
-Service slices:
-{_service_block(services)}
+{_group_heading(group)}
+{_group_block(group)}
+Enumerate this group's files yourself (e.g. `git ls-files -- '<root>/**'` or your
+Glob tool scoped to the roots above); the host never inlines file lists.
 
 Scope:
 {scope_note or "Audit all relevant services."}
@@ -1374,6 +1421,40 @@ Hard Rule 6 (verbatim):
 {HARD_RULE_6}
 
 {_schema_block(AUDIT_FINDINGS_SCHEMA)}
+"""
+
+
+def build_recon_commands_prompt(
+    *,
+    group: Mapping[str, Any],
+    recon_summary: str,
+    cwd: Path,
+) -> str:
+    """Build a read-only command-discovery prompt scoped to one partition group."""
+    return f"""IMPROVE_COMMAND_RECON
+
+Read the subtrees below without modifying them and discover the build, test, and
+lint commands that apply to them. Return structured command records only.
+
+{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
+
+{_group_heading(group)}
+{_group_block(group)}
+Enumerate these subtrees yourself (e.g. `git ls-files -- '<root>/**'` or your
+Glob tool scoped to the roots above); the host never inlines file lists.
+
+Repository-level reconnaissance already collected:
+{recon_summary or "(none supplied)"}
+
+Return:
+- {RECON_COMMAND_CONTRACT_BULLET}
+- set `working_directory` to the directory each command actually runs in — `.`
+  only when the command genuinely runs from the repository root;
+- set `applicability.scope` to `in-scope-paths` naming the partition roots above
+  unless a command genuinely governs the whole repository;
+- omit any command already present in the repository-level reconnaissance above.
+
+{_schema_block(RECON_COMMANDS_ONLY_SCHEMA)}
 """
 
 
@@ -1529,9 +1610,12 @@ __all__ = [
     "PLAN_AUTHOR_SCHEMA",
     "PLAN_WRITER_CONTRACT_INSTRUCTIONS",
     "PLAN_WRITER_SCHEMA",
+    "RECON_COMMANDS_ONLY_SCHEMA",
+    "RECON_COMMAND_CONTRACT_BULLET",
     "VET_SCHEMA",
     "build_audit_prompt",
     "build_plan_writer_prompt",
     "build_plan_writer_repair_prompt",
+    "build_recon_commands_prompt",
     "build_vet_prompt",
 ]
