@@ -328,8 +328,9 @@ def _run_gh(
         timeout: Subprocess timeout in seconds. ``None`` (the default) uses the
             env-overridable :func:`_gh_timeout`.
         input_text: Optional text piped to the subprocess on **stdin** (used to
-            pass secret values via ``gh secret set --body-file -`` so the value
-            never appears in the process argument vector).
+            pass secret values to ``gh secret set``, which reads stdin when
+            ``--body`` is omitted, so the value never appears in the process
+            argument vector).
         retries: How many additional attempts to make after a
             :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
             Only timeouts are retried; other failures raise immediately. Defaults
@@ -1705,7 +1706,7 @@ def gh_secret_set(
     org: str | None = None,
     repo_slug: str | None = None,
 ) -> None:
-    """Set an Actions secret via ``gh secret set <name> --body-file -``.
+    """Set an Actions secret via ``gh secret set <name>`` with the value on stdin.
 
     The *value* is piped on **stdin** (never the argument vector) so secret
     material such as a PEM private key cannot leak into process listings.
@@ -1717,7 +1718,7 @@ def gh_secret_set(
     Raises:
         GitError: If neither/both scopes are given, or the ``gh`` call fails.
     """
-    args = ["secret", "set", name, "--body-file", "-", *_scope_args(org, repo_slug)]
+    args = ["secret", "set", name, *_scope_args(org, repo_slug)]
     proc = _run_gh(repo, args, input_text=value)
     if proc.returncode != 0:
         raise _gh_error_for(f"gh secret set {name} failed: {proc.stderr.strip()}", proc.stderr)

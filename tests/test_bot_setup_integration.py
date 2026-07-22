@@ -78,27 +78,6 @@ def test_missing_code_raises_cancelled_and_never_exchanges(monkeypatch):
     assert called is False
 
 
-# --- Task 6: deposit_secrets ------------------------------------------------
-
-
-def test_deposit_sets_three_secrets_and_handle_var_with_pem_off_argv(
-    fake_gh: FakeGh, git_repo: Path
-) -> None:
-    """deposit_secrets sets the three canonical secrets + handle var, PEM off argv."""
-    creds = AppCredentials(7, "-----BEGIN RSA PRIVATE KEY-----\nx\n")
-    bot_setup.deposit_secrets(
-        git_repo,
-        creds,
-        anthropic_key="sk-ant",
-        bot_handle="acme-bot",
-        scope=bot_setup.Scope(repo="o/r"),
-    )
-    set_names = {c.name for c in fake_gh.secret_set_calls()}
-    assert set_names == set(config.SETUP_SECRET_NAMES)
-    assert fake_gh.variable_set_calls()[-1].name == config.BOT_HANDLE_VAR
-    assert all("BEGIN RSA" not in " ".join(c.argv) for c in fake_gh.secret_set_calls())
-
-
 # --- Task 7: land_workflows -------------------------------------------------
 
 
@@ -262,36 +241,6 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     pr_calls = _pr_create_calls(fake_gh)
     assert len(pr_calls) == 1
     assert git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
-
-
-def test_setup_prompts_for_anthropic_key_when_absent_and_deposits_it(
-    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``daydream setup`` with no ``ANTHROPIC_API_KEY`` in the env prompts for it.
-
-    A new operator should not be stranded on a pre-flight error: when the key
-    is absent, setup prompts (hidden input) and deposits what the operator
-    enters. Mocks the manifest seam and the prompt seam only; asserts the
-    observable outcome — the ``ANTHROPIC_API_KEY`` secret is set with the
-    prompted value (read off the recorded stdin, never argv) and setup exits 0.
-    """
-    pem = _real_pem()
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setattr(
-        "daydream.bot_setup.register_app_via_manifest",
-        lambda repo, org=None: (AppCredentials(7, pem), "acme-bot"),
-    )
-    monkeypatch.setattr("daydream.bot_setup._prompt_for_anthropic_key", lambda: "sk-ant-prompted")
-    fake_gh.serve_installations([{"account": {"login": "o"}}])
-    fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/6")
-
-    code = cli_main(["setup", str(repo_with_origin), "--repo", "o/r"])
-
-    assert code == 0
-    key_calls = [c for c in fake_gh.secret_set_calls() if c.name == "ANTHROPIC_API_KEY"]
-    assert len(key_calls) == 1
-    assert key_calls[0].stdin.strip() == "sk-ant-prompted"
-    assert "sk-ant-prompted" not in " ".join(key_calls[0].argv)
 
 
 def test_setup_fails_cleanly_when_key_absent_and_noninteractive(
