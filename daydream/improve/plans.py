@@ -1101,15 +1101,26 @@ def _dependency_order(
     return ordered
 
 
+def _run_from(command: dict[str, Any]) -> str:
+    """Human-readable working directory for a command record."""
+    directory = str(command.get("working_directory") or ".").strip() or "."
+    return "the repository root" if directory == "." else f"`{directory}`"
+
+
+def _path_list(paths: Sequence[str]) -> str:
+    return ", ".join(f"`{path}`" for path in paths) or "none"
+
+
 def _commands_table(commands: Sequence[dict[str, Any]]) -> str:
     if not commands:
         return "No host-verified repository commands were available during planning."
     lines = [
-        "| Purpose | Command | Expected on success |",
-        "|---------|---------|---------------------|",
+        "| Purpose | Run from | Command | Expected on success |",
+        "|---------|----------|---------|---------------------|",
     ]
     lines.extend(
-        f"| {_markdown_cell(command['purpose'])} | `{command['command']}` | "
+        f"| {_markdown_cell(command['purpose'])} | {_run_from(command)} | "
+        f"`{command['command']}` | "
         f"exit {command['expected_success']['exit_code']}; "
         f"{_markdown_cell(command['expected_success']['observable_result'])} |"
         for command in commands
@@ -1117,9 +1128,34 @@ def _commands_table(commands: Sequence[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _render_verification(command: dict[str, Any] | None) -> str:
+def _manual_step_check(changed_paths: Sequence[str]) -> str:
+    """Host-owned fallback when the model attached no command to a step.
+
+    Never leave the executor with nothing to do: both checks below are
+    deterministic, need no repository knowledge, and have a stated expected
+    result.
+    """
+    listed = _path_list(changed_paths)
+    return (
+        "No repository command was verified during planning for this step. "
+        "Verify it by hand instead, in this order:\n\n"
+        f"1. Re-read {listed} and confirm every **Target state** sentence "
+        "above is now literally true of the file contents. Expected: each one "
+        "describes what the file now says.\n"
+        "2. From the repository root run `git status --porcelain`. Expected: "
+        f"the only paths listed are {listed}.\n\n"
+        "If either check fails, that is a failed verification — apply the "
+        "\"repeated-verification-failure\" STOP condition."
+    )
+
+
+def _render_verification(
+    command: dict[str, Any] | None,
+    *,
+    changed_paths: Sequence[str],
+) -> str:
     if command is None:
-        return "No host-verified command is attached to this step."
+        return _manual_step_check(changed_paths)
     expected = command["expected_success"]
     exit_prefix = f"exit {expected['exit_code']} and "
     observable = expected["observable_result"]
@@ -1130,7 +1166,9 @@ def _render_verification(command: dict[str, Any] | None) -> str:
     )
     note = command.get("note")
     return (
+        "Run this now, before starting the next step.\n\n"
         f"**Purpose**: {command['purpose']}\n\n"
+        f"**Run from**: {_run_from(command)}\n\n"
         f"**Command**: `{command['command']}`\n\n"
         f"**Expected**: {expected_text}"
         + (f"\n\n**Why this gate**: {note}" if note else "")
@@ -1141,14 +1179,16 @@ def _render_verification_list(
     command: dict[str, Any] | None,
     *,
     indent: str,
+    fallback: str = "No host-verified command is attached; check this by hand.",
 ) -> str:
     if command is None:
-        return f"{indent}- No host-verified command is attached."
+        return f"{indent}- {fallback}"
     expected = command["expected_success"]
     note = command.get("note")
     return "\n".join(
         (
             f"{indent}- **Purpose**: {command['purpose']}",
+            f"{indent}- **Run from**: {_run_from(command)}",
             f"{indent}- **Command**: `{command['command']}`",
             (
                 f"{indent}- **Expected**: exit {expected['exit_code']}; "
@@ -1160,6 +1200,25 @@ def _render_verification_list(
                 else []
             ),
         )
+    )
+
+
+def _done_criterion_fallback(kind: str, in_scope_paths: Sequence[str]) -> str:
+    """Actionable stand-in for a done criterion the model left ungated.
+
+    ``scope-integrity`` is host-injected and always arrives ungated, yet it is
+    the one criterion the host can always check: it is a git diff.
+    """
+    if kind == "scope-integrity":
+        return (
+            "**Check**: from the repository root run "
+            "`git status --porcelain`. **Expected**: every listed path is one "
+            f"of {_path_list(in_scope_paths)}, and no other path appears."
+        )
+    return (
+        "No repository command was verified during planning for this "
+        "criterion. Confirm it by re-reading the files named in it; if you "
+        "cannot confirm it from the files alone, stop and report."
     )
 
 
@@ -1219,6 +1278,10 @@ def render_plan(
         ],
     ]
     workflow = plan["git_workflow"]
+    in_scope_paths = [
+        *[entry["path"] for entry in scope["existing_paths"]],
+        *[entry["path"] for entry in scope["new_paths"]],
+    ]
     step_sections: list[str] = []
     for step in sorted(plan["steps"], key=lambda item: item["order"]):
         changes = "\n".join(
@@ -1232,7 +1295,11 @@ def render_plan(
         step_sections.append(
             f"### Step {step['order']}: {step['title']}\n\n"
             f"{changes}\n\n"
-            f"**Verify**\n\n{_render_verification(step['verification'])}"
+            "**Verify**\n\n"
+            + _render_verification(
+                step["verification"],
+                changed_paths=[change["path"] for change in step["changes"]],
+            )
         )
     test_plan = plan["test_plan"]
     exemplar_lines = "\n".join(
@@ -1256,7 +1323,13 @@ def render_plan(
     done_lines = "\n".join(
         f"- [ ] **{criterion['id']} ({criterion['kind']})**: "
         f"{criterion['description']}\n"
-        f"{_render_verification_list(criterion['verification'], indent='  ')}"
+        + _render_verification_list(
+            criterion["verification"],
+            indent="  ",
+            fallback=_done_criterion_fallback(
+                str(criterion["kind"]), in_scope_paths
+            ),
+        )
         for criterion in plan["done_criteria"]
     )
     stop_lines = "\n".join(
@@ -1281,11 +1354,14 @@ def render_plan(
 
     return (
         f"# Plan {number:03d}: {plan['title']}\n\n"
-        "> **Executor instructions**: Follow this plan step by step. Use each provided\n"
-        "> verification command and confirm the expected result before moving to the\n"
-        "> next step. If anything in the \"STOP conditions\" section occurs, stop and\n"
-        "> report — do not improvise. When done, update the status row for this plan\n"
-        "> in `daydream_plans/README.md` unless a reviewer maintains the index.\n"
+        "> **Executor instructions**: Do the \"Before you start\" checks first, then\n"
+        "> work through the Steps in the order they are numbered. After each step run\n"
+        "> its **Verify** block and confirm the stated expected result before starting\n"
+        "> the next step. Change only the files listed under \"In scope\". Do not skip a\n"
+        "> step, reorder steps, or substitute your own judgement for an instruction. If\n"
+        "> anything in the \"STOP conditions\" section occurs, stop immediately and report\n"
+        "> it — do not improvise and do not work around it. When every done criterion is\n"
+        "> checked, follow the \"Finishing\" section at the end of this file.\n"
         "\n"
         "## Status\n\n"
         f"- **Priority**: {plan['priority']}\n"
@@ -1299,9 +1375,27 @@ def render_plan(
             if run_session_id is not None
             else ""
         )
-        +
+        + "## Before you start\n\n"
+        "Run these from the repository root, in this order, before Step 1. Each\n"
+        "one has an exact expected result; if any does not match, stop and report\n"
+        "instead of continuing.\n\n"
+        f"1. `git rev-parse --verify {planned_at}^{{commit}}` — expected: it "
+        f"prints `{planned_at}`. If it fails, you are in the wrong repository "
+        "and nothing in this plan applies.\n"
+        "2. `git status --porcelain` — expected: no output at all. If anything "
+        "is listed, the working tree is dirty; stop and report the output.\n"
+        f"3. `git rev-parse HEAD` — expected: it prints `{planned_at}`. Any "
+        "other value means the repository moved after this plan was written and "
+        "the line numbers quoted below may be stale; that is the `drift` STOP "
+        "condition. Stop and report both commit ids.\n"
+        f"4. `git switch --create {workflow['branch_name']} {planned_at}` — "
+        f"expected: `Switched to a new branch '{workflow['branch_name']}'`. If "
+        "the branch already exists, stop and report; do not reuse or delete it.\n\n"
         "## Why this matters\n\n"
-        f"{why['problem']} {why['concrete_cost']} {why['intended_outcome']}\n\n"
+        f"- **Problem**: {why['problem']}\n"
+        f"- **Cost of leaving it**: {why['concrete_cost']}\n"
+        f"- **Intended outcome (does not describe the code today)**: "
+        f"{why['intended_outcome']}\n\n"
         "## Current state\n\n"
         + "\n".join(current_state)
         + "\n\n## Commands you will need\n\n"
@@ -1317,20 +1411,44 @@ def render_plan(
         "- **Push**: never without operator instruction\n"
         "- **Pull request**: never without operator instruction\n\n"
         "## Steps\n\n"
+        "Do these in the order they are numbered. Finish and verify each one "
+        "before reading the next.\n\n"
         + "\n\n".join(step_sections)
-        + "\n\n## Test plan\n\n### Exemplars\n\n"
+        + "\n\n## Test plan\n\n"
+        "These are the tests this plan requires. Where a step above already "
+        "creates one, this section is that test's specification — write it "
+        "once, not twice.\n\n"
+        "### Exemplars\n\n"
+        "Copy the shape of these existing tests; do not invent a new style.\n\n"
         + exemplar_lines
         + "\n\n### Named cases\n\n"
         + case_lines
         + "\n\n## Done criteria\n\n"
+        "Every box must be checked before the plan is done.\n\n"
         + done_lines
         + "\n\n## STOP conditions\n\n"
+        "If any of these happens, stop work immediately and report it. Do not "
+        "attempt a workaround and do not continue to the next step.\n\n"
         + stop_lines
-        + "\n\n## Maintenance notes\n\n### Future interactions\n\n"
+        + "\n\n## Finishing\n\n"
+        "Only after every box under \"Done criteria\" is checked:\n\n"
+        f"1. Stage exactly the in-scope paths — never `git add -A`, never "
+        f"`git add .`: `git add {' '.join(in_scope_paths)}`\n"
+        "2. Confirm nothing else is staged: `git status --porcelain` — "
+        f"expected: every line is one of {_path_list(in_scope_paths)}.\n"
+        "3. Commit, following the **Commit boundaries** line under \"Git "
+        f"workflow\": `git commit -m \"{workflow['commit_message_example']}\"`\n"
+        "4. Do not push and do not open a pull request.\n"
+        f"5. Set this plan's Status cell in `daydream_plans/README.md` from "
+        "`TODO` to `DONE`.\n\n"
+        "## Maintenance notes\n\n"
+        "Background for reviewers. Nothing in this section is work to do.\n\n"
+        "### Future interactions\n\n"
         + future_lines
         + "\n\n### Review risks\n\n"
         + risk_lines
         + "\n\n### Deferred items\n\n"
+        "Explicitly out of scope for this plan. Do not implement them.\n\n"
         + deferred_lines
         + "\n"
     )

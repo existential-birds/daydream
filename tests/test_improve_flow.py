@@ -373,6 +373,7 @@ class _ImproveStubBackend:
         self.plan_file_role_override: str | None = None
         self.plan_problem_override: str | None = None
         self.plan_instruction_override: str | None = None
+        self.plan_ungate_steps = False
         self.plan_sloppy = False
         self.plan_bad_recon_id_attempts = 0
         self.plan_missing_path_attempts = 0
@@ -642,6 +643,16 @@ class _ImproveStubBackend:
                 plan["steps"][0]["changes"][0]["instruction"] = (
                     self.plan_instruction_override
                 )
+            if self.plan_ungate_steps:
+                # The shape a plan takes when recon verified no commands: the
+                # contract tells the writer to use null verification everywhere.
+                for step in plan["steps"]:
+                    step["verification"] = None
+                for case in plan["test_plan"]["cases"]:
+                    case["verification"] = None
+                for criterion in plan["done_criteria"]:
+                    criterion["verification"] = None
+                plan["additional_command_refs"] = []
             if self.plan_sloppy:
                 plan["debug_notes"] = (
                     "Planner scratch notes that must never reach the artifact."
@@ -3204,3 +3215,121 @@ async def test_empty_secret_named_assignments_do_not_eat_the_next_line(
     ):
         assert key in plan_text, key
     assert "[REDACTED_ENV_VAR]" not in plan_text
+
+
+@pytest.mark.anyio
+async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Walk the rendered artifact for the points a zero-context agent stalls on."""
+    _install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1)
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    plan_path = next(
+        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
+    )
+    text = plan_path.read_text(encoding="utf-8")
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=improve_monorepo_target,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # Preconditions: the executor is told where it must be standing, with the
+    # full commit id and an exact expected result per command.
+    assert "## Before you start" in text
+    assert f"`git rev-parse --verify {head_sha}^{{commit}}`" in text
+    assert "`git status --porcelain` — expected: no output at all." in text
+    assert f"`git rev-parse HEAD` — expected: it prints `{head_sha}`" in text
+    assert "`git switch --create improve/" in text
+    assert head_sha in text  # full sha, not only the 7-char Status stamp
+
+    # Why-this-matters is labelled, so the intended outcome cannot be misread
+    # as a statement about the code as it stands.
+    assert "- **Problem**:" in text
+    assert "- **Cost of leaving it**:" in text
+    assert "- **Intended outcome (does not describe the code today)**:" in text
+
+    # No judgement calls in host-owned wording.
+    assert "unless a reviewer maintains the index" not in text
+    assert "Do not skip a\n> step, reorder steps, or substitute your own judgement" in text
+
+    # Every command says where to run it.
+    assert "| Purpose | Run from | Command | Expected on success |" in text
+    assert "**Run from**: the repository root" in text
+    assert "Run this now, before starting the next step." in text
+
+    # Ordering and section relationships are stated, not implied.
+    assert "Do these in the order they are numbered." in text
+    assert "write it once, not twice." in text
+    assert "Explicitly out of scope for this plan. Do not implement them." in text
+
+    # Finishing is literal, and never `git add -A`.
+    assert "## Finishing" in text
+    assert "never `git add -A`" in text
+    assert "git add apps/billing/api.py apps/billing/test_api.py" in text
+    assert "4. Do not push and do not open a pull request." in text
+    assert "from\n`TODO` to `DONE`" in text or "`TODO` to `DONE`" in text
+
+    # The two previously unactionable STOP conditions now name the check.
+    assert (
+        "Before editing a file, read the exact line range quoted for it in "
+        "the Current state section" in text
+    )
+    assert "two failures total for the same verification" in text
+
+
+@pytest.mark.anyio
+async def test_ungated_step_and_scope_criterion_still_get_a_real_check(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A step the model left ungated must not render a dead end.
+
+    Five of six steps in a real replayed plan carried no command and rendered
+    only "No host-verified command is attached to this step."
+    """
+    stub = _install_improve_stub(
+        monkeypatch, improve_monorepo_target, n_findings=1
+    )
+    stub.plan_ungate_steps = True
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    text = next(
+        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
+    ).read_text(encoding="utf-8")
+
+    assert "No host-verified command is attached to this step." not in text
+    assert "No repository command was verified during planning for this step." in text
+    assert (
+        "confirm every **Target state** sentence above is now literally true"
+        in text
+    )
+    assert "From the repository root run `git status --porcelain`." in text
+    # The host-injected scope-integrity criterion is always ungated by the
+    # model, and is exactly the one the host can always check itself.
+    assert "(scope-integrity)" in text
+    assert (
+        "**Check**: from the repository root run `git status --porcelain`."
+        in text
+    )
+    assert "No host-verified command is attached." not in text

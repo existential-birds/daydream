@@ -812,8 +812,9 @@ def _boilerplate_stop_conditions(
         {
             "kind": "drift",
             "condition": (
-                "A file named in this plan no longer matches the excerpts "
-                "quoted in the Current state section."
+                "Before editing a file, read the exact line range quoted for "
+                "it in the Current state section and compare it to the quoted "
+                "text. It does not match character for character."
             ),
             "required_action": STOP_REQUIRED_ACTION,
             "evidence_to_report": (
@@ -826,8 +827,9 @@ def _boilerplate_stop_conditions(
         {
             "kind": "repeated-verification-failure",
             "condition": (
-                "Any verification command in this plan fails twice in a row "
-                "after one correction attempt."
+                "A verification in this plan fails, you make exactly one "
+                "correction, and it fails again — two failures total for the "
+                "same verification. Do not attempt a third time."
             ),
             "required_action": STOP_REQUIRED_ACTION,
             "evidence_to_report": (
