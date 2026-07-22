@@ -11,7 +11,7 @@ import pytest
 from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.config import AUDIT_CATEGORIES
 from daydream.config_file import DaydreamFileConfig
-from daydream.exploration_runner import repo_scan
+from daydream.exploration_runner import _sample_paths, repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.git_ops import head_sha
 from daydream.improve.assemble import assemble_plan
@@ -21,6 +21,7 @@ from daydream.improve.orchestrator import (
 from daydream.improve.plans import render_plan
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
 from daydream.runner import RunConfig, run
+from tests.harness.git_helpers import commit, git
 
 
 def _plan_ref(
@@ -392,7 +393,7 @@ class _ImproveStubBackend:
     ):
         marker = "other"
         category = None
-        if "you are the **pattern-scanner** specialist" in prompt.lower():
+        if "you are the **repo-survey** specialist" in prompt.lower():
             marker = "repo-scan"
         elif "IMPROVE_RECON" in prompt:
             marker = "recon"
@@ -469,7 +470,7 @@ class _ImproveStubBackend:
                 await anyio.sleep(self.audit_delay)
             finally:
                 self.audit_active -= 1
-        if "you are the **pattern-scanner** specialist" in prompt.lower():
+        if marker == "repo-scan":
             yield ResultEvent(
                 structured_output={
                     "conventions": [
@@ -1113,6 +1114,57 @@ async def test_repo_scan_seeds_specialists_from_tracked_files(tmp_git_repo: Path
     assert stub.calls[0]["marker"] == "repo-scan"
     assert "api.py" in prompt
     assert stub.calls[0]["read_only"] is True
+
+
+@pytest.mark.anyio
+async def test_repo_scan_prompt_carries_no_diff_framing(tmp_git_repo: Path) -> None:
+    """A repo-scoped scan has no change set, so it must not be described as one."""
+    stub = _ImproveStubBackend(tmp_git_repo)
+    ctx = await repo_scan(stub, tmp_git_repo, max_files=500)
+    prompt = stub.calls[0]["prompt"]
+    assert "pattern-scanner" not in prompt
+    assert "git diff" not in prompt
+    assert "affected_files" not in prompt
+    assert "relevant to the changes" not in prompt
+    assert "no change set here" in prompt.lower()
+    # A repo-scoped context has no affected files -- emitting the tracked tree
+    # would relabel the whole repository as change-relevant downstream.
+    assert ctx.affected_files == []
+    assert "Affected Files" not in ctx.to_prompt_section()
+
+
+@pytest.mark.anyio
+async def test_repo_scan_sample_spans_the_tree_not_the_alphabetical_head(
+    tmp_git_repo: Path,
+) -> None:
+    """A capped sample must still reach real source, not just dotfile dirs."""
+    dotdir = tmp_git_repo / ".agents" / "skills"
+    dotdir.mkdir(parents=True)
+    for i in range(40):
+        (dotdir / f"skill-{i:02d}.md").write_text(f"# skill {i}\n")
+    git(tmp_git_repo, "add", ".")
+    commit(tmp_git_repo, "add skills")
+
+    stub = _ImproveStubBackend(tmp_git_repo)
+    await repo_scan(stub, tmp_git_repo, max_files=10)
+    prompt = stub.calls[0]["prompt"]
+    sample = prompt.split("<tracked_file_sample>")[1].split("</tracked_file_sample>")[0]
+    sampled = [line[2:] for line in sample.strip().splitlines()]
+    # Head-truncation would return .agents/ entries exclusively -- the source
+    # tree sorts after them and never made it into the prompt.
+    assert any(path.startswith("apps/") for path in sampled)
+    assert "10 of 47 tracked files" in prompt
+
+
+def test_sample_paths_spreads_across_a_capped_list() -> None:
+    paths = [f"f{i:03d}" for i in range(100)]
+    sample = _sample_paths(paths, 10)
+    assert len(sample) == 10
+    assert sample[0] == "f000"
+    assert sample[-1] == "f090"
+    assert _sample_paths(paths, 200) == paths
+    assert _sample_paths(paths, 0) == []
+    assert _sample_paths([], 10) == []
 
 
 def test_registry_seeds_audit_slots_and_improve_prompts() -> None:

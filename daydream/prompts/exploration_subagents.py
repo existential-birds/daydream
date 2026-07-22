@@ -11,6 +11,10 @@ Three specialist subagents power pre-scan exploration:
 
 The orchestrator (daydream.exploration_runner) merges their partial
 ExplorationContext results with merge_contexts() in daydream.exploration.
+
+A fourth prompt, **repo-survey**, serves the diff-less repo-scoped scan used by
+``daydream improve``. It shares the pattern-scanner output shape but must never
+share its diff framing.
 """
 
 from __future__ import annotations
@@ -159,6 +163,49 @@ work file-by-file so your context stays small.
 """
 
 
+def build_repo_survey_prompt(sample_paths: list[str], total_tracked: int, *, cwd: Path) -> str:
+    """Build the repo-scoped survey prompt used by ``repo_scan``.
+
+    There is no diff in a repo-scoped run, so this prompt must not borrow the
+    diff framing of ``build_pattern_scanner_prompt``: no change-set, no
+    ``git diff``, and the file list is declared as the partial sample it is.
+
+    Args:
+        sample_paths: Repo-relative tracked paths, sampled across the tree.
+        total_tracked: Total tracked-file count, so the sample is honest about coverage.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
+    """
+    sample_block = "\n".join(f"- {path}" for path in sample_paths) or "- (no tracked files)"
+    coverage = (
+        f"{len(sample_paths)} of {total_tracked} tracked files, sampled across the tree"
+        if len(sample_paths) < total_tracked
+        else f"all {total_tracked} tracked files"
+    )
+    return f"""You are the **repo-survey** specialist. Survey this repository as a whole
+and report the conventions an implementation plan would have to preserve. There
+is no change set here — you are describing the repository's steady state, not
+reviewing edits.
+
+Instructions:
+- Read CLAUDE.md / AGENTS.md at the repo root if they exist.
+- Read any other house-style config files you find (ruff.toml, .editorconfig, tsconfig.json, go.mod, Cargo.toml).
+- Infer conventions from the code itself where config files are silent.
+- Cover the repository's real source directories, not just the sample below.
+
+{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
+
+<tracked_file_sample>
+{sample_block}
+</tracked_file_sample>
+
+The sample above is {coverage} — it is a starting point, NOT the repository's
+contents. Run `git ls-files` or Glob to see the full tree, and Read/Grep the
+files you need. Work file-by-file so your context stays small.
+
+{_schema_block(PATTERN_SCANNER_SCHEMA)}
+"""
+
+
 def build_dependency_tracer_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
     """Build the per-run dependency-tracer prompt.
 
@@ -229,5 +276,6 @@ __all__ = [
     "TEST_MAPPER_SCHEMA",
     "build_dependency_tracer_prompt",
     "build_pattern_scanner_prompt",
+    "build_repo_survey_prompt",
     "build_test_mapper_prompt",
 ]
