@@ -76,6 +76,23 @@ daydream improve --focus security /path/to/project
 `--effort` selects audit *breadth* only. It does not change the model or the
 reasoning effort — those are per-phase (see [Reasoning Effort](#reasoning-effort)).
 
+On a large repository the audit fans out over *partition groups* — bounded,
+stack-homogeneous slices of the tree (services where they exist, directories
+elsewhere) — instead of the whole repository at once, so one agent per group per
+category each search a bounded surface. `standard` audits at most eight groups
+per run, `deep` is unbounded, and `quick` audits the whole repository as one
+group. Tune both bounds in `[tool.daydream.improve]`:
+
+```toml
+[tool.daydream.improve]
+partition_max_files = 400
+max_partition_groups = 8
+```
+
+Whatever a bound leaves out is named in the report's "What was not audited"
+section and in `.daydream/improve/coverage.json` — coverage is never silently
+truncated.
+
 ### Focus modes
 
 | Focus | Behavior |

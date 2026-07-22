@@ -1319,6 +1319,14 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
     return None
 
 
+def _group_roots_cell(group: PartitionGroup, *, limit: int = 4) -> str:
+    """Render a group's roots for a report line, truncating a long tail."""
+    roots = group.roots
+    shown = ", ".join(f"`{root}/`" for root in roots[:limit])
+    remainder = len(roots) - limit
+    return f"{shown} +{remainder} more" if remainder > 0 else shown
+
+
 def _record_audit_coverage(
     directory: Path,
     partitions: list[Partition],
@@ -2566,10 +2574,7 @@ def _render_report(
         "\n".join(f"- **{stack.stack_name}**" for stack in stacks)
         or "- No stacks detected."
     )
-    roots_by_group = {
-        group.name: ", ".join(f"`{root}/`" for root in group.roots)
-        for group in groups
-    }
+    roots_by_group = {group.name: _group_roots_cell(group) for group in groups}
     failures = audit.get("failed", {})
     failed_assignment_lines = (
         "\n".join(
@@ -2581,12 +2586,17 @@ def _render_report(
         or "- None."
     )
     not_audited_lines = (
-        "\n".join(
-            f"- **{partition.name}** — `{partition.root}/` "
-            f"({len(partition.files)} files; group-ceiling)"
-            for partition in partitions_not_audited
+        (
+            "- Partitions not audited (reason: group-ceiling; raise "
+            "`max-partition-groups` to include them):\n"
+            + "\n".join(
+                f"  - **{partition.name}** — `{partition.root}/` "
+                f"({len(partition.files)} files)"
+                for partition in partitions_not_audited
+            )
         )
-        or f"All {len(partitions)} partitions were audited."
+        if partitions_not_audited
+        else f"- All {len(partitions)} partitions were audited."
     )
     tier_bound = {
         "quick": (

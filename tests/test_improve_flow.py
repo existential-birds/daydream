@@ -2505,6 +2505,13 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
     assert all(
         "apps/billing/api.py" in call["prompt"] for call in audit_calls
     )
+    # Branch focus bypasses partitioning: one synthetic group over the changed
+    # files, so the fan-out stays one serial agent per category.
+    assert len(audit_calls) == len(AUDIT_CATEGORIES)
+    assert all(_group_roots(call["prompt"]) == ["."] for call in audit_calls)
+    coverage = json.loads(_dd(improve_branch_target, "coverage.json").read_text())
+    assert [entry["name"] for entry in coverage["partitions"]] == ["branch"]
+    assert coverage["not_audited"] == []
     vetted = json.loads(
         _dd(improve_branch_target, "vetted-findings.json").read_text()
     )

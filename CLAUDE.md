@@ -207,18 +207,26 @@ step's config key, including fork-defined phases (per-flow key tables in
 Improve runtime controls are CLI-derived `RunConfig` fields:
 `improve_effort`, `improve_focus`, `improve_scope`,
 `improve_plan_description`, and `improve_review_plan`. They have no environment
-variable equivalents. Service discovery is config-file-only:
+variable equivalents. Service discovery and the audit fan-out bounds are
+config-file-only:
 
 ```toml
 [tool.daydream.improve]
 service_roots = ["apps/*", "web"]
+partition_max_files = 400   # per-partition file cap (default 400)
+max_partition_groups = 8    # audit groups per run (tier default: standard 8, deep unbounded)
 
 [tool.daydream.improve.service_groups]
 commerce = ["apps/billing", "apps/catalog"]
 ```
 
 Use the equivalent top-level `[improve]` and `[improve.service_groups]` tables
-in `.daydream.toml`.
+in `.daydream.toml`. Both bounds also accept their hyphenated spellings
+(`partition-max-files`, `max-partition-groups`); non-positive values are
+ignored. Audit fan-out is `partition-groups × categories`; when
+`max_partition_groups` binds, the largest groups are kept and every skipped
+partition is named in `.daydream/improve/coverage.json` and the report's
+"What was not audited" section.
 
 ### Deep-review pipeline
 
