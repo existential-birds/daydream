@@ -38,12 +38,18 @@ from daydream.improve.artifacts import (
     services_path,
     vetted_findings_path,
 )
+from daydream.improve.assemble import (
+    AssemblyIssue,
+    assemble_plan,
+    render_issue,
+)
 from daydream.improve.command_contract import (
     RECON_COMMAND_SCHEMA,
     valid_repository_file_path,
     validate_recon_commands,
 )
 from daydream.improve.plans import (
+    _attempt_diagnostic,
     _markdown_cell,
     load_rejections,
     planned_fingerprints,
@@ -62,7 +68,7 @@ from daydream.improve.prioritize import (
 )
 from daydream.improve.prompts import (
     AUDIT_FINDINGS_SCHEMA,
-    PLAN_WRITER_SCHEMA,
+    PLAN_AUTHOR_SCHEMA,
     VET_SCHEMA,
     build_plan_writer_repair_prompt,
 )
@@ -117,7 +123,7 @@ _PLAN_REVIEW_SCHEMA: dict[str, Any] = {
             "minLength": 20,
             "maxLength": 2000,
         },
-        "plan": PLAN_WRITER_SCHEMA,
+        "plan": PLAN_AUTHOR_SCHEMA,
     },
 }
 
@@ -1621,7 +1627,7 @@ def _build_plan_review_prompt(
     return f"""You are reviewing an existing daydream implementation plan for a
 different executor with no context. Read the repository at {plan_path.parents[1]}
 without modifying it, verify the plan's claims, and return a concise critique
-plus a complete PlanWriterResult object. Never return Markdown.
+plus a complete authored plan object. Never return Markdown.
 
 The tightened plan must let a cold executor work from the plan and repository
 alone. Every verification must be an exact command with an expected result;
@@ -1755,8 +1761,25 @@ async def _review_plan(ctx: FlowContext, requested: str) -> None:
         )
         return
 
+    assembled, assembly_issues = assemble_plan(
+        raw_plan,
+        repo=ctx.work.repo,
+        recon_commands=recon_commands,
+    )
+    if assembled is None or assembly_issues:
+        _reject_plan_review(
+            ctx,
+            plan_path=plan_path,
+            code=(
+                "REVIEW_PLAN_VALIDATION_FAILED:"
+                + ",".join(
+                    render_issue(issue) for issue in assembly_issues
+                )
+            ),
+        )
+        return
     plan = {
-        **raw_plan,
+        **assembled,
         "slug": identity.slug,
         "title": identity.title,
         "priority": identity.priority,
@@ -1855,6 +1878,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         effective_fanout_concurrency(PLAN_WRITE_MAX_CONCURRENCY, backend)
     )
     outputs: list[dict[str, Any] | None] = [None] * len(selected)
+    authoring_diagnostics: list[tuple[int, dict[str, Any]]] = []
     plans_dir = ctx.work.repo / "daydream_plans"
     known = planned_fingerprints(plans_dir) | set(
         load_rejections(plans_dir)
@@ -1921,7 +1945,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                                         ctx.work.repo,
                                         current_prompt,
                                         phase=DaydreamPhase.PLAN_WRITE,
-                                        output_schema=PLAN_WRITER_SCHEMA,
+                                        output_schema=PLAN_AUTHOR_SCHEMA,
                                         read_only=True,
                                         persist_session=False,
                                         wall_budget_s=ctx.wall_budget_s,
@@ -1956,31 +1980,55 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                                         "error": True,
                                     }
                                     return
-                                validation_errors = (
-                                    validate_plan_result(
+                                if isinstance(output, dict):
+                                    assembled, issues = assemble_plan(
                                         output,
                                         repo=ctx.work.repo,
-                                        planned_at=planned_at,
-                                        finding=current,
                                         recon_commands=_verification_commands(
                                             ctx.data["recon"]
                                         ),
                                     )
-                                    if isinstance(output, dict)
-                                    else ("NO_STRUCTURED_OBJECT",)
-                                )
-                                if not validation_errors:
+                                else:
+                                    assembled = None
+                                    issues = (
+                                        AssemblyIssue(
+                                            code="NO_STRUCTURED_OBJECT",
+                                            pointer="/",
+                                        ),
+                                    )
+                                if assembled is not None and not issues:
                                     outputs[current_index] = {
                                         "finding": current,
                                         "_attempt": task_attempt,
-                                        **output,
+                                        **assembled,
                                     }
                                     return
+                                rendered_issues = tuple(
+                                    render_issue(issue) for issue in issues
+                                )
+                                stage = (
+                                    "authoring"
+                                    if isinstance(output, dict)
+                                    else "transport"
+                                )
                                 if generation_index == 0:
+                                    authoring_diagnostics.append(
+                                        (
+                                            current_index,
+                                            _attempt_diagnostic(
+                                                finding=current,
+                                                attempt=task_attempt,
+                                                received=output,
+                                                disposition="retried",
+                                                stage=stage,
+                                                errors=rendered_issues,
+                                            ),
+                                        )
+                                    )
                                     current_prompt = (
                                         build_plan_writer_repair_prompt(
                                             task_prompt,
-                                            validation_errors,
+                                            issues,
                                         )
                                     )
                                     continue
@@ -1999,8 +2047,13 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                                     return
                                 outputs[current_index] = {
                                     "finding": current,
-                                    "_attempt": task_attempt,
-                                    **output,
+                                    "_attempt": {
+                                        **task_attempt,
+                                        "received_result": output,
+                                        "errors": rendered_issues,
+                                        "validation": True,
+                                    },
+                                    "error": True,
                                 }
                                 return
                         except Exception as exc:  # noqa: BLE001 - isolate each plan safely
@@ -2046,7 +2099,16 @@ async def _step_write_plans(ctx: FlowContext) -> None:
     )
     record_plan_write_diagnostics(
         plan_write_diagnostics_path(ctx.data["improve_dir"]),
-        result["diagnostics"],
+        [
+            *(
+                entry
+                for _, entry in sorted(
+                    authoring_diagnostics,
+                    key=lambda item: item[0],
+                )
+            ),
+            *result["diagnostics"],
+        ],
         artifact_provenance=_artifact_provenance(
             phase=DaydreamPhase.PLAN_WRITE
         ),

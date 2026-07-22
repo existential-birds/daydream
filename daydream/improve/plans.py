@@ -181,6 +181,19 @@ def _contains_secret_value(text: str) -> bool:
     return False
 
 
+def redact_secret_values(text: str) -> str:
+    """Deterministically replace literal secret values with ``<redacted>``."""
+
+    def _replace(match: re.Match[str]) -> str:
+        candidate = match.group(1).strip(_SECRET_VALUE_TRIM)
+        if candidate and not _SECRET_PLACEHOLDER.fullmatch(candidate):
+            prefix_length = match.start(1) - match.start(0)
+            return match.group(0)[:prefix_length] + "<redacted>"
+        return match.group(0)
+
+    return _SECRET_VALUE.sub(_replace, text)
+
+
 def _string_pointers(value: Any, pointer: str = "") -> list[tuple[str, str]]:
     if isinstance(value, str):
         return [(pointer or "/", value)]
@@ -379,6 +392,34 @@ def _validation_error(code_with_pointer: str) -> dict[str, str]:
     return {"code": code, "pointer": pointer}
 
 
+# Codes emitted by assemble._collect_issues (seam 2, model authoring defects).
+_AUTHORING_CODES = frozenset(
+    {
+        "AUTHOR_SCHEMA_INVALID",
+        "MALFORMED_APPENDED_ARGS",
+        "MALFORMED_PATH",
+        "PATH_OUTSIDE_REPOSITORY",
+        "EMPTY_SCOPE",
+        "EXISTING_PATH_MISSING",
+        "NEW_PATH_ALREADY_EXISTS",
+        "EXCERPT_ANCHOR_INVALID",
+        "EXCERPT_PATH_MISSING",
+        "RECON_COMMAND_UNKNOWN",
+        "COMMAND_SCOPE_MISMATCH",
+        "STEP_PATH_OUT_OF_SCOPE",
+        "CREATE_PATH_NOT_NEW",
+        "CHANGE_PATH_NOT_EXISTING",
+        "STEP_GATE_SCOPE_MISMATCH",
+        "TEST_EXEMPLAR_INVALID",
+        "TEST_PATH_OUT_OF_SCOPE",
+        "TEST_SYMBOL_DUPLICATE",
+        "DONE_CRITERIA_INCOMPLETE",
+        "STOP_PATH_UNKNOWN",
+        "STOP_STEP_UNKNOWN",
+    }
+)
+
+
 def _validation_stage(errors: Sequence[str]) -> str:
     codes = [error.partition("@")[0] for error in errors]
     if any(code.startswith("DEPENDENCY_") for code in codes):
@@ -387,6 +428,8 @@ def _validation_stage(errors: Sequence[str]) -> str:
         return "schema"
     if any(code == "RENDER_FAILED" for code in codes):
         return "render"
+    if any(code in _AUTHORING_CODES for code in codes):
+        return "authoring"
     return "semantic"
 
 
@@ -648,8 +691,6 @@ def _command_error(
     provenance = command["provenance"]
     recon_id = provenance["recon_command_id"]
     source_path = provenance["source_path"]
-    if provenance["kind"] == "planner-derived" and source_path not in in_scope:
-        return "COMMAND_PATH_OUT_OF_SCOPE"
     if (
         provenance["kind"] == "planner-derived"
         and _has_shell_composition(literal)
@@ -695,11 +736,12 @@ def validate_plan_result(
     finding: dict[str, Any] | None = None,
     recon_commands: Sequence[dict[str, Any]] | None = None,
 ) -> tuple[str, ...]:
-    """Return stable fail-closed errors for a planner result.
+    """Return stable fail-closed errors for a host-assembled plan.
 
-    Backend schema enforcement is advisory. This host validation is the
-    authoritative write boundary and intentionally returns codes, never rejected
-    values, so callers can safely persist its result.
+    Write-boundary self-check: assembly (``assemble.assemble_plan``) satisfies
+    these checks by construction, so a non-empty result indicates a host bug.
+    It intentionally returns codes, never rejected values, so callers can
+    safely persist its result.
     """
     if isinstance(result, dict) and "markdown" in result:
         return ("LEGACY_MARKDOWN_OUTPUT",)
@@ -788,12 +830,6 @@ def validate_plan_result(
     for string_pointer, text in _string_pointers(result):
         if _contains_secret_value(text):
             return (f"SECRET_CONTENT_REDACTED@{string_pointer}",)
-    commit = _git(repo, "cat-file", "-e", f"{planned_at}^{{commit}}")
-    if commit.returncode != 0:
-        return ("PLANNED_AT_INVALID",)
-    ancestor = _git(repo, "merge-base", "--is-ancestor", planned_at, "HEAD")
-    if ancestor.returncode != 0:
-        return ("PLANNED_AT_NOT_ANCESTOR",)
 
     scope = result["scope"]
     existing = [item["path"] for item in scope["existing_paths"]]
@@ -1089,10 +1125,12 @@ def _render_verification(command: dict[str, Any] | None) -> str:
         if observable.casefold().startswith(exit_prefix.casefold())
         else f"exit {expected['exit_code']}; {observable}"
     )
+    note = command.get("note")
     return (
         f"**Purpose**: {command['purpose']}\n\n"
         f"**Command**: `{command['command']}`\n\n"
         f"**Expected**: {expected_text}"
+        + (f"\n\n**Why this gate**: {note}" if note else "")
     )
 
 
@@ -1104,6 +1142,7 @@ def _render_verification_list(
     if command is None:
         return f"{indent}- No host-verified command is attached."
     expected = command["expected_success"]
+    note = command.get("note")
     return "\n".join(
         (
             f"{indent}- **Purpose**: {command['purpose']}",
@@ -1111,6 +1150,11 @@ def _render_verification_list(
             (
                 f"{indent}- **Expected**: exit {expected['exit_code']}; "
                 f"{expected['observable_result']}"
+            ),
+            *(
+                [f"{indent}- **Why this gate**: {note}"]
+                if note
+                else []
             ),
         )
     )
@@ -1550,6 +1594,16 @@ def write_plans(
         for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
         if (match := re.match(r"^(\d{3}-.+)\.md$", path.name))
     }
+    planned_at_errors: tuple[str, ...] = ()
+    commit = _git(plans_dir.parent, "cat-file", "-e", f"{planned_at}^{{commit}}")
+    if commit.returncode != 0:
+        planned_at_errors = ("PLANNED_AT_INVALID",)
+    else:
+        ancestor = _git(
+            plans_dir.parent, "merge-base", "--is-ancestor", planned_at, "HEAD"
+        )
+        if ancestor.returncode != 0:
+            planned_at_errors = ("PLANNED_AT_NOT_ANCESTOR",)
 
     for selection in ordered_selections:
         finding = selection.get("finding")
@@ -1619,23 +1673,39 @@ def write_plans(
             if not isinstance(raw_errors, (list, tuple)) and attempt is not None:
                 legacy_code = attempt.get("transport_error_code")
                 raw_errors = (legacy_code,) if isinstance(legacy_code, str) else ()
-            error_codes = tuple(
-                code
-                for code in (
+            error_entries = tuple(
+                entry
+                for entry in (
                     raw_errors if isinstance(raw_errors, (list, tuple)) else ()
                 )
-                if isinstance(code, str)
-                and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", code)
+                if isinstance(entry, str)
+                and re.fullmatch(
+                    r"[A-Z][A-Z0-9_]{1,63}", entry.partition("@")[0]
+                )
             )
-            if not error_codes:
-                error_codes = ("UNKNOWN",)
-            transport_code = error_codes[0]
+            if not error_entries:
+                error_entries = ("UNKNOWN",)
+            error_codes = tuple(
+                entry.partition("@")[0] for entry in error_entries
+            )
+            authoring_failure = bool(
+                attempt is not None and attempt.get("validation")
+            )
+            if authoring_failure:
+                status = (
+                    "BLOCKED (PLAN_VALIDATION_FAILED: "
+                    f"{','.join(error_codes)})"
+                )
+                stage = _validation_stage(error_entries)
+            else:
+                status = f"BLOCKED (PLAN_WRITER_FAILED: {error_codes[0]})"
+                stage = "transport"
             rows.append(
                 _blocked_index_row(
                     number=number,
                     marker=marker,
                     finding=finding,
-                    status=f"BLOCKED (PLAN_WRITER_FAILED: {transport_code})",
+                    status=status,
                 )
             )
             result["failed"].append(finding)
@@ -1649,8 +1719,8 @@ def write_plans(
                         else None
                     ),
                     disposition="blocked",
-                    stage="transport",
-                    errors=error_codes,
+                    stage=stage,
+                    errors=error_entries,
                 )
             )
             continue
@@ -1660,7 +1730,7 @@ def write_plans(
             for key, value in selection.items()
             if key not in {"finding", "error"} and not key.startswith("_")
         }
-        errors = validate_plan_result(
+        errors = planned_at_errors or validate_plan_result(
             plan_result,
             repo=plans_dir.parent,
             planned_at=planned_at,

@@ -14,50 +14,85 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.git_ops import head_sha
+from daydream.improve.assemble import assemble_plan
 from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
 )
 from daydream.improve.plans import render_plan
-from daydream.improve.prompts import PLAN_WRITER_SCHEMA
+from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
 from daydream.runner import RunConfig, run
 
 
-def _plan_command(
-    purpose: str,
-    observable: str,
+def _plan_ref(
+    recon_command_id: str,
     *,
-    paths: list[str] | None = None,
+    appended_args: str | None = None,
+    note: str | None = None,
 ) -> dict[str, Any]:
-    scoped_paths = paths or []
     return {
-        "purpose": purpose,
-        "command": "uv run pytest apps/billing/test_api.py -q",
-        "working_directory": ".",
-        "expected_success": {
-            "exit_code": 0,
-            "observable_result": observable,
-        },
-        "applicability": {
-            "scope": (
-                {"kind": "in-scope-paths", "paths": scoped_paths}
-                if scoped_paths
-                else {"kind": "whole-repository"}
-            ),
-            "preconditions": [],
-            "rationale": "The focused command verifies the requested billing behavior.",
-        },
-        "provenance": {
-            "kind": "planner-derived",
-            "recon_command_id": "test-suite",
-            "source_path": "apps/billing/api.py",
-        },
+        "recon_command_id": recon_command_id,
+        "appended_args": appended_args,
+        "note": note,
     }
 
 
-def _typed_plan_result(
-    finding: dict[str, Any],
-    target: Path,
-) -> dict[str, Any]:
+def _stub_recon_commands(*, all_invalid: bool = False) -> list[dict[str, Any]]:
+    scope_kind = "unsupported" if all_invalid else "whole-repository"
+    return [
+        {
+            "id": "test-suite",
+            "purpose": "Run the repository Python test suite",
+            "command": "uv run pytest",
+            "working_directory": ".",
+            "expected_success": {
+                "exit_code": 0,
+                "observable_result": (
+                    "exit 0 and the selected pytest tests pass"
+                ),
+            },
+            "applicability": {
+                "scope": {"kind": scope_kind},
+                "preconditions": [],
+                "rationale": (
+                    "The root configuration declares the test command."
+                ),
+            },
+            "evidence": {
+                "kind": "literal-command",
+                "source_path": "pyproject.toml",
+                "line_anchor": {"start_line": 5, "end_line": 5},
+                "verbatim_excerpt": 'test-command = "uv run pytest"',
+            },
+        },
+        {
+            "id": "git-diff",
+            "purpose": "Check that unrelated paths remain unchanged",
+            "command": "git diff --exit-code",
+            "working_directory": ".",
+            "expected_success": {
+                "exit_code": 0,
+                "observable_result": (
+                    "exit 0 and no unexpected diff is reported"
+                ),
+            },
+            "applicability": {
+                "scope": {"kind": scope_kind},
+                "preconditions": [],
+                "rationale": (
+                    "The root configuration declares the scope command."
+                ),
+            },
+            "evidence": {
+                "kind": "literal-command",
+                "source_path": "pyproject.toml",
+                "line_anchor": {"start_line": 6, "end_line": 6},
+                "verbatim_excerpt": 'scope-command = "git diff --exit-code"',
+            },
+        },
+    ]
+
+
+def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
     requested_context = (
         f" for the requested change: {finding['title']}"
         if finding.get("category") == "requested"
@@ -76,27 +111,20 @@ def _typed_plan_result(
             else f"Implement requested change {finding['title']}"
         )
     )
-    step_gate = _plan_command(
-        "Verify the billing service implementation",
-        "exit 0 and the named billing regression test passes",
-        paths=["apps/billing/api.py", "apps/billing/test_api.py"],
+    step_gate = _plan_ref(
+        "test-suite",
+        appended_args="apps/billing/test_api.py -q",
+        note="The focused billing suite proves the changed behavior.",
     )
-    test_gate = _plan_command(
-        "Run the named billing regression",
-        "exit 0 and test_service_name_preserves_contract passes",
+    test_gate = _plan_ref(
+        "test-suite",
+        appended_args="apps/billing/test_api.py -q",
     )
-    scope_gate = {
-        **_plan_command(
-            "Confirm unrelated documentation is unchanged",
-            "exit 0 and README.md has no changes",
-        ),
-        "command": "git diff --exit-code -- README.md",
-        "provenance": {
-            "kind": "planner-derived",
-            "recon_command_id": "git-diff",
-            "source_path": "apps/billing/api.py",
-        },
-    }
+    scope_gate = _plan_ref(
+        "git-diff",
+        appended_args="-- README.md",
+        note="Documentation must stay untouched by the billing change.",
+    )
     return {
         "slug": slug,
         "title": title,
@@ -115,22 +143,6 @@ def _typed_plan_result(
                 "regression coverage."
             ),
         },
-        "current_state_excerpts": [
-            {
-                "path": "apps/billing/api.py",
-                "line_anchor": {"start_line": 1, "end_line": 2},
-                "file_role": "Billing service name implementation under change.",
-                "verbatim_excerpt": (
-                    target / "apps/billing/api.py"
-                ).read_text(encoding="utf-8").rstrip("\n"),
-            }
-        ],
-        "commands_you_will_need": [
-            _plan_command(
-                "Run focused billing tests",
-                "exit 0 and all focused billing tests pass",
-            )
-        ],
         "scope": {
             "existing_paths": [
                 {
@@ -139,6 +151,7 @@ def _typed_plan_result(
                         "Implement the selected billing behavior"
                         f"{requested_context}."
                     ),
+                    "excerpts": [{"start_line": 1, "end_line": 2}],
                 }
             ],
             "new_paths": [
@@ -163,18 +176,13 @@ def _typed_plan_result(
                 }
             ],
         },
+        "context_excerpts": [],
         "git_workflow": {
-            "branch_name": "use the operator's current branch",
-            "branch_basis": "Recon found no repository branch naming convention.",
             "commit_boundaries": "Commit the billing behavior and test as one logical unit.",
             "commit_message_example": "fix: preserve billing service contract",
-            "push_policy": "never-without-operator-instruction",
-            "pull_request_policy": "never-without-operator-instruction",
         },
         "steps": [
             {
-                "id": "step-1",
-                "order": 1,
                 "title": "Implement the billing service behavior",
                 "changes": [
                     {
@@ -194,8 +202,6 @@ def _typed_plan_result(
                 "verification": step_gate,
             },
             {
-                "id": "step-2",
-                "order": 2,
                 "title": "Add the named billing regression",
                 "changes": [
                     {
@@ -252,7 +258,6 @@ def _typed_plan_result(
         },
         "done_criteria": [
             {
-                "id": "done-1",
                 "kind": "behavior",
                 "description": (
                     "service_name implements the requested billing behavior"
@@ -261,62 +266,30 @@ def _typed_plan_result(
                 "verification": step_gate,
             },
             {
-                "id": "done-2",
                 "kind": "test-gate",
                 "description": "The named billing service regression test passes.",
                 "verification": test_gate,
             },
             {
-                "id": "done-3",
                 "kind": "scope-integrity",
                 "description": "No file outside the declared billing scope changes.",
                 "verification": scope_gate,
             },
         ],
-        "stop_conditions": [
-            {
-                "kind": "drift",
-                "condition": (
-                    "apps/billing/api.py no longer matches the quoted service_name excerpt."
-                ),
-                "required_action": "STOP_AND_REPORT",
-                "evidence_to_report": (
-                    "Report the live service_name definition and planned-at commit."
-                ),
-                "related_paths": ["apps/billing/api.py"],
-                "related_step_ids": ["step-1"],
-            },
-            {
-                "kind": "repeated-verification-failure",
-                "condition": "The focused billing verification command fails twice.",
-                "required_action": "STOP_AND_REPORT",
-                "evidence_to_report": "Report both command outputs and attempted correction.",
-                "related_paths": ["apps/billing/test_api.py"],
-                "related_step_ids": ["step-2"],
-            },
-            {
-                "kind": "out-of-scope-change",
-                "condition": "The billing change requires editing README.md or catalog files.",
-                "required_action": "STOP_AND_REPORT",
-                "evidence_to_report": "Report the required path and why it is necessary.",
-                "related_paths": ["README.md"],
-                "related_step_ids": ["step-1"],
-            },
-            {
-                "kind": "false-assumption",
-                "condition": (
-                    "The service_name public return type is not a string "
-                    f"contract{requested_context}."
-                ),
-                "required_action": "STOP_AND_REPORT",
-                "evidence_to_report": (
-                    "Report the actual callers and observed return contract"
-                    f"{requested_context}."
-                ),
-                "related_paths": ["apps/billing/api.py"],
-                "related_step_ids": ["step-1"],
-            },
-        ],
+        "false_assumption": {
+            "condition": (
+                "The service_name public return type is not a string "
+                f"contract{requested_context}."
+            ),
+            "evidence_to_report": (
+                "Report the actual callers and observed return contract"
+                f"{requested_context}."
+            ),
+            "related_paths": ["apps/billing/api.py"],
+            "related_step_numbers": [1],
+        },
+        "additional_stop_conditions": [],
+        "additional_command_refs": [],
         "maintenance_notes": {
             "future_interactions": [
                 {
@@ -337,7 +310,7 @@ def _typed_plan_result(
 
 def _without_verification_commands(plan: dict[str, Any]) -> dict[str, Any]:
     """Represent a useful plan when recon found no host-verified commands."""
-    plan["commands_you_will_need"] = []
+    plan["additional_command_refs"] = []
     for step in plan["steps"]:
         step["verification"] = None
     for case in plan["test_plan"]["cases"]:
@@ -345,6 +318,17 @@ def _without_verification_commands(plan: dict[str, Any]) -> dict[str, Any]:
     for criterion in plan["done_criteria"]:
         criterion["verification"] = None
     return plan
+
+
+def _finding_from_prompt(prompt: str) -> dict[str, Any]:
+    for block in re.findall(r"```json\n(.*?)\n```", prompt, flags=re.DOTALL):
+        try:
+            candidate = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and "fingerprint" in candidate:
+            return candidate
+    raise AssertionError("no finding block in plan-writer prompt")
 
 
 class _ImproveStubBackend:
@@ -384,10 +368,11 @@ class _ImproveStubBackend:
         self.recon_output_override: Any = None
         self.abort_plan_on_tool_budget = False
         self.plan_dependency_slug: str | None = None
-        self.plan_excerpt_override: str | None = None
         self.plan_file_role_override: str | None = None
         self.plan_problem_override: str | None = None
-        self.plan_scope_conflict_once = False
+        self.plan_sloppy = False
+        self.plan_bad_recon_id_attempts = 0
+        self.plan_missing_path_attempts = 0
         self.plan_review_result = "typed"
 
     async def execute(
@@ -427,7 +412,10 @@ class _ImproveStubBackend:
             marker = "vet"
         elif "You are reviewing an existing daydream implementation plan" in prompt:
             marker = "plan-reviewer"
-        elif "You are writing a self-contained implementation plan" in prompt:
+        elif "You are writing a self-contained implementation plan" in prompt or (
+            isinstance(output_schema, dict)
+            and "false_assumption" in output_schema.get("properties", {})
+        ):
             marker = "plan-writer"
         self.calls.append(
             {
@@ -496,80 +484,9 @@ class _ImproveStubBackend:
                     continuation=None,
                 )
                 return
-            commands = self.recon_commands_override or [
-                {
-                    "id": "test-suite",
-                    "purpose": "Run the repository Python test suite",
-                    "command": "uv run pytest",
-                    "working_directory": ".",
-                    "expected_success": {
-                        "exit_code": 0,
-                        "observable_result": (
-                            "exit 0 and the selected pytest tests pass"
-                        ),
-                    },
-                    "applicability": {
-                        "scope": {
-                            "kind": (
-                                "unsupported"
-                                if self.all_recon_commands_invalid
-                                else "whole-repository"
-                            ),
-                        },
-                        "preconditions": [],
-                        "rationale": (
-                            "The root configuration declares the test command."
-                        ),
-                    },
-                    "evidence": {
-                        "kind": "literal-command",
-                        "source_path": "pyproject.toml",
-                        "line_anchor": {
-                            "start_line": 5,
-                            "end_line": 5,
-                        },
-                        "verbatim_excerpt": (
-                            'test-command = "uv run pytest"'
-                        ),
-                    },
-                },
-                {
-                    "id": "git-diff",
-                    "purpose": "Check that unrelated paths remain unchanged",
-                    "command": "git diff --exit-code",
-                    "working_directory": ".",
-                    "expected_success": {
-                        "exit_code": 0,
-                        "observable_result": (
-                            "exit 0 and no unexpected diff is reported"
-                        ),
-                    },
-                    "applicability": {
-                        "scope": {
-                            "kind": (
-                                "unsupported"
-                                if self.all_recon_commands_invalid
-                                else "whole-repository"
-                            ),
-                        },
-                        "preconditions": [],
-                        "rationale": (
-                            "The root configuration declares the scope command."
-                        ),
-                    },
-                    "evidence": {
-                        "kind": "literal-command",
-                        "source_path": "pyproject.toml",
-                        "line_anchor": {
-                            "start_line": 6,
-                            "end_line": 6,
-                        },
-                        "verbatim_excerpt": (
-                            'scope-command = "git diff --exit-code"'
-                        ),
-                    },
-                },
-            ]
+            commands = self.recon_commands_override or _stub_recon_commands(
+                all_invalid=self.all_recon_commands_invalid
+            )
             commands = [*commands, *self.recon_commands_extra]
             yield ResultEvent(
                 structured_output={
@@ -689,13 +606,7 @@ class _ImproveStubBackend:
                         input={"file_path": "apps/billing/api.py"},
                     )
                 return
-            match = re.search(
-                r"Selected vetted finding:\n```json\n(.*?)\n```",
-                prompt,
-                flags=re.DOTALL,
-            )
-            assert match is not None
-            finding = json.loads(match.group(1))
+            finding = _finding_from_prompt(prompt)
             if self.return_legacy_plan:
                 yield ResultEvent(
                     structured_output={
@@ -708,24 +619,41 @@ class _ImproveStubBackend:
                     continuation=None,
                 )
                 return
-            plan = _typed_plan_result(finding, self._target)
-            if self.plan_excerpt_override is not None:
-                plan["current_state_excerpts"][0]["verbatim_excerpt"] = (
-                    self.plan_excerpt_override
-                )
+            plan = _authored_plan_result(finding)
             if self.plan_file_role_override is not None:
-                plan["current_state_excerpts"][0]["file_role"] = (
+                plan["scope"]["existing_paths"][0]["role"] = (
                     self.plan_file_role_override
                 )
             if self.plan_problem_override is not None:
                 plan["why_this_matters"]["problem"] = self.plan_problem_override
-            if self.plan_scope_conflict_once and self.plan_writer_calls == 1:
+            if self.plan_sloppy:
+                plan["debug_notes"] = (
+                    "Planner scratch notes that must never reach the artifact."
+                )
+                plan["markdown"] = "## Steps\n\nMake the change."
                 plan["scope"]["out_of_scope_paths"].append(
                     {
                         "path": "apps/billing/api.py",
                         "reason": (
                             "The billing implementation file must not change further."
                         ),
+                    }
+                )
+                plan["scope"]["existing_paths"][0]["role"] = (
+                    "Billing role " + "x" * 293
+                )
+                plan["why_this_matters"]["problem"] = (
+                    "Callers keep sending secret: hunter2realvalue in "
+                    "production traffic today."
+                )
+            if self.plan_writer_calls <= self.plan_bad_recon_id_attempts:
+                plan["steps"][0]["verification"] = _plan_ref("make-tests")
+            if self.plan_writer_calls <= self.plan_missing_path_attempts:
+                plan["scope"]["existing_paths"].append(
+                    {
+                        "path": "apps/billing/legacy_api.py",
+                        "role": "Reference the retired billing module for parity.",
+                        "excerpts": [{"start_line": 1, "end_line": 2}],
                     }
                 )
             if self.all_recon_commands_invalid:
@@ -787,7 +715,7 @@ class _ImproveStubBackend:
                 "title": "Preserve the billing service contract",
                 "category": "correctness",
             }
-            plan = _typed_plan_result(finding, self._target)
+            plan = _authored_plan_result(finding)
             plan["title"] = "Reviewer attempted renamed billing plan"
             plan["slug"] = "reviewer-renamed-billing-plan"
             plan["priority"] = "P3"
@@ -986,14 +914,11 @@ class _ProductionPathBackend(_ImproveStubBackend):
             )
             return
 
-        if "You are writing a self-contained implementation plan" in prompt:
-            match = re.search(
-                r"Selected vetted finding:\n```json\n(.*?)\n```",
-                prompt,
-                flags=re.DOTALL,
-            )
-            assert match is not None
-            finding = json.loads(match.group(1))
+        if "You are writing a self-contained implementation plan" in prompt or (
+            isinstance(output_schema, dict)
+            and "false_assumption" in output_schema.get("properties", {})
+        ):
+            finding = _finding_from_prompt(prompt)
             if self.plan_active >= 2:
                 raise _ProductionPathRateLimitError(
                     "provider plan concurrency limit exceeded"
@@ -1865,13 +1790,19 @@ async def test_all_legacy_plan_results_block_and_return_failure(
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     assert code == 1
+    assert stub.plan_writer_calls == 2
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
-    assert "BLOCKED (PLAN_VALIDATION_FAILED: LEGACY_MARKDOWN_OUTPUT" in (
+    assert "BLOCKED (PLAN_VALIDATION_FAILED: " in (
         plans_dir / "README.md"
     ).read_text()
     report = _dd(improve_monorepo_target, "report.md").read_text()
     assert "Plans written: 0" in report
-    assert "LEGACY_MARKDOWN_OUTPUT" in report
+    diagnostics_text = _dd(
+        improve_monorepo_target,
+        "plan-write-diagnostics.json",
+    ).read_text(encoding="utf-8")
+    assert "AUTHOR_SCHEMA_INVALID" in diagnostics_text
+    assert "Make the change." not in diagnostics_text
 
 
 @pytest.mark.anyio
@@ -1951,7 +1882,6 @@ async def test_real_improve_flow_plans_from_live_dirty_source_without_running_ca
         n_findings=1,
     )
     stub.plan_dependency_slug = "billing-foundation"
-    stub.plan_excerpt_override = "return value from model-authored hint"
     stub.recon_commands_extra = [
         {
             "id": "manual-sentinel",
@@ -1993,7 +1923,6 @@ async def test_real_improve_flow_plans_from_live_dirty_source_without_running_ca
         'def service_name():\n    return "billing-from-live-working-tree"'
         in plan
     )
-    assert "return value from model-authored hint" not in plan
     assert "uv run pytest apps/billing/test_api.py -q" in plan
     assert "billing-foundation" in plan
     assert source_path.read_text(encoding="utf-8") == user_edit
@@ -2231,7 +2160,7 @@ async def test_plan_subverb_repairs_schema_invalid_plan_once(
     assert "PRIVATE_SCHEMA_SECRET" not in repair_prompt
     assert "TOKEN=" not in repair_prompt
     assert all(
-        call["output_schema"] == PLAN_WRITER_SCHEMA
+        call["output_schema"] == PLAN_AUTHOR_SCHEMA
         and call["read_only"] is True
         and call["persist_session"] is False
         for call in plan_calls
@@ -2285,10 +2214,17 @@ async def test_plan_subverb_blocks_after_one_unsuccessful_repair(
     )
     assert code == 1
     assert len(plan_calls) == 2
-    assert len(diagnostics["attempts"]) == 1
-    assert diagnostics["attempts"][0]["errors"] == [
-        {"code": "SCHEMA_INVALID", "pointer": "/priority"}
+    dispositions = [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
     ]
+    assert dispositions == ["retried", "blocked"]
+    for attempt in diagnostics["attempts"]:
+        assert attempt["stage"] == "authoring"
+        assert any(
+            error["code"] == "AUTHOR_SCHEMA_INVALID"
+            and error["pointer"] == "/priority"
+            for error in attempt["errors"]
+        )
     assert not list(
         (improve_monorepo_target / "daydream_plans").glob(
             "[0-9][0-9][0-9]-*.md"
@@ -2379,15 +2315,68 @@ async def test_plan_subverb_accepts_placeholder_secret_syntax(
 
 
 @pytest.mark.anyio
-async def test_plan_subverb_blocks_real_secret_with_pointer_and_never_leaks(
+async def test_secret_value_never_reaches_any_artifact(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub = _install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=1,
+    )
     stub.plan_problem_override = (
         "Document the rotation runbook including secret: hunter2realvalue "
         "before the credential expires."
     )
+    stub.plan_bad_recon_id_attempts = 1
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plan_calls = [
+        call for call in stub.calls if call["marker"] == "plan-writer"
+    ]
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert code == 0
+    assert len(plan_calls) == 2
+    assert len(plans) == 1
+    plan_text = plans[0].read_text(encoding="utf-8")
+    assert "<redacted>" in plan_text
+    assert "hunter2realvalue" not in plan_text
+    assert all(
+        "hunter2realvalue" not in call["prompt"] for call in stub.calls
+    )
+    diagnostics_text = _dd(
+        improve_monorepo_target, "plan-write-diagnostics.json"
+    ).read_text(encoding="utf-8")
+    assert "hunter2realvalue" not in diagnostics_text
+    diagnostics = json.loads(diagnostics_text)
+    assert [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
+    ] == ["retried", "success"]
+    assert all(
+        "hunter2realvalue" not in observable
+        for observable in _improve_observable_texts(improve_monorepo_target)
+    )
+
+
+@pytest.mark.anyio
+async def test_sloppy_but_salvageable_output_is_normalized_and_written(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_sloppy = True
 
     code = await run(
         RunConfig(
@@ -2402,45 +2391,85 @@ async def test_plan_subverb_blocks_real_secret_with_pointer_and_never_leaks(
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
     ]
-    assert code == 1
-    assert len(plan_calls) == 2
-    repair_prompt = plan_calls[1]["prompt"]
-    assert "SECRET_CONTENT_REDACTED" in repair_prompt
-    assert '"pointer": "/why_this_matters/problem"' in repair_prompt
-    assert "angle-bracket placeholder" in repair_prompt
-    assert "hunter2realvalue" not in repair_prompt
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert code == 0
+    assert len(plan_calls) == 1
+    assert len(plans) == 1
+    plan_text = plans[0].read_text(encoding="utf-8")
+    sloppy_role = "Billing role " + "x" * 293
+    assert sloppy_role[:299] + "…" in plan_text
+    assert sloppy_role not in plan_text
+    assert "<redacted>" in plan_text
+    assert "hunter2realvalue" not in plan_text
+    assert "Make the change." not in plan_text
+    assert "Planner scratch notes" not in plan_text
+    assert "The billing implementation file must not change further." not in plan_text
+    assert "The billing implementation does not alter documentation." in plan_text
+    assert all(
+        "hunter2realvalue" not in observable
+        and "Planner scratch notes" not in observable
+        for observable in _improve_observable_texts(improve_monorepo_target)
+    )
     diagnostics = json.loads(
         _dd(
             improve_monorepo_target,
             "plan-write-diagnostics.json",
         ).read_text(encoding="utf-8")
     )
-    assert len(diagnostics["attempts"]) == 1
-    assert diagnostics["attempts"][0]["disposition"] == "blocked"
-    assert diagnostics["attempts"][0]["errors"] == [
-        {
-            "code": "SECRET_CONTENT_REDACTED",
-            "pointer": "/why_this_matters/problem",
-        }
-    ]
-    assert not list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
-        )
-    )
-    assert all(
-        "hunter2realvalue" not in observable
-        for observable in _improve_observable_texts(improve_monorepo_target)
-    )
+    assert [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
+    ] == ["success"]
 
 
 @pytest.mark.anyio
-async def test_plan_subverb_repairs_scope_path_conflict_round_trip(
+async def test_n_selected_findings_produce_n_plans_first_attempt(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=3,
+    )
+    stub.vet_reject_titles = {"Phantom N+1"}
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans_dir = improve_monorepo_target / "daydream_plans"
+    plans = sorted(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
+    assert code == 0
+    assert stub.plan_writer_calls == 3
+    assert len(plans) == 3
+    for plan_path in plans:
+        plan_text = plan_path.read_text(encoding="utf-8")
+        assert "`uv run pytest apps/billing/test_api.py -q`" in plan_text
+        assert "`git diff --exit-code -- README.md`" in plan_text
+        assert "exit 0 and the selected pytest tests pass" in plan_text
+        assert "recon_command_id" not in plan_text
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    assert index.count("| TODO |") == 3
+    assert "BLOCKED (PLAN_" not in index
+
+
+@pytest.mark.anyio
+async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
-    stub.plan_scope_conflict_once = True
+    stub.plan_bad_recon_id_attempts = 1
+    stub.plan_missing_path_attempts = 1
 
     code = await run(
         RunConfig(
@@ -2458,18 +2487,85 @@ async def test_plan_subverb_repairs_scope_path_conflict_round_trip(
     assert code == 0
     assert len(plan_calls) == 2
     repair_prompt = plan_calls[1]["prompt"]
-    assert "SCOPE_PATH_CONFLICT" in repair_prompt
-    assert '"pointer": "/scope/out_of_scope_paths/1/path"' in repair_prompt
-    assert (
-        "exactly one of existing_paths, new_paths, or out_of_scope_paths"
-        in repair_prompt
-    )
+    assert "RECON_COMMAND_UNKNOWN" in repair_prompt
+    assert "/steps/0/verification" in repair_prompt
+    assert "valid recon command ids: test-suite, git-diff" in repair_prompt
+    assert "make-tests" not in repair_prompt
+    assert "EXISTING_PATH_MISSING" in repair_prompt
+    assert "/scope/existing_paths/1/path" in repair_prompt
     plans = list(
         (improve_monorepo_target / "daydream_plans").glob(
             "[0-9][0-9][0-9]-*.md"
         )
     )
     assert len(plans) == 1
+    plan_text = plans[0].read_text(encoding="utf-8")
+    assert "uv run pytest apps/billing/test_api.py -q" in plan_text
+    assert "apps/billing/legacy_api.py" not in plan_text
+    diagnostics = json.loads(
+        _dd(
+            improve_monorepo_target,
+            "plan-write-diagnostics.json",
+        ).read_text(encoding="utf-8")
+    )
+    assert [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
+    ] == ["retried", "success"]
+    first_attempt_codes = {
+        error["code"] for error in diagnostics["attempts"][0]["errors"]
+    }
+    assert {"RECON_COMMAND_UNKNOWN", "EXISTING_PATH_MISSING"} <= first_attempt_codes
+
+
+@pytest.mark.anyio
+async def test_persistent_authoring_failure_blocks_with_full_code_list(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_bad_recon_id_attempts = 99
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plan_calls = [
+        call for call in stub.calls if call["marker"] == "plan-writer"
+    ]
+    plans_dir = improve_monorepo_target / "daydream_plans"
+    assert code == 1
+    assert len(plan_calls) == 2
+    assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    blocked_rows = [
+        line
+        for line in index.splitlines()
+        if "BLOCKED (PLAN_VALIDATION_FAILED: " in line
+    ]
+    assert len(blocked_rows) == 1
+    assert re.search(r"\| 001 <!-- fingerprint:", blocked_rows[0])
+    diagnostics = json.loads(
+        _dd(
+            improve_monorepo_target,
+            "plan-write-diagnostics.json",
+        ).read_text(encoding="utf-8")
+    )
+    dispositions = [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
+    ]
+    assert dispositions == ["retried", "blocked"]
+    for attempt in diagnostics["attempts"]:
+        assert attempt["stage"] == "authoring"
+        assert any(
+            error["code"] == "RECON_COMMAND_UNKNOWN"
+            for error in attempt["errors"]
+        )
 
 
 @pytest.mark.anyio
@@ -2510,9 +2606,20 @@ def _write_review_plan_fixture(
         "evidence": ["apps/billing/api.py:1"],
         "fingerprint": "f" * 64,
     }
-    typed = _typed_plan_result(finding, target)
-    typed["slug"] = "billing-contract"
-    typed["title"] = finding["title"]
+    authored = _authored_plan_result(finding)
+    authored["slug"] = "billing-contract"
+    authored["title"] = finding["title"]
+    assembled, issues = assemble_plan(
+        authored,
+        repo=target,
+        recon_commands=_stub_recon_commands(),
+    )
+    assert not issues and assembled is not None
+    typed = {
+        **assembled,
+        "slug": "billing-contract",
+        "title": finding["title"],
+    }
     plans_dir = target / "daydream_plans"
     plans_dir.mkdir()
     plan = plans_dir / "007-billing-contract.md"

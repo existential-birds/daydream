@@ -209,11 +209,29 @@ _COMMAND_PROPERTIES: dict[str, Any] = {
 PLAN_COMMAND_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": [*_COMMAND_PROPERTIES, "provenance"],
+    "required": [*_COMMAND_PROPERTIES, "provenance", "note"],
     "properties": {
         **_COMMAND_PROPERTIES,
         "provenance": PROVENANCE_SCHEMA,
+        # Why this gate proves its piece; required-but-nullable so the
+        # assembled shape stays strict-structured-output compliant.
+        "note": {"type": ["string", "null"], "maxLength": 300},
     },
+}
+COMMAND_REF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["recon_command_id", "appended_args", "note"],
+    "properties": {
+        "recon_command_id": {"type": "string", "minLength": 3, "maxLength": 80},
+        # Focused argv suffix; null runs the recon command verbatim.
+        "appended_args": {"type": ["string", "null"], "maxLength": 400},
+        "note": {"type": ["string", "null"], "maxLength": 300},
+    },
+}
+_OPTIONAL_COMMAND_REF_SCHEMA: dict[str, Any] = {
+    **COMMAND_REF_SCHEMA,
+    "type": ["object", "null"],
 }
 RECON_COMMAND_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -799,6 +817,7 @@ def validate_recon_commands(
 
 __all__ = [
     "APPLICABILITY_SCHEMA",
+    "COMMAND_REF_SCHEMA",
     "DIRECTORY_SCOPE_PATTERN",
     "DIRECTORY_SCOPE_SCHEMA",
     "EVIDENCE_SCHEMA",
