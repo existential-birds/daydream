@@ -3333,6 +3333,13 @@ async def test_ungated_step_and_scope_criterion_still_get_a_real_check(
         in text
     )
     assert "No host-verified command is attached." not in text
+    # An ungated test case names the symbol to run and forbids guessing a runner.
+    assert (
+        "run only `test_service_name_preserves_contract` in "
+        "`apps/billing/test_api.py` using this repository's own test runner"
+        in text
+    )
+    assert "stop and report that — do not guess a command." in text
 
 
 @pytest.mark.anyio

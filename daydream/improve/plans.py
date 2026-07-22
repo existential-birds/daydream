@@ -1179,7 +1179,7 @@ def _render_verification_list(
     command: dict[str, Any] | None,
     *,
     indent: str,
-    fallback: str = "No host-verified command is attached; check this by hand.",
+    fallback: str,
 ) -> str:
     if command is None:
         return f"{indent}- {fallback}"
@@ -1200,6 +1200,16 @@ def _render_verification_list(
                 else []
             ),
         )
+    )
+
+
+def _test_case_fallback(test_file: str, test_symbol: str) -> str:
+    """Actionable stand-in when the model gated a test case with no command."""
+    return (
+        "**Check**: run only `{symbol}` in `{file}` using this repository's "
+        "own test runner and confirm it passes. **If you cannot determine the "
+        "runner command from the repository**, stop and report that — do not "
+        "guess a command.".format(symbol=test_symbol, file=test_file)
     )
 
 
@@ -1316,7 +1326,13 @@ def render_plan(
                 f"  - Assert: {assertion}" for assertion in case["assertions"]
             )
             + "\n  - Verification:\n"
-            + _render_verification_list(case["verification"], indent="    ")
+            + _render_verification_list(
+                case["verification"],
+                indent="    ",
+                fallback=_test_case_fallback(
+                    case["test_file"], case["test_symbol"]
+                ),
+            )
         )
         for case in test_plan["cases"]
     )
