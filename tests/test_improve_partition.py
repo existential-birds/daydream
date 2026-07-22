@@ -50,10 +50,25 @@ def test_oversized_directory_splits_by_subdirectory() -> None:
     ]
 
 
-def test_small_sibling_directories_merge_up_to_the_bound() -> None:
+def test_directory_at_the_bound_is_one_partition() -> None:
+    # Exactly at the bound: the subtree is never split, so its children stay a
+    # single partition. Coalescing *split* siblings is not a partition-layer
+    # merge (a merged root would overlap the siblings that did not merge) — it
+    # happens when groups are packed, see test_sibling_partitions_stay_in_one_group.
     files = [f"web/{sub}/f{i}.ts" for sub in ("a", "b", "c") for i in range(2)]
     partitions = build_partitions(files, [], max_files=6)
     assert [(p.name, p.root, len(p.files)) for p in partitions] == [("web", "web", 6)]
+
+
+def test_directory_one_file_over_the_bound_splits_into_children() -> None:
+    files = [f"web/{sub}/f{i}.ts" for sub in ("a", "b", "c") for i in range(2)]
+    files.append("web/a/extra.ts")
+    partitions = build_partitions(files, [], max_files=6)
+    assert [(p.name, len(p.files)) for p in partitions] == [
+        ("web/a", 3),
+        ("web/b", 2),
+        ("web/c", 2),
+    ]
 
 
 def test_oversized_service_splits_but_keeps_service_stamp() -> None:

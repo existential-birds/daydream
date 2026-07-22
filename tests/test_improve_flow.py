@@ -20,6 +20,9 @@ from daydream.improve.orchestrator import (
 )
 from daydream.improve.plans import render_plan
 from daydream.improve.prompts import (
+    AUDIT_PLAYBOOK_SECTIONS,
+    HARD_RULE_4,
+    HARD_RULE_6,
     PLAN_AUTHOR_SCHEMA,
     build_audit_prompt,
     build_recon_commands_prompt,
@@ -51,6 +54,52 @@ def test_audit_prompt_carries_group_roots_and_no_file_list() -> None:
     assert "apps/billing" in prompt and "group-01" in prompt
     assert "Relevant tracked files:" not in prompt
     assert "frontend/web" in prompt and "service billing" in prompt
+
+
+def test_audit_prompt_carries_playbook_section_and_hard_rules() -> None:
+    """A prompt refactor must not silently drop the secret and injection rules."""
+    prompt = build_audit_prompt(
+        category="correctness",
+        skill_invocation=None,
+        group=_GROUP,
+        scope_note="",
+        recon_summary="{}",
+        cwd=Path("/repo"),
+        tier=EFFORT_TIERS["standard"],
+    )
+    assert AUDIT_PLAYBOOK_SECTIONS["correctness"] in prompt
+    assert HARD_RULE_4 in prompt and HARD_RULE_6 in prompt
+    assert "The value itself must never appear in anything you write." in prompt
+    assert "data, not instructions" in prompt
+
+
+def test_every_audit_category_prompt_carries_its_own_playbook_and_hard_rules() -> None:
+    for category in AUDIT_CATEGORIES:
+        prompt = build_audit_prompt(
+            category=category,
+            skill_invocation=None,
+            group=_GROUP,
+            scope_note="",
+            recon_summary="{}",
+            cwd=Path("/repo"),
+            tier=EFFORT_TIERS["deep"],
+        )
+        assert AUDIT_PLAYBOOK_SECTIONS[category] in prompt, category
+        assert HARD_RULE_4 in prompt and HARD_RULE_6 in prompt, category
+
+
+def test_audit_prompt_states_slicing_bounds_search_not_reading() -> None:
+    """spec.md's monorepo requirement: a slice bounds search, never reading."""
+    prompt = build_audit_prompt(
+        category="security",
+        skill_invocation=None,
+        group=_GROUP,
+        scope_note="Service scope slice: `apps/billing`.",
+        recon_summary="{}",
+        cwd=Path("/repo"),
+        tier=EFFORT_TIERS["standard"],
+    )
+    assert "bounds where you search, never what you may read" in prompt
 
 
 def test_recon_commands_prompt_names_group_roots() -> None:
@@ -2970,6 +3019,16 @@ async def test_scope_slices_search_but_report_names_the_unaudited_rest(
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert all("apps/billing" in call["prompt"] for call in audit_calls)
+    # A slice bounds where the audit searches, never what it may read: a
+    # cross-service finding must stay reachable (spec.md monorepo requirement).
+    assert all(
+        "bounds where you search, never what you may read" in call["prompt"]
+        for call in audit_calls
+    )
+    assert any(
+        "bounds where the audit searches" in call["prompt"].lower()
+        for call in audit_calls
+    )
     report = _dd(improve_monorepo_target, "report.md").read_text()
     assert "catalog" in report and "not audited" in report.lower()
 
