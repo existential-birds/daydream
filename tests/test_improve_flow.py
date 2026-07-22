@@ -1672,6 +1672,48 @@ async def test_small_repo_collapses_to_bounded_groups(
 
 
 @pytest.mark.anyio
+async def test_top_offenders_name_directory_partitions_and_survive_artifacts(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _pin_stack_availability(monkeypatch, tmp_path)
+    stub = _install_improve_stub(
+        monkeypatch, improve_monorepo_target, n_findings=1
+    )
+    # Each group's agent cites a file inside its own group, so the react group's
+    # finding lands in the uncovered `web/` tree, which no service covers.
+    stub.group_scoped_findings = True
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    audit = json.loads(_dd(improve_monorepo_target, "audit-findings.json").read_text())
+    assert {finding["partition"] for finding in audit["findings"]} == {
+        "billing",
+        "web",
+        "residue",
+    }
+    vetted = json.loads(
+        _dd(improve_monorepo_target, "vetted-findings.json").read_text()
+    )
+    # The same pattern in three disjoint partitions aggregates into one finding
+    # that names every location it was found in.
+    assert len(vetted["findings"]) == 1
+    assert set(vetted["findings"][0]["partitions"]) == {"billing", "web", "residue"}
+    report = _dd(improve_monorepo_target, "report.md").read_text()
+    offenders = report.split("## Top offenders")[1].split("## ")[0]
+    assert "**web**" in offenders and "**billing**" in offenders
+
+
+@pytest.mark.anyio
 async def test_vet_batches_are_bounded_and_parallel(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,

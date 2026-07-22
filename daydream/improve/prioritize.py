@@ -99,10 +99,21 @@ def aggregate_cross_service(
 
 
 def _finding_services(finding: dict[str, Any]) -> set[str]:
+    """Return a finding's locality keys: its services plus its partition.
+
+    A finding in an uncovered tree has no service, so the partition is what
+    makes it comparable to the same pattern found elsewhere.
+    """
     services = finding.get("services")
-    if not isinstance(services, list):
-        return set()
-    return {service for service in services if isinstance(service, str) and service}
+    keys = (
+        {service for service in services if isinstance(service, str) and service}
+        if isinstance(services, list)
+        else set()
+    )
+    partition = finding.get("partition")
+    if isinstance(partition, str) and partition:
+        keys.add(partition)
+    return keys
 
 
 def _merge_cross_service_group(
@@ -112,6 +123,11 @@ def _merge_cross_service_group(
     merged = dict(representative)
     merged["services"] = _ordered_unique(
         service for finding in findings for service in _service_list(finding)
+    )
+    merged["partitions"] = _ordered_unique(
+        partition
+        for finding in findings
+        if isinstance((partition := finding.get("partition")), str) and partition
     )
     merged["evidence"] = _ordered_unique(
         entry for finding in findings for entry in _evidence_list(finding)
@@ -150,7 +166,12 @@ def _cross_service_locations(
         path = str(finding.get("path", ""))
         line = finding.get("line")
         location = f"{path}:{line}" if line is not None else path
-        locations.extend((service, location) for service in _service_list(finding))
+        owners = _service_list(finding)
+        if not owners:
+            # An uncovered tree has no service; name the partition instead.
+            partition = finding.get("partition")
+            owners = [partition] if isinstance(partition, str) and partition else []
+        locations.extend((owner, location) for owner in owners)
     return list(dict.fromkeys(locations))
 
 

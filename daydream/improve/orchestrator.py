@@ -2638,13 +2638,17 @@ def _blocked_plan_attempt_lines(
 def _top_offender_lines(findings: list[dict[str, Any]]) -> str:
     totals: dict[str, float] = {}
     for finding in findings:
-        services = finding.get("services")
-        if not isinstance(services, list):
-            continue
-        for service in dict.fromkeys(
-            item for item in services if isinstance(item, str) and item
-        ):
-            totals[service] = totals.get(service, 0.0) + leverage_score(finding)
+        # A finding outside every detected service is still located: its
+        # partition names the tree it came from.
+        raw_owners: list[Any] = []
+        for key in ("services", "partitions"):
+            value = finding.get(key)
+            if isinstance(value, list):
+                raw_owners.extend(value)
+        raw_owners.append(finding.get("partition"))
+        owners = [item for item in raw_owners if isinstance(item, str) and item]
+        for owner in dict.fromkeys(owners):
+            totals[owner] = totals.get(owner, 0.0) + leverage_score(finding)
     if not totals:
         return "- No vetted findings were assigned to a detected service."
     return "\n".join(

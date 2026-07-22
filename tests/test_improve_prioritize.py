@@ -90,3 +90,61 @@ def test_distinct_findings_do_not_aggregate() -> None:
         )
         == 2
     )
+
+
+def test_cross_partition_findings_merge_like_cross_service() -> None:
+    a = _f(
+        title="Unbounded query in the list endpoint",
+        path="frontend/src/alpha/view.tsx",
+        services=[],
+        partition="frontend/src/alpha",
+    )
+    b = _f(
+        title="Unbounded query in the list endpoint",
+        path="frontend/src/beta/view.tsx",
+        services=[],
+        partition="frontend/src/beta",
+    )
+    merged = aggregate_cross_service([a, b])
+    assert len(merged) == 1
+    assert set(merged[0]["partitions"]) == {
+        "frontend/src/alpha",
+        "frontend/src/beta",
+    }
+    assert "frontend/src/alpha" in merged[0]["body"]
+    assert "frontend/src/beta" in merged[0]["body"]
+
+
+def test_same_partition_findings_never_merge() -> None:
+    a = _f(
+        title="Unbounded query in the list endpoint",
+        path="frontend/src/alpha/list.tsx",
+        services=[],
+        partition="frontend/src/alpha",
+    )
+    b = _f(
+        title="Unbounded query in the list endpoint",
+        path="frontend/src/alpha/table.tsx",
+        services=[],
+        partition="frontend/src/alpha",
+    )
+    assert len(aggregate_cross_service([a, b])) == 2
+
+
+def test_service_and_partition_stamps_compose() -> None:
+    a = _f(
+        title="Unbounded query in the list endpoint",
+        path="apps/billing/api.py",
+        services=["billing"],
+        partition="billing",
+    )
+    b = _f(
+        title="Unbounded query in the list endpoint",
+        path="apps/catalog/api.py",
+        services=["catalog"],
+        partition="catalog",
+    )
+    merged = aggregate_cross_service([a, b])
+    assert len(merged) == 1
+    assert set(merged[0]["services"]) == {"billing", "catalog"}
+    assert set(merged[0]["partitions"]) == {"billing", "catalog"}
