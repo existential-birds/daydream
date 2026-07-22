@@ -1304,11 +1304,47 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
     (directory / "audit-findings.json").write_text(
         json.dumps(combined, indent=2) + "\n"
     )
+    _record_audit_coverage(
+        directory,
+        partitions,
+        groups,
+        ctx.data["partitions_not_audited"],
+        failures=failures,
+        assignments=assignments,
+    )
     ctx.data["audit"] = combined
     ctx.data["audit_discarded_no_evidence"] = discarded_no_evidence
     ctx.data["audit_dropped_low_confidence"] = dropped_low_confidence
     ctx.data["audit_dropped_by_cap"] = dropped_by_cap
     return None
+
+
+def _record_audit_coverage(
+    directory: Path,
+    partitions: list[Partition],
+    groups: list[PartitionGroup],
+    skipped: list[Partition],
+    *,
+    failures: dict[str, str],
+    assignments: list[_AuditAssignment],
+) -> None:
+    """Rewrite the coverage ledger with what the audit actually reached."""
+    failed_groups = {
+        assignment.group.name
+        for assignment in assignments
+        if assignment.key in failures
+    }
+    ledger = _coverage_ledger(partitions, groups, skipped)
+    for entry in ledger["groups"]:
+        entry["status"] = "failed" if entry["name"] in failed_groups else "audited"
+    ledger["failed_assignments"] = dict(sorted(failures.items()))
+    coverage_path(directory).write_text(
+        json.dumps(
+            _with_artifact_provenance(ledger, phase=DaydreamPhase.AUDIT),
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def _apply_vet_verdicts(
@@ -2514,6 +2550,9 @@ def _render_report(
     effort: str,
     scope: str | None,
     plan_write: dict[str, list[dict[str, Any]]],
+    partitions: list[Partition],
+    partitions_not_audited: list[Partition],
+    groups: list[PartitionGroup],
 ) -> str:
     service_lines = (
         "\n".join(
@@ -2527,13 +2566,27 @@ def _render_report(
         "\n".join(f"- **{stack.stack_name}**" for stack in stacks)
         or "- No stacks detected."
     )
+    roots_by_group = {
+        group.name: ", ".join(f"`{root}/`" for root in group.roots)
+        for group in groups
+    }
     failures = audit.get("failed", {})
     failed_assignment_lines = (
         "\n".join(
-            f"- **{assignment}** — {reason}"
+            f"- **{assignment.replace(':', ' / ')}** "
+            f"({roots_by_group.get(assignment.partition(':')[2], 'unknown group')})"
+            f" — {reason}"
             for assignment, reason in failures.items()
         )
         or "- None."
+    )
+    not_audited_lines = (
+        "\n".join(
+            f"- **{partition.name}** — `{partition.root}/` "
+            f"({len(partition.files)} files; group-ceiling)"
+            for partition in partitions_not_audited
+        )
+        or f"All {len(partitions)} partitions were audited."
     )
     tier_bound = {
         "quick": (
@@ -2541,12 +2594,13 @@ def _render_report(
             "and tests were not audited."
         ),
         "standard": (
-            "Coverage was hotspot-weighted across key packages; exhaustive "
-            "whole-repository coverage was not attempted."
+            "Coverage was hotspot-weighted across key packages; the partition "
+            "ledger below is authoritative for what was reached."
         ),
         "deep": (
-            "Coverage included every detected package; untracked files and "
-            "surfaces outside detected services were not audited."
+            "Every partitioned package was in scope; untracked files are never "
+            "audited, and the partition ledger below is authoritative for what "
+            "was reached."
         ),
     }[effort]
     if scope:
@@ -2592,6 +2646,7 @@ def _render_report(
         "## What was not audited\n\n"
         f"- {tier_bound}\n"
         f"- {scope_statement}\n\n"
+        f"{not_audited_lines}\n\n"
         "### Failed audit assignments\n\n"
         f"{failed_assignment_lines}\n\n"
         "## Audit filtering\n\n"
@@ -2723,6 +2778,9 @@ async def _step_report(ctx: FlowContext) -> Stop | None:
                 ctx.config.improve_effort,
                 ctx.config.improve_scope,
                 ctx.data["plan_write"],
+                ctx.data["partitions"],
+                ctx.data["partitions_not_audited"],
+                ctx.data["partition_groups"],
             )
         )
     )

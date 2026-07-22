@@ -1671,6 +1671,83 @@ async def test_small_repo_collapses_to_bounded_groups(
     assert len(coverage["groups"]) == 1
 
 
+def _not_audited_section(report: str) -> str:
+    return report.split("## What was not audited")[1].split("## ")[0]
+
+
+@pytest.mark.anyio
+async def test_report_names_unaudited_partitions_and_failed_groups(
+    improve_scaled_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _pin_stack_availability(monkeypatch, tmp_path)
+    file_config = _append_improve_config(
+        improve_scaled_monorepo_target,
+        "\n[tool.daydream.improve]\nmax-partition-groups = 1\n",
+    )
+    stub = _install_improve_stub(
+        monkeypatch, improve_scaled_monorepo_target, n_findings=0
+    )
+    stub.fail_categories = {"docs"}
+
+    code = await run(
+        RunConfig(
+            target=str(improve_scaled_monorepo_target),
+            flow_name="improve",
+            file_config=file_config,
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    report = _dd(improve_scaled_monorepo_target, "report.md").read_text()
+    section = _not_audited_section(report)
+    # Every ceiling-skipped partition is named with its root and reason.
+    assert "**frontend**" in section and "group-ceiling" in section
+    assert "`frontend/`" in section
+    failed = report.split("### Failed audit assignments")[1].split("## ")[0]
+    # The failed assignment resolves to its group's roots, not just a key.
+    assert "**docs / group-01**" in failed and "apps/svc00/" in failed
+    coverage = json.loads(
+        _dd(improve_scaled_monorepo_target, "coverage.json").read_text()
+    )
+    assert {entry["reason"] for entry in coverage["not_audited"]} == {"group-ceiling"}
+    assert coverage["groups"] and coverage["partitions"]
+    assert [entry["status"] for entry in coverage["groups"]] == ["failed"]
+    assert "docs:group-01" in coverage["failed_assignments"]
+
+
+@pytest.mark.anyio
+async def test_clean_full_coverage_reports_nothing_skipped(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _pin_stack_availability(monkeypatch, tmp_path)
+    _install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=0)
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    coverage = json.loads(_dd(improve_monorepo_target, "coverage.json").read_text())
+    assert coverage["not_audited"] == []
+    assert {entry["status"] for entry in coverage["groups"]} == {"audited"}
+    section = _not_audited_section(
+        _dd(improve_monorepo_target, "report.md").read_text()
+    )
+    assert "hotspot-weighted" in section  # the standard tier statement
+    assert "All 4 partitions were audited." in section
+
+
 @pytest.mark.anyio
 async def test_top_offenders_name_directory_partitions_and_survive_artifacts(
     improve_monorepo_target: Path,
