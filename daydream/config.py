@@ -160,14 +160,47 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 # from this table, or a phase absent from its sub-table, resolves to ``None`` —
 # the backend then applies its own ambient default.
 #
-# Only Codex consumes the resolved value. GPT-5.6 accepts ``none``, ``low``,
-# ``medium``, ``high``, ``xhigh``, and ``max``, defaulting to ``medium``.
-# Tiering follows OpenAI's guidance: ``low`` for latency-sensitive mechanical
-# work, ``medium`` as the balanced baseline, ``high``/``xhigh`` where more
-# reasoning buys measured quality. ``arbiter`` gets ``xhigh`` because it is the
-# scoped quality-first pass over only high-severity/contested findings, so the
-# extra reasoning is bounded to a small input.
+# All three backends consume the resolved value through their own native knob:
+# Claude via ``ClaudeAgentOptions.effort``, Codex via
+# ``-c model_reasoning_effort=...``, Pi via ``--thinking``. The five levels
+# below are the intersection of the three drivers' vocabularies, so any value
+# in this table is valid for any backend. Tiering: ``low`` for
+# latency-sensitive mechanical work, ``medium`` as the balanced baseline,
+# ``high``/``xhigh`` where more reasoning buys measured quality. ``arbiter``
+# gets ``xhigh`` because it is the scoped quality-first pass over only
+# high-severity/contested findings, so the extra reasoning is bounded to a
+# small input.
+#
+# ``plan_write`` is the only phase pinned to ``max`` on every backend. The
+# improve flow runs unattended on a cadence and its plans are executed later by
+# much weaker agents with no context beyond the plan file, so plan authoring,
+# plan repair, and ``review-plan`` (all three ride the ``plan_write`` key) are
+# the one place where spending the most reasoning available is unconditionally
+# correct: it is a small number of calls per run, and every ambiguity left in a
+# plan is paid for by the executor.
+REASONING_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
 PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
+    "claude": {
+        "parse": "low",
+        "fix": "medium",
+        "test": "medium",
+        "verify": "medium",
+        "exploration": "low",
+        "per_stack_review": "high",
+        "review": "high",
+        "arbiter": "xhigh",
+        "suppression": "medium",
+        "supervise": "medium",
+        "wonder": "high",
+        "merge": "medium",
+        "intent": "medium",
+        "pr_feedback": "high",
+        "recon": "low",
+        "audit": "high",
+        "vet": "xhigh",
+        "plan_write": "max",
+    },
     "codex": {
         "parse": "low",
         "fix": "medium",
@@ -186,8 +219,55 @@ PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
         "recon": "low",
         "audit": "high",
         "vet": "xhigh",
-        "plan_write": "high",
+        "plan_write": "max",
     },
+    "pi": {
+        "parse": "low",
+        "fix": "medium",
+        "test": "medium",
+        "verify": "medium",
+        "exploration": "low",
+        "per_stack_review": "high",
+        "review": "high",
+        "arbiter": "xhigh",
+        "suppression": "medium",
+        "supervise": "medium",
+        "wonder": "high",
+        "merge": "medium",
+        "intent": "medium",
+        "pr_feedback": "high",
+        "recon": "low",
+        "audit": "high",
+        "vet": "xhigh",
+        "plan_write": "max",
+    },
+}
+
+# Per-phase ``(wall_budget_s, tool_call_budget)`` for the improve flow, applied
+# by ``FlowContext.budget_for``. The flat ``DEFAULT_WALL_BUDGET_S`` /
+# ``DEFAULT_TOOL_CALL_BUDGET`` pair remains the fallback for any phase absent
+# here and for every other flow.
+#
+# Numbers are read off archived improve runs under ``~/.daydream/archive/runs``
+# (tool calls counted from each phase trajectory's ATIF steps):
+#
+# - ``audit``  n=49 turns, p50=40, p90=56, max=119 tool calls. 28% of audit
+#   turns exceeded the flat 50-call budget and were silently truncated, so 120
+#   covers the observed maximum rather than the median.
+# - ``plan_write``  n=79 turns, p50=21, p90=49, max=75 tool calls under the old
+#   ``high`` effort. 120 keeps the same headroom multiple as audit, because
+#   ``max`` effort buys more tool use per turn and the plan writer gets a
+#   second repair generation inside the same budget.
+# - ``vet``  observed wall clock averaged 1594 s per occurrence on the slowest
+#   archived run (9567 s over 6 occurrences), i.e. within 12% of the flat
+#   1800 s ceiling; 2700 s restores headroom on slow backends.
+# - ``recon``  observed wall clock 88-422 s across 7 runs and well under 50
+#   tool calls; it keeps a modest raise for margin only.
+IMPROVE_PHASE_BUDGETS: dict[str, tuple[float, int]] = {
+    "recon": (1800.0, 60),
+    "audit": (2400.0, 120),
+    "vet": (2700.0, 80),
+    "plan_write": (3600.0, 120),
 }
 
 

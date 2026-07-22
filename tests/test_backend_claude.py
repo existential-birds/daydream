@@ -805,3 +805,43 @@ def test_claude_agent_sdk_has_shielded_teardown() -> None:
         "'Attempted to exit a cancel scope that isn't the current tasks's current "
         "cancel scope'. Do not pin below 0.2.111."
     )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_reaches_sdk_options_as_effort(patch_sdk):
+    """The resolved per-phase effort arrives as ClaudeAgentOptions.effort."""
+    captured: dict[str, Any] = {}
+
+    class _CapturingClient(_scripted_client([MockResultMessage(total_cost_usd=0.0)])):
+        def __init__(self, options: Any = None) -> None:
+            captured["options"] = options
+            super().__init__(options)
+
+    patch_sdk(_CapturingClient)
+    backend = ClaudeBackend(model="opus", reasoning_effort="max")
+    async for _ in backend.execute(Path("/tmp"), "go"):
+        pass
+
+    assert captured["options"].effort == "max"
+
+
+@pytest.mark.asyncio
+async def test_no_reasoning_effort_leaves_sdk_effort_unset(patch_sdk):
+    captured: dict[str, Any] = {}
+
+    class _CapturingClient(_scripted_client([MockResultMessage(total_cost_usd=0.0)])):
+        def __init__(self, options: Any = None) -> None:
+            captured["options"] = options
+            super().__init__(options)
+
+    patch_sdk(_CapturingClient)
+    backend = ClaudeBackend(model="opus")
+    async for _ in backend.execute(Path("/tmp"), "go"):
+        pass
+
+    assert captured["options"].effort is None
+
+
+def test_unsupported_reasoning_effort_fails_at_construction():
+    with pytest.raises(ValueError, match="does not support reasoning effort"):
+        ClaudeBackend(model="opus", reasoning_effort="minimal")

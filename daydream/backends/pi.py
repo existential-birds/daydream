@@ -481,9 +481,24 @@ class PiBackend:
 
     concise_fix_prompts = True  # GLM produces verbose reasoning in fix prompts
 
-    def __init__(self, model: str | None = None, *, cwd: Path | None = None):
-        """Initialize the backend with an optional explicit model override."""
+    def __init__(
+        self,
+        model: str | None = None,
+        *,
+        cwd: Path | None = None,
+        reasoning_effort: str | None = None,
+    ):
+        """Initialize the backend with an optional explicit model override.
+
+        Args:
+            reasoning_effort: Resolved per-phase reasoning level, forwarded as
+                ``--thinking <level>``. When None, ``PI_THINKING`` is used
+                instead — the env var is Pi's ambient default, the same role
+                ``model_reasoning_effort`` in ``~/.codex/config.toml`` plays for
+                Codex, so an explicitly resolved per-phase level outranks it.
+        """
         self._model_override = model
+        self.reasoning_effort = reasoning_effort
         # ``.model`` must be resolved at construction (runner/recorder read it
         # before execute); cache the settings lookup so execute() need not
         # re-read settings.json for the same workspace.
@@ -559,7 +574,7 @@ class PiBackend:
                 provider = "zai"
 
         api_key = os.environ.get("PI_API_KEY")
-        thinking = os.environ.get("PI_THINKING")
+        thinking = self.reasoning_effort or os.environ.get("PI_THINKING")
         if provider:
             args.extend(["--provider", provider])
         if thinking:

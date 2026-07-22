@@ -300,7 +300,7 @@ name inventories, module shape, supervision seam, and bump policy — is
 | `DAYDREAM_EXT_DIR` | Extensions | Explicit path to the `daydream_ext` package (overrides `import daydream_ext`) |
 | `DAYDREAM_GH_TIMEOUT_SECONDS` | Git ops | Override `gh` CLI timeout |
 | `DAYDREAM_GH_TIMEOUT_RETRIES` | Git ops | Override `gh` timeout retry count |
-| `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags |
+| `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags (`PI_THINKING` loses to a resolved per-phase `reasoning_effort`) |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `DAYDREAM_PI_RETRY_BASE_DELAY_S` | Pi backend | Transient retry tuning |
 | `CLAUDE_CONFIG_DIR` | Claude backend | Override `~/.claude` directory |
 | `MARTIAN_API_KEY` / `MARTIAN_BASE_URL` / `MARTIAN_MODEL` | Benchmark | Judge endpoint and model (`martian` route) |

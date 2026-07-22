@@ -379,7 +379,7 @@ async def test_fork_disables_respond_step(
         "    r.remove('pr-feedback', 'respond-feedback')\n"
     )
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     rc = await runner.run_feedback(
         RunConfig(target=str(multi_stack_target), bot="x[bot]", non_interactive=True), pr=1
@@ -411,7 +411,7 @@ async def test_fork_inserts_custom_phase_into_review_flow(
         "    r.insert_after('review', anchor='review-alternatives', step='ro_audit')\n"
     )
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
@@ -482,7 +482,7 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
     backend = ShallowRecordingBackend(
         parse_results=[[{"id": 1, "description": "Align hello() return value", "file": "api.py", "line": 1}]]
     )
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
@@ -644,7 +644,7 @@ async def _run_tool_case(
     backend = DeferredWriteBackend(written)
     if backend_capture is not None:
         backend_capture.append(backend)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
@@ -755,7 +755,7 @@ async def test_custom_flow_dispatches_and_dumps_artifacts(
     --dump-artifacts writes the bundle (must-haves 1 + 2)."""
     ext_dir.write_module(CUSTOM_FLOW_EXT)
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
@@ -782,7 +782,7 @@ async def test_unknown_flow_name_errors(
 ) -> None:
     """An unregistered flow name fails with exit 1 (Extension Error panel; must-have 3)."""
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
@@ -805,7 +805,7 @@ async def test_pr_feedback_not_selectable_via_flow(
 ) -> None:
     """--flow pr-feedback errors (needs PR number + bot; must-have 5)."""
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
@@ -845,7 +845,7 @@ async def test_custom_phase_full_stack(
     backend = _StubBackend(multi_stack_target)
     created: list[tuple[str, str | None]] = []
 
-    def fake_create(name: str, model: str | None = None) -> _StubBackend:
+    def fake_create(name: str, model: str | None = None, **kwargs: object) -> _StubBackend:
         created.append((name, model))
         return backend
 
@@ -912,7 +912,7 @@ async def test_flow_review_routes_to_review_helper(
     """--flow review runs the real review pipeline: the alternatives prompt
     reaches the backend via the review flow, exit 0."""
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
@@ -938,7 +938,7 @@ async def test_flow_shallow_routes_to_shallow_helper(
     backend = ShallowRecordingBackend(
         parse_results=[[{"id": 1, "description": "Align return", "file": "api.py", "line": 1}]]
     )
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 

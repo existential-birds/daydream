@@ -401,7 +401,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
 
     monkeypatch.setattr(
         "daydream.runner.create_backend",
-        lambda name, model=None: PhaseDispatchBackend(),
+        lambda name, model=None, **kwargs: PhaseDispatchBackend(),
     )
 
     # Patch phase_test_and_heal to avoid running a real test suite.

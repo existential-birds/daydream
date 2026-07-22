@@ -7,12 +7,13 @@ import re
 import shlex
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookJSONOutput, HookMatcher
 from claude_agent_sdk.types import (
     AgentDefinition,
     AssistantMessage,
+    EffortLevel,
     HookCallback,
     ResultMessage,
     TextBlock,
@@ -289,6 +290,25 @@ def _make_skill_guard(allowed_skills: frozenset[str]) -> HookCallback:
     return _skill_guard
 
 
+_CLAUDE_EFFORT_LEVELS: frozenset[str] = frozenset(("low", "medium", "high", "xhigh", "max"))
+
+
+def _claude_effort(value: str | None) -> EffortLevel | None:
+    """Narrow a resolved reasoning effort to the SDK's ``EffortLevel``.
+
+    Raises at construction rather than letting an unsupported level reach the
+    CLI as ``--effort <junk>``, which fails mid-run with an opaque message.
+    """
+    if value is None:
+        return None
+    if value not in _CLAUDE_EFFORT_LEVELS:
+        raise ValueError(
+            f"Claude backend does not support reasoning effort {value!r}; "
+            f"expected one of {sorted(_CLAUDE_EFFORT_LEVELS)}"
+        )
+    return cast(EffortLevel, value)
+
+
 class ClaudeBackend:
     """Backend that wraps the Claude Agent SDK.
 
@@ -297,8 +317,9 @@ class ClaudeBackend:
 
     concise_fix_prompts = False
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, *, reasoning_effort: str | None = None):
         self.model = model
+        self.reasoning_effort = _claude_effort(reasoning_effort)
         self.fanout_concurrency = 4
         self._active_clients: set[ClaudeSDKClient] = set()
 
@@ -357,6 +378,8 @@ class ClaudeBackend:
             output_format=output_format,
             max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
             max_turns=max_turns,
+            # None leaves the CLI's ambient default; the SDK omits --effort.
+            effort=self.reasoning_effort,
             hooks={
                 "PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=pre_tool_use_hooks)]
             },

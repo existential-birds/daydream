@@ -349,6 +349,7 @@ class _ImproveStubBackend:
         self._n_findings = n_findings
         self._attempt_write = attempt_write
         self._write_attempted = False
+        self.reasoning_effort: str | None = None
         self.fanout_concurrency = fanout_concurrency
         self.audit_delay = audit_delay
         self.audit_active = 0
@@ -367,6 +368,7 @@ class _ImproveStubBackend:
         self.recon_languages_override: Any = None
         self.recon_output_override: Any = None
         self.abort_plan_on_tool_budget = False
+        self.plan_tool_calls_before_result = 0
         self.plan_dependency_slug: str | None = None
         self.plan_file_role_override: str | None = None
         self.plan_problem_override: str | None = None
@@ -427,6 +429,9 @@ class _ImproveStubBackend:
                 "read_only": read_only,
                 "persist_session": persist_session,
                 "marker": marker,
+                # Observed at the execute seam: what this turn actually ran on.
+                "model": self.model,
+                "reasoning_effort": self.reasoning_effort,
             }
         )
         if self._attempt_write and not self._write_attempted:
@@ -606,6 +611,12 @@ class _ImproveStubBackend:
                         input={"file_path": "apps/billing/api.py"},
                     )
                 return
+            for index in range(self.plan_tool_calls_before_result):
+                yield ToolStartEvent(
+                    id=f"plan-read-{index}",
+                    name="Read",
+                    input={"file_path": "apps/billing/api.py"},
+                )
             finding = _finding_from_prompt(prompt)
             if self.return_legacy_plan:
                 yield ResultEvent(
@@ -968,6 +979,46 @@ def _install_improve_stub(
     )
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: stub)
     return stub
+
+
+def _install_per_phase_improve_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+) -> list[dict[str, Any]]:
+    """Install a factory that mints one stub per resolved backend triple.
+
+    ``_resolve_backend`` caches on ``(name, model, reasoning_effort)``, so one
+    stub per triple is exactly one stub per distinct phase tier. Every stub
+    shares a single ``calls`` list, and each recorded call carries the
+    ``model``/``reasoning_effort`` the turn actually ran on — the observable at
+    the ``Backend.execute`` seam.
+    """
+    shared_calls: list[dict[str, Any]] = []
+
+    def _factory(
+        name: str,
+        model: str | None = None,
+        *,
+        cwd: Path | None = None,
+        reasoning_effort: str | None = None,
+    ) -> _ImproveStubBackend:
+        stub = _ImproveStubBackend(target)
+        stub.calls = shared_calls
+        stub.model = model or "mock-model"
+        stub.reasoning_effort = reasoning_effort
+        return stub
+
+    monkeypatch.setattr("daydream.runner.create_backend", _factory)
+    return shared_calls
+
+
+def _tiers_by_marker(calls: list[dict[str, Any]]) -> dict[str, set[tuple[str, str | None]]]:
+    tiers: dict[str, set[tuple[str, str | None]]] = {}
+    for call in calls:
+        tiers.setdefault(str(call["marker"]), set()).add(
+            (str(call["model"]), call["reasoning_effort"])
+        )
+    return tiers
 
 
 def _git_status_porcelain(repo: Path) -> str:
@@ -1818,8 +1869,8 @@ async def test_failed_planning_reports_budget_failure_and_nonzero_exit(
     )
     stub.abort_plan_on_tool_budget = True
     monkeypatch.setattr(
-        "daydream.runner.DEFAULT_TOOL_CALL_BUDGET",
-        1,
+        "daydream.runner.IMPROVE_PHASE_BUDGETS",
+        {"plan_write": (3600.0, 1)},
         raising=False,
     )
 
@@ -2903,3 +2954,128 @@ async def test_improve_pi_calls_are_ephemeral(
         "plan-writer",
     }
     assert all(call["persist_session"] is False for call in improve_calls)
+
+
+@pytest.mark.anyio
+async def test_improve_phases_resolve_their_own_model_and_reasoning_tier(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan authoring runs on the top model tier at max reasoning; recon does not.
+
+    Observed at the ``Backend.execute`` seam: each recorded turn carries the
+    model and reasoning effort the backend serving it was constructed with.
+    """
+    calls = _install_per_phase_improve_stubs(monkeypatch, improve_monorepo_target)
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    tiers = _tiers_by_marker(calls)
+    assert tiers["plan-writer"] == {("claude-opus-4-8", "max")}
+    assert tiers["vet"] == {("claude-opus-4-8", "xhigh")}
+    assert tiers["audit"] == {("claude-sonnet-5", "high")}
+    assert tiers["recon"] == {("claude-sonnet-5", "low")}
+
+
+@pytest.mark.anyio
+async def test_review_plan_runs_at_top_model_tier_and_max_reasoning(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan, _, _, _ = _write_review_plan_fixture(improve_monorepo_target)
+    calls = _install_per_phase_improve_stubs(monkeypatch, improve_monorepo_target)
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_review_plan=str(plan),
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    review_calls = [call for call in calls if call["marker"] == "plan-reviewer"]
+    assert review_calls
+    assert all(
+        (call["model"], call["reasoning_effort"]) == ("claude-opus-4-8", "max")
+        for call in review_calls
+    )
+
+
+@pytest.mark.anyio
+async def test_config_file_phase_override_outranks_plan_write_defaults(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``[tool.daydream.phases.plan_write]`` table still wins over the new defaults."""
+    calls = _install_per_phase_improve_stubs(monkeypatch, improve_monorepo_target)
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            file_config=DaydreamFileConfig(
+                phases={
+                    "plan_write": {
+                        "model": "claude-sonnet-5",
+                        "reasoning_effort": "medium",
+                    }
+                }
+            ),
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    tiers = _tiers_by_marker(calls)
+    assert tiers["plan-writer"] == {("claude-sonnet-5", "medium")}
+    # Unrelated phases keep their own defaults.
+    assert tiers["recon"] == {("claude-sonnet-5", "low")}
+    assert tiers["vet"] == {("claude-opus-4-8", "xhigh")}
+
+
+@pytest.mark.anyio
+async def test_plan_writer_survives_a_tool_budget_that_the_flat_default_would_abort(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan-writing turn spending 80 tool calls still lands its plan.
+
+    ``DEFAULT_TOOL_CALL_BUDGET`` is 50; ``IMPROVE_PHASE_BUDGETS["plan_write"]``
+    raises it to 120, so this turn — which would have been silently truncated
+    before — completes and writes its artifact.
+    """
+    stub = _install_improve_stub(
+        monkeypatch, improve_monorepo_target, n_findings=1
+    )
+    stub.plan_tool_calls_before_result = 80
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
+    )
+    assert len(plans) == 1
+    diagnostics = json.loads(
+        _dd(improve_monorepo_target, "plan-write-diagnostics.json").read_text()
+    )
+    assert not any(
+        error["code"] == "TOOL_CALL_BUDGET_EXCEEDED"
+        for attempt in diagnostics["attempts"]
+        for error in attempt["errors"]
+    )

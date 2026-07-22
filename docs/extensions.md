@@ -588,7 +588,7 @@ A fork-defined phase has no entry in the built-in `PHASE_DEFAULT_MODELS` /
 `PHASE_DEFAULT_EFFORT` tables, so it skips only that tier: CLI `--model` /
 `--reasoning-effort` still win, then the phase table, then the config-file
 global, then the backend default. Set `model` / `reasoning_effort` on the phase table
-to pin it (see the README's [Reasoning Effort](../README.md#reasoning-effort-codex-only)
+to pin it (see the README's [Reasoning Effort](../README.md#reasoning-effort)
 section for the precedence chain).
 
 ### Validate the registry

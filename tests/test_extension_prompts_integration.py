@@ -97,7 +97,7 @@ async def test_fork_prompt_override_reaches_backend(
         "    r.override_prompt('review', lambda **kw: f\"RO-REVIEW {kw['skill_invocation']}\")\n"
     )
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     rc = await runner.run(
         RunConfig(
@@ -155,7 +155,7 @@ async def test_plan_writer_override_receives_legacy_string_commands_and_typed_ou
     backend = _ImproveStubBackend(improve_monorepo_target, n_findings=1)
     monkeypatch.setattr(
         "daydream.runner.create_backend",
-        lambda name, model=None: backend,
+        lambda name, model=None, **kwargs: backend,
     )
 
     rc = await runner.run(
@@ -203,7 +203,7 @@ async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagno
     backend.return_legacy_plan = True
     monkeypatch.setattr(
         "daydream.runner.create_backend",
-        lambda name, model=None: backend,
+        lambda name, model=None, **kwargs: backend,
     )
 
     rc = await runner.run(
@@ -250,7 +250,7 @@ async def test_plan_writer_prompt_exception_blocks_only_that_plan(
     backend = _ImproveStubBackend(improve_monorepo_target, n_findings=2)
     monkeypatch.setattr(
         "daydream.runner.create_backend",
-        lambda name, model=None: backend,
+        lambda name, model=None, **kwargs: backend,
     )
 
     rc = await runner.run(

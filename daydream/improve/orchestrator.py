@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -473,12 +473,13 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     )
     branch_files = _diff_changed_files(branch_diff) if branch_focus else []
     if branch_focus:
-        ctx.data["effort_tier"] = EffortTier(
-            categories=None,
-            max_concurrency=1,
-            high_confidence_only=False,
-            max_findings=None,
-            include_investigate=False,
+        # Branch focus needs every category over one small diff, run serially —
+        # but the requested --effort tier still owns confidence filtering,
+        # finding caps, and audit depth, or the run silently contradicts the
+        # tier the report claims it used.
+        requested: EffortTier = ctx.data["effort_tier"]
+        ctx.data["effort_tier"] = replace(
+            requested, categories=None, max_concurrency=1
         )
     ctx.data["branch_diff"] = branch_diff
     ctx.data["branch_files"] = branch_files
@@ -522,6 +523,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         )
 
     backend = ctx.backend_for("recon")
+    wall_budget, tool_budget = ctx.budget_for("recon")
     async with phase_scope(DaydreamPhase.RECON):
         exploration = await repo_scan(backend, target)
         recon, _, _ = await run_agent(
@@ -532,8 +534,8 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             output_schema=_RECON_SCHEMA,
             read_only=True,
             persist_session=False,
-            wall_budget_s=ctx.wall_budget_s,
-            tool_call_budget=ctx.tool_call_budget,
+            wall_budget_s=wall_budget,
+            tool_call_budget=tool_budget,
         )
 
     recon_data: dict[str, Any] = {}
@@ -821,6 +823,7 @@ async def _step_audit(ctx: FlowContext) -> None:
     branch_focus = ctx.config.improve_focus == "branch"
     assignments = _audit_assignments(ctx, categories, stacks)
     backend = ctx.backend_for("audit")
+    wall_budget, tool_budget = ctx.budget_for("audit")
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(tier.max_concurrency, backend)
@@ -906,8 +909,8 @@ async def _step_audit(ctx: FlowContext) -> None:
                                 ),
                                 read_only=True,
                                 persist_session=False,
-                                wall_budget_s=ctx.wall_budget_s,
-                                tool_call_budget=ctx.tool_call_budget,
+                                wall_budget_s=wall_budget,
+                                tool_call_budget=tool_budget,
                             )
                             raw_findings = (
                                 output.get("findings", [])
@@ -1071,6 +1074,7 @@ async def _step_vet(ctx: FlowContext) -> None:
         by_category.setdefault(category, []).append(finding)
 
     backend = ctx.backend_for("vet")
+    wall_budget, tool_budget = ctx.budget_for("vet")
     kept: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for category_findings in by_category.values():
@@ -1104,8 +1108,8 @@ async def _step_vet(ctx: FlowContext) -> None:
                     ),
                     read_only=True,
                     persist_session=False,
-                    wall_budget_s=ctx.wall_budget_s,
-                    tool_call_budget=ctx.tool_call_budget,
+                    wall_budget_s=wall_budget,
+                    tool_call_budget=tool_budget,
                 )
         except Exception:  # noqa: BLE001 - no verdict fails closed
             output = {}
@@ -1712,6 +1716,7 @@ async def _review_plan(ctx: FlowContext, requested: str) -> None:
         return
 
     backend = ctx.backend_for("plan_write")
+    wall_budget, tool_budget = ctx.budget_for("plan_write")
     try:
         async with phase_scope(DaydreamPhase.PLAN_WRITE):
             output, _, _ = await run_agent(
@@ -1727,8 +1732,8 @@ async def _review_plan(ctx: FlowContext, requested: str) -> None:
                 output_schema=_PLAN_REVIEW_SCHEMA,
                 read_only=True,
                 persist_session=False,
-                wall_budget_s=ctx.wall_budget_s,
-                tool_call_budget=ctx.tool_call_budget,
+                wall_budget_s=wall_budget,
+                tool_call_budget=tool_budget,
             )
     except Exception:  # noqa: BLE001 - fail closed without rejected content
         _reject_plan_review(
@@ -1873,6 +1878,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
     else:
         selected = ctx.data["selected_findings"]
     backend = ctx.backend_for("plan_write")
+    wall_budget, tool_budget = ctx.budget_for("plan_write")
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(PLAN_WRITE_MAX_CONCURRENCY, backend)
@@ -1948,8 +1954,8 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                                         output_schema=PLAN_AUTHOR_SCHEMA,
                                         read_only=True,
                                         persist_session=False,
-                                        wall_budget_s=ctx.wall_budget_s,
-                                        tool_call_budget=ctx.tool_call_budget,
+                                        wall_budget_s=wall_budget,
+                                        tool_call_budget=tool_budget,
                                     )
                                 output = _redact_model_value(output)
                                 if aborted_reason is not None:

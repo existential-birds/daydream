@@ -178,7 +178,7 @@ def _wire_mocks(monkeypatch, backend: _DeepMockBackend) -> None:
     """
     monkeypatch.setattr(
         "daydream.runner.create_backend",
-        lambda name, model=None: backend,
+        lambda name, model=None, **kwargs: backend,
     )
     # Orchestrator fix gate: decline to apply fixes.
     monkeypatch.setattr(

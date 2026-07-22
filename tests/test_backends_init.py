@@ -169,3 +169,19 @@ async def test_backend_execute_accepts_agents_kwarg():
     async for event in backend.execute(Path("/tmp"), "test", agents=None):
         events.append(event)
     assert len(events) == 1
+
+
+def test_create_backend_forwards_reasoning_effort_to_every_driver():
+    """All three backends carry the resolved effort, not just Codex."""
+    from daydream.backends import create_backend
+
+    for name in ("claude", "codex", "pi"):
+        backend = create_backend(name, reasoning_effort="max")
+        assert backend.reasoning_effort == "max", name
+
+
+def test_create_backend_without_reasoning_effort_leaves_it_unset():
+    from daydream.backends import create_backend
+
+    for name in ("claude", "codex", "pi"):
+        assert create_backend(name).reasoning_effort is None, name

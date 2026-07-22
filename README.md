@@ -73,6 +73,9 @@ daydream improve --focus security /path/to/project
 | `standard` | All nine categories with a concurrency ceiling of ten; the default |
 | `deep` | All nine categories with a concurrency ceiling of ten; includes LOW-confidence investigation items |
 
+`--effort` selects audit *breadth* only. It does not change the model or the
+reasoning effort — those are per-phase (see [Reasoning Effort](#reasoning-effort)).
+
 ### Focus modes
 
 | Focus | Behavior |
@@ -230,36 +233,52 @@ per-backend table in `daydream/config.py`. The same order applies to backend
 selection via `--backend` / config / the `claude` fallback. (There is no
 environment-variable tier. `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
 
-### Reasoning Effort (Codex only)
+### Reasoning Effort
 
 `reasoning_effort` is accepted as a global key and per-phase, alongside
-`model`/`backend`. Only the Codex backend consumes it (forwarded as
-`-c model_reasoning_effort=...`); it is ignored for `claude` and `pi`. GPT-5.6
-accepts `none`, `low`, `medium`, `high`, `xhigh`, and `max`.
+`model`/`backend`. All three backends consume it through their own native knob:
+
+| Backend | Knob |
+|---------|------|
+| `claude` | `ClaudeAgentOptions.effort` → the CLI's `--effort` |
+| `codex` | `-c model_reasoning_effort=<level>` |
+| `pi` | `--thinking <level>` |
+
+The accepted levels are `low`, `medium`, `high`, `xhigh`, and `max` — the
+intersection of the three drivers' vocabularies, so any level is valid for any
+backend. (Codex additionally accepts `none`, and Pi `off`/`minimal`; those are
+usable via config but have no built-in default.)
 
 Resolution precedence, highest first:
 
 **`--reasoning-effort` > config file (phase, then global) > built-in per-phase default.**
 
-The built-in Codex defaults are:
+The built-in defaults are identical for all three backends:
 
 | Effort | Phases |
 |--------|--------|
-| `low` | `parse`, `exploration` |
+| `low` | `parse`, `exploration`, `recon` |
 | `medium` | `fix`, `test`, `verify`, `suppression`, `supervise`, `merge`, `intent` |
-| `high` | `per_stack_review`, `review`, `wonder`, `pr_feedback` |
-| `xhigh` | `arbiter` |
+| `high` | `per_stack_review`, `review`, `wonder`, `pr_feedback`, `audit` |
+| `xhigh` | `arbiter`, `vet` |
+| `max` | `plan_write` |
+
+`plan_write` is pinned to `max` on every backend. It covers plan authoring,
+plan repair, and `improve review-plan` — the phases whose output is executed
+later by a weaker agent with no context beyond the plan file, so every
+ambiguity left in a plan is paid for downstream.
 
 When no tier supplies a value the flag is not passed at all, and the backend
 applies its own ambient default (for Codex, `model_reasoning_effort` from
-`~/.codex/config.toml`).
+`~/.codex/config.toml`; for Pi, the `PI_THINKING` environment variable).
 
 For the `pi` backend, an unset daydream model leaves Pi's own configured
 `defaultModel` intact. The built-in `glm-5.2` value is used only when neither
 daydream nor Pi has selected a model.
 
 Pi accepts `PI_PROVIDER`, `PI_API_KEY`, and `PI_THINKING` as compatibility
-overrides. For the built-in `zai` provider, daydream passes `PI_API_KEY` to the
+overrides. `PI_THINKING` is Pi's ambient default and is used only when no
+resolved `reasoning_effort` applies; a per-phase level always outranks it. For the built-in `zai` provider, daydream passes `PI_API_KEY` to the
 child process as `ZAI_API_KEY`; credentials are never placed in process
 arguments. Providers without a known native credential environment variable
 must be configured through Pi directly instead of `PI_API_KEY`.

@@ -570,18 +570,35 @@ def _build_improve_parser(
         choices=["quick", "standard", "deep"],
         default="standard",
         dest="improve_effort",
+        help=(
+            "Audit breadth: quick = correctness/security/tests only, serial, "
+            "HIGH-confidence findings capped near six; standard (default) = all "
+            "nine categories in parallel; deep = all nine searched very "
+            "thoroughly, including labeled LOW-confidence investigate items. "
+            "Does not change the model or reasoning effort — those are per-phase "
+            "(see [tool.daydream.phases.<phase>])"
+        ),
     )
     parser.add_argument(
         "--focus",
         choices=["security", "performance", "tests", "branch", "next"],
         default=None,
         dest="improve_focus",
+        help=(
+            "Narrow the audit: a single category, 'branch' to audit only the "
+            "diff against the base branch, or 'next' for product direction "
+            "instead of defects"
+        ),
     )
     parser.add_argument(
         "--scope",
         default=None,
         metavar="SERVICE_OR_GLOB",
         dest="improve_scope",
+        help=(
+            "Restrict the audit to one service, a glob over service roots, or a "
+            "named group from [tool.daydream.improve.service_groups]"
+        ),
     )
     _add_shared_arguments(parser)
     return parser

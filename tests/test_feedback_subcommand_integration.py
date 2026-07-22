@@ -54,7 +54,7 @@ async def test_feedback_subcommand_argv_to_body(
 
     _silence(monkeypatch)
     stub = _PRFeedbackStubBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: stub)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
 
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
@@ -115,7 +115,7 @@ async def test_feedback_subcommand_non_interactive_argv_to_body(
 
     # No _silence — stdin must never be touched.
     stub = _PRFeedbackStubBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: stub)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
 
     def _forbidden_input(*_a: object, **_kw: object) -> str:
         raise AssertionError("input() was called -- feedback path must not touch stdin")

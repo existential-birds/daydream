@@ -1226,3 +1226,33 @@ def test_pi_fanout_concurrency_env_validation(
     assert PiBackend(model="glm-5.2").fanout_concurrency == expected
     if expected == 10:
         assert "using default 10" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pi_reasoning_effort_forwards_as_thinking_flag(monkeypatch):
+    """The resolved per-phase effort arrives as ``--thinking <level>``."""
+    monkeypatch.delenv("PI_THINKING", raising=False)
+    backend = PiBackend(model="glm-5.2", reasoning_effort="max")
+
+    flat_args, _ = await _run_and_capture_args(backend)
+    assert flat_args[flat_args.index("--thinking") + 1] == "max"
+
+
+@pytest.mark.asyncio
+async def test_pi_reasoning_effort_outranks_pi_thinking_env(monkeypatch):
+    """An explicit per-phase level beats Pi's ambient PI_THINKING default."""
+    monkeypatch.setenv("PI_THINKING", "low")
+    backend = PiBackend(model="glm-5.2", reasoning_effort="xhigh")
+
+    flat_args, _ = await _run_and_capture_args(backend)
+    assert flat_args[flat_args.index("--thinking") + 1] == "xhigh"
+    assert "low" not in flat_args
+
+
+@pytest.mark.asyncio
+async def test_pi_falls_back_to_pi_thinking_when_no_effort_resolved(monkeypatch):
+    monkeypatch.setenv("PI_THINKING", "high")
+    backend = PiBackend(model="glm-5.2")
+
+    flat_args, _ = await _run_and_capture_args(backend)
+    assert flat_args[flat_args.index("--thinking") + 1] == "high"

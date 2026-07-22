@@ -72,7 +72,7 @@ class _LogModeStubBackend:
 def _capture_stdout_and_run(config: RunConfig, backend: Backend, monkeypatch: pytest.MonkeyPatch) -> str:
     """Run daydream with the given config and capture stdout output."""
     # Patch create_backend to return our test backend
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     # Mock external dependencies
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)

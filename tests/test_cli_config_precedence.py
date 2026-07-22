@@ -110,7 +110,11 @@ def test_reasoning_effort_precedence_cli_over_file(tmp_path: Path) -> None:
     cfg.reasoning_effort = None
     assert _resolved_reasoning_effort(cfg, "review") == "file-global"  # no phase override -> file global
     cfg2 = RunConfig(target=str(tmp_path), reasoning_effort=None, file_config=DaydreamFileConfig())
-    assert _resolved_reasoning_effort(cfg2, "review") is None  # no source -> backend applies its own default
+    # No CLI or file source -> the per-backend table is the terminal tier.
+    assert _resolved_reasoning_effort(cfg2, "review") == "high"
+    assert _resolved_reasoning_effort(cfg2, "plan_write") == "max"
+    # A phase with no table entry still resolves to None.
+    assert _resolved_reasoning_effort(cfg2, "not_a_phase") is None
 
 
 def _codex_backend(cfg: RunConfig, phase: str, cache: dict | None = None) -> CodexBackend:
@@ -150,12 +154,12 @@ def test_phase_default_effort_table_is_the_lowest_precedence_tier(tmp_path: Path
     assert _codex_backend(cfg2, "parse").reasoning_effort == "high"
 
 
-def test_claude_phases_resolve_to_no_reasoning_effort(tmp_path: Path) -> None:
-    """Only Codex has an effort table, so Claude phases carry no effort at all."""
+def test_claude_phases_carry_their_table_reasoning_effort(tmp_path: Path) -> None:
+    """Claude has its own effort table and the resolved backend carries it."""
     cfg = RunConfig(target=str(tmp_path), backend="claude", model=None, file_config=DaydreamFileConfig())
-    assert _resolved_reasoning_effort(cfg, "arbiter") is None
-    backend = _resolve_backend(cfg, "arbiter")
-    assert getattr(backend, "reasoning_effort", None) is None
+    assert _resolved_reasoning_effort(cfg, "arbiter") == "xhigh"
+    assert getattr(_resolve_backend(cfg, "arbiter"), "reasoning_effort") == "xhigh"
+    assert getattr(_resolve_backend(cfg, "plan_write"), "reasoning_effort") == "max"
 
 
 def test_backend_cache_splits_on_table_default_effort(tmp_path: Path) -> None:

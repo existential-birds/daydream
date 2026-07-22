@@ -55,6 +55,7 @@ from daydream.config import (
     DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_WALL_BUDGET_S,
     EFFORT_TIERS,
+    IMPROVE_PHASE_BUDGETS,
     PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_MODELS,
     REVIEW_SKILLS,
@@ -207,11 +208,17 @@ class RunConfig:
         flow_name: Name of a registered flow to dispatch (``--flow``); built-in
             names route to their dedicated helper, other registered names to the
             generic custom-flow runner.
-        improve_effort: Improve audit effort tier (quick, standard, or deep).
+        improve_effort: Improve audit *breadth* tier (quick, standard, or deep),
+            resolved to an ``EFFORT_TIERS`` entry that selects categories, audit
+            fanout concurrency, confidence filtering, and finding caps. It does
+            not select the model or reasoning effort — those are per-phase
+            (``PHASE_DEFAULT_MODELS`` / ``PHASE_DEFAULT_EFFORT``).
         improve_focus: Optional improve focus mode.
         improve_scope: Optional service name/root/glob to audit.
-        improve_plan_description: Reserved improve plan description.
-        improve_review_plan: Reserved improve plan-review path.
+        improve_plan_description: One-line request for ``daydream improve plan``;
+            switches the flow to single-request investigation mode.
+        improve_review_plan: Path under ``TARGET/daydream_plans`` for
+            ``daydream improve review-plan``; switches the flow to plan critique.
 
     """
 
@@ -418,8 +425,8 @@ def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
     passes nothing).
 
     Like :func:`_resolved_model`, the default-table lookup keys off the backend
-    kind resolved by :func:`_resolved_backend_name`. Only the Codex backend
-    consumes the resolved value today, and only ``codex`` has a default table.
+    kind resolved by :func:`_resolved_backend_name`. All three backends consume
+    the resolved value through their own native knob.
     """
     file_config = _file_config_or_empty(config)
     backend_name = _resolved_backend_name(config, phase)
@@ -453,7 +460,8 @@ def _resolve_backend(
     - Reasoning effort via :func:`_resolved_reasoning_effort`
       (``config.reasoning_effort`` → file-config phase → file-config global →
       ``PHASE_DEFAULT_EFFORT`` → ``None``, where ``None`` falls through to the
-      backend's own default). Only Codex applies the resolved value.
+      backend's own default). All three backends apply the resolved value
+      through their native knob.
 
     Args:
         config: Run configuration with backend/model/reasoning-effort and
@@ -474,11 +482,15 @@ def _resolve_backend(
     resolved_effort = _resolved_reasoning_effort(config, phase)
 
     def _make() -> Backend:
+        # ``cwd`` stays pi-only: it exists solely to resolve Pi's configured
+        # default model, and widening it churns every patched create_backend.
         if backend_name == "pi":
-            return create_backend(backend_name, model=resolved_model, cwd=cwd)
-        if backend_name == "codex":
-            return create_backend(backend_name, model=resolved_model, reasoning_effort=resolved_effort)
-        return create_backend(backend_name, model=resolved_model)
+            return create_backend(
+                backend_name, model=resolved_model, cwd=cwd, reasoning_effort=resolved_effort
+            )
+        return create_backend(
+            backend_name, model=resolved_model, reasoning_effort=resolved_effort
+        )
 
     if cache is None:
         return _make()
@@ -1058,6 +1070,7 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
             registry=get_registry(),
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            phase_budgets=dict(IMPROVE_PHASE_BUDGETS),
         )
         ctx.data["improve_dir"] = directory
         ctx.data["effort_tier"] = tier

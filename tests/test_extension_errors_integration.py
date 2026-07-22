@@ -72,7 +72,7 @@ async def test_broken_flow_ref_fails_before_any_agent(
         "    r.insert_after('deep', anchor='intent', step='ghost_phase')\n"
     )
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
@@ -93,7 +93,7 @@ async def test_version_mismatch_exits_1_naming_versions(
     # 99 is above the ceiling.
     ext_dir.write_module("DAYDREAM_EXT_API = 99\ndef register(r): ...\n")
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 

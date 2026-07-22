@@ -273,6 +273,18 @@ class Backend(Protocol):
     request verbosity-suppressing fix-phase prompts (set True for pi/GLM, which
     produces verbose reasoning). When absent, the caller falls back to False via
     ``getattr(backend, "concise_fix_prompts", False)``.
+
+    Optional extension: backends may expose ``reasoning_effort``, the per-phase
+    reasoning level resolved by ``daydream.runner._resolved_reasoning_effort``
+    and applied through the driver's native knob (Claude
+    ``ClaudeAgentOptions.effort``, Codex ``-c model_reasoning_effort=``, Pi
+    ``--thinking``). All three shipped backends set it; it stays off the
+    protocol because each narrows it to its own driver's literal vocabulary.
+    Read it via ``getattr(backend, "reasoning_effort", None)``. It is set at
+    construction rather than per ``execute`` call because a backend instance is
+    already cached per resolved ``(kind, model, reasoning_effort)`` triple, so
+    one instance serves exactly one effort level. ``None`` means no source
+    supplied one and the driver applies its own ambient default.
     """
 
     model: str
@@ -340,9 +352,11 @@ def create_backend(
             defaults here. Pi receives ``None`` unchanged so its own configured
             default can win before Pi's GLM fallback is selected.
         cwd: Target workspace used to resolve Pi's configured default model.
-        reasoning_effort: Optional reasoning-effort override (e.g. "low",
-            "medium", "high"). Only Codex applies this today (forwarded as
-            ``-c model_reasoning_effort=...``); ignored for claude/pi.
+        reasoning_effort: Optional reasoning-effort override (one of
+            ``daydream.config.REASONING_EFFORT_LEVELS``). Every backend applies
+            it through its own native knob: Claude via
+            ``ClaudeAgentOptions.effort``, Codex via
+            ``-c model_reasoning_effort=...``, Pi via ``--thinking``.
 
     Returns:
         A Backend instance whose ``.model`` attribute is a non-empty string.
@@ -354,13 +368,13 @@ def create_backend(
 
     if name == "claude":
         from daydream.backends.claude import ClaudeBackend
-        return ClaudeBackend(model=model or DEFAULT_CLAUDE_MODEL)
+        return ClaudeBackend(model=model or DEFAULT_CLAUDE_MODEL, reasoning_effort=reasoning_effort)
     if name == "codex":
         from daydream.backends.codex import CodexBackend
         return CodexBackend(model=model or DEFAULT_CODEX_MODEL, reasoning_effort=reasoning_effort)
     if name == "pi":
         from daydream.backends.pi import PiBackend
-        return PiBackend(model=model, cwd=cwd)
+        return PiBackend(model=model, cwd=cwd, reasoning_effort=reasoning_effort)
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', or 'pi'.")
 
 

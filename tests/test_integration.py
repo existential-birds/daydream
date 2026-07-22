@@ -69,7 +69,7 @@ class MockBackendWithEvents:
 def mock_backend(monkeypatch):
     """Patch create_backend to return the shared phase-dispatch fake."""
     backend = PhaseDispatchBackend(parse_results=[[_FULL_FLOW_ISSUE]], emit_cost=True)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     return backend
 
 
@@ -534,7 +534,7 @@ async def test_run_comment_full_flow(tmp_path, monkeypatch):
         def format_skill_invocation(self, skill_key, args=""):
             return f"/{skill_key}"
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: TrustMockBackend())
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: TrustMockBackend())
 
     # Mock UI functions
     monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
@@ -608,7 +608,7 @@ async def test_run_comment_does_not_prompt_for_skill(tmp_path, monkeypatch):
         async def cancel(self): pass
         def format_skill_invocation(self, k, a=""): return f"/{k}"
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: MinimalBackend())
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: MinimalBackend())
     monkeypatch.setattr("daydream.phases.print_phase_hero", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.phases.print_info", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.phases.print_success", lambda *a, **kw: None)
@@ -673,7 +673,7 @@ async def test_run_populates_exploration_context(monkeypatch, target_project: Pa
     monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", fake_phase_commit_push)
     monkeypatch.setattr(
         "daydream.runner.create_backend",
-        lambda name, model=None: _AgentsRecordingMockBackend(),
+        lambda name, model=None, **kwargs: _AgentsRecordingMockBackend(),
     )
 
     config = RunConfig(

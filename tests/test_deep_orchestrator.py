@@ -641,7 +641,7 @@ def _install_stub_backend(
             (exploration disabled) that the rest of the suite relies on.
     """
     stub = _StubBackend(target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: stub)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     if pin_skill_availability:
         # None -> orchestrator falls back to set(SKILL_MAP.keys()).
         monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
@@ -676,7 +676,7 @@ def _install_model_capturing_stubs(
     """
     shared_calls: list[dict[str, Any]] = []
 
-    def factory(name: str, model: str | None = None) -> _StubBackend:
+    def factory(name: str, model: str | None = None, **kwargs: object) -> _StubBackend:
         stub = _StubBackend(target, model=model or "mock-model", shared_calls=shared_calls)
         stub.parse_severity = parse_severity
         stub.merge_echo_records = merge_echo_records
@@ -2738,7 +2738,7 @@ def test_intent_phase_resolves_to_sonnet_default(
         def __init__(self, model: str | None) -> None:
             self.model = model
 
-    def fake_create(name: str, model: str | None = None) -> _B:  # noqa: ARG001
+    def fake_create(name: str, model: str | None = None, **kwargs: object) -> _B:  # noqa: ARG001
         captured["model"] = model
         return _B(model)
 

@@ -68,8 +68,8 @@ async def test_improve_recon_budget_exhaustion_is_diagnostic_and_nonfatal(
         lambda *args, **kwargs: backend,
     )
     monkeypatch.setattr(
-        "daydream.runner.DEFAULT_TOOL_CALL_BUDGET",
-        2,
+        "daydream.runner.IMPROVE_PHASE_BUDGETS",
+        {"recon": (60.0, 2)},
         raising=False,
     )
 
