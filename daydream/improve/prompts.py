@@ -776,6 +776,13 @@ verification. Do not invent a command or treat an unverified suggestion as
 authorized. Commands in this plan are implementation guidance; this workflow
 does not execute them.
 
+Never write `name: value` or `name=value` syntax for a secret-named key
+(token, password, secret, api key), even in prose or examples. Name the
+credential and where its value comes from; when header or assignment syntax
+is unavoidable, use an angle-bracket placeholder such as
+`X-Internal-Service-Secret: <value-from-env>`. A string that pairs a
+secret-named key with a literal-looking value is blocked.
+
 Do not return a `markdown` field. The host owns deterministic Markdown
 rendering, plan numbering, planned-at stamps, finding metadata, and index
 status. A legacy Markdown result or incomplete typed result is blocked."""
@@ -934,6 +941,88 @@ _STABLE_PLAN_ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _STABLE_JSON_POINTER = re.compile(
     r"^/(?:[A-Za-z0-9_.~-]+(?:/[A-Za-z0-9_.~-]+)*)?$"
 )
+_STABLE_ERROR_DETAIL = re.compile(r"^[A-Za-z0-9_.;=-]{1,80}$")
+
+_REPAIR_HINTS: dict[str, str] = {
+    "SCOPE_PATH_CONFLICT": (
+        "The path at this pointer also appears in another scope list. Every "
+        "path must appear in exactly one of existing_paths, new_paths, or "
+        "out_of_scope_paths — keep it in the single list that matches how "
+        "the plan treats it."
+    ),
+    "SECRET_CONTENT_REDACTED": (
+        "The string at this pointer writes `name: value` or `name=value` "
+        "syntax for a secret-named key (token, password, secret, api key). "
+        "Name the credential and where its value comes from instead; if "
+        "syntax is unavoidable, use an angle-bracket placeholder such as "
+        "`X-Internal-Service-Secret: <value-from-env>`."
+    ),
+    "RECON_COMMAND_MISMATCH": (
+        "A command with provenance.kind `recon` must repeat the selected "
+        "recon record exactly: purpose, command, working_directory, "
+        "expected_success, applicability, and evidence.source_path."
+    ),
+    "PLANNER_COMMAND_PREFIX_MISMATCH": (
+        "A planner-derived command may only append focused arguments to the "
+        "selected recon command's executable argv prefix and must keep that "
+        "record's working_directory."
+    ),
+    "EXISTING_PATH_EXCERPT_MISSING": (
+        "Every path in scope.existing_paths needs at least one "
+        "current_state_excerpts entry. Add an excerpt for the path at this "
+        "pointer or move the path out of existing_paths."
+    ),
+    "COMMAND_PATH_OUT_OF_SCOPE": (
+        "A planner-derived command's provenance.source_path must be one of "
+        "the plan's existing_paths or new_paths."
+    ),
+    "COMMAND_SCOPE_MISMATCH": (
+        "Every applicability scope path must cover at least one in-scope "
+        "plan path (existing_paths or new_paths)."
+    ),
+    "STEP_PATH_OUT_OF_SCOPE": (
+        "Every step change path must be declared in scope.existing_paths or "
+        "scope.new_paths."
+    ),
+    "CREATE_PATH_NOT_NEW": (
+        "A create operation's path must be listed in scope.new_paths."
+    ),
+    "CHANGE_PATH_NOT_EXISTING": (
+        "A modify/delete/move/rename operation's path must be listed in "
+        "scope.existing_paths."
+    ),
+    "TEST_PATH_OUT_OF_SCOPE": (
+        "Every test case's test_file must be an in-scope path declared in "
+        "scope.existing_paths or scope.new_paths."
+    ),
+    "EXCERPT_ANCHOR_INVALID": (
+        "The line anchor at this pointer does not exist in the file at the "
+        "planned-at commit. Re-read the file and use exact 1-based start and "
+        "end lines."
+    ),
+}
+
+
+def _length_hint(detail: str) -> str | None:
+    parsed = dict(
+        part.split("=", 1) for part in detail.split(";") if "=" in part
+    )
+    for keyword, phrasing in (
+        ("maxLength", "at most {limit} characters (it has {actual})"),
+        ("minLength", "at least {limit} characters (it has {actual})"),
+        ("maxItems", "at most {limit} items (it has {actual})"),
+        ("minItems", "at least {limit} items (it has {actual})"),
+    ):
+        if keyword in parsed:
+            return (
+                "Rewrite the value at this pointer to "
+                + phrasing.format(
+                    limit=parsed[keyword],
+                    actual=parsed.get("actual", "?"),
+                )
+                + "; keep every other field unchanged in meaning."
+            )
+    return None
 
 
 def build_plan_writer_repair_prompt(
@@ -943,7 +1032,8 @@ def build_plan_writer_repair_prompt(
     """Request one complete replacement using sanitized host feedback only."""
     feedback: list[dict[str, str]] = []
     for raw_error in validation_errors:
-        code, separator, pointer = raw_error.partition("@")
+        code, separator, remainder = raw_error.partition("@")
+        pointer, detail_separator, detail = remainder.partition("#")
         if not _STABLE_PLAN_ERROR_CODE.fullmatch(code):
             code = "PLAN_VALIDATION_FAILED"
         item = {"code": code}
@@ -951,6 +1041,12 @@ def build_plan_writer_repair_prompt(
             item["pointer"] = pointer
         elif code == "NO_STRUCTURED_OBJECT":
             item["pointer"] = "/"
+        if detail_separator and _STABLE_ERROR_DETAIL.fullmatch(detail):
+            item["detail"] = detail
+            if hint := _length_hint(detail):
+                item["hint"] = hint
+        if "hint" not in item and (hint := _REPAIR_HINTS.get(code)):
+            item["hint"] = hint
         feedback.append(item)
     return (
         f"{original_prompt}\n\n"

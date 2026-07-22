@@ -2066,6 +2066,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                 continue
             reasons = ", ".join(
                 f"{error['code']} at {error['pointer']}"
+                + (f" ({error['detail']})" if error.get("detail") else "")
                 for error in diagnostic["errors"]
             )
             print_warning(
@@ -2201,6 +2202,7 @@ def _blocked_plan_attempt_lines(
         finding = diagnostic["finding"]
         errors = ", ".join(
             f"`{error['code']}` at `{error['pointer']}`"
+            + (f" ({error['detail']})" if error.get("detail") else "")
             for error in diagnostic["errors"]
         )
         lines.append(

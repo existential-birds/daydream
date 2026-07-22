@@ -385,6 +385,9 @@ class _ImproveStubBackend:
         self.abort_plan_on_tool_budget = False
         self.plan_dependency_slug: str | None = None
         self.plan_excerpt_override: str | None = None
+        self.plan_file_role_override: str | None = None
+        self.plan_problem_override: str | None = None
+        self.plan_scope_conflict_once = False
         self.plan_review_result = "typed"
 
     async def execute(
@@ -709,6 +712,21 @@ class _ImproveStubBackend:
             if self.plan_excerpt_override is not None:
                 plan["current_state_excerpts"][0]["verbatim_excerpt"] = (
                     self.plan_excerpt_override
+                )
+            if self.plan_file_role_override is not None:
+                plan["current_state_excerpts"][0]["file_role"] = (
+                    self.plan_file_role_override
+                )
+            if self.plan_problem_override is not None:
+                plan["why_this_matters"]["problem"] = self.plan_problem_override
+            if self.plan_scope_conflict_once and self.plan_writer_calls == 1:
+                plan["scope"]["out_of_scope_paths"].append(
+                    {
+                        "path": "apps/billing/api.py",
+                        "reason": (
+                            "The billing implementation file must not change further."
+                        ),
+                    }
                 )
             if self.all_recon_commands_invalid:
                 plan = _without_verification_commands(plan)
@@ -2276,6 +2294,182 @@ async def test_plan_subverb_blocks_after_one_unsuccessful_repair(
             "[0-9][0-9][0-9]-*.md"
         )
     )
+
+
+@pytest.mark.anyio
+async def test_plan_subverb_clamps_over_length_prose_without_repair(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    over_length_role = "Billing role " + "x" * 293
+    assert len(over_length_role) == 306
+    stub.plan_file_role_override = over_length_role
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plan_calls = [
+        call for call in stub.calls if call["marker"] == "plan-writer"
+    ]
+    assert code == 0
+    assert len(plan_calls) == 1
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert len(plans) == 1
+    plan_text = plans[0].read_text(encoding="utf-8")
+    assert over_length_role[:299] + "…" in plan_text
+    assert over_length_role not in plan_text
+    diagnostics = json.loads(
+        _dd(
+            improve_monorepo_target,
+            "plan-write-diagnostics.json",
+        ).read_text(encoding="utf-8")
+    )
+    assert [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
+    ] == ["success"]
+
+
+@pytest.mark.anyio
+async def test_plan_subverb_accepts_placeholder_secret_syntax(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_problem_override = (
+        "Callers must send X-Internal-Service-Secret: <internalSecret> in "
+        "production and X-Internal-Service-Secret: test-secret in tests."
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plan_calls = [
+        call for call in stub.calls if call["marker"] == "plan-writer"
+    ]
+    assert code == 0
+    assert len(plan_calls) == 1
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert len(plans) == 1
+    plan_text = plans[0].read_text(encoding="utf-8")
+    assert "X-Internal-Service-Secret: <internalSecret>" in plan_text
+    assert "X-Internal-Service-Secret: test-secret" in plan_text
+
+
+@pytest.mark.anyio
+async def test_plan_subverb_blocks_real_secret_with_pointer_and_never_leaks(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_problem_override = (
+        "Document the rotation runbook including secret: hunter2realvalue "
+        "before the credential expires."
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plan_calls = [
+        call for call in stub.calls if call["marker"] == "plan-writer"
+    ]
+    assert code == 1
+    assert len(plan_calls) == 2
+    repair_prompt = plan_calls[1]["prompt"]
+    assert "SECRET_CONTENT_REDACTED" in repair_prompt
+    assert '"pointer": "/why_this_matters/problem"' in repair_prompt
+    assert "angle-bracket placeholder" in repair_prompt
+    assert "hunter2realvalue" not in repair_prompt
+    diagnostics = json.loads(
+        _dd(
+            improve_monorepo_target,
+            "plan-write-diagnostics.json",
+        ).read_text(encoding="utf-8")
+    )
+    assert len(diagnostics["attempts"]) == 1
+    assert diagnostics["attempts"][0]["disposition"] == "blocked"
+    assert diagnostics["attempts"][0]["errors"] == [
+        {
+            "code": "SECRET_CONTENT_REDACTED",
+            "pointer": "/why_this_matters/problem",
+        }
+    ]
+    assert not list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert all(
+        "hunter2realvalue" not in observable
+        for observable in _improve_observable_texts(improve_monorepo_target)
+    )
+
+
+@pytest.mark.anyio
+async def test_plan_subverb_repairs_scope_path_conflict_round_trip(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_scope_conflict_once = True
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plan_calls = [
+        call for call in stub.calls if call["marker"] == "plan-writer"
+    ]
+    assert code == 0
+    assert len(plan_calls) == 2
+    repair_prompt = plan_calls[1]["prompt"]
+    assert "SCOPE_PATH_CONFLICT" in repair_prompt
+    assert '"pointer": "/scope/out_of_scope_paths/1/path"' in repair_prompt
+    assert (
+        "exactly one of existing_paths, new_paths, or out_of_scope_paths"
+        in repair_prompt
+    )
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert len(plans) == 1
 
 
 @pytest.mark.anyio

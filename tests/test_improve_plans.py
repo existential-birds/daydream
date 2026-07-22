@@ -17,6 +17,7 @@ from daydream.improve.plans import (
     validate_plan_result,
     write_plans,
 )
+from daydream.improve.prompts import build_plan_writer_repair_prompt
 
 
 @pytest.mark.parametrize(
@@ -1701,7 +1702,11 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(
         {"code": "NO_STRUCTURED_OBJECT", "pointer": "/"}
     ]
     assert diagnostics["fp-schema"]["validation_errors"] == [
-        {"code": "SCHEMA_INVALID", "pointer": "/why_this_matters/problem"}
+        {
+            "code": "SCHEMA_INVALID",
+            "pointer": "/why_this_matters/problem",
+            "detail": "minLength=30;actual=0",
+        }
     ]
     assert diagnostics["fp-dependency"]["validation_errors"] == [
         {"code": "DEPENDENCY_UNKNOWN", "pointer": "/dependencies"}
@@ -1748,3 +1753,185 @@ def test_record_rejections_appends_and_loads_by_fingerprint(
         "schema_version": 1,
         "rejected": [first, second],
     }
+
+
+def test_overlong_prose_fields_are_clamped_in_place_and_pass(
+    tmp_path: Path,
+) -> None:
+    repo, sha = _repo(tmp_path)
+    plan = _typed_plan()
+    plan["current_state_excerpts"][0]["file_role"] = "R" * 306
+    plan["scope"]["existing_paths"][0]["role"] = "S" * 306
+
+    errors = validate_plan_result(
+        plan,
+        repo=repo,
+        planned_at=sha,
+        finding=_finding(),
+        recon_commands=_recon_commands(),
+    )
+
+    assert errors == ()
+    file_role = plan["current_state_excerpts"][0]["file_role"]
+    assert len(file_role) == 300
+    assert file_role == "R" * 299 + "…"
+    role = plan["scope"]["existing_paths"][0]["role"]
+    assert len(role) == 300
+    assert role == "S" * 299 + "…"
+
+
+def test_unclamped_overlong_title_fails_with_max_length_detail(
+    tmp_path: Path,
+) -> None:
+    repo, sha = _repo(tmp_path)
+    plan = _typed_plan()
+    plan["title"] = "T" * 170
+
+    errors = validate_plan_result(
+        plan,
+        repo=repo,
+        planned_at=sha,
+        finding=_finding(),
+        recon_commands=_recon_commands(),
+    )
+
+    assert errors == ("SCHEMA_INVALID@/title#maxLength=160;actual=170",)
+
+
+def test_min_length_violation_token_carries_detail_segment(
+    tmp_path: Path,
+) -> None:
+    repo, sha = _repo(tmp_path)
+    plan = _typed_plan()
+    plan["why_this_matters"]["problem"] = ""
+
+    errors = validate_plan_result(
+        plan,
+        repo=repo,
+        planned_at=sha,
+        finding=_finding(),
+        recon_commands=_recon_commands(),
+    )
+
+    assert errors == (
+        "SCHEMA_INVALID@/why_this_matters/problem#minLength=30;actual=0",
+    )
+
+
+def test_scope_path_conflict_reports_indexed_pointer(tmp_path: Path) -> None:
+    repo, sha = _repo(tmp_path)
+    plan = _typed_plan()
+    plan["scope"]["out_of_scope_paths"].append(
+        {
+            "path": "apps/catalog/api.py",
+            "reason": "This path is also declared as an existing in-scope path.",
+        }
+    )
+
+    errors = validate_plan_result(
+        plan,
+        repo=repo,
+        planned_at=sha,
+        finding=_finding(),
+        recon_commands=_recon_commands(),
+    )
+
+    assert errors == ("SCOPE_PATH_CONFLICT@/scope/out_of_scope_paths/1/path",)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Callers must send X-Internal-Service-Secret: <internalSecret> on every request.",
+        "Callers must send X-Internal-Service-Secret: ${INTERNAL_SECRET} on every request.",
+        "The deploy script reads secret: $SECRET from the environment at startup.",
+        "The fixture configures secret: test-secret for the local integration suite.",
+    ],
+)
+def test_secret_placeholder_prose_passes_validation(
+    tmp_path: Path,
+    prose: str,
+) -> None:
+    repo, sha = _repo(tmp_path)
+    plan = _typed_plan()
+    plan["why_this_matters"]["problem"] = prose
+
+    errors = validate_plan_result(
+        plan,
+        repo=repo,
+        planned_at=sha,
+        finding=_finding(),
+        recon_commands=_recon_commands(),
+    )
+
+    assert errors == ()
+
+
+def test_secret_literal_value_fails_with_pointer_and_no_value_leak(
+    tmp_path: Path,
+) -> None:
+    repo, sha = _repo(tmp_path)
+    plan = _typed_plan()
+    plan["why_this_matters"]["problem"] = (
+        "The bootstrap script hardcodes secret: hunter2realvalue in cleartext."
+    )
+
+    errors = validate_plan_result(
+        plan,
+        repo=repo,
+        planned_at=sha,
+        finding=_finding(),
+        recon_commands=_recon_commands(),
+    )
+
+    assert errors == ("SECRET_CONTENT_REDACTED@/why_this_matters/problem",)
+    assert all("hunter2realvalue" not in error for error in errors)
+
+
+def test_repair_prompt_renders_length_detail_and_hint() -> None:
+    prompt = build_plan_writer_repair_prompt(
+        "original writer prompt",
+        [
+            "SCHEMA_INVALID@/current_state_excerpts/1/file_role"
+            "#maxLength=300;actual=306"
+        ],
+    )
+
+    assert "/current_state_excerpts/1/file_role" in prompt
+    assert "maxLength=300;actual=306" in prompt
+    assert "at most 300 characters (it has 306)" in prompt
+
+
+def test_repair_prompt_renders_scope_conflict_hint() -> None:
+    prompt = build_plan_writer_repair_prompt(
+        "original writer prompt",
+        ["SCOPE_PATH_CONFLICT@/scope/out_of_scope_paths/1/path"],
+    )
+
+    assert "/scope/out_of_scope_paths/1/path" in prompt
+    assert (
+        "exactly one of existing_paths, new_paths, or out_of_scope_paths"
+        in prompt
+    )
+
+
+def test_repair_prompt_renders_secret_placeholder_hint() -> None:
+    prompt = build_plan_writer_repair_prompt(
+        "original writer prompt",
+        ["SECRET_CONTENT_REDACTED@/steps/0/changes/0/instruction"],
+    )
+
+    assert "/steps/0/changes/0/instruction" in prompt
+    assert "angle-bracket placeholder" in prompt
+    assert "X-Internal-Service-Secret: <value-from-env>" in prompt
+
+
+def test_repair_prompt_drops_malformed_detail_segment() -> None:
+    prompt = build_plan_writer_repair_prompt(
+        "original writer prompt",
+        ["SCHEMA_INVALID@/x#bad,stuff!"],
+    )
+
+    assert "/x" in prompt
+    assert "bad,stuff!" not in prompt
+    assert '"detail"' not in prompt

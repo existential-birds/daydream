@@ -40,6 +40,7 @@ _FINGERPRINT_MARKER = re.compile(
     r"<!--\s*fingerprint:([^\s>]+)\s*-->"
 )
 _NUMBERED_PLAN = re.compile(r"^(\d{3})-[a-z0-9-]+\.md$")
+_SAFE_ERROR_DETAIL = re.compile(r"^[A-Za-z0-9_.;=-]{1,80}$")
 _HOST_BLOCKED_STATUS = re.compile(
     r"^BLOCKED \(PLAN_(?:WRITER|VALIDATION)_FAILED: [^()\r\n]+\)$"
 )
@@ -153,23 +154,135 @@ def resolve_review_plan_path(repo: Path, requested: str) -> Path:
 
 
 _SECRET_VALUE = re.compile(
-    r"(?i)\b(?:token|password|secret|api[_-]?key)\b\s*[:=]\s*[^\s]+"
+    r"(?i)\b(?:token|password|secret|api[_-]?key)\b\s*[:=]\s*([^\s]+)"
 )
+# Structural placeholders are not secret values: angle-bracket slots,
+# shell/env references, and obvious placeholder words. Anything else after a
+# secret-named key still fails closed.
+_SECRET_PLACEHOLDER = re.compile(
+    r"(?i)^(?:"
+    r"<[^<>]{1,80}>"
+    r"|\$\{[^{}]{1,80}\}"
+    r"|\$[A-Za-z_][A-Za-z0-9_]*"
+    r"|(?:test|example|changeme|dummy|placeholder|redacted|sample|fake|stub"
+    r"|mock|your)[A-Za-z0-9_.\-]*"
+    r"|x{3,}|\*{3,}|\.{3,}|…"
+    r")$"
+)
+_SECRET_VALUE_TRIM = "`'\".,;:()*"
 _SAFE_METADATA_LABEL = re.compile(r"^[A-Za-z0-9._:/-]{1,160}$")
 
 
-def _all_strings(value: Any) -> list[str]:
+def _contains_secret_value(text: str) -> bool:
+    for match in _SECRET_VALUE.finditer(text):
+        candidate = match.group(1).strip(_SECRET_VALUE_TRIM)
+        if candidate and not _SECRET_PLACEHOLDER.fullmatch(candidate):
+            return True
+    return False
+
+
+def _string_pointers(value: Any, pointer: str = "") -> list[tuple[str, str]]:
     if isinstance(value, str):
-        return [value]
+        return [(pointer or "/", value)]
     if isinstance(value, dict):
         return [
-            text
-            for child in value.values()
-            for text in _all_strings(child)
+            item
+            for key, child in value.items()
+            for item in _string_pointers(child, f"{pointer}/{key}")
         ]
     if isinstance(value, list):
-        return [text for child in value for text in _all_strings(child)]
+        return [
+            item
+            for index, child in enumerate(value)
+            for item in _string_pointers(child, f"{pointer}/{index}")
+        ]
     return []
+
+
+# Render-only prose fields, clamped in place to their schema maxLength at the
+# authoritative write boundary. Identifiers, enums, paths, symbols, and
+# literal command material are never clamped: the host compares those against
+# repository or recon state, so truncation would corrupt that comparison.
+_PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
+    ("dependencies", "*", "reason"),
+    ("why_this_matters", "problem"),
+    ("why_this_matters", "concrete_cost"),
+    ("why_this_matters", "intended_outcome"),
+    ("current_state_excerpts", "*", "file_role"),
+    ("commands_you_will_need", "*", "purpose"),
+    ("scope", "existing_paths", "*", "role"),
+    ("scope", "new_paths", "*", "role"),
+    ("scope", "out_of_scope_paths", "*", "reason"),
+    ("scope", "out_of_scope_behaviors", "*", "behavior"),
+    ("scope", "out_of_scope_behaviors", "*", "reason"),
+    ("git_workflow", "branch_basis"),
+    ("git_workflow", "commit_boundaries"),
+    ("git_workflow", "commit_message_example"),
+    ("steps", "*", "title"),
+    ("steps", "*", "changes", "*", "instruction"),
+    ("steps", "*", "changes", "*", "target_state"),
+    ("steps", "*", "verification", "purpose"),
+    ("test_plan", "exemplars", "*", "pattern_to_copy"),
+    ("test_plan", "cases", "*", "name"),
+    ("test_plan", "cases", "*", "setup"),
+    ("test_plan", "cases", "*", "action"),
+    ("test_plan", "cases", "*", "assertions", "*"),
+    ("test_plan", "cases", "*", "verification", "purpose"),
+    ("done_criteria", "*", "description"),
+    ("done_criteria", "*", "verification", "purpose"),
+    ("stop_conditions", "*", "condition"),
+    ("stop_conditions", "*", "evidence_to_report"),
+    ("maintenance_notes", "future_interactions", "*", "area"),
+    ("maintenance_notes", "future_interactions", "*", "note"),
+    ("maintenance_notes", "review_risks", "*", "risk"),
+    ("maintenance_notes", "review_risks", "*", "review_check"),
+    ("maintenance_notes", "deferred_items", "*", "item"),
+    ("maintenance_notes", "deferred_items", "*", "reason"),
+    ("maintenance_notes", "deferred_items", "*", "revisit_trigger"),
+)
+
+
+def _schema_max_length(pattern: tuple[str, ...]) -> int:
+    node: dict[str, Any] = PLAN_WRITER_SCHEMA
+    for segment in pattern:
+        node = node["items"] if segment == "*" else node["properties"][segment]
+    return int(node["maxLength"])
+
+
+_PROSE_CLAMP_LIMITS: tuple[tuple[tuple[str, ...], int], ...] = tuple(
+    (pattern, _schema_max_length(pattern)) for pattern in _PROSE_FIELD_PATTERNS
+)
+
+
+def _clamp_string(value: Any, limit: int) -> Any:
+    if isinstance(value, str) and len(value) > limit:
+        return value[: limit - 1] + "…"
+    return value
+
+
+def _clamp_node(node: Any, pattern: tuple[str, ...], limit: int) -> None:
+    head, rest = pattern[0], pattern[1:]
+    if head == "*":
+        if not isinstance(node, list):
+            return
+        for index, child in enumerate(node):
+            if rest:
+                _clamp_node(child, rest, limit)
+            else:
+                node[index] = _clamp_string(child, limit)
+        return
+    if not isinstance(node, dict):
+        return
+    if rest:
+        _clamp_node(node.get(head), rest, limit)
+    elif head in node:
+        node[head] = _clamp_string(node[head], limit)
+
+
+def _clamp_prose_fields(result: dict[str, Any]) -> None:
+    """Truncate over-limit render-only prose to its schema maxLength."""
+    for pattern, limit in _PROSE_CLAMP_LIMITS:
+        _clamp_node(result, pattern, limit)
 
 
 def _safe_metadata_label(value: Any, *, fallback: str) -> str:
@@ -231,7 +344,8 @@ def _received_metadata(value: Any) -> dict[str, Any]:
 
 
 def _validation_error(code_with_pointer: str) -> dict[str, str]:
-    code, separator, embedded_pointer = code_with_pointer.partition("@")
+    code, separator, remainder = code_with_pointer.partition("@")
+    embedded_pointer, _, detail = remainder.partition("#")
     if separator and embedded_pointer.startswith("/"):
         pointer = embedded_pointer
     elif code.startswith("DEPENDENCY_"):
@@ -260,6 +374,8 @@ def _validation_error(code_with_pointer: str) -> dict[str, str]:
         pointer = "/scope"
     else:
         pointer = "/"
+    if detail and _SAFE_ERROR_DETAIL.fullmatch(detail):
+        return {"code": code, "pointer": pointer, "detail": detail}
     return {"code": code, "pointer": pointer}
 
 
@@ -589,6 +705,7 @@ def validate_plan_result(
         return ("LEGACY_MARKDOWN_OUTPUT",)
     if not isinstance(result, dict):
         return ("SCHEMA_INVALID@/",)
+    _clamp_prose_fields(result)
     schema_result = result
     raw_excerpts = result.get("current_state_excerpts")
     if isinstance(raw_excerpts, list):
@@ -619,7 +736,18 @@ def validate_plan_result(
             if missing:
                 pointer_parts.append(missing[0])
         pointer = "/" + "/".join(pointer_parts) if pointer_parts else "/"
-        return (f"SCHEMA_INVALID@{pointer}",)
+        detail = ""
+        if error.validator in {
+            "maxLength",
+            "minLength",
+            "maxItems",
+            "minItems",
+        } and isinstance(error.instance, (str, list)):
+            detail = (
+                f"#{error.validator}={error.validator_value}"
+                f";actual={len(error.instance)}"
+            )
+        return (f"SCHEMA_INVALID@{pointer}{detail}",)
 
     if any(
         _literal_command_error(
@@ -657,9 +785,9 @@ def validate_plan_result(
     ):
         return ("PATH_OUTSIDE_REPOSITORY",)
 
-    strings = _all_strings(result)
-    if any(_SECRET_VALUE.search(value) for value in strings):
-        return ("SECRET_CONTENT_REDACTED",)
+    for string_pointer, text in _string_pointers(result):
+        if _contains_secret_value(text):
+            return (f"SECRET_CONTENT_REDACTED@{string_pointer}",)
     commit = _git(repo, "cat-file", "-e", f"{planned_at}^{{commit}}")
     if commit.returncode != 0:
         return ("PLANNED_AT_INVALID",)
@@ -671,7 +799,6 @@ def validate_plan_result(
     existing = [item["path"] for item in scope["existing_paths"]]
     new = [item["path"] for item in scope["new_paths"]]
     excluded = [item["path"] for item in scope["out_of_scope_paths"]]
-    all_paths = [*existing, *new, *excluded]
     if not existing and not new:
         return ("EMPTY_SCOPE",)
     if any(
@@ -679,12 +806,29 @@ def validate_plan_result(
         for path in [*existing, *new]
     ) or any(not _valid_directory_scope(path) for path in excluded):
         return ("MALFORMED_PATH",)
-    if len(set(all_paths)) != len(all_paths):
-        return ("SCOPE_PATH_CONFLICT",)
-    if any(_read_host_file(repo, path) is None for path in existing):
-        return ("EXISTING_PATH_MISSING",)
-    if any((repo / path).exists() for path in new):
-        return ("NEW_PATH_ALREADY_EXISTS",)
+    seen_scope_paths: set[str] = set()
+    for list_name, entries in (
+        ("existing_paths", scope["existing_paths"]),
+        ("new_paths", scope["new_paths"]),
+        ("out_of_scope_paths", scope["out_of_scope_paths"]),
+    ):
+        for entry_index, entry in enumerate(entries):
+            if entry["path"] in seen_scope_paths:
+                return (
+                    "SCOPE_PATH_CONFLICT"
+                    f"@/scope/{list_name}/{entry_index}/path",
+                )
+            seen_scope_paths.add(entry["path"])
+    for index, path in enumerate(existing):
+        if _read_host_file(repo, path) is None:
+            return (
+                f"EXISTING_PATH_MISSING@/scope/existing_paths/{index}/path",
+            )
+    for index, path in enumerate(new):
+        if (repo / path).exists():
+            return (
+                f"NEW_PATH_ALREADY_EXISTS@/scope/new_paths/{index}/path",
+            )
     in_scope = set(existing + new)
     recon_by_id = (
         {command["id"]: command for command in recon_commands}
@@ -693,23 +837,32 @@ def validate_plan_result(
     )
 
     excerpt_paths: set[str] = set()
-    for excerpt in result["current_state_excerpts"]:
+    for index, excerpt in enumerate(result["current_state_excerpts"]):
         path = excerpt["path"]
         if not _valid_repository_file_path(path):
-            return ("MALFORMED_PATH",)
+            return (f"MALFORMED_PATH@/current_state_excerpts/{index}/path",)
         source = _read_host_file(repo, path)
         if source is None:
-            return ("EXCERPT_PATH_MISSING",)
+            return (
+                f"EXCERPT_PATH_MISSING@/current_state_excerpts/{index}/path",
+            )
         start = excerpt["line_anchor"]["start_line"]
         end = excerpt["line_anchor"]["end_line"]
         lines = source.splitlines()
         if end < start or end > len(lines):
-            return ("EXCERPT_ANCHOR_INVALID",)
+            return (
+                "EXCERPT_ANCHOR_INVALID"
+                f"@/current_state_excerpts/{index}/line_anchor",
+            )
         actual = "\n".join(lines[start - 1 : end])
         excerpt["verbatim_excerpt"] = actual
         excerpt_paths.add(path)
-    if not set(existing) <= excerpt_paths:
-        return ("EXISTING_PATH_EXCERPT_MISSING",)
+    for index, path in enumerate(existing):
+        if path not in excerpt_paths:
+            return (
+                "EXISTING_PATH_EXCERPT_MISSING"
+                f"@/scope/existing_paths/{index}/path",
+            )
 
     steps = result["steps"]
     if [step["order"] for step in steps] != list(range(1, len(steps) + 1)):
@@ -717,19 +870,21 @@ def validate_plan_result(
     step_ids = [step["id"] for step in steps]
     if len(set(step_ids)) != len(step_ids):
         return ("STEP_ID_DUPLICATE",)
-    for step in steps:
+    for step_index, step in enumerate(steps):
         changed_paths: set[str] = set()
-        for change in step["changes"]:
+        for change_index, change in enumerate(step["changes"]):
             path = change["path"]
             changed_paths.add(path)
+            change_pointer = f"/steps/{step_index}/changes/{change_index}/path"
             if path not in in_scope:
-                return ("STEP_PATH_OUT_OF_SCOPE",)
+                return (f"STEP_PATH_OUT_OF_SCOPE@{change_pointer}",)
             if change["operation"] == "create" and path not in new:
-                return ("CREATE_PATH_NOT_NEW",)
+                return (f"CREATE_PATH_NOT_NEW@{change_pointer}",)
             if change["operation"] != "create" and path not in existing:
-                return ("CHANGE_PATH_NOT_EXISTING",)
+                return (f"CHANGE_PATH_NOT_EXISTING@{change_pointer}",)
         verification = step["verification"]
         if verification is not None:
+            gate_pointer = f"/steps/{step_index}/verification"
             command_error = _command_error(
                 verification,
                 in_scope,
@@ -737,7 +892,7 @@ def validate_plan_result(
                 recon_by_id=recon_by_id,
             )
             if command_error:
-                return (command_error,)
+                return (f"{command_error}@{gate_pointer}",)
             scope = verification["applicability"]["scope"]
             scope_paths = scope.get("paths", [])
             if (
@@ -751,26 +906,34 @@ def validate_plan_result(
                     for changed_path in changed_paths
                 )
             ):
-                return ("STEP_GATE_SCOPE_MISMATCH",)
+                return (f"STEP_GATE_SCOPE_MISMATCH@{gate_pointer}",)
 
-    for command in result["commands_you_will_need"]:
+    for command_index, command in enumerate(result["commands_you_will_need"]):
         if command_error := _command_error(
             command,
             in_scope,
             repo=repo,
             recon_by_id=recon_by_id,
         ):
-            return (command_error,)
+            return (
+                f"{command_error}@/commands_you_will_need/{command_index}",
+            )
     test_symbols: set[str] = set()
-    for exemplar in result["test_plan"]["exemplars"]:
+    for index, exemplar in enumerate(result["test_plan"]["exemplars"]):
         source = _read_host_file(repo, exemplar["path"])
         if source is None or exemplar["symbol"] not in source:
-            return ("TEST_EXEMPLAR_INVALID",)
-    for case in result["test_plan"]["cases"]:
+            return (f"TEST_EXEMPLAR_INVALID@/test_plan/exemplars/{index}",)
+    for case_index, case in enumerate(result["test_plan"]["cases"]):
         if case["test_file"] not in in_scope:
-            return ("TEST_PATH_OUT_OF_SCOPE",)
+            return (
+                "TEST_PATH_OUT_OF_SCOPE"
+                f"@/test_plan/cases/{case_index}/test_file",
+            )
         if case["test_symbol"] in test_symbols:
-            return ("TEST_SYMBOL_DUPLICATE",)
+            return (
+                "TEST_SYMBOL_DUPLICATE"
+                f"@/test_plan/cases/{case_index}/test_symbol",
+            )
         test_symbols.add(case["test_symbol"])
         if case["verification"] is not None:
             if command_error := _command_error(
@@ -779,12 +942,15 @@ def validate_plan_result(
                 repo=repo,
                 recon_by_id=recon_by_id,
             ):
-                return (command_error,)
+                return (
+                    f"{command_error}"
+                    f"@/test_plan/cases/{case_index}/verification",
+                )
 
     done_kinds = {criterion["kind"] for criterion in result["done_criteria"]}
     if not {"behavior", "test-gate", "scope-integrity"} <= done_kinds:
         return ("DONE_CRITERIA_INCOMPLETE",)
-    for criterion in result["done_criteria"]:
+    for criterion_index, criterion in enumerate(result["done_criteria"]):
         if criterion["verification"] is not None:
             if command_error := _command_error(
                 criterion["verification"],
@@ -792,7 +958,10 @@ def validate_plan_result(
                 repo=repo,
                 recon_by_id=recon_by_id,
             ):
-                return (command_error,)
+                return (
+                    f"{command_error}"
+                    f"@/done_criteria/{criterion_index}/verification",
+                )
     stop_kinds = {condition["kind"] for condition in result["stop_conditions"]}
     if not {
         "drift",
@@ -801,18 +970,21 @@ def validate_plan_result(
         "false-assumption",
     } <= stop_kinds:
         return ("STOP_CONDITIONS_INCOMPLETE",)
-    if any(
-        path not in in_scope and path not in set(excluded)
-        for condition in result["stop_conditions"]
-        for path in condition["related_paths"]
-    ):
-        return ("STOP_PATH_UNKNOWN",)
-    if any(
-        step_id not in set(step_ids)
-        for condition in result["stop_conditions"]
-        for step_id in condition["related_step_ids"]
-    ):
-        return ("STOP_STEP_UNKNOWN",)
+    excluded_paths = set(excluded)
+    known_step_ids = set(step_ids)
+    for condition_index, condition in enumerate(result["stop_conditions"]):
+        for path_index, path in enumerate(condition["related_paths"]):
+            if path not in in_scope and path not in excluded_paths:
+                return (
+                    "STOP_PATH_UNKNOWN@/stop_conditions"
+                    f"/{condition_index}/related_paths/{path_index}",
+                )
+        for id_index, step_id in enumerate(condition["related_step_ids"]):
+            if step_id not in known_step_ids:
+                return (
+                    "STOP_STEP_UNKNOWN@/stop_conditions"
+                    f"/{condition_index}/related_step_ids/{id_index}",
+                )
 
     return ()
 
