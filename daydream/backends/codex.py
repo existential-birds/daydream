@@ -29,7 +29,12 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.backends._subprocess import cancel_processes, terminate_process
+from daydream.backends._subprocess import (
+    cancel_processes,
+    readline_with_idle_timeout,
+    stream_idle_timeout_s,
+    terminate_process,
+)
 from daydream.pricing import compute_cost_from_totals, load_user_prices, resolve_prices
 
 _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
@@ -105,6 +110,10 @@ class CodexBackend:
 
         Raises:
             CodexError: If the Codex turn fails.
+            StreamStalledError: If the ``codex`` subprocess emits nothing on
+                stdout for the idle window (see
+                :func:`daydream.backends._subprocess.stream_idle_timeout_s`).
+                Terminal — never retried.
             NotImplementedError: If ``agents`` is non-empty (Codex backend
                 does not support exploration subagents).
         """
@@ -199,10 +208,13 @@ class CodexBackend:
                 proc.stdin.write(prompt.encode())
                 proc.stdin.close()
 
+            idle_timeout_s = stream_idle_timeout_s()
             while True:
                 if proc.stdout is None:
                     break
-                line = await proc.stdout.readline()
+                line = await readline_with_idle_timeout(
+                    proc.stdout, cli="codex", timeout_s=idle_timeout_s
+                )
                 if not line:
                     break
 

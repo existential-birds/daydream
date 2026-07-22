@@ -48,7 +48,12 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.backends._subprocess import cancel_processes, terminate_process
+from daydream.backends._subprocess import (
+    cancel_processes,
+    readline_with_idle_timeout,
+    stream_idle_timeout_s,
+    terminate_process,
+)
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.json_utils import extract_json
 
@@ -545,6 +550,10 @@ class PiBackend:
 
         Raises:
             PiError: If a Pi turn ends with ``stopReason == "error"``.
+            StreamStalledError: If the ``pi`` subprocess emits nothing on stdout
+                for the idle window (see
+                :func:`daydream.backends._subprocess.stream_idle_timeout_s`).
+                Terminal — never retried.
             NotImplementedError: If ``agents`` is non-empty (Pi backend does not
                 support exploration subagents).
         """
@@ -667,11 +676,14 @@ class PiBackend:
             )
             self._processes.append(proc)
 
+            idle_timeout_s = stream_idle_timeout_s()
             is_first_line = True
             while True:
                 if proc.stdout is None:
                     break
-                line = await proc.stdout.readline()
+                line = await readline_with_idle_timeout(
+                    proc.stdout, cli="pi", timeout_s=idle_timeout_s
+                )
                 if not line:
                     break
 

@@ -187,6 +187,14 @@ and recorder are backend-agnostic.
 Every `run_agent()` call is bounded by wall-clock and tool-call limits, tiered by
 phase. Budget exhaustion emits a `TurnEndEvent` and marks the trajectory partial.
 The default wall budget is 1800s; the default tool-call budget varies by phase.
+The improve phases deliberately run with no wall budget.
+
+Independently, the pi and codex backends bound their stdout stream with an idle
+timeout (`DAYDREAM_STREAM_IDLE_TIMEOUT_S`, default 2700s): a subprocess that
+emits nothing for that long is killed and the turn fails with a terminal
+`StreamStalledError`. It fires on the absence of output, never on slow output,
+and sits above the wall budget so it can only bite where nothing else bounds the
+turn.
 
 ### Config and per-phase model overrides
 
@@ -310,6 +318,7 @@ name inventories, module shape, supervision seam, and bump policy — is
 | `DAYDREAM_GH_TIMEOUT_RETRIES` | Git ops | Override `gh` timeout retry count |
 | `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags (`PI_THINKING` loses to a resolved per-phase `reasoning_effort`) |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `DAYDREAM_PI_RETRY_BASE_DELAY_S` | Pi backend | Transient retry tuning |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex backends | Seconds of stdout silence before a stalled CLI subprocess is killed (default `2700`; `0` disables). Fires only on the absence of output — a slow but streaming CLI never trips it. A stall is terminal, never retried. |
 | `CLAUDE_CONFIG_DIR` | Claude backend | Override `~/.claude` directory |
 | `MARTIAN_API_KEY` / `MARTIAN_BASE_URL` / `MARTIAN_MODEL` | Benchmark | Judge endpoint and model (`martian` route) |
 | `ANTHROPIC_API_KEY` | Benchmark | Direct Anthropic judge (`anthropic-direct` route) |
