@@ -6,7 +6,8 @@ import hashlib
 import json
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -1692,119 +1693,270 @@ def _blocked_index_row(
     )
 
 
-def write_plans(
-    plans_dir: Path,
-    selections: Sequence[dict[str, Any]],
-    *,
-    planned_at: str,
-    commands: Sequence[dict[str, Any]] | None = None,
-    non_interactive_default: bool = False,
-    run_session_id: str | None = None,
-) -> dict[str, list[dict[str, Any]]]:
-    """Reconcile selected plan-writer results into files and the durable index."""
-    plans_dir.mkdir(parents=True, exist_ok=True)
-    index_path = plans_dir / "README.md"
-    index_text = (
-        index_path.read_text(encoding="utf-8") if index_path.is_file() else ""
-    )
-    rows = _existing_index_rows(index_text)
-    existing_dependency_notes, unstructured_dependency_notes = (
-        _existing_dependency_notes(index_text)
-    )
-    fingerprints = planned_fingerprints(plans_dir)
-    rejected = load_rejections(plans_dir)
-    next_number = _highest_plan_number(plans_dir, rows) + 1
-    result: dict[str, list[dict[str, Any]]] = {
-        "written": [],
-        "skipped": [],
-        "failed": [],
-        "diagnostics": [],
-    }
-    new_dependency_notes: dict[tuple[int, str], str] = {}
-    safe_selections = [
-        safe
-        for selection in selections
-        if isinstance(
-            (safe := _redact_model_value(selection)),
-            dict,
-        )
-    ]
-    candidate_slugs = {
-        selection.get("slug")
-        for selection in safe_selections
-        if isinstance(selection.get("slug"), str)
-    }
-    cycle_slugs = _dependency_cycle_slugs(safe_selections)
-    ordered_selections = _dependency_order(safe_selections)
-    available_slugs = {
-        match.group(1).split("-", 1)[1]
-        for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
-        if (match := re.match(r"^(\d{3}-.+)\.md$", path.name))
-    }
-    planned_at_errors: tuple[str, ...] = ()
-    commit = _git(plans_dir.parent, "cat-file", "-e", f"{planned_at}^{{commit}}")
-    if commit.returncode != 0:
-        planned_at_errors = ("PLANNED_AT_INVALID",)
-    else:
-        ancestor = _git(
-            plans_dir.parent, "merge-base", "--is-ancestor", planned_at, "HEAD"
-        )
-        if ancestor.returncode != 0:
-            planned_at_errors = ("PLANNED_AT_NOT_ANCESTOR",)
+@dataclass(frozen=True)
+class PlanReservation:
+    """A plan number claimed before any plan writer has produced output.
 
-    for selection in ordered_selections:
-        finding = selection.get("finding")
-        if not isinstance(finding, dict):
-            continue
-        fingerprint = str(finding.get("fingerprint") or "")
-        attempt = (
-            selection.get("_attempt")
-            if isinstance(selection.get("_attempt"), dict)
-            else None
+    Numbers are handed out in the order the caller reserves them, so the
+    filename a finding gets never depends on which writer finishes first.
+    ``number`` is ``None`` when the finding is already planned or rejected and
+    therefore consumes no number.
+    """
+
+    index: int
+    fingerprint: str
+    number: int | None
+
+
+@dataclass(frozen=True)
+class PlanOutcome:
+    """What a single :meth:`PlanWriteSession.commit` did on disk."""
+
+    status: str
+    number: int | None
+    path: str | None
+    title: str
+
+
+class PlanWriteSession:
+    """Reconcile plan-writer results into files and the durable index.
+
+    The session owns every piece of plan-directory state: number reservation
+    (including reuse of a host-blocked attempt's number), validation,
+    rendering, blocked-attempt rows, and index reconciliation. Callers reserve
+    numbers once in a deterministic order, then commit each result as its
+    writer completes, so a finished plan is on disk while slower writers are
+    still running.
+
+    ``commit`` is synchronous on purpose: called from concurrent async tasks it
+    runs to completion without an await point, so the shared row/number state
+    needs no lock.
+
+    A plan that declares dependencies is deferred to :meth:`finish`, because
+    cycle detection and dependency availability are properties of the whole
+    selected set — resolving them per-arrival would make a plan's disposition
+    depend on completion order.
+    """
+
+    def __init__(
+        self,
+        plans_dir: Path,
+        *,
+        planned_at: str,
+        commands: Sequence[dict[str, Any]] | None = None,
+        non_interactive_default: bool = False,
+        run_session_id: str | None = None,
+    ) -> None:
+        self._plans_dir = plans_dir
+        self._repo = plans_dir.parent
+        self._planned_at = planned_at
+        self._commands = commands
+        self._run_session_id = run_session_id
+        plans_dir.mkdir(parents=True, exist_ok=True)
+        self._index_path = plans_dir / "README.md"
+        index_text = (
+            self._index_path.read_text(encoding="utf-8")
+            if self._index_path.is_file()
+            else ""
         )
-        if fingerprint in fingerprints or fingerprint in rejected:
-            result["skipped"].append(finding)
+        self._non_interactive_default = (
+            non_interactive_default
+            or "non-interactive default" in index_text.lower()
+        )
+        self._rows = _existing_index_rows(index_text)
+        self._existing_notes, self._unstructured_notes = (
+            _existing_dependency_notes(index_text)
+        )
+        self._new_notes: dict[tuple[int, str], str] = {}
+        self._fingerprints = planned_fingerprints(plans_dir)
+        self._rejected = load_rejections(plans_dir)
+        self._next_number = _highest_plan_number(plans_dir, self._rows) + 1
+        self._available_slugs = {
+            match.group(1).split("-", 1)[1]
+            for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
+            if (match := re.match(r"^(\d{3}-.+)\.md$", path.name))
+        }
+        self._reserved_count = 0
+        self._selections: list[dict[str, Any]] = []
+        self._deferred: list[tuple[PlanReservation, dict[str, Any]]] = []
+        self._written: list[tuple[int, dict[str, Any]]] = []
+        self._skipped: list[tuple[int, dict[str, Any]]] = []
+        self._failed: list[tuple[int, dict[str, Any]]] = []
+        self._diagnostics: list[tuple[int, dict[str, Any]]] = []
+        self._planned_at_errors: tuple[str, ...] = ()
+        commit = _git(self._repo, "cat-file", "-e", f"{planned_at}^{{commit}}")
+        if commit.returncode != 0:
+            self._planned_at_errors = ("PLANNED_AT_INVALID",)
+        else:
+            ancestor = _git(
+                self._repo, "merge-base", "--is-ancestor", planned_at, "HEAD"
+            )
+            if ancestor.returncode != 0:
+                self._planned_at_errors = ("PLANNED_AT_NOT_ANCESTOR",)
+
+    def reserve(
+        self, findings: Sequence[dict[str, Any] | None]
+    ) -> list[PlanReservation]:
+        """Claim one plan number per finding, in the order given."""
+        reservations: list[PlanReservation] = []
+        for finding in findings:
+            index = self._reserved_count
+            self._reserved_count += 1
+            if not isinstance(finding, dict):
+                reservations.append(PlanReservation(index, "", None))
+                continue
+            fingerprint = str(finding.get("fingerprint") or "")
+            if fingerprint in self._fingerprints or fingerprint in self._rejected:
+                reservations.append(
+                    PlanReservation(index, fingerprint, None)
+                )
+                continue
+            retry_rows = [
+                row
+                for row in self._rows
+                if (
+                    (match := _FINGERPRINT_MARKER.search(row)) is not None
+                    and match.group(1) == fingerprint
+                    and _retryable_host_blocked_row(row, self._plans_dir)
+                )
+            ]
+            reserved_numbers = [
+                number
+                for row in retry_rows
+                if (number := _row_number(row)) is not None
+            ]
+            self._rows = [row for row in self._rows if row not in retry_rows]
+            if reserved_numbers:
+                number = min(reserved_numbers)
+            else:
+                number = self._next_number
+                self._next_number += 1
+            reservations.append(PlanReservation(index, fingerprint, number))
+        return reservations
+
+    def commit(
+        self,
+        reservation: PlanReservation,
+        selection: dict[str, Any],
+    ) -> PlanOutcome:
+        """Land one plan-writer result, writing its file when it is complete."""
+        safe = _redact_model_value(selection)
+        if not isinstance(safe, dict):
+            return PlanOutcome("ignored", None, None, "")
+        self._selections.append(safe)
+        finding = safe.get("finding")
+        if not isinstance(finding, dict):
+            return PlanOutcome("ignored", None, None, "")
+        title = str(finding.get("title") or "Selected finding")
+        if reservation.number is None:
+            self._skipped.append((reservation.index, finding))
+            attempt = self._attempt_of(safe)
             if attempt is not None:
-                received = {
-                    key: value
-                    for key, value in selection.items()
-                    if key not in {"finding", "error"} and not key.startswith("_")
-                }
-                result["diagnostics"].append(
-                    _attempt_diagnostic(
-                        finding=finding,
-                        attempt=attempt,
-                        received=received,
-                        disposition="skipped",
-                        stage="reconciliation",
-                        errors=("ALREADY_PLANNED_OR_REJECTED",),
+                self._diagnostics.append(
+                    (
+                        reservation.index,
+                        _attempt_diagnostic(
+                            finding=finding,
+                            attempt=attempt,
+                            received=_plan_payload(safe),
+                            disposition="skipped",
+                            stage="reconciliation",
+                            errors=("ALREADY_PLANNED_OR_REJECTED",),
+                        ),
                     )
                 )
-            continue
-        retry_rows = [
-            row
-            for row in rows
-            if (
-                (match := _FINGERPRINT_MARKER.search(row)) is not None
-                and match.group(1) == fingerprint
-                and _retryable_host_blocked_row(row, plans_dir)
+            return PlanOutcome("skipped", None, None, title)
+        if not safe.get("error") and safe.get("dependencies"):
+            self._deferred.append((reservation, safe))
+            return PlanOutcome("deferred", reservation.number, None, title)
+        return self._land(reservation, safe)
+
+    def finish(self) -> dict[str, list[dict[str, Any]]]:
+        """Resolve deferred plans, reconcile the index, and return the result."""
+        deferred = self._deferred
+        self._deferred = []
+        candidate_slugs = {
+            selection.get("slug")
+            for selection in self._selections
+            if isinstance(selection.get("slug"), str)
+        }
+        cycle_slugs = _dependency_cycle_slugs(self._selections)
+        for reservation, selection in _in_dependency_order(deferred):
+            self._land(
+                reservation,
+                selection,
+                candidate_slugs=candidate_slugs,
+                cycle_slugs=cycle_slugs,
             )
-        ]
-        reserved_numbers = [
-            number
-            for row in retry_rows
-            if (number := _row_number(row)) is not None
-        ]
-        rows = [row for row in rows if row not in retry_rows]
-        if reserved_numbers:
-            number = min(reserved_numbers)
-        else:
-            number = next_number
-            next_number += 1
+        self._write_index()
+        return {
+            "written": _by_reservation(self._written),
+            "skipped": _by_reservation(self._skipped),
+            "failed": _by_reservation(self._failed),
+            "diagnostics": _by_reservation(self._diagnostics),
+        }
+
+    @staticmethod
+    def _attempt_of(selection: dict[str, Any]) -> dict[str, Any] | None:
+        attempt = selection.get("_attempt")
+        return attempt if isinstance(attempt, dict) else None
+
+    def _block(
+        self,
+        reservation: PlanReservation,
+        selection: dict[str, Any],
+        *,
+        number: int,
+        finding: dict[str, Any],
+        status: str,
+        stage: str,
+        errors: Sequence[str],
+        received: Any,
+    ) -> PlanOutcome:
+        self._rows.append(
+            _blocked_index_row(
+                number=number,
+                marker=f"<!-- fingerprint:{reservation.fingerprint} -->",
+                finding=finding,
+                status=status,
+            )
+        )
+        self._failed.append((reservation.index, finding))
+        self._diagnostics.append(
+            (
+                reservation.index,
+                _attempt_diagnostic(
+                    finding=finding,
+                    attempt=self._attempt_of(selection),
+                    received=received,
+                    disposition="blocked",
+                    stage=stage,
+                    errors=errors,
+                ),
+            )
+        )
+        self._write_index()
+        return PlanOutcome(
+            "blocked",
+            number,
+            None,
+            str(finding.get("title") or "Selected finding"),
+        )
+
+    def _land(
+        self,
+        reservation: PlanReservation,
+        selection: dict[str, Any],
+        *,
+        candidate_slugs: Collection[Any] = (),
+        cycle_slugs: Collection[str] = (),
+    ) -> PlanOutcome:
+        finding = selection["finding"]
+        assert reservation.number is not None  # commit() gates on the number
+        number = reservation.number
+        title = str(finding.get("title") or "Selected finding")
+        attempt = self._attempt_of(selection)
         slug = str(selection.get("slug") or "plan")
-        trusted_title = str(finding.get("title") or "Selected finding")
-        title = str(selection.get("title") or trusted_title)
-        priority = str(selection.get("priority") or "P2")
         raw_dependencies = selection.get("dependencies")
         dependencies: list[Any] = (
             raw_dependencies if isinstance(raw_dependencies, list) else []
@@ -1814,7 +1966,6 @@ def write_plans(
             for dependency in dependencies
             if isinstance(dependency, dict)
         ]
-        marker = f"<!-- fingerprint:{fingerprint} -->"
         if selection.get("error"):
             raw_errors = attempt.get("errors") if attempt is not None else None
             if not isinstance(raw_errors, (list, tuple)) and attempt is not None:
@@ -1835,10 +1986,7 @@ def write_plans(
             error_codes = tuple(
                 entry.partition("@")[0] for entry in error_entries
             )
-            authoring_failure = bool(
-                attempt is not None and attempt.get("validation")
-            )
-            if authoring_failure:
+            if attempt is not None and attempt.get("validation"):
                 status = (
                     "BLOCKED (PLAN_VALIDATION_FAILED: "
                     f"{','.join(error_codes)})"
@@ -1847,42 +1995,28 @@ def write_plans(
             else:
                 status = f"BLOCKED (PLAN_WRITER_FAILED: {error_codes[0]})"
                 stage = "transport"
-            rows.append(
-                _blocked_index_row(
-                    number=number,
-                    marker=marker,
-                    finding=finding,
-                    status=status,
-                )
+            return self._block(
+                reservation,
+                selection,
+                number=number,
+                finding=finding,
+                status=status,
+                stage=stage,
+                errors=error_entries,
+                received=(
+                    attempt.get("received_result")
+                    if attempt is not None
+                    else None
+                ),
             )
-            result["failed"].append(finding)
-            result["diagnostics"].append(
-                _attempt_diagnostic(
-                    finding=finding,
-                    attempt=attempt,
-                    received=(
-                        attempt.get("received_result")
-                        if attempt is not None
-                        else None
-                    ),
-                    disposition="blocked",
-                    stage=stage,
-                    errors=error_entries,
-                )
-            )
-            continue
 
-        plan_result = {
-            key: value
-            for key, value in selection.items()
-            if key not in {"finding", "error"} and not key.startswith("_")
-        }
-        errors = planned_at_errors or validate_plan_result(
+        plan_result = _plan_payload(selection)
+        errors = self._planned_at_errors or validate_plan_result(
             plan_result,
-            repo=plans_dir.parent,
-            planned_at=planned_at,
+            repo=self._repo,
+            planned_at=self._planned_at,
             finding=finding,
-            recon_commands=commands,
+            recon_commands=self._commands,
         )
         if not errors:
             if slug in depends_on:
@@ -1891,106 +2025,76 @@ def write_plans(
                 errors = ("DEPENDENCY_CYCLE",)
             elif any(
                 dependency not in candidate_slugs
-                and dependency not in available_slugs
+                and dependency not in self._available_slugs
                 for dependency in depends_on
             ):
                 errors = ("DEPENDENCY_UNKNOWN",)
-            elif any(dependency not in available_slugs for dependency in depends_on):
+            elif any(
+                dependency not in self._available_slugs
+                for dependency in depends_on
+            ):
                 errors = ("DEPENDENCY_UNAVAILABLE",)
-        if not errors and not _head_matches(plans_dir.parent, planned_at):
+        if not errors and not _head_matches(self._repo, self._planned_at):
             errors = ("PLAN_HEAD_CHANGED",)
         if errors:
-            code_list = ",".join(errors)
-            rows.append(
-                _blocked_index_row(
-                    number=number,
-                    marker=marker,
-                    finding=finding,
-                    status=(
-                        "BLOCKED (PLAN_VALIDATION_FAILED: "
-                        f"{code_list})"
-                    ),
-                )
+            return self._block(
+                reservation,
+                selection,
+                number=number,
+                finding=finding,
+                status=(
+                    "BLOCKED (PLAN_VALIDATION_FAILED: "
+                    f"{','.join(errors)})"
+                ),
+                stage=_validation_stage(errors),
+                errors=errors,
+                received=plan_result,
             )
-            result["failed"].append(finding)
-            result["diagnostics"].append(
-                _attempt_diagnostic(
-                    finding=finding,
-                    attempt=attempt,
-                    received=plan_result,
-                    disposition="blocked",
-                    stage=_validation_stage(errors),
-                    errors=errors,
-                )
-            )
-            continue
 
         filename = f"{number:03d}-{slug}.md"
         try:
             text = render_plan(
                 finding,
                 plan=plan_result,
-                planned_at=planned_at,
+                planned_at=self._planned_at,
                 number=number,
-                run_session_id=run_session_id,
+                run_session_id=self._run_session_id,
             )
         except Exception:  # noqa: BLE001 - persist a safe render disposition
-            rows.append(
-                _blocked_index_row(
-                    number=number,
-                    marker=marker,
-                    finding=finding,
-                    status=(
-                        "BLOCKED (PLAN_VALIDATION_FAILED: RENDER_FAILED)"
-                    ),
-                )
+            return self._block(
+                reservation,
+                selection,
+                number=number,
+                finding=finding,
+                status="BLOCKED (PLAN_VALIDATION_FAILED: RENDER_FAILED)",
+                stage="render",
+                errors=("RENDER_FAILED",),
+                received=plan_result,
             )
-            result["failed"].append(finding)
-            result["diagnostics"].append(
-                _attempt_diagnostic(
-                    finding=finding,
-                    attempt=attempt,
-                    received=plan_result,
-                    disposition="blocked",
-                    stage="render",
-                    errors=("RENDER_FAILED",),
-                )
+        if not _head_matches(self._repo, self._planned_at):
+            return self._block(
+                reservation,
+                selection,
+                number=number,
+                finding=finding,
+                status=(
+                    "BLOCKED (PLAN_VALIDATION_FAILED: PLAN_HEAD_CHANGED)"
+                ),
+                stage=_validation_stage(("PLAN_HEAD_CHANGED",)),
+                errors=("PLAN_HEAD_CHANGED",),
+                received=plan_result,
             )
-            continue
-        if not _head_matches(plans_dir.parent, planned_at):
-            errors = ("PLAN_HEAD_CHANGED",)
-            rows.append(
-                _blocked_index_row(
-                    number=number,
-                    marker=marker,
-                    finding=finding,
-                    status=(
-                        "BLOCKED (PLAN_VALIDATION_FAILED: "
-                        f"{errors[0]})"
-                    ),
-                )
-            )
-            result["failed"].append(finding)
-            result["diagnostics"].append(
-                _attempt_diagnostic(
-                    finding=finding,
-                    attempt=attempt,
-                    received=plan_result,
-                    disposition="blocked",
-                    stage=_validation_stage(errors),
-                    errors=errors,
-                )
-            )
-            continue
-        (plans_dir / filename).write_text(text, encoding="utf-8")
-        rows.append(
-            f"| [{number:03d}]({filename}) {marker} | "
-            f"{_markdown_cell(title)} | {_markdown_cell(priority)} | "
+        (self._plans_dir / filename).write_text(text, encoding="utf-8")
+        self._rows.append(
+            f"| [{number:03d}]({filename}) "
+            f"<!-- fingerprint:{reservation.fingerprint} --> | "
+            f"{_markdown_cell(selection.get('title') or title)} | "
+            f"{_markdown_cell(selection.get('priority') or 'P2')} | "
             f"{_markdown_cell(finding.get('effort'))} | "
             f"{_markdown_cell(', '.join(depends_on))} | TODO |"
         )
         if depends_on:
-            new_dependency_notes.update(
+            self._new_notes.update(
                 {
                     (number, dependency["slug"]): (
                         f"{number:03d} depends on {dependency['slug']} "
@@ -1999,43 +2103,121 @@ def write_plans(
                     for dependency in dependencies
                 }
             )
-        result["written"].append({**selection, "number": number, "path": filename})
-        result["diagnostics"].append(
-            _attempt_diagnostic(
-                finding=finding,
-                attempt=attempt,
-                received=plan_result,
-                disposition="success",
-                stage="success",
-                artifact={"path": filename, "status": "TODO"},
+        self._written.append(
+            (
+                reservation.index,
+                {**selection, "number": number, "path": filename},
             )
         )
-        fingerprints.add(fingerprint)
-        available_slugs.add(slug)
-
-    rows.sort(
-        key=lambda row: (
-            _row_number(row) is None,
-            _row_number(row) or 0,
+        self._diagnostics.append(
+            (
+                reservation.index,
+                _attempt_diagnostic(
+                    finding=finding,
+                    attempt=attempt,
+                    received=plan_result,
+                    disposition="success",
+                    stage="success",
+                    artifact={"path": filename, "status": "TODO"},
+                ),
+            )
         )
-    )
-    dependency_notes = _merged_dependency_notes(
-        rows,
-        existing=existing_dependency_notes,
-        new=new_dependency_notes,
-        unstructured=unstructured_dependency_notes,
-    )
-    index_path.write_text(
-        _render_index(
-            rows,
-            plans_dir=plans_dir,
-            non_interactive_default=(
-                non_interactive_default
-                or "non-interactive default" in index_text.lower()
+        self._fingerprints.add(reservation.fingerprint)
+        self._available_slugs.add(slug)
+        self._write_index()
+        return PlanOutcome("written", number, filename, title)
+
+    def _write_index(self) -> None:
+        """Rewrite the index from the rows landed so far.
+
+        Rewriting on every landing costs one small file write and leaves an
+        interrupted run with an index that matches the plans already on disk.
+        """
+        self._rows.sort(
+            key=lambda row: (
+                _row_number(row) is None,
+                _row_number(row) or 0,
+            )
+        )
+        self._index_path.write_text(
+            _render_index(
+                self._rows,
+                plans_dir=self._plans_dir,
+                non_interactive_default=self._non_interactive_default,
+                dependency_notes=_merged_dependency_notes(
+                    self._rows,
+                    existing=self._existing_notes,
+                    new=self._new_notes,
+                    unstructured=self._unstructured_notes,
+                ),
+                run_session_id=self._run_session_id,
             ),
-            dependency_notes=dependency_notes,
-            run_session_id=run_session_id,
-        ),
-        encoding="utf-8",
+            encoding="utf-8",
+        )
+
+
+def _plan_payload(selection: dict[str, Any]) -> dict[str, Any]:
+    """Return the authored plan fields, without host bookkeeping keys."""
+    return {
+        key: value
+        for key, value in selection.items()
+        if key not in {"finding", "error"} and not key.startswith("_")
+    }
+
+
+def _by_reservation(
+    entries: Sequence[tuple[int, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    return [entry for _, entry in sorted(entries, key=lambda item: item[0])]
+
+
+def _in_dependency_order(
+    pairs: Sequence[tuple[PlanReservation, dict[str, Any]]],
+) -> list[tuple[PlanReservation, dict[str, Any]]]:
+    """Order reservation/selection pairs dependency-first by identity."""
+    remaining = list(pairs)
+    ordered: list[tuple[PlanReservation, dict[str, Any]]] = []
+    for selection in _dependency_order([item for _, item in pairs]):
+        for position, (_, candidate) in enumerate(remaining):
+            if candidate is selection:
+                ordered.append(remaining.pop(position))
+                break
+    return ordered
+
+
+def write_plans(
+    plans_dir: Path,
+    selections: Sequence[dict[str, Any]],
+    *,
+    planned_at: str,
+    commands: Sequence[dict[str, Any]] | None = None,
+    non_interactive_default: bool = False,
+    run_session_id: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Reconcile a complete set of plan-writer results in one call.
+
+    Numbers follow dependency order here because the whole set is known up
+    front; a caller that commits results as they arrive reserves its own
+    numbers through :class:`PlanWriteSession`.
+    """
+    session = PlanWriteSession(
+        plans_dir,
+        planned_at=planned_at,
+        commands=commands,
+        non_interactive_default=non_interactive_default,
+        run_session_id=run_session_id,
     )
-    return result
+    ordered = _dependency_order(
+        [selection for selection in selections if isinstance(selection, dict)]
+    )
+    reservations = session.reserve(
+        [
+            selection.get("finding")
+            if isinstance(selection.get("finding"), dict)
+            else None
+            for selection in ordered
+        ]
+    )
+    for reservation, selection in zip(reservations, ordered, strict=True):
+        session.commit(reservation, selection)
+    return session.finish()

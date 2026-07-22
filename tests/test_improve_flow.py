@@ -1185,6 +1185,80 @@ class _ProductionPathBackend(_ImproveStubBackend):
             yield event
 
 
+def _is_plan_writer_prompt(prompt: str, output_schema: Any) -> bool:
+    return "You are writing a self-contained implementation plan" in prompt or (
+        isinstance(output_schema, dict)
+        and "false_assumption" in output_schema.get("properties", {})
+    )
+
+
+class _IncrementalPlanBackend(_ImproveStubBackend):
+    """Holds one plan writer open until another writer's plan reaches disk.
+
+    ``observed_while_slow_writer_ran`` is the plan-directory listing taken from
+    inside the slow writer's ``execute``. Batch writing leaves it empty: no
+    plan file exists until every writer has returned.
+    """
+
+    def __init__(
+        self,
+        target: Path,
+        *,
+        slow_title: str,
+        crash: bool = False,
+    ) -> None:
+        super().__init__(target, n_findings=2)
+        self._slow_title = slow_title
+        self._crash = crash
+        self._plans_dir = target / "daydream_plans"
+        self.observed_while_slow_writer_ran: list[str] = []
+        self.observed_index_while_slow_writer_ran = ""
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ):
+        if (
+            _is_plan_writer_prompt(prompt, output_schema)
+            and _finding_from_prompt(prompt)["title"] == self._slow_title
+        ):
+            with anyio.move_on_after(10):
+                while not self.observed_while_slow_writer_ran:
+                    await anyio.sleep(0.01)
+                    self.observed_while_slow_writer_ran = sorted(
+                        path.name
+                        for path in self._plans_dir.glob("[0-9][0-9][0-9]-*.md")
+                    )
+                    index_path = self._plans_dir / "README.md"
+                    self.observed_index_while_slow_writer_ran = (
+                        index_path.read_text(encoding="utf-8")
+                        if index_path.is_file()
+                        else ""
+                    )
+            if self._crash:
+                raise _ProductionPathPlannerError(
+                    "plan writer process exited"
+                )
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+            persist_session=persist_session,
+        ):
+            yield event
+
+
 @pytest.fixture
 def tmp_git_repo(improve_monorepo_target: Path) -> Path:
     return improve_monorepo_target
@@ -2710,6 +2784,103 @@ async def test_non_interactive_run_writes_plans_and_index(
     index = (plans_dir / "README.md").read_text()
     assert "non-interactive default" in index.lower()
     assert head_sha(improve_monorepo_target)[:7] in plan_files[0].read_text()
+
+
+# Selection order is the leverage order of the two audited findings; the plan
+# number each one gets is claimed from that order before any writer runs.
+_PLAN_FILE_BY_TITLE = {
+    "Security finding": "001-security-finding.md",
+    "high-leverage-title": "002-high-leverage-title.md",
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("slow_title", sorted(_PLAN_FILE_BY_TITLE))
+async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slow_title: str,
+) -> None:
+    """Each plan lands as its writer completes, numbered by selection order.
+
+    Parametrizing which writer finishes last also proves the numbering: both
+    completion orders produce the same title-to-number mapping.
+    """
+    backend = _IncrementalPlanBackend(
+        improve_monorepo_target,
+        slow_title=slow_title,
+    )
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda *args, **kwargs: backend,
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans_dir = improve_monorepo_target / "daydream_plans"
+    fast_title = next(
+        title for title in _PLAN_FILE_BY_TITLE if title != slow_title
+    )
+    assert code == 0
+    assert backend.observed_while_slow_writer_ran == [
+        _PLAN_FILE_BY_TITLE[fast_title]
+    ]
+    # An interrupt at that moment would leave a resumable index, not an
+    # orphaned plan file.
+    assert (
+        f"({_PLAN_FILE_BY_TITLE[fast_title]})"
+        in backend.observed_index_while_slow_writer_ran
+    )
+    assert sorted(
+        path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
+    ) == sorted(_PLAN_FILE_BY_TITLE.values())
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    for filename in _PLAN_FILE_BY_TITLE.values():
+        assert f"({filename})" in index
+
+
+@pytest.mark.anyio
+async def test_plan_writer_crash_leaves_the_finished_plan_on_disk(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _IncrementalPlanBackend(
+        improve_monorepo_target,
+        slow_title="Security finding",
+        crash=True,
+    )
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda *args, **kwargs: backend,
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans_dir = improve_monorepo_target / "daydream_plans"
+    assert code == 0
+    assert backend.observed_while_slow_writer_ran == [
+        _PLAN_FILE_BY_TITLE["high-leverage-title"]
+    ]
+    assert [
+        path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
+    ] == [_PLAN_FILE_BY_TITLE["high-leverage-title"]]
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    assert "BLOCKED (PLAN_WRITER_FAILED: PROCESS_EXIT)" in index
+    assert "002" in index
 
 
 @pytest.mark.anyio

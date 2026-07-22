@@ -59,16 +59,15 @@ from daydream.improve.partition import (
     stack_by_path,
 )
 from daydream.improve.plans import (
+    PlanWriteSession,
     _attempt_diagnostic,
     _markdown_cell,
     load_rejections,
-    planned_fingerprints,
     record_plan_write_diagnostics,
     record_rejections,
     render_plan,
     resolve_review_plan_path,
     validate_plan_result,
-    write_plans,
 )
 from daydream.improve.prioritize import (
     aggregate_cross_service,
@@ -93,7 +92,7 @@ from daydream.trajectory import (
     phase_scope,
     redact_text,
 )
-from daydream.ui import print_error, print_success, print_warning
+from daydream.ui import print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
@@ -2277,22 +2276,64 @@ async def _step_write_plans(ctx: FlowContext) -> None:
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(PLAN_WRITE_MAX_CONCURRENCY, backend)
     )
-    outputs: list[dict[str, Any] | None] = [None] * len(selected)
     authoring_diagnostics: list[tuple[int, dict[str, Any]]] = []
     plans_dir = ctx.work.repo / "daydream_plans"
-    known = planned_fingerprints(plans_dir) | set(
-        load_rejections(plans_dir)
-    )
     try:
         planned_at = git_ops.head_sha(ctx.work.repo)
     except git_ops.GitError:
         planned_at = ctx.work.head_sha
 
+    session = PlanWriteSession(
+        plans_dir,
+        planned_at=planned_at,
+        commands=_verification_commands(ctx.data["recon"]),
+        non_interactive_default=(
+            ctx.data["selection_mode"] == "non-interactive-default"
+        ),
+        run_session_id=_run_session_id(),
+    )
+    # Numbers are claimed here, in selection order, before any writer runs, so
+    # a plan's number never depends on which writer finishes first.
+    reservations = session.reserve(selected)
+    pending = {reservation.index for reservation in reservations}
+    total = sum(
+        1 for reservation in reservations if reservation.number is not None
+    )
+    landed = 0
+    announced: set[int] = set()
+
+    def _land(index: int, record: dict[str, Any]) -> None:
+        """Persist one writer's result and report the movement."""
+        nonlocal landed
+        pending.discard(index)
+        outcome = session.commit(reservations[index], record)
+        if reservations[index].number is None:
+            return
+        landed += 1
+        if outcome.status == "written" and outcome.number is not None:
+            announced.add(outcome.number)
+            print_success(
+                console,
+                f"Plan {outcome.number:03d} written to "
+                f"daydream_plans/{outcome.path} ({landed}/{total}).",
+            )
+        elif outcome.status == "deferred":
+            print_info(
+                console,
+                f"Plan {outcome.number:03d} for {outcome.title} is held until "
+                f"its dependencies land ({landed}/{total}).",
+            )
+        else:
+            print_info(
+                console,
+                f"No plan file written for {outcome.title} "
+                f"({landed}/{total}).",
+            )
+
     async with anyio.create_task_group() as task_group:
         for selection_index, finding in enumerate(selected):
-            fingerprint = str(finding["fingerprint"])
-            if fingerprint in known:
-                outputs[selection_index] = {"finding": finding}
+            if reservations[selection_index].number is None:
+                _land(selection_index, {"finding": finding})
                 continue
             descriptor = (
                 f"plan-{_plan_slug('', finding.get('title'))}-"
@@ -2316,15 +2357,18 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                     cwd=ctx.work.repo,
                 )
             except Exception:  # noqa: BLE001 - isolate each plan safely
-                outputs[selection_index] = {
-                    "finding": finding,
-                    "_attempt": {
-                        **attempt,
-                        "received_result": None,
-                        "errors": ("PROMPT_CONSTRUCTION_FAILED",),
+                _land(
+                    selection_index,
+                    {
+                        "finding": finding,
+                        "_attempt": {
+                            **attempt,
+                            "received_result": None,
+                            "errors": ("PROMPT_CONSTRUCTION_FAILED",),
+                        },
+                        "error": True,
                     },
-                    "error": True,
-                }
+                )
                 continue
 
             async def _task(
@@ -2334,128 +2378,126 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                 task_descriptor: str = descriptor,
                 task_attempt: dict[str, Any] = attempt,
             ) -> None:
+                async def _generate() -> dict[str, Any]:
+                    current_prompt = task_prompt
+                    for generation_index in range(2):
+                        async with phase_scope(DaydreamPhase.PLAN_WRITE):
+                            output, _, aborted_reason = await run_agent(
+                                backend,
+                                ctx.work.repo,
+                                current_prompt,
+                                phase=DaydreamPhase.PLAN_WRITE,
+                                output_schema=PLAN_AUTHOR_SCHEMA,
+                                read_only=True,
+                                persist_session=False,
+                                wall_budget_s=wall_budget,
+                                tool_call_budget=tool_budget,
+                            )
+                        output = _redact_model_value(output)
+                        if aborted_reason is not None:
+                            abort_code = {
+                                "tool_call_budget_exceeded": (
+                                    "TOOL_CALL_BUDGET_EXCEEDED"
+                                ),
+                                "wall_budget_exceeded": (
+                                    "WALL_BUDGET_EXCEEDED"
+                                ),
+                            }.get(
+                                aborted_reason,
+                                (
+                                    "TOOL_VETOED"
+                                    if aborted_reason.startswith(
+                                        "tool_vetoed:"
+                                    )
+                                    else "AGENT_ABORTED"
+                                ),
+                            )
+                            return {
+                                "finding": current,
+                                "_attempt": {
+                                    **task_attempt,
+                                    "received_result": output,
+                                    "errors": (abort_code,),
+                                },
+                                "error": True,
+                            }
+                        if isinstance(output, dict):
+                            assembled, issues = assemble_plan(
+                                output,
+                                repo=ctx.work.repo,
+                                recon_commands=_verification_commands(
+                                    ctx.data["recon"]
+                                ),
+                            )
+                        else:
+                            assembled = None
+                            issues = (
+                                AssemblyIssue(
+                                    code="NO_STRUCTURED_OBJECT",
+                                    pointer="/",
+                                ),
+                            )
+                        if assembled is not None and not issues:
+                            return {
+                                "finding": current,
+                                "_attempt": task_attempt,
+                                **assembled,
+                            }
+                        rendered_issues = tuple(
+                            render_issue(issue) for issue in issues
+                        )
+                        stage = (
+                            "authoring"
+                            if isinstance(output, dict)
+                            else "transport"
+                        )
+                        if generation_index == 0:
+                            authoring_diagnostics.append(
+                                (
+                                    current_index,
+                                    _attempt_diagnostic(
+                                        finding=current,
+                                        attempt=task_attempt,
+                                        received=output,
+                                        disposition="retried",
+                                        stage=stage,
+                                        errors=rendered_issues,
+                                    ),
+                                )
+                            )
+                            current_prompt = (
+                                build_plan_writer_repair_prompt(
+                                    task_prompt,
+                                    issues,
+                                )
+                            )
+                            continue
+                        if not isinstance(output, dict):
+                            return {
+                                "finding": current,
+                                "_attempt": {
+                                    **task_attempt,
+                                    "received_result": output,
+                                    "errors": ("NO_STRUCTURED_OBJECT",),
+                                },
+                                "error": True,
+                            }
+                        return {
+                            "finding": current,
+                            "_attempt": {
+                                **task_attempt,
+                                "received_result": output,
+                                "errors": rendered_issues,
+                                "validation": True,
+                            },
+                            "error": True,
+                        }
+                    return {"finding": current}
+
                 async with limiter:
                     async with maybe_fork(recorder, task_descriptor):
                         try:
-                            current_prompt = task_prompt
-                            for generation_index in range(2):
-                                async with phase_scope(DaydreamPhase.PLAN_WRITE):
-                                    output, _, aborted_reason = await run_agent(
-                                        backend,
-                                        ctx.work.repo,
-                                        current_prompt,
-                                        phase=DaydreamPhase.PLAN_WRITE,
-                                        output_schema=PLAN_AUTHOR_SCHEMA,
-                                        read_only=True,
-                                        persist_session=False,
-                                        wall_budget_s=wall_budget,
-                                        tool_call_budget=tool_budget,
-                                    )
-                                output = _redact_model_value(output)
-                                if aborted_reason is not None:
-                                    abort_code = {
-                                        "tool_call_budget_exceeded": (
-                                            "TOOL_CALL_BUDGET_EXCEEDED"
-                                        ),
-                                        "wall_budget_exceeded": (
-                                            "WALL_BUDGET_EXCEEDED"
-                                        ),
-                                    }.get(
-                                        aborted_reason,
-                                        (
-                                            "TOOL_VETOED"
-                                            if aborted_reason.startswith(
-                                                "tool_vetoed:"
-                                            )
-                                            else "AGENT_ABORTED"
-                                        ),
-                                    )
-                                    outputs[current_index] = {
-                                        "finding": current,
-                                        "_attempt": {
-                                            **task_attempt,
-                                            "received_result": output,
-                                            "errors": (abort_code,),
-                                        },
-                                        "error": True,
-                                    }
-                                    return
-                                if isinstance(output, dict):
-                                    assembled, issues = assemble_plan(
-                                        output,
-                                        repo=ctx.work.repo,
-                                        recon_commands=_verification_commands(
-                                            ctx.data["recon"]
-                                        ),
-                                    )
-                                else:
-                                    assembled = None
-                                    issues = (
-                                        AssemblyIssue(
-                                            code="NO_STRUCTURED_OBJECT",
-                                            pointer="/",
-                                        ),
-                                    )
-                                if assembled is not None and not issues:
-                                    outputs[current_index] = {
-                                        "finding": current,
-                                        "_attempt": task_attempt,
-                                        **assembled,
-                                    }
-                                    return
-                                rendered_issues = tuple(
-                                    render_issue(issue) for issue in issues
-                                )
-                                stage = (
-                                    "authoring"
-                                    if isinstance(output, dict)
-                                    else "transport"
-                                )
-                                if generation_index == 0:
-                                    authoring_diagnostics.append(
-                                        (
-                                            current_index,
-                                            _attempt_diagnostic(
-                                                finding=current,
-                                                attempt=task_attempt,
-                                                received=output,
-                                                disposition="retried",
-                                                stage=stage,
-                                                errors=rendered_issues,
-                                            ),
-                                        )
-                                    )
-                                    current_prompt = (
-                                        build_plan_writer_repair_prompt(
-                                            task_prompt,
-                                            issues,
-                                        )
-                                    )
-                                    continue
-                                if not isinstance(output, dict):
-                                    outputs[current_index] = {
-                                        "finding": current,
-                                        "_attempt": {
-                                            **task_attempt,
-                                            "received_result": output,
-                                            "errors": (
-                                                "NO_STRUCTURED_OBJECT",
-                                            ),
-                                        },
-                                        "error": True,
-                                    }
-                                    return
-                                outputs[current_index] = {
-                                    "finding": current,
-                                    "_attempt": {
-                                        **task_attempt,
-                                        "received_result": output,
-                                        "errors": rendered_issues,
-                                        "validation": True,
-                                    },
-                                    "error": True,
-                                }
-                                return
+                            record = await _generate()
                         except Exception as exc:  # noqa: BLE001 - isolate each plan safely
                             category = getattr(exc, "category", "UNKNOWN")
                             stable_category = (
@@ -2471,7 +2513,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                                 }
                                 else "UNKNOWN"
                             )
-                            outputs[current_index] = {
+                            record = {
                                 "finding": current,
                                 "_attempt": {
                                     **task_attempt,
@@ -2480,23 +2522,22 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                                 },
                                 "error": True,
                             }
+                # Each writer's plan reaches disk here, while its slower
+                # siblings are still running.
+                _land(current_index, record)
 
             task_group.start_soon(_task)
 
-    ordered_outputs = [
-        output if output is not None else {"finding": selected[index]}
-        for index, output in enumerate(outputs)
-    ]
-    result = write_plans(
-        plans_dir,
-        ordered_outputs,
-        planned_at=planned_at,
-        commands=_verification_commands(ctx.data["recon"]),
-        non_interactive_default=(
-            ctx.data["selection_mode"] == "non-interactive-default"
-        ),
-        run_session_id=_run_session_id(),
-    )
+    for index in sorted(pending):
+        _land(index, {"finding": selected[index]})
+    result = session.finish()
+    for entry in result["written"]:
+        if entry["number"] not in announced:
+            print_success(
+                console,
+                f"Plan {entry['number']:03d} written to "
+                f"daydream_plans/{entry['path']}.",
+            )
     record_plan_write_diagnostics(
         plan_write_diagnostics_path(ctx.data["improve_dir"]),
         [
