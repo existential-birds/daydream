@@ -173,6 +173,30 @@ def improve_monorepo_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def improve_scaled_monorepo_target(tmp_path: Path) -> Path:
+    """Committed monorepo large enough that partition fan-out must split."""
+    project = tmp_path / "improve_scaled"
+    for index in range(12):  # 12 conventional-root services
+        root = project / "apps" / f"svc{index:02d}"
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f'[project]\nname = "svc{index:02d}"\n')
+        (root / "api.py").write_text(f'def service_name():\n    return "svc{index:02d}"\n')
+    for sub in ("alpha", "beta", "gamma"):  # uncovered react tree, no service signal
+        pkg = project / "frontend" / "src" / sub
+        pkg.mkdir(parents=True)
+        for index in range(4):
+            (pkg / f"view{index}.tsx").write_text("export const V = () => <div/>;\n")
+    (project / "README.md").write_text("# scaled\n")
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "improve-scaled"\n\n[tool.daydream]\ntest-command = "uv run pytest"\n'
+    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    return project
+
+
+@pytest.fixture
 def improve_branch_target(tmp_path: Path) -> Path:
     """Improve monorepo with one billing change committed on a feature branch."""
     project = tmp_path / "improve_branch"

@@ -28,11 +28,15 @@ def command_validation_diagnostics_path(improve_dir_path: Path) -> Path:
 
 
 def audit_findings_path(
-    improve_dir_path: Path, category: str, stack: str | None
+    improve_dir_path: Path, category: str, group_name: str
 ) -> Path:
-    """Return the findings path for one category/stack audit assignment."""
-    suffix = f"-{stack}" if stack else ""
-    return improve_dir_path / f"audit-{category}{suffix}-findings.json"
+    """Return the findings path for one category/partition-group assignment."""
+    return improve_dir_path / f"audit-{category}-{group_name}-findings.json"
+
+
+def coverage_path(improve_dir_path: Path) -> Path:
+    """Return the partition/group coverage-ledger artifact path."""
+    return improve_dir_path / "coverage.json"
 
 
 def vetted_findings_path(improve_dir_path: Path) -> Path:

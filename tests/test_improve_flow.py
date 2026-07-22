@@ -10,7 +10,7 @@ import pytest
 
 from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS
-from daydream.config_file import DaydreamFileConfig
+from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.exploration_runner import _sample_paths, repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.git_ops import head_sha
@@ -25,7 +25,7 @@ from daydream.improve.prompts import (
     build_recon_commands_prompt,
 )
 from daydream.runner import RunConfig, run
-from tests.harness.git_helpers import commit, git
+from tests.harness.git_helpers import commit, git, init_repo
 
 _GROUP = {
     "name": "group-01",
@@ -368,6 +368,38 @@ def _finding_from_prompt(prompt: str) -> dict[str, Any]:
     raise AssertionError("no finding block in plan-writer prompt")
 
 
+def _group_scope(prompt: str) -> tuple[str, str]:
+    """Return (partition-group name, first member root) from an audit prompt."""
+    group = re.search(r"Partition group `(group-\d+)`", prompt)
+    root = re.search(r"^- .+ — `(.+?)/` \(", prompt, flags=re.MULTILINE)
+    assert group is not None and root is not None, prompt
+    return group.group(1), root.group(1)
+
+
+def _group_roots(prompt: str) -> list[str]:
+    """Return every partition root named in an audit prompt's group block."""
+    return re.findall(r"^- .+ — `(.+?)/` \(", prompt, flags=re.MULTILINE)
+
+
+def _group_file_counts(prompt: str) -> list[int]:
+    """Return each member partition's file count from an audit prompt."""
+    return [int(count) for count in re.findall(r"^- .+ — `.+?/` \((\d+) files", prompt, flags=re.MULTILINE)]
+
+
+def _citable_file(target: Path, root: str) -> str:
+    """Return a real committed file inside ``root`` for a stub finding to cite."""
+    base = target if root == "." else target / root
+    direct = sorted(path for path in base.iterdir() if path.is_file())
+    if direct:
+        return direct[0].relative_to(target).as_posix()
+    nested = sorted(
+        path
+        for path in base.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    )
+    return nested[0].relative_to(target).as_posix() if nested else f"{root}/api.py"
+
+
 class _ImproveStubBackend:
     """Backend stub for improve-flow tests."""
 
@@ -415,6 +447,7 @@ class _ImproveStubBackend:
         self.plan_bad_recon_id_attempts = 0
         self.plan_missing_path_attempts = 0
         self.plan_review_result = "typed"
+        self.group_scoped_findings = False
 
     async def execute(
         self,
@@ -566,6 +599,11 @@ class _ImproveStubBackend:
                 title = "low-leverage-title"
                 impact = "LOW"
                 effort = "L"
+            cited = "apps/billing/api.py"
+            if self.group_scoped_findings:
+                group, root = _group_scope(prompt)
+                cited = _citable_file(self._target, root)
+                title = f"{title} in {group}"
             findings = [
                 {
                     "title": (
@@ -574,14 +612,14 @@ class _ImproveStubBackend:
                         else title
                     ),
                     "category": "wrong-agent-category",
-                    "path": "apps/billing/api.py",
+                    "path": cited,
                     "line": 1,
                     "body": f"Concrete {category} impact and fix.",
                     "impact": impact,
                     "effort": effort,
                     "risk": "LOW",
                     "confidence": "HIGH",
-                    "evidence": ["apps/billing/api.py:1"],
+                    "evidence": [f"{cited}:1"],
                 }
             ]
             if category == "performance":
@@ -1308,6 +1346,240 @@ async def test_improve_recon_writes_artifacts_and_never_mutates_source(
     )
     assert all(call["read_only"] for call in stub.calls)
     assert _git_status_porcelain(improve_monorepo_target) == before
+
+
+def _pin_stack_availability(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Pin stack routing: an absent plugin registry means optimistic availability.
+
+    Without this the detected stacks -- and so the partition-group count --
+    depend on which Beagle plugins the developer happens to have installed.
+    """
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config-absent"))
+
+
+def _append_improve_config(target: Path, body: str) -> DaydreamFileConfig:
+    """Append an ``[tool.daydream.improve]`` block, re-commit, and load it.
+
+    The CLI is what reads the repo's config file (``cli.py`` calls
+    ``load_file_config`` before building the RunConfig), so a runner-entry test
+    loads it the same way instead of hand-building the dataclass.
+    """
+    pyproject = target / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text() + body)
+    git(target, "add", "pyproject.toml")
+    commit(target, "configure improve partition bounds")
+    return load_file_config(target)
+
+
+@pytest.mark.anyio
+async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
+    improve_scaled_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _pin_stack_availability(monkeypatch, tmp_path)
+    # Default bound (400): partitions = 12 services + frontend + residue, which
+    # pack into exactly 3 stack-homogeneous groups (python / react / generic).
+    stub = _install_improve_stub(
+        monkeypatch, improve_scaled_monorepo_target, n_findings=0
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_scaled_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    assert len(audit_calls) == 3 * len(AUDIT_CATEGORIES)
+    assert all("Relevant tracked files" not in call["prompt"] for call in audit_calls)
+    # Roots only: no prompt names an individual tracked file.
+    assert all("apps/svc00/api.py" not in call["prompt"] for call in audit_calls)
+    assert {_group_scope(call["prompt"])[0] for call in audit_calls} == {
+        "group-01",
+        "group-02",
+        "group-03",
+    }
+    names = sorted(
+        path.name
+        for path in (improve_scaled_monorepo_target / ".daydream" / "improve").glob(
+            "audit-*-findings.json"
+        )
+    )
+    assert len(names) == 3 * len(AUDIT_CATEGORIES)
+    assert "audit-correctness-group-01-findings.json" in names
+    coverage = json.loads(_dd(improve_scaled_monorepo_target, "coverage.json").read_text())
+    assert len(coverage["groups"]) == 3
+    assert {entry["name"] for entry in coverage["partitions"]} == {
+        *(f"svc{index:02d}" for index in range(12)),
+        "frontend",
+        "residue",
+    }
+    assert coverage["not_audited"] == []
+
+
+@pytest.mark.anyio
+async def test_partition_bound_splits_oversized_trees_via_config(
+    improve_scaled_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _pin_stack_availability(monkeypatch, tmp_path)
+    # max-partition-groups is raised out of the way so the bound alone is measured.
+    file_config = _append_improve_config(
+        improve_scaled_monorepo_target,
+        "\n[tool.daydream.improve]\npartition-max-files = 5\nmax-partition-groups = 20\n",
+    )
+    stub = _install_improve_stub(
+        monkeypatch, improve_scaled_monorepo_target, n_findings=0
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_scaled_monorepo_target),
+            flow_name="improve",
+            file_config=file_config,
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    groups = {_group_scope(call["prompt"])[0] for call in audit_calls}
+    # frontend/src (12 files) splits into 3 partitions of 4; the 12 two-file
+    # services pack 2-per-group; the residue stands alone -> 10 groups.
+    assert len(groups) == 10
+    assert len(audit_calls) == 10 * len(AUDIT_CATEGORIES)
+    for call in audit_calls:
+        assert sum(_group_file_counts(call["prompt"])) <= 5
+    coverage = json.loads(_dd(improve_scaled_monorepo_target, "coverage.json").read_text())
+    assert {"frontend/src/alpha", "frontend/src/beta", "frontend/src/gamma"} <= {
+        entry["name"] for entry in coverage["partitions"]
+    }
+    assert coverage["not_audited"] == []
+
+
+@pytest.mark.anyio
+async def test_group_ceiling_skips_smallest_groups_and_reports_them(
+    improve_scaled_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _pin_stack_availability(monkeypatch, tmp_path)
+    file_config = _append_improve_config(
+        improve_scaled_monorepo_target,
+        "\n[tool.daydream.improve]\nmax-partition-groups = 1\n",
+    )
+    stub = _install_improve_stub(
+        monkeypatch, improve_scaled_monorepo_target, n_findings=0
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_scaled_monorepo_target),
+            flow_name="improve",
+            file_config=file_config,
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    # Only the largest group (the 24-file python service group) is audited.
+    assert len(audit_calls) == len(AUDIT_CATEGORIES)
+    assert {_group_scope(call["prompt"])[0] for call in audit_calls} == {"group-01"}
+    coverage = json.loads(_dd(improve_scaled_monorepo_target, "coverage.json").read_text())
+    skipped = {entry["partition"]: entry["reason"] for entry in coverage["not_audited"]}
+    assert skipped == {"frontend": "group-ceiling", "residue": "group-ceiling"}
+
+
+@pytest.mark.anyio
+async def test_quick_tier_audits_whole_repo_in_one_group(
+    improve_scaled_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _pin_stack_availability(monkeypatch, tmp_path)
+    stub = _install_improve_stub(
+        monkeypatch, improve_scaled_monorepo_target, n_findings=0
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_scaled_monorepo_target),
+            flow_name="improve",
+            improve_effort="quick",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    assert len(audit_calls) == 3  # the quick tier's three categories
+    for call in audit_calls:
+        assert _group_roots(call["prompt"]) == ["."]
+    coverage = json.loads(_dd(improve_scaled_monorepo_target, "coverage.json").read_text())
+    assert coverage["not_audited"] == []
+    assert [entry["name"] for entry in coverage["partitions"]] == ["repository"]
+
+
+@pytest.mark.anyio
+async def test_all_audit_assignments_failing_exits_nonzero(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.fail_categories = set(AUDIT_CATEGORIES)
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 1
+    assert not _dd(improve_monorepo_target, "report.md").exists()
+
+
+@pytest.mark.anyio
+async def test_small_repo_collapses_to_bounded_groups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin_stack_availability(monkeypatch, tmp_path)
+    target = tmp_path / "single_package"
+    target.mkdir()
+    (target / "api.py").write_text("def handler():\n    return 1\n")
+    (target / "pyproject.toml").write_text('[project]\nname = "single-package"\n')
+    init_repo(target)
+    git(target, "add", ".")
+    commit(target, "initial")
+    stub = _install_improve_stub(monkeypatch, target, n_findings=0)
+
+    code = await run(
+        RunConfig(
+            target=str(target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    assert len(audit_calls) == len(AUDIT_CATEGORIES)
+    assert all(_group_roots(call["prompt"]) == ["."] for call in audit_calls)
+    coverage = json.loads(_dd(target, "coverage.json").read_text())
+    assert [entry["name"] for entry in coverage["partitions"]] == ["residue"]
+    assert len(coverage["groups"]) == 1
 
 
 @pytest.mark.anyio

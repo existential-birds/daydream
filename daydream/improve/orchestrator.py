@@ -32,6 +32,7 @@ from daydream.extensions.api import FlowStep, Stop
 from daydream.improve.artifacts import (
     audit_findings_path,
     command_validation_diagnostics_path,
+    coverage_path,
     plan_write_diagnostics_path,
     recon_path,
     report_path,
@@ -47,6 +48,14 @@ from daydream.improve.command_contract import (
     RECON_COMMAND_SCHEMA,
     valid_repository_file_path,
     validate_recon_commands,
+)
+from daydream.improve.partition import (
+    PARTITION_MAX_FILES,
+    Partition,
+    PartitionGroup,
+    build_partitions,
+    group_partitions,
+    stack_by_path,
 )
 from daydream.improve.plans import (
     _attempt_diagnostic,
@@ -389,17 +398,12 @@ class _ReviewPlanIdentity:
 @dataclass(frozen=True)
 class _AuditAssignment:
     category: str
-    stack: str | None
+    group: PartitionGroup
     skill: str | None
-    files: tuple[str, ...]
 
     @property
     def key(self) -> str:
-        return (
-            f"{self.category}:{self.stack}"
-            if self.stack is not None
-            else self.category
-        )
+        return f"{self.category}:{self.group.name}"
 
 
 def _service_dict(service: Service) -> dict[str, str]:
@@ -635,56 +639,180 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         )
 
     stacks: list[StackAssignment] = []
+    partitions: list[Partition] = []
+    groups: list[PartitionGroup] = []
+    skipped: list[Partition] = []
     if not description_mode:
         installed = get_installed_skills()
         availability = (
             installed if installed is not None else ctx.registry.stack_keys()
         )
+        tracked = branch_files if branch_focus else git_ops.ls_files(target)
         stacks = detect_stacks(
-            branch_files if branch_focus else git_ops.ls_files(target),
+            tracked,
             skill_availability=availability,
             registry=ctx.registry,
         )
         if ctx.config.improve_scope:
             stacks = _stacks_for_services(stacks, services)
+            tracked = sorted({path for stack in stacks for path in stack.files})
+        partitions, groups, skipped = _partition_repository(
+            ctx,
+            tracked,
+            services,
+            stacks,
+            branch_focus=branch_focus,
+        )
+        coverage_path(directory).write_text(
+            json.dumps(
+                _with_artifact_provenance(
+                    _coverage_ledger(partitions, groups, skipped),
+                    phase=DaydreamPhase.RECON,
+                ),
+                indent=2,
+            )
+            + "\n"
+        )
     ctx.data["all_services"] = all_services
     ctx.data["services"] = services
     ctx.data["recon"] = recon_data
     ctx.data["stacks"] = stacks
+    ctx.data["partitions"] = partitions
+    ctx.data["partition_groups"] = groups
+    ctx.data["partitions_not_audited"] = skipped
     return None
+
+
+def _partition_repository(
+    ctx: FlowContext,
+    tracked: list[str],
+    services: list[Service],
+    stacks: list[StackAssignment],
+    *,
+    branch_focus: bool,
+) -> tuple[list[Partition], list[PartitionGroup], list[Partition]]:
+    """Cover the audited surface with partitions and pack them into groups.
+
+    Branch focus and the ``quick`` tier bypass partitioning: both audit one
+    synthetic whole-surface group, so their fan-out stays exactly one agent per
+    category.
+    """
+    stack_of = stack_by_path(stacks)
+    file_config = ctx.config.file_config or DaydreamFileConfig()
+    max_files = file_config.improve_partition_max_files or PARTITION_MAX_FILES
+    tier: EffortTier = ctx.data["effort_tier"]
+    max_groups = (
+        file_config.improve_max_partition_groups or tier.max_partition_groups
+    )
+
+    if branch_focus or ctx.config.improve_effort == "quick":
+        whole = Partition(
+            name="branch" if branch_focus else "repository",
+            root=".",
+            source="branch" if branch_focus else "quick",
+            service=None,
+            files=tuple(tracked),
+        )
+        return [whole], [_whole_surface_group(whole, stack_of)], []
+
+    partitions = build_partitions(tracked, services, max_files=max_files)
+    groups, skipped = group_partitions(
+        partitions,
+        stack_of,
+        max_files=max_files,
+        max_groups=max_groups,
+    )
+    return partitions, groups, skipped
+
+
+def _whole_surface_group(
+    partition: Partition, stack_of: dict[str, str]
+) -> PartitionGroup:
+    counts = Counter(stack_of.get(path, "generic") for path in partition.files)
+    dominant = (
+        min(sorted(counts), key=lambda stack: (-counts[stack], stack))
+        if counts
+        else "generic"
+    )
+    return PartitionGroup(
+        name="group-01", stack=dominant, partitions=(partition,)
+    )
+
+
+def _partition_dict(partition: Partition) -> dict[str, Any]:
+    return {
+        "name": partition.name,
+        "root": partition.root,
+        "file_count": len(partition.files),
+        "service": partition.service,
+    }
+
+
+def _group_dict(group: PartitionGroup) -> dict[str, Any]:
+    return {
+        "name": group.name,
+        "stack": group.stack,
+        "file_count": group.file_count,
+        "partitions": [
+            _partition_dict(partition) for partition in group.partitions
+        ],
+    }
+
+
+def _coverage_ledger(
+    partitions: list[Partition],
+    groups: list[PartitionGroup],
+    skipped: list[Partition],
+) -> dict[str, Any]:
+    """Build the coverage ledger recording what the audit did and did not cover."""
+    return {
+        "artifact_type": "daydream.improve-coverage",
+        "partitions": [
+            {**_partition_dict(partition), "source": partition.source}
+            for partition in partitions
+        ],
+        "groups": [
+            {
+                "name": group.name,
+                "stack": group.stack,
+                "file_count": group.file_count,
+                "partitions": [
+                    partition.name for partition in group.partitions
+                ],
+            }
+            for group in groups
+        ],
+        "not_audited": [
+            {
+                "partition": partition.name,
+                "root": partition.root,
+                "file_count": len(partition.files),
+                "reason": "group-ceiling",
+            }
+            for partition in skipped
+        ],
+    }
 
 
 def _audit_assignments(
     ctx: FlowContext,
     categories: tuple[str, ...],
-    stacks: list[StackAssignment],
+    groups: list[PartitionGroup],
 ) -> list[_AuditAssignment]:
     assignments: list[_AuditAssignment] = []
     for category in categories:
-        remaining_files: set[str] = set()
-        for stack in stacks:
-            skill = ctx.registry.skill_if_registered(
-                f"audit:{category}:{stack.stack_name}"
+        for group in groups:
+            skill = (
+                ctx.registry.skill_if_registered(
+                    f"audit:{category}:{group.stack}"
+                )
+                if group.stack
+                else None
             )
             if skill is None:
-                remaining_files.update(stack.files)
-                continue
+                skill = ctx.registry.skill_if_registered(f"audit:{category}")
             assignments.append(
-                _AuditAssignment(
-                    category=category,
-                    stack=stack.stack_name,
-                    skill=skill,
-                    files=tuple(stack.files),
-                )
-            )
-        if remaining_files or not stacks:
-            assignments.append(
-                _AuditAssignment(
-                    category=category,
-                    stack=None,
-                    skill=ctx.registry.skill_if_registered(f"audit:{category}"),
-                    files=tuple(sorted(remaining_files)),
-                )
+                _AuditAssignment(category=category, group=group, skill=skill)
             )
     return assignments
 
@@ -743,16 +871,32 @@ def _evidence_paths(finding: dict[str, Any]) -> list[str]:
     return paths
 
 
+def _owning_partition(
+    partitions: list[Partition], evidence_paths: list[str]
+) -> str | None:
+    if not evidence_paths:
+        return None
+    path = evidence_paths[0]
+    for partition in sorted(
+        partitions, key=lambda item: -len(item.root)
+    ):
+        if partition.root == "." or path.startswith(f"{partition.root}/"):
+            return partition.name
+    return None
+
+
 def _stamp_finding(
     finding: dict[str, Any],
     category: str,
     services: list[Service],
+    partitions: list[Partition],
 ) -> dict[str, Any] | None:
     evidence_paths = _evidence_paths(finding)
     if not evidence_paths:
         return None
     stamped = dict(finding)
     stamped["category"] = category
+    stamped["partition"] = _owning_partition(partitions, evidence_paths)
     stamped["services"] = [
         service.name
         for service in services
@@ -800,47 +944,16 @@ def _schema_with_provenance(
     return extended
 
 
-def _shim_group(
-    assignment: _AuditAssignment, services: list[Service]
-) -> dict[str, Any]:
-    """Render one assignment as a single partition group (replaced in Task 4)."""
-    partitions = [
-        {
-            "name": service.name,
-            "root": service.root.as_posix(),
-            "file_count": sum(
-                1
-                for path in assignment.files
-                if path.startswith(f"{service.root.as_posix()}/")
-            ),
-            "service": service.name,
-        }
-        for service in services
-    ] or [
-        {
-            "name": assignment.stack or "repository",
-            "root": ".",
-            "file_count": len(assignment.files),
-            "service": None,
-        }
-    ]
-    return {
-        "name": "group-01",
-        "stack": assignment.stack,
-        "file_count": len(assignment.files),
-        "partitions": partitions,
-    }
-
-
-async def _step_audit(ctx: FlowContext) -> None:
+async def _step_audit(ctx: FlowContext) -> Stop | None:
     """Run tier-driven category audits and persist grounded findings."""
     directory: Path = ctx.data["improve_dir"]
     tier: EffortTier = ctx.data["effort_tier"]
     services: list[Service] = ctx.data["services"]
-    stacks: list[StackAssignment] = ctx.data["stacks"]
+    partitions: list[Partition] = ctx.data["partitions"]
+    groups: list[PartitionGroup] = ctx.data["partition_groups"]
     categories = resolve_categories(tier, ctx.config.improve_focus)
     branch_focus = ctx.config.improve_focus == "branch"
-    assignments = _audit_assignments(ctx, categories, stacks)
+    assignments = _audit_assignments(ctx, categories, groups)
     backend = ctx.backend_for("audit")
     wall_budget, tool_budget = ctx.budget_for("audit")
     recorder = get_current_recorder()
@@ -857,11 +970,10 @@ async def _step_audit(ctx: FlowContext) -> None:
                 if assignment.skill is not None
                 else None
             )
-            scoped_services = _services_for_files(services, assignment.files)
             scope_note = (
-                f"Audit the {assignment.stack} stack."
-                if assignment.stack is not None
-                else "Cover the remaining repository surface."
+                f"Audit the {assignment.group.stack} stack in this group."
+                if assignment.group.stack
+                else "Audit this group's surface."
             )
             if ctx.config.improve_focus == "next":
                 scope_note += (
@@ -889,7 +1001,7 @@ async def _step_audit(ctx: FlowContext) -> None:
             prompt = ctx.registry.prompt("audit")(
                 category=assignment.category,
                 skill_invocation=invocation,
-                group=_shim_group(assignment, scoped_services),
+                group=_group_dict(assignment.group),
                 scope_note=scope_note,
                 recon_summary=json.dumps(ctx.data["recon"], sort_keys=True),
                 cwd=ctx.work.repo,
@@ -906,9 +1018,7 @@ async def _step_audit(ctx: FlowContext) -> None:
                 current: _AuditAssignment = assignment,
                 task_prompt: str = prompt,
             ) -> None:
-                descriptor = f"audit-{current.category}"
-                if current.stack is not None:
-                    descriptor += f"-{current.stack}"
+                descriptor = f"audit-{current.category}-{current.group.name}"
                 async with limiter:
                     async with maybe_fork(recorder, descriptor):
                         try:
@@ -950,7 +1060,17 @@ async def _step_audit(ctx: FlowContext) -> None:
     if recorder is not None:
         recorder.create_dispatch_step(phase=DaydreamPhase.AUDIT)
 
-    grounded: list[dict[str, Any]] = []
+    if assignments and len(failures) == len(assignments):
+        print_error(
+            console,
+            "Improve audit failed",
+            "every audit assignment failed",
+        )
+        return Stop(1)
+
+    per_group: dict[str, list[dict[str, Any]]] = {
+        group.name: [] for group in groups
+    }
     discarded_no_evidence = 0
     dropped_low_confidence = 0
     for assignment in assignments:
@@ -964,6 +1084,7 @@ async def _step_audit(ctx: FlowContext) -> None:
                 finding,
                 assignment.category,
                 services,
+                partitions,
             )
             if stamped is None:
                 discarded_no_evidence += 1
@@ -975,7 +1096,7 @@ async def _step_audit(ctx: FlowContext) -> None:
         audit_findings_path(
             directory,
             assignment.category,
-            assignment.stack,
+            assignment.group.name,
         ).write_text(
             json.dumps(
                 _with_artifact_provenance(
@@ -986,12 +1107,22 @@ async def _step_audit(ctx: FlowContext) -> None:
             )
             + "\n"
         )
-        grounded.extend(assignment_findings)
+        per_group[assignment.group.name].extend(assignment_findings)
+
+    # Cap per group first so one noisy group cannot consume a tier's whole
+    # finding budget, then apply the tier cap to the merged set.
+    dropped_by_cap = 0
+    grounded: list[dict[str, Any]] = []
+    for group in groups:
+        group_findings = order_by_leverage(per_group[group.name])
+        if tier.max_findings is not None and len(group_findings) > tier.max_findings:
+            dropped_by_cap += len(group_findings) - tier.max_findings
+            group_findings = group_findings[: tier.max_findings]
+        grounded.extend(group_findings)
 
     ordered = order_by_leverage(grounded)
-    dropped_by_cap = 0
     if tier.max_findings is not None and len(ordered) > tier.max_findings:
-        dropped_by_cap = len(ordered) - tier.max_findings
+        dropped_by_cap += len(ordered) - tier.max_findings
         ordered = ordered[: tier.max_findings]
 
     combined = _with_artifact_provenance(
@@ -1009,6 +1140,7 @@ async def _step_audit(ctx: FlowContext) -> None:
     ctx.data["audit_discarded_no_evidence"] = discarded_no_evidence
     ctx.data["audit_dropped_low_confidence"] = dropped_low_confidence
     ctx.data["audit_dropped_by_cap"] = dropped_by_cap
+    return None
 
 
 def _apply_vet_verdicts(
