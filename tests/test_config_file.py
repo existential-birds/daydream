@@ -21,6 +21,40 @@ def test_improve_config_absent_defaults_empty(tmp_path: Path) -> None:
     assert load_file_config(tmp_path).improve_service_roots == []
 
 
+def test_improve_partition_bounds_parse_from_tool_daydream_improve(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.daydream.improve]\npartition-max-files = 7\nmax-partition-groups = 2\n"
+    )
+    config = load_file_config(tmp_path)
+    assert config.improve_partition_max_files == 7
+    assert config.improve_max_partition_groups == 2
+
+
+def test_improve_partition_bounds_parse_from_dotfile_snake_case(tmp_path: Path) -> None:
+    (tmp_path / ".daydream.toml").write_text("[improve]\npartition_max_files = 30\nmax_partition_groups = 4\n")
+    config = load_file_config(tmp_path)
+    assert config.improve_partition_max_files == 30
+    assert config.improve_max_partition_groups == 4
+
+
+def test_improve_partition_bounds_default_to_none(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text('[tool.daydream.improve]\nservice_roots = ["apps/*"]\n')
+    config = load_file_config(tmp_path)
+    assert config.improve_partition_max_files is None
+    assert config.improve_max_partition_groups is None
+    assert DaydreamFileConfig().improve_partition_max_files is None
+    assert DaydreamFileConfig().improve_max_partition_groups is None
+
+
+def test_improve_partition_bounds_reject_non_positive(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.daydream.improve]\npartition-max-files = 0\nmax-partition-groups = "many"\n'
+    )
+    config = load_file_config(tmp_path)
+    assert config.improve_partition_max_files is None
+    assert config.improve_max_partition_groups is None
+
+
 def test_dotfile_wins_over_pyproject(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text('[tool.daydream]\nmodel = "from-pyproject"\n')
     (tmp_path / ".daydream.toml").write_text('model = "from-dotfile"\n[phases.fix]\nbackend = "codex"\n')

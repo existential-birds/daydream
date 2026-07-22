@@ -41,6 +41,12 @@ def test_quick_effort_tier_uses_high_confidence_core_categories() -> None:
     assert EFFORT_TIERS["quick"].categories == ("correctness", "security", "tests")
 
 
+def test_effort_tiers_carry_partition_group_ceilings() -> None:
+    assert EFFORT_TIERS["quick"].max_partition_groups is None  # quick never partitions
+    assert EFFORT_TIERS["standard"].max_partition_groups == 8
+    assert EFFORT_TIERS["deep"].max_partition_groups is None
+
+
 def test_audit_skill_map_values_are_plugin_skill_names() -> None:
     for stack_skills in AUDIT_SKILL_MAP.values():
         for skill in stack_skills.values():

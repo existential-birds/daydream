@@ -82,6 +82,8 @@ class DaydreamFileConfig:
     tool_bash_deny: list[str] = field(default_factory=list)
     improve_service_roots: list[str] = field(default_factory=list)
     improve_service_groups: dict[str, list[str]] = field(default_factory=dict)
+    improve_partition_max_files: int | None = None
+    improve_max_partition_groups: int | None = None
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase."""
@@ -202,6 +204,16 @@ def _coerce_int(raw: Any) -> int | None:
     return raw if isinstance(raw, int) else None
 
 
+def _coerce_positive_int(table: dict[str, Any], key: str) -> int | None:
+    """Return a positive int bound from ``key``, accepting its hyphenated spelling.
+
+    Non-int and non-positive values degrade to None (the built-in default then
+    applies), matching the loader's lenient coercion style.
+    """
+    value = _coerce_int(table.get(key, table.get(key.replace("_", "-"))))
+    return value if value is not None and value > 0 else None
+
+
 def _coerce_float(raw: Any) -> float | None:
     """Return ``raw`` as a float, or None for bool/non-number (degrade to default).
 
@@ -283,4 +295,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
             str(group): _coerce_string_list(roots)
             for group, roots in service_groups.items()
         },
+        improve_partition_max_files=_coerce_positive_int(improve, "partition_max_files"),
+        improve_max_partition_groups=_coerce_positive_int(improve, "max_partition_groups"),
     )

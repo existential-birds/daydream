@@ -11,6 +11,7 @@ Exports:
     EffortTier: Frozen improve audit effort-tier configuration.
     EFFORT_TIERS: dict[str, EffortTier] - Improve audit effort tiers.
     PLAN_WRITE_MAX_CONCURRENCY: int - Improve plan-writer concurrency ceiling.
+    VET_BATCH_MAX_FINDINGS: int - Candidate findings per improve vetting batch.
     ReviewSkillChoice: Enum for review skill menu choices.
     REVIEW_SKILLS: dict[ReviewSkillChoice, str] - Mapping of review type identifiers to skill names.
     REVIEW_OUTPUT_FILE: str - Default filename for storing review results.
@@ -69,6 +70,10 @@ DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 # they inherit the standard/deep audit fanout of ten. Keep plan generation at
 # the prior stable Pi fanout while audit retains its independent tier ceiling.
 PLAN_WRITE_MAX_CONCURRENCY = 2
+
+# Vetting prompts inline their candidate findings as JSON, so the batch size is
+# what keeps one vet turn readable at monorepo audit volume.
+VET_BATCH_MAX_FINDINGS: int = 20
 
 # Per-backend per-phase default model table. The phase resolver in
 # ``daydream.runner._resolve_backend`` looks up
@@ -300,6 +305,7 @@ class EffortTier:
     high_confidence_only: bool
     max_findings: int | None
     include_investigate: bool
+    max_partition_groups: int | None
 
 
 EFFORT_TIERS: dict[str, EffortTier] = {
@@ -309,6 +315,7 @@ EFFORT_TIERS: dict[str, EffortTier] = {
         high_confidence_only=True,
         max_findings=6,
         include_investigate=False,
+        max_partition_groups=None,  # quick audits the whole repo as one group
     ),
     "standard": EffortTier(
         categories=None,
@@ -316,6 +323,7 @@ EFFORT_TIERS: dict[str, EffortTier] = {
         high_confidence_only=False,
         max_findings=None,
         include_investigate=False,
+        max_partition_groups=8,
     ),
     "deep": EffortTier(
         categories=None,
@@ -323,6 +331,7 @@ EFFORT_TIERS: dict[str, EffortTier] = {
         high_confidence_only=False,
         max_findings=None,
         include_investigate=True,
+        max_partition_groups=None,
     ),
 }
 
