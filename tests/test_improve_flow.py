@@ -3333,3 +3333,47 @@ async def test_ungated_step_and_scope_criterion_still_get_a_real_check(
         in text
     )
     assert "No host-verified command is attached." not in text
+
+
+@pytest.mark.anyio
+async def test_plan_writer_is_told_to_leave_the_executor_no_decisions(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The anti-ambiguity contract and per-field guidance reach the writer.
+
+    Observed at the ``Backend.execute`` seam: the prompt text and the schema
+    the plan-writer call actually received.
+    """
+    stub = _install_improve_stub(
+        monkeypatch, improve_monorepo_target, n_findings=1
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    call = next(c for c in stub.calls if c["marker"] == "plan-writer")
+    prompt = call["prompt"]
+    assert "cannot infer and will not look" in prompt
+    assert "has never seen this repository" in prompt
+    for banned in ("the relevant handler", "as appropriate", "update accordingly"):
+        assert banned in prompt, banned
+    assert "Length is never a reason to compress." in prompt
+
+    changes = call["output_schema"]["properties"]["steps"]["items"][
+        "properties"
+    ]["changes"]["items"]["properties"]
+    assert "Banned:" in changes["instruction"]["description"]
+    assert changes["instruction"]["maxLength"] == 4000
+    assert "re-read the file" in changes["target_state"]["description"]
+    assert "verbatim from the file" in changes["symbol"]["description"]
+    done = call["output_schema"]["properties"]["done_criteria"]["items"][
+        "properties"
+    ]["description"]["description"]
+    assert "without judgement" in done

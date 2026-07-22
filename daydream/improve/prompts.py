@@ -839,11 +839,20 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "minLength": 20,
                     "maxLength": 500,
+                    "description": (
+                        "How to split the work into commits, stated as a "
+                        "decision the executor follows rather than a choice it "
+                        "makes: say 'one commit' or list each commit and the "
+                        "step numbers it covers. Never 'split as appropriate'."
+                    ),
                 },
                 "commit_message_example": {
                     "type": "string",
                     "minLength": 5,
                     "maxLength": 200,
+                    "description": (
+                        "The literal commit message to use, ready to paste."
+                    ),
                 },
             },
         },
@@ -859,6 +868,11 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "minLength": 12,
                         "maxLength": 200,
+                        "description": (
+                            "What this step accomplishes, in the imperative. "
+                            "Steps are executed strictly in array order, so "
+                            "order them by dependency."
+                        ),
                     },
                     "changes": {
                         "type": "array",
@@ -879,6 +893,13 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                                     "type": "string",
                                     "minLength": 1,
                                     "maxLength": 300,
+                                    "description": (
+                                        "Exact name of the function, class, "
+                                        "constant, or block being changed, "
+                                        "copied verbatim from the file. Never "
+                                        "a description like 'the relevant "
+                                        "handler'."
+                                    ),
                                 },
                                 "operation": {
                                     "type": "string",
@@ -894,11 +915,37 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                                     "type": "string",
                                     "minLength": 30,
                                     "maxLength": 4000,
+                                    "description": (
+                                        "Exactly what to do, written for an "
+                                        "executor that cannot infer anything "
+                                        "and will not look around the "
+                                        "repository. Name every identifier, "
+                                        "literal, header, key, and import in "
+                                        "full. State what must NOT change. "
+                                        "Banned: 'the relevant X', 'the "
+                                        "appropriate Y', 'as needed', 'if "
+                                        "necessary', 'update accordingly', "
+                                        "'and similar', 'etc.' — each one is "
+                                        "a decision the executor cannot make. "
+                                        "If a change needs more than 4000 "
+                                        "characters to specify, split it into "
+                                        "several entries in this array or "
+                                        "into another step; it is never "
+                                        "truncated for you."
+                                    ),
                                 },
                                 "target_state": {
                                     "type": "string",
                                     "minLength": 30,
                                     "maxLength": 4000,
+                                    "description": (
+                                        "What is literally true of this file "
+                                        "once the instruction is done, phrased "
+                                        "so the executor can re-read the file "
+                                        "and check it sentence by sentence. "
+                                        "Describe observable content, not "
+                                        "intent or quality."
+                                    ),
                                 },
                             },
                         },
@@ -975,11 +1022,22 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                                 "type": "string",
                                 "minLength": 20,
                                 "maxLength": 1000,
+                                "description": (
+                                    "The exact fixtures, helpers, and starting "
+                                    "values this test needs, named as they "
+                                    "appear in the repository. Prefer reusing "
+                                    "a named harness from an exemplar over "
+                                    "describing one."
+                                ),
                             },
                             "action": {
                                 "type": "string",
                                 "minLength": 20,
                                 "maxLength": 1000,
+                                "description": (
+                                    "The single call or interaction under "
+                                    "test, with its literal arguments."
+                                ),
                             },
                             "assertions": {
                                 "type": "array",
@@ -988,6 +1046,12 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                                     "type": "string",
                                     "minLength": 15,
                                     "maxLength": 500,
+                                    "description": (
+                                        "One observable outcome and the exact "
+                                        "expected value. Assert on what the "
+                                        "user or caller sees, never that a "
+                                        "function was called."
+                                    ),
                                 },
                             },
                             "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
@@ -1018,6 +1082,13 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "minLength": 20,
                         "maxLength": 500,
+                        "description": (
+                            "A statement the executor can settle as true or "
+                            "false without judgement, naming the exact test "
+                            "symbol, file, or observable behaviour it turns "
+                            "on. Not 'the code is clean' or 'performance "
+                            "improves'."
+                        ),
                     },
                     "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
                 },
@@ -1200,7 +1271,35 @@ Never write `name: value` or `name=value` syntax for a secret-named key
 (token, password, secret, api key), even in prose or examples. Name the
 credential and where its value comes from; when header or assignment syntax
 is unavoidable, use an angle-bracket placeholder such as
-`X-Internal-Service-Secret: <value-from-env>`."""
+`X-Internal-Service-Secret: <value-from-env>`.
+
+Write every instruction for an executor that cannot infer and will not look
+around. It reads this file top to bottom, has never seen this repository, and
+has no access to the audit that produced the plan. It will do exactly what the
+words say and nothing else — so anything you leave implicit becomes a guess.
+Concretely:
+
+- Name identifiers, files, headers, keys, imports, and literal values in full,
+  every time. Never `the relevant handler`, `the appropriate middleware`, `the
+  corresponding test`, `the existing pattern` — the executor cannot resolve
+  which one you mean.
+- Never make the executor decide. Banned in every instruction, target state,
+  test case, and done criterion: `as appropriate`, `as needed`, `if necessary`,
+  `where applicable`, `update accordingly`, `and similar`, `etc.`, `consider`,
+  `you may want to`, `try to`. Each is a decision it is not equipped to make.
+  Decide it now and state the decision.
+- Say what must NOT change, not only what must. An executor with a vague
+  instruction rewrites more than you intended.
+- Make every step self-contained and ordered. A step may depend on earlier
+  steps in the array, never on later ones.
+- A `target_state` must be checkable by re-reading the file. Describe content
+  that will be there, not intent, quality, or an improvement.
+- Never tell the executor to run a command, branch, commit, push, or update the
+  plan index: the host renders all of that, with exact expected results.
+- Length is never a reason to compress. `instruction` and `target_state` take
+  4000 characters each and are never truncated for you — if a change does not
+  fit, split it into more entries or more steps. A precise long instruction
+  always beats a short ambiguous one."""
 
 
 def _schema_block(schema: dict[str, Any]) -> str:
