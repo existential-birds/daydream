@@ -84,8 +84,11 @@ _AUTHOR_PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
     ("git_workflow", "commit_boundaries"),
     ("git_workflow", "commit_message_example"),
     ("steps", "*", "title"),
-    ("steps", "*", "changes", "*", "instruction"),
-    ("steps", "*", "changes", "*", "target_state"),
+    # ``instruction`` and ``target_state`` are deliberately absent: they are the
+    # executable payload, not render-only prose. Clamping them cut real plans
+    # off mid-sentence ("...currently saying it …"), handing the executor an
+    # unfinished order. An over-length one is now an authoring issue the model
+    # repairs by splitting the change, never a silent truncation.
     ("steps", "*", "verification", "note"),
     ("test_plan", "exemplars", "*", "pattern_to_copy"),
     ("test_plan", "cases", "*", "name"),

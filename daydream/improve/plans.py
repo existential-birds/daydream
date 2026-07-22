@@ -153,8 +153,11 @@ def resolve_review_plan_path(repo: Path, requested: str) -> Path:
     return candidate
 
 
+# Horizontal-only separator whitespace: see ``_ENV_VAR_PATTERN`` in
+# daydream/trajectory.py — crossing a newline makes an empty assignment eat the
+# following line.
 _SECRET_VALUE = re.compile(
-    r"(?i)\b(?:token|password|secret|api[_-]?key)\b\s*[:=]\s*([^\s]+)"
+    r"(?i)\b(?:token|password|secret|api[_-]?key)\b[^\S\n\r]*[:=][^\S\n\r]*([^\s]+)"
 )
 # Structural placeholders are not secret values: angle-bracket slots,
 # shell/env references, and obvious placeholder words. Anything else after a
@@ -232,8 +235,8 @@ _PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
     ("git_workflow", "commit_boundaries"),
     ("git_workflow", "commit_message_example"),
     ("steps", "*", "title"),
-    ("steps", "*", "changes", "*", "instruction"),
-    ("steps", "*", "changes", "*", "target_state"),
+    # See the matching note in assemble.py: the executable payload is never
+    # clamped. Assembly already rejected an over-length one.
     ("steps", "*", "verification", "purpose"),
     ("test_plan", "exemplars", "*", "pattern_to_copy"),
     ("test_plan", "cases", "*", "name"),

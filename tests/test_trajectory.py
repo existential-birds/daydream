@@ -532,6 +532,30 @@ def test_redactor_scrubs_api_key_in_message() -> None:
     assert "[REDACTED_API_KEY]" in out.message
 
 
+def test_empty_secret_assignment_does_not_consume_the_following_line() -> None:
+    """Redaction never deletes a line it mistook for a secret's value.
+
+    ``API_KEY=`` at end of line used to match the *next* line as its value and
+    the replacement dropped the newline, silently deleting real content.
+    """
+    block = (
+        "CLERK_SECRET_KEY=\n"
+        "CLOUDFLARE_ACCOUNT_ID=\n"
+        "CLOUDFLARE_API_TOKEN=\n"
+        "CLOUDFLARE_ACCOUNT_HASH=\n"
+        "INTERNAL_SERVICE_SECRET="
+    )
+
+    assert redact_text(block) == block
+
+
+def test_secret_value_on_the_same_line_is_still_redacted() -> None:
+    assert redact_text("API_KEY= sk-live-abc123") == "API_KEY=[REDACTED_ENV_VAR]"
+    assert redact_text(
+        "TOKEN=abc\nPLAIN_SETTING=1"
+    ) == "TOKEN=[REDACTED_ENV_VAR]\nPLAIN_SETTING=1"
+
+
 def test_public_text_redactor_is_fail_closed() -> None:
     secret = "OPENAI_API_KEY=sk-secret123456"
 

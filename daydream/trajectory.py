@@ -91,8 +91,12 @@ _PEM_KEY_PATTERN = re.compile(
 # the var name is a secret keyword. Substring matching (the original) over-
 # redacted MONKEY_PATCH/KEYBOARD_LAYOUT/AUTHOR/TOKENIZED — segment-aware
 # matching keeps the secret list precise without false positives.
+# The separator whitespace is horizontal-only. With plain ``\s*`` an empty
+# assignment (``API_KEY=`` at end of line) consumed the newline and swallowed
+# the whole next line as its "value", deleting real content from redacted text.
+# An assignment with no value on its own line carries no secret.
 _ENV_VAR_PATTERN = re.compile(
-    r"\b((?:[A-Z][A-Z0-9]*_)*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|API_?KEY|APIKEY|AUTH)(?:_[A-Z0-9]+)*)\s*=\s*([^\s\n\r;]+)"  # noqa: E501 - secret-segment alternation
+    r"\b((?:[A-Z][A-Z0-9]*_)*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|API_?KEY|APIKEY|AUTH)(?:_[A-Z0-9]+)*)[^\S\n\r]*=[^\S\n\r]*([^\s\n\r;]+)"  # noqa: E501 - secret-segment alternation
 )
 _REDACTION_RULES: tuple[tuple[Any, str], ...] = (
     (_URL_CREDENTIAL_PATTERN, r"\1[REDACTED_USER]:[REDACTED_API_KEY]@"),

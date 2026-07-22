@@ -465,12 +465,12 @@ PLAN_WRITER_SCHEMA: dict[str, Any] = {
                                 "instruction": {
                                     "type": "string",
                                     "minLength": 30,
-                                    "maxLength": 1500,
+                                    "maxLength": 4000,
                                 },
                                 "target_state": {
                                     "type": "string",
                                     "minLength": 30,
-                                    "maxLength": 1500,
+                                    "maxLength": 4000,
                                 },
                             },
                         },
@@ -893,12 +893,12 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                                 "instruction": {
                                     "type": "string",
                                     "minLength": 30,
-                                    "maxLength": 1500,
+                                    "maxLength": 4000,
                                 },
                                 "target_state": {
                                     "type": "string",
                                     "minLength": 30,
-                                    "maxLength": 1500,
+                                    "maxLength": 4000,
                                 },
                             },
                         },

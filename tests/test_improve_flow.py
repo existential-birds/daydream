@@ -372,6 +372,7 @@ class _ImproveStubBackend:
         self.plan_dependency_slug: str | None = None
         self.plan_file_role_override: str | None = None
         self.plan_problem_override: str | None = None
+        self.plan_instruction_override: str | None = None
         self.plan_sloppy = False
         self.plan_bad_recon_id_attempts = 0
         self.plan_missing_path_attempts = 0
@@ -637,6 +638,10 @@ class _ImproveStubBackend:
                 )
             if self.plan_problem_override is not None:
                 plan["why_this_matters"]["problem"] = self.plan_problem_override
+            if self.plan_instruction_override is not None:
+                plan["steps"][0]["changes"][0]["instruction"] = (
+                    self.plan_instruction_override
+                )
             if self.plan_sloppy:
                 plan["debug_notes"] = (
                     "Planner scratch notes that must never reach the artifact."
@@ -3079,3 +3084,123 @@ async def test_plan_writer_survives_a_tool_budget_that_the_flat_default_would_ab
         for attempt in diagnostics["attempts"]
         for error in attempt["errors"]
     )
+
+
+@pytest.mark.anyio
+async def test_long_step_instruction_reaches_the_plan_whole(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 2000-char step instruction renders in full, ending on its last word.
+
+    The old 1500-char prose clamp cut real plan instructions off mid-sentence,
+    handing the executor an order that stopped in the middle of a requirement.
+    """
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    instruction = (
+        "In apps/billing/api.py, replace the body of service_name. "
+        + "Keep every existing caller working. " * 45
+        + "Do NOT modify any other file in this step."
+    )
+    assert 1500 < len(instruction) <= 4000
+    stub.plan_instruction_override = instruction
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    plan_text = next(
+        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
+    ).read_text(encoding="utf-8")
+    assert instruction in plan_text
+    assert "…" not in plan_text
+
+
+@pytest.mark.anyio
+async def test_over_length_instruction_is_repaired_not_silently_truncated(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the schema ceiling the host asks for a rewrite instead of cutting."""
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_instruction_override = "Replace service_name. " + "x" * 4000
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 1
+    diagnostics = json.loads(
+        _dd(improve_monorepo_target, "plan-write-diagnostics.json").read_text()
+    )
+    errors = [
+        error
+        for attempt in diagnostics["attempts"]
+        for error in attempt["errors"]
+    ]
+    assert any(
+        error["pointer"] == "/steps/0/changes/0/instruction" for error in errors
+    ), errors
+    # The plan writer was asked again rather than a mangled plan being written.
+    assert stub.plan_writer_calls == 2
+    assert not list(
+        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
+    )
+
+
+@pytest.mark.anyio
+async def test_empty_secret_named_assignments_do_not_eat_the_next_line(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Redaction must not delete plan content it mistakes for a secret value.
+
+    An instruction naming empty ``.env`` placeholders lost two of its five
+    lines: each empty ``*_SECRET=``/``*_TOKEN=`` consumed the following line as
+    its "value" and the replacement dropped the newline with it.
+    """
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_instruction_override = (
+        "Create .env.dev.example at the repository root with exactly these "
+        "five empty assignment lines, in this order and with no value after "
+        "any equals sign:\n"
+        "CLERK_SECRET_KEY=\n"
+        "CLOUDFLARE_ACCOUNT_ID=\n"
+        "CLOUDFLARE_API_TOKEN=\n"
+        "CLOUDFLARE_ACCOUNT_HASH=\n"
+        "INTERNAL_SERVICE_SECRET="
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="repoint dev env secrets",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    plan_text = next(
+        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
+    ).read_text(encoding="utf-8")
+    for key in (
+        "CLERK_SECRET_KEY=",
+        "CLOUDFLARE_ACCOUNT_ID=",
+        "CLOUDFLARE_API_TOKEN=",
+        "CLOUDFLARE_ACCOUNT_HASH=",
+        "INTERNAL_SERVICE_SECRET=",
+    ):
+        assert key in plan_text, key
+    assert "[REDACTED_ENV_VAR]" not in plan_text
