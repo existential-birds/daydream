@@ -164,43 +164,28 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 # Claude via ``ClaudeAgentOptions.effort``, Codex via
 # ``-c model_reasoning_effort=...``, Pi via ``--thinking``. The five levels
 # below are the intersection of the three drivers' vocabularies, so any value
-# in this table is valid for any backend. Tiering: ``low`` for
-# latency-sensitive mechanical work, ``medium`` as the balanced baseline,
-# ``high``/``xhigh`` where more reasoning buys measured quality. ``arbiter``
-# gets ``xhigh`` because it is the scoped quality-first pass over only
-# high-severity/contested findings, so the extra reasoning is bounded to a
-# small input.
+# in this table is valid for any backend.
 #
-# ``plan_write`` is the only phase pinned to ``max`` on every backend. The
-# improve flow runs unattended on a cadence and its plans are executed later by
-# much weaker agents with no context beyond the plan file, so plan authoring,
-# plan repair, and ``review-plan`` (all three ride the ``plan_write`` key) are
-# the one place where spending the most reasoning available is unconditionally
-# correct: it is a small number of calls per run, and every ambiguity left in a
-# plan is paid for by the executor.
+# The table is composed from two independently-owned halves so tuning one flow
+# never moves the other. Both are merged into ``PHASE_DEFAULT_EFFORT``, which
+# is what the resolver reads.
 REASONING_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
-PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
-    "claude": {
-        "parse": "low",
-        "fix": "medium",
-        "test": "medium",
-        "verify": "medium",
-        "exploration": "low",
-        "per_stack_review": "high",
-        "review": "high",
-        "arbiter": "xhigh",
-        "suppression": "medium",
-        "supervise": "medium",
-        "wonder": "high",
-        "merge": "medium",
-        "intent": "medium",
-        "pr_feedback": "high",
-        "recon": "low",
-        "audit": "high",
-        "vet": "xhigh",
-        "plan_write": "max",
-    },
+# Half one: the review/fix pipeline (deep, shallow, review, pr-feedback).
+#
+# Codex-only, and deliberately so — this is the historical table and its values
+# are tuned against Codex's own ambient default. Claude and Pi have no entry
+# here, so those phases resolve to ``None`` and each driver keeps applying the
+# default it already had. Adding a backend here changes deep-review behavior
+# for every existing user of that backend; do that as its own change, on its
+# own evidence, not as a side effect of improve work.
+#
+# Tiering follows OpenAI's guidance: ``low`` for latency-sensitive mechanical
+# work, ``medium`` as the balanced baseline, ``high``/``xhigh`` where more
+# reasoning buys measured quality. ``arbiter`` gets ``xhigh`` because it is the
+# scoped quality-first pass over only high-severity/contested findings, so the
+# extra reasoning is bounded to a small input.
+DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     "codex": {
         "parse": "low",
         "fix": "medium",
@@ -216,59 +201,60 @@ PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
         "merge": "medium",
         "intent": "medium",
         "pr_feedback": "high",
-        "recon": "low",
-        "audit": "high",
-        "vet": "xhigh",
-        "plan_write": "max",
-    },
-    "pi": {
-        "parse": "low",
-        "fix": "medium",
-        "test": "medium",
-        "verify": "medium",
-        "exploration": "low",
-        "per_stack_review": "high",
-        "review": "high",
-        "arbiter": "xhigh",
-        "suppression": "medium",
-        "supervise": "medium",
-        "wonder": "high",
-        "merge": "medium",
-        "intent": "medium",
-        "pr_feedback": "high",
-        "recon": "low",
-        "audit": "high",
-        "vet": "xhigh",
-        "plan_write": "max",
     },
 }
 
-# Per-phase ``(wall_budget_s, tool_call_budget)`` for the improve flow, applied
-# by ``FlowContext.budget_for``. The flat ``DEFAULT_WALL_BUDGET_S`` /
-# ``DEFAULT_TOOL_CALL_BUDGET`` pair remains the fallback for any phase absent
-# here and for every other flow.
+# Half two: the improve advisor (recon, audit, vet, plan_write).
 #
-# Numbers are read off archived improve runs under ``~/.daydream/archive/runs``
-# (tool calls counted from each phase trajectory's ATIF steps):
+# All three backends, because the improve flow runs unattended on a cadence and
+# nothing about its output is reviewed in the moment.
 #
-# - ``audit``  n=49 turns, p50=40, p90=56, max=119 tool calls. 28% of audit
-#   turns exceeded the flat 50-call budget and were silently truncated, so 120
-#   covers the observed maximum rather than the median.
-# - ``plan_write``  n=79 turns, p50=21, p90=49, max=75 tool calls under the old
-#   ``high`` effort. 120 keeps the same headroom multiple as audit, because
-#   ``max`` effort buys more tool use per turn and the plan writer gets a
-#   second repair generation inside the same budget.
-# - ``vet``  observed wall clock averaged 1594 s per occurrence on the slowest
-#   archived run (9567 s over 6 occurrences), i.e. within 12% of the flat
-#   1800 s ceiling; 2700 s restores headroom on slow backends.
-# - ``recon``  observed wall clock 88-422 s across 7 runs and well under 50
-#   tool calls; it keeps a modest raise for margin only.
-IMPROVE_PHASE_BUDGETS: dict[str, tuple[float, int]] = {
-    "recon": (1800.0, 60),
-    "audit": (2400.0, 120),
-    "vet": (2700.0, 80),
-    "plan_write": (3600.0, 120),
+# ``plan_write`` is pinned to ``max`` everywhere. It covers plan authoring,
+# plan repair, and ``review-plan``; those plans are executed later by much
+# weaker agents with no context beyond the plan file, so it is the one place
+# where spending the most reasoning available is unconditionally correct — a
+# handful of calls per run, and every ambiguity left in a plan is paid for by
+# the executor.
+IMPROVE_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
+    backend: {
+        "recon": "low",
+        "audit": "high",
+        "vet": "xhigh",
+        "plan_write": "max",
+    }
+    for backend in ("claude", "codex", "pi")
 }
+
+PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
+    backend: {
+        **DEEP_PHASE_DEFAULT_EFFORT.get(backend, {}),
+        **IMPROVE_PHASE_DEFAULT_EFFORT.get(backend, {}),
+    }
+    for backend in {*DEEP_PHASE_DEFAULT_EFFORT, *IMPROVE_PHASE_DEFAULT_EFFORT}
+}
+
+# Per-phase ``(wall_budget_s, tool_call_budget)`` overrides for the improve
+# flow, applied by ``FlowContext.budget_for``. Empty on purpose: the improve
+# flow ships unbudgeted, and ``_run_improve`` passes no flow-wide pair either.
+#
+# The improve flow runs unattended and its plans are executed later by weaker
+# agents, so a truncated turn is worse than a slow one: a budget abort returns
+# partial output, and four of the five improve call sites discard
+# ``budget_reason`` — a cut-short audit is silently treated as a complete one.
+# The old flat 1800 s / 50-call pair was doing exactly that. Measured over
+# archived runs under ``~/.daydream/archive/runs``:
+#
+# - ``audit``   n=49 turns, tool calls p50=40 p90=56 max=119. Ten of the 49
+#   recorded an actual ``tool_call_budget_exceeded`` abort.
+# - ``plan``    n=79 turns, tool calls p50=21 p90=49 max=75; wall clock
+#   p50=744 s, p90=3645 s, max=3979 s.
+#
+# Every ceiling that looked defensible from that data still clipped the tail,
+# so there is no evidence-backed number to ship. Tune *down* from here when a
+# specific phase shows a real runaway, and put the number in this table rather
+# than restoring a flow-wide default — a per-phase entry wins over the pair on
+# ``FlowContext``, which is what makes it tunable one phase at a time.
+IMPROVE_PHASE_BUDGETS: dict[str, tuple[float | None, int | None]] = {}
 
 
 class ReviewSkillChoice(Enum):

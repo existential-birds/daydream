@@ -51,7 +51,7 @@ class FlowContext:
     data: dict[str, Any] = field(default_factory=dict)
     wall_budget_s: float | None = None
     tool_call_budget: int | None = None
-    phase_budgets: dict[str, tuple[float, int]] = field(default_factory=dict)
+    phase_budgets: dict[str, tuple[float | None, int | None]] = field(default_factory=dict)
     _backend_cache: dict[tuple[str, str | None, str | None], Backend] = field(
         default_factory=dict, repr=False
     )

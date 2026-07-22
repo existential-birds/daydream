@@ -110,10 +110,12 @@ def test_reasoning_effort_precedence_cli_over_file(tmp_path: Path) -> None:
     cfg.reasoning_effort = None
     assert _resolved_reasoning_effort(cfg, "review") == "file-global"  # no phase override -> file global
     cfg2 = RunConfig(target=str(tmp_path), reasoning_effort=None, file_config=DaydreamFileConfig())
-    # No CLI or file source -> the per-backend table is the terminal tier.
-    assert _resolved_reasoning_effort(cfg2, "review") == "high"
+    # No CLI or file source -> the per-backend table is the terminal tier. The
+    # default backend is claude, which is tiered for improve phases only.
     assert _resolved_reasoning_effort(cfg2, "plan_write") == "max"
-    # A phase with no table entry still resolves to None.
+    # A phase with no entry for this backend still resolves to None, leaving
+    # the driver's ambient default in place.
+    assert _resolved_reasoning_effort(cfg2, "review") is None
     assert _resolved_reasoning_effort(cfg2, "not_a_phase") is None
 
 
@@ -154,11 +156,18 @@ def test_phase_default_effort_table_is_the_lowest_precedence_tier(tmp_path: Path
     assert _codex_backend(cfg2, "parse").reasoning_effort == "high"
 
 
-def test_claude_phases_carry_their_table_reasoning_effort(tmp_path: Path) -> None:
-    """Claude has its own effort table and the resolved backend carries it."""
+def test_claude_effort_is_improve_only(tmp_path: Path) -> None:
+    """Claude is tiered for improve phases and left alone for deep-review ones.
+
+    Deep phases have no Claude entry, so they resolve to None and the CLI keeps
+    applying the ambient default it always had — improve tiering must not move
+    deep-review behavior.
+    """
     cfg = RunConfig(target=str(tmp_path), backend="claude", model=None, file_config=DaydreamFileConfig())
-    assert _resolved_reasoning_effort(cfg, "arbiter") == "xhigh"
-    assert getattr(_resolve_backend(cfg, "arbiter"), "reasoning_effort") == "xhigh"
+    assert _resolved_reasoning_effort(cfg, "arbiter") is None
+    assert _resolved_reasoning_effort(cfg, "review") is None
+    assert getattr(_resolve_backend(cfg, "arbiter"), "reasoning_effort") is None
+    assert _resolved_reasoning_effort(cfg, "plan_write") == "max"
     assert getattr(_resolve_backend(cfg, "plan_write"), "reasoning_effort") == "max"
 
 

@@ -41,8 +41,8 @@ STOP_REQUIRED_ACTION = "STOP_AND_REPORT"
 # Sha-free by design: the Status section renders the planned-at commit, so
 # assembly stays git-free.
 GIT_BRANCH_BASIS = (
-    "Branch from the operator's current checkout at the planned-at commit "
-    "recorded in Status."
+    "Branch from the operator's current checkout. HEAD is expected to have "
+    "moved past the planned-at commit; see Before you start."
 )
 
 _PLACEHOLDER_ARG_TOKENS = {"...", "todo", "tbd", "${todo}"}

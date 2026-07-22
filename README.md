@@ -253,20 +253,40 @@ Resolution precedence, highest first:
 
 **`--reasoning-effort` > config file (phase, then global) > built-in per-phase default.**
 
-The built-in defaults are identical for all three backends:
+The built-in defaults come from two independently-tuned tables, so changing one
+flow never moves the other.
+
+**Review/fix pipeline** (`DEEP_PHASE_DEFAULT_EFFORT`) — Codex only. Claude and
+Pi have no entry, so these phases pass no flag and each driver keeps its own
+ambient default.
 
 | Effort | Phases |
 |--------|--------|
-| `low` | `parse`, `exploration`, `recon` |
+| `low` | `parse`, `exploration` |
 | `medium` | `fix`, `test`, `verify`, `suppression`, `supervise`, `merge`, `intent` |
-| `high` | `per_stack_review`, `review`, `wonder`, `pr_feedback`, `audit` |
-| `xhigh` | `arbiter`, `vet` |
+| `high` | `per_stack_review`, `review`, `wonder`, `pr_feedback` |
+| `xhigh` | `arbiter` |
+
+**Improve advisor** (`IMPROVE_PHASE_DEFAULT_EFFORT`) — all three backends,
+because the flow runs unattended and nothing it produces is reviewed in the
+moment.
+
+| Effort | Phases |
+|--------|--------|
+| `low` | `recon` |
+| `high` | `audit` |
+| `xhigh` | `vet` |
 | `max` | `plan_write` |
 
 `plan_write` is pinned to `max` on every backend. It covers plan authoring,
 plan repair, and `improve review-plan` — the phases whose output is executed
 later by a weaker agent with no context beyond the plan file, so every
 ambiguity left in a plan is paid for downstream.
+
+The improve flow runs with **no wall-clock or tool-call budget**. Its turns are
+long by design and a budget abort returns partial output that reads as
+complete, so ceilings belong in `IMPROVE_PHASE_BUDGETS` per phase once a real
+runaway justifies one.
 
 When no tier supplies a value the flag is not passed at all, and the backend
 applies its own ambient default (for Codex, `model_reasoning_effort` from

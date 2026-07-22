@@ -3059,19 +3059,19 @@ async def test_config_file_phase_override_outranks_plan_write_defaults(
 
 
 @pytest.mark.anyio
-async def test_plan_writer_survives_a_tool_budget_that_the_flat_default_would_abort(
+async def test_improve_runs_unbudgeted_so_a_long_turn_is_never_truncated(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A plan-writing turn spending 80 tool calls still lands its plan.
+    """A plan turn spending 200 tool calls completes and writes its plan.
 
-    ``DEFAULT_TOOL_CALL_BUDGET`` is 50; ``IMPROVE_PHASE_BUDGETS["plan_write"]``
-    raises it to 120, so this turn — which would have been silently truncated
-    before — completes and writes its artifact.
+    The flow used to cap every phase at 50 calls / 1800 s; ten of 49 archived
+    audit turns recorded a real ``tool_call_budget_exceeded`` abort under it,
+    and a budget abort returns partial output the flow reads as complete.
     """
     stub = _install_improve_stub(
         monkeypatch, improve_monorepo_target, n_findings=1
     )
-    stub.plan_tool_calls_before_result = 80
+    stub.plan_tool_calls_before_result = 200
 
     code = await run(
         RunConfig(
@@ -3091,7 +3091,7 @@ async def test_plan_writer_survives_a_tool_budget_that_the_flat_default_would_ab
         _dd(improve_monorepo_target, "plan-write-diagnostics.json").read_text()
     )
     assert not any(
-        error["code"] == "TOOL_CALL_BUDGET_EXCEEDED"
+        error["code"] in ("TOOL_CALL_BUDGET_EXCEEDED", "WALL_BUDGET_EXCEEDED")
         for attempt in diagnostics["attempts"]
         for error in attempt["errors"]
     )
@@ -3249,11 +3249,19 @@ async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
     # Preconditions: the executor is told where it must be standing, with the
     # full commit id and an exact expected result per command.
     assert "## Before you start" in text
-    assert f"`git rev-parse --verify {head_sha}^{{commit}}`" in text
+    assert f"`git cat-file -e {head_sha}^{{commit}}`" in text
     assert "`git status --porcelain` — expected: no output at all." in text
-    assert f"`git rev-parse HEAD` — expected: it prints `{head_sha}`" in text
-    assert "`git switch --create improve/" in text
     assert head_sha in text  # full sha, not only the 7-char Status stamp
+    # A moved HEAD is expected, not a stop: drift is scoped to this plan's own
+    # files, because plans are executed days or weeks after they are written.
+    assert "You are expected to be running it later, from a HEAD" in text
+    assert "that has moved on — that is normal and is not by itself a reason to" in text
+    assert f"`git diff --name-only {head_sha} HEAD --" in text
+    assert "Files outside this list do not matter." in text
+    # The branch comes off the executor's current HEAD, not the planned-at sha.
+    assert "`git switch --create improve/" in text
+    assert f"`git switch --create improve/batch-billing-contract {head_sha}`" not in text
+    assert "branches from your current HEAD, which is what you want." in text
 
     # Why-this-matters is labelled, so the intended outcome cannot be misread
     # as a statement about the code as it stands.

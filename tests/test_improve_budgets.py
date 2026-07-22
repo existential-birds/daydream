@@ -73,7 +73,10 @@ async def test_improve_recon_budget_exhaustion_is_diagnostic_and_nonfatal(
         raising=False,
     )
 
-    with anyio.fail_after(1):
+    # A hang guard, not a timing assertion: the tool-call budget is what stops
+    # the runaway backend, and the assertions below prove it fired. One second
+    # was tight enough to trip on a saturated xdist run.
+    with anyio.fail_after(30):
         code = await run(
             RunConfig(
                 target=str(improve_monorepo_target),

@@ -52,8 +52,6 @@ from daydream.agent import (
 )
 from daydream.backends import Backend, create_backend
 from daydream.config import (
-    DEFAULT_TOOL_CALL_BUDGET,
-    DEFAULT_WALL_BUDGET_S,
     EFFORT_TIERS,
     IMPROVE_PHASE_BUDGETS,
     PHASE_DEFAULT_EFFORT,
@@ -1064,12 +1062,14 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         work=work,
         flow_kind=DaydreamRunFlow.IMPROVE,
     ):
+        # Unbudgeted by default, like every other flow here: a truncated
+        # improve turn returns partial output that reads as complete. See
+        # IMPROVE_PHASE_BUDGETS for the measurements and for where to put a
+        # per-phase ceiling once one is justified.
         ctx = FlowContext(
             config=config,
             work=work,
             registry=get_registry(),
-            wall_budget_s=DEFAULT_WALL_BUDGET_S,
-            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             phase_budgets=dict(IMPROVE_PHASE_BUDGETS),
         )
         ctx.data["improve_dir"] = directory

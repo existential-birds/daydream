@@ -5,12 +5,12 @@ import pytest
 from daydream.config import (
     AUDIT_CATEGORIES,
     AUDIT_SKILL_MAP,
+    DEEP_PHASE_DEFAULT_EFFORT,
     DEFAULT_EXPLORATION_MODEL,
     DEFAULT_PI_MODEL,
-    DEFAULT_TOOL_CALL_BUDGET,
-    DEFAULT_WALL_BUDGET_S,
     EFFORT_TIERS,
     IMPROVE_PHASE_BUDGETS,
+    IMPROVE_PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_MODELS,
     REASONING_EFFORT_LEVELS,
@@ -20,6 +20,7 @@ PHASE_NAMES = {
     "review", "per_stack_review", "arbiter", "suppression", "supervise", "parse", "fix", "test", "verify",
     "exploration", "intent", "wonder", "merge", "pr_feedback", "recon", "audit", "vet", "plan_write",
 }
+IMPROVE_PHASE_NAMES = {"recon", "audit", "vet", "plan_write"}
 
 
 def test_audit_categories_match_playbook() -> None:
@@ -101,11 +102,32 @@ def test_phase_default_models_codex_tier_assignments():
         assert codex[phase] == "gpt-5.6-sol", f"codex phase {phase} should default to the heavy tier"
 
 
-def test_every_backend_has_a_full_reasoning_effort_table():
-    """All three drivers expose a native reasoning knob, so all three are tiered."""
-    assert set(PHASE_DEFAULT_EFFORT.keys()) == {"claude", "codex", "pi"}
-    for backend, table in PHASE_DEFAULT_EFFORT.items():
-        assert set(table.keys()) == PHASE_NAMES, backend
+def test_deep_effort_table_stays_codex_only():
+    """Improve tiering must not move deep-review behavior for claude/pi.
+
+    Claude and Pi have no deep-phase entry, so those phases resolve to None and
+    each driver keeps the ambient default it always had.
+    """
+    assert set(DEEP_PHASE_DEFAULT_EFFORT.keys()) == {"codex"}
+    assert set(DEEP_PHASE_DEFAULT_EFFORT["codex"].keys()) == PHASE_NAMES - IMPROVE_PHASE_NAMES
+    for backend in ("claude", "pi"):
+        for phase in PHASE_NAMES - IMPROVE_PHASE_NAMES:
+            assert phase not in PHASE_DEFAULT_EFFORT[backend], f"{backend}/{phase}"
+
+
+def test_improve_effort_table_covers_every_backend():
+    """The improve advisor is tiered on all three drivers."""
+    assert set(IMPROVE_PHASE_DEFAULT_EFFORT.keys()) == {"claude", "codex", "pi"}
+    for backend, table in IMPROVE_PHASE_DEFAULT_EFFORT.items():
+        assert set(table.keys()) == IMPROVE_PHASE_NAMES, backend
+
+
+def test_merged_table_is_the_union_of_its_two_halves():
+    assert PHASE_DEFAULT_EFFORT["codex"] == {
+        **DEEP_PHASE_DEFAULT_EFFORT["codex"],
+        **IMPROVE_PHASE_DEFAULT_EFFORT["codex"],
+    }
+    assert PHASE_DEFAULT_EFFORT["claude"] == IMPROVE_PHASE_DEFAULT_EFFORT["claude"]
 
 
 def test_phase_default_effort_levels_are_valid_for_every_driver():
@@ -116,18 +138,24 @@ def test_phase_default_effort_levels_are_valid_for_every_driver():
             assert level in REASONING_EFFORT_LEVELS, f"{backend}/{phase}={level}"
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "pi"])
-def test_phase_default_effort_tier_assignments(backend):
-    effort = PHASE_DEFAULT_EFFORT[backend]
-    for phase in ("parse", "exploration", "recon"):
+def test_deep_phase_effort_tier_assignments():
+    effort = DEEP_PHASE_DEFAULT_EFFORT["codex"]
+    for phase in ("parse", "exploration"):
         assert effort[phase] == "low", f"{phase} should be latency-tier effort"
     for phase in ("fix", "test", "verify", "suppression", "supervise", "merge", "intent"):
         assert effort[phase] == "medium", f"{phase} should be baseline effort"
-    for phase in ("per_stack_review", "review", "wonder", "pr_feedback", "audit"):
+    for phase in ("per_stack_review", "review", "wonder", "pr_feedback"):
         assert effort[phase] == "high", f"{phase} should be high effort"
-    # The arbiter and vet phases are scoped quality-first passes over small inputs.
-    for phase in ("arbiter", "vet"):
-        assert effort[phase] == "xhigh"
+    # The arbiter is a scoped quality-first pass over a small input.
+    assert effort["arbiter"] == "xhigh"
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "pi"])
+def test_improve_phase_effort_tier_assignments(backend):
+    effort = IMPROVE_PHASE_DEFAULT_EFFORT[backend]
+    assert effort["recon"] == "low"
+    assert effort["audit"] == "high"
+    assert effort["vet"] == "xhigh"
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "pi"])
@@ -143,15 +171,14 @@ def test_plan_write_is_pinned_to_the_top_model_tier(backend):
     assert models["plan_write"] == models["review"] == models["arbiter"]
 
 
-def test_improve_phase_budgets_exceed_the_flat_defaults():
-    """Every tiered improve phase gets more room than the flow-wide fallback."""
-    assert set(IMPROVE_PHASE_BUDGETS) == {"recon", "audit", "vet", "plan_write"}
-    for phase, (wall, tools) in IMPROVE_PHASE_BUDGETS.items():
-        assert wall >= DEFAULT_WALL_BUDGET_S, phase
-        assert tools > DEFAULT_TOOL_CALL_BUDGET, phase
-    # Audit and plan_write carry the observed p99 tool-call load (max 119/75).
-    assert IMPROVE_PHASE_BUDGETS["audit"][1] == 120
-    assert IMPROVE_PHASE_BUDGETS["plan_write"][1] == 120
+def test_improve_ships_unbudgeted():
+    """No ceiling until one is justified by evidence.
+
+    Every candidate number derived from the archive still clipped the measured
+    tail (plan turns: wall p90=3645s, max=3979s), and a budget abort returns
+    partial output that four of five improve call sites treat as complete.
+    """
+    assert IMPROVE_PHASE_BUDGETS == {}
 
 
 def test_pi_model_is_a_backend_fallback_not_a_phase_override():
