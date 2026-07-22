@@ -119,6 +119,51 @@ def test_empty_and_single_file_repos() -> None:
     assert [(p.root, p.source) for p in partitions] == [(".", "residue")]
 
 
+def test_sibling_partitions_stay_in_one_group() -> None:
+    # web/ splits into four children; a big unrelated tree competes for space.
+    files = [f"web/{sub}/f{i}.ts" for sub in ("a", "b", "c", "d") for i in range(2)]
+    files += [f"lib/f{i}.ts" for i in range(6)]
+    partitions = build_partitions(files, [], max_files=6)
+    stack_of = dict.fromkeys(files, "ts")
+    groups, skipped = group_partitions(partitions, stack_of, max_files=8, max_groups=None)
+    assert skipped == []
+    by_group = {group.name: set(group.roots) for group in groups}
+    # Packing by size alone would fill the first bin with lib + two web children
+    # and strand the rest; the siblings must travel together instead.
+    assert {"web/a", "web/b", "web/c", "web/d"} in by_group.values()
+    assert {"lib"} in by_group.values()
+
+
+def test_oversized_sibling_cluster_spills_into_adjacent_groups() -> None:
+    files = [f"web/{sub}/f{i}.ts" for sub in ("a", "b", "c") for i in range(4)]
+    partitions = build_partitions(files, [], max_files=4)
+    stack_of = dict.fromkeys(files, "ts")
+    groups, _ = group_partitions(partitions, stack_of, max_files=8, max_groups=None)
+    # 12 files against an 8-file group bound: two groups, neither over the bound,
+    # and every partition still placed.
+    assert [group.file_count for group in groups] == [8, 4]
+    assert sorted(root for group in groups for root in group.roots) == [
+        "web/a",
+        "web/b",
+        "web/c",
+    ]
+
+
+def test_split_service_slices_stay_in_one_group() -> None:
+    files = [f"apps/big/{sub}/f{i}.py" for sub in ("x", "y") for i in range(3)]
+    files += [f"apps/other/f{i}.py" for i in range(5)]
+    services = [
+        Service(name="big", root=Path("apps/big"), source="config"),
+        Service(name="other", root=Path("apps/other"), source="config"),
+    ]
+    partitions = build_partitions(files, services, max_files=4)
+    stack_of = dict.fromkeys(files, "python")
+    groups, _ = group_partitions(partitions, stack_of, max_files=8, max_groups=None)
+    by_group = {group.name: {p.name for p in group.partitions} for group in groups}
+    # An oversized service's slices keep their identity *and* their locality.
+    assert {"big/x", "big/y"} in by_group.values()
+
+
 def test_group_exposes_file_count_and_roots() -> None:
     parts = build_partitions(["apps/s1/a.py", "web/c.tsx"], [Service(name="s1", root=Path("apps/s1"), source="config")])
     groups, _ = group_partitions(parts, {"apps/s1/a.py": "python", "web/c.tsx": "python"})

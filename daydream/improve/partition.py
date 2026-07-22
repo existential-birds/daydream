@@ -19,6 +19,7 @@ PARTITION_MAX_FILES: int = 400
 
 _GENERIC_STACK = "generic"
 _RESIDUE_NAME = "residue"
+_TOP_LEVEL = ""
 
 
 @dataclass(frozen=True)
@@ -227,18 +228,61 @@ def _dominant_stack(partition: Partition, stack_of: Mapping[str, str]) -> str:
     return min(sorted(counts), key=lambda stack: (-counts[stack], stack))
 
 
+def _parent(partition: Partition) -> str:
+    """Return the partition root's parent directory, or a repo-top sentinel."""
+    root, separator, _ = partition.root.rpartition("/")
+    return root if separator else _TOP_LEVEL
+
+
 def _pack(partitions: Sequence[Partition], max_files: int) -> list[list[Partition]]:
-    """First-fit-decreasing bin packing; an oversized partition gets its own bin."""
+    """Bin-pack sibling-first, so one subtree's slices land in one agent's group.
+
+    Packing purely by size scatters a split subtree across groups — on a real
+    1892-file monorepo it put one React app's eleven sibling partitions in four
+    different groups, making four agents rebuild the same context. Sibling
+    clusters are placed whole wherever one bin has room; a cluster larger than
+    the bound spills into as few adjacent bins as possible. Within a cluster
+    the order stays first-fit-decreasing, and an oversized partition still gets
+    its own bin.
+    """
+    clusters = defaultdict(list)
+    for partition in partitions:
+        clusters[_parent(partition)].append(partition)
+
     bins: list[list[Partition]] = []
     sizes: list[int] = []
-    for partition in sorted(partitions, key=lambda item: (-len(item.files), item.name)):
+
+    def place(partition: Partition, preferred: int | None) -> int:
         size = len(partition.files)
+        if preferred is not None and sizes[preferred] + size <= max_files:
+            bins[preferred].append(partition)
+            sizes[preferred] += size
+            return preferred
         for index, current in enumerate(sizes):
             if current + size <= max_files:
                 bins[index].append(partition)
                 sizes[index] = current + size
-                break
-        else:
-            bins.append([partition])
-            sizes.append(size)
+                return index
+        bins.append([partition])
+        sizes.append(size)
+        return len(bins) - 1
+
+    ordered_clusters = sorted(
+        clusters.items(),
+        key=lambda entry: (-sum(len(p.files) for p in entry[1]), entry[0]),
+    )
+    for _, members in ordered_clusters:
+        members = sorted(members, key=lambda item: (-len(item.files), item.name))
+        total = sum(len(partition.files) for partition in members)
+        whole = next(
+            (index for index, size in enumerate(sizes) if size + total <= max_files),
+            None,
+        )
+        if whole is not None:
+            bins[whole].extend(members)
+            sizes[whole] += total
+            continue
+        home: int | None = None
+        for partition in members:
+            home = place(partition, home)
     return bins
