@@ -22,6 +22,7 @@ from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
     AUDIT_CATEGORIES,
     PLAN_WRITE_MAX_CONCURRENCY,
+    VET_BATCH_MAX_FINDINGS,
     EffortTier,
 )
 from daydream.config_file import DaydreamFileConfig
@@ -1389,61 +1390,94 @@ async def _step_vet(ctx: FlowContext) -> None:
         category = str(finding.get("category", "unknown"))
         by_category.setdefault(category, []).append(finding)
 
+    # One prompt inlines its whole batch as JSON, so batches are bounded and
+    # fanned out rather than run as one serial prompt per category.
+    batches = [
+        (category, category_findings[offset : offset + VET_BATCH_MAX_FINDINGS])
+        for category, category_findings in by_category.items()
+        for offset in range(0, len(category_findings), VET_BATCH_MAX_FINDINGS)
+    ]
     backend = ctx.backend_for("vet")
     wall_budget, tool_budget = ctx.budget_for("vet")
-    kept: list[dict[str, Any]] = []
-    rejected: list[dict[str, Any]] = []
-    for category_findings in by_category.values():
-        indexed = [
-            {**finding, "vet_id": vet_id}
-            for vet_id, finding in enumerate(category_findings, start=1)
-        ]
-        prompt = ctx.registry.prompt("vet")(
-            findings=indexed,
-            cwd=ctx.work.repo,
-        )
-        if branch_focus:
-            prompt += (
-                "\nConfirm each candidate's branch provenance against this "
-                "merge-base diff. Return `provenance` as `introduced` only "
-                "when the diff supports that conclusion; otherwise return "
-                "`inherited`.\n```diff\n"
-                f"{ctx.data['branch_diff']}\n```"
+    tier: EffortTier = ctx.data["effort_tier"]
+    recorder = get_current_recorder()
+    limiter = anyio.CapacityLimiter(
+        effective_fanout_concurrency(tier.max_concurrency, backend)
+    )
+    results: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = [
+        ([], []) for _ in batches
+    ]
+
+    async with anyio.create_task_group() as task_group:
+        for index, (category, batch) in enumerate(batches):
+            indexed = [
+                {**finding, "vet_id": vet_id}
+                for vet_id, finding in enumerate(batch, start=1)
+            ]
+            prompt = ctx.registry.prompt("vet")(
+                findings=indexed,
+                cwd=ctx.work.repo,
             )
-        try:
-            async with phase_scope(DaydreamPhase.VET):
-                output, _, _ = await run_agent(
-                    backend,
-                    ctx.work.repo,
-                    prompt,
-                    phase=DaydreamPhase.VET,
-                    output_schema=(
-                        _schema_with_provenance(VET_SCHEMA)
-                        if branch_focus
-                        else VET_SCHEMA
-                    ),
-                    read_only=True,
-                    persist_session=False,
-                    wall_budget_s=wall_budget,
-                    tool_call_budget=tool_budget,
+            if branch_focus:
+                prompt += (
+                    "\nConfirm each candidate's branch provenance against this "
+                    "merge-base diff. Return `provenance` as `introduced` only "
+                    "when the diff supports that conclusion; otherwise return "
+                    "`inherited`.\n```diff\n"
+                    f"{ctx.data['branch_diff']}\n```"
                 )
-        except Exception:  # noqa: BLE001 - no verdict fails closed
-            output = {}
-        safe_output = _redact_model_value(output)
-        verdicts = (
-            safe_output.get("verdicts", [])
-            if isinstance(safe_output, dict)
-            and isinstance(safe_output.get("verdicts"), list)
-            else []
-        )
-        category_kept, category_rejected = _apply_vet_verdicts(
-            category_findings,
-            verdicts,
-            rejected_at_sha=ctx.work.head_sha,
-            default_provenance="inherited" if branch_focus else None,
-        )
-        kept.extend(category_kept)
-        rejected.extend(category_rejected)
+
+            async def _task(
+                slot: int = index,
+                descriptor: str = f"vet-{category}-{index:02d}",
+                batch_findings: list[dict[str, Any]] = batch,
+                task_prompt: str = prompt,
+            ) -> None:
+                async with limiter:
+                    async with maybe_fork(recorder, descriptor):
+                        try:
+                            output, _, _ = await run_agent(
+                                backend,
+                                ctx.work.repo,
+                                task_prompt,
+                                phase=DaydreamPhase.VET,
+                                output_schema=(
+                                    _schema_with_provenance(VET_SCHEMA)
+                                    if branch_focus
+                                    else VET_SCHEMA
+                                ),
+                                read_only=True,
+                                persist_session=False,
+                                wall_budget_s=wall_budget,
+                                tool_call_budget=tool_budget,
+                            )
+                        except Exception:  # noqa: BLE001 - no verdict fails closed
+                            output = {}
+                        safe_output = _redact_model_value(output)
+                        verdicts = (
+                            safe_output.get("verdicts", [])
+                            if isinstance(safe_output, dict)
+                            and isinstance(safe_output.get("verdicts"), list)
+                            else []
+                        )
+                        results[slot] = _apply_vet_verdicts(
+                            batch_findings,
+                            verdicts,
+                            rejected_at_sha=ctx.work.head_sha,
+                            default_provenance=(
+                                "inherited" if branch_focus else None
+                            ),
+                        )
+
+            task_group.start_soon(_task)
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.VET)
+
+    kept = [finding for batch_kept, _ in results for finding in batch_kept]
+    rejected = [
+        finding for _, batch_rejected in results for finding in batch_rejected
+    ]
 
     record_rejections(plans_dir, rejected)
     vetted = _with_artifact_provenance(

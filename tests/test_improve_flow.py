@@ -9,7 +9,7 @@ import anyio
 import pytest
 
 from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
-from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS
+from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.exploration_runner import _sample_paths, repo_scan
 from daydream.extensions.loader import build_registry
@@ -483,6 +483,8 @@ class _ImproveStubBackend:
         self.group_scoped_findings = False
         self.invalid_group_commands: set[str] = set()
         self.fail_groups: set[str] = set()
+        self.findings_per_category: int | None = None
+        self.fail_vet_titles: set[str] = set()
 
     async def execute(
         self,
@@ -645,6 +647,29 @@ class _ImproveStubBackend:
                     continuation=None,
                 )
                 return
+            if self.findings_per_category is not None:
+                cited = "apps/billing/api.py"
+                yield ResultEvent(
+                    structured_output={
+                        "findings": [
+                            {
+                                "title": f"{category.title()} finding {number:02d}",
+                                "category": "wrong-agent-category",
+                                "path": cited,
+                                "line": 1,
+                                "body": f"Concrete {category} impact and fix {number:02d}.",
+                                "impact": "HIGH",
+                                "effort": "S",
+                                "risk": "LOW",
+                                "confidence": "HIGH",
+                                "evidence": [f"{cited}:1"],
+                            }
+                            for number in range(1, self.findings_per_category + 1)
+                        ]
+                    },
+                    continuation=None,
+                )
+                return
             title = f"{category.title()} finding"
             impact = "HIGH"
             effort = "S"
@@ -705,6 +730,11 @@ class _ImproveStubBackend:
             )
             assert match is not None
             candidates = json.loads(match.group(1))
+            if any(
+                candidate["title"] in self.fail_vet_titles
+                for candidate in candidates
+            ):
+                raise RuntimeError("vet batch failed")
             yield ResultEvent(
                 structured_output={
                     "verdicts": [
@@ -1043,11 +1073,15 @@ class _ProductionPathBackend(_ImproveStubBackend):
                     "marker": "audit",
                 }
             )
-            if self.audit_findings_issued >= 10:
+            # One finding per category, from the first partition group only:
+            # numbering by category keeps the selected set identical no matter
+            # how the audit fans out or in what order the agents complete.
+            group, _ = _group_scope(prompt)
+            if group != "group-01":
                 findings: list[dict[str, Any]] = []
             else:
                 self.audit_findings_issued += 1
-                finding_number = self.audit_findings_issued
+                finding_number = AUDIT_CATEGORIES.index(category) + 1
                 findings = [
                     {
                         "title": f"Production finding {finding_number:02d}",
@@ -1635,6 +1669,90 @@ async def test_small_repo_collapses_to_bounded_groups(
     coverage = json.loads(_dd(target, "coverage.json").read_text())
     assert [entry["name"] for entry in coverage["partitions"]] == ["residue"]
     assert len(coverage["groups"]) == 1
+
+
+@pytest.mark.anyio
+async def test_vet_batches_are_bounded_and_parallel(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _pin_stack_availability(monkeypatch, tmp_path)
+    # One partition group and one category keep the batch math exact: 45
+    # candidates -> 20 + 20 + 5.
+    file_config = _append_improve_config(
+        improve_monorepo_target,
+        "\n[tool.daydream.improve]\nmax-partition-groups = 1\n",
+    )
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.findings_per_category = 45
+    stub.vet_reject_titles = {"Security finding 45"}
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_focus="security",
+            file_config=file_config,
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    vet_calls = [call for call in stub.calls if call["marker"] == "vet"]
+    assert len(vet_calls) == 3
+    for call in vet_calls:
+        payload = json.loads(call["prompt"].split("```json\n")[1].split("```")[0])
+        assert len(payload) <= VET_BATCH_MAX_FINDINGS
+    vetted = json.loads(_dd(improve_monorepo_target, "vetted-findings.json").read_text())
+    titles = {finding["title"] for finding in vetted["findings"]}
+    # Verdicts from every batch apply: the last batch's rejection is honored
+    # and the other 44 keeps survive.
+    assert len(vetted["findings"]) == 44
+    assert "Security finding 45" not in titles
+    assert "Security finding 01" in titles and "Security finding 44" in titles
+    rejected = json.loads(
+        (improve_monorepo_target / "daydream_plans" / "rejected.json").read_text()
+    )
+    assert any(
+        entry["title"] == "Security finding 45" for entry in rejected["rejected"]
+    )
+
+
+@pytest.mark.anyio
+async def test_vet_batch_failure_fails_closed_per_batch(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _pin_stack_availability(monkeypatch, tmp_path)
+    file_config = _append_improve_config(
+        improve_monorepo_target,
+        "\n[tool.daydream.improve]\nmax-partition-groups = 1\n",
+    )
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.findings_per_category = 45
+    stub.fail_vet_titles = {"Security finding 41"}  # the third batch's agent raises
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_focus="security",
+            file_config=file_config,
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    vetted = json.loads(_dd(improve_monorepo_target, "vetted-findings.json").read_text())
+    titles = {finding["title"] for finding in vetted["findings"]}
+    # Only the failed batch's five findings drop; the other two batches keep theirs.
+    assert len(vetted["findings"]) == 40
+    assert "Security finding 41" not in titles
+    assert "Security finding 01" in titles and "Security finding 40" in titles
 
 
 @pytest.mark.anyio
