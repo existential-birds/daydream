@@ -25,7 +25,10 @@ from daydream.improve.plans import (
     validate_plan_result,
     write_plans,
 )
-from daydream.improve.prompts import build_plan_writer_repair_prompt
+from daydream.improve.prompts import (
+    PLAN_AUTHOR_SCHEMA,
+    build_plan_writer_repair_prompt,
+)
 
 
 @pytest.mark.parametrize(
@@ -2368,6 +2371,145 @@ def test_assemble_dedups_scope_lists_by_disk_truth(tmp_path: Path) -> None:
     assert [entry["path"] for entry in scope["out_of_scope_paths"]] == [
         "README.md"
     ]
+
+
+def _stop_condition(*related_paths: str) -> dict[str, Any]:
+    return {
+        "kind": "environment",
+        "condition": (
+            "The retired catalog loader module is still present on disk when "
+            "you start this plan."
+        ),
+        "evidence_to_report": "Report the module path and its current contents.",
+        "related_paths": list(related_paths),
+        "related_step_numbers": [1],
+    }
+
+
+def _injected_out_of_scope(assembled: dict[str, Any], path: str) -> dict[str, Any]:
+    entries = [
+        entry
+        for entry in assembled["scope"]["out_of_scope_paths"]
+        if entry["path"] == path
+    ]
+    assert len(entries) == 1
+    return entries[0]
+
+
+def test_undeclared_stop_path_is_declared_out_of_scope_not_blocked(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["false_assumption"]["related_paths"] = [
+        "apps/catalog/api.py",
+        "Makefile",
+    ]
+
+    assembled = _assembled(repo, plan)
+
+    entry = _injected_out_of_scope(assembled, "Makefile")
+    assert entry["reason"] == (
+        "Referenced by a stop condition for context only; do not create, "
+        "modify, or depend on this path."
+    )
+    assert [entry["path"] for entry in assembled["scope"]["out_of_scope_paths"]] == [
+        "README.md",
+        "Makefile",
+    ]
+    assert assembled["stop_conditions"][3]["related_paths"] == [
+        "apps/catalog/api.py",
+        "Makefile",
+    ]
+
+
+def test_deleted_stop_path_is_declared_out_of_scope_without_touching_disk(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    deleted = "apps/catalog/legacy_loader.py"
+    plan = _authored_plan()
+    plan["additional_stop_conditions"] = [_stop_condition(deleted)]
+
+    assembled = _assembled(repo, plan)
+
+    assert _injected_out_of_scope(assembled, deleted)["path"] == deleted
+    assert not (repo / deleted).exists()
+    assert assembled["stop_conditions"][4]["related_paths"] == [deleted]
+
+
+@pytest.mark.parametrize("path", ["../outside.py", "src/$(whoami).py"])
+def test_malformed_stop_path_stays_blocked_and_is_never_declared(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["additional_stop_conditions"] = [_stop_condition(path)]
+
+    issues = _issues(repo, plan)
+
+    assert "MALFORMED_PATH" in {issue.code for issue in issues}
+    assert plan["scope"]["out_of_scope_paths"] == [
+        {
+            "path": "README.md",
+            "reason": "Catalog batching does not change user documentation.",
+        }
+    ]
+
+
+def test_out_of_repository_stop_path_stays_blocked_and_is_never_declared(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / "escape").symlink_to(outside, target_is_directory=True)
+    plan = _authored_plan()
+    plan["additional_stop_conditions"] = [_stop_condition("escape/pwn.py")]
+
+    issues = _issues(repo, plan)
+
+    assert "PATH_OUTSIDE_REPOSITORY" in {issue.code for issue in issues}
+    assert [
+        issue.pointer
+        for issue in issues
+        if issue.code == "PATH_OUTSIDE_REPOSITORY"
+    ] == ["/additional_stop_conditions/0/related_paths/0"]
+
+
+def test_already_declared_stop_paths_are_never_duplicated(tmp_path: Path) -> None:
+    repo, _ = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["additional_stop_conditions"] = [
+        _stop_condition("README.md", "tests/test_catalog.py", "README.md")
+    ]
+
+    assembled = _assembled(repo, plan)
+
+    assert assembled["scope"]["out_of_scope_paths"] == [
+        {
+            "path": "README.md",
+            "reason": "Catalog batching does not change user documentation.",
+        }
+    ]
+
+
+def test_injected_out_of_scope_entry_satisfies_the_authoring_schema(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["false_assumption"]["related_paths"] = ["Makefile"]
+
+    assembled = _assembled(repo, plan)
+
+    entry = _injected_out_of_scope(assembled, "Makefile")
+    item_schema = PLAN_AUTHOR_SCHEMA["properties"]["scope"]["properties"][
+        "out_of_scope_paths"
+    ]["items"]
+    assert not list(Draft202012Validator(item_schema).iter_errors(entry))
+    assert 20 <= len(entry["reason"]) <= 500
 
 
 def test_repair_prompt_renders_complete_issue_list_with_hints() -> None:

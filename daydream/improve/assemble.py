@@ -276,6 +276,61 @@ def _clamp_excerpt_end_lines(normalized: dict[str, Any], *, repo: Path) -> None:
             _clamp_anchor(entry, count)
 
 
+_STOP_PATH_OUT_OF_SCOPE_REASON = (
+    "Referenced by a stop condition for context only; do not create, modify, "
+    "or depend on this path."
+)
+
+
+def _declare_stop_condition_paths(
+    normalized: dict[str, Any],
+    *,
+    repo: Path,
+) -> None:
+    """Declare every well-formed stop-condition path the plan left undeclared.
+
+    A stop condition legitimately names paths the plan never touches — a file
+    it expects to already be deleted, most of all. Blocking the plan over that
+    bookkeeping gap wastes a repair generation, so the host closes it instead:
+    declaring a path out-of-scope only ever restricts the executor further, and
+    the injected entry renders in the plan's own out-of-scope section.
+    Malformed and unconfined paths are left alone so they still fail as
+    ``MALFORMED_PATH`` / ``PATH_OUTSIDE_REPOSITORY``.
+    """
+    scope = normalized.get("scope")
+    if not isinstance(scope, dict):
+        return
+    out_entries = scope.get("out_of_scope_paths")
+    if not isinstance(out_entries, list):
+        return
+    declared = {
+        *_entry_paths(scope.get("existing_paths")),
+        *_entry_paths(scope.get("new_paths")),
+        *_entry_paths(out_entries),
+    }
+    extra = normalized.get("additional_stop_conditions")
+    conditions = [
+        normalized.get("false_assumption"),
+        *(extra if isinstance(extra, list) else []),
+    ]
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            continue
+        related = condition.get("related_paths")
+        for path in related if isinstance(related, list) else []:
+            if (
+                not isinstance(path, str)
+                or path in declared
+                or not _valid_repository_file_path(path)
+                or not _path_is_confined(repo, path)
+            ):
+                continue
+            declared.add(path)
+            out_entries.append(
+                {"path": path, "reason": _STOP_PATH_OUT_OF_SCOPE_REASON}
+            )
+
+
 def _normalize_authored(
     authored: Any,
     *,
@@ -946,6 +1001,7 @@ def assemble_plan(
     normalized = _normalize_authored(authored, repo=repo)
     if normalized is None:
         return None, (AssemblyIssue("NO_STRUCTURED_OBJECT", "/"),)
+    _declare_stop_condition_paths(normalized, repo=repo)
     recon_by_id = {
         command["id"]: command
         for command in recon_commands
