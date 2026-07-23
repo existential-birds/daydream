@@ -37,7 +37,7 @@ from daydream.backends import (
 from daydream.config import UNKNOWN_SKILL_PATTERN
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
-from daydream.trajectory import DaydreamPhase, get_current_recorder
+from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_text
 from daydream.ui import (
     AgentTextRenderer,
     LiveToolPanelRegistry,
@@ -730,12 +730,13 @@ async def run_agent(
         raise exc.original from None
     except Exception as exc:
         category = getattr(exc, "category", None)
-        diagnostic = (
-            f"{type(exc).__name__}: {category}"
-            if isinstance(category, str)
-            else type(exc).__name__
-        )
-        print_error(console, "Backend Execution Error", diagnostic)
+        msg = str(exc).strip()
+        diagnostic = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+        if isinstance(category, str):
+            diagnostic += f" [{category}]"
+        # Error messages can embed secrets (a leaked env var, an API key in a
+        # provider error); redact at this host boundary like every other surfaced text.
+        print_error(console, "Backend Execution Error", redact_text(diagnostic))
         raise
     finally:
         _state.current_backends.remove(backend)

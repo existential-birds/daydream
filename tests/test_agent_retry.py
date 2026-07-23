@@ -114,6 +114,39 @@ class _AlwaysRetryableBackend:
         return ""
 
 
+class _PlainErrorBackend:
+    """Raises a non-retryable plain exception with NO ``.category`` (Claude/Codex-style)."""
+
+    model = "test-model"
+    fanout_concurrency = 4
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ):
+        self.call_count += 1
+        # A human-readable reason plus a secret-shaped substring, to prove the
+        # message surfaces AND that secrets are scrubbed at the host boundary.
+        raise RuntimeError("overloaded-502 ZAI_API_KEY=leaked-secret-abc123")
+        yield  # make this an async generator
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, *a: Any, **kw: Any) -> str:
+        return ""
+
+
 class _PartialThenRetryBackend:
     """Yields partial text then raises retryable on attempt 1; yields final text on attempt 2."""
 
@@ -172,6 +205,27 @@ async def test_run_agent_no_retry_on_non_retryable(monkeypatch, tmp_path: Path) 
         await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
 
     assert backend.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_run_agent_surfaces_backend_error_message(monkeypatch, tmp_path: Path) -> None:
+    """A categoryless backend error surfaces its MESSAGE to the user, not a bare class name."""
+    from rich.console import Console
+
+    rec = Console(record=True, force_terminal=True, width=200)
+    monkeypatch.setattr("daydream.agent.console", rec)
+    backend = _PlainErrorBackend()
+
+    with pytest.raises(RuntimeError, match="overloaded-502"):
+        await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
+
+    out = rec.export_text()
+    assert "Backend Execution Error" in out
+    # The exception MESSAGE (not just "RuntimeError") must reach the user.
+    assert "overloaded-502" in out
+    # ...but a secret embedded in that message is redacted at the host boundary.
+    assert "leaked-secret-abc123" not in out
+    assert "[REDACTED_ENV_VAR]" in out
 
 
 @pytest.mark.asyncio
