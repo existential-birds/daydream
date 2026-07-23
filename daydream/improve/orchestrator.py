@@ -1113,8 +1113,16 @@ async def _step_vet(ctx: FlowContext) -> None:
     ]
 
     record_rejections(plans_dir, rejected)
+    findings = aggregate_cross_service(order_by_leverage(kept))
+    defects, direction = partition_direction(findings)
+    ordered_defects = order_by_leverage(defects)
+    ordered_direction = order_by_leverage(direction)
     vetted = _with_artifact_provenance(
-        {"findings": order_by_leverage(kept)},
+        {
+            "findings": [*ordered_defects, *ordered_direction],
+            "defects": ordered_defects,
+            "direction": ordered_direction,
+        },
         phase=DaydreamPhase.VET,
     )
     vetted_findings_path(directory).write_text(
@@ -1123,6 +1131,31 @@ async def _step_vet(ctx: FlowContext) -> None:
     ctx.data["vetted"] = vetted
     ctx.data["previously_rejected"] = previously_rejected
     ctx.data["vet_rejected"] = len(rejected)
+    ctx.data["defects"] = ordered_defects
+    ctx.data["direction"] = ordered_direction
+    if branch_focus:
+        introduced = [
+            finding
+            for finding in ordered_defects
+            if finding.get("provenance") == "introduced"
+        ]
+        inherited = [
+            finding
+            for finding in ordered_defects
+            if finding.get("provenance") != "introduced"
+        ]
+        ctx.data["findings_table"] = (
+            "### Introduced by this branch\n\n"
+            f"{_findings_table(introduced)}\n\n"
+            "### Inherited from the base\n\n"
+            f"{_findings_table(inherited, start=len(introduced) + 1)}"
+        )
+    else:
+        ctx.data["findings_table"] = _findings_table(ordered_defects)
+    ctx.data["direction_section"] = _direction_section(
+        ordered_direction,
+        start=len(ordered_defects) + 1,
+    )
 
 
 def _evidence_cell(finding: dict[str, Any]) -> str:
@@ -1182,56 +1215,6 @@ def _direction_section(
             f"Evidence: {_evidence_cell(finding)}."
         )
     return "## Direction\n\n" + "\n\n".join(entries)
-
-
-async def _step_prioritize(ctx: FlowContext) -> None:
-    """Partition and leverage-order vetted findings for reporting and selection."""
-    directory: Path = ctx.data["improve_dir"]
-    payload = json.loads(vetted_findings_path(directory).read_text())
-    raw_findings = payload.get("findings", [])
-    findings = aggregate_cross_service(
-        [finding for finding in raw_findings if isinstance(finding, dict)]
-    )
-    defects, direction = partition_direction(findings)
-    ordered_defects = order_by_leverage(defects)
-    ordered_direction = order_by_leverage(direction)
-    vetted = _with_artifact_provenance(
-        {
-            "findings": [*ordered_defects, *ordered_direction],
-            "defects": ordered_defects,
-            "direction": ordered_direction,
-        },
-        phase=DaydreamPhase.VET,
-    )
-    vetted_findings_path(directory).write_text(
-        json.dumps(vetted, indent=2) + "\n"
-    )
-    ctx.data["vetted"] = vetted
-    ctx.data["defects"] = ordered_defects
-    ctx.data["direction"] = ordered_direction
-    if ctx.config.improve_focus == "branch":
-        introduced = [
-            finding
-            for finding in ordered_defects
-            if finding.get("provenance") == "introduced"
-        ]
-        inherited = [
-            finding
-            for finding in ordered_defects
-            if finding.get("provenance") != "introduced"
-        ]
-        ctx.data["findings_table"] = (
-            "### Introduced by this branch\n\n"
-            f"{_findings_table(introduced)}\n\n"
-            "### Inherited from the base\n\n"
-            f"{_findings_table(inherited, start=len(introduced) + 1)}"
-        )
-    else:
-        ctx.data["findings_table"] = _findings_table(ordered_defects)
-    ctx.data["direction_section"] = _direction_section(
-        ordered_direction,
-        start=len(ordered_defects) + 1,
-    )
 
 
 def _parse_selection(raw: str, *, total: int) -> list[int] | None:
@@ -2007,7 +1990,6 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="recon", run=_step_recon, enabled=_needs_recon),
     FlowStep(name="audit", run=_step_audit, enabled=_is_audit_run),
     FlowStep(name="vet", run=_step_vet, enabled=_is_audit_run),
-    FlowStep(name="prioritize", run=_step_prioritize, enabled=_is_audit_run),
     FlowStep(name="select-plans", run=_step_select, enabled=_is_audit_run),
     FlowStep(
         name="write-plans",
