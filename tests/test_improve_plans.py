@@ -1961,6 +1961,42 @@ def test_undeclared_test_case_path_is_declared_new_when_absent_from_disk(
     assert f"::{plan['test_plan']['cases'][0]['test_symbol']}" in rendered
 
 
+def test_duplicate_test_symbols_are_numbered_and_both_cases_survive(
+    tmp_path: Path,
+) -> None:
+    repo, planned_at = _repo(tmp_path)
+    plan = _authored_plan()
+    duplicate = deepcopy(plan["test_plan"]["cases"][0])
+    duplicate["name"] = "Catalog loading preserves item order"
+    third = deepcopy(duplicate)
+    third["name"] = "Catalog loading tolerates an empty catalog"
+    plan["test_plan"]["cases"].extend([duplicate, third])
+
+    assembled = _assembled(repo, plan)
+
+    symbol = "test_list_catalog_batches_item_loading"
+    assert [case["test_symbol"] for case in assembled["test_plan"]["cases"]] == [
+        symbol,
+        f"{symbol}_2",
+        f"{symbol}_3",
+    ]
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=planned_at,
+        number=1,
+    )
+    assert f"`tests/test_catalog.py::{symbol}` (unit)" in rendered
+    assert f"`tests/test_catalog.py::{symbol}_2` (unit)" in rendered
+    assert f"`tests/test_catalog.py::{symbol}_3` (unit)" in rendered
+    assert "**Catalog loading preserves item order**" in rendered
+    assert "**Catalog loading tolerates an empty catalog**" in rendered
+    assert (
+        f"Every named test-plan case passes: {symbol}, {symbol}_2, "
+        f"{symbol}_3."
+    ) in rendered
+
+
 @pytest.mark.parametrize(
     ("location", "pointer"),
     [

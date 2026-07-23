@@ -388,6 +388,36 @@ def _relocate_existing_new_paths(
                 change["operation"] = "modify"
 
 
+_TEST_SYMBOL_MAX_LENGTH = _author_schema_max_length(
+    ("test_plan", "cases", "*", "test_symbol")
+)
+
+
+def _disambiguate_test_symbols(normalized: dict[str, Any]) -> None:
+    """Number a repeated test symbol instead of blocking on the collision.
+
+    Two cases naming the same test is a naming slip, not a defect in the work
+    the plan describes. The first occurrence keeps the authored name and each
+    repeat gets the lowest unused ``_<n>`` suffix, so every case still names one
+    distinct test the executor can write and run.
+    """
+    test_plan = normalized.get("test_plan")
+    cases = test_plan.get("cases") if isinstance(test_plan, dict) else None
+    seen: set[str] = set()
+    for case in cases if isinstance(cases, list) else []:
+        symbol = case.get("test_symbol") if isinstance(case, dict) else None
+        if not isinstance(symbol, str):
+            continue
+        candidate = symbol
+        suffix = 2
+        while candidate in seen:
+            tail = f"_{suffix}"
+            candidate = symbol[: _TEST_SYMBOL_MAX_LENGTH - len(tail)] + tail
+            suffix += 1
+        seen.add(candidate)
+        case["test_symbol"] = candidate
+
+
 def _clamp_anchor(anchor: Any, line_count: int) -> None:
     if not isinstance(anchor, dict):
         return
@@ -500,6 +530,7 @@ def _normalize_authored(
     _declare_referenced_paths(normalized, repo=repo)
     _dedup_scope(normalized, repo=repo)
     _relocate_existing_new_paths(normalized, repo=repo)
+    _disambiguate_test_symbols(normalized)
     _clamp_excerpt_end_lines(normalized, repo=repo)
     return normalized
 
@@ -875,21 +906,13 @@ def _collect_issues(
         ):
             add("TEST_EXEMPLAR_INVALID", pointer)
     cases = test_plan.get("cases")
-    test_symbols: set[str] = set()
     for index, case in enumerate(cases if isinstance(cases, list) else []):
         if not isinstance(case, dict):
             continue
-        # Normalization already declared a well-formed test_file in scope; the
-        # check that stays is the path grammar and confinement one.
+        # Normalization already declared a well-formed test_file in scope and
+        # disambiguated any repeated test_symbol; the check that stays is the
+        # path grammar and confinement one.
         check_path(f"/test_plan/cases/{index}/test_file", case.get("test_file"))
-        symbol = case.get("test_symbol")
-        if isinstance(symbol, str):
-            if symbol in test_symbols:
-                add(
-                    "TEST_SYMBOL_DUPLICATE",
-                    f"/test_plan/cases/{index}/test_symbol",
-                )
-            test_symbols.add(symbol)
 
     for pointer, ref in _iter_command_refs(normalized):
         if pointer.startswith("/steps/"):
