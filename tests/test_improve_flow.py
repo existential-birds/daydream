@@ -22,7 +22,6 @@ from daydream.improve.prompts import (
     HARD_RULE_6,
     PLAN_AUTHOR_SCHEMA,
     build_audit_prompt,
-    build_recon_commands_prompt,
 )
 from daydream.runner import RunConfig, run
 from tests.harness.git_helpers import commit, git, init_repo
@@ -97,13 +96,6 @@ def test_audit_prompt_states_slicing_bounds_search_not_reading() -> None:
         tier=EFFORT_TIERS["standard"],
     )
     assert "bounds where you search, never what you may read" in prompt
-
-
-def test_recon_commands_prompt_names_group_roots() -> None:
-    prompt = build_recon_commands_prompt(group=_GROUP, recon_summary="{}", cwd=Path("/repo"))
-    assert "group-01" in prompt
-    assert "apps/billing" in prompt and "frontend/web" in prompt
-    assert "build, test, and lint commands" in prompt
 
 
 def _plan_ref(
@@ -432,39 +424,6 @@ def _group_file_counts(prompt: str) -> list[int]:
     return [int(count) for count in re.findall(r"^- .+ — `.+?/` \((\d+) files", prompt, flags=re.MULTILINE)]
 
 
-def _stub_group_command(
-    group: str, root: str, roots: list[str], *, invalid: bool
-) -> dict[str, Any]:
-    """One per-group command record, evidenced by the root test-command line."""
-    scoped = [path for path in roots if path != "."]
-    return {
-        "id": "suite",
-        "purpose": f"Run the {group} test suite",
-        "command": "uv run pytest",
-        # An unreadable working directory is the host-rejected shape.
-        "working_directory": f"{root}/nonexistent" if invalid else root,
-        "expected_success": {
-            "exit_code": 0,
-            "observable_result": "exit 0 and the selected pytest tests pass",
-        },
-        "applicability": {
-            "scope": (
-                {"kind": "in-scope-paths", "paths": scoped}
-                if scoped
-                else {"kind": "whole-repository"}
-            ),
-            "preconditions": [],
-            "rationale": f"The {group} subtree is covered by the root test command.",
-        },
-        "evidence": {
-            "kind": "literal-command",
-            "source_path": "pyproject.toml",
-            "line_anchor": {"start_line": 5, "end_line": 5},
-            "verbatim_excerpt": 'test-command = "uv run pytest"',
-        },
-    }
-
-
 def _citable_file(target: Path, root: str) -> str:
     """Return a real committed file inside ``root`` for a stub finding to cite."""
     base = target if root == "." else target / root
@@ -527,8 +486,6 @@ class _ImproveStubBackend:
         self.plan_crash_attempts = 0
         self.plan_stop_condition_path: str | None = None
         self.group_scoped_findings = False
-        self.invalid_group_commands: set[str] = set()
-        self.fail_groups: set[str] = set()
         self.findings_per_category: int | None = None
         self.fail_vet_titles: set[str] = set()
 
@@ -547,8 +504,6 @@ class _ImproveStubBackend:
         category = None
         if "you are the **repo-survey** specialist" in prompt.lower():
             marker = "repo-scan"
-        elif "IMPROVE_COMMAND_RECON" in prompt:
-            marker = "recon-commands"
         elif "IMPROVE_RECON" in prompt:
             marker = "recon"
         elif "read-only improve audit specialist" in prompt:
@@ -622,24 +577,6 @@ class _ImproveStubBackend:
                 await anyio.sleep(self.audit_delay)
             finally:
                 self.audit_active -= 1
-        if marker == "recon-commands":
-            group, root = _group_scope(prompt)
-            if group in self.fail_groups:
-                raise RuntimeError(f"{group} command recon failed")
-            yield ResultEvent(
-                structured_output={
-                    "commands": [
-                        _stub_group_command(
-                            group,
-                            root,
-                            _group_roots(prompt),
-                            invalid=group in self.invalid_group_commands,
-                        )
-                    ]
-                },
-                continuation=None,
-            )
-            return
         if marker == "repo-scan":
             yield ResultEvent(
                 structured_output={
@@ -1545,6 +1482,38 @@ def _append_improve_config(target: Path, body: str) -> DaydreamFileConfig:
 
 
 @pytest.mark.anyio
+async def test_recon_prompt_names_audited_subtrees_for_per_service_commands(
+    improve_scaled_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One recon pass carries the audited roots, so it can return per-service commands."""
+    _pin_stack_availability(monkeypatch, tmp_path)
+    stub = _install_improve_stub(
+        monkeypatch, improve_scaled_monorepo_target, n_findings=0
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_scaled_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    recon_calls = [call for call in stub.calls if call["marker"] == "recon"]
+    assert len(recon_calls) == 1
+    prompt = recon_calls[0]["prompt"]
+    assert "`apps/svc00`" in prompt and "`frontend`" in prompt
+    assert "Return the per-subtree build, test, and lint commands" in prompt
+    assert "`in-scope-paths`" in prompt
+    # Roots only: the recon prompt never inlines an individual tracked file.
+    assert "apps/svc00/api.py" not in prompt
+
+
+@pytest.mark.anyio
 async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
     improve_scaled_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1956,175 +1925,6 @@ async def test_vet_batch_failure_fails_closed_per_batch(
     assert len(vetted["findings"]) == 40
     assert "Security finding 41" not in titles
     assert "Security finding 01" in titles and "Security finding 40" in titles
-
-
-@pytest.mark.anyio
-async def test_recon_commands_fan_out_per_group_and_merge(
-    improve_scaled_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    stub = _install_improve_stub(
-        monkeypatch, improve_scaled_monorepo_target, n_findings=0
-    )
-    stub.invalid_group_commands = {"group-02"}
-
-    code = await run(
-        RunConfig(
-            target=str(improve_scaled_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    assert code == 0
-    discovery = [call for call in stub.calls if call["marker"] == "recon-commands"]
-    assert len(discovery) == 3
-    assert {_group_scope(call["prompt"])[0] for call in discovery} == {
-        "group-01",
-        "group-02",
-        "group-03",
-    }
-    assert all(call["read_only"] for call in discovery)
-    recon = json.loads(_dd(improve_scaled_monorepo_target, "recon.json").read_text())
-    ids = {command["id"] for command in recon["commands"]}
-    # The two valid groups' records survive under group-prefixed ids; the third
-    # group's invalid record is rejected without taking the others with it.
-    assert {"group-01-suite", "group-03-suite"} <= ids
-    assert "group-02-suite" not in ids
-    assert "test-suite" in ids  # the repo-level record still stands
-    assert any(
-        rejection["code"] == "RECON_WORKING_DIRECTORY_INVALID"
-        for rejection in recon["command_rejections"]
-    )
-    diagnostics = json.loads(
-        _dd(
-            improve_scaled_monorepo_target,
-            "command-validation-diagnostics.json",
-        ).read_text()
-    )
-    assert any(
-        rejection["candidate_id"] == "group-02-suite"
-        for rejection in diagnostics["rejections"]
-    )
-
-
-@pytest.mark.anyio
-async def test_failed_group_command_recon_is_not_fatal(
-    improve_scaled_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    stub = _install_improve_stub(
-        monkeypatch, improve_scaled_monorepo_target, n_findings=0
-    )
-    stub.fail_groups = {"group-01"}
-
-    code = await run(
-        RunConfig(
-            target=str(improve_scaled_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    assert code == 0
-    recon = json.loads(_dd(improve_scaled_monorepo_target, "recon.json").read_text())
-    ids = {command["id"] for command in recon["commands"]}
-    assert "group-01-suite" not in ids
-    assert {"group-02-suite", "group-03-suite"} <= ids
-    assert "group-01" in recon["command_discovery_failures"]
-
-
-@pytest.mark.anyio
-async def test_single_group_repo_skips_per_group_recon(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    target = tmp_path / "single_group"
-    target.mkdir()
-    (target / "api.py").write_text("def handler():\n    return 1\n")
-    (target / "pyproject.toml").write_text('[project]\nname = "single-group"\n')
-    init_repo(target)
-    git(target, "add", ".")
-    commit(target, "initial")
-    stub = _install_improve_stub(monkeypatch, target, n_findings=0)
-
-    code = await run(
-        RunConfig(
-            target=str(target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    assert code == 0
-    assert not [call for call in stub.calls if call["marker"] == "recon-commands"]
-    assert [call for call in stub.calls if call["marker"] == "recon"]
-
-
-@pytest.mark.anyio
-async def test_quick_and_branch_and_description_skip_per_group_recon(
-    improve_scaled_monorepo_target: Path,
-    improve_branch_target: Path,
-    improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    quick = _install_improve_stub(
-        monkeypatch, improve_scaled_monorepo_target, n_findings=0
-    )
-    assert (
-        await run(
-            RunConfig(
-                target=str(improve_scaled_monorepo_target),
-                flow_name="improve",
-                improve_effort="quick",
-                non_interactive=True,
-                archive=False,
-            )
-        )
-        == 0
-    )
-    assert not [call for call in quick.calls if call["marker"] == "recon-commands"]
-
-    branch = _install_improve_stub(monkeypatch, improve_branch_target, n_findings=0)
-    assert (
-        await run(
-            RunConfig(
-                target=str(improve_branch_target),
-                flow_name="improve",
-                improve_focus="branch",
-                non_interactive=True,
-                archive=False,
-            )
-        )
-        == 0
-    )
-    assert not [call for call in branch.calls if call["marker"] == "recon-commands"]
-
-    description = _install_improve_stub(monkeypatch, improve_monorepo_target)
-    assert (
-        await run(
-            RunConfig(
-                target=str(improve_monorepo_target),
-                flow_name="improve",
-                improve_plan_description="add rate limiting",
-                non_interactive=True,
-                archive=False,
-            )
-        )
-        == 0
-    )
-    assert not [
-        call for call in description.calls if call["marker"] == "recon-commands"
-    ]
 
 
 @pytest.mark.anyio

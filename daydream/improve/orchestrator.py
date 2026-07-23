@@ -73,7 +73,6 @@ from daydream.improve.prompts import (
     AUDIT_FINDINGS_SCHEMA,
     PLAN_AUTHOR_SCHEMA,
     RECON_COMMAND_CONTRACT_BULLET,
-    RECON_COMMANDS_ONLY_SCHEMA,
     VET_SCHEMA,
     build_plan_writer_repair_prompt,
 )
@@ -347,11 +346,18 @@ def _service_dict(service: Service) -> dict[str, str]:
 
 
 def _build_recon_prompt(
-    repo: Path, services: list[Service], exploration_summary: str
+    repo: Path,
+    services: list[Service],
+    groups: list[PartitionGroup],
+    exploration_summary: str,
 ) -> str:
     service_lines = "\n".join(
         f"- {service.name}: {service.root.as_posix()}" for service in services
     )
+    audited_roots = sorted(
+        {root for group in groups for root in group.roots if root != "."}
+    )
+    root_list = ", ".join(f"`{root}`" for root in audited_roots)
     return f"""IMPROVE_RECON
 
 Read the repository at {repo} without modifying it. Return structured
@@ -364,6 +370,13 @@ reconnaissance facts only:
 
 Services:
 {service_lines or "- repository root"}
+
+Audited subtrees ({len(audited_roots)}): {root_list or "the repository root"}.
+Return the per-subtree build, test, and lint commands for these too, not only
+the repository-wide ones: set each command's `working_directory` to the
+directory it actually runs in, and set `applicability.scope` to
+`in-scope-paths` naming the subtrees it governs whenever it does not genuinely
+govern the whole repository.
 
 Existing repository scan:
 {exploration_summary or "No additional conventions detected."}
@@ -445,13 +458,51 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             + "\n"
         )
 
+    stacks: list[StackAssignment] = []
+    partitions: list[Partition] = []
+    groups: list[PartitionGroup] = []
+    skipped: list[Partition] = []
+    if not description_mode:
+        installed = get_installed_skills()
+        availability = (
+            installed if installed is not None else ctx.registry.stack_keys()
+        )
+        tracked = branch_files if branch_focus else git_ops.ls_files(target)
+        stacks = detect_stacks(
+            tracked,
+            skill_availability=availability,
+            registry=ctx.registry,
+        )
+        if ctx.config.improve_scope:
+            stacks = _stacks_for_services(stacks, services)
+            tracked = sorted({path for stack in stacks for path in stack.files})
+        partitions, groups, skipped = _partition_repository(
+            ctx,
+            tracked,
+            services,
+            stacks,
+            branch_focus=branch_focus,
+        )
+        coverage_path(directory).write_text(
+            json.dumps(
+                _with_artifact_provenance(
+                    _coverage_ledger(partitions, groups, skipped),
+                    phase=DaydreamPhase.RECON,
+                ),
+                indent=2,
+            )
+            + "\n"
+        )
+
     backend = ctx.backend_for("recon")
     async with phase_scope(DaydreamPhase.RECON):
         exploration = await repo_scan(backend, target)
         recon, _, _ = await run_agent(
             backend,
             target,
-            _build_recon_prompt(target, services, exploration.to_prompt_section()),
+            _build_recon_prompt(
+                target, services, groups, exploration.to_prompt_section()
+            ),
             phase=DaydreamPhase.RECON,
             output_schema=RECON_SCHEMA,
             read_only=True,
@@ -501,64 +552,12 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
                 {"code": "RECON_CONTAINER_INVALID", "pointer": "/"}
             ],
         }
-    stacks: list[StackAssignment] = []
-    partitions: list[Partition] = []
-    groups: list[PartitionGroup] = []
-    skipped: list[Partition] = []
-    if not description_mode:
-        installed = get_installed_skills()
-        availability = (
-            installed if installed is not None else ctx.registry.stack_keys()
-        )
-        tracked = branch_files if branch_focus else git_ops.ls_files(target)
-        stacks = detect_stacks(
-            tracked,
-            skill_availability=availability,
-            registry=ctx.registry,
-        )
-        if ctx.config.improve_scope:
-            stacks = _stacks_for_services(stacks, services)
-            tracked = sorted({path for stack in stacks for path in stack.files})
-        partitions, groups, skipped = _partition_repository(
-            ctx,
-            tracked,
-            services,
-            stacks,
-            branch_focus=branch_focus,
-        )
-        coverage_path(directory).write_text(
-            json.dumps(
-                _with_artifact_provenance(
-                    _coverage_ledger(partitions, groups, skipped),
-                    phase=DaydreamPhase.RECON,
-                ),
-                indent=2,
-            )
-            + "\n"
-        )
-
-    group_commands = _GroupCommandResult([], [], [])
-    if _wants_group_command_recon(ctx, groups, branch_focus=branch_focus):
-        group_commands = await _discover_group_commands(
-            ctx, groups, recon_data, target
-        )
-
     diagnostics = _command_validation_diagnostics(
         safe_recon,
         valid_commands=valid_commands,
         command_errors=command_errors,
         container_errors=container_errors,
     )
-    if group_commands.candidates:
-        diagnostics = _merge_command_diagnostics(
-            diagnostics,
-            _command_validation_diagnostics(
-                {"commands": group_commands.candidates},
-                valid_commands=group_commands.accepted,
-                command_errors=group_commands.errors,
-                container_errors=[],
-            ),
-        )
     diagnostics_file = command_validation_diagnostics_path(directory)
     diagnostics_file.write_text(
         json.dumps(diagnostics, indent=2) + "\n",
@@ -627,152 +626,6 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     ctx.data["partition_groups"] = groups
     ctx.data["partitions_not_audited"] = skipped
     return None
-
-
-@dataclass(frozen=True)
-class _GroupCommandResult:
-    """Per-partition-group command discovery output, host-validated."""
-
-    candidates: list[dict[str, Any]]
-    accepted: list[dict[str, Any]]
-    errors: list[str]
-
-
-def _wants_group_command_recon(
-    ctx: FlowContext,
-    groups: list[PartitionGroup],
-    *,
-    branch_focus: bool,
-) -> bool:
-    """Per-group command discovery only pays off on a partitioned audit run."""
-    return (
-        len(groups) > 1
-        and not branch_focus
-        and ctx.config.improve_effort != "quick"
-        and _is_audit_run(ctx)
-    )
-
-
-async def _discover_group_commands(
-    ctx: FlowContext,
-    groups: list[PartitionGroup],
-    recon_data: dict[str, Any],
-    target: Path,
-) -> _GroupCommandResult:
-    """Discover per-partition-group build/test/lint commands and merge them in.
-
-    Each group's candidates are id-prefixed with the group name, then the whole
-    cross-group set is host-validated once so id collisions and semantic checks
-    fail closed. A failed group agent is recorded and skipped, never fatal.
-    """
-    backend = ctx.backend_for("recon")
-    tier: EffortTier = ctx.data["effort_tier"]
-    recorder = get_current_recorder()
-    limiter = anyio.CapacityLimiter(
-        effective_fanout_concurrency(tier.max_concurrency, backend)
-    )
-    summary = json.dumps(recon_data, sort_keys=True)
-    outputs: dict[str, Any] = {}
-    failures: dict[str, str] = {}
-
-    async with anyio.create_task_group() as task_group:
-        for group in groups:
-            prompt = ctx.registry.prompt("recon-commands")(
-                group=_group_dict(group),
-                recon_summary=summary,
-                cwd=target,
-            )
-
-            async def _task(
-                current: PartitionGroup = group,
-                task_prompt: str = prompt,
-            ) -> None:
-                async with limiter:
-                    async with maybe_fork(
-                        recorder, f"recon-commands-{current.name}"
-                    ):
-                        try:
-                            output, _, _ = await run_agent(
-                                backend,
-                                target,
-                                task_prompt,
-                                phase=DaydreamPhase.RECON,
-                                output_schema=RECON_COMMANDS_ONLY_SCHEMA,
-                                read_only=True,
-                                persist_session=False,
-                            )
-                            outputs[current.name] = output
-                        except Exception as exc:  # noqa: BLE001
-                            failures[current.name] = redact_text(
-                                f"{type(exc).__name__}: {exc}"
-                            )
-
-            task_group.start_soon(_task)
-
-    if recorder is not None:
-        recorder.create_dispatch_step(phase=DaydreamPhase.RECON)
-
-    candidates: list[dict[str, Any]] = []
-    for group in groups:
-        output = _redact_model_value(outputs.get(group.name))
-        records = output.get("commands") if isinstance(output, dict) else None
-        for record in records if isinstance(records, list) else []:
-            if not isinstance(record, dict):
-                candidates.append(record)
-                continue
-            prefixed = dict(record)
-            if isinstance(prefixed.get("id"), str):
-                prefixed["id"] = f"{group.name}-{prefixed['id']}"
-            candidates.append(prefixed)
-
-    accepted, errors = validate_recon_commands(
-        {"commands": candidates}, repo=target
-    )
-    taken = {
-        command["id"]
-        for command in recon_data.get("commands", [])
-        if isinstance(command, dict) and isinstance(command.get("id"), str)
-    }
-    surviving: list[dict[str, Any]] = []
-    for record in accepted:
-        if record["id"] in taken:
-            errors.append(
-                f"RECON_COMMAND_ID_INVALID@/commands/{candidates.index(record)}/id"
-            )
-            continue
-        surviving.append(record)
-
-    recon_data.setdefault("commands", []).extend(surviving)
-    recon_data.setdefault("command_rejections", []).extend(
-        {
-            "code": error.partition("@")[0],
-            "pointer": error.partition("@")[2] or "/",
-        }
-        for error in errors
-    )
-    if failures:
-        recon_data["command_discovery_failures"] = dict(sorted(failures.items()))
-    return _GroupCommandResult(candidates, surviving, errors)
-
-
-def _merge_command_diagnostics(
-    base: dict[str, Any], extra: dict[str, Any]
-) -> dict[str, Any]:
-    """Fold a second validation envelope into the repo-level one."""
-    merged = dict(base)
-    merged["counts"] = {
-        key: base["counts"][key] + extra["counts"][key] for key in base["counts"]
-    }
-    merged["container_errors"] = [
-        *base["container_errors"],
-        *(
-            error
-            for error in extra["container_errors"]
-            if error not in base["container_errors"]
-        ),
-    ]
-    merged["rejections"] = [*base["rejections"], *extra["rejections"]]
-    return merged
 
 
 def _partition_repository(

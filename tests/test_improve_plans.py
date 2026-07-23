@@ -30,6 +30,7 @@ from daydream.improve.prompts import (
     PLAN_AUTHOR_SCHEMA,
     build_plan_writer_repair_prompt,
 )
+from daydream.improve.repo_commands import enumerate_repository_commands
 
 
 @pytest.mark.parametrize(
@@ -339,158 +340,126 @@ def test_command_contract_schema_discloses_scope_cross_field_invariants() -> Non
     assert all(list(validator.iter_errors(item)) for item in invalid_variants)
 
 
-def test_make_and_package_script_evidence_structurally_derives_commands(
+def test_host_enumerates_make_targets_and_package_scripts(
     tmp_path: Path,
 ) -> None:
     repo = tmp_path / "repo"
     (repo / "admin-dashboard").mkdir(parents=True)
     make_lines = [
+        "SHELL := /bin/bash",
+        ".PHONY: build test",
         "build: ## Build every module",
         "test: ## Run all tests",
         "test-frontend: ## Run frontend tests",
-        "lint: ## Run all linters",
-        "typecheck: ## Run all type checkers",
+        "lint typecheck: ## Run all static checks",
+        "\tuv run ruff check .",
     ]
     (repo / "Makefile").write_text(
         "\n".join(make_lines) + "\n",
         encoding="utf-8",
     )
-    package_line = (
-        '{"name":"admin-dashboard","packageManager":"pnpm@10.27.0",'
-        '"scripts":{"test":"vitest run"}}'
-    )
+    # No packageManager field: the corepack opt-in most repositories omit.
     (repo / "admin-dashboard/package.json").write_text(
-        package_line + "\n",
+        json.dumps(
+            {
+                "name": "admin-dashboard",
+                "scripts": {"test": "vitest run", "build:app": "vite build"},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (repo / "admin-dashboard/pnpm-lock.yaml").write_text(
+        "lockfileVersion: '9.0'\n",
         encoding="utf-8",
     )
 
-    commands = [
-        _contract_recon_command(
-            command_id=f"make-{target}",
-            command=f"make {target}",
-            evidence={
-                "kind": "make-target",
-                "source_path": "Makefile",
-                "line_anchor": {
-                    "start_line": index,
-                    "end_line": index,
-                },
-                "verbatim_excerpt": declaration,
-                "target": target,
-            },
-        )
-        for index, (target, declaration) in enumerate(
-            zip(
-                ("build", "test", "test-frontend", "lint", "typecheck"),
-                make_lines,
-                strict=True,
-            ),
-            start=1,
-        )
-    ]
-    commands.append(
-        _contract_recon_command(
-            command_id="pnpm-test-admin",
-            command="pnpm test",
-            working_directory="admin-dashboard",
-            paths=("admin-dashboard/",),
-            evidence={
-                "kind": "package-script",
-                "source_path": "admin-dashboard/package.json",
-                "line_anchor": {"start_line": 1, "end_line": 1},
-                "verbatim_excerpt": package_line,
-                "package_manager": "pnpm",
-                "script": "test",
-                "working_directory": "admin-dashboard",
-            },
-        )
+    commands = enumerate_repository_commands(
+        repo,
+        directories=(".", "admin-dashboard"),
     )
 
-    accepted, errors = validate_recon_commands(
-        {"commands": commands},
-        repo=repo,
-    )
-
-    assert errors == []
-    assert [item["command"] for item in accepted] == [
+    assert [item["command"] for item in commands] == [
         "make build",
         "make test",
         "make test-frontend",
         "make lint",
         "make typecheck",
         "pnpm test",
+        "pnpm build:app",
     ]
-    assert all(
-        item["command"] not in item["evidence"]["verbatim_excerpt"]
-        for item in accepted
+    assert [item["id"] for item in commands] == [
+        "make-build",
+        "make-test",
+        "make-test-frontend",
+        "make-lint",
+        "make-typecheck",
+        "pnpm-test",
+        "pnpm-build-app",
+    ]
+    by_command = {item["command"]: item for item in commands}
+    assert by_command["make test"]["applicability"]["scope"] == {
+        "kind": "whole-repository"
+    }
+    assert by_command["pnpm test"]["working_directory"] == "admin-dashboard"
+    assert by_command["pnpm test"]["applicability"]["scope"] == {
+        "kind": "in-scope-paths",
+        "paths": ["admin-dashboard"],
+    }
+    assert (
+        by_command["pnpm test"]["evidence"]["source_path"]
+        == "admin-dashboard/package.json"
     )
+    assert (
+        by_command["pnpm test"]["evidence"]["verbatim_excerpt"].strip()
+        == '"test": "vitest run",'
+    )
+    assert by_command["make test"]["evidence"]["line_anchor"] == {
+        "start_line": 4,
+        "end_line": 4,
+    }
+    assert enumerate_repository_commands(
+        repo, directories=(".", "admin-dashboard")
+    ) == commands
 
 
-def _package_script_command(
-    manifest: dict[str, Any],
-    repo: Path,
-    *,
-    package_manager: str = "pnpm",
-    command: str = "pnpm test",
-) -> dict[str, Any]:
-    (repo / "admin-dashboard").mkdir(parents=True, exist_ok=True)
-    line = json.dumps(manifest)
-    (repo / "admin-dashboard/package.json").write_text(
-        line + "\n",
+@pytest.mark.parametrize(
+    ("manager_file", "expected"),
+    [
+        ("yarn.lock", "yarn test"),
+        ("bun.lockb", "bun run test"),
+        ("package-lock.json", "npm run test"),
+        (None, "npm run test"),
+    ],
+)
+def test_host_derives_the_invocation_for_each_package_manager(
+    tmp_path: Path,
+    manager_file: str | None,
+    expected: str,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "package.json").write_text(
+        json.dumps({"name": "web", "scripts": {"test": "vitest run"}}) + "\n",
         encoding="utf-8",
     )
-    return _contract_recon_command(
-        command_id="pnpm-test-admin",
-        command=command,
-        working_directory="admin-dashboard",
-        paths=("admin-dashboard",),
-        evidence={
-            "kind": "package-script",
-            "source_path": "admin-dashboard/package.json",
-            "line_anchor": {"start_line": 1, "end_line": 1},
-            "verbatim_excerpt": line,
-            "package_manager": package_manager,
-            "script": "test",
-            "working_directory": "admin-dashboard",
-        },
-    )
+    if manager_file is not None:
+        (repo / manager_file).write_text("{}\n", encoding="utf-8")
+
+    commands = enumerate_repository_commands(repo)
+
+    assert [item["command"] for item in commands] == [expected]
 
 
-def test_package_script_without_package_manager_field_is_accepted(
+def test_host_enumeration_skips_unreadable_and_malformed_sources(
     tmp_path: Path,
 ) -> None:
     repo = tmp_path / "repo"
-    manifest = {"name": "admin-dashboard", "scripts": {"test": "vitest run"}}
+    repo.mkdir()
+    (repo / "package.json").write_text("{not json", encoding="utf-8")
 
-    accepted, errors = validate_recon_commands(
-        {"commands": [_package_script_command(manifest, repo)]},
-        repo=repo,
-    )
-
-    assert errors == []
-    assert [item["command"] for item in accepted] == ["pnpm test"]
-
-
-def test_package_script_manager_cannot_be_spoofed(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    manifest = {"name": "admin-dashboard", "scripts": {"test": "vitest run"}}
-
-    accepted, errors = validate_recon_commands(
-        {
-            "commands": [
-                _package_script_command(
-                    manifest,
-                    repo,
-                    package_manager="npm",
-                    command="pnpm test",
-                )
-            ]
-        },
-        repo=repo,
-    )
-
-    assert accepted == []
-    assert errors == ["RECON_EVIDENCE_MISMATCH@/commands/0/evidence"]
+    assert enumerate_repository_commands(repo) == []
 
 
 @pytest.mark.parametrize(
@@ -514,11 +483,10 @@ def test_recon_applicability_directory_scopes_fail_closed(
         command="make test",
         paths=(scope,),
         evidence={
-            "kind": "make-target",
+            "kind": "literal-command",
             "source_path": "Makefile",
             "line_anchor": {"start_line": 1, "end_line": 1},
-            "verbatim_excerpt": "test:",
-            "target": "test",
+            "verbatim_excerpt": "make test",
         },
     )
 

@@ -25,15 +25,12 @@ from daydream.improve.command_contract import (
     DIRECTORY_SCOPE_SCHEMA as _DIRECTORY_SCOPE_SCHEMA,
 )
 from daydream.improve.command_contract import (
-    RECON_COMMAND_SCHEMA as _RECON_COMMAND_SCHEMA,
-)
-from daydream.improve.command_contract import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
 )
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
-# Single source for the structured repository-command contract wording shared by
-# the repo-level recon prompt and the per-partition-group command discovery.
+# Single source for the structured repository-command contract wording used by
+# the repo-level recon prompt.
 RECON_COMMAND_CONTRACT_BULLET = """exact build, test, and lint commands supported by repository files. Return
   one structured record per executable command, with a stable id,
   purpose, working directory, expected exit code and observable result,
@@ -42,12 +39,10 @@ RECON_COMMAND_CONTRACT_BULLET = """exact build, test, and lint commands supporte
   `in-scope-paths` with one or more repository file-or-directory scopes, while
   `preconditions` is a list of runtime requirements such as Docker, installed
   dependencies, environment variables, or a required harness. Never encode a
-  prerequisite as scope or discard either concept. Use `literal-command`
-  evidence only when the exact invocation appears in the cited slice. Use
-  `make-target` evidence for a declared Make target and derive exactly
-  `make <target>`. Use `package-script` evidence for a package.json script,
-  naming its package manager, script key, and working directory so the host can
-  derive and verify the invocation. Never combine a label, arrow, annotation,
+  prerequisite as scope or discard either concept. Evidence is always
+  `literal-command`: cite it only when the exact invocation appears verbatim in
+  the cited slice. Never report Make targets or package.json scripts; the host
+  enumerates those itself. Never combine a label, arrow, annotation,
   or explanatory prose with the command;"""
 
 AUDIT_FINDINGS_SCHEMA: dict[str, Any] = {
@@ -88,18 +83,6 @@ AUDIT_FINDINGS_SCHEMA: dict[str, Any] = {
                     },
                 },
             },
-        },
-    },
-}
-
-RECON_COMMANDS_ONLY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["commands"],
-    "properties": {
-        "commands": {
-            "type": "array",
-            "items": _RECON_COMMAND_SCHEMA,
         },
     },
 }
@@ -962,40 +945,6 @@ Hard Rule 6 (verbatim):
 """
 
 
-def build_recon_commands_prompt(
-    *,
-    group: Mapping[str, Any],
-    recon_summary: str,
-    cwd: Path,
-) -> str:
-    """Build a read-only command-discovery prompt scoped to one partition group."""
-    return f"""IMPROVE_COMMAND_RECON
-
-Read the subtrees below without modifying them and discover the build, test, and
-lint commands that apply to them. Return structured command records only.
-
-{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
-
-{_group_heading(group)}
-{_group_block(group)}
-Enumerate these subtrees yourself (e.g. `git ls-files -- '<root>/**'` or your
-Glob tool scoped to the roots above); the host never inlines file lists.
-
-Repository-level reconnaissance already collected:
-{recon_summary or "(none supplied)"}
-
-Return:
-- {RECON_COMMAND_CONTRACT_BULLET}
-- set `working_directory` to the directory each command actually runs in — `.`
-  only when the command genuinely runs from the repository root;
-- set `applicability.scope` to `in-scope-paths` naming the partition roots above
-  unless a command genuinely governs the whole repository;
-- omit any command already present in the repository-level reconnaissance above.
-
-{_schema_block(RECON_COMMANDS_ONLY_SCHEMA)}
-"""
-
-
 def build_vet_prompt(*, findings: Sequence[dict[str, Any]], cwd: Path) -> str:
     """Build the skeptical re-verification prompt for candidate findings."""
     return f"""You are the improve vet. Re-open every cited location before deciding
@@ -1147,12 +1096,10 @@ __all__ = [
     "AUDIT_PLAYBOOK_SECTIONS",
     "PLAN_AUTHOR_SCHEMA",
     "PLAN_WRITER_CONTRACT_INSTRUCTIONS",
-    "RECON_COMMANDS_ONLY_SCHEMA",
     "RECON_COMMAND_CONTRACT_BULLET",
     "VET_SCHEMA",
     "build_audit_prompt",
     "build_plan_writer_prompt",
     "build_plan_writer_repair_prompt",
-    "build_recon_commands_prompt",
     "build_vet_prompt",
 ]

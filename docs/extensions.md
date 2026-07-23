@@ -121,11 +121,11 @@ not bump the version.
 ### Changelog
 
 - **Version 3** — additive. Adds the `improve` flow and its steps, the
-  `audit:<category>[:<stack>]` skill slots, and four new prompt slots: `audit`
+  `audit:<category>[:<stack>]` skill slots, and three new prompt slots: `audit`
   (kwargs `category`, `skill_invocation`, `group`, `scope_note`,
   `recon_summary`, `cwd`, `tier`, where `group` is a partition-group mapping of
   `name`, `stack`, `file_count`, `partitions[{name, root, file_count, service}]`),
-  `recon-commands`, `vet`, and `plan-writer`. Every one of these names is new in
+  `vet`, and `plan-writer`. Every one of these names is new in
   this release, so no v1 or v2 extension can have overridden them. No existing
   flow name, step name, prompt name, prompt kwarg, skill slot, or `Registry`
   method changed. The floor therefore stays at `1`: the supported range is
@@ -356,7 +356,6 @@ noted.
 | `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path` |
 | `verify` | `items`, `cwd`, `output_path` |
 | `audit` | `category`, `skill_invocation`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
-| `recon-commands` | `group`, `recon_summary`, `cwd` |
 | `vet` | `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
 
