@@ -639,15 +639,12 @@ def _validate_evidence(
         return None, ContractRejection(
             "RECON_EVIDENCE_MISMATCH", "/evidence"
         )
-    package_manager_declaration = manifest.get("packageManager")
     scripts = manifest.get("scripts")
     script_key_spans = key_spans.get(("scripts", script), [])
     anchor_start, anchor_end = _anchor_source_span(source, evidence)
     if (
         command["working_directory"] != working_directory
         or evidence["source_path"] != expected_source
-        or not isinstance(package_manager_declaration, str)
-        or not package_manager_declaration.startswith(f"{package_manager}@")
         or not isinstance(scripts, dict)
         or not isinstance(scripts.get(script), str)
         or len(key_spans.get(("scripts",), [])) != 1

@@ -426,6 +426,73 @@ def test_make_and_package_script_evidence_structurally_derives_commands(
     )
 
 
+def _package_script_command(
+    manifest: dict[str, Any],
+    repo: Path,
+    *,
+    package_manager: str = "pnpm",
+    command: str = "pnpm test",
+) -> dict[str, Any]:
+    (repo / "admin-dashboard").mkdir(parents=True, exist_ok=True)
+    line = json.dumps(manifest)
+    (repo / "admin-dashboard/package.json").write_text(
+        line + "\n",
+        encoding="utf-8",
+    )
+    return _contract_recon_command(
+        command_id="pnpm-test-admin",
+        command=command,
+        working_directory="admin-dashboard",
+        paths=("admin-dashboard",),
+        evidence={
+            "kind": "package-script",
+            "source_path": "admin-dashboard/package.json",
+            "line_anchor": {"start_line": 1, "end_line": 1},
+            "verbatim_excerpt": line,
+            "package_manager": package_manager,
+            "script": "test",
+            "working_directory": "admin-dashboard",
+        },
+    )
+
+
+def test_package_script_without_package_manager_field_is_accepted(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    manifest = {"name": "admin-dashboard", "scripts": {"test": "vitest run"}}
+
+    accepted, errors = validate_recon_commands(
+        {"commands": [_package_script_command(manifest, repo)]},
+        repo=repo,
+    )
+
+    assert errors == []
+    assert [item["command"] for item in accepted] == ["pnpm test"]
+
+
+def test_package_script_manager_cannot_be_spoofed(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    manifest = {"name": "admin-dashboard", "scripts": {"test": "vitest run"}}
+
+    accepted, errors = validate_recon_commands(
+        {
+            "commands": [
+                _package_script_command(
+                    manifest,
+                    repo,
+                    package_manager="npm",
+                    command="pnpm test",
+                )
+            ]
+        },
+        repo=repo,
+    )
+
+    assert accepted == []
+    assert errors == ["RECON_EVIDENCE_MISMATCH@/commands/0/evidence"]
+
+
 def test_package_script_evidence_rejects_same_named_key_outside_scripts(
     tmp_path: Path,
 ) -> None:
