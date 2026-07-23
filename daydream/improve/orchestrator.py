@@ -98,7 +98,7 @@ if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
 
 
-_RECON_SCHEMA: dict[str, Any] = {
+RECON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
@@ -124,7 +124,7 @@ _EVIDENCE_LOCATION = re.compile(
 _SAFE_RECON_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _PLAN_SLUG = re.compile(r"^[a-z0-9-]{1,60}$")
 _PROVENANCE_VALUES = {"introduced", "inherited"}
-_PLAN_REVIEW_SCHEMA: dict[str, Any] = {
+PLAN_REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["critique", "plan"],
@@ -359,7 +359,7 @@ def _recon_container_errors(recon: Any) -> list[str]:
     container = {**recon, "commands": []}
     missing = [
         field
-        for field in _RECON_SCHEMA["required"]
+        for field in RECON_SCHEMA["required"]
         if field not in recon
     ]
     rendered = [
@@ -367,7 +367,7 @@ def _recon_container_errors(recon: Any) -> list[str]:
         for field in missing
     ]
     errors = sorted(
-        Draft202012Validator(_RECON_SCHEMA).iter_errors(container),
+        Draft202012Validator(RECON_SCHEMA).iter_errors(container),
         key=lambda error: repr(list(error.absolute_path)),
     )
     for error in errors:
@@ -522,7 +522,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             target,
             _build_recon_prompt(target, services, exploration.to_prompt_section()),
             phase=DaydreamPhase.RECON,
-            output_schema=_RECON_SCHEMA,
+            output_schema=RECON_SCHEMA,
             read_only=True,
             persist_session=False,
         )
@@ -1948,7 +1948,7 @@ def _parse_review_plan_identity(
 
 def _review_schema_error(output: Any) -> str | None:
     errors = sorted(
-        Draft202012Validator(_PLAN_REVIEW_SCHEMA).iter_errors(output),
+        Draft202012Validator(PLAN_REVIEW_SCHEMA).iter_errors(output),
         key=lambda error: tuple(str(part) for part in error.absolute_path),
     )
     if not errors:
@@ -2043,7 +2043,7 @@ Existing plan:
 
 Return only an object matching this schema:
 ```json
-{json.dumps(_PLAN_REVIEW_SCHEMA, indent=2)}
+{json.dumps(PLAN_REVIEW_SCHEMA, indent=2)}
 ```
 """
 
@@ -2109,7 +2109,7 @@ async def _review_plan(ctx: FlowContext, requested: str) -> None:
                     recon=recon,
                 ),
                 phase=DaydreamPhase.PLAN_WRITE,
-                output_schema=_PLAN_REVIEW_SCHEMA,
+                output_schema=PLAN_REVIEW_SCHEMA,
                 read_only=True,
                 persist_session=False,
             )

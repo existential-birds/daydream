@@ -16,6 +16,14 @@ This is exactly how ``MERGED_ITEMS_SCHEMA`` (vestigial ``source`` not in
 
 This test collects the static and generated schemas passed at the
 ``output_schema=`` call sites and asserts each conforms recursively.
+
+Collection is by introspection, never a hand-maintained list: every public
+module-level ``*_SCHEMA`` dict in the modules below is checked. Those modules
+keep their sub-schemas module-private, so the public names are the roots handed
+to a backend. A newly added output schema is therefore covered automatically, a
+deleted one simply stops being collected, and a public constant that is only
+validated host-side (``PLAN_WRITER_SCHEMA``) is covered too — over-coverage is
+the safe direction, because a sub-schema of a strict root must be strict anyway.
 """
 
 from __future__ import annotations
@@ -33,6 +41,8 @@ import daydream.prompts.exploration_subagents as exploration_subagents
 _SCHEMA_MODULES = [
     phases,
     exploration_subagents,
+    improve_prompts,
+    improve_orchestrator,
 ]
 
 # OpenAI Structured Outputs accepts only this documented JSON Schema subset.
@@ -63,39 +73,38 @@ _SUPPORTED_SCHEMA_KEYWORDS = {
 }
 
 
+def _takes_provenance(schema: dict[str, Any]) -> bool:
+    """True for the improve schemas ``_schema_with_provenance`` extends."""
+    properties = schema.get("properties", {})
+    return any(
+        isinstance(properties.get(key), dict)
+        and isinstance(properties[key].get("items"), dict)
+        for key in ("findings", "verdicts")
+    )
+
+
 def _collect_output_schemas() -> list[tuple[str, dict[str, Any]]]:
     """Return every static or generated schema passed to a backend."""
     found: list[tuple[str, dict[str, Any]]] = []
+    seen: set[int] = set()
     for module in _SCHEMA_MODULES:
         for name in dir(module):
             if name.startswith("_") or not name.endswith("_SCHEMA"):
                 continue
             value = getattr(module, name)
-            if isinstance(value, dict):
+            # A module that re-exports another's schema is checked once.
+            if isinstance(value, dict) and id(value) not in seen:
+                seen.add(id(value))
                 found.append((f"{module.__name__}.{name}", value))
+    # Branch-focus audits and vets send a provenance-extended variant, so the
+    # transformed shape is checked alongside the base it was derived from.
     found.extend(
-        [
-            ("daydream.improve.orchestrator._RECON_SCHEMA", improve_orchestrator._RECON_SCHEMA),
-            (
-                "daydream.improve.orchestrator._PLAN_REVIEW_SCHEMA",
-                improve_orchestrator._PLAN_REVIEW_SCHEMA,
-            ),
-            ("daydream.improve.prompts.AUDIT_FINDINGS_SCHEMA", improve_prompts.AUDIT_FINDINGS_SCHEMA),
-            ("daydream.improve.prompts.VET_SCHEMA", improve_prompts.VET_SCHEMA),
-            ("daydream.improve.prompts.PLAN_WRITER_SCHEMA", improve_prompts.PLAN_WRITER_SCHEMA),
-            (
-                "daydream.improve.orchestrator.branch_audit_schema",
-                improve_orchestrator._schema_with_provenance(
-                    improve_prompts.AUDIT_FINDINGS_SCHEMA,
-                ),
-            ),
-            (
-                "daydream.improve.orchestrator.branch_vet_schema",
-                improve_orchestrator._schema_with_provenance(
-                    improve_prompts.VET_SCHEMA,
-                ),
-            ),
-        ]
+        (
+            f"_schema_with_provenance({name})",
+            improve_orchestrator._schema_with_provenance(schema),
+        )
+        for name, schema in list(found)
+        if name.startswith("daydream.improve.") and _takes_provenance(schema)
     )
     return found
 
