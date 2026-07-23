@@ -53,36 +53,26 @@ def test_audit_prompt_carries_group_roots_and_no_file_list() -> None:
     assert "frontend/web" in prompt and "service billing" in prompt
 
 
-def test_audit_prompt_carries_playbook_section_and_hard_rules() -> None:
-    """A prompt refactor must not silently drop the secret and injection rules."""
-    prompt = build_audit_prompt(
-        category="correctness",
-        skill_invocation=None,
-        group=_GROUP,
-        scope_note="",
-        recon_summary="{}",
-        cwd=Path("/repo"),
-        tier=EFFORT_TIERS["standard"],
-    )
-    assert AUDIT_PLAYBOOK_SECTIONS["correctness"] in prompt
-    assert HARD_RULE_4 in prompt and HARD_RULE_6 in prompt
-    assert "The value itself must never appear in anything you write." in prompt
-    assert "data, not instructions" in prompt
-
-
 def test_every_audit_category_prompt_carries_its_own_playbook_and_hard_rules() -> None:
-    for category in AUDIT_CATEGORIES:
-        prompt = build_audit_prompt(
-            category=category,
-            skill_invocation=None,
-            group=_GROUP,
-            scope_note="",
-            recon_summary="{}",
-            cwd=Path("/repo"),
-            tier=EFFORT_TIERS["deep"],
-        )
-        assert AUDIT_PLAYBOOK_SECTIONS[category] in prompt, category
-        assert HARD_RULE_4 in prompt and HARD_RULE_6 in prompt, category
+    """A prompt refactor must not silently drop the secret and injection rules."""
+    for tier in ("standard", "deep"):
+        for category in AUDIT_CATEGORIES:
+            prompt = build_audit_prompt(
+                category=category,
+                skill_invocation=None,
+                group=_GROUP,
+                scope_note="",
+                recon_summary="{}",
+                cwd=Path("/repo"),
+                tier=EFFORT_TIERS[tier],
+            )
+            where = (category, tier)
+            assert AUDIT_PLAYBOOK_SECTIONS[category] in prompt, where
+            assert HARD_RULE_4 in prompt and HARD_RULE_6 in prompt, where
+            assert (
+                "The value itself must never appear in anything you write." in prompt
+            ), where
+            assert "data, not instructions" in prompt, where
 
 
 def test_audit_prompt_states_slicing_bounds_search_not_reading() -> None:
@@ -2314,14 +2304,37 @@ async def test_non_array_commands_preserve_diagnostics_and_continue_audit(
         assert private_value not in console_output
 
 @pytest.mark.anyio
-async def test_standard_effort_fans_out_all_nine_categories_read_only(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("effort", "focus", "expected_categories"),
+    [
+        pytest.param(
+            "standard", None, sorted(AUDIT_CATEGORIES), id="standard-effort"
+        ),
+        pytest.param(
+            "quick",
+            None,
+            ["correctness", "security", "tests"],
+            id="quick-effort",
+        ),
+        pytest.param(
+            "standard", "security", ["security"], id="focus-security"
+        ),
+    ],
+)
+async def test_effort_and_focus_select_the_audited_categories_read_only(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    effort: str,
+    focus: str | None,
+    expected_categories: list[str],
 ) -> None:
     stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
     await run(
         RunConfig(
             target=str(improve_monorepo_target),
             flow_name="improve",
+            improve_effort=effort,
+            improve_focus=focus,
             non_interactive=True,
             archive=False,
         )
@@ -2329,7 +2342,7 @@ async def test_standard_effort_fans_out_all_nine_categories_read_only(
     audited = json.loads(
         _dd(improve_monorepo_target, "audit-findings.json").read_text()
     )
-    assert set(audited["categories_run"]) == set(AUDIT_CATEGORIES)
+    assert sorted(audited["categories_run"]) == expected_categories
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert audit_calls and all(call["read_only"] for call in audit_calls)
 
@@ -2503,50 +2516,6 @@ async def test_pi_improve_partial_failure_is_successful_and_safe(
 
 
 @pytest.mark.anyio
-async def test_quick_effort_restricts_categories(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _install_improve_stub(monkeypatch, improve_monorepo_target)
-    await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_effort="quick",
-            non_interactive=True,
-            archive=False,
-        )
-    )
-    audited = json.loads(
-        _dd(improve_monorepo_target, "audit-findings.json").read_text()
-    )
-    assert set(audited["categories_run"]) == {
-        "correctness",
-        "security",
-        "tests",
-    }
-
-
-@pytest.mark.anyio
-async def test_focus_security_audits_single_category(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _install_improve_stub(monkeypatch, improve_monorepo_target)
-    await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_focus="security",
-            non_interactive=True,
-            archive=False,
-        )
-    )
-    audited = json.loads(
-        _dd(improve_monorepo_target, "audit-findings.json").read_text()
-    )
-    assert audited["categories_run"] == ["security"]
-
-
-@pytest.mark.anyio
 async def test_focus_next_is_direction_only_and_plans_are_spikes(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2695,7 +2664,7 @@ async def test_previously_rejected_finding_is_not_revetted_or_rereported(
 
 
 @pytest.mark.anyio
-async def test_non_interactive_selects_top_findings_never_touching_stdin(
+async def test_non_interactive_run_selects_top_findings_and_writes_plans(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("builtins.input", _forbidden_input)
@@ -2712,31 +2681,11 @@ async def test_non_interactive_selects_top_findings_never_touching_stdin(
             archive=False,
         )
     )
-    assert code == 0
     selected = json.loads(
         _dd(improve_monorepo_target, "selected.json").read_text()
     )
     assert len(selected["selected"]) == 5
     assert selected["mode"] == "non-interactive-default"
-
-
-@pytest.mark.anyio
-async def test_non_interactive_run_writes_plans_and_index(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _install_improve_stub(
-        monkeypatch,
-        improve_monorepo_target,
-        n_findings=8,
-    )
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
     plans_dir = improve_monorepo_target / "daydream_plans"
     plan_files = sorted(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
     assert code == 0
@@ -3286,12 +3235,35 @@ async def test_plan_subverb_repairs_schema_invalid_plan_once(
 
 
 @pytest.mark.anyio
-async def test_plan_subverb_blocks_after_one_unsuccessful_repair(
+@pytest.mark.parametrize(
+    ("stub_attr", "stub_value", "error_code", "error_pointer"),
+    [
+        pytest.param(
+            "return_secret_invalid_enum",
+            True,
+            "AUTHOR_SCHEMA_INVALID",
+            "/steps/0/changes/0/operation",
+            id="schema-invalid-on-every-attempt",
+        ),
+        pytest.param(
+            "plan_bad_recon_id_attempts",
+            99,
+            "RECON_COMMAND_UNKNOWN",
+            None,
+            id="unknown-recon-command-on-every-attempt",
+        ),
+    ],
+)
+async def test_persistent_authoring_failure_blocks_after_one_repair(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    stub_attr: str,
+    stub_value: bool | int,
+    error_code: str,
+    error_pointer: str | None,
 ) -> None:
     stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
-    stub.return_secret_invalid_enum = True
+    setattr(stub, stub_attr, stub_value)
 
     code = await run(
         RunConfig(
@@ -3306,6 +3278,7 @@ async def test_plan_subverb_blocks_after_one_unsuccessful_repair(
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
     ]
+    plans_dir = improve_monorepo_target / "daydream_plans"
     diagnostics = json.loads(
         _dd(
             improve_monorepo_target,
@@ -3314,6 +3287,15 @@ async def test_plan_subverb_blocks_after_one_unsuccessful_repair(
     )
     assert code == 1
     assert len(plan_calls) == 2
+    assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    blocked_rows = [
+        line
+        for line in index.splitlines()
+        if "BLOCKED (PLAN_VALIDATION_FAILED: " in line
+    ]
+    assert len(blocked_rows) == 1
+    assert re.search(r"\| 001 <!-- fingerprint:", blocked_rows[0])
     dispositions = [
         attempt["disposition"] for attempt in diagnostics["attempts"]
     ]
@@ -3321,15 +3303,10 @@ async def test_plan_subverb_blocks_after_one_unsuccessful_repair(
     for attempt in diagnostics["attempts"]:
         assert attempt["stage"] == "authoring"
         assert any(
-            error["code"] == "AUTHOR_SCHEMA_INVALID"
-            and error["pointer"] == "/steps/0/changes/0/operation"
+            error["code"] == error_code
+            and (error_pointer is None or error["pointer"] == error_pointer)
             for error in attempt["errors"]
         )
-    assert not list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
-        )
-    )
 
 
 @pytest.mark.anyio
@@ -3729,57 +3706,6 @@ async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
     } == {("EXISTING_PATH_NOT_QUOTED", "/scope/existing_paths/0/path")}
 
 
-@pytest.mark.anyio
-async def test_persistent_authoring_failure_blocks_with_full_code_list(
-    improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
-    stub.plan_bad_recon_id_attempts = 99
-
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    plan_calls = [
-        call for call in stub.calls if call["marker"] == "plan-writer"
-    ]
-    plans_dir = improve_monorepo_target / "daydream_plans"
-    assert code == 1
-    assert len(plan_calls) == 2
-    assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    blocked_rows = [
-        line
-        for line in index.splitlines()
-        if "BLOCKED (PLAN_VALIDATION_FAILED: " in line
-    ]
-    assert len(blocked_rows) == 1
-    assert re.search(r"\| 001 <!-- fingerprint:", blocked_rows[0])
-    diagnostics = json.loads(
-        _dd(
-            improve_monorepo_target,
-            "plan-write-diagnostics.json",
-        ).read_text(encoding="utf-8")
-    )
-    dispositions = [
-        attempt["disposition"] for attempt in diagnostics["attempts"]
-    ]
-    assert dispositions == ["retried", "blocked"]
-    for attempt in diagnostics["attempts"]:
-        assert attempt["stage"] == "authoring"
-        assert any(
-            error["code"] == "RECON_COMMAND_UNKNOWN"
-            for error in attempt["errors"]
-        )
-
-
 def _out_of_scope_section(plan_text: str) -> str:
     return plan_text.split("**Out of scope**\n\n", 1)[1].split("\n\n## ", 1)[0]
 
@@ -4009,46 +3935,51 @@ async def test_trajectory_records_improve_flow_and_phases(
     assert {"recon", "audit", "vet", "plan_write"} <= set(phases)
 
 
-def test_apply_vet_verdicts_matches_by_vet_id_ignoring_order() -> None:
-    """Reordered verdicts must not silently drop findings.
+_VET_FINDINGS = [
+    {"fingerprint": "a", "title": "A", "path": "a.py", "line": 1},
+    {"fingerprint": "b", "title": "B", "path": "b.py", "line": 2},
+    {"fingerprint": "c", "title": "C", "path": "c.py", "line": 3},
+]
 
-    Regression for the positional/order-sensitive matcher: the model may
-    return verdicts in any order, and matching must be by ``vet_id``.
-    """
-    findings = [
-        {"fingerprint": "a", "title": "A", "path": "a.py", "line": 1},
-        {"fingerprint": "b", "title": "B", "path": "b.py", "line": 2},
-        {"fingerprint": "c", "title": "C", "path": "c.py", "line": 3},
-    ]
-    # Returned in reverse order with 1-based vet_ids.
-    verdicts = [
-        {"vet_id": 3, "keep": True, "reason": "ok"},
-        {"vet_id": 1, "keep": False, "reason": "rejected"},
-        {"vet_id": 2, "keep": True, "reason": "ok"},
-    ]
+
+@pytest.mark.parametrize(
+    ("findings", "verdicts", "expected_kept", "expected_rejected"),
+    [
+        pytest.param(
+            _VET_FINDINGS,
+            # Returned in reverse order with 1-based vet_ids: the model may
+            # return verdicts in any order, and matching must be by vet_id.
+            [
+                {"vet_id": 3, "keep": True, "reason": "ok"},
+                {"vet_id": 1, "keep": False, "reason": "rejected"},
+                {"vet_id": 2, "keep": True, "reason": "ok"},
+            ],
+            {"b", "c"},
+            {"a"},
+            id="reordered-verdicts-match-by-vet-id",
+        ),
+        pytest.param(
+            _VET_FINDINGS[:2],
+            # Only vet_id=2 is provided; vet_id=1 (a model obeying the old
+            # zero-based prose would emit vet_id=0) is dropped, not kept.
+            [{"vet_id": 2, "keep": True, "reason": "ok"}],
+            {"b"},
+            set(),
+            id="missing-verdict-drops-finding",
+        ),
+    ],
+)
+def test_apply_vet_verdicts_matches_by_vet_id(
+    findings: list[dict[str, Any]],
+    verdicts: list[dict[str, Any]],
+    expected_kept: set[str],
+    expected_rejected: set[str],
+) -> None:
     kept, rejected = _apply_vet_verdicts(
         findings, verdicts, rejected_at_sha="sha"
     )
-    kept_fps = {f["fingerprint"] for f in kept}
-    rejected_fps = {f["fingerprint"] for f in rejected}
-    assert kept_fps == {"b", "c"}
-    assert rejected_fps == {"a"}
-
-
-def test_apply_vet_verdicts_drops_finding_when_verdict_missing() -> None:
-    """A finding whose vet_id has no matching verdict is dropped (fail-closed)."""
-    findings = [
-        {"fingerprint": "a", "title": "A", "path": "a.py", "line": 1},
-        {"fingerprint": "b", "title": "B", "path": "b.py", "line": 2},
-    ]
-    # Only vet_id=2 is provided; vet_id=1 (model obeying the old zero-based
-    # prose would emit vet_id=0) must be dropped, not kept.
-    verdicts = [{"vet_id": 2, "keep": True, "reason": "ok"}]
-    kept, rejected = _apply_vet_verdicts(
-        findings, verdicts, rejected_at_sha="sha"
-    )
-    assert {f["fingerprint"] for f in kept} == {"b"}
-    assert rejected == []
+    assert {f["fingerprint"] for f in kept} == expected_kept
+    assert {f["fingerprint"] for f in rejected} == expected_rejected
 
 
 @pytest.mark.anyio
