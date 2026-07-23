@@ -315,7 +315,8 @@ name inventories, module shape, supervision seam, and bump policy — is
 | `DAYDREAM_EXT_DIR` | Extensions | Explicit path to the `daydream_ext` package (overrides `import daydream_ext`) |
 | `DAYDREAM_GH_TIMEOUT_SECONDS` | Git ops | Override `gh` CLI timeout |
 | `DAYDREAM_GH_TIMEOUT_RETRIES` | Git ops | Override `gh` timeout retry count |
-| `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags (`PI_THINKING` loses to a resolved per-phase `reasoning_effort`) |
+| `PI_PROVIDER` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags (`--provider` / `--thinking`; `PI_THINKING` loses to a resolved per-phase `reasoning_effort`) |
+| `PI_API_KEY` | Pi backend | Copied into the child process's provider-native credential env var (e.g. `ZAI_API_KEY`), never onto argv/CLI flags (security); ignored with a warning if the provider has no mapped native var |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `DAYDREAM_PI_RETRY_BASE_DELAY_S` | Pi backend | Transient retry tuning |
 | `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex backends | Seconds of stdout silence before a stalled CLI subprocess is killed (default `2700`; `0` disables). Fires only on the absence of output — a slow but streaming CLI never trips it. A stall is terminal, never retried. |
 | `CLAUDE_CONFIG_DIR` | Claude backend | Override `~/.claude` directory |
