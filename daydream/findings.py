@@ -13,7 +13,6 @@ reverse — no cycle.
 
 Exports:
     FINDINGS_SCHEMA_VERSION: Current artifact schema version (1).
-    FINDING_ENTRY_SCHEMA: Strict JSON Schema for one finding entry.
     FINDINGS_SCHEMA: Strict JSON Schema for the artifact
         (``additionalProperties: False`` at every level).
     MAX_ARTIFACT_BYTES: Size cap enforced before the artifact is read.
@@ -28,7 +27,7 @@ Exports:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -40,43 +39,6 @@ from daydream.pr_review import ParsedIssue, PRInfo
 FINDINGS_SCHEMA_VERSION = 1
 
 MAX_ARTIFACT_BYTES = 1_048_576
-
-FINDING_ENTRY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "fingerprint",
-        "path",
-        "line",
-        "placement",
-        "title",
-        "body",
-        "severity",
-        "confidence",
-        "is_cross_stack",
-    ],
-    "properties": {
-        "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "path": {"type": "string"},
-        "line": {"type": ["integer", "null"]},
-        "placement": {"enum": ["inline", "file", "body"]},
-        "title": {"type": "string"},
-        "body": {"type": "string"},
-        "severity": {"type": ["string", "null"]},
-        "confidence": {"type": ["string", "null"]},
-        "is_cross_stack": {"type": "boolean"},
-        "impact": {"type": ["string", "null"], "enum": ["HIGH", "MED", "LOW", None]},
-        "effort": {"type": ["string", "null"], "enum": ["S", "M", "L", None]},
-        "risk": {"type": ["string", "null"], "enum": ["LOW", "MED", "HIGH", None]},
-        "leverage": {"type": ["number", "null"]},
-        "category": {"type": ["string", "null"]},
-        "services": {"type": "array", "items": {"type": "string"}},
-        "provenance": {
-            "type": ["string", "null"],
-            "enum": ["introduced", "inherited", None],
-        },
-    },
-}
 
 FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -90,7 +52,32 @@ FINDINGS_SCHEMA: dict[str, Any] = {
         "run_info": {"type": ["string", "null"]},
         "findings": {
             "type": "array",
-            "items": FINDING_ENTRY_SCHEMA,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "fingerprint",
+                    "path",
+                    "line",
+                    "placement",
+                    "title",
+                    "body",
+                    "severity",
+                    "confidence",
+                    "is_cross_stack",
+                ],
+                "properties": {
+                    "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "path": {"type": "string"},
+                    "line": {"type": ["integer", "null"]},
+                    "placement": {"enum": ["inline", "file", "body"]},
+                    "title": {"type": "string"},
+                    "body": {"type": "string"},
+                    "severity": {"type": ["string", "null"]},
+                    "confidence": {"type": ["string", "null"]},
+                    "is_cross_stack": {"type": "boolean"},
+                },
+            },
         },
     },
 }
@@ -114,13 +101,6 @@ class ArtifactFinding:
         severity: Severity label, or None.
         confidence: Confidence label, or None.
         is_cross_stack: Whether the finding came from the cross-stack merge.
-        impact: Advisory impact tier, or None.
-        effort: Advisory effort tier, or None.
-        risk: Advisory fix-risk tier, or None.
-        leverage: Advisory leverage score, or None.
-        category: Advisory audit category, or None.
-        services: Services affected by the finding.
-        provenance: Whether the finding was introduced or inherited, or None.
     """
 
     fingerprint: str
@@ -132,13 +112,6 @@ class ArtifactFinding:
     severity: str | None
     confidence: str | None
     is_cross_stack: bool
-    impact: str | None = None
-    effort: str | None = None
-    risk: str | None = None
-    leverage: float | None = None
-    category: str | None = None
-    services: list[str] = field(default_factory=list)
-    provenance: str | None = None
 
 
 @dataclass
