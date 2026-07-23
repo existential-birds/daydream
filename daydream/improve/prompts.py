@@ -179,7 +179,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
         "test_plan",
         "done_criteria",
         "false_assumption",
-        "additional_stop_conditions",
         "additional_command_refs",
     ],
     "properties": {
@@ -573,27 +572,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
             ],
             "properties": _STOP_CONDITION_BODY_PROPERTIES,
         },
-        "additional_stop_conditions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "kind",
-                    "condition",
-                    "evidence_to_report",
-                    "related_paths",
-                    "related_step_numbers",
-                ],
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": ["approval-boundary", "environment"],
-                    },
-                    **_STOP_CONDITION_BODY_PROPERTIES,
-                },
-            },
-        },
         "additional_command_refs": {
             "type": "array",
             "items": _COMMAND_REF_SCHEMA,
@@ -730,8 +708,7 @@ reads and renders the canonical repository text for every anchor.
 
 Declare existing and new writable paths separately; every step change path,
 test file, and stop-condition path must be declared in scope. Name exactly one
-plan-specific false assumption in `false_assumption`; add approval-boundary or
-environment stop conditions only when this plan needs them. At least one done
+plan-specific false assumption in `false_assumption`. At least one done
 criterion must have kind `behavior`.
 
 Never write `name: value` or `name=value` syntax for a secret-named key

@@ -100,8 +100,6 @@ _AUTHOR_PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
     ("done_criteria", "*", "verification", "note"),
     ("false_assumption", "condition"),
     ("false_assumption", "evidence_to_report"),
-    ("additional_stop_conditions", "*", "condition"),
-    ("additional_stop_conditions", "*", "evidence_to_report"),
     ("additional_command_refs", "*", "note"),
 )
 
@@ -314,27 +312,22 @@ def _declare_stop_condition_paths(
         *_entry_paths(scope.get("new_paths")),
         *_entry_paths(out_entries),
     }
-    extra = normalized.get("additional_stop_conditions")
-    conditions = [
-        normalized.get("false_assumption"),
-        *(extra if isinstance(extra, list) else []),
-    ]
-    for condition in conditions:
-        if not isinstance(condition, dict):
+    condition = normalized.get("false_assumption")
+    if not isinstance(condition, dict):
+        return
+    related = condition.get("related_paths")
+    for path in related if isinstance(related, list) else []:
+        if (
+            not isinstance(path, str)
+            or path in declared
+            or not _valid_repository_file_path(path)
+            or not _path_is_confined(repo, path)
+        ):
             continue
-        related = condition.get("related_paths")
-        for path in related if isinstance(related, list) else []:
-            if (
-                not isinstance(path, str)
-                or path in declared
-                or not _valid_repository_file_path(path)
-                or not _path_is_confined(repo, path)
-            ):
-                continue
-            declared.add(path)
-            out_entries.append(
-                {"path": path, "reason": _STOP_PATH_OUT_OF_SCOPE_REASON}
-            )
+        declared.add(path)
+        out_entries.append(
+            {"path": path, "reason": _STOP_PATH_OUT_OF_SCOPE_REASON}
+        )
 
 
 def _normalize_authored(
@@ -795,11 +788,6 @@ def _collect_issues(
                 )
 
     check_stop_references("/false_assumption", normalized.get("false_assumption"))
-    extra_conditions = normalized.get("additional_stop_conditions")
-    for index, condition in enumerate(
-        extra_conditions if isinstance(extra_conditions, list) else []
-    ):
-        check_stop_references(f"/additional_stop_conditions/{index}", condition)
 
     return issues
 
@@ -933,10 +921,6 @@ def _boilerplate_stop_conditions(
 
     conditions.append(
         mapped("false-assumption", normalized["false_assumption"])
-    )
-    conditions.extend(
-        mapped(condition["kind"], condition)
-        for condition in normalized["additional_stop_conditions"]
     )
     return conditions
 

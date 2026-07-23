@@ -647,7 +647,6 @@ def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
             "related_paths": ["apps/catalog/api.py"],
             "related_step_numbers": [1],
         },
-        "additional_stop_conditions": [],
         "additional_command_refs": [],
     }
 
@@ -1767,17 +1766,6 @@ def test_assemble_templates_three_boilerplate_stop_conditions_plus_false_assumpt
 ) -> None:
     repo, _ = _repo(tmp_path)
     plan = _authored_plan()
-    plan["additional_stop_conditions"] = [
-        {
-            "kind": "environment",
-            "condition": (
-                "The catalog test database is unavailable in this environment."
-            ),
-            "evidence_to_report": "Report the connection error and the database host.",
-            "related_paths": ["tests/test_catalog.py"],
-            "related_step_numbers": [1],
-        }
-    ]
 
     assembled = _assembled(repo, plan)
 
@@ -1787,7 +1775,6 @@ def test_assemble_templates_three_boilerplate_stop_conditions_plus_false_assumpt
         "repeated-verification-failure",
         "out-of-scope-change",
         "false-assumption",
-        "environment",
     ]
     assert all(
         condition["required_action"] == "STOP_AND_REPORT"
@@ -1802,7 +1789,6 @@ def test_assemble_templates_three_boilerplate_stop_conditions_plus_false_assumpt
         "apps/catalog/api.py",
         "tests/test_catalog.py",
     ]
-    assert conditions[4]["related_step_ids"] == ["step-1"]
 
 
 def test_assemble_clamps_excerpt_end_line_but_rejects_start_beyond_eof(
@@ -1911,19 +1897,6 @@ def test_assemble_dedups_scope_lists_by_disk_truth(tmp_path: Path) -> None:
     ]
 
 
-def _stop_condition(*related_paths: str) -> dict[str, Any]:
-    return {
-        "kind": "environment",
-        "condition": (
-            "The retired catalog loader module is still present on disk when "
-            "you start this plan."
-        ),
-        "evidence_to_report": "Report the module path and its current contents.",
-        "related_paths": list(related_paths),
-        "related_step_numbers": [1],
-    }
-
-
 def _injected_out_of_scope(assembled: dict[str, Any], path: str) -> dict[str, Any]:
     entries = [
         entry
@@ -1967,13 +1940,13 @@ def test_deleted_stop_path_is_declared_out_of_scope_without_touching_disk(
     repo, _ = _repo(tmp_path)
     deleted = "apps/catalog/legacy_loader.py"
     plan = _authored_plan()
-    plan["additional_stop_conditions"] = [_stop_condition(deleted)]
+    plan["false_assumption"]["related_paths"] = [deleted]
 
     assembled = _assembled(repo, plan)
 
     assert _injected_out_of_scope(assembled, deleted)["path"] == deleted
     assert not (repo / deleted).exists()
-    assert assembled["stop_conditions"][4]["related_paths"] == [deleted]
+    assert assembled["stop_conditions"][3]["related_paths"] == [deleted]
 
 
 @pytest.mark.parametrize("path", ["../outside.py", "src/$(whoami).py"])
@@ -1983,7 +1956,7 @@ def test_malformed_stop_path_stays_blocked_and_is_never_declared(
 ) -> None:
     repo, _ = _repo(tmp_path)
     plan = _authored_plan()
-    plan["additional_stop_conditions"] = [_stop_condition(path)]
+    plan["false_assumption"]["related_paths"] = [path]
 
     issues = _issues(repo, plan)
 
@@ -2004,7 +1977,7 @@ def test_out_of_repository_stop_path_stays_blocked_and_is_never_declared(
     outside.mkdir()
     (repo / "escape").symlink_to(outside, target_is_directory=True)
     plan = _authored_plan()
-    plan["additional_stop_conditions"] = [_stop_condition("escape/pwn.py")]
+    plan["false_assumption"]["related_paths"] = ["escape/pwn.py"]
 
     issues = _issues(repo, plan)
 
@@ -2013,14 +1986,16 @@ def test_out_of_repository_stop_path_stays_blocked_and_is_never_declared(
         issue.pointer
         for issue in issues
         if issue.code == "PATH_OUTSIDE_REPOSITORY"
-    ] == ["/additional_stop_conditions/0/related_paths/0"]
+    ] == ["/false_assumption/related_paths/0"]
 
 
 def test_already_declared_stop_paths_are_never_duplicated(tmp_path: Path) -> None:
     repo, _ = _repo(tmp_path)
     plan = _authored_plan()
-    plan["additional_stop_conditions"] = [
-        _stop_condition("README.md", "tests/test_catalog.py", "README.md")
+    plan["false_assumption"]["related_paths"] = [
+        "README.md",
+        "tests/test_catalog.py",
+        "README.md",
     ]
 
     assembled = _assembled(repo, plan)

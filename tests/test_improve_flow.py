@@ -356,7 +356,6 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
             "related_paths": ["apps/billing/api.py"],
             "related_step_numbers": [1],
         },
-        "additional_stop_conditions": [],
         "additional_command_refs": [],
     }
 
@@ -815,20 +814,9 @@ class _ImproveStubBackend:
                 # The only honest answer in a repository with no test files.
                 plan["test_plan"]["exemplars"] = []
             if self.plan_stop_condition_path is not None:
-                plan["additional_stop_conditions"] = [
-                    {
-                        "kind": "environment",
-                        "condition": (
-                            "The retired billing loader is still present on "
-                            "disk when you start this plan."
-                        ),
-                        "evidence_to_report": (
-                            "Report the module path and its current contents."
-                        ),
-                        "related_paths": [self.plan_stop_condition_path],
-                        "related_step_numbers": [1],
-                    }
-                ]
+                plan["false_assumption"]["related_paths"].append(
+                    self.plan_stop_condition_path
+                )
             if self.plan_writer_calls <= self.plan_bad_recon_id_attempts:
                 plan["steps"][0]["verification"] = _plan_ref("make-tests")
             if self.plan_writer_calls <= self.plan_missing_path_attempts:
