@@ -736,18 +736,6 @@ def _collect_issues(
                 )
             test_symbols.add(symbol)
 
-    criteria = normalized.get("done_criteria")
-    criteria = criteria if isinstance(criteria, list) else []
-    if not any(
-        isinstance(criterion, dict) and criterion.get("kind") == "behavior"
-        for criterion in criteria
-    ):
-        add(
-            "DONE_CRITERIA_INCOMPLETE",
-            "/done_criteria",
-            hint="author at least one done criterion with kind behavior",
-        )
-
     for pointer, ref in _iter_command_refs(normalized):
         if pointer.startswith("/steps/"):
             continue
@@ -931,6 +919,19 @@ def _injected_done_criteria(
     ]
     kinds = {criterion["kind"] for criterion in criteria}
     description_limit = 500
+    if "behavior" not in kinds:
+        # ``why_this_matters.intended_outcome`` is schema-required at >=30
+        # characters, so the derived criterion is never empty or a stub.
+        outcome = normalized["why_this_matters"]["intended_outcome"]
+        description = f"The plan's intended outcome holds: {outcome}"
+        criteria.insert(
+            0,
+            {
+                "kind": "behavior",
+                "description": description[:description_limit],
+                "verification": None,
+            },
+        )
     if "test-gate" not in kinds:
         symbols = ", ".join(
             case["test_symbol"] for case in normalized["test_plan"]["cases"]

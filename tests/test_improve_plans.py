@@ -1792,6 +1792,44 @@ def test_assemble_templates_three_boilerplate_stop_conditions_plus_false_assumpt
     ]
 
 
+def test_assemble_synthesizes_behavior_done_criterion_from_intended_outcome(
+    tmp_path: Path,
+) -> None:
+    repo, planned_at = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["done_criteria"] = [
+        {
+            "kind": "static-invariant",
+            "description": "No call to load_item remains inside list_catalog.",
+            "verification": None,
+        }
+    ]
+
+    assembled = _assembled(repo, plan)
+
+    criteria = assembled["done_criteria"]
+    assert [criterion["kind"] for criterion in criteria] == [
+        "behavior",
+        "static-invariant",
+        "test-gate",
+        "scope-integrity",
+    ]
+    assert criteria[0]["description"] == (
+        "The plan's intended outcome holds: list_catalog batches item "
+        "loading while preserving results."
+    )
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=planned_at,
+        number=1,
+    )
+    assert (
+        "- [ ] **done-1 (behavior)**: The plan's intended outcome holds: "
+        "list_catalog batches item loading while preserving results."
+    ) in rendered
+
+
 def test_assemble_drops_out_of_range_stop_step_numbers_instead_of_blocking(
     tmp_path: Path,
 ) -> None:
