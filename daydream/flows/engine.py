@@ -38,31 +38,15 @@ class FlowContext:
         work: The resolved workspace for the run.
         registry: The per-run extension registry the flow resolves against.
         data: Cross-step scratch state; steps replace locals with keys here.
-        wall_budget_s: Per-agent wall-clock limit for this flow.
-        tool_call_budget: Per-agent tool-call limit for this flow.
-        phase_budgets: Per-phase ``(wall_budget_s, tool_call_budget)`` overrides
-            read by :meth:`budget_for`. A phase absent here falls back to the
-            flow-wide pair above.
     """
 
     config: RunConfig
     work: WorkContext
     registry: Registry
     data: dict[str, Any] = field(default_factory=dict)
-    wall_budget_s: float | None = None
-    tool_call_budget: int | None = None
-    phase_budgets: dict[str, tuple[float | None, int | None]] = field(default_factory=dict)
     _backend_cache: dict[tuple[str, str | None, str | None], Backend] = field(
         default_factory=dict, repr=False
     )
-
-    def budget_for(self, phase: str) -> tuple[float | None, int | None]:
-        """Return the ``(wall_budget_s, tool_call_budget)`` pair for ``phase``.
-
-        Falls back to the flow-wide pair when ``phase`` has no entry, so a flow
-        that sets no ``phase_budgets`` behaves exactly as before.
-        """
-        return self.phase_budgets.get(phase, (self.wall_budget_s, self.tool_call_budget))
 
     def backend_for(self, phase: str) -> Backend:
         """Get or create the backend for ``phase``, reusing per-context instances.

@@ -515,7 +515,6 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         )
 
     backend = ctx.backend_for("recon")
-    wall_budget, tool_budget = ctx.budget_for("recon")
     async with phase_scope(DaydreamPhase.RECON):
         exploration = await repo_scan(backend, target)
         recon, _, _ = await run_agent(
@@ -526,8 +525,6 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             output_schema=_RECON_SCHEMA,
             read_only=True,
             persist_session=False,
-            wall_budget_s=wall_budget,
-            tool_call_budget=tool_budget,
         )
 
     recon_data: dict[str, Any] = {}
@@ -738,7 +735,6 @@ async def _discover_group_commands(
     fail closed. A failed group agent is recorded and skipped, never fatal.
     """
     backend = ctx.backend_for("recon")
-    wall_budget, tool_budget = ctx.budget_for("recon")
     tier: EffortTier = ctx.data["effort_tier"]
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
@@ -773,8 +769,6 @@ async def _discover_group_commands(
                                 output_schema=RECON_COMMANDS_ONLY_SCHEMA,
                                 read_only=True,
                                 persist_session=False,
-                                wall_budget_s=wall_budget,
-                                tool_call_budget=tool_budget,
                             )
                             outputs[current.name] = output
                         except Exception as exc:  # noqa: BLE001
@@ -1122,7 +1116,6 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
     branch_focus = ctx.config.improve_focus == "branch"
     assignments = _audit_assignments(ctx, categories, groups)
     backend = ctx.backend_for("audit")
-    wall_budget, tool_budget = ctx.budget_for("audit")
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(tier.max_concurrency, backend)
@@ -1203,8 +1196,6 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                                 ),
                                 read_only=True,
                                 persist_session=False,
-                                wall_budget_s=wall_budget,
-                                tool_call_budget=tool_budget,
                             )
                             raw_findings = (
                                 output.get("findings", [])
@@ -1441,7 +1432,6 @@ async def _step_vet(ctx: FlowContext) -> None:
         for offset in range(0, len(category_findings), VET_BATCH_MAX_FINDINGS)
     ]
     backend = ctx.backend_for("vet")
-    wall_budget, tool_budget = ctx.budget_for("vet")
     tier: EffortTier = ctx.data["effort_tier"]
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
@@ -1491,8 +1481,6 @@ async def _step_vet(ctx: FlowContext) -> None:
                                 ),
                                 read_only=True,
                                 persist_session=False,
-                                wall_budget_s=wall_budget,
-                                tool_call_budget=tool_budget,
                             )
                         except Exception:  # noqa: BLE001 - no verdict fails closed
                             output = {}
@@ -2109,7 +2097,6 @@ async def _review_plan(ctx: FlowContext, requested: str) -> None:
         return
 
     backend = ctx.backend_for("plan_write")
-    wall_budget, tool_budget = ctx.budget_for("plan_write")
     try:
         async with phase_scope(DaydreamPhase.PLAN_WRITE):
             output, _, _ = await run_agent(
@@ -2125,8 +2112,6 @@ async def _review_plan(ctx: FlowContext, requested: str) -> None:
                 output_schema=_PLAN_REVIEW_SCHEMA,
                 read_only=True,
                 persist_session=False,
-                wall_budget_s=wall_budget,
-                tool_call_budget=tool_budget,
             )
     except Exception:  # noqa: BLE001 - fail closed without rejected content
         _reject_plan_review(
@@ -2271,7 +2256,6 @@ async def _step_write_plans(ctx: FlowContext) -> None:
     else:
         selected = ctx.data["selected_findings"]
     backend = ctx.backend_for("plan_write")
-    wall_budget, tool_budget = ctx.budget_for("plan_write")
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(PLAN_WRITE_MAX_CONCURRENCY, backend)
@@ -2390,8 +2374,6 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                             output_schema=PLAN_AUTHOR_SCHEMA,
                             read_only=True,
                             persist_session=False,
-                            wall_budget_s=wall_budget,
-                            tool_call_budget=tool_budget,
                         )
                     return output, aborted_reason
 

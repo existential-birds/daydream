@@ -518,7 +518,6 @@ class _ImproveStubBackend:
         self.recon_commands_extra: list[dict[str, Any]] = []
         self.recon_languages_override: Any = None
         self.recon_output_override: Any = None
-        self.abort_plan_on_tool_budget = False
         self.plan_tool_calls_before_result = 0
         self.plan_dependency_slug: str | None = None
         self.plan_file_role_override: str | None = None
@@ -818,14 +817,6 @@ class _ImproveStubBackend:
                 raise _ProductionPathPlannerError("plan writer process exited")
             if self.inject_credential:
                 yield TextEvent(text="OPENAI_API_KEY=sk-secret123456")
-            if self.abort_plan_on_tool_budget:
-                for index in range(3):
-                    yield ToolStartEvent(
-                        id=f"plan-budget-{index}",
-                        name="Read",
-                        input={"file_path": "apps/billing/api.py"},
-                    )
-                return
             for index in range(self.plan_tool_calls_before_result):
                 yield ToolStartEvent(
                     id=f"plan-read-{index}",
@@ -2937,48 +2928,6 @@ async def test_all_legacy_plan_results_block_and_return_failure(
     ).read_text(encoding="utf-8")
     assert "AUTHOR_SCHEMA_INVALID" in diagnostics_text
     assert "Make the change." not in diagnostics_text
-
-
-@pytest.mark.anyio
-async def test_failed_planning_reports_budget_failure_and_nonzero_exit(
-    improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    stub = _install_improve_stub(
-        monkeypatch,
-        improve_monorepo_target,
-        n_findings=1,
-    )
-    stub.abort_plan_on_tool_budget = True
-    monkeypatch.setattr(
-        "daydream.runner.IMPROVE_PHASE_BUDGETS",
-        {"plan_write": (3600.0, 1)},
-        raising=False,
-    )
-
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    diagnostics_text = _dd(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    ).read_text(encoding="utf-8")
-    diagnostics = json.loads(diagnostics_text)
-    console_output = capsys.readouterr().out
-    assert code == 1
-    assert diagnostics["attempts"][0]["errors"] == [
-        {"code": "TOOL_CALL_BUDGET_EXCEEDED", "pointer": "/"}
-    ]
-    assert "NO_STRUCTURED_OBJECT" not in diagnostics_text
-    assert "Improve audit complete" not in console_output
-    assert "Plan writing failed" in console_output
 
 
 @pytest.mark.anyio

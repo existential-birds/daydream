@@ -302,8 +302,7 @@ ambiguity left in a plan is paid for downstream.
 
 The improve flow runs with **no wall-clock or tool-call budget**. Its turns are
 long by design and a budget abort returns partial output that reads as
-complete, so ceilings belong in `IMPROVE_PHASE_BUDGETS` per phase once a real
-runaway justifies one.
+complete.
 
 When no tier supplies a value the flag is not passed at all, and the backend
 applies its own ambient default (for Codex, `model_reasoning_effort` from

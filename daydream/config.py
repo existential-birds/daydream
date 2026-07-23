@@ -238,30 +238,6 @@ PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     for backend in {*DEEP_PHASE_DEFAULT_EFFORT, *IMPROVE_PHASE_DEFAULT_EFFORT}
 }
 
-# Per-phase ``(wall_budget_s, tool_call_budget)`` overrides for the improve
-# flow, applied by ``FlowContext.budget_for``. Empty on purpose: the improve
-# flow ships unbudgeted, and ``_run_improve`` passes no flow-wide pair either.
-#
-# The improve flow runs unattended and its plans are executed later by weaker
-# agents, so a truncated turn is worse than a slow one: a budget abort returns
-# partial output, and four of the five improve call sites discard
-# ``budget_reason`` — a cut-short audit is silently treated as a complete one.
-# The old flat 1800 s / 50-call pair was doing exactly that. Measured over
-# archived runs under ``~/.daydream/archive/runs``:
-#
-# - ``audit``   n=49 turns, tool calls p50=40 p90=56 max=119. Ten of the 49
-#   recorded an actual ``tool_call_budget_exceeded`` abort.
-# - ``plan``    n=79 turns, tool calls p50=21 p90=49 max=75; wall clock
-#   p50=744 s, p90=3645 s, max=3979 s.
-#
-# Every ceiling that looked defensible from that data still clipped the tail,
-# so there is no evidence-backed number to ship. Tune *down* from here when a
-# specific phase shows a real runaway, and put the number in this table rather
-# than restoring a flow-wide default — a per-phase entry wins over the pair on
-# ``FlowContext``, which is what makes it tunable one phase at a time.
-IMPROVE_PHASE_BUDGETS: dict[str, tuple[float | None, int | None]] = {}
-
-
 class ReviewSkillChoice(Enum):
     """Enum for review skill menu choices."""
 

@@ -9,7 +9,6 @@ from daydream.config import (
     DEFAULT_EXPLORATION_MODEL,
     DEFAULT_PI_MODEL,
     EFFORT_TIERS,
-    IMPROVE_PHASE_BUDGETS,
     IMPROVE_PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_MODELS,
@@ -175,16 +174,6 @@ def test_plan_write_is_pinned_to_the_top_model_tier(backend):
     """plan_write shares the top tier with the heaviest review phases."""
     models = PHASE_DEFAULT_MODELS[backend]
     assert models["plan_write"] == models["review"] == models["arbiter"]
-
-
-def test_improve_ships_unbudgeted():
-    """No ceiling until one is justified by evidence.
-
-    Every candidate number derived from the archive still clipped the measured
-    tail (plan turns: wall p90=3645s, max=3979s), and a budget abort returns
-    partial output that four of five improve call sites treat as complete.
-    """
-    assert IMPROVE_PHASE_BUDGETS == {}
 
 
 def test_pi_model_is_a_backend_fallback_not_a_phase_override():
