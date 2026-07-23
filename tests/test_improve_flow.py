@@ -16,6 +16,7 @@ from daydream.git_ops import head_sha
 from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
 )
+from daydream.improve.plans import PLAN_INDEX_FILENAME
 from daydream.improve.prompts import (
     AUDIT_PLAYBOOK_SECTIONS,
     HARD_RULE_4,
@@ -2845,6 +2846,24 @@ async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_ord
     }
     assert len(list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))) == 3
     assert index.count("| TODO |") == 3
+    # The durable record is the sidecar; the README above is rendered from it.
+    sidecar = json.loads(
+        (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    )
+    assert sidecar["schema_version"] == 1
+    assert sidecar["artifact_type"] == "daydream.plan-index"
+    assert [
+        (entry["number"], entry["fingerprint"], entry["status"])
+        for entry in sidecar["plans"]
+    ] == [
+        (rank + 1, fingerprint, "TODO")
+        for rank, fingerprint in enumerate(selected)
+    ]
+    assert all(
+        (plans_dir / f"{entry['number']:03d}-{entry['slug']}.md").is_file()
+        and entry["planned_at"] == head_sha(improve_monorepo_target)
+        for entry in sidecar["plans"]
+    )
 
 
 @pytest.mark.anyio
@@ -3060,13 +3079,16 @@ async def test_schema_invalid_planner_metadata_never_reaches_observables(
     index = (
         improve_monorepo_target / "daydream_plans/README.md"
     ).read_text(encoding="utf-8")
+    sidecar = (
+        improve_monorepo_target / "daydream_plans" / PLAN_INDEX_FILENAME
+    ).read_text(encoding="utf-8")
     report = _dd(improve_monorepo_target, "report.md").read_text(encoding="utf-8")
     diagnostics = _dd(
         improve_monorepo_target,
         "plan-write-diagnostics.json",
     ).read_text(encoding="utf-8")
     console_output = capsys.readouterr().out
-    for observable in (index, report, console_output, diagnostics):
+    for observable in (index, sidecar, report, console_output, diagnostics):
         assert "PRIVATE_SCHEMA_SECRET" not in observable
         assert "TOKEN=" not in observable
         assert "SCHEMA_INVALID" in observable
