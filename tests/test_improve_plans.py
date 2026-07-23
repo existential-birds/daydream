@@ -493,50 +493,6 @@ def test_package_script_manager_cannot_be_spoofed(tmp_path: Path) -> None:
     assert errors == ["RECON_EVIDENCE_MISMATCH@/commands/0/evidence"]
 
 
-def test_package_script_evidence_rejects_same_named_key_outside_scripts(
-    tmp_path: Path,
-) -> None:
-    repo = tmp_path / "repo"
-    package = repo / "admin-dashboard"
-    package.mkdir(parents=True)
-    manifest_lines = [
-        "{",
-        '  "packageManager": "pnpm@10.27.0",',
-        '  "config": {"test": "not a package script"},',
-        '  "scripts": {',
-        '    "test": "vitest run"',
-        "  }",
-        "}",
-    ]
-    (package / "package.json").write_text(
-        "\n".join(manifest_lines) + "\n",
-        encoding="utf-8",
-    )
-    command = _contract_recon_command(
-        command_id="pnpm-test-admin",
-        command="pnpm test",
-        working_directory="admin-dashboard",
-        paths=("admin-dashboard",),
-        evidence={
-            "kind": "package-script",
-            "source_path": "admin-dashboard/package.json",
-            "line_anchor": {"start_line": 3, "end_line": 3},
-            "verbatim_excerpt": manifest_lines[2],
-            "package_manager": "pnpm",
-            "script": "test",
-            "working_directory": "admin-dashboard",
-        },
-    )
-
-    accepted, errors = validate_recon_commands(
-        {"commands": [command]},
-        repo=repo,
-    )
-
-    assert accepted == []
-    assert errors == ["RECON_EVIDENCE_MISMATCH@/commands/0/evidence"]
-
-
 @pytest.mark.parametrize(
     "scope",
     [

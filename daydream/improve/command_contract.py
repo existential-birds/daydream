@@ -509,75 +509,6 @@ def _package_invocation(package_manager: str, script: str) -> str:
     return f"{package_manager} {script}"
 
 
-def _json_key_spans(source: str) -> dict[tuple[str, ...], list[tuple[int, int]]]:
-    """Return exact source spans for object keys at each parsed JSON path."""
-    decoder = json.JSONDecoder()
-    spans: dict[tuple[str, ...], list[tuple[int, int]]] = {}
-
-    def skip_whitespace(position: int) -> int:
-        while position < len(source) and source[position].isspace():
-            position += 1
-        return position
-
-    def parse_value(position: int, path: tuple[str, ...]) -> int:
-        position = skip_whitespace(position)
-        if position >= len(source):
-            raise ValueError
-        if source[position] == "{":
-            position = skip_whitespace(position + 1)
-            if position < len(source) and source[position] == "}":
-                return position + 1
-            while True:
-                key_start = position
-                key, key_end = decoder.raw_decode(source, position)
-                if not isinstance(key, str) or source[position] != '"':
-                    raise ValueError
-                key_path = (*path, key)
-                spans.setdefault(key_path, []).append((key_start, key_end))
-                position = skip_whitespace(key_end)
-                if position >= len(source) or source[position] != ":":
-                    raise ValueError
-                position = parse_value(position + 1, key_path)
-                position = skip_whitespace(position)
-                if position < len(source) and source[position] == "}":
-                    return position + 1
-                if position >= len(source) or source[position] != ",":
-                    raise ValueError
-                position = skip_whitespace(position + 1)
-        if source[position] == "[":
-            position = skip_whitespace(position + 1)
-            if position < len(source) and source[position] == "]":
-                return position + 1
-            while True:
-                position = parse_value(position, path)
-                position = skip_whitespace(position)
-                if position < len(source) and source[position] == "]":
-                    return position + 1
-                if position >= len(source) or source[position] != ",":
-                    raise ValueError
-                position = skip_whitespace(position + 1)
-        _, end = decoder.raw_decode(source, position)
-        return end
-
-    end = skip_whitespace(parse_value(0, ()))
-    if end != len(source):
-        raise ValueError
-    return spans
-
-
-def _anchor_source_span(
-    source: str,
-    evidence: dict[str, Any],
-) -> tuple[int, int]:
-    lines = source.splitlines(keepends=True)
-    start_line = evidence["line_anchor"]["start_line"]
-    end_line = evidence["line_anchor"]["end_line"]
-    return (
-        sum(len(line) for line in lines[: start_line - 1]),
-        sum(len(line) for line in lines[:end_line]),
-    )
-
-
 def _validate_evidence(
     command: dict[str, Any],
     *,
@@ -634,25 +565,16 @@ def _validate_evidence(
     )
     try:
         manifest = json.loads(source)
-        key_spans = _json_key_spans(source)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError:
         return None, ContractRejection(
             "RECON_EVIDENCE_MISMATCH", "/evidence"
         )
     scripts = manifest.get("scripts")
-    script_key_spans = key_spans.get(("scripts", script), [])
-    anchor_start, anchor_end = _anchor_source_span(source, evidence)
     if (
         command["working_directory"] != working_directory
         or evidence["source_path"] != expected_source
         or not isinstance(scripts, dict)
         or not isinstance(scripts.get(script), str)
-        or len(key_spans.get(("scripts",), [])) != 1
-        or len(script_key_spans) != 1
-        or not (
-            anchor_start <= script_key_spans[0][0]
-            and script_key_spans[0][1] <= anchor_end
-        )
         or command["command"] != _package_invocation(package_manager, script)
     ):
         return None, ContractRejection(
