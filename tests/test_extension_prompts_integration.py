@@ -21,7 +21,7 @@ from daydream.backends import ResultEvent, TextEvent
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
-from tests.test_improve_flow import _dd, _ImproveStubBackend
+from tests.harness.improve_backend import ImproveStubBackend, improve_artifact
 
 
 class RecordingBackend:
@@ -152,7 +152,7 @@ async def test_plan_writer_override_receives_legacy_string_commands_and_typed_ou
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_plan_writer_override())
-    backend = _ImproveStubBackend(improve_monorepo_target, n_findings=1)
+    backend = ImproveStubBackend(improve_monorepo_target, n_findings=1)
     monkeypatch.setattr(
         "daydream.runner.create_backend",
         lambda name, model=None, **kwargs: backend,
@@ -199,7 +199,7 @@ async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagno
     ``LEGACY_MARKDOWN_OUTPUT`` code and no pointer at ``/markdown``.
     """
     ext_dir.write_module(_plan_writer_override())
-    backend = _ImproveStubBackend(improve_monorepo_target, n_findings=1)
+    backend = ImproveStubBackend(improve_monorepo_target, n_findings=1)
     backend.return_legacy_plan = True
     monkeypatch.setattr(
         "daydream.runner.create_backend",
@@ -216,7 +216,7 @@ async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagno
     )
 
     plans_dir = improve_monorepo_target / "daydream_plans"
-    diagnostics = _dd(
+    diagnostics = improve_artifact(
         improve_monorepo_target,
         "plan-write-diagnostics.json",
     ).read_text(encoding="utf-8")
@@ -247,7 +247,7 @@ async def test_plan_writer_prompt_exception_blocks_only_that_plan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_plan_writer_override(raises_on_first_call=True))
-    backend = _ImproveStubBackend(improve_monorepo_target, n_findings=2)
+    backend = ImproveStubBackend(improve_monorepo_target, n_findings=2)
     monkeypatch.setattr(
         "daydream.runner.create_backend",
         lambda name, model=None, **kwargs: backend,
@@ -264,7 +264,7 @@ async def test_plan_writer_prompt_exception_blocks_only_that_plan(
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    diagnostics = _dd(
+    diagnostics = improve_artifact(
         improve_monorepo_target,
         "plan-write-diagnostics.json",
     ).read_text(encoding="utf-8")
