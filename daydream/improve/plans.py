@@ -26,6 +26,13 @@ _HOST_BLOCKED_STATUS = re.compile(
 )
 # Plan | Title | Priority | Effort | Status
 _INDEX_COLUMNS = 5
+_SLUG_SEPARATOR = re.compile(r"[^a-z0-9]+")
+
+
+def plan_slug(title: Any) -> str:
+    """Derive a plan's filename and branch slug from its title."""
+    derived = _SLUG_SEPARATOR.sub("-", str(title or "").lower()).strip("-")
+    return derived[:60].rstrip("-") or "plan"
 
 
 def _redact_model_value(value: Any) -> Any:
@@ -1099,7 +1106,7 @@ class PlanWriteSession:
         number = reservation.number
         title = str(finding.get("title") or "Selected finding")
         attempt = self._attempt_of(selection)
-        slug = str(selection.get("slug") or "plan")
+        slug = plan_slug(selection.get("title"))
         if selection.get("error"):
             raw_errors = attempt.get("errors") if attempt is not None else None
             if not isinstance(raw_errors, (list, tuple)) and attempt is not None:

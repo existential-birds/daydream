@@ -33,7 +33,7 @@ from daydream.improve.command_contract import (
 from daydream.improve.command_contract import (
     valid_repository_file_path as _valid_repository_file_path,
 )
-from daydream.improve.plans import redact_secret_values
+from daydream.improve.plans import plan_slug, redact_secret_values
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
 
 GIT_PUSH_POLICY = "never-without-operator-instruction"
@@ -67,8 +67,8 @@ def render_issue(issue: AssemblyIssue) -> str:
     return rendered
 
 
-def _branch_name(slug: str) -> str:
-    return f"improve/{slug}"
+def _branch_name(title: str) -> str:
+    return f"improve/{plan_slug(title)}"
 
 
 _AUTHOR_PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
@@ -1049,7 +1049,6 @@ def assemble_plan(
         for entry in normalized["context_excerpts"]
     )
     assembled = {
-        "slug": normalized["slug"],
         "title": normalized["title"],
         "priority": normalized["priority"],
         "why_this_matters": dict(normalized["why_this_matters"]),
@@ -1067,7 +1066,7 @@ def assemble_plan(
             "out_of_scope_behaviors": deepcopy(scope["out_of_scope_behaviors"]),
         },
         "git_workflow": {
-            "branch_name": _branch_name(normalized["slug"]),
+            "branch_name": _branch_name(normalized["title"]),
             "branch_basis": GIT_BRANCH_BASIS,
             "commit_boundaries": normalized["git_workflow"]["commit_boundaries"],
             "commit_message_example": (

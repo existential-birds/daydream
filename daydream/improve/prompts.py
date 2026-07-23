@@ -150,12 +150,6 @@ _LINE_ANCHOR_SCHEMA: dict[str, Any] = {
         "end_line": {"type": "integer", "minimum": 1},
     },
 }
-_SLUG_SCHEMA: dict[str, Any] = {
-    "type": "string",
-    "minLength": 3,
-    "maxLength": 60,
-    "pattern": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
-}
 _STEP_NUMBER_LIST_SCHEMA: dict[str, Any] = {
     "type": "array",
     "items": {"type": "integer", "minimum": 1},
@@ -176,7 +170,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "slug",
         "title",
         "priority",
         "why_this_matters",
@@ -191,7 +184,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
         "additional_command_refs",
     ],
     "properties": {
-        "slug": _SLUG_SCHEMA,
         "title": {"type": "string", "minLength": 12, "maxLength": 160},
         "priority": {"type": "string", "enum": ["P1", "P2", "P3"]},
         "why_this_matters": {

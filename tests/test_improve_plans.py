@@ -544,11 +544,10 @@ def _ref(
     }
 
 
-def _authored_plan(*, slug: str = "batch-catalog-queries") -> dict[str, Any]:
+def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
     focused = "tests/test_catalog.py -q"
     return {
-        "slug": slug,
-        "title": "Batch catalog queries before loading items",
+        "title": title,
         "priority": "P1",
         "why_this_matters": {
             "problem": "list_catalog currently loads each catalog item separately.",
@@ -655,7 +654,7 @@ def _authored_plan(*, slug: str = "batch-catalog-queries") -> dict[str, Any]:
 
 
 def _authored_new_file_plan() -> dict[str, Any]:
-    plan = _authored_plan(slug="add-catalog-batching-regression")
+    plan = _authored_plan(title="Add catalog batching regression")
     new_test = "tests/test_catalog_batching.py"
     plan["scope"]["new_paths"] = [
         {
@@ -1225,7 +1224,7 @@ def test_mixed_batch_writes_valid_sibling_and_blocks_invalid_sibling(
     tmp_path: Path,
 ) -> None:
     repo, sha = _repo(tmp_path)
-    invalid = _authored_plan(slug="invalid-catalog-plan")
+    invalid = _authored_plan(title="Invalid catalog plan")
     invalid["test_plan"]["cases"] = []
     issues = _issues(repo, invalid)
 
@@ -1376,7 +1375,7 @@ def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(
             {
                 "finding": _finding(fingerprint="fp-observability"),
                 **_assembled(
-                    repo, _authored_plan(slug="catalog-observability")
+                    repo, _authored_plan(title="Catalog observability")
                 ),
             }
         ],
@@ -1431,7 +1430,7 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(
     tmp_path: Path,
 ) -> None:
     repo, sha = _repo(tmp_path)
-    authoring_invalid = _authored_plan(slug="authoring-invalid-plan")
+    authoring_invalid = _authored_plan()
     authoring_invalid["title"] = "Too short"
 
     selections = [
@@ -1452,7 +1451,7 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(
         ),
         {
             "finding": _finding(fingerprint="fp-success"),
-            **_assembled(repo, _authored_plan(slug="successful-plan")),
+            **_assembled(repo, _authored_plan(title="Land the successful plan")),
         },
     ]
 

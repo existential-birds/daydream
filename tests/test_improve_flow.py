@@ -173,10 +173,6 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
         if finding.get("category") == "requested"
         else ""
     )
-    raw_slug = re.sub(
-        r"[^a-z0-9]+", "-", finding["title"].lower()
-    ).strip("-")
-    slug = raw_slug if len(raw_slug) >= 3 else f"requested-change-{raw_slug}"
     title = (
         f"Spike {finding['title']}"
         if finding.get("category") == "direction"
@@ -201,7 +197,6 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
         note="Documentation must stay untouched by the billing change.",
     )
     return {
-        "slug": slug,
         "title": title,
         "priority": "P1",
         "why_this_matters": {

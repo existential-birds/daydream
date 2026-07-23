@@ -56,6 +56,7 @@ from daydream.improve.plans import (
     _attempt_diagnostic,
     _markdown_cell,
     load_rejections,
+    plan_slug,
     record_plan_write_diagnostics,
     record_rejections,
 )
@@ -111,7 +112,6 @@ RECON_SCHEMA: dict[str, Any] = {
 _EVIDENCE_LOCATION = re.compile(
     r"^`?(.+?):(\d+)(?::\d+)?(?:`|\b)"
 )
-_PLAN_SLUG = re.compile(r"^[a-z0-9-]{1,60}$")
 _PROVENANCE_VALUES = {"introduced", "inherited"}
 
 
@@ -1366,14 +1366,6 @@ async def _step_select(ctx: FlowContext) -> Stop | None:
     return None
 
 
-def _plan_slug(value: Any, title: Any) -> str:
-    candidate = str(value or "")
-    if _PLAN_SLUG.fullmatch(candidate):
-        return candidate
-    derived = re.sub(r"[^a-z0-9]+", "-", str(title or "").lower()).strip("-")
-    return derived[:60].rstrip("-") or "plan"
-
-
 def _verification_commands(recon: dict[str, Any]) -> list[dict[str, Any]]:
     raw_commands = recon.get("commands")
     if not isinstance(raw_commands, list):
@@ -1485,7 +1477,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                 _land(selection_index, {"finding": finding})
                 continue
             descriptor = (
-                f"plan-{_plan_slug('', finding.get('title'))}-"
+                f"plan-{plan_slug(finding.get('title'))}-"
                 f"{selection_index + 1:03d}"
             )
             attempt = {
