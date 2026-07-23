@@ -1417,12 +1417,10 @@ async def test_improve_recon_writes_artifacts_and_never_mutates_source(
     )
     assert code == 0
     dd = improve_monorepo_target / ".daydream" / "improve"
-    services = json.loads((dd / "services.json").read_text())
-    assert {service["name"] for service in services["services"]} == {
-        "billing",
-        "catalog",
-    }
     assert (dd / "report.md").is_file()
+    report_text = (dd / "report.md").read_text()
+    assert "- **billing** — `apps/billing`" in report_text
+    assert "- **catalog** — `apps/catalog`" in report_text
     trajectories = list(
         (improve_monorepo_target / ".daydream" / "runs").glob(
             "*/trajectory.json"
@@ -1546,14 +1544,6 @@ async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
         "group-02",
         "group-03",
     }
-    names = sorted(
-        path.name
-        for path in (improve_scaled_monorepo_target / ".daydream" / "improve").glob(
-            "audit-*-findings.json"
-        )
-    )
-    assert len(names) == 3 * len(AUDIT_CATEGORIES)
-    assert "audit-correctness-group-01-findings.json" in names
     coverage = json.loads(_dd(improve_scaled_monorepo_target, "coverage.json").read_text())
     assert len(coverage["groups"]) == 3
     assert {entry["name"] for entry in coverage["partitions"]} == {

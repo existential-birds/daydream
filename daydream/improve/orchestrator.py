@@ -27,12 +27,10 @@ from daydream.deep.orchestrator import _diff_changed_files, get_installed_skills
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.api import FlowStep, Stop
 from daydream.improve.artifacts import (
-    audit_findings_path,
     coverage_path,
     plan_write_diagnostics_path,
     recon_path,
     report_path,
-    services_path,
     vetted_findings_path,
 )
 from daydream.improve.assemble import (
@@ -185,14 +183,6 @@ class _AuditAssignment:
         return f"{self.category}:{self.group.name}"
 
 
-def _service_dict(service: Service) -> dict[str, str]:
-    return {
-        "name": service.name,
-        "root": service.root.as_posix(),
-        "source": service.source,
-    }
-
-
 def _build_recon_prompt(
     repo: Path,
     services: list[Service],
@@ -289,22 +279,6 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             return Stop(1)
     if branch_focus:
         services = _services_for_files(services, tuple(branch_files))
-
-    if not description_mode:
-        services_path(directory).write_text(
-            json.dumps(
-                {
-                    "artifact_provenance": _artifact_provenance(
-                        phase=DaydreamPhase.RECON
-                    ),
-                    "services": [
-                        _service_dict(service) for service in services
-                    ],
-                },
-                indent=2,
-            )
-            + "\n"
-        )
 
     stacks: list[StackAssignment] = []
     partitions: list[Partition] = []
@@ -853,20 +827,6 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                 dropped_low_confidence += 1
                 continue
             assignment_findings.append(stamped)
-        audit_findings_path(
-            directory,
-            assignment.category,
-            assignment.group.name,
-        ).write_text(
-            json.dumps(
-                _with_artifact_provenance(
-                    {"findings": assignment_findings},
-                    phase=DaydreamPhase.AUDIT,
-                ),
-                indent=2,
-            )
-            + "\n"
-        )
         per_group[assignment.group.name].extend(assignment_findings)
 
     # Cap per group first so one noisy group cannot consume a tier's whole
@@ -1982,12 +1942,8 @@ def _is_audit_run(ctx: FlowContext) -> bool:
     return ctx.config.improve_plan_description is None
 
 
-def _needs_recon(_ctx: FlowContext) -> bool:
-    return True
-
-
 STEPS: tuple[FlowStep, ...] = (
-    FlowStep(name="recon", run=_step_recon, enabled=_needs_recon),
+    FlowStep(name="recon", run=_step_recon),
     FlowStep(name="audit", run=_step_audit, enabled=_is_audit_run),
     FlowStep(name="vet", run=_step_vet, enabled=_is_audit_run),
     FlowStep(name="select-plans", run=_step_select, enabled=_is_audit_run),
