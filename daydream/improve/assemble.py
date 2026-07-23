@@ -852,8 +852,10 @@ def _derived_commands_table(
 
 
 def _resolve_excerpt(repo: Path, path: str, start: int, end: int) -> str:
+    # Repository bytes are spliced in after _redact_strings has already run over
+    # the authored content, so they must be redacted here.
     lines = (repo / path).read_text(encoding="utf-8").splitlines()
-    return "\n".join(lines[start - 1 : end])
+    return redact_secret_values("\n".join(lines[start - 1 : end]))
 
 
 def _boilerplate_stop_conditions(

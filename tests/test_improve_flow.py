@@ -3459,6 +3459,57 @@ async def test_plan_subverb_accepts_placeholder_secret_syntax(
 
 
 @pytest.mark.anyio
+async def test_repository_secret_in_quoted_source_is_redacted_not_blocked(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credential on a quoted source line must not reach the plan on disk.
+
+    The excerpt is spliced from raw repository bytes after the authored-string
+    redaction has already run. The secret shape is lowercase on purpose:
+    ``trajectory.redact_text`` does not match it, so this exercises the
+    improve-side redaction rather than pre-existing coverage.
+    """
+    source_path = improve_monorepo_target / "apps/billing/api.py"
+    source_path.write_text(  # the stub quotes lines 1-2 of this file
+        'password = "s3cr3tplaintext"\n'
+        "def service_name():\n"
+        '    return "billing"\n',
+        encoding="utf-8",
+    )
+    _install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=1,
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert code == 0
+    # A plan was written: the secret is redacted, not a reason to block.
+    assert len(plans) == 1
+    plan_text = plans[0].read_text(encoding="utf-8")
+    assert "password = <redacted>" in plan_text
+    assert "s3cr3tplaintext" not in plan_text
+    assert all(
+        "s3cr3tplaintext" not in observable
+        for observable in _improve_observable_texts(improve_monorepo_target)
+    )
+
+
+@pytest.mark.anyio
 async def test_secret_value_never_reaches_any_artifact(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,

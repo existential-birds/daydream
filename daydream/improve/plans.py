@@ -895,7 +895,8 @@ def validate_plan_result(
                 f"@/current_state_excerpts/{index}/line_anchor",
             )
         actual = "\n".join(lines[start - 1 : end])
-        excerpt["verbatim_excerpt"] = actual
+        # Raw repository bytes, re-spliced after the secret scan above ran.
+        excerpt["verbatim_excerpt"] = redact_secret_values(actual)
         excerpt_paths.add(path)
     for index, path in enumerate(existing):
         if path not in excerpt_paths:

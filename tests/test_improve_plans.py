@@ -2333,6 +2333,50 @@ def test_assemble_clamps_excerpt_end_line_but_rejects_start_beyond_eof(
     ]
 
 
+def test_repository_secrets_are_redacted_not_blocked_in_excerpts(
+    tmp_path: Path,
+) -> None:
+    """Repository bytes are spliced into excerpts after authored-string
+    redaction has already run, so both splice points must redact them.
+
+    The secret shape here is lowercase on purpose: ``trajectory.redact_text``
+    does not match it, so only the improve-side redaction can catch it.
+    """
+    repo, sha = _repo(tmp_path)
+    (repo / "apps/catalog/api.py").write_text(
+        '    password = "s3cr3tplaintext"\n'
+        "    return [load_item(item_id) for item_id in item_ids]\n",
+        encoding="utf-8",
+    )
+
+    assembled = _assembled(repo)
+
+    excerpt = next(
+        item
+        for item in assembled["current_state_excerpts"]
+        if item["path"] == "apps/catalog/api.py"
+    )
+    assert excerpt["verbatim_excerpt"] == (
+        "    password = <redacted>\n"
+        "    return [load_item(item_id) for item_id in item_ids]"
+    )
+    assert "s3cr3tplaintext" not in json.dumps(assembled)
+
+    # The plan is redacted, never blocked: SECRET_CONTENT_REDACTED must not fire.
+    errors = validate_plan_result(
+        assembled,
+        repo=repo,
+        planned_at=sha,
+        finding=_finding(),
+        recon_commands=_recon_commands(),
+    )
+
+    assert errors == ()
+    # validate_plan_result re-splices raw bytes over verbatim_excerpt, so it
+    # has to redact them too or the secret lands in the rendered plan.
+    assert "s3cr3tplaintext" not in json.dumps(assembled)
+
+
 def test_assemble_dedups_scope_lists_by_disk_truth(tmp_path: Path) -> None:
     repo, _ = _repo(tmp_path)
     plan = _authored_new_file_plan()
