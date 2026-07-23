@@ -559,12 +559,10 @@ def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
                 {
                     "path": "apps/catalog/api.py",
                     "role": "Implement batched catalog loading.",
-                    "excerpts": [{"start_line": 1, "end_line": 2}],
                 },
                 {
                     "path": "tests/test_catalog.py",
                     "role": "Add catalog query regression coverage.",
-                    "excerpts": [{"start_line": 1, "end_line": 2}],
                 },
             ],
             "new_paths": [],
@@ -581,7 +579,20 @@ def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
                 }
             ],
         },
-        "context_excerpts": [],
+        "context_excerpts": [
+            {
+                "path": "apps/catalog/api.py",
+                "start_line": 1,
+                "end_line": 2,
+                "file_role": "Implement batched catalog loading.",
+            },
+            {
+                "path": "tests/test_catalog.py",
+                "start_line": 1,
+                "end_line": 2,
+                "file_role": "Add catalog query regression coverage.",
+            },
+        ],
         "git_workflow": {
             "commit_boundaries": "Commit the behavior and its tests as one logical unit.",
             "commit_message_example": "perf: batch catalog item loading",
@@ -1835,6 +1846,35 @@ def test_assemble_relocates_an_already_existing_new_path_into_existing_scope(
     assert f"- `{collision}` (create) —" not in rendered
 
 
+def test_a_host_synthesized_anchor_is_redacted_like_an_authored_one(
+    tmp_path: Path,
+) -> None:
+    """The relocation repair anchors a file the model never quoted.
+
+    Those bytes reach ``verbatim_excerpt`` by the same splice as an authored
+    anchor, so they must be redacted on that route too.
+    """
+    repo, _ = _repo(tmp_path)
+    plan = _authored_new_file_plan()
+    relocated = plan["scope"]["new_paths"][0]["path"]
+    (repo / relocated).write_text(
+        'api_key = "b4dc0ffeeplaintext"\ndef test_placeholder():\n',
+        encoding="utf-8",
+    )
+
+    assembled = _assembled(repo, plan)
+
+    quoted = next(
+        excerpt
+        for excerpt in assembled["current_state_excerpts"]
+        if excerpt["path"] == relocated
+    )
+    assert quoted["verbatim_excerpt"] == (
+        "api_key = <redacted>\ndef test_placeholder():"
+    )
+    assert "b4dc0ffeeplaintext" not in json.dumps(assembled)
+
+
 def test_assemble_still_rejects_a_new_path_occupied_by_a_directory(
     tmp_path: Path,
 ) -> None:
@@ -1847,6 +1887,91 @@ def test_assemble_still_rejects_a_new_path_occupied_by_a_directory(
     assert [render_issue(issue) for issue in issues] == [
         "NEW_PATH_ALREADY_EXISTS@/scope/new_paths/0/path"
     ]
+
+
+def test_an_edited_file_the_plan_never_quotes_is_blocked(
+    tmp_path: Path,
+) -> None:
+    """Every path the plan edits must be quoted, or drift has no anchor.
+
+    The drift STOP condition tells the executor to compare each file it is
+    about to edit against the text quoted for it, so an unquoted edited file
+    hands it a condition it cannot evaluate.
+    """
+    repo, _ = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["context_excerpts"] = [
+        entry
+        for entry in plan["context_excerpts"]
+        if entry["path"] != "apps/catalog/api.py"
+    ]
+
+    issues = _issues(repo, plan)
+
+    assert [render_issue(issue) for issue in issues] == [
+        "EXISTING_PATH_NOT_QUOTED@/scope/existing_paths/0/path"
+    ]
+    assert "context_excerpts" in (issues[0].hint or "")
+
+
+def test_the_drift_condition_names_only_paths_the_plan_quotes(
+    tmp_path: Path,
+) -> None:
+    """The drift condition's related_paths are exactly the quoted files.
+
+    Shape that would catch a regression: one path the model quoted itself, one
+    the host had to relocate out of ``new_paths``, and one it declared from a
+    step change the plan left out of scope entirely.
+    """
+    repo, planned_at = _repo(tmp_path)
+    plan = _authored_new_file_plan()
+    relocated = plan["scope"]["new_paths"][0]["path"]
+    (repo / relocated).write_text(
+        "def test_placeholder():\n    assert True\n",
+        encoding="utf-8",
+    )
+    plan["scope"]["out_of_scope_paths"].append(
+        {
+            "path": "Makefile",
+            "reason": "The catalog change adds no new build or test entry point.",
+        }
+    )
+    plan["steps"][0]["changes"].append(
+        {
+            "path": "README.md",
+            "symbol": "Catalog service",
+            "operation": "modify",
+            "instruction": "Document that catalog item loading is now batched.",
+            "target_state": "README.md states catalog loading issues one query.",
+        }
+    )
+
+    assembled = _assembled(repo, plan)
+
+    drift = next(
+        condition
+        for condition in assembled["stop_conditions"]
+        if condition["kind"] == "drift"
+    )
+    quoted = {
+        excerpt["path"] for excerpt in assembled["current_state_excerpts"]
+    }
+    assert set(drift["related_paths"]) == quoted
+    assert quoted == {
+        "apps/catalog/api.py",
+        "tests/test_catalog.py",
+        relocated,
+        "README.md",
+    }
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=planned_at,
+        number=1,
+    )
+    for path in drift["related_paths"]:
+        assert f"- `{path}:1-" in rendered
+    assert "# Catalog service" in rendered
 
 
 def test_undeclared_step_path_is_declared_existing_with_a_usable_excerpt(
@@ -2255,9 +2380,7 @@ def test_assemble_clamps_excerpt_end_line_but_rejects_start_beyond_eof(
 ) -> None:
     repo, _ = _repo(tmp_path)
     clamped = _authored_plan()
-    clamped["scope"]["existing_paths"][0]["excerpts"] = [
-        {"start_line": 1, "end_line": 200}
-    ]
+    clamped["context_excerpts"][0]["end_line"] = 200
 
     assembled = _assembled(repo, clamped)
 
@@ -2269,20 +2392,14 @@ def test_assemble_clamps_excerpt_end_line_but_rejects_start_beyond_eof(
     )
 
     beyond = _authored_plan()
-    beyond["scope"]["existing_paths"][0]["excerpts"] = [
-        {"start_line": 50, "end_line": 60}
-    ]
+    beyond["context_excerpts"][0].update(start_line=50, end_line=60)
     issues = _issues(repo, beyond)
     assert [
         (issue.code, issue.pointer, issue.detail)
         for issue in issues
         if issue.code == "EXCERPT_ANCHOR_INVALID"
     ] == [
-        (
-            "EXCERPT_ANCHOR_INVALID",
-            "/scope/existing_paths/0/excerpts/0",
-            "lines=2",
-        )
+        ("EXCERPT_ANCHOR_INVALID", "/context_excerpts/0", "lines=2")
     ]
 
 

@@ -219,7 +219,6 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
                         "Implement the selected billing behavior"
                         f"{requested_context}."
                     ),
-                    "excerpts": [{"start_line": 1, "end_line": 2}],
                 }
             ],
             "new_paths": [
@@ -244,7 +243,16 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
                 }
             ],
         },
-        "context_excerpts": [],
+        "context_excerpts": [
+            {
+                "path": "apps/billing/api.py",
+                "start_line": 1,
+                "end_line": 2,
+                "file_role": (
+                    f"Quote the billing behavior being changed{requested_context}."
+                ),
+            }
+        ],
         "git_workflow": {
             "commit_boundaries": "Commit the billing behavior and test as one logical unit.",
             "commit_message_example": "fix: preserve billing service contract",
@@ -480,6 +488,7 @@ class _ImproveStubBackend:
         self.plan_sloppy = False
         self.plan_bad_recon_id_attempts = 0
         self.plan_missing_path_attempts = 0
+        self.plan_unquoted_path_attempts = 0
         self.plan_crash_attempts = 0
         self.plan_stop_condition_path: str | None = None
         self.plan_no_test_exemplars = False
@@ -774,6 +783,9 @@ class _ImproveStubBackend:
                 plan["scope"]["existing_paths"][0]["role"] = (
                     self.plan_file_role_override
                 )
+                plan["context_excerpts"][0]["file_role"] = (
+                    self.plan_file_role_override
+                )
             if self.plan_problem_override is not None:
                 plan["why_this_matters"]["problem"] = self.plan_problem_override
             if self.plan_instruction_override is not None:
@@ -819,12 +831,13 @@ class _ImproveStubBackend:
                 )
             if self.plan_writer_calls <= self.plan_bad_recon_id_attempts:
                 plan["steps"][0]["verification"] = _plan_ref("make-tests")
+            if self.plan_writer_calls <= self.plan_unquoted_path_attempts:
+                plan["context_excerpts"] = []
             if self.plan_writer_calls <= self.plan_missing_path_attempts:
                 plan["scope"]["existing_paths"].append(
                     {
                         "path": "apps/billing/legacy_api.py",
                         "role": "Reference the retired billing module for parity.",
-                        "excerpts": [{"start_line": 1, "end_line": 2}],
                     }
                 )
             if self.all_recon_commands_invalid:
@@ -3521,6 +3534,67 @@ async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
         error["code"] for error in diagnostics["attempts"][0]["errors"]
     }
     assert {"RECON_COMMAND_UNKNOWN", "EXISTING_PATH_MISSING"} <= first_attempt_codes
+
+
+@pytest.mark.anyio
+async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The drift STOP condition must never ship without text to compare.
+
+    A first attempt that edits a file it never quotes is rejected and named
+    back to the writer; the landed plan quotes every path drift lists.
+    """
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_unquoted_path_attempts = 1
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plan_calls = [
+        call for call in stub.calls if call["marker"] == "plan-writer"
+    ]
+    assert code == 0
+    assert len(plan_calls) == 2
+    repair_prompt = plan_calls[1]["prompt"]
+    assert "EXISTING_PATH_NOT_QUOTED" in repair_prompt
+    assert "/scope/existing_paths/0/path" in repair_prompt
+    assert "context_excerpts" in repair_prompt
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert len(plans) == 1
+    plan_text = plans[0].read_text(encoding="utf-8")
+    current_state = plan_text.split("## Current state\n\n", 1)[1].split(
+        "\n\n## Commands"
+    )[0]
+    assert "- `apps/billing/api.py:1-2`" in current_state
+    assert "def service_name" in current_state
+    diagnostics = json.loads(
+        _dd(
+            improve_monorepo_target,
+            "plan-write-diagnostics.json",
+        ).read_text(encoding="utf-8")
+    )
+    assert [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
+    ] == ["retried", "success"]
+    first_attempt = diagnostics["attempts"][0]
+    assert first_attempt["stage"] == "authoring"
+    assert {
+        (error["code"], error["pointer"])
+        for error in first_attempt["errors"]
+    } == {("EXISTING_PATH_NOT_QUOTED", "/scope/existing_paths/0/path")}
 
 
 @pytest.mark.anyio

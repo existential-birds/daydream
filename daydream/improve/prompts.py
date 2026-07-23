@@ -141,15 +141,6 @@ VET_SCHEMA: dict[str, Any] = {
     },
 }
 
-_LINE_ANCHOR_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["start_line", "end_line"],
-    "properties": {
-        "start_line": {"type": "integer", "minimum": 1},
-        "end_line": {"type": "integer", "minimum": 1},
-    },
-}
 _STEP_NUMBER_LIST_SCHEMA: dict[str, Any] = {
     "type": "array",
     "items": {"type": "integer", "minimum": 1},
@@ -207,18 +198,13 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
-                        "required": ["path", "role", "excerpts"],
+                        "required": ["path", "role"],
                         "properties": {
                             "path": _REPOSITORY_FILE_PATH_SCHEMA,
                             "role": {
                                 "type": "string",
                                 "minLength": 12,
                                 "maxLength": 300,
-                            },
-                            "excerpts": {
-                                "type": "array",
-                                "minItems": 1,
-                                "items": _LINE_ANCHOR_SCHEMA,
                             },
                         },
                     },
@@ -287,7 +273,7 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                     "end_line": {"type": "integer", "minimum": 1},
                     "file_role": {
                         "type": "string",
-                        "minLength": 15,
+                        "minLength": 12,
                         "maxLength": 300,
                     },
                 },
@@ -701,9 +687,10 @@ piece it is attached to. If recon lists no verified commands, use null
 verification everywhere and an empty `additional_command_refs` array; never
 invent a command.
 
-Cite current code with line anchors only. Each `scope.existing_paths` entry
-carries at least one `{start_line, end_line}` excerpt anchor;
-`context_excerpts` anchors files you reference but do not change. The host
+Cite current code with line anchors only, in `context_excerpts` — it is the one
+place excerpts live. Every `scope.existing_paths` path needs at least one
+anchor there, because the executor compares the quoted text against the file
+before editing it; anchor a file you read but never change there too. The host
 reads and renders the canonical repository text for every anchor.
 
 Declare existing and new writable paths separately; every step change path,

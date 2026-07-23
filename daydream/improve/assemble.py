@@ -188,6 +188,15 @@ def _entry_paths(entries: Any) -> list[str]:
     ]
 
 
+def _context_excerpts(normalized: dict[str, Any]) -> list[Any]:
+    """Return the plan's excerpt list, creating it when a repair must append."""
+    context = normalized.get("context_excerpts")
+    if not isinstance(context, list):
+        context = []
+        normalized["context_excerpts"] = context
+    return context
+
+
 def _dedup_scope(normalized: dict[str, Any], *, repo: Path) -> None:
     scope = normalized.get("scope")
     if not isinstance(scope, dict):
@@ -272,8 +281,8 @@ def _declare_referenced_paths(
     already do rather than spending a repair generation on the bookkeeping gap.
     Every path is appended to ``new_paths``; ``_relocate_existing_new_paths``
     runs later in normalization and moves the ones that exist on disk into
-    ``existing_paths``, giving them the head-of-file excerpt anchor
-    ``existing_paths`` requires and the drift stop condition quotes, and turning
+    ``existing_paths``, giving them the head-of-file ``context_excerpts`` anchor
+    every existing path needs and the drift stop condition quotes, and turning
     any ``create`` of them into a ``modify``. Running before ``_dedup_scope``
     also lets that pass drop an out-of-scope entry the new declaration
     contradicts.
@@ -309,6 +318,35 @@ def _declare_referenced_paths(
 _RELOCATED_EXCERPT_MAX_LINES = 40
 
 
+def _quote_head_of_file(
+    normalized: dict[str, Any],
+    *,
+    path: str,
+    role: str,
+    line_count: int,
+) -> None:
+    """Anchor the head of a relocated path unless the plan already quotes it.
+
+    The path's own role is reused verbatim as the excerpt's ``file_role``: it is
+    the sentence describing this file the plan already carries, and both fields
+    hold the same kind of prose under the same length bounds.
+    """
+    context = _context_excerpts(normalized)
+    if any(
+        isinstance(entry, dict) and entry.get("path") == path
+        for entry in context
+    ):
+        return
+    context.append(
+        {
+            "path": path,
+            "start_line": 1,
+            "end_line": min(line_count, _RELOCATED_EXCERPT_MAX_LINES),
+            "file_role": role,
+        }
+    )
+
+
 def _relocate_existing_new_paths(
     normalized: dict[str, Any],
     *,
@@ -318,10 +356,11 @@ def _relocate_existing_new_paths(
 
     ``_dedup_scope`` already settles this exact defect from disk when a path is
     declared in both lists; a path declared only under ``new_paths`` gets the
-    same answer here rather than costing a repair generation. ``existing_paths``
-    requires an excerpt anchor and the drift stop condition quotes it, so the
-    host anchors the head of the real file, and any step that meant to
-    ``create`` the path is switched to ``modify`` so the plan stays coherent.
+    same answer here rather than costing a repair generation. Every existing
+    path must be quoted in ``context_excerpts`` and the drift stop condition
+    compares against that quote, so the host anchors the head of the real file
+    when the path is not quoted already, and any step that meant to ``create``
+    the path is switched to ``modify`` so the plan stays coherent.
 
     Three cases are deliberately left alone. Malformed and unconfined paths stay
     in ``new_paths`` so they still fail as ``MALFORMED_PATH`` /
@@ -358,19 +397,12 @@ def _relocate_existing_new_paths(
         if line_count < 1:
             kept.append(entry)
             continue
-        existing_entries.append(
-            {
-                "path": path,
-                "role": role,
-                "excerpts": [
-                    {
-                        "start_line": 1,
-                        "end_line": min(
-                            line_count, _RELOCATED_EXCERPT_MAX_LINES
-                        ),
-                    }
-                ],
-            }
+        existing_entries.append({"path": path, "role": role})
+        _quote_head_of_file(
+            normalized,
+            path=str(path),
+            role=str(role),
+            line_count=line_count,
         )
         relocated.add(str(path))
     scope["new_paths"] = kept
@@ -418,51 +450,31 @@ def _disambiguate_test_symbols(normalized: dict[str, Any]) -> None:
         case["test_symbol"] = candidate
 
 
-def _clamp_anchor(anchor: Any, line_count: int) -> None:
-    if not isinstance(anchor, dict):
-        return
-    start = anchor.get("start_line")
-    end = anchor.get("end_line")
-    if (
-        isinstance(start, int)
-        and isinstance(end, int)
-        and 1 <= start <= line_count
-        and end > line_count
-    ):
-        anchor["end_line"] = line_count
-
-
 def _clamp_excerpt_end_lines(normalized: dict[str, Any], *, repo: Path) -> None:
     line_counts: dict[str, int | None] = {}
-
-    def count_for(path: Any) -> int | None:
+    context = normalized.get("context_excerpts")
+    for anchor in context if isinstance(context, list) else []:
+        if not isinstance(anchor, dict):
+            continue
+        path = anchor.get("path")
         if not isinstance(path, str):
-            return None
+            continue
         if path not in line_counts:
             source = _read_repo_file(repo, path)
             line_counts[path] = (
                 len(source.splitlines()) if source is not None else None
             )
-        return line_counts[path]
-
-    scope = normalized.get("scope")
-    entries = scope.get("existing_paths") if isinstance(scope, dict) else None
-    for entry in entries if isinstance(entries, list) else []:
-        if not isinstance(entry, dict):
-            continue
-        count = count_for(entry.get("path"))
-        if count is None:
-            continue
-        excerpts = entry.get("excerpts")
-        for anchor in excerpts if isinstance(excerpts, list) else []:
-            _clamp_anchor(anchor, count)
-    context = normalized.get("context_excerpts")
-    for entry in context if isinstance(context, list) else []:
-        if not isinstance(entry, dict):
-            continue
-        count = count_for(entry.get("path"))
-        if count is not None:
-            _clamp_anchor(entry, count)
+        line_count = line_counts[path]
+        start = anchor.get("start_line")
+        end = anchor.get("end_line")
+        if (
+            line_count is not None
+            and isinstance(start, int)
+            and isinstance(end, int)
+            and 1 <= start <= line_count
+            and end > line_count
+        ):
+            anchor["end_line"] = line_count
 
 
 _STOP_PATH_OUT_OF_SCOPE_REASON = (
@@ -810,6 +822,10 @@ def _collect_issues(
         if _valid_repository_file_path(path)
     ]
 
+    context = normalized.get("context_excerpts")
+    context = context if isinstance(context, list) else []
+    quoted_paths = set(_entry_paths(context))
+
     if not existing_entries and not new_entries:
         add("EMPTY_SCOPE", "/scope")
 
@@ -820,27 +836,22 @@ def _collect_issues(
         path = entry.get("path")
         if not isinstance(path, str) or not check_path(pointer, path):
             continue
-        source = _read_repo_file(repo, path)
-        if source is None:
+        if _read_repo_file(repo, path) is None:
             add("EXISTING_PATH_MISSING", pointer)
             continue
-        line_count = len(source.splitlines())
-        excerpts = entry.get("excerpts")
-        for anchor_index, anchor in enumerate(
-            excerpts if isinstance(excerpts, list) else []
-        ):
-            if not isinstance(anchor, dict):
-                continue
-            start = anchor.get("start_line")
-            end = anchor.get("end_line")
-            if not isinstance(start, int) or not isinstance(end, int):
-                continue
-            if start > line_count or end < start:
-                add(
-                    "EXCERPT_ANCHOR_INVALID",
-                    f"/scope/existing_paths/{index}/excerpts/{anchor_index}",
-                    f"lines={line_count}",
-                )
+        # The drift stop condition tells the executor to compare each file it
+        # is about to edit against the text quoted for it, so a path this plan
+        # changes without quoting leaves that condition nothing to compare.
+        if path not in quoted_paths:
+            add(
+                "EXISTING_PATH_NOT_QUOTED",
+                pointer,
+                hint=(
+                    "add a context_excerpts entry anchoring the lines of this "
+                    "file the plan changes; every scope.existing_paths path "
+                    "must be quoted there"
+                ),
+            )
     for index, entry in enumerate(new_entries):
         if not isinstance(entry, dict):
             continue
@@ -869,8 +880,7 @@ def _collect_issues(
                 directory=True,
             )
 
-    context = normalized.get("context_excerpts")
-    for index, entry in enumerate(context if isinstance(context, list) else []):
+    for index, entry in enumerate(context):
         if not isinstance(entry, dict):
             continue
         pointer = f"/context_excerpts/{index}"
@@ -1234,21 +1244,6 @@ def assemble_plan(
         {
             "path": entry["path"],
             "line_anchor": {
-                "start_line": anchor["start_line"],
-                "end_line": anchor["end_line"],
-            },
-            "file_role": entry["role"],
-            "verbatim_excerpt": _resolve_excerpt(
-                repo, entry["path"], anchor["start_line"], anchor["end_line"]
-            ),
-        }
-        for entry in scope["existing_paths"]
-        for anchor in entry["excerpts"]
-    ]
-    current_state_excerpts.extend(
-        {
-            "path": entry["path"],
-            "line_anchor": {
                 "start_line": entry["start_line"],
                 "end_line": entry["end_line"],
             },
@@ -1258,7 +1253,7 @@ def assemble_plan(
             ),
         }
         for entry in normalized["context_excerpts"]
-    )
+    ]
     assembled = {
         "title": normalized["title"],
         "why_this_matters": dict(normalized["why_this_matters"]),
