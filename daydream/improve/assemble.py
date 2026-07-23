@@ -1031,12 +1031,6 @@ def _expand_command_ref(
         ),
         "working_directory": base["working_directory"],
         "expected_success": deepcopy(base["expected_success"]),
-        "applicability": deepcopy(base["applicability"]),
-        "provenance": {
-            "kind": "recon" if appended is None else "planner-derived",
-            "recon_command_id": base["id"],
-            "source_path": base["evidence"]["source_path"],
-        },
         "note": ref["note"],
     }
 

@@ -802,19 +802,8 @@ def test_null_args_ref_expands_to_recon_record_byte_for_byte(
 
     gate = assembled["steps"][0]["verification"]
     base = _recon_commands()[0]
-    for key in (
-        "purpose",
-        "command",
-        "working_directory",
-        "expected_success",
-        "applicability",
-    ):
+    for key in ("purpose", "command", "working_directory", "expected_success"):
         assert gate[key] == base[key]
-    assert gate["provenance"] == {
-        "kind": "recon",
-        "recon_command_id": "test-suite",
-        "source_path": "Makefile",
-    }
 
 
 def test_appended_args_expand_to_recon_prefix_plus_suffix(
@@ -827,7 +816,6 @@ def test_appended_args_expand_to_recon_prefix_plus_suffix(
     gate = assembled["steps"][0]["verification"]
     assert gate["command"] == "uv run pytest tests/test_catalog.py -q"
     assert gate["working_directory"] == "."
-    assert gate["provenance"]["kind"] == "planner-derived"
 
 
 @pytest.mark.parametrize(
@@ -907,20 +895,6 @@ def test_recon_command_rejects_shell_composition_at_trust_boundary(
     assert errors == [
         "RECON_MALFORMED_COMMAND@/commands/0/command"
     ]
-
-
-def test_provenance_source_path_is_host_stamped_from_recon_evidence(
-    tmp_path: Path,
-) -> None:
-    repo, sha = _repo(tmp_path)
-
-    assembled = _assembled(repo)
-
-    stamped = {
-        command["provenance"]["source_path"]
-        for command in assembled["commands_you_will_need"]
-    }
-    assert stamped == {"Makefile"}
 
 
 @pytest.mark.parametrize(
@@ -1016,10 +990,9 @@ def test_every_model_authored_path_rejects_a_symlink_crossing(
     assert "PATH_OUTSIDE_REPOSITORY" in {issue.code for issue in issues}
 
 
-# Path-grammar codes assembly raises for a path it will not accept. The
-# recon-owned slots (a command's provenance source_path, its applicability
-# scope, and its working directory) are deliberately absent: the model cannot
-# author them, the host copies them from an already-confined recon record.
+# Path-grammar codes assembly raises for a path it will not accept. A command's
+# working directory is deliberately absent: the model cannot author it, the host
+# copies it from an already-confined recon record.
 _PATH_REJECTION_CODES = {
     "AUTHOR_SCHEMA_INVALID",
     "MALFORMED_PATH",
