@@ -24,7 +24,7 @@ def test_contract_doc_names_every_registered_surface() -> None:
         "raise the floor",
         "PlanWriterResult",
         "Sequence[str]",
-        "LEGACY_MARKDOWN_OUTPUT",
+        "AUTHOR_SCHEMA_INVALID",
         "host-owned",
     ):
         assert fragment in doc, f"contract detail {fragment!r} undocumented"

@@ -20,10 +20,10 @@ This test collects the static and generated schemas passed at the
 Collection is by introspection, never a hand-maintained list: every public
 module-level ``*_SCHEMA`` dict in the modules below is checked. Those modules
 keep their sub-schemas module-private, so the public names are the roots handed
-to a backend. A newly added output schema is therefore covered automatically, a
-deleted one simply stops being collected, and a public constant that is only
-validated host-side (``PLAN_WRITER_SCHEMA``) is covered too — over-coverage is
-the safe direction, because a sub-schema of a strict root must be strict anyway.
+to a backend. A newly added output schema is therefore covered automatically and
+a deleted one simply stops being collected. A public constant that never reaches
+a backend is covered too — over-coverage is the safe direction, because a
+sub-schema of a strict root must be strict anyway.
 """
 
 from __future__ import annotations
