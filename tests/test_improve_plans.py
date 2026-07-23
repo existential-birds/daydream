@@ -1961,6 +1961,152 @@ def test_undeclared_test_case_path_is_declared_new_when_absent_from_disk(
     assert f"::{plan['test_plan']['cases'][0]['test_symbol']}" in rendered
 
 
+def _scoped_recon_command(
+    command_id: str,
+    *,
+    command: str,
+    paths: list[str],
+) -> dict[str, Any]:
+    scoped = deepcopy(_recon_commands()[0])
+    scoped["id"] = command_id
+    scoped["command"] = command
+    scoped["purpose"] = f"Run the {command_id} checks"
+    scoped["applicability"]["scope"] = {
+        "kind": "in-scope-paths",
+        "paths": paths,
+    }
+    return scoped
+
+
+def _retarget_refs(plan: dict[str, Any], recon_command_id: str) -> None:
+    plan["steps"][0]["verification"] = _ref(recon_command_id)
+    plan["test_plan"]["cases"][0]["verification"] = _ref(recon_command_id)
+    plan["done_criteria"][0]["verification"] = _ref(recon_command_id)
+
+
+def test_step_gate_scope_mismatch_falls_back_to_the_repository_wide_command(
+    tmp_path: Path,
+) -> None:
+    repo, planned_at = _repo(tmp_path)
+    plan = _authored_plan()
+    # The gate covers the step's implementation path but not its test path.
+    _retarget_refs(plan, "catalog-only")
+    commands = [
+        *_recon_commands(),
+        _scoped_recon_command(
+            "catalog-only",
+            command="uv run pytest apps/catalog",
+            paths=["apps/catalog"],
+        ),
+    ]
+
+    assembled = _assembled(repo, plan, commands=commands)
+
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=planned_at,
+        number=1,
+    )
+    step_section = rendered.partition("### Step 1:")[2].partition("## Test plan")[0]
+    assert "**Command**: `uv run pytest`" in step_section
+    assert "uv run pytest apps/catalog" not in step_section
+    assert (
+        "**Why this gate**: Retargeted by the host: the command this plan "
+        "named is verified only for paths this plan does not change, so this "
+        "repository-wide command runs instead." in step_section
+    )
+    # The test case's own gate fits the plan's scope, so it is left alone.
+    assert "`uv run pytest apps/catalog`" in rendered
+
+
+def test_command_scope_mismatch_without_a_repo_wide_command_renders_a_caveat(
+    tmp_path: Path,
+) -> None:
+    repo, planned_at = _repo(tmp_path)
+    plan = _authored_plan()
+    # billing is not a path this plan changes, so the command's scope fits
+    # nothing in the plan and no repository-wide command exists to fall back to.
+    _retarget_refs(plan, "billing-only")
+    commands = [
+        _scoped_recon_command(
+            "billing-only",
+            command="uv run pytest apps/billing",
+            paths=["apps/billing"],
+        )
+    ]
+
+    assembled = _assembled(repo, plan, commands=commands)
+
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=planned_at,
+        number=1,
+    )
+    assert "**Command**: `uv run pytest apps/billing`" in rendered
+    assert (
+        "**Why this gate**: Scope caveat from the host: this command's "
+        "verified applicability does not cover every path this plan changes, "
+        "and no verified command that covers them is available here. Run it as "
+        "written and report what it reports; do not substitute a command of "
+        "your own." in rendered
+    )
+
+
+def test_scope_mismatched_ref_with_appended_args_keeps_its_command(
+    tmp_path: Path,
+) -> None:
+    """A suffix authored for one command is never pasted onto another."""
+    repo, planned_at = _repo(tmp_path)
+    plan = _authored_plan()
+    _retarget_refs(plan, "catalog-only")
+    plan["steps"][0]["verification"] = _ref(
+        "catalog-only",
+        appended_args="-k batches",
+        note="Runs the focused catalog regression.",
+    )
+    commands = [
+        *_recon_commands(),
+        _scoped_recon_command(
+            "catalog-only",
+            command="uv run pytest apps/catalog",
+            paths=["apps/catalog"],
+        ),
+    ]
+
+    assembled = _assembled(repo, plan, commands=commands)
+
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=planned_at,
+        number=1,
+    )
+    assert "**Command**: `uv run pytest apps/catalog -k batches`" in rendered
+    assert (
+        "**Why this gate**: Runs the focused catalog regression. Scope caveat "
+        "from the host: this command's verified applicability does not cover "
+        "every path this plan changes, and no verified command that covers them "
+        "is available here. Run it as written and report what it reports; do "
+        "not substitute a command of your own." in rendered
+    )
+
+
+def test_hallucinated_recon_command_still_blocks_the_plan(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["steps"][0]["verification"] = _ref("no-such-command")
+
+    issues = _issues(repo, plan)
+
+    assert [render_issue(issue) for issue in issues] == [
+        "RECON_COMMAND_UNKNOWN@/steps/0/verification/recon_command_id"
+    ]
+
+
 def test_duplicate_test_symbols_are_numbered_and_both_cases_survive(
     tmp_path: Path,
 ) -> None:

@@ -665,6 +665,96 @@ def _iter_command_refs(
             yield f"/additional_command_refs/{index}", ref
 
 
+_COMMAND_NOTE_MAX_LENGTH = _author_schema_max_length(
+    ("additional_command_refs", "*", "note")
+)
+_RETARGETED_COMMAND_NOTE = (
+    "Retargeted by the host: the command this plan named is verified only for "
+    "paths this plan does not change, so this repository-wide command runs "
+    "instead."
+)
+_COMMAND_SCOPE_CAVEAT = (
+    "Scope caveat from the host: this command's verified applicability does "
+    "not cover every path this plan changes, and no verified command that "
+    "covers them is available here. Run it as written and report what it "
+    "reports; do not substitute a command of your own."
+)
+
+
+def _annotate_ref(ref: dict[str, Any], addition: str) -> None:
+    """Append host text to a ref note, clamping the model's half, never ours."""
+    note = ref.get("note")
+    room = _COMMAND_NOTE_MAX_LENGTH - len(addition) - 1
+    keep = (
+        f"{_clamp_string(note, room)} "
+        if isinstance(note, str) and note and room > 1
+        else ""
+    )
+    ref["note"] = keep + addition
+
+
+def _repair_command_scope(
+    normalized: dict[str, Any],
+    *,
+    recon_by_id: dict[str, dict[str, Any]],
+) -> None:
+    """Retarget or annotate a verified command whose scope misses the plan.
+
+    A command whose applicability does not line up with the plan's changed
+    paths runs a slightly too narrow or too broad check; it does not make the
+    plan wrong, so it is repaired rather than thrown away. The host prefers a
+    verified repository-wide command, which by definition covers every path,
+    and otherwise keeps the model's choice and states the caveat in the note
+    the plan renders — the executor is told the truth either way.
+
+    Two things are deliberately left alone. A ``recon_command_id`` naming no
+    verified command at all is a hallucination, not a scope imperfection, and
+    still fails as ``RECON_COMMAND_UNKNOWN``. A ref carrying ``appended_args``
+    is never retargeted either: the suffix was authored for the command it was
+    attached to, and pasting it onto a different one composes a command nobody
+    verified.
+    """
+    scope = normalized.get("scope")
+    scope = scope if isinstance(scope, dict) else {}
+    in_scope = sorted(
+        {
+            *_entry_paths(scope.get("existing_paths")),
+            *_entry_paths(scope.get("new_paths")),
+        }
+    )
+    repository_wide = next(
+        (
+            recon_id
+            for recon_id, command in recon_by_id.items()
+            if _scope_paths_of(command) is None
+        ),
+        None,
+    )
+    steps = normalized.get("steps")
+    step_targets: dict[str, list[str]] = {}
+    for index, step in enumerate(steps if isinstance(steps, list) else []):
+        changes = step.get("changes") if isinstance(step, dict) else None
+        step_targets[f"/steps/{index}/verification"] = [
+            change["path"]
+            for change in (changes if isinstance(changes, list) else [])
+            if isinstance(change, dict) and isinstance(change.get("path"), str)
+        ]
+    for pointer, ref in _iter_command_refs(normalized):
+        recon_id = ref.get("recon_command_id")
+        base = recon_by_id.get(recon_id) if isinstance(recon_id, str) else None
+        if base is None:
+            continue
+        if _command_scope_fits_plan(base, in_scope) and _command_covers_all(
+            base, step_targets.get(pointer, ())
+        ):
+            continue
+        if repository_wide is not None and ref.get("appended_args") is None:
+            ref["recon_command_id"] = repository_wide
+            _annotate_ref(ref, _RETARGETED_COMMAND_NOTE)
+            continue
+        _annotate_ref(ref, _COMMAND_SCOPE_CAVEAT)
+
+
 def _collect_issues(
     normalized: dict[str, Any],
     *,
@@ -806,18 +896,15 @@ def _collect_issues(
         if recon_by_id
         else "no verified recon commands exist; use null verification"
     )
-    fitting_ids = [
-        recon_id
-        for recon_id, command in recon_by_id.items()
-        if _command_scope_fits_plan(command, sorted(in_scope))
-    ]
 
-    def check_ref(pointer: str, ref: Any) -> dict[str, Any] | None:
+    def check_ref(pointer: str, ref: Any) -> None:
+        # Imperfect command scope was already retargeted or annotated by
+        # _repair_command_scope; a command that does not exist at all is a
+        # hallucination no host repair can settle, so it still blocks.
         if not isinstance(ref, dict):
-            return None
+            return
         recon_id = ref.get("recon_command_id")
-        base = recon_by_id.get(recon_id) if isinstance(recon_id, str) else None
-        if isinstance(recon_id, str) and base is None:
+        if isinstance(recon_id, str) and recon_id not in recon_by_id:
             add(
                 "RECON_COMMAND_UNKNOWN",
                 f"{pointer}/recon_command_id",
@@ -826,25 +913,12 @@ def _collect_issues(
         appended = ref.get("appended_args")
         if isinstance(appended, str) and _appended_args_invalid(appended):
             add("MALFORMED_APPENDED_ARGS", f"{pointer}/appended_args")
-        if base is not None and not _command_scope_fits_plan(
-            base, sorted(in_scope)
-        ):
-            add(
-                "COMMAND_SCOPE_MISMATCH",
-                pointer,
-                hint=(
-                    "recon commands whose scope fits this plan: "
-                    + (", ".join(fitting_ids) or "none")
-                ),
-            )
-        return base
 
     steps = normalized.get("steps")
     steps = steps if isinstance(steps, list) else []
     for step_index, step in enumerate(steps):
         if not isinstance(step, dict):
             continue
-        changed_paths: list[str] = []
         changes = step.get("changes")
         for change_index, change in enumerate(
             changes if isinstance(changes, list) else []
@@ -855,7 +929,6 @@ def _collect_issues(
             path = change.get("path")
             if not isinstance(path, str) or not check_path(pointer, path):
                 continue
-            changed_paths.append(path)
             # Every well-formed path is in scope by now: normalization declares
             # the ones the plan left out, so what remains to check is only
             # whether the operation agrees with which list the path landed in.
@@ -868,22 +941,7 @@ def _collect_issues(
                 add("CHANGE_PATH_NOT_EXISTING", pointer)
         verification = step.get("verification")
         if isinstance(verification, dict):
-            gate_pointer = f"/steps/{step_index}/verification"
-            base = check_ref(gate_pointer, verification)
-            if base is not None and not _command_covers_all(base, changed_paths):
-                covering = [
-                    recon_id
-                    for recon_id, command in recon_by_id.items()
-                    if _command_covers_all(command, changed_paths)
-                ]
-                add(
-                    "STEP_GATE_SCOPE_MISMATCH",
-                    gate_pointer,
-                    hint=(
-                        "recon commands covering this step's paths: "
-                        + (", ".join(covering) or "none")
-                    ),
-                )
+            check_ref(f"/steps/{step_index}/verification", verification)
 
     test_plan = normalized.get("test_plan")
     test_plan = test_plan if isinstance(test_plan, dict) else {}
@@ -1166,6 +1224,7 @@ def assemble_plan(
         for command in recon_commands
         if isinstance(command, dict) and isinstance(command.get("id"), str)
     }
+    _repair_command_scope(normalized, recon_by_id=recon_by_id)
     issues = _collect_issues(normalized, repo=repo, recon_by_id=recon_by_id)
     if issues:
         return None, tuple(issues)
