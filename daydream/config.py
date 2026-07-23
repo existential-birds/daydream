@@ -214,8 +214,8 @@ DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
 # All three backends, because the improve flow runs unattended on a cadence and
 # nothing about its output is reviewed in the moment.
 #
-# ``plan_write`` is pinned to ``max`` everywhere. It covers plan authoring,
-# plan repair, and ``review-plan``; those plans are executed later by much
+# ``plan_write`` is pinned to ``max`` everywhere. It covers plan authoring and
+# plan repair; those plans are executed later by much
 # weaker agents with no context beyond the plan file, so it is the one place
 # where spending the most reasoning available is unconditionally correct — a
 # handful of calls per run, and every ambiguity left in a plan is paid for by

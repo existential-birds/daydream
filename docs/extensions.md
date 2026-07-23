@@ -297,7 +297,7 @@ an existing config key.
 | 7 | `improve-report` | `recon` |
 
 The improve run configuration also carries `improve_effort`, `improve_focus`,
-`improve_scope`, `improve_plan_description`, and `improve_review_plan`.
+`improve_scope`, and `improve_plan_description`.
 
 Steps carry `enabled` predicates internally (tier gates, `--loop` mode,
 resume points); a step listed here may be skipped for a given run, but the

@@ -165,7 +165,7 @@ def test_improve_phase_effort_tier_assignments(backend):
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "pi"])
 def test_plan_write_is_pinned_to_max_reasoning_on_every_backend(backend):
-    """Plan authoring, plan repair, and review-plan all ride the plan_write key."""
+    """Plan authoring and plan repair both ride the plan_write key."""
     assert PHASE_DEFAULT_EFFORT[backend]["plan_write"] == "max"
 
 

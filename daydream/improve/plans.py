@@ -116,23 +116,6 @@ def _section_content(markdown: str) -> dict[str, str]:
     return sections
 
 
-def resolve_review_plan_path(repo: Path, requested: str) -> Path:
-    """Resolve a review target confined to ``repo/daydream_plans``."""
-    plans_dir = (repo / "daydream_plans").resolve()
-    candidate = Path(requested)
-    if not candidate.is_absolute():
-        candidate = repo / candidate
-    candidate = candidate.resolve()
-    if not candidate.is_relative_to(plans_dir):
-        raise ValueError(
-            "review-plan only accepts files under "
-            f"{plans_dir}; received {requested!r}"
-        )
-    if not candidate.is_file():
-        raise ValueError(f"review-plan file does not exist: {candidate}")
-    return candidate
-
-
 # Horizontal-only separator whitespace: see ``_ENV_VAR_PATTERN`` in
 # daydream/trajectory.py — crossing a newline makes an empty assignment eat the
 # following line.

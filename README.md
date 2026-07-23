@@ -110,12 +110,10 @@ services. The report names detected services that the scope did not cover.
 
 ```bash
 daydream improve plan "add rate limiting" /path/to/project
-daydream improve review-plan daydream_plans/001-rate-limiting.md /path/to/project
 ```
 
 `plan` runs reconnaissance and writes one plan for the supplied request without
-running the category audit. `review-plan` critiques and rewrites an existing
-file in `daydream_plans/`; paths outside that directory are rejected.
+running the category audit.
 
 Each audit writes its report and structured intermediate data under
 `.daydream/improve/`. Durable output under `daydream_plans/` consists of
@@ -153,7 +151,6 @@ daydream feedback 42 --bot "<bot-login>[bot]" /path  # ingest and fix bot PR com
 daydream ext validate                              # resolve-check the daydream_ext extension registry
 daydream improve /path/to/project                  # read-only audit and prioritized plans
 daydream improve plan "add rate limiting" /path/to/project
-daydream improve review-plan daydream_plans/001-rate-limiting.md /path/to/project
 ```
 
 ### Corpus Commands
@@ -295,8 +292,8 @@ moment.
 | `xhigh` | `vet` |
 | `max` | `plan_write` |
 
-`plan_write` is pinned to `max` on every backend. It covers plan authoring,
-plan repair, and `improve review-plan` — the phases whose output is executed
+`plan_write` is pinned to `max` on every backend. It covers plan authoring
+and plan repair — the phases whose output is executed
 later by a weaker agent with no context beyond the plan file, so every
 ambiguity left in a plan is paid for downstream.
 

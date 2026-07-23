@@ -27,7 +27,6 @@ daydream /path/to/project                          # review -> fix -> test (deep
 daydream --comment /path/to/project                # review -> post inline PR comments, then exit
 daydream improve /path/to/project                  # read-only repo audit -> prioritized plans
 daydream improve plan "add rate limiting" /path/to/project  # investigate one request -> plan
-daydream improve review-plan daydream_plans/001-rate-limiting.md /path/to/project  # tighten a plan
 
 # Other verbs / flags
 daydream --shallow -s python /path/to/project      # shallow Python review-fix-test loop
@@ -213,8 +212,8 @@ step's config key, including fork-defined phases (per-flow key tables in
 `docs/extensions.md`).
 
 Improve runtime controls are CLI-derived `RunConfig` fields:
-`improve_effort`, `improve_focus`, `improve_scope`,
-`improve_plan_description`, and `improve_review_plan`. They have no environment
+`improve_effort`, `improve_focus`, `improve_scope`, and
+`improve_plan_description`. They have no environment
 variable equivalents. Service discovery and the audit fan-out bounds are
 config-file-only:
 

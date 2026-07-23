@@ -12,7 +12,6 @@ top-level ``TARGET`` positional):
 - ``daydream feedback <pr#>`` — apply bot PR-review comments
 - ``daydream improve <target>`` — audit a repository and write advisory artifacts
     - ``improve plan <description> <target>`` — investigate and write one plan
-    - ``improve review-plan <file> <target>`` — critique and tighten a durable plan
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
 - ``daydream bench`` — score deep-review findings against the offline benchmark
 - ``daydream post-findings <artifact>`` — validate a Phase A findings artifact
@@ -558,12 +557,6 @@ def _build_improve_parser(
             metavar="DESCRIPTION",
             help="Change to investigate and turn into one implementation plan",
         )
-    elif subverb == "review-plan":
-        parser.add_argument(
-            "improve_review_plan",
-            metavar="FILE",
-            help="Plan under TARGET/daydream_plans to critique and tighten",
-        )
     parser.add_argument("target", metavar="TARGET", help="Repository to audit")
     parser.add_argument(
         "--effort",
@@ -609,7 +602,7 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
     improve_argv = argv[1:] if argv and argv[0] == "improve" else argv
     subverb = (
         improve_argv[0]
-        if improve_argv and improve_argv[0] in {"plan", "review-plan"}
+        if improve_argv and improve_argv[0] == "plan"
         else None
     )
     if subverb is not None:
@@ -636,7 +629,6 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
         improve_plan_description=getattr(
             args, "improve_plan_description", None
         ),
-        improve_review_plan=getattr(args, "improve_review_plan", None),
     )
 
 

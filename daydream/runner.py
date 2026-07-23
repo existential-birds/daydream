@@ -214,8 +214,6 @@ class RunConfig:
         improve_scope: Optional service name/root/glob to audit.
         improve_plan_description: One-line request for ``daydream improve plan``;
             switches the flow to single-request investigation mode.
-        improve_review_plan: Path under ``TARGET/daydream_plans`` for
-            ``daydream improve review-plan``; switches the flow to plan critique.
 
     """
 
@@ -275,7 +273,6 @@ class RunConfig:
     improve_focus: str | None = None
     improve_scope: str | None = None
     improve_plan_description: str | None = None
-    improve_review_plan: str | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:

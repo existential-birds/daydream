@@ -1,7 +1,6 @@
 import json
 import re
 import subprocess
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +13,9 @@ from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.exploration_runner import _sample_paths, repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.git_ops import head_sha
-from daydream.improve.assemble import assemble_plan
 from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
 )
-from daydream.improve.plans import render_plan
 from daydream.improve.prompts import (
     AUDIT_PLAYBOOK_SECTIONS,
     HARD_RULE_4,
@@ -529,7 +526,6 @@ class _ImproveStubBackend:
         self.plan_missing_path_attempts = 0
         self.plan_crash_attempts = 0
         self.plan_stop_condition_path: str | None = None
-        self.plan_review_result = "typed"
         self.group_scoped_findings = False
         self.invalid_group_commands: set[str] = set()
         self.fail_groups: set[str] = set()
@@ -573,8 +569,6 @@ class _ImproveStubBackend:
             )
         elif "You are the improve vet." in prompt:
             marker = "vet"
-        elif "You are reviewing an existing daydream implementation plan" in prompt:
-            marker = "plan-reviewer"
         elif "You are writing a self-contained implementation plan" in prompt or (
             isinstance(output_schema, dict)
             and "false_assumption" in output_schema.get("properties", {})
@@ -930,49 +924,6 @@ class _ImproveStubBackend:
                 ]
             yield ResultEvent(
                 structured_output=plan,
-                continuation=None,
-            )
-            return
-        if marker == "plan-reviewer":
-            if self.plan_review_result == "markdown":
-                yield ResultEvent(
-                    structured_output={
-                        "critique": "The original plan lacked executable detail.",
-                        "markdown": (
-                            "# Plan 001: Fix\n\n"
-                            "## Status\n\n- **Priority**: P1\n\n"
-                            "## Why this matters\n\nConcrete impact.\n\n"
-                            "## Current state\n\n`apps/billing/api.py:1`.\n\n"
-                            "## Commands you will need\n\n"
-                            "| Purpose | Command | Expected on success |\n"
-                            "|---|---|---|\n"
-                            "| Test | `uv run pytest` | exit 0 |\n\n"
-                            "## Scope\n\nOnly `apps/billing/api.py`.\n\n"
-                            "## Steps\n\n### Step 1\n\nMake the change.\n\n"
-                            "## Test plan\n\nRun `uv run pytest`.\n\n"
-                            "## Done criteria\n\n- [ ] Tests pass.\n\n"
-                            "## STOP conditions\n\nStop on drift.\n"
-                        ),
-                    },
-                    continuation=None,
-                )
-                return
-            finding = {
-                "title": "Preserve the billing service contract",
-                "category": "correctness",
-            }
-            plan = _authored_plan_result(finding)
-            plan["title"] = "Reviewer attempted renamed billing plan"
-            plan["slug"] = "reviewer-renamed-billing-plan"
-            plan["priority"] = "P3"
-            plan["maintenance_notes"]["future_interactions"][0]["note"] = (
-                "Recheck the billing contract when service discovery becomes dynamic."
-            )
-            yield ResultEvent(
-                structured_output={
-                    "critique": "The original plan lacked executable detail.",
-                    "plan": plan,
-                },
                 continuation=None,
             )
             return
@@ -3842,166 +3793,6 @@ async def test_two_consecutive_transport_crashes_block_the_finding(
 
 
 @pytest.mark.anyio
-async def test_review_plan_rejects_files_outside_daydream_plans(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_review_plan="README.md",
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    assert code == 1
-
-
-def _write_review_plan_fixture(
-    target: Path,
-) -> tuple[Path, Path, str, dict[str, Any]]:
-    planned_at = head_sha(target)
-    finding: dict[str, Any] = {
-        "title": "Preserve the billing service contract",
-        "category": "correctness",
-        "path": "apps/billing/api.py",
-        "line": 1,
-        "body": (
-            "The billing service contract needs explicit implementation and "
-            "named regression coverage."
-        ),
-        "impact": "MED",
-        "effort": "M",
-        "risk": "LOW",
-        "confidence": "HIGH",
-        "evidence": ["apps/billing/api.py:1"],
-        "fingerprint": "f" * 64,
-    }
-    authored = _authored_plan_result(finding)
-    authored["slug"] = "billing-contract"
-    authored["title"] = finding["title"]
-    assembled, issues = assemble_plan(
-        authored,
-        repo=target,
-        recon_commands=_stub_recon_commands(),
-    )
-    assert not issues and assembled is not None
-    typed = {
-        **assembled,
-        "slug": "billing-contract",
-        "title": finding["title"],
-    }
-    plans_dir = target / "daydream_plans"
-    plans_dir.mkdir()
-    plan = plans_dir / "007-billing-contract.md"
-    plan.write_text(
-        render_plan(
-            finding,
-            plan=typed,
-            planned_at=planned_at,
-            number=7,
-            planned_on=date(2024, 1, 2),
-        ),
-        encoding="utf-8",
-    )
-    index = plans_dir / "README.md"
-    index.write_text(
-        "# Implementation Plans\n\n"
-        "## Execution order & status\n\n"
-        "| Plan | Title | Priority | Effort | Depends on | Status |\n"
-        "|------|-------|----------|--------|------------|--------|\n"
-        "| [007](007-billing-contract.md) "
-        f"<!-- fingerprint:{finding['fingerprint']} --> | "
-        "Preserve the billing service contract | P1 | M | — | TODO |\n",
-        encoding="utf-8",
-    )
-    return plan, index, planned_at, typed
-
-
-@pytest.mark.anyio
-async def test_review_plan_rejects_heading_only_markdown_and_keeps_original(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    plan, index, _, _ = _write_review_plan_fixture(
-        improve_monorepo_target
-    )
-    original = plan.read_bytes()
-    original_index = index.read_bytes()
-    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
-    stub.plan_review_result = "markdown"
-
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_review_plan=str(plan),
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    assert code == 1
-    assert plan.read_bytes() == original
-    assert index.read_bytes() == original_index
-    review_call = next(
-        call for call in stub.calls if call["marker"] == "plan-reviewer"
-    )
-    assert set(review_call["output_schema"]["required"]) == {
-        "critique",
-        "plan",
-    }
-
-
-@pytest.mark.anyio
-async def test_review_plan_typed_rewrite_preserves_identity_and_index(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    plan, index, planned_at, _ = _write_review_plan_fixture(
-        improve_monorepo_target
-    )
-    original = plan.read_bytes()
-    original_index = index.read_bytes()
-    sibling = plan.parent / "008-leave-alone.md"
-    sibling.write_bytes(b"sibling plan must remain byte-for-byte unchanged\n")
-    sibling_original = sibling.read_bytes()
-    _install_improve_stub(monkeypatch, improve_monorepo_target)
-
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_review_plan=str(plan),
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    assert code == 0
-    rewritten = plan.read_text(encoding="utf-8")
-    assert plan.read_bytes() != original
-    assert rewritten.startswith(
-        "# Plan 007: Preserve the billing service contract\n"
-    )
-    assert 'def service_name():\n    return "billing"' in rewritten
-    assert "`uv run pytest apps/billing/test_api.py -q`" in rewritten
-    assert "## Scope" in rewritten
-    assert "## Steps" in rewritten
-    assert "## Test plan" in rewritten
-    assert "## Done criteria" in rewritten
-    assert "## STOP conditions" in rewritten
-    assert "## Maintenance notes" in rewritten
-    assert "- **Priority**: P1" in rewritten
-    assert "- **Effort**: M" in rewritten
-    assert "- **Risk**: LOW" in rewritten
-    assert "- **Category**: correctness" in rewritten
-    assert f"- **Planned at**: commit `{planned_at[:7]}`, 2024-01-02" in rewritten
-    assert index.read_bytes() == original_index
-    assert sibling.read_bytes() == sibling_original
-
-
-@pytest.mark.anyio
 async def test_full_run_leaves_tracked_tree_and_untracked_set_untouched(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4204,32 +3995,6 @@ async def test_improve_phases_resolve_their_own_model_and_reasoning_tier(
     assert tiers["vet"] == {("claude-opus-4-8", "xhigh")}
     assert tiers["audit"] == {("claude-sonnet-5", "high")}
     assert tiers["recon"] == {("claude-sonnet-5", "low")}
-
-
-@pytest.mark.anyio
-async def test_review_plan_runs_at_top_model_tier_and_max_reasoning(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    plan, _, _, _ = _write_review_plan_fixture(improve_monorepo_target)
-    calls = _install_per_phase_improve_stubs(monkeypatch, improve_monorepo_target)
-
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_review_plan=str(plan),
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    assert code == 0
-    review_calls = [call for call in calls if call["marker"] == "plan-reviewer"]
-    assert review_calls
-    assert all(
-        (call["model"], call["reasoning_effort"]) == ("claude-opus-4-8", "max")
-        for call in review_calls
-    )
 
 
 @pytest.mark.anyio
