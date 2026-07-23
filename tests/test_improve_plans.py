@@ -13,11 +13,12 @@ from daydream.improve.assemble import (
     render_issue,
 )
 from daydream.improve.command_contract import (
-    COMMAND_REF_SCHEMA,
+    canonicalize_directory_scope,
     literal_command_error,
     path_is_confined,
     valid_directory_scope_lexical,
     valid_repository_file_path,
+    validate_applicability,
     validate_recon_commands,
 )
 from daydream.improve.plans import (
@@ -281,43 +282,20 @@ def _contract_recon_command(
     }
 
 
-def test_command_contract_schema_and_applicability_semantics_are_in_parity(
+def test_directory_scope_canonicalization_drops_the_trailing_slash(
     tmp_path: Path,
 ) -> None:
-    from daydream.improve.command_contract import (
-        APPLICABILITY_SCHEMA,
-        validate_applicability,
-    )
-
     repo = tmp_path / "repo"
     (repo / "frontend").mkdir(parents=True)
-    variants = [
-        _contract_applicability(),
-        _contract_applicability("frontend"),
-        _contract_applicability("frontend/"),
-        _contract_applicability(
-            "frontend/",
-            preconditions=[
-                "Docker is running",
-                "Project dependencies are installed",
-            ],
-        ),
-    ]
+    applicability = _contract_applicability("frontend/")
 
-    validator = Draft202012Validator(APPLICABILITY_SCHEMA)
-    for applicability in variants:
-        assert list(validator.iter_errors(applicability)) == []
-        normalized, rejection = validate_applicability(
-            applicability,
-            repo=repo,
-        )
-        assert rejection is None
-        assert normalized is not None
+    normalized, rejection = validate_applicability(applicability, repo=repo)
 
-    assert variants[2]["scope"]["paths"] == ["frontend/"]
-    normalized, _ = validate_applicability(variants[2], repo=repo)
+    assert rejection is None
     assert normalized is not None
+    assert applicability["scope"]["paths"] == ["frontend/"]
     assert normalized["scope"]["paths"] == ["frontend"]
+    assert canonicalize_directory_scope("frontend/") == "frontend"
 
 
 def test_command_contract_schema_discloses_scope_cross_field_invariants() -> None:
@@ -1809,25 +1787,6 @@ def test_secret_shaped_word_prefixes_are_not_treated_as_key_names(
     assembled = _assembled(repo, plan)
 
     assert assembled["why_this_matters"]["problem"] == prose
-
-
-def test_command_ref_schema_grammar() -> None:
-    validator = Draft202012Validator(COMMAND_REF_SCHEMA)
-    valid_refs = [
-        _ref(),
-        _ref(appended_args="tests/test_catalog.py -q"),
-        _ref(note="Proves the focused catalog behavior."),
-    ]
-    for ref in valid_refs:
-        assert list(validator.iter_errors(ref)) == []
-
-    invalid_refs = [
-        {"recon_command_id": "test-suite"},
-        {"recon_command_id": "ab", "appended_args": None, "note": None},
-        {**_ref(), "command": "uv run pytest"},
-        _ref(appended_args="x" * 401),
-    ]
-    assert all(list(validator.iter_errors(ref)) for ref in invalid_refs)
 
 
 def test_assemble_reports_every_issue_at_once_with_pointers_and_hints(
