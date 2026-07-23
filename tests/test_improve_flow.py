@@ -198,7 +198,6 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         "title": title,
-        "priority": "P1",
         "why_this_matters": {
             "problem": (
                 f"{finding['title']} affects the billing service contract today."
@@ -464,8 +463,8 @@ class _ImproveStubBackend:
         self.fail_categories: set[str] = set()
         self.vet_reject_titles: set[str] = set()
         self.return_legacy_plan = False
-        self.return_secret_invalid_priority = False
-        self.return_secret_invalid_priority_once = False
+        self.return_secret_invalid_enum = False
+        self.return_secret_invalid_enum_once = False
         self.plan_writer_calls = 0
         self.inject_credential = False
         self.all_recon_commands_invalid = False
@@ -842,14 +841,20 @@ class _ImproveStubBackend:
                 )
             if self.all_recon_commands_invalid:
                 plan = _without_verification_commands(plan)
-            if self.return_secret_invalid_priority or (
-                self.return_secret_invalid_priority_once
+            if self.return_secret_invalid_enum or (
+                self.return_secret_invalid_enum_once
                 and self.plan_writer_calls == 1
             ):
-                plan["priority"] = "TOKEN=PRIVATE_SCHEMA_SECRET"
+                # A schema-invalid enum carrying a credential: the value must
+                # fail validation AND never surface in any host observable.
+                plan["steps"][0]["changes"][0]["operation"] = (
+                    "TOKEN=PRIVATE_SCHEMA_SECRET"
+                )
                 plan["title"] = "PRIVATE_SCHEMA_SECRET rejected title"
             if self.inject_credential:
-                plan["priority"] = "OPENAI_API_KEY=sk-secret123456"
+                plan["steps"][0]["changes"][0]["operation"] = (
+                    "OPENAI_API_KEY=sk-secret123456"
+                )
             yield ResultEvent(
                 structured_output=plan,
                 continuation=None,
@@ -2929,7 +2934,7 @@ async def test_schema_invalid_planner_metadata_never_reaches_observables(
         improve_monorepo_target,
         n_findings=1,
     )
-    stub.return_secret_invalid_priority = True
+    stub.return_secret_invalid_enum = True
 
     code = await run(
         RunConfig(
@@ -3101,7 +3106,7 @@ async def test_plan_subverb_repairs_schema_invalid_plan_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
-    stub.return_secret_invalid_priority_once = True
+    stub.return_secret_invalid_enum_once = True
 
     code = await run(
         RunConfig(
@@ -3153,7 +3158,7 @@ async def test_plan_subverb_blocks_after_one_unsuccessful_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
-    stub.return_secret_invalid_priority = True
+    stub.return_secret_invalid_enum = True
 
     code = await run(
         RunConfig(
@@ -3184,7 +3189,7 @@ async def test_plan_subverb_blocks_after_one_unsuccessful_repair(
         assert attempt["stage"] == "authoring"
         assert any(
             error["code"] == "AUTHOR_SCHEMA_INVALID"
-            and error["pointer"] == "/priority"
+            and error["pointer"] == "/steps/0/changes/0/operation"
             for error in attempt["errors"]
         )
     assert not list(

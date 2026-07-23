@@ -171,7 +171,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": [
         "title",
-        "priority",
         "why_this_matters",
         "scope",
         "context_excerpts",
@@ -185,7 +184,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "title": {"type": "string", "minLength": 12, "maxLength": 160},
-        "priority": {"type": "string", "enum": ["P1", "P2", "P3"]},
         "why_this_matters": {
             "type": "object",
             "additionalProperties": False,

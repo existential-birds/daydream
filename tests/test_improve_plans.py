@@ -548,7 +548,6 @@ def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
     focused = "tests/test_catalog.py -q"
     return {
         "title": title,
-        "priority": "P1",
         "why_this_matters": {
             "problem": "list_catalog currently loads each catalog item separately.",
             "concrete_cost": "Large catalogs create avoidable query latency per request.",

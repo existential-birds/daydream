@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from daydream.improve.prioritize import plan_priority
 from daydream.trajectory import redact_text
 
 REJECTIONS_SCHEMA_VERSION = 1
@@ -649,7 +650,7 @@ def render_plan(
         "> checked, follow the \"Finishing\" section at the end of this file.\n"
         "\n"
         "## Status\n\n"
-        f"- **Priority**: {plan['priority']}\n"
+        f"- **Priority**: {plan_priority(finding)}\n"
         f"- **Effort**: {finding.get('effort', '—')}\n"
         f"- **Risk**: {finding.get('risk', '—')}\n"
         f"- **Category**: {finding.get('category', '—')}\n"
@@ -878,7 +879,8 @@ def _blocked_index_row(
     """Render a blocked row without consulting rejected planner metadata."""
     trusted_title = str(finding.get("title") or "Selected finding")
     return (
-        f"| {number:03d} {marker} | {_markdown_cell(trusted_title)} | P2 | "
+        f"| {number:03d} {marker} | {_markdown_cell(trusted_title)} | "
+        f"{plan_priority(finding)} | "
         f"{_markdown_cell(finding.get('effort'))} | {status} |"
     )
 
@@ -1208,7 +1210,7 @@ class PlanWriteSession:
             f"| [{number:03d}]({filename}) "
             f"<!-- fingerprint:{reservation.fingerprint} --> | "
             f"{_markdown_cell(selection.get('title') or title)} | "
-            f"{_markdown_cell(selection.get('priority') or 'P2')} | "
+            f"{plan_priority(finding)} | "
             f"{_markdown_cell(finding.get('effort'))} | TODO |"
         )
         self._written.append(

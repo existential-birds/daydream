@@ -1050,7 +1050,6 @@ def assemble_plan(
     )
     assembled = {
         "title": normalized["title"],
-        "priority": normalized["priority"],
         "why_this_matters": dict(normalized["why_this_matters"]),
         "current_state_excerpts": current_state_excerpts,
         "commands_you_will_need": _derived_commands_table(

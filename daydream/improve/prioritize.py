@@ -11,6 +11,10 @@ _EFFORT = {"S": 1.0, "M": 2.0, "L": 3.0}
 _CONFIDENCE = {"HIGH": 1.0, "MED": 0.7, "LOW": 0.4}
 _RISK = {"LOW": 1.0, "MED": 0.8, "HIGH": 0.6}
 _CROSS_SERVICE_SIMILARITY = 0.5
+# HIGH impact still clears P1 at medium effort; the P2 floor is a MED/MED/MED
+# finding, so only the low-impact or high-risk tail lands in P3.
+_P1_LEVERAGE = 1.2
+_P2_LEVERAGE = 0.8
 
 
 def leverage_score(finding: dict[str, Any]) -> float:
@@ -22,6 +26,18 @@ def leverage_score(finding: dict[str, Any]) -> float:
     )
     risk = _axis_value(_RISK, finding.get("risk"), min(_RISK.values()))
     return (impact / effort) * confidence * risk
+
+
+def plan_priority(finding: dict[str, Any]) -> str:
+    """Rank a finding's plan for a human picking what to work on next.
+
+    Derived from the same impact/effort/risk/confidence axes as the leverage
+    score, so the plan index and the audit report cannot disagree.
+    """
+    score = round(leverage_score(finding), 2)
+    if score >= _P1_LEVERAGE:
+        return "P1"
+    return "P2" if score >= _P2_LEVERAGE else "P3"
 
 
 def order_by_leverage(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
