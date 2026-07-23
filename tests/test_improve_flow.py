@@ -383,6 +383,26 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_MENU_ID = re.compile(r"^- id `([a-z0-9-]+)`", re.MULTILINE)
+
+
+def _menu_ids(prompt: str) -> list[str]:
+    """Return the recon command ids offered to the plan writer, in order."""
+    return _MENU_ID.findall(prompt)
+
+
+def _gate_plan_on(plan: dict[str, Any], command_id: str) -> dict[str, Any]:
+    """Point every verification slot at one recon id, run verbatim."""
+    plan["additional_command_refs"] = []
+    for step in plan["steps"]:
+        step["verification"] = _plan_ref(command_id)
+    for case in plan["test_plan"]["cases"]:
+        case["verification"] = _plan_ref(command_id)
+    for criterion in plan["done_criteria"]:
+        criterion["verification"] = _plan_ref(command_id)
+    return plan
+
+
 def _without_verification_commands(plan: dict[str, Any]) -> dict[str, Any]:
     """Represent a useful plan when recon found no host-verified commands."""
     plan["additional_command_refs"] = []
@@ -480,6 +500,7 @@ class _ImproveStubBackend:
         self.plan_problem_override: str | None = None
         self.plan_instruction_override: str | None = None
         self.plan_ungate_steps = False
+        self.plan_gate_on_first_menu_id = False
         self.plan_sloppy = False
         self.plan_bad_recon_id_attempts = 0
         self.plan_missing_path_attempts = 0
@@ -768,6 +789,10 @@ class _ImproveStubBackend:
                 )
                 return
             plan = _authored_plan_result(finding)
+            if self.plan_gate_on_first_menu_id:
+                # A writer can only gate on what the menu actually offers.
+                offered = _menu_ids(prompt)
+                plan = _gate_plan_on(plan, offered[0]) if offered else plan
             if self.plan_file_role_override is not None:
                 plan["scope"]["existing_paths"][0]["role"] = (
                     self.plan_file_role_override
@@ -1276,6 +1301,10 @@ def _improve_observable_texts(repo: Path) -> list[str]:
         for path in root.rglob("*")
         if path.is_file()
     ]
+
+
+def _raise_enumeration_failure(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+    raise RuntimeError("unparseable repository manifest")
 
 
 def _forbidden_input(*_args: Any, **_kwargs: Any) -> str:
@@ -2027,6 +2056,136 @@ async def test_improve_continues_audit_and_planning_when_recon_has_no_valid_comm
         "RECON_APPLICABILITY_INVALID": 2
     }
     assert recon["artifact_provenance"]["session_id"] == trajectory["session_id"]
+
+
+@pytest.mark.anyio
+async def test_makefile_and_manifest_gate_plans_when_the_model_cites_nothing(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host enumerates Make/manifest commands the model is told to skip.
+
+    Recon is read-only, so it can never run a command to confirm one exists.
+    A repository whose only test gate lives in a Makefile or package.json --
+    written nowhere in prose for a model to cite -- must still hand the
+    executor a real verification command instead of the manual fallback.
+    """
+    (improve_monorepo_target / "Makefile").write_text(
+        "check: ## Run the full gate\n\tuv run pytest\n",
+        encoding="utf-8",
+    )
+    (improve_monorepo_target / "web" / "package.json").write_text(
+        json.dumps({"name": "web", "scripts": {"test": "vitest run"}}, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
+    (improve_monorepo_target / "web" / "pnpm-lock.yaml").write_text(
+        "lockfileVersion: '9.0'\n",
+        encoding="utf-8",
+    )
+    git(
+        improve_monorepo_target,
+        "add",
+        "Makefile",
+        "web/package.json",
+        "web/pnpm-lock.yaml",
+    )
+    commit(improve_monorepo_target, "add build tooling")
+    # Neither invocation is written verbatim anywhere, so `literal-command`
+    # evidence for them cannot exist: only host enumeration can supply them.
+    for tracked in improve_monorepo_target.rglob("*"):
+        if not tracked.is_file() or ".git" in tracked.parts:
+            continue
+        source = tracked.read_text(encoding="utf-8", errors="ignore")
+        assert "make check" not in source and "pnpm test" not in source
+
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.recon_output_override = {
+        "languages": ["python", "typescript"],
+        "commands": [],
+        "conventions": ["OpenAPI First"],
+        "intent_docs": ["README.md"],
+    }
+    stub.plan_gate_on_first_menu_id = True
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    recon = json.loads(
+        _dd(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
+    )
+    by_command = {command["command"]: command for command in recon["commands"]}
+    assert "make check" in by_command and "pnpm test" in by_command
+    assert by_command["make check"]["id"] == "make-check"
+    assert by_command["make check"]["working_directory"] == "."
+    assert by_command["make check"]["evidence"] == {
+        "kind": "host-derived",
+        "source_path": "Makefile",
+        "line_anchor": {"start_line": 1, "end_line": 1},
+        "verbatim_excerpt": "check: ## Run the full gate",
+    }
+    assert by_command["pnpm test"]["working_directory"] == "web"
+    assert by_command["pnpm test"]["applicability"]["scope"] == {
+        "kind": "in-scope-paths",
+        "paths": ["web"],
+    }
+
+    plans = sorted(
+        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
+    )
+    assert plans
+    texts = [plan.read_text(encoding="utf-8") for plan in plans]
+    assert all("**Command**: `make check`" in text for text in texts)
+    assert all(
+        "No repository command was verified during planning" not in text
+        for text in texts
+    )
+    assert all(call["read_only"] for call in stub.calls)
+    assert _git_status_porcelain(improve_monorepo_target) == ""
+
+
+@pytest.mark.anyio
+async def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A broken enumerator degrades to the model's commands, never silently."""
+    monkeypatch.setattr(
+        "daydream.improve.orchestrator.enumerate_repository_commands",
+        _raise_enumeration_failure,
+    )
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    recon = json.loads(
+        _dd(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
+    )
+    assert [command["id"] for command in recon["commands"]] == [
+        "test-suite",
+        "git-diff",
+    ]
+    assert recon["command_rejections"] == [
+        {"code": "HOST_COMMAND_ENUMERATION_FAILED", "pointer": "/host_commands"}
+    ]
+    assert "Host command enumeration failed" in capsys.readouterr().out
+    assert [call for call in stub.calls if call["marker"] == "plan-writer"]
 
 
 @pytest.mark.anyio

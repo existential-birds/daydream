@@ -40,6 +40,7 @@ from daydream.improve.assemble import (
 )
 from daydream.improve.command_contract import (
     RECON_COMMAND_SCHEMA,
+    validate_host_commands,
     validate_recon_commands,
 )
 from daydream.improve.partition import (
@@ -71,6 +72,7 @@ from daydream.improve.prompts import (
     VET_SCHEMA,
     build_plan_writer_repair_prompt,
 )
+from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
 from daydream.trajectory import (
@@ -221,6 +223,68 @@ Existing repository scan:
 """
 
 
+def _command_enumeration_directories(
+    repo: Path,
+    services: list[Service],
+    groups: list[PartitionGroup],
+) -> list[str]:
+    """Return the repository-relative roots to enumerate commands under."""
+    directories = ["."]
+    seen = {".", ""}
+    candidates = {
+        *(service.root.as_posix() for service in services),
+        *(root for group in groups for root in group.roots),
+    }
+    for candidate in sorted(candidates):
+        normalized = candidate.removeprefix("./").rstrip("/")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if (repo / normalized).is_dir():
+            directories.append(normalized)
+    return directories
+
+
+def _host_enumerated_commands(
+    repo: Path,
+    services: list[Service],
+    groups: list[PartitionGroup],
+    *,
+    model_commands: list[dict[str, Any]],
+) -> tuple[int, list[dict[str, Any]], list[str]]:
+    """Derive the Make/manifest commands the recon model is told to skip.
+
+    Returns ``(candidates, validated, errors)``. Enumeration is read-only and
+    never fatal: a failure leaves the run on the model's commands alone and is
+    surfaced as a warning plus a recorded rejection code.
+    """
+    try:
+        enumerated = enumerate_repository_commands(
+            repo,
+            directories=_command_enumeration_directories(repo, services, groups),
+            reserved_ids=[command["id"] for command in model_commands],
+        )
+    except Exception as exc:
+        print_warning(
+            console,
+            "Host command enumeration failed; continuing with the recon "
+            "model's commands only. "
+            f"{type(exc).__name__}: {exc}",
+        )
+        return 0, [], ["HOST_COMMAND_ENUMERATION_FAILED@/host_commands"]
+    already_cited = {
+        (command["command"], command["working_directory"])
+        for command in model_commands
+    }
+    candidates = [
+        command
+        for command in enumerated
+        if (command["command"], command["working_directory"]) not in already_cited
+    ]
+    validated, errors = validate_host_commands(candidates, repo=repo)
+    return len(candidates), validated, errors
+
+
 async def _step_recon(ctx: FlowContext) -> Stop | None:
     """Enumerate services, inspect repository conventions, and detect stacks."""
     target = ctx.work.repo
@@ -331,51 +395,54 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             persist_session=False,
         )
 
-    recon_data: dict[str, Any] = {}
     total_candidates = 0
     valid_commands: list[dict[str, Any]] = []
     command_errors: list[str] = []
+    model_fields: dict[str, Any] = {}
     safe_recon = _redact_model_value(recon)
     if isinstance(safe_recon, dict):
         raw_commands = safe_recon.get("commands")
         total_candidates = len(raw_commands) if isinstance(raw_commands, list) else 0
-        candidate_commands, command_errors = validate_recon_commands(
+        valid_commands, command_errors = validate_recon_commands(
             safe_recon,
             repo=target,
         )
-        valid_commands = candidate_commands
-        recon_data = {
-            "artifact_type": "daydream.improve-recon",
-            "artifact_provenance": _artifact_provenance(
-                phase=DaydreamPhase.RECON
-            ),
-            **{
-                field: value
-                if isinstance((value := safe_recon.get(field)), list)
-                and all(isinstance(item, str) for item in value)
-                else []
-                for field in ("languages", "conventions", "intent_docs")
-            },
-            "commands": valid_commands,
-            "command_rejections": [
-                {
-                    "code": error.partition("@")[0],
-                    "pointer": error.partition("@")[2] or "/",
-                }
-                for error in command_errors
-            ],
+        model_fields = {
+            field: value
+            if isinstance((value := safe_recon.get(field)), list)
+            and all(isinstance(item, str) for item in value)
+            else []
+            for field in ("languages", "conventions", "intent_docs")
         }
     else:
-        recon_data = {
-            "artifact_type": "daydream.improve-recon",
-            "artifact_provenance": _artifact_provenance(
-                phase=DaydreamPhase.RECON
-            ),
-            "commands": [],
-            "command_rejections": [
-                {"code": "RECON_CONTAINER_INVALID", "pointer": "/"}
-            ],
-        }
+        command_errors = ["RECON_CONTAINER_INVALID@/"]
+
+    # Make targets and manifest scripts are host-enumerated, not model-cited:
+    # the recon prompt forbids reporting them, so without this the only
+    # verification command a Makefile-driven repository has never lands.
+    host_candidates, host_commands, host_errors = _host_enumerated_commands(
+        target,
+        services,
+        groups,
+        model_commands=valid_commands,
+    )
+    total_candidates += host_candidates
+    valid_commands = [*valid_commands, *host_commands]
+    command_errors = [*command_errors, *host_errors]
+
+    recon_data: dict[str, Any] = {
+        "artifact_type": "daydream.improve-recon",
+        "artifact_provenance": _artifact_provenance(phase=DaydreamPhase.RECON),
+        **model_fields,
+        "commands": valid_commands,
+        "command_rejections": [
+            {
+                "code": error.partition("@")[0],
+                "pointer": error.partition("@")[2] or "/",
+            }
+            for error in command_errors
+        ],
+    }
     recon_path(directory).write_text(json.dumps(recon_data, indent=2) + "\n")
     reasons = Counter(error.partition("@")[0] for error in command_errors)
     recorder = get_current_recorder()

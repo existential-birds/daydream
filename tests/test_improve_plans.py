@@ -19,6 +19,7 @@ from daydream.improve.command_contract import (
     valid_directory_scope_lexical,
     valid_repository_file_path,
     validate_applicability,
+    validate_host_commands,
     validate_recon_commands,
 )
 from daydream.improve.plans import (
@@ -438,6 +439,58 @@ def test_host_enumeration_skips_unreadable_and_malformed_sources(
     (repo / "package.json").write_text("{not json", encoding="utf-8")
 
     assert enumerate_repository_commands(repo) == []
+
+
+def test_host_ids_never_shadow_a_model_supplied_id(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Makefile").write_text("test:\n\tpytest\n", encoding="utf-8")
+
+    commands = enumerate_repository_commands(repo, reserved_ids=["make-test"])
+
+    assert [item["id"] for item in commands] == ["make-test-2"]
+    assert commands[0]["command"] == "make test"
+
+
+def test_host_enumeration_never_reads_outside_the_repository(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "vendor").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "Makefile").write_text("leak:\n\tcat /etc/passwd\n", encoding="utf-8")
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
+
+    assert enumerate_repository_commands(repo, directories=(".", "linked")) == []
+    assert (
+        enumerate_repository_commands(repo, directories=(".", "../outside")) == []
+    )
+
+
+def test_host_command_with_shell_composition_is_rejected(tmp_path: Path) -> None:
+    """A manifest script key is arbitrary text and must clear the same gate."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "package.json").write_text(
+        json.dumps(
+            {"name": "web", "scripts": {"ci && rm -rf /": "true", "test": "vitest"}},
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    candidates = enumerate_repository_commands(repo)
+    accepted, errors = validate_host_commands(candidates, repo=repo)
+
+    assert [item["command"] for item in candidates] == [
+        "npm run ci && rm -rf /",
+        "npm run test",
+    ]
+    assert [item["command"] for item in accepted] == ["npm run test"]
+    assert errors == ["RECON_MALFORMED_COMMAND@/host_commands/0/command"]
+    assert accepted[0]["evidence"]["kind"] == "host-derived"
 
 
 @pytest.mark.parametrize(

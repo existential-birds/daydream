@@ -15,6 +15,11 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
+from daydream.improve.command_contract import (
+    HOST_EVIDENCE_KIND,
+    path_is_confined,
+)
+
 _MAKE_DECLARATION = re.compile(
     r"^(?P<targets>[A-Za-z0-9][A-Za-z0-9_.-]*"
     r"(?:[ \t]+[A-Za-z0-9][A-Za-z0-9_.-]*)*)[ \t]*(?P<sep>::?)(?P<assign>=?)"
@@ -43,28 +48,38 @@ def enumerate_repository_commands(
     repo: Path,
     *,
     directories: Sequence[str] = (".",),
+    reserved_ids: Iterable[str] = (),
 ) -> list[dict[str, Any]]:
     """Return recon command records derived from Makefiles and manifests.
 
     ``directories`` are repository-relative working directories (``"."`` for
-    the repository root). Output is deterministic: directories in the given
-    order, Makefile targets then manifest scripts, each in source order.
+    the repository root). ``reserved_ids`` are ids already spoken for by
+    model-supplied records, so a derived id never shadows one of those. Output
+    is deterministic: directories in the given order, Makefile targets then
+    manifest scripts, each in source order.
+
+    Reads only. Every source file is confinement-checked before it is opened,
+    so a directory or symlink pointing outside ``repo`` yields nothing.
     """
     records: list[dict[str, Any]] = []
-    used_ids: set[str] = set()
+    used_ids: set[str] = set(reserved_ids)
     for directory in directories:
         base = repo if directory == "." else repo / directory
         for record in (
-            *_make_records(base, directory),
-            *_script_records(base, directory),
+            *_make_records(repo, base, directory),
+            *_script_records(repo, base, directory),
         ):
             record["id"] = _unique_id(record["id"], used_ids)
             records.append(record)
     return records
 
 
-def _make_records(base: Path, directory: str) -> Iterable[dict[str, Any]]:
+def _make_records(
+    repo: Path, base: Path, directory: str
+) -> Iterable[dict[str, Any]]:
     source_path = _relative(directory, "Makefile")
+    if not path_is_confined(repo, source_path):
+        return
     text = _read_text(base / "Makefile")
     if text is None:
         return
@@ -91,8 +106,12 @@ def _make_records(base: Path, directory: str) -> Iterable[dict[str, Any]]:
             )
 
 
-def _script_records(base: Path, directory: str) -> Iterable[dict[str, Any]]:
+def _script_records(
+    repo: Path, base: Path, directory: str
+) -> Iterable[dict[str, Any]]:
     source_path = _relative(directory, "package.json")
+    if not path_is_confined(repo, source_path):
+        return
     text = _read_text(base / "package.json")
     if text is None:
         return
@@ -158,7 +177,7 @@ def _record(
             ),
         },
         "evidence": {
-            "kind": "host-derived",
+            "kind": HOST_EVIDENCE_KIND,
             "source_path": source_path,
             "line_anchor": {"start_line": line, "end_line": line},
             "verbatim_excerpt": excerpt,

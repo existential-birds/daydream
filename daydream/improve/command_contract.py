@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -125,6 +126,21 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
     "properties": _EVIDENCE_PROPERTIES,
 }
 
+HOST_EVIDENCE_KIND = "host-derived"
+# Make targets and manifest scripts are enumerated by the host, so their
+# evidence is a declaration site, not a verbatim copy of the invocation. This
+# schema is deliberately NOT reachable from the model-facing recon output
+# schema: a model may only ever claim `literal-command`, which still has to
+# survive the "command appears in the cited slice" check.
+HOST_EVIDENCE_SCHEMA: dict[str, Any] = {
+    **EVIDENCE_SCHEMA,
+    "properties": {
+        **_EVIDENCE_PROPERTIES,
+        "kind": {"type": "string", "enum": [HOST_EVIDENCE_KIND]},
+        "verbatim_excerpt": {"type": "string"},
+    },
+}
+
 _COMMAND_PROPERTIES: dict[str, Any] = {
     "purpose": {"type": "string", "minLength": 10, "maxLength": 200},
     "command": {
@@ -165,6 +181,13 @@ RECON_COMMAND_SCHEMA: dict[str, Any] = {
         },
         **_COMMAND_PROPERTIES,
         "evidence": EVIDENCE_SCHEMA,
+    },
+}
+HOST_RECON_COMMAND_SCHEMA: dict[str, Any] = {
+    **RECON_COMMAND_SCHEMA,
+    "properties": {
+        **RECON_COMMAND_SCHEMA["properties"],
+        "evidence": HOST_EVIDENCE_SCHEMA,
     },
 }
 
@@ -444,13 +467,14 @@ def _validate_evidence(
     command: dict[str, Any],
     *,
     repo: Path,
+    require_command_in_excerpt: bool,
 ) -> tuple[dict[str, Any] | None, ContractRejection | None]:
     evidence = command["evidence"]
     excerpt, rejection = _source_slice(repo, evidence)
     if rejection is not None:
         return None, rejection
     assert excerpt is not None
-    if command["command"] not in excerpt:
+    if require_command_in_excerpt and command["command"] not in excerpt:
         return None, ContractRejection(
             "RECON_EVIDENCE_MISMATCH",
             "/evidence",
@@ -467,6 +491,44 @@ def validate_recon_commands(
     commands = recon.get("commands")
     if not isinstance(commands, list):
         return [], ["RECON_COMMANDS_INVALID@/commands"]
+    return _validate_command_records(
+        commands,
+        repo=repo,
+        schema=RECON_COMMAND_SCHEMA,
+        pointer_prefix="/commands",
+        require_command_in_excerpt=True,
+    )
+
+
+def validate_host_commands(
+    commands: Sequence[Any],
+    *,
+    repo: Path,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate host-enumerated records against the same safety gates.
+
+    Host records are constructed, not cited, so the invocation is not required
+    to appear in the declaration slice. Everything else — the id grammar, the
+    literal-command gate that rejects shell composition, working-directory and
+    evidence-path confinement, and the excerpt re-read — is identical.
+    """
+    return _validate_command_records(
+        list(commands),
+        repo=repo,
+        schema=HOST_RECON_COMMAND_SCHEMA,
+        pointer_prefix="/host_commands",
+        require_command_in_excerpt=False,
+    )
+
+
+def _validate_command_records(
+    commands: list[Any],
+    *,
+    repo: Path,
+    schema: dict[str, Any],
+    pointer_prefix: str,
+    require_command_in_excerpt: bool,
+) -> tuple[list[dict[str, Any]], list[str]]:
     validated: list[dict[str, Any]] = []
     errors: list[str] = []
     ids = Counter(
@@ -474,7 +536,7 @@ def validate_recon_commands(
         for item in commands
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     )
-    validator = Draft202012Validator(RECON_COMMAND_SCHEMA)
+    validator = Draft202012Validator(schema)
     schema_codes = {
         "id": "RECON_COMMAND_ID_INVALID",
         "command": "RECON_MALFORMED_COMMAND",
@@ -484,7 +546,7 @@ def validate_recon_commands(
     }
 
     def reject(index: int, rejection: ContractRejection) -> None:
-        errors.append(rejection.render(f"/commands/{index}"))
+        errors.append(rejection.render(f"{pointer_prefix}/{index}"))
 
     for index, command in enumerate(commands):
         candidate = command
@@ -564,6 +626,7 @@ def validate_recon_commands(
         canonical_evidence, evidence_rejection = _validate_evidence(
             command,
             repo=repo,
+            require_command_in_excerpt=require_command_in_excerpt,
         )
         if evidence_rejection is not None:
             reject(index, evidence_rejection)
@@ -586,6 +649,9 @@ __all__ = [
     "DIRECTORY_SCOPE_SCHEMA",
     "EVIDENCE_SCHEMA",
     "EXPECTED_SUCCESS_SCHEMA",
+    "HOST_EVIDENCE_KIND",
+    "HOST_EVIDENCE_SCHEMA",
+    "HOST_RECON_COMMAND_SCHEMA",
     "RECON_COMMAND_SCHEMA",
     "REPOSITORY_FILE_PATH_PATTERN",
     "REPOSITORY_FILE_PATH_SCHEMA",
@@ -598,5 +664,6 @@ __all__ = [
     "valid_directory_scope_lexical",
     "valid_repository_file_path",
     "validate_applicability",
+    "validate_host_commands",
     "validate_recon_commands",
 ]
