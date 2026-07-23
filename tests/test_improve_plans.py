@@ -23,6 +23,7 @@ from daydream.improve.command_contract import (
     validate_recon_commands,
 )
 from daydream.improve.plans import (
+    PLAN_INDEX_FILENAME,
     PlanWriteSession,
     load_rejections,
     plan_slug,
@@ -1560,6 +1561,12 @@ def test_valid_linked_plan_is_preserved_for_every_executor_status(
     tmp_path: Path,
     status: str,
 ) -> None:
+    """A hand-edited Status cell outranks the sidecar and is adopted by it.
+
+    ``render_plan``'s Finishing section tells the executor to set this cell, so
+    the README owns Status; the sidecar owns everything else and converges on
+    the operator's edit rather than overwriting it.
+    """
     repo, sha = _repo(tmp_path)
     plans_dir = repo / "daydream_plans"
     selection = _selection(repo)
@@ -1581,6 +1588,183 @@ def test_valid_linked_plan_is_preserved_for_every_executor_status(
     index = index_path.read_text()
     assert index.count("fingerprint:fp-fix-n-plus-one") == 1
     assert f"| {status} |" in index
+    sidecar = json.loads(
+        (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    )
+    assert [
+        (entry["number"], entry["fingerprint"], entry["slug"], entry["status"])
+        for entry in sidecar["plans"]
+    ] == [(1, "fp-fix-n-plus-one", "batch-catalog-queries", status)]
+
+
+def test_hand_edited_status_on_a_blocked_row_stops_the_retry(
+    tmp_path: Path,
+) -> None:
+    """An operator who marks a host-blocked attempt resolved is believed."""
+    repo, sha = _repo(tmp_path)
+    plans_dir = repo / "daydream_plans"
+    invalid = _authored_plan()
+    invalid["test_plan"]["cases"] = []
+    _write_plans(
+        plans_dir,
+        [_authoring_failure_selection(_issues(repo, invalid))],
+        planned_at=sha,
+    )
+    assert planned_fingerprints(plans_dir) == set()
+
+    index_path = plans_dir / "README.md"
+    blocked_status = "BLOCKED (PLAN_VALIDATION_FAILED: AUTHOR_SCHEMA_INVALID)"
+    assert f"| {blocked_status} |" in index_path.read_text(encoding="utf-8")
+    index_path.write_text(
+        index_path.read_text(encoding="utf-8").replace(
+            f"| {blocked_status} |", "| DONE |"
+        ),
+        encoding="utf-8",
+    )
+    assert planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
+
+    result = _write_plans(plans_dir, [_selection(repo)], planned_at=sha)
+
+    assert result["written"] == []
+    assert len(result["skipped"]) == 1
+    assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
+    sidecar = json.loads(
+        (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    )
+    assert [
+        (entry["number"], entry["status"], entry["host_blocked"])
+        for entry in sidecar["plans"]
+    ] == [(1, "DONE", False)]
+
+
+def test_deleted_sidecar_is_rebuilt_from_the_rendered_index(
+    tmp_path: Path,
+) -> None:
+    """Losing the sidecar must not re-plan or renumber what is already there."""
+    repo, sha = _repo(tmp_path)
+    plans_dir = repo / "daydream_plans"
+    selections = [_plan_selection(repo, title) for title in _CONCURRENT_TITLES]
+    _write_plans(plans_dir, selections, planned_at=sha)
+    (plans_dir / PLAN_INDEX_FILENAME).unlink()
+
+    assert planned_fingerprints(plans_dir) == {
+        f"fp-{plan_slug(title)}" for title in _CONCURRENT_TITLES
+    }
+
+    result = _write_plans(plans_dir, selections, planned_at=sha)
+
+    assert result["written"] == []
+    assert len(result["skipped"]) == 3
+    sidecar = json.loads(
+        (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    )
+    assert [
+        (entry["number"], entry["fingerprint"], entry["slug"], entry["status"])
+        for entry in sidecar["plans"]
+    ] == [
+        (rank + 1, f"fp-{plan_slug(title)}", plan_slug(title), "TODO")
+        for rank, title in enumerate(_CONCURRENT_TITLES)
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param("{ not json at all", id="unparseable"),
+        pytest.param('{"schema_version": 99, "plans": []}', id="wrong-version"),
+        pytest.param("[]", id="wrong-shape"),
+        pytest.param('{"schema_version": 1, "plans": "nope"}', id="wrong-plans"),
+    ],
+)
+def test_unusable_sidecar_never_reuses_a_number_already_on_disk(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    """With no readable state left, the filesystem still bounds numbering."""
+    repo, sha = _repo(tmp_path)
+    plans_dir = repo / "daydream_plans"
+    _write_plans(
+        plans_dir,
+        [_plan_selection(repo, "Batch catalog queries")],
+        planned_at=sha,
+    )
+    (plans_dir / PLAN_INDEX_FILENAME).write_text(payload, encoding="utf-8")
+    (plans_dir / "README.md").unlink()
+    first_plan = (plans_dir / "001-batch-catalog-queries.md").read_text(
+        encoding="utf-8"
+    )
+
+    result = _write_plans(
+        plans_dir,
+        [_plan_selection(repo, "Catalog observability")],
+        planned_at=sha,
+    )
+
+    assert [entry["number"] for entry in result["written"]] == [2]
+    assert (
+        plans_dir / "001-batch-catalog-queries.md"
+    ).read_text(encoding="utf-8") == first_plan
+    assert sorted(
+        path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
+    ) == [
+        "001-batch-catalog-queries.md",
+        "002-catalog-observability.md",
+    ]
+
+
+def test_sidecar_entry_survives_a_hand_deleted_plan_file(
+    tmp_path: Path,
+) -> None:
+    """A deleted plan file frees neither its number nor its fingerprint.
+
+    Only a host-blocked attempt is retryable; a plan the operator deleted is
+    treated as deliberately gone, so nothing is silently rewritten over it.
+    """
+    repo, sha = _repo(tmp_path)
+    plans_dir = repo / "daydream_plans"
+    _write_plans(
+        plans_dir,
+        [_plan_selection(repo, "Batch catalog queries")],
+        planned_at=sha,
+    )
+    (plans_dir / "001-batch-catalog-queries.md").unlink()
+
+    result = _write_plans(
+        plans_dir,
+        [
+            _plan_selection(repo, "Batch catalog queries"),
+            _plan_selection(repo, "Catalog observability"),
+        ],
+        planned_at=sha,
+    )
+
+    assert len(result["skipped"]) == 1
+    assert [entry["number"] for entry in result["written"]] == [2]
+    assert [
+        path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
+    ] == ["002-catalog-observability.md"]
+
+
+def test_planner_title_credential_is_redacted_in_the_plan_index(
+    tmp_path: Path,
+) -> None:
+    """The sidecar carries model-authored text and must redact it like the plan."""
+    repo, sha = _repo(tmp_path)
+    plans_dir = repo / "daydream_plans"
+    plan = _authored_plan()
+    plan["title"] = "Rotate AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE in deploys"
+
+    _write_plans(plans_dir, [_selection(repo, plan=plan)], planned_at=sha)
+
+    sidecar_text = (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    sidecar = json.loads(sidecar_text)
+    assert "AKIAIOSFODNN7EXAMPLE" not in sidecar_text
+    assert sidecar["plans"][0]["title"] == (
+        "Rotate AWS_SECRET_ACCESS_KEY=[REDACTED_ENV_VAR] in deploys"
+    )
+    for path in plans_dir.rglob("*"):
+        if path.is_file():
+            assert "AKIAIOSFODNN7EXAMPLE" not in path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("failure_kind", ["transport", "validation"])

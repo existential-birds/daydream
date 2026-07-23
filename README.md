@@ -117,8 +117,10 @@ running the category audit.
 
 Each audit writes its report and structured intermediate data under
 `.daydream/improve/`. Durable output under `daydream_plans/` consists of
-numbered plan files, a `README.md` plan index, and `rejected.json` for findings
-that later runs should suppress. In non-interactive mode, Daydream selects the
+numbered plan files, a `.index.json` durable plan record, a `README.md` plan
+index rendered from it, and `rejected.json` for findings that later runs should
+suppress. Editing a plan's **Status** cell in `README.md` is honored: that cell
+outranks `.index.json`. In non-interactive mode, Daydream selects the
 top five or fewer vetted defect findings by leverage; direction findings are
 never selected automatically.
 

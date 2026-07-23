@@ -6,8 +6,8 @@ import hashlib
 import json
 import re
 import subprocess
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,8 @@ from daydream.trajectory import redact_text
 
 REJECTIONS_SCHEMA_VERSION = 1
 PLAN_WRITE_DIAGNOSTICS_SCHEMA_VERSION = 1
+PLAN_INDEX_SCHEMA_VERSION = 1
+PLAN_INDEX_FILENAME = ".index.json"
 _FINGERPRINT_MARKER = re.compile(
     r"<!--\s*fingerprint:([^\s>]+)\s*-->"
 )
@@ -27,6 +29,10 @@ _HOST_BLOCKED_STATUS = re.compile(
 )
 # Plan | Title | Priority | Effort | Status
 _INDEX_COLUMNS = 5
+_INDEX_ROW_NUMBER = re.compile(r"\b(\d{3})\b")
+# The slug class admits no separator or dot, so a recovered link can never name
+# anything but a sibling plan file.
+_INDEX_ROW_LINK = re.compile(r"\[\d{3}\]\(\d{3}-([a-z0-9-]+)\.md\)")
 _SLUG_SEPARATOR = re.compile(r"[^a-z0-9]+")
 
 
@@ -732,90 +738,205 @@ def render_plan(
     )
 
 
-def _existing_index_rows(index_text: str) -> list[str]:
-    rows: list[str] = []
-    for line in index_text.splitlines():
-        if not line.startswith("|"):
-            continue
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if len(cells) != _INDEX_COLUMNS or cells[0] in {"Plan", "------"}:
-            continue
-        if set(cells[0]) == {"-"}:
-            continue
-        rows.append(line)
-    return rows
+@dataclass(frozen=True)
+class PlanIndexEntry:
+    """One plan's durable record in ``daydream_plans/.index.json``."""
+
+    number: int
+    slug: str
+    title: str
+    fingerprint: str
+    priority: str
+    effort: str
+    risk: str
+    category: str
+    planned_at: str
+    status: str
+    host_blocked: bool
+
+    @property
+    def path(self) -> str | None:
+        """The plan file this entry names, or ``None`` when none was written."""
+        return f"{self.number:03d}-{self.slug}.md" if self.slug else None
 
 
-def _row_cells(row: str) -> list[str]:
-    return [cell.strip() for cell in row.strip("|").split("|")]
+def _index_field(value: Any) -> str:
+    """Normalize a model- or operator-supplied index field for durable storage."""
+    return redact_text(str(value or "").strip())
 
 
-def _row_number(row: str) -> int | None:
-    cells = _row_cells(row)
-    if not cells:
+def _entry_payload(entry: PlanIndexEntry) -> dict[str, Any]:
+    return {
+        "number": entry.number,
+        "slug": entry.slug,
+        "title": entry.title,
+        "fingerprint": entry.fingerprint,
+        "priority": entry.priority,
+        "effort": entry.effort,
+        "risk": entry.risk,
+        "category": entry.category,
+        "planned_at": entry.planned_at,
+        "status": entry.status,
+        "host_blocked": entry.host_blocked,
+    }
+
+
+def _entry_from_payload(payload: Any) -> PlanIndexEntry | None:
+    if not isinstance(payload, dict):
         return None
-    match = re.search(r"\b(\d{3})\b", cells[0])
-    return int(match.group(1)) if match is not None else None
-
-
-def _row_plan_path(row: str) -> str | None:
-    cells = _row_cells(row)
-    if not cells:
+    number = payload.get("number")
+    fingerprint = payload.get("fingerprint")
+    slug = _index_field(payload.get("slug"))
+    status = _index_field(payload.get("status"))
+    if (
+        not isinstance(number, int)
+        or isinstance(number, bool)
+        or not 0 < number < 1000
+        or not isinstance(fingerprint, str)
+        or not fingerprint
+        or not status
+        or (slug and _NUMBERED_PLAN.fullmatch(f"{number:03d}-{slug}.md") is None)
+    ):
         return None
-    match = re.search(r"\[\d{3}\]\(([^)]+)\)", cells[0])
-    if match is None:
-        return None
-    filename = match.group(1)
-    if Path(filename).name != filename or _NUMBERED_PLAN.fullmatch(filename) is None:
-        return None
-    return filename
-
-
-def _row_has_plan_artifact(row: str, plans_dir: Path) -> bool:
-    filename = _row_plan_path(row)
-    if filename is not None and (plans_dir / filename).is_file():
-        return True
-    number = _row_number(row)
-    return number is not None and any(
-        plans_dir.glob(f"{number:03d}-*.md")
+    return PlanIndexEntry(
+        number=number,
+        slug=slug,
+        title=_index_field(payload.get("title")),
+        fingerprint=fingerprint,
+        priority=_index_field(payload.get("priority")),
+        effort=_index_field(payload.get("effort")),
+        risk=_index_field(payload.get("risk")),
+        category=_index_field(payload.get("category")),
+        planned_at=_index_field(payload.get("planned_at")),
+        status=status,
+        host_blocked=bool(payload.get("host_blocked")),
     )
 
 
-def _retryable_host_blocked_row(row: str, plans_dir: Path) -> bool:
-    cells = _row_cells(row)
-    if len(cells) != _INDEX_COLUMNS or _row_has_plan_artifact(row, plans_dir):
-        return False
-    return _HOST_BLOCKED_STATUS.fullmatch(cells[-1]) is not None
+def load_plan_index(plans_dir: Path) -> list[PlanIndexEntry]:
+    """Load the durable plan index.
+
+    An absent, unreadable, malformed, or structurally invalid sidecar yields no
+    entries; the run then recovers what it can from the rendered index and from
+    the plan files on disk rather than failing.
+    """
+    try:
+        payload = json.loads(
+            (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != PLAN_INDEX_SCHEMA_VERSION
+        or not isinstance(payload.get("plans"), list)
+    ):
+        return []
+    return [
+        entry
+        for item in payload["plans"]
+        if (entry := _entry_from_payload(item)) is not None
+    ]
+
+
+def _index_text(plans_dir: Path) -> str:
+    try:
+        return (plans_dir / "README.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _rendered_index_entries(plans_dir: Path) -> dict[str, PlanIndexEntry]:
+    """Recover index rows from the rendered README, keyed by fingerprint.
+
+    ``README.md`` is render-only output with one standing exception: its Status
+    cell is what ``render_plan``'s Finishing section tells an executor to edit,
+    so a hand-edited status outranks the sidecar. Whole rows are recovered too,
+    which is how a run survives a deleted sidecar or an index written before the
+    sidecar existed.
+    """
+    entries: dict[str, PlanIndexEntry] = {}
+    for line in _index_text(plans_dir).splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) != _INDEX_COLUMNS:
+            continue
+        marker = _FINGERPRINT_MARKER.search(cells[0])
+        number = _INDEX_ROW_NUMBER.search(cells[0])
+        status = _index_field(cells[-1])
+        if marker is None or number is None or not status:
+            continue
+        link = _INDEX_ROW_LINK.search(cells[0])
+        entries[marker.group(1)] = PlanIndexEntry(
+            number=int(number.group(1)),
+            slug=link.group(1) if link is not None else "",
+            title=_index_field(cells[1]),
+            fingerprint=marker.group(1),
+            priority=_index_field(cells[2]),
+            effort=_index_field(cells[3]),
+            risk="",
+            category="",
+            planned_at="",
+            status=status,
+            host_blocked=_HOST_BLOCKED_STATUS.fullmatch(status) is not None,
+        )
+    return entries
+
+
+def _merged_index(plans_dir: Path) -> dict[int, PlanIndexEntry]:
+    """Durable entries keyed by plan number, with README statuses applied."""
+    rendered = _rendered_index_entries(plans_dir)
+    merged: dict[int, PlanIndexEntry] = {}
+    for entry in load_plan_index(plans_dir):
+        override = rendered.pop(entry.fingerprint, None)
+        if override is not None and override.status != entry.status:
+            entry = replace(
+                entry,
+                status=override.status,
+                host_blocked=override.host_blocked,
+            )
+        merged.setdefault(entry.number, entry)
+    for entry in rendered.values():
+        merged.setdefault(entry.number, entry)
+    return merged
+
+
+def _has_plan_file(plans_dir: Path, entry: PlanIndexEntry) -> bool:
+    filename = entry.path
+    if filename is not None and (plans_dir / filename).is_file():
+        return True
+    return any(plans_dir.glob(f"{entry.number:03d}-*.md"))
+
+
+def _is_retryable(plans_dir: Path, entry: PlanIndexEntry) -> bool:
+    """A host-blocked attempt whose number never produced a plan file."""
+    return entry.host_blocked and not _has_plan_file(plans_dir, entry)
 
 
 def planned_fingerprints(plans_dir: Path) -> set[str]:
     """Return fingerprints with durable executable/non-transient status."""
-    index_path = plans_dir / "README.md"
-    if not index_path.is_file():
-        return set()
-    try:
-        index_text = index_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return set()
-    rows = _existing_index_rows(index_text)
     return {
-        match.group(1)
-        for row in rows
-        if not _retryable_host_blocked_row(row, plans_dir)
-        if (match := _FINGERPRINT_MARKER.search(row)) is not None
+        entry.fingerprint
+        for entry in _merged_index(plans_dir).values()
+        if not _is_retryable(plans_dir, entry)
     }
 
 
-def _highest_plan_number(plans_dir: Path, rows: Sequence[str]) -> int:
+def _highest_plan_number(
+    plans_dir: Path, entries: Iterable[PlanIndexEntry]
+) -> int:
+    """Highest number claimed by the index or already taken on disk.
+
+    The filesystem is consulted unconditionally: a deleted, truncated, or stale
+    sidecar must never hand back a number that would overwrite a plan file.
+    """
     numbers = [
         int(match.group(1))
         for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
         if (match := _NUMBERED_PLAN.match(path.name)) is not None
     ]
-    for row in rows:
-        match = re.search(r"\b(\d{3})\b", row)
-        if match is not None:
-            numbers.append(int(match.group(1)))
+    numbers.extend(entry.number for entry in entries)
     return max(numbers, default=0)
 
 
@@ -863,19 +984,42 @@ def _render_index(
     )
 
 
-def _blocked_index_row(
+def _index_row(entry: PlanIndexEntry) -> str:
+    """Render one durable entry as an execution-order row."""
+    filename = entry.path
+    plan_cell = (
+        f"[{entry.number:03d}]({filename})"
+        if filename is not None
+        else f"{entry.number:03d}"
+    )
+    return (
+        f"| {plan_cell} <!-- fingerprint:{entry.fingerprint} --> | "
+        f"{_markdown_cell(entry.title)} | {_markdown_cell(entry.priority)} | "
+        f"{_markdown_cell(entry.effort)} | {_markdown_cell(entry.status)} |"
+    )
+
+
+def _blocked_entry(
     *,
     number: int,
-    marker: str,
+    fingerprint: str,
     finding: dict[str, Any],
     status: str,
-) -> str:
-    """Render a blocked row without consulting rejected planner metadata."""
-    trusted_title = str(finding.get("title") or "Selected finding")
-    return (
-        f"| {number:03d} {marker} | {_markdown_cell(trusted_title)} | "
-        f"{plan_priority(finding)} | "
-        f"{_markdown_cell(finding.get('effort'))} | {status} |"
+    planned_at: str,
+) -> PlanIndexEntry:
+    """Record a blocked attempt without consulting rejected planner metadata."""
+    return PlanIndexEntry(
+        number=number,
+        slug="",
+        title=_index_field(finding.get("title") or "Selected finding"),
+        fingerprint=fingerprint,
+        priority=plan_priority(finding),
+        effort=_index_field(finding.get("effort")),
+        risk=_index_field(finding.get("risk")),
+        category=_index_field(finding.get("category")),
+        planned_at=planned_at,
+        status=status,
+        host_blocked=_HOST_BLOCKED_STATUS.fullmatch(status) is not None,
     )
 
 
@@ -914,8 +1058,12 @@ class PlanWriteSession:
     writer completes, so a finished plan is on disk while slower writers are
     still running.
 
+    Durable state lives in ``daydream_plans/.index.json``; ``README.md`` is
+    rendered from it and is never parsed back except for an operator's Status
+    edit (see :func:`_rendered_index_entries`).
+
     ``commit`` is synchronous on purpose: called from concurrent async tasks it
-    runs to completion without an await point, so the shared row/number state
+    runs to completion without an await point, so the shared entry/number state
     needs no lock.
     """
 
@@ -933,19 +1081,21 @@ class PlanWriteSession:
         self._run_session_id = run_session_id
         plans_dir.mkdir(parents=True, exist_ok=True)
         self._index_path = plans_dir / "README.md"
-        index_text = (
-            self._index_path.read_text(encoding="utf-8")
-            if self._index_path.is_file()
-            else ""
-        )
+        self._sidecar_path = plans_dir / PLAN_INDEX_FILENAME
         self._non_interactive_default = (
             non_interactive_default
-            or "non-interactive default" in index_text.lower()
+            or "non-interactive default" in _index_text(plans_dir).lower()
         )
-        self._rows = _existing_index_rows(index_text)
-        self._fingerprints = planned_fingerprints(plans_dir)
+        self._entries = _merged_index(plans_dir)
+        self._fingerprints = {
+            entry.fingerprint
+            for entry in self._entries.values()
+            if not _is_retryable(plans_dir, entry)
+        }
         self._rejected = load_rejections(plans_dir)
-        self._next_number = _highest_plan_number(plans_dir, self._rows) + 1
+        self._next_number = (
+            _highest_plan_number(plans_dir, self._entries.values()) + 1
+        )
         self._reserved_count = 0
         self._written: list[tuple[int, dict[str, Any]]] = []
         self._skipped: list[tuple[int, dict[str, Any]]] = []
@@ -979,21 +1129,14 @@ class PlanWriteSession:
                     PlanReservation(index, fingerprint, None)
                 )
                 continue
-            retry_rows = [
-                row
-                for row in self._rows
-                if (
-                    (match := _FINGERPRINT_MARKER.search(row)) is not None
-                    and match.group(1) == fingerprint
-                    and _retryable_host_blocked_row(row, self._plans_dir)
-                )
-            ]
             reserved_numbers = [
-                number
-                for row in retry_rows
-                if (number := _row_number(row)) is not None
+                entry.number
+                for entry in self._entries.values()
+                if entry.fingerprint == fingerprint
+                and _is_retryable(self._plans_dir, entry)
             ]
-            self._rows = [row for row in self._rows if row not in retry_rows]
+            for reserved in reserved_numbers:
+                del self._entries[reserved]
             if reserved_numbers:
                 number = min(reserved_numbers)
             else:
@@ -1062,13 +1205,12 @@ class PlanWriteSession:
         errors: Sequence[str],
         received: Any,
     ) -> PlanOutcome:
-        self._rows.append(
-            _blocked_index_row(
-                number=number,
-                marker=f"<!-- fingerprint:{reservation.fingerprint} -->",
-                finding=finding,
-                status=status,
-            )
+        self._entries[number] = _blocked_entry(
+            number=number,
+            fingerprint=reservation.fingerprint,
+            finding=finding,
+            status=status,
+            planned_at=self._planned_at,
         )
         self._failed.append((reservation.index, finding))
         self._diagnostics.append(
@@ -1200,12 +1342,18 @@ class PlanWriteSession:
                 received=plan_result,
             )
         (self._plans_dir / filename).write_text(text, encoding="utf-8")
-        self._rows.append(
-            f"| [{number:03d}]({filename}) "
-            f"<!-- fingerprint:{reservation.fingerprint} --> | "
-            f"{_markdown_cell(selection.get('title') or title)} | "
-            f"{plan_priority(finding)} | "
-            f"{_markdown_cell(finding.get('effort'))} | TODO |"
+        self._entries[number] = PlanIndexEntry(
+            number=number,
+            slug=slug,
+            title=_index_field(selection.get("title") or title),
+            fingerprint=reservation.fingerprint,
+            priority=plan_priority(finding),
+            effort=_index_field(finding.get("effort")),
+            risk=_index_field(finding.get("risk")),
+            category=_index_field(finding.get("category")),
+            planned_at=self._planned_at,
+            status="TODO",
+            host_blocked=False,
         )
         self._written.append(
             (
@@ -1231,20 +1379,29 @@ class PlanWriteSession:
         return PlanOutcome("written", number, filename, title)
 
     def _write_index(self) -> None:
-        """Rewrite the index from the rows landed so far.
+        """Rewrite the sidecar and its rendered index from the entries so far.
 
-        Rewriting on every landing costs one small file write and leaves an
-        interrupted run with an index that matches the plans already on disk.
+        The sidecar lands first: it is the durable record, and rewriting both on
+        every landing leaves an interrupted run with state that matches the plan
+        files already on disk.
         """
-        self._rows.sort(
-            key=lambda row: (
-                _row_number(row) is None,
-                _row_number(row) or 0,
+        entries = [self._entries[number] for number in sorted(self._entries)]
+        self._sidecar_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": PLAN_INDEX_SCHEMA_VERSION,
+                    "artifact_type": "daydream.plan-index",
+                    "plans": [_entry_payload(entry) for entry in entries],
+                },
+                indent=2,
+                ensure_ascii=False,
             )
+            + "\n",
+            encoding="utf-8",
         )
         self._index_path.write_text(
             _render_index(
-                self._rows,
+                [_index_row(entry) for entry in entries],
                 plans_dir=self._plans_dir,
                 non_interactive_default=self._non_interactive_default,
                 run_session_id=self._run_session_id,
