@@ -2,8 +2,8 @@
 
 The model authors judgment content only (``PLAN_AUTHOR_SCHEMA``); this module
 normalizes it, collects every authoring issue at once, and expands the result
-into the assembled plan shape that ``render_plan`` and ``write_plans`` already
-consume. Assembly is the single validation boundary for model-authored plan
+into the assembled plan shape that ``render_plan`` and ``PlanWriteSession``
+already consume. Assembly is the single validation boundary for model-authored plan
 content: nothing downstream re-checks it. Assembly is pure with respect to the
 model output: filesystem reads only, no randomness, no wall-clock reads.
 """
@@ -1216,7 +1216,7 @@ def assemble_plan(
 
     Returns ``(assembled, ())`` on success or ``(None, issues)`` when
     authoring defects remain after normalization. The assembled dict has the
-    shape ``render_plan``/``write_plans`` and review parsing consume. Never
+    shape ``render_plan``/``PlanWriteSession`` and review parsing consume. Never
     raises on model content.
     """
     normalized = _normalize_authored(authored, repo=repo)

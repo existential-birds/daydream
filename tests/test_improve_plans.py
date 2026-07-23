@@ -23,11 +23,11 @@ from daydream.improve.command_contract import (
     validate_recon_commands,
 )
 from daydream.improve.plans import (
+    PlanWriteSession,
     load_rejections,
     planned_fingerprints,
     record_rejections,
     render_plan,
-    write_plans,
 )
 from daydream.improve.prompts import (
     PLAN_AUTHOR_SCHEMA,
@@ -737,9 +737,46 @@ def _authoring_failure_selection(
     }
 
 
+def _write_plans(
+    plans_dir: Path,
+    selections: list[dict[str, Any]],
+    *,
+    planned_at: str,
+    non_interactive_default: bool = False,
+    run_session_id: str | None = None,
+    completion_order: list[int] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Drive the production plan-write API the way the orchestrator does.
+
+    Numbers are reserved once, in selection order, before any result is
+    committed; each result is then committed on its own, in
+    ``completion_order`` (selection order by default). This mirrors
+    ``_step_write_plans``, which reserves up front and lands each plan as its
+    writer returns.
+    """
+    session = PlanWriteSession(
+        plans_dir,
+        planned_at=planned_at,
+        non_interactive_default=non_interactive_default,
+        run_session_id=run_session_id,
+    )
+    reservations = session.reserve(
+        [selection.get("finding") for selection in selections]
+    )
+    order = (
+        completion_order
+        if completion_order is not None
+        else list(range(len(selections)))
+    )
+    assert sorted(order) == list(range(len(selections)))
+    for index in order:
+        session.commit(reservations[index], selections[index])
+    return session.finish()
+
+
 def test_assembled_plan_renders_complete_deterministic_handoff(tmp_path: Path) -> None:
     repo, sha = _repo(tmp_path)
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [{"finding": _finding(), **_assembled(repo)}],
         planned_at=sha,
@@ -920,7 +957,7 @@ def test_annotated_absolute_escaping_and_metachar_paths_are_blocked(
     )
 
     issues = _issues(repo, plan)
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [_authoring_failure_selection(issues)],
         planned_at=sha,
@@ -1107,7 +1144,7 @@ def test_valid_new_path_with_nonexistent_parent_remains_allowed(
     repo, sha = _repo(tmp_path)
     plan = _authored_new_file_plan()
 
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [{"finding": _finding(), **_assembled(repo, plan)}],
         planned_at=sha,
@@ -1134,7 +1171,7 @@ def test_unselected_recon_commands_are_not_injected_into_plan(
     )
     assembled = _assembled(repo, commands=commands)
 
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [{"finding": _finding(), **assembled}],
         planned_at=sha,
@@ -1169,7 +1206,7 @@ def test_plan_current_state_uses_locator_and_persists_host_excerpt(
         plan["scope"]["existing_paths"][0]["verbatim_excerpt"] = model_excerpt
     raw_plan = deepcopy(plan)
 
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [{"finding": _finding(), **_assembled(repo, plan)}],
         planned_at=sha,
@@ -1192,7 +1229,7 @@ def test_stray_markdown_key_is_stripped_and_plan_writes(
     plan = _authored_plan()
     plan["markdown"] = "## Steps\n\nTOKEN=super-secret-value"
 
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [{"finding": _finding(), **_assembled(repo, plan)}],
         planned_at=sha,
@@ -1211,7 +1248,7 @@ def test_mixed_batch_writes_valid_sibling_and_blocks_invalid_sibling(
     invalid["test_plan"]["cases"] = []
     issues = _issues(repo, invalid)
 
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [
             {"finding": _finding(), **_assembled(repo)},
@@ -1243,7 +1280,7 @@ def test_planned_at_from_an_unrelated_root_is_rejected(tmp_path: Path) -> None:
     )
     _git(repo, "checkout", "--detach", unrelated_root)
 
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [{"finding": _finding(), **assembled}],
         planned_at=original_root,
@@ -1265,7 +1302,7 @@ def test_head_change_after_planning_blocks_stale_todo(tmp_path: Path) -> None:
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-m", "advance head after plan fan-out")
 
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [{"finding": _finding(), **assembled}],
         planned_at=planned_at,
@@ -1294,14 +1331,14 @@ def test_valid_linked_plan_is_preserved_for_every_executor_status(
     repo, sha = _repo(tmp_path)
     plans_dir = repo / "daydream_plans"
     selection = _selection(repo)
-    write_plans(plans_dir, [selection], planned_at=sha)
+    _write_plans(plans_dir, [selection], planned_at=sha)
     index_path = plans_dir / "README.md"
     index_path.write_text(
         index_path.read_text().replace("| TODO |", f"| {status} |"),
         encoding="utf-8",
     )
 
-    result = write_plans(plans_dir, [selection], planned_at=sha)
+    result = _write_plans(plans_dir, [selection], planned_at=sha)
 
     assert result["written"] == []
     assert len(result["skipped"]) == 1
@@ -1335,7 +1372,7 @@ def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(
         invalid["test_plan"]["cases"] = []
         failed_selection = _authoring_failure_selection(_issues(repo, invalid))
 
-    failed = write_plans(plans_dir, [failed_selection], planned_at=sha)
+    failed = _write_plans(plans_dir, [failed_selection], planned_at=sha)
     failed_index = (plans_dir / "README.md").read_text()
     expected_failure_status = (
         "PLAN_WRITER_FAILED"
@@ -1347,12 +1384,12 @@ def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(
     assert planned_fingerprints(plans_dir) == set()
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
 
-    retried = write_plans(
+    retried = _write_plans(
         plans_dir,
         [{"finding": _finding(), **_assembled(repo)}],
         planned_at=sha,
     )
-    unrelated = write_plans(
+    unrelated = _write_plans(
         plans_dir,
         [
             {
@@ -1401,7 +1438,7 @@ def test_rejected_index_status_is_preserved_and_not_retried(
         encoding="utf-8",
     )
 
-    result = write_plans(plans_dir, [_selection(repo)], planned_at=sha)
+    result = _write_plans(plans_dir, [_selection(repo)], planned_at=sha)
 
     assert result["written"] == []
     assert len(result["skipped"]) == 1
@@ -1438,7 +1475,7 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(
         },
     ]
 
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         selections,
         planned_at=sha,
@@ -1600,7 +1637,7 @@ def test_secret_literal_value_is_redacted_and_never_reaches_artifacts(
     )
 
     assembled = _assembled(repo, plan)
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [{"finding": _finding(), **assembled}],
         planned_at=sha,
@@ -1635,7 +1672,7 @@ def test_underscored_secret_key_name_is_redacted_in_quoted_source(
     )
 
     assembled = _assembled(repo)
-    result = write_plans(
+    result = _write_plans(
         repo / "daydream_plans",
         [{"finding": _finding(), **assembled}],
         planned_at=sha,

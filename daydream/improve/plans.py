@@ -1266,34 +1266,3 @@ def _by_reservation(
     entries: Sequence[tuple[int, dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     return [entry for _, entry in sorted(entries, key=lambda item: item[0])]
-
-
-def write_plans(
-    plans_dir: Path,
-    selections: Sequence[dict[str, Any]],
-    *,
-    planned_at: str,
-    non_interactive_default: bool = False,
-    run_session_id: str | None = None,
-) -> dict[str, list[dict[str, Any]]]:
-    """Reconcile a complete set of plan-writer results in one call."""
-    session = PlanWriteSession(
-        plans_dir,
-        planned_at=planned_at,
-        non_interactive_default=non_interactive_default,
-        run_session_id=run_session_id,
-    )
-    ordered = [
-        selection for selection in selections if isinstance(selection, dict)
-    ]
-    reservations = session.reserve(
-        [
-            selection.get("finding")
-            if isinstance(selection.get("finding"), dict)
-            else None
-            for selection in ordered
-        ]
-    )
-    for reservation, selection in zip(reservations, ordered, strict=True):
-        session.commit(reservation, selection)
-    return session.finish()
