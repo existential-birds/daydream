@@ -26,15 +26,14 @@ from daydream.improve.plans import (
     PLAN_INDEX_FILENAME,
     PlanWriteSession,
     load_rejections,
-    plan_slug,
     planned_fingerprints,
     record_rejections,
-    render_plan,
 )
 from daydream.improve.prompts import (
     PLAN_AUTHOR_SCHEMA,
     build_plan_writer_repair_prompt,
 )
+from daydream.improve.render import plan_slug, render_plan
 from daydream.improve.repo_commands import enumerate_repository_commands
 
 

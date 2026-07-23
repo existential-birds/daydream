@@ -54,7 +54,6 @@ from daydream.improve.partition import (
 from daydream.improve.plans import (
     PlanWriteSession,
     _attempt_diagnostic,
-    _markdown_cell,
     load_rejections,
     plan_slug,
     record_plan_write_diagnostics,
@@ -73,6 +72,7 @@ from daydream.improve.prompts import (
     VET_SCHEMA,
     build_plan_writer_repair_prompt,
 )
+from daydream.improve.render import markdown_cell
 from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
@@ -1189,7 +1189,7 @@ def _evidence_cell(finding: dict[str, Any]) -> str:
     evidence = finding.get("evidence", [])
     if not isinstance(evidence, list):
         return "—"
-    return "<br>".join(_markdown_cell(entry) for entry in evidence) or "—"
+    return "<br>".join(markdown_cell(entry) for entry in evidence) or "—"
 
 
 def _findings_table(
@@ -1207,12 +1207,12 @@ def _findings_table(
             + " | ".join(
                 (
                     str(number),
-                    _markdown_cell(finding.get("title")),
-                    _markdown_cell(finding.get("category")),
-                    _markdown_cell(finding.get("impact")),
-                    _markdown_cell(finding.get("effort")),
-                    _markdown_cell(finding.get("risk")),
-                    _markdown_cell(finding.get("confidence")),
+                    markdown_cell(finding.get("title")),
+                    markdown_cell(finding.get("category")),
+                    markdown_cell(finding.get("impact")),
+                    markdown_cell(finding.get("effort")),
+                    markdown_cell(finding.get("risk")),
+                    markdown_cell(finding.get("confidence")),
                     _evidence_cell(finding),
                 )
             )
@@ -1234,11 +1234,11 @@ def _direction_section(
     entries: list[str] = []
     for number, finding in enumerate(findings[:limit], start=start):
         entries.append(
-            f"### {number}. {_markdown_cell(finding.get('title'))}\n\n"
-            f"{_markdown_cell(finding.get('body'))} "
-            f"Impact: {_markdown_cell(finding.get('impact'))}; "
-            f"effort: {_markdown_cell(finding.get('effort'))}; "
-            f"fix risk: {_markdown_cell(finding.get('risk'))}. "
+            f"### {number}. {markdown_cell(finding.get('title'))}\n\n"
+            f"{markdown_cell(finding.get('body'))} "
+            f"Impact: {markdown_cell(finding.get('impact'))}; "
+            f"effort: {markdown_cell(finding.get('effort'))}; "
+            f"fix risk: {markdown_cell(finding.get('risk'))}. "
             f"Evidence: {_evidence_cell(finding)}."
         )
     return "## Direction\n\n" + "\n\n".join(entries)
@@ -1891,7 +1891,7 @@ def _blocked_plan_attempt_lines(
             for error in diagnostic["errors"]
         )
         lines.append(
-            f"  - **{_markdown_cell(finding['title'])}** "
+            f"  - **{markdown_cell(finding['title'])}** "
             f"(`{finding['fingerprint'][:12]}`) — "
             f"{diagnostic['stage']}: {errors}"
         )

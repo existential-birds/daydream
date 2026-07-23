@@ -33,8 +33,8 @@ from daydream.improve.command_contract import (
 from daydream.improve.command_contract import (
     valid_repository_file_path as _valid_repository_file_path,
 )
-from daydream.improve.plans import plan_slug, redact_secret_values
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
+from daydream.improve.render import plan_slug, redact_secret_values
 
 GIT_PUSH_POLICY = "never-without-operator-instruction"
 GIT_PULL_REQUEST_POLICY = "never-without-operator-instruction"
