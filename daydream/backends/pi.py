@@ -598,12 +598,14 @@ class PiBackend:
                 else None
             )
             if native_key_name is None:
-                raise PiError(
-                    "PI_API_KEY requires a provider with a supported "
-                    "native credential environment variable",
-                    category="AUTH_CONFIG",
+                logger.warning(
+                    "PI_API_KEY could not be mapped to a native credential "
+                    "environment variable for provider %r and is being ignored. "
+                    "Set the provider's native credential variable directly.",
+                    provider,
                 )
-            child_env[native_key_name] = api_key
+            else:
+                child_env[native_key_name] = api_key
 
         # Pi's built-in system prompt is minimal; append the daydream preamble
         # so the GLM model gets the same tool-efficiency / budget-awareness

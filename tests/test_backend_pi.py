@@ -287,18 +287,28 @@ async def test_pi_api_key_never_enters_process_argv(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_pi_api_key_unknown_provider_fails_with_safe_category(monkeypatch):
+async def test_pi_api_key_unknown_provider_warns_and_skips(monkeypatch, caplog):
+    """An unmapped provider warns and proceeds; the key never reaches argv or any env var."""
     sentinel = "synthetic-unknown-provider-key"
     monkeypatch.setenv("PI_PROVIDER", "custom-provider")
     monkeypatch.setenv("PI_API_KEY", sentinel)
     backend = PiBackend(model="custom-model")
 
-    with pytest.raises(PiError) as exc_info:
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
+    with caplog.at_level("WARNING"):
+        flat_args, mock_exec = await _run_and_capture_args(backend)
 
-    assert exc_info.value.category == "AUTH_CONFIG"
-    assert sentinel not in str(exc_info.value)
+    # No hard failure — the run proceeded to launch the subprocess.
+    assert flat_args[flat_args.index("--provider") + 1] == "custom-provider"
+    # The key never reaches argv...
+    assert sentinel not in flat_args
+    assert "--api-key" not in flat_args
+    # ...nor any env var handed to the child.
+    child_env = mock_exec.call_args.kwargs["env"]
+    assert sentinel not in child_env.values()
+    assert "PI_API_KEY" not in child_env
+    # And the user is warned (without the key value leaking into the log).
+    assert any("PI_API_KEY" in r.getMessage() for r in caplog.records)
+    assert sentinel not in caplog.text
 
 
 @pytest.mark.asyncio
