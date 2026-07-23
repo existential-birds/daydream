@@ -514,7 +514,11 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
             "properties": {
                 "exemplars": {
                     "type": "array",
-                    "minItems": 1,
+                    "description": (
+                        "Existing tests whose shape the new tests copy. Leave "
+                        "this empty when the repository has no test to copy — "
+                        "an invented exemplar is worse than none."
+                    ),
                     "items": {
                         "type": "object",
                         "additionalProperties": False,

@@ -506,6 +506,7 @@ class _ImproveStubBackend:
         self.plan_missing_path_attempts = 0
         self.plan_crash_attempts = 0
         self.plan_stop_condition_path: str | None = None
+        self.plan_no_test_exemplars = False
         self.group_scoped_findings = False
         self.findings_per_category: int | None = None
         self.fail_vet_titles: set[str] = set()
@@ -833,6 +834,9 @@ class _ImproveStubBackend:
                     "Callers keep sending secret: hunter2realvalue in "
                     "production traffic today."
                 )
+            if self.plan_no_test_exemplars:
+                # The only honest answer in a repository with no test files.
+                plan["test_plan"]["exemplars"] = []
             if self.plan_stop_condition_path is not None:
                 plan["additional_stop_conditions"] = [
                     {
@@ -2291,6 +2295,58 @@ async def test_standard_effort_fans_out_all_nine_categories_read_only(
     assert set(audited["categories_run"]) == set(AUDIT_CATEGORIES)
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert audit_calls and all(call["read_only"] for call in audit_calls)
+
+
+@pytest.mark.anyio
+async def test_repo_with_no_test_files_still_receives_a_plan(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repository with zero tests must still be plannable.
+
+    The audit playbook tells the auditor that "if there is no one-command way
+    to know the codebase works, that is a prerequisite finding" — so the plan
+    writer has to be able to author the plan that fixes it, in a repository
+    with no existing test to point at as an exemplar.
+    """
+    assert not list(improve_monorepo_target.rglob("test_*.py"))
+    assert not list(improve_monorepo_target.rglob("*_test.py"))
+    stub = _install_improve_stub(
+        monkeypatch, improve_monorepo_target, n_findings=1
+    )
+    stub.plan_no_test_exemplars = True
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans = sorted(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    diagnostics = json.loads(
+        _dd(
+            improve_monorepo_target,
+            "plan-write-diagnostics.json",
+        ).read_text(encoding="utf-8")
+    )
+
+    assert code == 0
+    assert plans
+    body = plans[0].read_text(encoding="utf-8")
+    assert "## Test plan" in body
+    assert "### Named cases" in body
+    assert "test_service_name_preserves_contract" in body
+    assert "no existing test" in body
+    assert [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
+    ] == ["success"]
 
 
 @pytest.mark.anyio

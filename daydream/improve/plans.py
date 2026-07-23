@@ -667,9 +667,19 @@ def render_plan(
             )
         )
     test_plan = plan["test_plan"]
-    exemplar_lines = "\n".join(
-        f"- `{item['path']}` — `{item['symbol']}`: {item['pattern_to_copy']}"
-        for item in test_plan["exemplars"]
+    exemplar_section = (
+        "Copy the shape of these existing tests; do not invent a new style.\n\n"
+        + "\n".join(
+            f"- `{item['path']}` — `{item['symbol']}`: "
+            f"{item['pattern_to_copy']}"
+            for item in test_plan["exemplars"]
+        )
+        if test_plan["exemplars"]
+        else (
+            "This repository has no existing test to copy. Write each named "
+            "case below from its own specification only, and do not go looking "
+            "for a house style that is not there."
+        )
     )
     case_lines = "\n\n".join(
         (
@@ -800,8 +810,7 @@ def render_plan(
         "creates one, this section is that test's specification — write it "
         "once, not twice.\n\n"
         "### Exemplars\n\n"
-        "Copy the shape of these existing tests; do not invent a new style.\n\n"
-        + exemplar_lines
+        + exemplar_section
         + "\n\n### Named cases\n\n"
         + case_lines
         + "\n\n## Done criteria\n\n"
