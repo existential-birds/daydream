@@ -1698,7 +1698,7 @@ def test_assemble_reports_every_issue_at_once_with_pointers_and_hints(
     plan = _authored_plan()
     plan["title"] = "Too short"
     plan["steps"][0]["verification"]["recon_command_id"] = "make-tests"
-    plan["steps"][0]["changes"][0]["path"] = "README.md"
+    plan["steps"][0]["changes"][0]["operation"] = "create"
 
     issues = _issues(repo, plan)
 
@@ -1706,11 +1706,7 @@ def test_assemble_reports_every_issue_at_once_with_pointers_and_hints(
     assert len(issues) == 3
     assert by_code["AUTHOR_SCHEMA_INVALID"].pointer == "/title"
     assert by_code["AUTHOR_SCHEMA_INVALID"].detail == "minLength=12;actual=9"
-    assert (
-        by_code["STEP_PATH_OUT_OF_SCOPE"].pointer == "/steps/0/changes/0/path"
-    )
-    assert by_code["STEP_PATH_OUT_OF_SCOPE"].hint is not None
-    assert "apps/catalog/api.py" in by_code["STEP_PATH_OUT_OF_SCOPE"].hint
+    assert by_code["CREATE_PATH_NOT_NEW"].pointer == "/steps/0/changes/0/path"
     unknown = by_code["RECON_COMMAND_UNKNOWN"]
     assert unknown.pointer == "/steps/0/verification/recon_command_id"
     assert unknown.hint == "valid recon command ids: test-suite, git-diff"
@@ -1851,6 +1847,167 @@ def test_assemble_still_rejects_a_new_path_occupied_by_a_directory(
     assert [render_issue(issue) for issue in issues] == [
         "NEW_PATH_ALREADY_EXISTS@/scope/new_paths/0/path"
     ]
+
+
+def test_undeclared_step_path_is_declared_existing_with_a_usable_excerpt(
+    tmp_path: Path,
+) -> None:
+    repo, planned_at = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["scope"]["out_of_scope_paths"].append(
+        {
+            "path": "Makefile",
+            "reason": "The catalog change adds no new build or test entry point.",
+        }
+    )
+    plan["steps"][0]["changes"].append(
+        {
+            "path": "README.md",
+            "symbol": "Catalog service",
+            "operation": "modify",
+            "instruction": "Document that catalog item loading is now batched.",
+            "target_state": "README.md states catalog loading issues one query.",
+        }
+    )
+
+    assembled = _assembled(repo, plan)
+
+    scope = assembled["scope"]
+    assert [entry["path"] for entry in scope["existing_paths"]] == [
+        "apps/catalog/api.py",
+        "tests/test_catalog.py",
+        "README.md",
+    ]
+    assert scope["new_paths"] == []
+    # The model had declared README.md out of scope; the step wins.
+    assert [entry["path"] for entry in scope["out_of_scope_paths"]] == ["Makefile"]
+    quoted = [
+        excerpt
+        for excerpt in assembled["current_state_excerpts"]
+        if excerpt["path"] == "README.md"
+    ]
+    assert quoted[0]["line_anchor"] == {"start_line": 1, "end_line": 1}
+    assert quoted[0]["verbatim_excerpt"] == "# Catalog service"
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=planned_at,
+        number=1,
+    )
+    assert (
+        "git add apps/catalog/api.py tests/test_catalog.py README.md"
+        in rendered
+    )
+    assert "- `README.md` (existing) —" in rendered
+    assert "- `README.md` (create) —" not in rendered
+    assert "`README.md:1-1`" in rendered
+
+
+def test_step_editing_the_sole_out_of_scope_path_still_blocks(
+    tmp_path: Path,
+) -> None:
+    """In-scope wins the contradiction, exactly as _dedup_scope already decides.
+
+    The out-of-scope entry is dropped, and an emptied ``out_of_scope_paths`` is
+    then the schema defect the model repairs — the same outcome ``_dedup_scope``
+    already produces for a path declared both in scope and out of scope.
+    """
+    repo, _ = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["steps"][0]["changes"].append(
+        {
+            "path": "README.md",
+            "symbol": "Catalog service",
+            "operation": "modify",
+            "instruction": "Document that catalog item loading is now batched.",
+            "target_state": "README.md states catalog loading issues one query.",
+        }
+    )
+
+    issues = _issues(repo, plan)
+
+    assert [render_issue(issue) for issue in issues] == [
+        "AUTHOR_SCHEMA_INVALID@/scope/out_of_scope_paths#minItems=1;actual=0"
+    ]
+
+
+def test_undeclared_test_case_path_is_declared_new_when_absent_from_disk(
+    tmp_path: Path,
+) -> None:
+    repo, planned_at = _repo(tmp_path)
+    plan = _authored_plan()
+    unlisted = "tests/test_catalog_batching.py"
+    plan["test_plan"]["cases"][0]["test_file"] = unlisted
+
+    assembled = _assembled(repo, plan)
+
+    scope = assembled["scope"]
+    assert [entry["path"] for entry in scope["new_paths"]] == [unlisted]
+    assert [entry["path"] for entry in scope["existing_paths"]] == [
+        "apps/catalog/api.py",
+        "tests/test_catalog.py",
+    ]
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=planned_at,
+        number=1,
+    )
+    assert (
+        f"git add apps/catalog/api.py tests/test_catalog.py {unlisted}"
+        in rendered
+    )
+    assert f"- `{unlisted}` (create) —" in rendered
+    assert f"::{plan['test_plan']['cases'][0]['test_symbol']}" in rendered
+
+
+@pytest.mark.parametrize(
+    ("location", "pointer"),
+    [
+        ("step", "/steps/0/changes/0/path"),
+        ("test", "/test_plan/cases/0/test_file"),
+    ],
+)
+def test_undeclared_escaping_path_is_blocked_and_never_declared_in_scope(
+    tmp_path: Path,
+    location: str,
+    pointer: str,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "pwn.py").write_text("SECRET = 1\n", encoding="utf-8")
+    (repo / "escape").symlink_to(outside, target_is_directory=True)
+    escaping = "escape/pwn.py"
+    plan = _authored_plan()
+    if location == "step":
+        plan["steps"][0]["changes"][0]["path"] = escaping
+    else:
+        plan["test_plan"]["cases"][0]["test_file"] = escaping
+
+    issues = _issues(repo, plan)
+
+    # Reported at the authored pointer, never at a /scope pointer: a laundered
+    # path would have been re-reported from the scope list the host wrote it to.
+    assert f"PATH_OUTSIDE_REPOSITORY@{pointer}" in {
+        render_issue(issue) for issue in issues
+    }
+    assert not [issue for issue in issues if issue.pointer.startswith("/scope/")]
+
+
+def test_undeclared_malformed_step_path_is_blocked_and_never_declared_in_scope(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["steps"][0]["changes"][0]["path"] = "../outside/pwn.py"
+
+    issues = _issues(repo, plan)
+
+    assert "MALFORMED_PATH@/steps/0/changes/0/path" in {
+        render_issue(issue) for issue in issues
+    }
+    assert not [issue for issue in issues if issue.pointer.startswith("/scope/")]
 
 
 def test_assemble_synthesizes_behavior_done_criterion_from_intended_outcome(

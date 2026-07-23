@@ -233,6 +233,79 @@ def _dedup_scope(normalized: dict[str, Any], *, repo: Path) -> None:
         ]
 
 
+_STEP_PATH_ROLE = (
+    "Named by a plan step but left out of the authored scope lists; the host "
+    "declared it in scope so the executor is allowed to change it."
+)
+_TEST_PATH_ROLE = (
+    "Named by a test-plan case but left out of the authored scope lists; the "
+    "host declared it in scope so the executor is allowed to write it."
+)
+
+
+def _referenced_paths(normalized: dict[str, Any]) -> Iterator[tuple[str, str]]:
+    """Yield every (path, host role) a step change or test case names."""
+    steps = normalized.get("steps")
+    for step in steps if isinstance(steps, list) else []:
+        changes = step.get("changes") if isinstance(step, dict) else None
+        for change in changes if isinstance(changes, list) else []:
+            path = change.get("path") if isinstance(change, dict) else None
+            if isinstance(path, str):
+                yield path, _STEP_PATH_ROLE
+    test_plan = normalized.get("test_plan")
+    cases = test_plan.get("cases") if isinstance(test_plan, dict) else None
+    for case in cases if isinstance(cases, list) else []:
+        path = case.get("test_file") if isinstance(case, dict) else None
+        if isinstance(path, str):
+            yield path, _TEST_PATH_ROLE
+
+
+def _declare_referenced_paths(
+    normalized: dict[str, Any],
+    *,
+    repo: Path,
+) -> None:
+    """Declare every well-formed step/test path the plan left out of scope.
+
+    Which list a path belongs in is disk truth, not judgment, so the host
+    settles it the same way ``_dedup_scope`` and ``_relocate_existing_new_paths``
+    already do rather than spending a repair generation on the bookkeeping gap.
+    Every path is appended to ``new_paths``; ``_relocate_existing_new_paths``
+    runs later in normalization and moves the ones that exist on disk into
+    ``existing_paths``, giving them the head-of-file excerpt anchor
+    ``existing_paths`` requires and the drift stop condition quotes, and turning
+    any ``create`` of them into a ``modify``. Running before ``_dedup_scope``
+    also lets that pass drop an out-of-scope entry the new declaration
+    contradicts.
+
+    Malformed and unconfined paths are deliberately skipped so they still fail
+    as ``MALFORMED_PATH`` / ``PATH_OUTSIDE_REPOSITORY`` at their own step or
+    test-case pointer: this repair must never launder an escaping path into
+    scope. A path that exists on disk but is empty has no line to anchor, so it
+    stays in ``new_paths`` and a step that means to modify it still fails as
+    ``CHANGE_PATH_NOT_EXISTING``.
+    """
+    scope = normalized.get("scope")
+    if not isinstance(scope, dict):
+        return
+    existing_entries = scope.get("existing_paths")
+    new_entries = scope.get("new_paths")
+    if not isinstance(existing_entries, list) or not isinstance(
+        new_entries, list
+    ):
+        return
+    declared = {*_entry_paths(existing_entries), *_entry_paths(new_entries)}
+    for path, role in _referenced_paths(normalized):
+        if (
+            path in declared
+            or not _valid_repository_file_path(path)
+            or not _path_is_confined(repo, path)
+        ):
+            continue
+        declared.add(path)
+        new_entries.append({"path": path, "role": role})
+
+
 _RELOCATED_EXCERPT_MAX_LINES = 40
 
 
@@ -424,6 +497,7 @@ def _normalize_authored(
     normalized = _redact_strings(normalized)
     for pattern, limit in _AUTHOR_PROSE_CLAMP_LIMITS:
         _clamp_node(normalized, pattern, limit)
+    _declare_referenced_paths(normalized, repo=repo)
     _dedup_scope(normalized, repo=repo)
     _relocate_existing_new_paths(normalized, repo=repo)
     _clamp_excerpt_end_lines(normalized, repo=repo)
@@ -614,11 +688,6 @@ def _collect_issues(
         for path in [*existing_paths, *new_paths]
         if _valid_repository_file_path(path)
     ]
-    in_scope_hint = (
-        "declared in-scope paths: " + ", ".join(lexical_in_scope)
-        if lexical_in_scope
-        else "declare the path in scope.existing_paths or scope.new_paths first"
-    )
 
     if not existing_entries and not new_entries:
         add("EMPTY_SCOPE", "/scope")
@@ -756,9 +825,10 @@ def _collect_issues(
             if not isinstance(path, str) or not check_path(pointer, path):
                 continue
             changed_paths.append(path)
-            if path not in in_scope:
-                add("STEP_PATH_OUT_OF_SCOPE", pointer, hint=in_scope_hint)
-            elif change.get("operation") == "create" and path not in new_paths:
+            # Every well-formed path is in scope by now: normalization declares
+            # the ones the plan left out, so what remains to check is only
+            # whether the operation agrees with which list the path landed in.
+            if change.get("operation") == "create" and path not in new_paths:
                 add("CREATE_PATH_NOT_NEW", pointer)
             elif (
                 change.get("operation") != "create"
@@ -809,10 +879,9 @@ def _collect_issues(
     for index, case in enumerate(cases if isinstance(cases, list) else []):
         if not isinstance(case, dict):
             continue
-        test_file = case.get("test_file")
-        file_pointer = f"/test_plan/cases/{index}/test_file"
-        if check_path(file_pointer, test_file) and test_file not in in_scope:
-            add("TEST_PATH_OUT_OF_SCOPE", file_pointer, hint=in_scope_hint)
+        # Normalization already declared a well-formed test_file in scope; the
+        # check that stays is the path grammar and confinement one.
+        check_path(f"/test_plan/cases/{index}/test_file", case.get("test_file"))
         symbol = case.get("test_symbol")
         if isinstance(symbol, str):
             if symbol in test_symbols:
