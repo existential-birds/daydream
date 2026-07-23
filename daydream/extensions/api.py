@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 # Current/preferred extension contract version; doubles as the max accepted (range ceiling).
 EXTENSION_API_VERSION: int = 3
 # Oldest extension contract version still accepted (range floor).
-MIN_SUPPORTED_EXTENSION_API_VERSION: int = 3
+MIN_SUPPORTED_EXTENSION_API_VERSION: int = 1
 
 
 class ExtensionError(Exception):

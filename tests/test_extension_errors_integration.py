@@ -72,7 +72,7 @@ async def test_broken_flow_ref_fails_before_any_agent(
     outcome through ``runner.run``: exit 1, zero agents, named broken piece.
     """
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 3\n"
+        "DAYDREAM_EXT_API = 2\n"
         "def register(r):\n"
         "    r.insert_after('deep', anchor='intent', step='ghost_phase')\n"
     )

@@ -9,7 +9,7 @@ programs against, and the policy for when those names may change. A drift-guard
 test (`tests/test_extension_contract_doc.py`) pins this document to the
 registered inventories in the code.
 
-Current contract version: **`EXTENSION_API_VERSION = 3`** (supported: `3..3`).
+Current contract version: **`EXTENSION_API_VERSION = 3`** (supported: `1..3`).
 
 ## Extension module contract
 
@@ -120,23 +120,24 @@ not bump the version.
 
 ### Changelog
 
-- **Version 3** — hard-breaking. The `audit` prompt is re-signed: the `services`
-  kwarg is replaced by `group`, a partition-group mapping
-  (`name`, `stack`, `file_count`, `partitions[{name, root, file_count, service}]`),
-  and the host no longer inlines tracked-file lists into audit prompts — an
-  audit agent enumerates its own group roots. Adds the `recon-commands` prompt
-  slot for per-partition-group command discovery. Because no older extension can
-  satisfy the changed kwargs, the floor rises with the ceiling in this same
-  release: the supported range is `3..3` and a v1/v2 extension fails to load
-  with `ExtensionVersionError` until it declares `DAYDREAM_EXT_API = 3` (and, if
-  it overrides `audit`, adopts the `group` kwarg). `vet` and `plan-writer` are
-  unchanged.
+- **Version 3** — additive. Adds the `improve` flow and its steps, the
+  `audit:<category>[:<stack>]` skill slots, and four new prompt slots: `audit`
+  (kwargs `category`, `skill_invocation`, `group`, `scope_note`,
+  `recon_summary`, `cwd`, `tier`, where `group` is a partition-group mapping of
+  `name`, `stack`, `file_count`, `partitions[{name, root, file_count, service}]`),
+  `recon-commands`, `vet`, and `plan-writer`. Every one of these names is new in
+  this release, so no v1 or v2 extension can have overridden them. No existing
+  flow name, step name, prompt name, prompt kwarg, skill slot, or `Registry`
+  method changed. The floor therefore stays at `1`: the supported range is
+  `1..3` and an extension declaring `DAYDREAM_EXT_API = 1` or `2` keeps loading
+  unchanged. New forks should declare `DAYDREAM_EXT_API = 3`; a fork only needs
+  to bump if it wants to override one of the new slots.
 - **Version 2** — adds the synchronous tool-supervisor seam, the
   `ToolDecision` result, and the public `items_file` findings surface. The
-  extension module literal is now `DAYDREAM_EXT_API = 2`. Aged out of the
-  supported range in version 3.
+  extension module literal for that contract is `DAYDREAM_EXT_API = 2`. Still
+  within the supported range.
 - **Version 1** — initial flow, skill, prompt, stack, loader, and validation
-  contract. Aged out of the supported range in version 3.
+  contract. Still within the supported range.
 
 ## Tool supervision
 
@@ -371,13 +372,15 @@ when composing detailed command guidance; adding a required `recon_commands`
 kwarg would break exact-signature builders.
 
 A plan-writer must ask the backend to return `PlanWriterResult` structured
-data, not authored Markdown. `PLAN_WRITER_CONTRACT_INSTRUCTIONS` and
-`PLAN_WRITER_SCHEMA` are available from `daydream.improve.prompts` for
-overrides that want to compose the built-in typed-contract guidance.
-Regardless of prompt content, the host-owned `PLAN_WRITER_SCHEMA` is supplied
-to the backend separately and the host runs repository-aware semantic
-validation before rendering a plan. A wholesale prompt override cannot replace
-or weaken either validation boundary.
+data, not authored Markdown. `PLAN_WRITER_CONTRACT_INSTRUCTIONS` is available
+from `daydream.improve.prompts` for overrides that want to compose the built-in
+typed-contract guidance. Regardless of prompt content, the host supplies its
+own `PLAN_AUTHOR_SCHEMA` as the backend `output_schema` for the plan-write
+call, then assembles the authored judgment content into the host-owned
+`PLAN_WRITER_SCHEMA` shape and validates it — schema plus repository-aware
+semantic checks — at the write boundary before rendering a plan.
+`PLAN_WRITER_SCHEMA` is never sent to a backend. A wholesale prompt override
+cannot replace or weaken either validation boundary.
 
 Legacy override output containing `{markdown: ...}` fails closed with
 `LEGACY_MARKDOWN_OUTPUT`: the finding is indexed as `BLOCKED`, sanitized
