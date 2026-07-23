@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import subprocess
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -24,7 +24,8 @@ _SAFE_ERROR_DETAIL = re.compile(r"^[A-Za-z0-9_.;=-]{1,80}$")
 _HOST_BLOCKED_STATUS = re.compile(
     r"^BLOCKED \(PLAN_(?:WRITER|VALIDATION)_FAILED: [^()\r\n]+\)$"
 )
-_SECTION = re.compile(r"^## (.+?)\s*$", re.MULTILINE)
+# Plan | Title | Priority | Effort | Status
+_INDEX_COLUMNS = 5
 
 
 def _redact_model_value(value: Any) -> Any:
@@ -105,15 +106,6 @@ def record_rejections(
 def _markdown_cell(value: Any) -> str:
     """Render a value safely inside a Markdown table cell."""
     return redact_text(str(value or "—")).replace("|", "\\|").replace("\n", " ")
-
-
-def _section_content(markdown: str) -> dict[str, str]:
-    matches = list(_SECTION.finditer(markdown))
-    sections: dict[str, str] = {}
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else None
-        sections[match.group(1)] = markdown[match.end() : end].strip()
-    return sections
 
 
 # Horizontal-only separator whitespace: see ``_ENV_VAR_PATTERN`` in
@@ -222,13 +214,12 @@ def _validation_error(code_with_pointer: str) -> dict[str, str]:
     code, separator, remainder = code_with_pointer.partition("@")
     embedded_pointer, _, detail = remainder.partition("#")
     # Assembly issues always carry their own pointer; the host codes raised
-    # around them are plan-wide, apart from the dependency graph.
-    if separator and embedded_pointer.startswith("/"):
-        pointer = embedded_pointer
-    elif code.startswith("DEPENDENCY_"):
-        pointer = "/dependencies"
-    else:
-        pointer = "/"
+    # around them are plan-wide.
+    pointer = (
+        embedded_pointer
+        if separator and embedded_pointer.startswith("/")
+        else "/"
+    )
     if detail and _SAFE_ERROR_DETAIL.fullmatch(detail):
         return {"code": code, "pointer": pointer, "detail": detail}
     return {"code": code, "pointer": pointer}
@@ -264,8 +255,6 @@ _AUTHORING_CODES = frozenset(
 
 def _validation_stage(errors: Sequence[str]) -> str:
     codes = [error.partition("@")[0] for error in errors]
-    if any(code.startswith("DEPENDENCY_") for code in codes):
-        return "dependency"
     if any(code == "RENDER_FAILED" for code in codes):
         return "render"
     if any(code in _AUTHORING_CODES for code in codes):
@@ -381,79 +370,6 @@ def _head_matches(repo: Path, planned_at: str) -> bool:
         and head.returncode == 0
         and planned.stdout.strip() == head.stdout.strip()
     )
-
-
-def _dependency_cycle_slugs(
-    selections: Sequence[dict[str, Any]],
-) -> set[str]:
-    graph: dict[str, set[str]] = {}
-    for selection in selections:
-        slug = selection.get("slug")
-        dependencies = selection.get("dependencies")
-        if not isinstance(slug, str) or not isinstance(dependencies, list):
-            continue
-        graph[slug] = {
-            dependency["slug"]
-            for dependency in dependencies
-            if isinstance(dependency, dict)
-            and isinstance(dependency.get("slug"), str)
-        }
-
-    cyclic: set[str] = set()
-    visiting: list[str] = []
-    visited: set[str] = set()
-
-    def visit(slug: str) -> None:
-        if slug in visiting:
-            cyclic.update(visiting[visiting.index(slug) :])
-            return
-        if slug in visited:
-            return
-        visiting.append(slug)
-        for dependency in graph.get(slug, set()):
-            if dependency in graph:
-                visit(dependency)
-        visiting.pop()
-        visited.add(slug)
-
-    for slug in graph:
-        visit(slug)
-    return cyclic
-
-
-def _dependency_order(
-    selections: Sequence[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Return a stable dependency-first order; retain input order for cycles."""
-    remaining = list(selections)
-    candidate_slugs = {
-        selection.get("slug")
-        for selection in remaining
-        if isinstance(selection.get("slug"), str)
-    }
-    emitted: set[str] = set()
-    ordered: list[dict[str, Any]] = []
-    while remaining:
-        ready: list[dict[str, Any]] = []
-        for selection in remaining:
-            dependencies = selection.get("dependencies")
-            internal = {
-                dependency.get("slug")
-                for dependency in dependencies
-                if isinstance(dependency, dict)
-            } if isinstance(dependencies, list) else set()
-            if not (internal & candidate_slugs) - emitted:
-                ready.append(selection)
-        if not ready:
-            ordered.extend(remaining)
-            break
-        for selection in ready:
-            remaining.remove(selection)
-            ordered.append(selection)
-            slug = selection.get("slug")
-            if isinstance(slug, str):
-                emitted.add(slug)
-    return ordered
 
 
 def _run_from(command: dict[str, Any]) -> str:
@@ -601,10 +517,6 @@ def render_plan(
     plan = _redact_model_value(plan)
     planned_date = planned_on or date.today()
     scope = plan["scope"]
-    dependencies = ", ".join(
-        dependency["slug"] for dependency in plan["dependencies"]
-    ) or "none"
-
     why = plan["why_this_matters"]
     current_state: list[str] = []
     for excerpt in plan["current_state_excerpts"]:
@@ -748,7 +660,6 @@ def render_plan(
         f"- **Priority**: {plan['priority']}\n"
         f"- **Effort**: {finding.get('effort', '—')}\n"
         f"- **Risk**: {finding.get('risk', '—')}\n"
-        f"- **Depends on**: {dependencies}\n"
         f"- **Category**: {finding.get('category', '—')}\n"
         f"- **Planned at**: commit `{planned_at[:7]}`, {planned_date.isoformat()}\n\n"
         + (
@@ -850,7 +761,7 @@ def _existing_index_rows(index_text: str) -> list[str]:
         if not line.startswith("|"):
             continue
         cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if len(cells) != 6 or cells[0] in {"Plan", "------"}:
+        if len(cells) != _INDEX_COLUMNS or cells[0] in {"Plan", "------"}:
             continue
         if set(cells[0]) == {"-"}:
             continue
@@ -895,7 +806,7 @@ def _row_has_plan_artifact(row: str, plans_dir: Path) -> bool:
 
 def _retryable_host_blocked_row(row: str, plans_dir: Path) -> bool:
     cells = _row_cells(row)
-    if len(cells) != 6 or _row_has_plan_artifact(row, plans_dir):
+    if len(cells) != _INDEX_COLUMNS or _row_has_plan_artifact(row, plans_dir):
         return False
     return _HOST_BLOCKED_STATUS.fullmatch(cells[-1]) is not None
 
@@ -931,71 +842,11 @@ def _highest_plan_number(plans_dir: Path, rows: Sequence[str]) -> int:
     return max(numbers, default=0)
 
 
-_DEPENDENCY_NOTE = re.compile(
-    r"^(\d{3}) depends on ([a-z0-9-]+) because (.+)$"
-)
-
-
-def _existing_dependency_notes(
-    index_text: str,
-) -> tuple[dict[tuple[int, str], str], list[str]]:
-    notes = _section_content(index_text).get("Dependency notes", "")
-    by_edge: dict[tuple[int, str], str] = {}
-    unstructured: list[str] = []
-    for line in notes.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped == "- None recorded.":
-            continue
-        if not stripped.startswith("- "):
-            continue
-        content = stripped[2:]
-        match = _DEPENDENCY_NOTE.fullmatch(content)
-        if match is None:
-            if content not in unstructured:
-                unstructured.append(content)
-            continue
-        key = (int(match.group(1)), match.group(2))
-        by_edge.setdefault(key, content)
-    return by_edge, unstructured
-
-
-def _dependency_edges(rows: Sequence[str]) -> list[tuple[int, str]]:
-    edges: list[tuple[int, str]] = []
-    for row in rows:
-        cells = _row_cells(row)
-        number = _row_number(row)
-        if len(cells) != 6 or number is None or cells[4] == "—":
-            continue
-        edges.extend(
-            (number, dependency.strip())
-            for dependency in cells[4].split(",")
-            if re.fullmatch(r"[a-z0-9-]+", dependency.strip())
-        )
-    return edges
-
-
-def _merged_dependency_notes(
-    rows: Sequence[str],
-    *,
-    existing: dict[tuple[int, str], str],
-    new: dict[tuple[int, str], str],
-    unstructured: Sequence[str],
-) -> list[str]:
-    notes = [
-        new[edge] if edge in new else existing[edge]
-        for edge in _dependency_edges(rows)
-        if edge in existing or edge in new
-    ]
-    notes.extend(note for note in unstructured if note not in notes)
-    return notes
-
-
 def _render_index(
     rows: Sequence[str],
     *,
     plans_dir: Path,
     non_interactive_default: bool,
-    dependency_notes: Sequence[str],
     run_session_id: str | None,
 ) -> str:
     rejections = load_rejections(plans_dir)
@@ -1014,8 +865,8 @@ def _render_index(
     return (
         "# Implementation Plans\n\n"
         f"Generated by daydream improve on {date.today().isoformat()}. Execute "
-        "in the order below unless dependencies say otherwise. Read each plan "
-        "fully, honor its STOP conditions, and update its row when done.\n"
+        "in the order below. Read each plan fully, honor its STOP conditions, "
+        "and update its row when done.\n"
         + (
             f"\nDaydream run: `{run_session_id}`\n"
             if run_session_id is not None
@@ -1024,18 +875,12 @@ def _render_index(
         +
         f"{default_note}\n"
         "## Execution order & status\n\n"
-        "| Plan | Title | Priority | Effort | Depends on | Status |\n"
-        "|------|-------|----------|--------|------------|--------|\n"
-        + ("\n".join(rows) if rows else "| — | No plans written. | — | — | — | — |")
+        "| Plan | Title | Priority | Effort | Status |\n"
+        "|------|-------|----------|--------|--------|\n"
+        + ("\n".join(rows) if rows else "| — | No plans written. | — | — | — |")
         + "\n\nStatus values: TODO | IN PROGRESS | DONE | BLOCKED "
         "(with one-line reason) | REJECTED (with one-line rationale)\n\n"
-        "## Dependency notes\n\n"
-        + (
-            "\n".join(f"- {note}" for note in dependency_notes)
-            if dependency_notes
-            else "- None recorded."
-        )
-        + "\n\n## Findings considered and rejected\n\n"
+        "## Findings considered and rejected\n\n"
         + ("\n".join(rejected_lines) if rejected_lines else "- None.")
         + "\n"
     )
@@ -1052,7 +897,7 @@ def _blocked_index_row(
     trusted_title = str(finding.get("title") or "Selected finding")
     return (
         f"| {number:03d} {marker} | {_markdown_cell(trusted_title)} | P2 | "
-        f"{_markdown_cell(finding.get('effort'))} | — | {status} |"
+        f"{_markdown_cell(finding.get('effort'))} | {status} |"
     )
 
 
@@ -1094,11 +939,6 @@ class PlanWriteSession:
     ``commit`` is synchronous on purpose: called from concurrent async tasks it
     runs to completion without an await point, so the shared row/number state
     needs no lock.
-
-    A plan that declares dependencies is deferred to :meth:`finish`, because
-    cycle detection and dependency availability are properties of the whole
-    selected set — resolving them per-arrival would make a plan's disposition
-    depend on completion order.
     """
 
     def __init__(
@@ -1125,21 +965,10 @@ class PlanWriteSession:
             or "non-interactive default" in index_text.lower()
         )
         self._rows = _existing_index_rows(index_text)
-        self._existing_notes, self._unstructured_notes = (
-            _existing_dependency_notes(index_text)
-        )
-        self._new_notes: dict[tuple[int, str], str] = {}
         self._fingerprints = planned_fingerprints(plans_dir)
         self._rejected = load_rejections(plans_dir)
         self._next_number = _highest_plan_number(plans_dir, self._rows) + 1
-        self._available_slugs = {
-            match.group(1).split("-", 1)[1]
-            for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
-            if (match := re.match(r"^(\d{3}-.+)\.md$", path.name))
-        }
         self._reserved_count = 0
-        self._selections: list[dict[str, Any]] = []
-        self._deferred: list[tuple[PlanReservation, dict[str, Any]]] = []
         self._written: list[tuple[int, dict[str, Any]]] = []
         self._skipped: list[tuple[int, dict[str, Any]]] = []
         self._failed: list[tuple[int, dict[str, Any]]] = []
@@ -1204,7 +1033,6 @@ class PlanWriteSession:
         safe = _redact_model_value(selection)
         if not isinstance(safe, dict):
             return PlanOutcome("ignored", None, None, "")
-        self._selections.append(safe)
         finding = safe.get("finding")
         if not isinstance(finding, dict):
             return PlanOutcome("ignored", None, None, "")
@@ -1227,28 +1055,10 @@ class PlanWriteSession:
                     )
                 )
             return PlanOutcome("skipped", None, None, title)
-        if not safe.get("error") and safe.get("dependencies"):
-            self._deferred.append((reservation, safe))
-            return PlanOutcome("deferred", reservation.number, None, title)
         return self._land(reservation, safe)
 
     def finish(self) -> dict[str, list[dict[str, Any]]]:
-        """Resolve deferred plans, reconcile the index, and return the result."""
-        deferred = self._deferred
-        self._deferred = []
-        candidate_slugs = {
-            selection.get("slug")
-            for selection in self._selections
-            if isinstance(selection.get("slug"), str)
-        }
-        cycle_slugs = _dependency_cycle_slugs(self._selections)
-        for reservation, selection in _in_dependency_order(deferred):
-            self._land(
-                reservation,
-                selection,
-                candidate_slugs=candidate_slugs,
-                cycle_slugs=cycle_slugs,
-            )
+        """Reconcile the index and return what this session landed."""
         self._write_index()
         return {
             "written": _by_reservation(self._written),
@@ -1308,9 +1118,6 @@ class PlanWriteSession:
         self,
         reservation: PlanReservation,
         selection: dict[str, Any],
-        *,
-        candidate_slugs: Collection[Any] = (),
-        cycle_slugs: Collection[str] = (),
     ) -> PlanOutcome:
         finding = selection["finding"]
         assert reservation.number is not None  # commit() gates on the number
@@ -1318,15 +1125,6 @@ class PlanWriteSession:
         title = str(finding.get("title") or "Selected finding")
         attempt = self._attempt_of(selection)
         slug = str(selection.get("slug") or "plan")
-        raw_dependencies = selection.get("dependencies")
-        dependencies: list[Any] = (
-            raw_dependencies if isinstance(raw_dependencies, list) else []
-        )
-        depends_on = [
-            str(dependency.get("slug"))
-            for dependency in dependencies
-            if isinstance(dependency, dict)
-        ]
         if selection.get("error"):
             raw_errors = attempt.get("errors") if attempt is not None else None
             if not isinstance(raw_errors, (list, tuple)) and attempt is not None:
@@ -1373,22 +1171,6 @@ class PlanWriteSession:
 
         plan_result = _plan_payload(selection)
         errors = self._planned_at_errors
-        if not errors:
-            if slug in depends_on:
-                errors = ("DEPENDENCY_SELF_REFERENCE",)
-            elif slug in cycle_slugs:
-                errors = ("DEPENDENCY_CYCLE",)
-            elif any(
-                dependency not in candidate_slugs
-                and dependency not in self._available_slugs
-                for dependency in depends_on
-            ):
-                errors = ("DEPENDENCY_UNKNOWN",)
-            elif any(
-                dependency not in self._available_slugs
-                for dependency in depends_on
-            ):
-                errors = ("DEPENDENCY_UNAVAILABLE",)
         if not errors and not _head_matches(self._repo, self._planned_at):
             errors = ("PLAN_HEAD_CHANGED",)
         if errors:
@@ -1445,19 +1227,8 @@ class PlanWriteSession:
             f"<!-- fingerprint:{reservation.fingerprint} --> | "
             f"{_markdown_cell(selection.get('title') or title)} | "
             f"{_markdown_cell(selection.get('priority') or 'P2')} | "
-            f"{_markdown_cell(finding.get('effort'))} | "
-            f"{_markdown_cell(', '.join(depends_on))} | TODO |"
+            f"{_markdown_cell(finding.get('effort'))} | TODO |"
         )
-        if depends_on:
-            self._new_notes.update(
-                {
-                    (number, dependency["slug"]): (
-                        f"{number:03d} depends on {dependency['slug']} "
-                        f"because {_markdown_cell(dependency['reason'])}"
-                    )
-                    for dependency in dependencies
-                }
-            )
         self._written.append(
             (
                 reservation.index,
@@ -1478,7 +1249,6 @@ class PlanWriteSession:
             )
         )
         self._fingerprints.add(reservation.fingerprint)
-        self._available_slugs.add(slug)
         self._write_index()
         return PlanOutcome("written", number, filename, title)
 
@@ -1499,12 +1269,6 @@ class PlanWriteSession:
                 self._rows,
                 plans_dir=self._plans_dir,
                 non_interactive_default=self._non_interactive_default,
-                dependency_notes=_merged_dependency_notes(
-                    self._rows,
-                    existing=self._existing_notes,
-                    new=self._new_notes,
-                    unstructured=self._unstructured_notes,
-                ),
                 run_session_id=self._run_session_id,
             ),
             encoding="utf-8",
@@ -1526,20 +1290,6 @@ def _by_reservation(
     return [entry for _, entry in sorted(entries, key=lambda item: item[0])]
 
 
-def _in_dependency_order(
-    pairs: Sequence[tuple[PlanReservation, dict[str, Any]]],
-) -> list[tuple[PlanReservation, dict[str, Any]]]:
-    """Order reservation/selection pairs dependency-first by identity."""
-    remaining = list(pairs)
-    ordered: list[tuple[PlanReservation, dict[str, Any]]] = []
-    for selection in _dependency_order([item for _, item in pairs]):
-        for position, (_, candidate) in enumerate(remaining):
-            if candidate is selection:
-                ordered.append(remaining.pop(position))
-                break
-    return ordered
-
-
 def write_plans(
     plans_dir: Path,
     selections: Sequence[dict[str, Any]],
@@ -1548,21 +1298,16 @@ def write_plans(
     non_interactive_default: bool = False,
     run_session_id: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Reconcile a complete set of plan-writer results in one call.
-
-    Numbers follow dependency order here because the whole set is known up
-    front; a caller that commits results as they arrive reserves its own
-    numbers through :class:`PlanWriteSession`.
-    """
+    """Reconcile a complete set of plan-writer results in one call."""
     session = PlanWriteSession(
         plans_dir,
         planned_at=planned_at,
         non_interactive_default=non_interactive_default,
         run_session_id=run_session_id,
     )
-    ordered = _dependency_order(
-        [selection for selection in selections if isinstance(selection, dict)]
-    )
+    ordered = [
+        selection for selection in selections if isinstance(selection, dict)
+    ]
     reservations = session.reserve(
         [
             selection.get("finding")

@@ -550,7 +550,6 @@ def _authored_plan(*, slug: str = "batch-catalog-queries") -> dict[str, Any]:
         "slug": slug,
         "title": "Batch catalog queries before loading items",
         "priority": "P1",
-        "dependencies": [],
         "why_this_matters": {
             "problem": "list_catalog currently loads each catalog item separately.",
             "concrete_cost": "Large catalogs create avoidable query latency per request.",
@@ -1313,123 +1312,6 @@ def test_head_change_after_planning_blocks_stale_todo(tmp_path: Path) -> None:
     ).read_text()
 
 
-def test_dependency_cycle_blocks_every_member(tmp_path: Path) -> None:
-    repo, sha = _repo(tmp_path)
-    first = _authored_plan(slug="catalog-foundation")
-    second = _authored_plan(slug="catalog-consumer")
-    first["dependencies"] = [
-        {
-            "slug": "catalog-consumer",
-            "reason": "The foundation assumes the consumer contract is established.",
-        }
-    ]
-    second["dependencies"] = [
-        {
-            "slug": "catalog-foundation",
-            "reason": "The consumer must follow the established foundation contract.",
-        }
-    ]
-
-    result = write_plans(
-        repo / "daydream_plans",
-        [
-            {
-                "finding": _finding(fingerprint="fp-foundation"),
-                **_assembled(repo, first),
-            },
-            {
-                "finding": _finding(fingerprint="fp-consumer"),
-                **_assembled(repo, second),
-            },
-        ],
-        planned_at=sha,
-    )
-
-    assert result["written"] == []
-    assert len(result["failed"]) == 2
-    assert (repo / "daydream_plans/README.md").read_text().count(
-        "DEPENDENCY_CYCLE"
-    ) == 2
-
-
-def test_dependency_precedes_consumer_and_reason_is_rendered(
-    tmp_path: Path,
-) -> None:
-    repo, sha = _repo(tmp_path)
-    foundation = _authored_plan(slug="catalog-foundation")
-    consumer = _authored_plan(slug="catalog-consumer")
-    consumer["dependencies"] = [
-        {
-            "slug": "catalog-foundation",
-            "reason": "The consumer must follow the established foundation contract.",
-        }
-    ]
-
-    result = write_plans(
-        repo / "daydream_plans",
-        [
-            {
-                "finding": _finding(fingerprint="fp-consumer"),
-                **_assembled(repo, consumer),
-            },
-            {
-                "finding": _finding(fingerprint="fp-foundation"),
-                **_assembled(repo, foundation),
-            },
-        ],
-        planned_at=sha,
-    )
-
-    assert [entry["slug"] for entry in result["written"]] == [
-        "catalog-foundation",
-        "catalog-consumer",
-    ]
-    assert [path.name for path in (repo / "daydream_plans").glob("0*.md")] == [
-        "001-catalog-foundation.md",
-        "002-catalog-consumer.md",
-    ]
-    index = (repo / "daydream_plans/README.md").read_text()
-    assert (
-        "002 depends on catalog-foundation because The consumer must follow "
-        "the established foundation contract."
-    ) in index
-
-
-def test_dependency_reason_survives_later_unrelated_append(
-    tmp_path: Path,
-) -> None:
-    repo, sha = _repo(tmp_path)
-    foundation = _authored_plan(slug="catalog-foundation")
-    consumer = _authored_plan(slug="catalog-consumer")
-    reason = "The consumer must follow the established foundation contract."
-    consumer["dependencies"] = [
-        {
-            "slug": "catalog-foundation",
-            "reason": reason,
-        }
-    ]
-    write_plans(
-        repo / "daydream_plans",
-        [
-            _selection(repo, plan=consumer, fingerprint="fp-consumer"),
-            _selection(repo, plan=foundation, fingerprint="fp-foundation"),
-        ],
-        planned_at=sha,
-    )
-
-    unrelated = _authored_plan(slug="catalog-observability")
-    result = write_plans(
-        repo / "daydream_plans",
-        [_selection(repo, plan=unrelated, fingerprint="fp-observability")],
-        planned_at=sha,
-    )
-
-    assert [entry["number"] for entry in result["written"]] == [3]
-    index = (repo / "daydream_plans/README.md").read_text()
-    assert index.count(f"002 depends on catalog-foundation because {reason}") == 1
-    assert "| catalog-foundation | TODO |" in index
-
-
 @pytest.mark.parametrize(
     "status",
     [
@@ -1541,14 +1423,14 @@ def test_rejected_index_status_is_preserved_and_not_retried(
     index_path = plans_dir / "README.md"
     rejected_row = (
         "| 001 <!-- fingerprint:fp-fix-n-plus-one --> | "
-        "Fix N+1 catalog queries | P2 | M | — | "
+        "Fix N+1 catalog queries | P2 | M | "
         "REJECTED (superseded by repository evidence) |"
     )
     index_path.write_text(
         "# Implementation Plans\n\n"
         "## Execution order & status\n\n"
-        "| Plan | Title | Priority | Effort | Depends on | Status |\n"
-        "|------|-------|----------|--------|------------|--------|\n"
+        "| Plan | Title | Priority | Effort | Status |\n"
+        "|------|-------|----------|--------|--------|\n"
         f"{rejected_row}\n",
         encoding="utf-8",
     )
@@ -1567,13 +1449,6 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(
     repo, sha = _repo(tmp_path)
     authoring_invalid = _authored_plan(slug="authoring-invalid-plan")
     authoring_invalid["title"] = "Too short"
-    dependency_invalid = _authored_plan(slug="dependency-invalid-plan")
-    dependency_invalid["dependencies"] = [
-        {
-            "slug": "missing-foundation",
-            "reason": "The implementation requires a foundation that is not available.",
-        }
-    ]
 
     selections = [
         {
@@ -1591,10 +1466,6 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(
             _issues(repo, authoring_invalid),
             fingerprint="fp-authoring",
         ),
-        {
-            "finding": _finding(fingerprint="fp-dependency"),
-            **_assembled(repo, dependency_invalid),
-        },
         {
             "finding": _finding(fingerprint="fp-success"),
             **_assembled(repo, _authored_plan(slug="successful-plan")),
@@ -1617,7 +1488,6 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(
     } == {
         "fp-transport": ("transport", "blocked"),
         "fp-authoring": ("authoring", "blocked"),
-        "fp-dependency": ("dependency", "blocked"),
         "fp-success": ("success", "success"),
     }
     assert diagnostics["fp-transport"]["validation_errors"] == [
@@ -1629,9 +1499,6 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(
             "pointer": "/title",
             "detail": "minLength=12;actual=9",
         }
-    ]
-    assert diagnostics["fp-dependency"]["validation_errors"] == [
-        {"code": "DEPENDENCY_UNKNOWN", "pointer": "/dependencies"}
     ]
     assert diagnostics["fp-success"]["artifact"]["path"].endswith(
         "-successful-plan.md"

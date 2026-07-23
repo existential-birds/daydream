@@ -1472,12 +1472,6 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                 f"Plan {outcome.number:03d} written to "
                 f"daydream_plans/{outcome.path} ({landed}/{total}).",
             )
-        elif outcome.status == "deferred":
-            print_info(
-                console,
-                f"Plan {outcome.number:03d} for {outcome.title} is held until "
-                f"its dependencies land ({landed}/{total}).",
-            )
         else:
             print_info(
                 console,

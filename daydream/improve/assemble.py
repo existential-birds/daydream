@@ -72,7 +72,6 @@ def _branch_name(slug: str) -> str:
 
 
 _AUTHOR_PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
-    ("dependencies", "*", "reason"),
     ("why_this_matters", "problem"),
     ("why_this_matters", "concrete_cost"),
     ("why_this_matters", "intended_outcome"),
@@ -243,18 +242,6 @@ def _dedup_scope(normalized: dict[str, Any], *, repo: Path) -> None:
         ]
 
 
-def _drop_self_dependencies(normalized: dict[str, Any]) -> None:
-    dependencies = normalized.get("dependencies")
-    if not isinstance(dependencies, list):
-        return
-    slug = normalized.get("slug")
-    normalized["dependencies"] = [
-        dependency
-        for dependency in dependencies
-        if not (isinstance(dependency, dict) and dependency.get("slug") == slug)
-    ]
-
-
 def _clamp_anchor(anchor: Any, line_count: int) -> None:
     if not isinstance(anchor, dict):
         return
@@ -370,7 +357,6 @@ def _normalize_authored(
     for pattern, limit in _AUTHOR_PROSE_CLAMP_LIMITS:
         _clamp_node(normalized, pattern, limit)
     _dedup_scope(normalized, repo=repo)
-    _drop_self_dependencies(normalized)
     _clamp_excerpt_end_lines(normalized, repo=repo)
     return normalized
 
@@ -1073,7 +1059,6 @@ def assemble_plan(
         "slug": normalized["slug"],
         "title": normalized["title"],
         "priority": normalized["priority"],
-        "dependencies": deepcopy(normalized["dependencies"]),
         "why_this_matters": dict(normalized["why_this_matters"]),
         "current_state_excerpts": current_state_excerpts,
         "commands_you_will_need": _derived_commands_table(

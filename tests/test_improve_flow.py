@@ -204,7 +204,6 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
         "slug": slug,
         "title": title,
         "priority": "P1",
-        "dependencies": [],
         "why_this_matters": {
             "problem": (
                 f"{finding['title']} affects the billing service contract today."
@@ -495,7 +494,6 @@ class _ImproveStubBackend:
         self.recon_languages_override: Any = None
         self.recon_output_override: Any = None
         self.plan_tool_calls_before_result = 0
-        self.plan_dependency_slug: str | None = None
         self.plan_file_role_override: str | None = None
         self.plan_problem_override: str | None = None
         self.plan_instruction_override: str | None = None
@@ -870,24 +868,8 @@ class _ImproveStubBackend:
             ):
                 plan["priority"] = "TOKEN=PRIVATE_SCHEMA_SECRET"
                 plan["title"] = "PRIVATE_SCHEMA_SECRET rejected title"
-                plan["dependencies"] = [
-                    {
-                        "slug": "private-schema-secret",
-                        "reason": "PRIVATE_SCHEMA_SECRET rejected dependency",
-                    }
-                ]
             if self.inject_credential:
                 plan["priority"] = "OPENAI_API_KEY=sk-secret123456"
-            if self.plan_dependency_slug:
-                plan["dependencies"] = [
-                    {
-                        "slug": self.plan_dependency_slug,
-                        "reason": (
-                            "The billing implementation must follow the established "
-                            "billing foundation contract."
-                        ),
-                    }
-                ]
             yield ResultEvent(
                 structured_output=plan,
                 continuation=None,
@@ -2865,11 +2847,11 @@ async def test_real_improve_flow_plans_from_live_dirty_source_without_running_ca
     (plans_dir / "README.md").write_text(
         "# Implementation Plans\n\n"
         "## Execution order & status\n\n"
-        "| Plan | Title | Priority | Effort | Depends on | Status |\n"
-        "|------|-------|----------|--------|------------|--------|\n"
+        "| Plan | Title | Priority | Effort | Status |\n"
+        "|------|-------|----------|--------|--------|\n"
         "| [001](001-billing-foundation.md) "
         "<!-- fingerprint:trusted-existing-foundation --> | "
-        "Establish billing foundation | P1 | S | — | TODO |\n",
+        "Establish billing foundation | P1 | S | TODO |\n",
         encoding="utf-8",
     )
     stub = _install_improve_stub(
@@ -2877,7 +2859,6 @@ async def test_real_improve_flow_plans_from_live_dirty_source_without_running_ca
         improve_monorepo_target,
         n_findings=1,
     )
-    stub.plan_dependency_slug = "billing-foundation"
     stub.recon_commands_extra = [
         {
             "id": "manual-sentinel",
@@ -2920,7 +2901,6 @@ async def test_real_improve_flow_plans_from_live_dirty_source_without_running_ca
         in plan
     )
     assert "uv run pytest apps/billing/test_api.py -q" in plan
-    assert "billing-foundation" in plan
     assert source_path.read_text(encoding="utf-8") == user_edit
     assert _git_status_porcelain(improve_monorepo_target) == dirty_status
     assert not (improve_monorepo_target / "candidate-command-ran").exists()
@@ -2942,7 +2922,7 @@ async def test_real_improve_flow_plans_from_live_dirty_source_without_running_ca
     )
 
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    assert "| high-leverage-title | P1 | S | billing-foundation | TODO |" in index
+    assert "| high-leverage-title | P1 | S | TODO |" in index
 
     diagnostics = json.loads(
         _dd(

@@ -240,7 +240,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
         "slug",
         "title",
         "priority",
-        "dependencies",
         "why_this_matters",
         "scope",
         "context_excerpts",
@@ -257,22 +256,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
         "slug": _SLUG_SCHEMA,
         "title": {"type": "string", "minLength": 12, "maxLength": 160},
         "priority": {"type": "string", "enum": ["P1", "P2", "P3"]},
-        "dependencies": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["slug", "reason"],
-                "properties": {
-                    "slug": _SLUG_SCHEMA,
-                    "reason": {
-                        "type": "string",
-                        "minLength": 20,
-                        "maxLength": 300,
-                    },
-                },
-            },
-        },
         "why_this_matters": {
             "type": "object",
             "additionalProperties": False,
