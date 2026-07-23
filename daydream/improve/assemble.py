@@ -2,9 +2,10 @@
 
 The model authors judgment content only (``PLAN_AUTHOR_SCHEMA``); this module
 normalizes it, collects every authoring issue at once, and expands the result
-into the assembled plan shape (``PLAN_WRITER_SCHEMA``) that ``render_plan`` and
-``write_plans`` already consume. Assembly is pure with respect to the model
-output: filesystem reads only, no randomness, no wall-clock reads.
+into the assembled plan shape that ``render_plan`` and ``write_plans`` already
+consume. Assembly is the single validation boundary for model-authored plan
+content: nothing downstream re-checks it. Assembly is pure with respect to the
+model output: filesystem reads only, no randomness, no wall-clock reads.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from daydream.improve.command_contract import (
 from daydream.improve.command_contract import (
     valid_repository_file_path as _valid_repository_file_path,
 )
-from daydream.improve.plans import _clamp_node, redact_secret_values
+from daydream.improve.plans import redact_secret_values
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
 
 GIT_PUSH_POLICY = "never-without-operator-instruction"
@@ -124,6 +125,31 @@ _AUTHOR_PROSE_CLAMP_LIMITS: tuple[tuple[tuple[str, ...], int], ...] = tuple(
     (pattern, _author_schema_max_length(pattern))
     for pattern in _AUTHOR_PROSE_FIELD_PATTERNS
 )
+
+
+def _clamp_string(value: Any, limit: int) -> Any:
+    if isinstance(value, str) and len(value) > limit:
+        return value[: limit - 1] + "…"
+    return value
+
+
+def _clamp_node(node: Any, pattern: tuple[str, ...], limit: int) -> None:
+    head, rest = pattern[0], pattern[1:]
+    if head == "*":
+        if not isinstance(node, list):
+            return
+        for index, child in enumerate(node):
+            if rest:
+                _clamp_node(child, rest, limit)
+            else:
+                node[index] = _clamp_string(child, limit)
+        return
+    if not isinstance(node, dict):
+        return
+    if rest:
+        _clamp_node(node.get(head), rest, limit)
+    elif head in node:
+        node[head] = _clamp_string(node[head], limit)
 
 
 def _strip_unknown(value: Any, schema: dict[str, Any]) -> Any:
@@ -997,8 +1023,8 @@ def assemble_plan(
 
     Returns ``(assembled, ())`` on success or ``(None, issues)`` when
     authoring defects remain after normalization. The assembled dict has the
-    ``PLAN_WRITER_SCHEMA`` shape so ``render_plan``/``write_plans`` and review
-    parsing are unchanged. Never raises on model content.
+    shape ``render_plan``/``write_plans`` and review parsing consume. Never
+    raises on model content.
     """
     normalized = _normalize_authored(authored, repo=repo)
     if normalized is None:

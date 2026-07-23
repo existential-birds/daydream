@@ -67,7 +67,6 @@ from daydream.improve.plans import (
     record_rejections,
     render_plan,
     resolve_review_plan_path,
-    validate_plan_result,
 )
 from daydream.improve.prioritize import (
     aggregate_cross_service,
@@ -2176,24 +2175,6 @@ async def _review_plan(ctx: FlowContext, requested: str) -> None:
             code="REVIEW_HEAD_UNAVAILABLE",
         )
         return
-    validation_errors = validate_plan_result(
-        plan,
-        repo=ctx.work.repo,
-        planned_at=identity.planned_at,
-        finding=identity.finding,
-        recon_commands=recon_commands,
-    )
-    if validation_errors:
-        _reject_plan_review(
-            ctx,
-            plan_path=plan_path,
-            code=(
-                "REVIEW_PLAN_VALIDATION_FAILED:"
-                + ",".join(validation_errors)
-            ),
-        )
-        return
-
     try:
         rendered = render_plan(
             identity.finding,
@@ -2270,7 +2251,6 @@ async def _step_write_plans(ctx: FlowContext) -> None:
     session = PlanWriteSession(
         plans_dir,
         planned_at=planned_at,
-        commands=_verification_commands(ctx.data["recon"]),
         non_interactive_default=(
             ctx.data["selection_mode"] == "non-interactive-default"
         ),

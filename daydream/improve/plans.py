@@ -12,27 +12,6 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator
-
-from daydream.improve.command_contract import (
-    command_argv as _command_argv,
-)
-from daydream.improve.command_contract import (
-    has_shell_composition as _has_shell_composition,
-)
-from daydream.improve.command_contract import (
-    literal_command_error as _literal_command_error,
-)
-from daydream.improve.command_contract import (
-    path_is_confined as _path_is_confined,
-)
-from daydream.improve.command_contract import (
-    valid_directory_scope_lexical as _valid_directory_scope,
-)
-from daydream.improve.command_contract import (
-    valid_repository_file_path as _valid_repository_file_path,
-)
-from daydream.improve.prompts import PLAN_WRITER_SCHEMA
 from daydream.trajectory import redact_text
 
 REJECTIONS_SCHEMA_VERSION = 1
@@ -185,14 +164,6 @@ _SECRET_VALUE_TRIM = "`'\".,;:()*"
 _SAFE_METADATA_LABEL = re.compile(r"^[A-Za-z0-9._:/-]{1,160}$")
 
 
-def _contains_secret_value(text: str) -> bool:
-    for match in _SECRET_VALUE.finditer(text):
-        candidate = match.group(1).strip(_SECRET_VALUE_TRIM)
-        if candidate and not _SECRET_PLACEHOLDER.fullmatch(candidate):
-            return True
-    return False
-
-
 def redact_secret_values(text: str) -> str:
     """Deterministically replace literal secret values with ``<redacted>``."""
 
@@ -204,110 +175,6 @@ def redact_secret_values(text: str) -> str:
         return match.group(0)
 
     return _SECRET_VALUE.sub(_replace, text)
-
-
-def _string_pointers(value: Any, pointer: str = "") -> list[tuple[str, str]]:
-    if isinstance(value, str):
-        return [(pointer or "/", value)]
-    if isinstance(value, dict):
-        return [
-            item
-            for key, child in value.items()
-            for item in _string_pointers(child, f"{pointer}/{key}")
-        ]
-    if isinstance(value, list):
-        return [
-            item
-            for index, child in enumerate(value)
-            for item in _string_pointers(child, f"{pointer}/{index}")
-        ]
-    return []
-
-
-# Render-only prose fields, clamped in place to their schema maxLength at the
-# authoritative write boundary. Identifiers, enums, paths, symbols, and
-# literal command material are never clamped: the host compares those against
-# repository or recon state, so truncation would corrupt that comparison.
-_PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
-    ("dependencies", "*", "reason"),
-    ("why_this_matters", "problem"),
-    ("why_this_matters", "concrete_cost"),
-    ("why_this_matters", "intended_outcome"),
-    ("current_state_excerpts", "*", "file_role"),
-    ("commands_you_will_need", "*", "purpose"),
-    ("scope", "existing_paths", "*", "role"),
-    ("scope", "new_paths", "*", "role"),
-    ("scope", "out_of_scope_paths", "*", "reason"),
-    ("scope", "out_of_scope_behaviors", "*", "behavior"),
-    ("scope", "out_of_scope_behaviors", "*", "reason"),
-    ("git_workflow", "branch_basis"),
-    ("git_workflow", "commit_boundaries"),
-    ("git_workflow", "commit_message_example"),
-    ("steps", "*", "title"),
-    # See the matching note in assemble.py: the executable payload is never
-    # clamped. Assembly already rejected an over-length one.
-    ("steps", "*", "verification", "purpose"),
-    ("test_plan", "exemplars", "*", "pattern_to_copy"),
-    ("test_plan", "cases", "*", "name"),
-    ("test_plan", "cases", "*", "setup"),
-    ("test_plan", "cases", "*", "action"),
-    ("test_plan", "cases", "*", "assertions", "*"),
-    ("test_plan", "cases", "*", "verification", "purpose"),
-    ("done_criteria", "*", "description"),
-    ("done_criteria", "*", "verification", "purpose"),
-    ("stop_conditions", "*", "condition"),
-    ("stop_conditions", "*", "evidence_to_report"),
-    ("maintenance_notes", "future_interactions", "*", "area"),
-    ("maintenance_notes", "future_interactions", "*", "note"),
-    ("maintenance_notes", "review_risks", "*", "risk"),
-    ("maintenance_notes", "review_risks", "*", "review_check"),
-    ("maintenance_notes", "deferred_items", "*", "item"),
-    ("maintenance_notes", "deferred_items", "*", "reason"),
-    ("maintenance_notes", "deferred_items", "*", "revisit_trigger"),
-)
-
-
-def _schema_max_length(pattern: tuple[str, ...]) -> int:
-    node: dict[str, Any] = PLAN_WRITER_SCHEMA
-    for segment in pattern:
-        node = node["items"] if segment == "*" else node["properties"][segment]
-    return int(node["maxLength"])
-
-
-_PROSE_CLAMP_LIMITS: tuple[tuple[tuple[str, ...], int], ...] = tuple(
-    (pattern, _schema_max_length(pattern)) for pattern in _PROSE_FIELD_PATTERNS
-)
-
-
-def _clamp_string(value: Any, limit: int) -> Any:
-    if isinstance(value, str) and len(value) > limit:
-        return value[: limit - 1] + "…"
-    return value
-
-
-def _clamp_node(node: Any, pattern: tuple[str, ...], limit: int) -> None:
-    head, rest = pattern[0], pattern[1:]
-    if head == "*":
-        if not isinstance(node, list):
-            return
-        for index, child in enumerate(node):
-            if rest:
-                _clamp_node(child, rest, limit)
-            else:
-                node[index] = _clamp_string(child, limit)
-        return
-    if not isinstance(node, dict):
-        return
-    if rest:
-        _clamp_node(node.get(head), rest, limit)
-    elif head in node:
-        node[head] = _clamp_string(node[head], limit)
-
-
-def _clamp_prose_fields(result: dict[str, Any]) -> None:
-    """Truncate over-limit render-only prose to its schema maxLength."""
-    for pattern, limit in _PROSE_CLAMP_LIMITS:
-        _clamp_node(result, pattern, limit)
 
 
 def _safe_metadata_label(value: Any, *, fallback: str) -> str:
@@ -371,32 +238,12 @@ def _received_metadata(value: Any) -> dict[str, Any]:
 def _validation_error(code_with_pointer: str) -> dict[str, str]:
     code, separator, remainder = code_with_pointer.partition("@")
     embedded_pointer, _, detail = remainder.partition("#")
+    # Assembly issues always carry their own pointer; the host codes raised
+    # around them are plan-wide, apart from the dependency graph.
     if separator and embedded_pointer.startswith("/"):
         pointer = embedded_pointer
     elif code.startswith("DEPENDENCY_"):
         pointer = "/dependencies"
-    elif code.startswith(("EXCERPT_", "EXISTING_PATH_EXCERPT")):
-        pointer = "/current_state_excerpts"
-    elif code.startswith(("SCOPE_", "EMPTY_SCOPE", "NEW_PATH_", "EXISTING_PATH_")):
-        pointer = "/scope"
-    elif code.startswith(("STEP_", "CREATE_PATH_", "CHANGE_PATH_", "TARGET_STATE_")):
-        pointer = "/steps"
-    elif code.startswith(("TEST_",)):
-        pointer = "/test_plan"
-    elif code.startswith("DONE_"):
-        pointer = "/done_criteria"
-    elif code.startswith("STOP_"):
-        pointer = "/stop_conditions"
-    elif code in {
-        "MALFORMED_COMMAND",
-        "RECON_COMMAND_MISMATCH",
-        "PLANNER_COMMAND_PREFIX_MISMATCH",
-        "PLANNER_COMMAND_SHELL_COMPOSITION",
-        "PATH_OUT_OF_SCOPE",
-    }:
-        pointer = "/commands_you_will_need"
-    elif code == "MALFORMED_PATH":
-        pointer = "/scope"
     else:
         pointer = "/"
     if detail and _SAFE_ERROR_DETAIL.fullmatch(detail):
@@ -436,8 +283,6 @@ def _validation_stage(errors: Sequence[str]) -> str:
     codes = [error.partition("@")[0] for error in errors]
     if any(code.startswith("DEPENDENCY_") for code in codes):
         return "dependency"
-    if any(code in {"SCHEMA_INVALID", "LEGACY_MARKDOWN_OUTPUT"} for code in codes):
-        return "schema"
     if any(code == "RENDER_FAILED" for code in codes):
         return "render"
     if any(code in _AUTHORING_CODES for code in codes):
@@ -545,13 +390,6 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _read_host_file(repo: Path, path: str) -> str | None:
-    try:
-        return (repo / path).read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return None
-
-
 def _head_matches(repo: Path, planned_at: str) -> bool:
     planned = _git(repo, "rev-parse", "--verify", f"{planned_at}^{{commit}}")
     head = _git(repo, "rev-parse", "--verify", "HEAD")
@@ -560,482 +398,6 @@ def _head_matches(repo: Path, planned_at: str) -> bool:
         and head.returncode == 0
         and planned.stdout.strip() == head.stdout.strip()
     )
-
-
-def valid_plan_path(value: str, *, repo: Path) -> bool:
-    """Return whether a repository file path is safe and confined to ``repo``."""
-    return _valid_repository_file_path(value) and _path_is_confined(repo, value)
-
-
-def valid_directory_scope(value: str, *, repo: Path) -> bool:
-    """Return whether an authored directory prefix is safe and repo-confined."""
-    return _valid_directory_scope(value) and _path_is_confined(
-        repo,
-        value,
-        directory_scope=True,
-    )
-
-
-def _command_candidates(result: Any) -> list[Any]:
-    """Find authored command fields for semantic validation."""
-    if isinstance(result, dict):
-        return [
-            *([result["command"]] if "command" in result else []),
-            *[
-                command
-                for value in result.values()
-                for command in _command_candidates(value)
-            ],
-        ]
-    if isinstance(result, list):
-        return [
-            command
-            for value in result
-            for command in _command_candidates(value)
-        ]
-    return []
-
-
-def _authored_path_candidates(result: Any) -> tuple[list[Any], list[Any]]:
-    """Find authored repository-file and directory-prefix fields."""
-    if isinstance(result, dict):
-        file_paths: list[Any] = []
-        directory_scopes: list[Any] = []
-        for key, value in result.items():
-            if key == "out_of_scope_paths" and isinstance(value, list):
-                for entry in value:
-                    if isinstance(entry, dict):
-                        directory_scopes.append(entry.get("path"))
-                        for entry_key, entry_value in entry.items():
-                            if entry_key != "path":
-                                nested_files, nested_scopes = (
-                                    _authored_path_candidates(entry_value)
-                                )
-                                file_paths.extend(nested_files)
-                                directory_scopes.extend(nested_scopes)
-                continue
-            if key in {"path", "source_path", "test_file"}:
-                file_paths.append(value)
-            elif key == "paths" and isinstance(value, list):
-                directory_scopes.extend(value)
-            elif key == "related_paths" and isinstance(value, list):
-                file_paths.extend(value)
-            nested_files, nested_scopes = _authored_path_candidates(value)
-            file_paths.extend(nested_files)
-            directory_scopes.extend(nested_scopes)
-        return file_paths, directory_scopes
-    if isinstance(result, list):
-        file_paths = []
-        directory_scopes = []
-        for value in result:
-            nested_files, nested_scopes = _authored_path_candidates(value)
-            file_paths.extend(nested_files)
-            directory_scopes.extend(nested_scopes)
-        return file_paths, directory_scopes
-    return [], []
-
-
-def _working_directory_candidates(result: Any) -> list[Any]:
-    """Find authored working directories for semantic validation."""
-    if isinstance(result, dict):
-        candidates = (
-            [result["working_directory"]]
-            if "working_directory" in result
-            else []
-        )
-        return [
-            *candidates,
-            *[
-                working_directory
-                for value in result.values()
-                for working_directory in _working_directory_candidates(value)
-            ],
-        ]
-    if isinstance(result, list):
-        return [
-            working_directory
-            for value in result
-            for working_directory in _working_directory_candidates(value)
-        ]
-    return []
-
-
-def _command_error(
-    command: dict[str, Any],
-    in_scope: set[str],
-    *,
-    repo: Path,
-    recon_by_id: dict[str, dict[str, Any]] | None = None,
-) -> str | None:
-    literal = command["command"]
-    if _literal_command_error(literal, allow_shell_composition=True):
-        return "MALFORMED_COMMAND"
-    working_directory = command["working_directory"]
-    if (
-        working_directory != "."
-        and not _valid_repository_file_path(working_directory)
-    ):
-        return "COMMAND_WORKING_DIRECTORY_INVALID"
-    if (
-        not _path_is_confined(repo, working_directory)
-        or not (repo / working_directory).is_dir()
-    ):
-        return "PATH_OUTSIDE_REPOSITORY"
-    applicability = command["applicability"]
-    scope = applicability["scope"]
-    paths = scope.get("paths", [])
-    if any(not _valid_directory_scope(path) for path in paths):
-        return "MALFORMED_PATH"
-    if any(
-        not _path_is_confined(repo, path, directory_scope=True)
-        for path in paths
-    ):
-        return "PATH_OUTSIDE_REPOSITORY"
-    if any(
-        not any(
-            in_scope_path == path.rstrip("/")
-            or in_scope_path.startswith(f"{path.rstrip('/')}/")
-            for in_scope_path in in_scope
-        )
-        for path in paths
-    ):
-        return "COMMAND_SCOPE_MISMATCH"
-    provenance = command["provenance"]
-    recon_id = provenance["recon_command_id"]
-    source_path = provenance["source_path"]
-    if (
-        provenance["kind"] == "planner-derived"
-        and _has_shell_composition(literal)
-    ):
-        return "PLANNER_COMMAND_SHELL_COMPOSITION"
-    if recon_by_id is not None:
-        base = recon_by_id.get(recon_id)
-        if base is None:
-            return "RECON_COMMAND_UNKNOWN"
-        if provenance["kind"] == "recon":
-            if (
-                source_path != base["evidence"]["source_path"]
-                or any(
-                    command[key] != base[key]
-                    for key in (
-                        "purpose",
-                        "command",
-                        "working_directory",
-                        "expected_success",
-                        "applicability",
-                    )
-                )
-            ):
-                return "RECON_COMMAND_MISMATCH"
-        else:
-            base_argv = _command_argv(base["command"])
-            plan_argv = _command_argv(literal)
-            if (
-                base_argv is None
-                or plan_argv is None
-                or plan_argv[: len(base_argv)] != base_argv
-                or command["working_directory"] != base["working_directory"]
-            ):
-                return "PLANNER_COMMAND_PREFIX_MISMATCH"
-    return None
-
-
-def validate_plan_result(
-    result: Any,
-    *,
-    repo: Path,
-    planned_at: str,
-    finding: dict[str, Any] | None = None,
-    recon_commands: Sequence[dict[str, Any]] | None = None,
-) -> tuple[str, ...]:
-    """Return stable fail-closed errors for a host-assembled plan.
-
-    Write-boundary self-check: assembly (``assemble.assemble_plan``) satisfies
-    these checks by construction, so a non-empty result indicates a host bug.
-    It intentionally returns codes, never rejected values, so callers can
-    safely persist its result.
-    """
-    if isinstance(result, dict) and "markdown" in result:
-        return ("LEGACY_MARKDOWN_OUTPUT",)
-    if not isinstance(result, dict):
-        return ("SCHEMA_INVALID@/",)
-    _clamp_prose_fields(result)
-    schema_result = result
-    raw_excerpts = result.get("current_state_excerpts")
-    if isinstance(raw_excerpts, list):
-        schema_result = {
-            **result,
-            "current_state_excerpts": [
-                (
-                    {
-                        **excerpt,
-                        "verbatim_excerpt": None,
-                    }
-                    if isinstance(excerpt, dict)
-                    and not isinstance(excerpt.get("verbatim_excerpt"), str)
-                    else excerpt
-                )
-                for excerpt in raw_excerpts
-            ],
-        }
-    schema_errors = sorted(
-        Draft202012Validator(PLAN_WRITER_SCHEMA).iter_errors(schema_result),
-        key=lambda error: tuple(str(part) for part in error.absolute_path),
-    )
-    if schema_errors:
-        error = schema_errors[0]
-        pointer_parts = [str(part) for part in error.absolute_path]
-        if error.validator == "required":
-            missing = sorted(set(error.validator_value) - set(error.instance))
-            if missing:
-                pointer_parts.append(missing[0])
-        pointer = "/" + "/".join(pointer_parts) if pointer_parts else "/"
-        detail = ""
-        if error.validator in {
-            "maxLength",
-            "minLength",
-            "maxItems",
-            "minItems",
-        } and isinstance(error.instance, (str, list)):
-            detail = (
-                f"#{error.validator}={error.validator_value}"
-                f";actual={len(error.instance)}"
-            )
-        return (f"SCHEMA_INVALID@{pointer}{detail}",)
-
-    if any(
-        _literal_command_error(
-            command,
-            allow_shell_composition=True,
-        )
-        for command in _command_candidates(result)
-    ):
-        return ("MALFORMED_COMMAND",)
-    repository_file_paths, directory_scopes = _authored_path_candidates(result)
-    if any(
-        not isinstance(path, str) or not _valid_repository_file_path(path)
-        for path in repository_file_paths
-    ) or any(
-        not isinstance(path, str) or not _valid_directory_scope(path)
-        for path in directory_scopes
-    ):
-        return ("MALFORMED_PATH",)
-    if any(
-        not _path_is_confined(repo, path)
-        for path in repository_file_paths
-        if isinstance(path, str)
-    ) or any(
-        not _path_is_confined(repo, path, directory_scope=True)
-        for path in directory_scopes
-        if isinstance(path, str)
-    ) or any(
-        not isinstance(working_directory, str)
-        or (
-            working_directory != "."
-            and not _valid_repository_file_path(working_directory)
-        )
-        or not _path_is_confined(repo, working_directory)
-        for working_directory in _working_directory_candidates(result)
-    ):
-        return ("PATH_OUTSIDE_REPOSITORY",)
-
-    for string_pointer, text in _string_pointers(result):
-        if _contains_secret_value(text):
-            return (f"SECRET_CONTENT_REDACTED@{string_pointer}",)
-
-    scope = result["scope"]
-    existing = [item["path"] for item in scope["existing_paths"]]
-    new = [item["path"] for item in scope["new_paths"]]
-    excluded = [item["path"] for item in scope["out_of_scope_paths"]]
-    if not existing and not new:
-        return ("EMPTY_SCOPE",)
-    if any(
-        not _valid_repository_file_path(path)
-        for path in [*existing, *new]
-    ) or any(not _valid_directory_scope(path) for path in excluded):
-        return ("MALFORMED_PATH",)
-    seen_scope_paths: set[str] = set()
-    for list_name, entries in (
-        ("existing_paths", scope["existing_paths"]),
-        ("new_paths", scope["new_paths"]),
-        ("out_of_scope_paths", scope["out_of_scope_paths"]),
-    ):
-        for entry_index, entry in enumerate(entries):
-            if entry["path"] in seen_scope_paths:
-                return (
-                    "SCOPE_PATH_CONFLICT"
-                    f"@/scope/{list_name}/{entry_index}/path",
-                )
-            seen_scope_paths.add(entry["path"])
-    for index, path in enumerate(existing):
-        if _read_host_file(repo, path) is None:
-            return (
-                f"EXISTING_PATH_MISSING@/scope/existing_paths/{index}/path",
-            )
-    for index, path in enumerate(new):
-        if (repo / path).exists():
-            return (
-                f"NEW_PATH_ALREADY_EXISTS@/scope/new_paths/{index}/path",
-            )
-    in_scope = set(existing + new)
-    recon_by_id = (
-        {command["id"]: command for command in recon_commands}
-        if recon_commands is not None
-        else None
-    )
-
-    excerpt_paths: set[str] = set()
-    for index, excerpt in enumerate(result["current_state_excerpts"]):
-        path = excerpt["path"]
-        if not _valid_repository_file_path(path):
-            return (f"MALFORMED_PATH@/current_state_excerpts/{index}/path",)
-        source = _read_host_file(repo, path)
-        if source is None:
-            return (
-                f"EXCERPT_PATH_MISSING@/current_state_excerpts/{index}/path",
-            )
-        start = excerpt["line_anchor"]["start_line"]
-        end = excerpt["line_anchor"]["end_line"]
-        lines = source.splitlines()
-        if end < start or end > len(lines):
-            return (
-                "EXCERPT_ANCHOR_INVALID"
-                f"@/current_state_excerpts/{index}/line_anchor",
-            )
-        actual = "\n".join(lines[start - 1 : end])
-        # Raw repository bytes, re-spliced after the secret scan above ran.
-        excerpt["verbatim_excerpt"] = redact_secret_values(actual)
-        excerpt_paths.add(path)
-    for index, path in enumerate(existing):
-        if path not in excerpt_paths:
-            return (
-                "EXISTING_PATH_EXCERPT_MISSING"
-                f"@/scope/existing_paths/{index}/path",
-            )
-
-    steps = result["steps"]
-    if [step["order"] for step in steps] != list(range(1, len(steps) + 1)):
-        return ("STEP_ORDER_INVALID",)
-    step_ids = [step["id"] for step in steps]
-    if len(set(step_ids)) != len(step_ids):
-        return ("STEP_ID_DUPLICATE",)
-    for step_index, step in enumerate(steps):
-        changed_paths: set[str] = set()
-        for change_index, change in enumerate(step["changes"]):
-            path = change["path"]
-            changed_paths.add(path)
-            change_pointer = f"/steps/{step_index}/changes/{change_index}/path"
-            if path not in in_scope:
-                return (f"STEP_PATH_OUT_OF_SCOPE@{change_pointer}",)
-            if change["operation"] == "create" and path not in new:
-                return (f"CREATE_PATH_NOT_NEW@{change_pointer}",)
-            if change["operation"] != "create" and path not in existing:
-                return (f"CHANGE_PATH_NOT_EXISTING@{change_pointer}",)
-        verification = step["verification"]
-        if verification is not None:
-            gate_pointer = f"/steps/{step_index}/verification"
-            command_error = _command_error(
-                verification,
-                in_scope,
-                repo=repo,
-                recon_by_id=recon_by_id,
-            )
-            if command_error:
-                return (f"{command_error}@{gate_pointer}",)
-            scope = verification["applicability"]["scope"]
-            scope_paths = scope.get("paths", [])
-            if (
-                scope["kind"] != "whole-repository"
-                and any(
-                    not any(
-                        changed_path == path.rstrip("/")
-                        or changed_path.startswith(f"{path.rstrip('/')}/")
-                        for path in scope_paths
-                    )
-                    for changed_path in changed_paths
-                )
-            ):
-                return (f"STEP_GATE_SCOPE_MISMATCH@{gate_pointer}",)
-
-    for command_index, command in enumerate(result["commands_you_will_need"]):
-        if command_error := _command_error(
-            command,
-            in_scope,
-            repo=repo,
-            recon_by_id=recon_by_id,
-        ):
-            return (
-                f"{command_error}@/commands_you_will_need/{command_index}",
-            )
-    test_symbols: set[str] = set()
-    for index, exemplar in enumerate(result["test_plan"]["exemplars"]):
-        source = _read_host_file(repo, exemplar["path"])
-        if source is None or exemplar["symbol"] not in source:
-            return (f"TEST_EXEMPLAR_INVALID@/test_plan/exemplars/{index}",)
-    for case_index, case in enumerate(result["test_plan"]["cases"]):
-        if case["test_file"] not in in_scope:
-            return (
-                "TEST_PATH_OUT_OF_SCOPE"
-                f"@/test_plan/cases/{case_index}/test_file",
-            )
-        if case["test_symbol"] in test_symbols:
-            return (
-                "TEST_SYMBOL_DUPLICATE"
-                f"@/test_plan/cases/{case_index}/test_symbol",
-            )
-        test_symbols.add(case["test_symbol"])
-        if case["verification"] is not None:
-            if command_error := _command_error(
-                case["verification"],
-                in_scope,
-                repo=repo,
-                recon_by_id=recon_by_id,
-            ):
-                return (
-                    f"{command_error}"
-                    f"@/test_plan/cases/{case_index}/verification",
-                )
-
-    done_kinds = {criterion["kind"] for criterion in result["done_criteria"]}
-    if not {"behavior", "test-gate", "scope-integrity"} <= done_kinds:
-        return ("DONE_CRITERIA_INCOMPLETE",)
-    for criterion_index, criterion in enumerate(result["done_criteria"]):
-        if criterion["verification"] is not None:
-            if command_error := _command_error(
-                criterion["verification"],
-                in_scope,
-                repo=repo,
-                recon_by_id=recon_by_id,
-            ):
-                return (
-                    f"{command_error}"
-                    f"@/done_criteria/{criterion_index}/verification",
-                )
-    stop_kinds = {condition["kind"] for condition in result["stop_conditions"]}
-    if not {
-        "drift",
-        "repeated-verification-failure",
-        "out-of-scope-change",
-        "false-assumption",
-    } <= stop_kinds:
-        return ("STOP_CONDITIONS_INCOMPLETE",)
-    excluded_paths = set(excluded)
-    known_step_ids = set(step_ids)
-    for condition_index, condition in enumerate(result["stop_conditions"]):
-        for path_index, path in enumerate(condition["related_paths"]):
-            if path not in in_scope and path not in excluded_paths:
-                return (
-                    "STOP_PATH_UNKNOWN@/stop_conditions"
-                    f"/{condition_index}/related_paths/{path_index}",
-                )
-        for id_index, step_id in enumerate(condition["related_step_ids"]):
-            if step_id not in known_step_ids:
-                return (
-                    "STOP_STEP_UNKNOWN@/stop_conditions"
-                    f"/{condition_index}/related_step_ids/{id_index}",
-                )
-
-    return ()
 
 
 def _dependency_cycle_slugs(
@@ -1752,14 +1114,12 @@ class PlanWriteSession:
         plans_dir: Path,
         *,
         planned_at: str,
-        commands: Sequence[dict[str, Any]] | None = None,
         non_interactive_default: bool = False,
         run_session_id: str | None = None,
     ) -> None:
         self._plans_dir = plans_dir
         self._repo = plans_dir.parent
         self._planned_at = planned_at
-        self._commands = commands
         self._run_session_id = run_session_id
         plans_dir.mkdir(parents=True, exist_ok=True)
         self._index_path = plans_dir / "README.md"
@@ -2020,13 +1380,7 @@ class PlanWriteSession:
             )
 
         plan_result = _plan_payload(selection)
-        errors = self._planned_at_errors or validate_plan_result(
-            plan_result,
-            repo=self._repo,
-            planned_at=self._planned_at,
-            finding=finding,
-            recon_commands=self._commands,
-        )
+        errors = self._planned_at_errors
         if not errors:
             if slug in depends_on:
                 errors = ("DEPENDENCY_SELF_REFERENCE",)
@@ -2199,7 +1553,6 @@ def write_plans(
     selections: Sequence[dict[str, Any]],
     *,
     planned_at: str,
-    commands: Sequence[dict[str, Any]] | None = None,
     non_interactive_default: bool = False,
     run_session_id: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -2212,7 +1565,6 @@ def write_plans(
     session = PlanWriteSession(
         plans_dir,
         planned_at=planned_at,
-        commands=commands,
         non_interactive_default=non_interactive_default,
         run_session_id=run_session_id,
     )

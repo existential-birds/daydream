@@ -176,24 +176,6 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
     ],
 }
 
-PROVENANCE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["kind", "recon_command_id", "source_path"],
-    "properties": {
-        "kind": {
-            "type": "string",
-            "enum": ["recon", "planner-derived"],
-        },
-        "recon_command_id": {
-            "type": "string",
-            "minLength": 3,
-            "maxLength": 80,
-        },
-        "source_path": REPOSITORY_FILE_PATH_SCHEMA,
-    },
-}
-
 _COMMAND_PROPERTIES: dict[str, Any] = {
     "purpose": {"type": "string", "minLength": 10, "maxLength": 200},
     "command": {
@@ -205,18 +187,6 @@ _COMMAND_PROPERTIES: dict[str, Any] = {
     "working_directory": WORKING_DIRECTORY_SCHEMA,
     "expected_success": EXPECTED_SUCCESS_SCHEMA,
     "applicability": APPLICABILITY_SCHEMA,
-}
-PLAN_COMMAND_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [*_COMMAND_PROPERTIES, "provenance", "note"],
-    "properties": {
-        **_COMMAND_PROPERTIES,
-        "provenance": PROVENANCE_SCHEMA,
-        # Why this gate proves its piece; required-but-nullable so the
-        # assembled shape stays strict-structured-output compliant.
-        "note": {"type": ["string", "null"], "maxLength": 300},
-    },
 }
 COMMAND_REF_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -822,8 +792,6 @@ __all__ = [
     "DIRECTORY_SCOPE_SCHEMA",
     "EVIDENCE_SCHEMA",
     "EXPECTED_SUCCESS_SCHEMA",
-    "PLAN_COMMAND_SCHEMA",
-    "PROVENANCE_SCHEMA",
     "RECON_COMMAND_SCHEMA",
     "REPOSITORY_FILE_PATH_PATTERN",
     "REPOSITORY_FILE_PATH_SCHEMA",

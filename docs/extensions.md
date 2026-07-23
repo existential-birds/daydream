@@ -376,17 +376,20 @@ data, not authored Markdown. `PLAN_WRITER_CONTRACT_INSTRUCTIONS` is available
 from `daydream.improve.prompts` for overrides that want to compose the built-in
 typed-contract guidance. Regardless of prompt content, the host supplies its
 own `PLAN_AUTHOR_SCHEMA` as the backend `output_schema` for the plan-write
-call, then assembles the authored judgment content into the host-owned
-`PLAN_WRITER_SCHEMA` shape and validates it — schema plus repository-aware
-semantic checks — at the write boundary before rendering a plan.
-`PLAN_WRITER_SCHEMA` is never sent to a backend. A wholesale prompt override
-cannot replace or weaken either validation boundary.
+call. `daydream.improve.assemble.assemble_plan` is the single validation
+boundary: it validates the authored object against that schema, applies the
+deterministic repairs, collects every remaining authoring defect as a pointered
+`AssemblyIssue`, and only then expands the result into the host-owned assembled
+plan shape that `render_plan` consumes. A wholesale prompt override cannot
+replace or weaken that boundary.
 
-Legacy override output containing `{markdown: ...}` fails closed with
-`LEGACY_MARKDOWN_OUTPUT`: the finding is indexed as `BLOCKED`, sanitized
-diagnostics record only stable metadata and error codes, and no plan file is
-written. There is intentionally no Markdown-to-typed adapter. Override authors
-must update their prompt to request `PlanWriterResult`.
+Legacy override output containing `{markdown: ...}` fails closed: every
+required authoring field is absent, so assembly returns one
+`AUTHOR_SCHEMA_INVALID` issue per missing key, the finding is indexed as
+`BLOCKED`, sanitized diagnostics record only stable metadata and error codes,
+and no plan file is written. There is intentionally no Markdown-to-typed
+adapter. Override authors must update their prompt to request
+`PlanWriterResult`.
 
 This compatibility repair does not bump `EXTENSION_API_VERSION` or its support
 floor. The documented prompt name and kwargs are unchanged, and the legacy
